@@ -3,14 +3,14 @@
 //! `submit_change` leader-aware forwarding logic, behind a stable
 //! [`ControllerHandle`] API the broker depends on.
 //!
-//! `BootstrapMode` drives cluster formation. A fresh `Bootstrap` or `Join` node
-//! seeds its quorum state from `initial_voters`. A restarted `Rejoin` node
-//! recovers from its on-disk metadata log, its checkpoint, and its quorum-state
-//! file. [`KraftController::open`] handles that recovery.
+//! Cluster formation is driven by `BootstrapMode`: a fresh `Bootstrap`/`Join`
+//! node seeds its quorum state from configured static voters or a dynamic
+//! bootstrap snapshot; a restarted `Rejoin` node recovers from its on-disk
+//! metadata log, checkpoint, and quorum-state file (handled inside
+//! [`KraftController::open`]).
 //!
-//! The voter set is static. `add_voter`, `remove_voter`, `update_voter`,
-//! `change_membership`, and `add_learner` all return
-//! [`RaftError::Unsupported`] with "dynamic reconfig unsupported".
+//! KIP-853 voter changes are serialized by the same single-owner engine that
+//! appends, commits, truncates, and snapshots the metadata log.
 
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
@@ -33,31 +33,26 @@ use crate::{
     types::{Node, NodeId, controller_endpoint_addr as endpoint_addr_from_endpoints},
 };
 
-/// Crabka-native view of the controller's current quorum state.
-///
-/// [`ControllerHandle::quorum_state`] returns it for the broker's
-/// `DescribeQuorum` admin handler, so callers do not depend on engine internals
-/// directly.
+/// Crabka-native view of the controller's current quorum state. Surfaced by
+/// [`ControllerHandle::quorum_state`] for the broker's `DescribeQuorum` admin
+/// handler so callers don't depend on engine internals directly.
 #[derive(Debug, Clone)]
 pub struct QuorumState {
     /// `KRaft` leader epoch (on the wire as `leader_epoch`).
     pub current_term: u64,
-    /// High watermark, which is the last committed and applied offset on this
-    /// node. It is `0` until the first commit.
+    /// High watermark — the last committed/applied offset on this node. `0`
+    /// until the first commit.
     pub last_applied_index: u64,
-    /// Current cluster leader. It is `None` during an election.
+    /// Current cluster leader. `None` mid-election.
     pub current_leader: Option<NodeId>,
-    /// Voter ids in the current static membership.
+    /// Voter ids in the current (static) membership.
     pub voters: Vec<NodeId>,
-    /// Full voter node identities, keyed by node id. Each identity holds the
-    /// directory id, the endpoints, and the kraft.version. This field mirrors
-    /// `voters` and carries the KIP-853 voter metadata that the
-    /// `DescribeQuorum` path needs.
+    /// Full voter node identities (directory id + endpoints + kraft.version)
+    /// keyed by node id. Mirrors `voters`; carries the KIP-853 voter metadata
+    /// the `DescribeQuorum` path needs.
     pub voter_nodes: BTreeMap<NodeId, Node>,
-    /// Per-voter fetch offset, the matched index. It is populated ONLY on the
-    /// leader, because the engine tracks per-follower progress only while it
-    /// leads. It is empty on a follower, and callers then fall back to the JVM
-    /// `-1` "Unknown" sentinel.
+    /// Per-replica fetch offset (matched index), including observers known to
+    /// the leader. Empty on a follower; callers use Kafka's unknown sentinel.
     pub per_voter_matched_index: BTreeMap<NodeId, u64>,
 }
 
@@ -72,54 +67,54 @@ pub struct SnapshotSlice {
     pub bytes: bytes::Bytes,
 }
 
-/// Outcome of [`ControllerHandle::read_snapshot_range`].
-///
-/// The broker's `FetchSnapshot` handler maps each variant to its Kafka error
-/// code: `NoSnapshot` to `SNAPSHOT_NOT_FOUND`, and `OutOfRange` to
-/// `POSITION_OUT_OF_RANGE`.
+/// Outcome of [`ControllerHandle::read_snapshot_range`]. The broker's
+/// `FetchSnapshot` handler maps each variant to its Kafka error code:
+/// `NoSnapshot` → `SNAPSHOT_NOT_FOUND`, `OutOfRange` → `POSITION_OUT_OF_RANGE`.
 pub enum SnapshotRange {
     /// No `.checkpoint` exists yet.
     NoSnapshot,
     /// `position` is strictly past the snapshot's end byte. A `position`
-    /// exactly at the end is valid and gives an empty `Slice`.
+    /// exactly at the end is valid and yields an empty `Slice`.
     OutOfRange,
     /// The requested byte window.
     Slice(SnapshotSlice),
 }
 
-/// Handle returned by [`Controller::start`].
-///
-/// It owns the live [`KraftController`] engine and the listener task. A drop is
-/// NOT a clean shutdown. Call [`Self::shutdown`], or [`Self::cancel`], to drain
-/// the listener and stop the engine before the runtime is torn down.
+/// Handle returned by [`Controller::start`]. Owns the live [`KraftController`]
+/// engine and the listener task. Drop is NOT a clean shutdown — call
+/// [`Self::shutdown`] (or [`Self::cancel`]) to drain the listener + stop the
+/// engine before the runtime is torn down.
 pub struct ControllerHandle {
     engine: KraftController,
     leader: watch::Receiver<Option<NodeId>>,
     shutdown: CancellationToken,
     listener_task: Mutex<Option<JoinHandle<()>>>,
-    /// Directory that holds the metadata log and the KIP-630 `.checkpoint`
-    /// artifacts.
+    /// Directory holding the metadata log + KIP-630 `.checkpoint` artifacts.
     data_dir: std::path::PathBuf,
     client_id: String,
     client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     client_frame_max: crabka_client_core::ClientFrameMax,
-    /// This node's own id. [`ReconfigOps::is_leader`] uses it.
+    /// This node's own id, used for leader and membership checks.
     self_node_id: NodeId,
-    /// Static voter set. KIP-853 dynamic membership is not supported. This set
-    /// resolves the voter endpoints for `quorum_state().voter_nodes` and for
-    /// `forward_submit_to`.
+    /// Configured bootstrap voter set. Dynamic membership comes from the
+    /// engine snapshot; this remains only as an address fallback during
+    /// initial discovery at kraft.version 0.
     voters: crabka_metadata::VoterSet,
-    /// Outbound dialer. `forward_submit_to` and `fetch_metadata_from` reach a
-    /// peer's controller listener with the same TLS and SASL handshake that the
-    /// engine's RPCs ride on.
+    /// Compatibility staging area for callers that still separate observer
+    /// registration from promotion. Membership itself is changed only by an
+    /// engine-owned KIP-853 command.
+    staged_learners: std::sync::Mutex<BTreeMap<NodeId, Node>>,
+    /// Outbound dialer; `forward_submit_to`/`fetch_metadata_from` reach a peer's
+    /// controller listener with the same TLS/SASL handshake the engine's RPCs
+    /// ride on.
     dialer: Arc<dyn OutboundDialer>,
-    /// The address the controller listener actually bound to. This holds the
-    /// resolved port when `controller_listen_addr` requested port 0.
+    /// The address the controller listener actually bound to (resolved port when
+    /// `controller_listen_addr` requested port 0).
     controller_bound_addr: SocketAddr,
 }
 
 impl ControllerHandle {
-    /// Current metadata snapshot. This is cheap, an `Arc` clone.
+    /// Current metadata snapshot (cheap; `Arc` clone).
     #[must_use]
     pub fn current_image(&self) -> Arc<MetadataImage> {
         self.engine.current_image()
@@ -131,11 +126,9 @@ impl ControllerHandle {
         self.controller_bound_addr
     }
 
-    /// Reads up to `max_bytes` of the latest metadata snapshot, starting at
-    /// `position`.
-    ///
-    /// This method reads the engine's `.checkpoint` artifacts directly. The
-    /// engine writes a bare KIP-630 checkpoint, with no `.meta` sidecar.
+    /// Read up to `max_bytes` of the latest metadata snapshot starting at
+    /// `position`. Reads the engine's `.checkpoint` artifacts directly (the
+    /// engine writes a bare KIP-630 checkpoint, no `.meta` sidecar).
     ///
     /// `position` and `max_bytes` stay the raw KIP-595 `FetchSnapshot` `int64`
     /// and `int32`: both are byte offsets into an on-disk checkpoint that the
@@ -162,27 +155,25 @@ impl ControllerHandle {
         })
     }
 
-    /// Subscribes to leader-id changes.
+    /// Subscribe to leader-id changes.
     #[must_use]
     pub fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
         self.leader.clone()
     }
 
-    /// Subscribes to metadata-image changes.
+    /// Subscribe to metadata-image changes.
     #[must_use]
     pub fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
         self.engine.watch_image()
     }
 
-    /// Snapshots the controller's current quorum state.
-    ///
-    /// The broker's `DescribeQuorum` handler (`api_key=55`, KIP-595) uses it.
-    /// The call is cheap: it is a `watch` borrow of the engine's published
-    /// snapshot plus a clone of the static voter metadata.
+    /// Snapshot the controller's current quorum state. Used by the broker's
+    /// `DescribeQuorum` (`api_key=55`, KIP-595) handler. Cheap — a `watch`
+    /// borrow of the engine's published snapshot.
     #[must_use]
     pub fn quorum_state(&self) -> QuorumState {
         let snap = self.engine.quorum_snapshot();
-        let voter_nodes: BTreeMap<NodeId, Node> = self
+        let voter_nodes: BTreeMap<NodeId, Node> = snap
             .voters
             .iter()
             .map(|v| {
@@ -197,7 +188,7 @@ impl ControllerHandle {
             })
             .collect();
         let per_voter_matched_index: BTreeMap<NodeId, u64> = snap
-            .per_voter_fetch_offset
+            .per_replica_fetch_offset
             .iter()
             .map(|(id, off)| (*id, u64::try_from((*off).max(0)).unwrap_or(0)))
             .collect();
@@ -205,14 +196,19 @@ impl ControllerHandle {
             current_term: u64::from(snap.leader_epoch),
             last_applied_index: u64::try_from(snap.high_watermark.max(0)).unwrap_or(0),
             current_leader: snap.leader_id,
-            voters: snap.voters,
+            voters: snap.voters.ids().into_iter().collect(),
             voter_nodes,
             per_voter_matched_index,
         }
     }
 
-    /// Triggers a metadata snapshot, a KIP-630 checkpoint, on this node by
-    /// hand.
+    /// Directory identity voted for in the current leader epoch, if any.
+    #[must_use]
+    pub fn voted_directory_id(&self) -> Option<Uuid> {
+        self.engine.quorum_snapshot().voted_directory_id
+    }
+
+    /// Manually trigger a metadata snapshot (KIP-630 checkpoint) on this node.
     ///
     /// # Errors
     /// Returns [`RaftError`] if serialization or the file write fails.
@@ -220,8 +216,8 @@ impl ControllerHandle {
         self.engine.trigger_snapshot().await
     }
 
-    /// Reads committed `__cluster_metadata` entries, starting at
-    /// `fetch_offset`, encoded as Kafka record batches for an observer.
+    /// Read committed `__cluster_metadata` entries starting at `fetch_offset`,
+    /// encoded as Kafka record batches for an observer.
     #[must_use]
     pub async fn metadata_records(
         &self,
@@ -238,12 +234,10 @@ impl ControllerHandle {
         )
     }
 
-    /// Submits a batch of metadata records.
-    ///
-    /// Returns `Ok(())` once the batch is committed AND applied on the leader.
-    /// The pre-validation lives in the engine. On a follower, that is on
-    /// `NotLeader` with a known leader, this method forwards the batch straight
-    /// to the leader's controller listener with `API_KEY_SUBMIT_CHANGE`.
+    /// Submit a batch of metadata records. Returns `Ok(())` once committed AND
+    /// applied on the leader. Pre-validation lives in the engine. On a follower
+    /// (`NotLeader` with a known leader), forwards directly to the leader's
+    /// controller listener via `API_KEY_SUBMIT_CHANGE`.
     ///
     /// # Errors
     /// Returns an error if validation, replication, or forwarding fails.
@@ -273,80 +267,154 @@ impl ControllerHandle {
         }
     }
 
-    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
+    /// Reconcile a single-node voter-set delta through the KIP-853 engine.
     ///
     /// # Errors
-    /// Always [`RaftError::Unsupported`].
-    pub fn change_membership(
+    /// Rejects multi-node batch changes; KIP-642 is a separate operation.
+    pub async fn change_membership(
         &self,
-        _new_voters: std::collections::BTreeSet<NodeId>,
-    ) -> std::future::Ready<Result<(), RaftError>> {
-        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
+        new_voters: std::collections::BTreeSet<NodeId>,
+    ) -> Result<(), RaftError> {
+        let current = self.engine.quorum_snapshot().voters;
+        let current_ids: std::collections::BTreeSet<NodeId> = current.ids().into_iter().collect();
+        let added: Vec<NodeId> = new_voters.difference(&current_ids).copied().collect();
+        let removed: Vec<NodeId> = current_ids.difference(&new_voters).copied().collect();
+        if added.len() + removed.len() > 1 {
+            return Err(RaftError::ReconfigRejected(
+                "only one voter change may be submitted at a time".into(),
+            ));
+        }
+        let outcome = if let Some(id) = removed.first() {
+            let voter = current.get(*id).ok_or_else(|| {
+                RaftError::ReconfigRejected(format!(
+                    "voter {id} disappeared while preparing removal"
+                ))
+            })?;
+            self.remove_voter(crate::reconfig::RemoveVoter {
+                id: *id,
+                directory_id: voter.directory_id,
+            })
+            .await?
+        } else if let Some(id) = added.first() {
+            let node = self
+                .staged_learners
+                .lock()
+                .map_err(|_| RaftError::ReconfigRejected("staged learner lock poisoned".into()))?
+                .get(id)
+                .cloned()
+                .ok_or_else(|| {
+                    RaftError::ReconfigRejected(format!(
+                        "voter {id} must be staged with add_learner first"
+                    ))
+                })?;
+            self.add_voter(crate::reconfig::AddVoter {
+                voter: crabka_metadata::Voter {
+                    id: *id,
+                    directory_id: node.directory_id,
+                    endpoints: node.endpoints,
+                    kraft_version: node.kraft_version,
+                },
+                ack_when_committed: true,
+            })
+            .await?
+        } else {
+            return Ok(());
+        };
+        match outcome {
+            crate::reconfig::ReconfigOutcome::Committed => Ok(()),
+            crate::reconfig::ReconfigOutcome::NotLeader { leader } => Err(RaftError::NotLeader {
+                current_leader: leader,
+            }),
+        }
     }
 
-    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
+    /// Stage a caught-up observer identity for later voter promotion.
     ///
     /// # Errors
-    /// Always [`RaftError::Unsupported`].
+    /// The observer catches up by fetching from the leader; this call does not
+    /// alter quorum membership.
     pub fn add_learner(
         &self,
-        _node_id: NodeId,
-        _node: Node,
+        node_id: NodeId,
+        node: Node,
     ) -> std::future::Ready<Result<(), RaftError>> {
-        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
+        let result = self
+            .staged_learners
+            .lock()
+            .map_err(|_| RaftError::ReconfigRejected("staged learner lock poisoned".into()))
+            .map(|mut learners| {
+                learners.insert(node_id, node);
+            });
+        std::future::ready(result)
     }
 
-    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
+    /// Add a caught-up controller voter through the Raft control log.
     ///
     /// # Errors
-    /// Always [`RaftError::Unsupported`].
-    pub fn add_voter(
+    /// Returns a validation, leadership, timeout, or storage error from Raft.
+    pub async fn add_voter(
         &self,
-        _req: crate::reconfig::AddVoter,
-    ) -> std::future::Ready<Result<crate::reconfig::ReconfigOutcome, RaftError>> {
-        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
+        req: crate::reconfig::AddVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        self.engine
+            .reconfigure(crate::reconfig::VoterChange::Add(req))
+            .await
     }
 
-    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
+    /// Remove the exact node/directory pair through the Raft control log.
     ///
     /// # Errors
-    /// Always [`RaftError::Unsupported`].
-    pub fn remove_voter(
+    /// Returns a validation, leadership, timeout, or storage error from Raft.
+    pub async fn remove_voter(
         &self,
-        _req: crate::reconfig::RemoveVoter,
-    ) -> std::future::Ready<Result<crate::reconfig::ReconfigOutcome, RaftError>> {
-        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
+        req: crate::reconfig::RemoveVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        self.engine
+            .reconfigure(crate::reconfig::VoterChange::Remove(req))
+            .await
     }
 
-    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
+    /// Update the exact voter's endpoint and supported feature range.
     ///
     /// # Errors
-    /// Always [`RaftError::Unsupported`].
-    pub fn update_voter(
+    /// Returns a validation, leadership, timeout, or storage error from Raft.
+    pub async fn update_voter(
         &self,
-        _req: crate::reconfig::UpdateVoter,
-    ) -> std::future::Ready<Result<crate::reconfig::ReconfigOutcome, RaftError>> {
-        std::future::ready(Err(RaftError::Unsupported("dynamic reconfig unsupported")))
+        req: crate::reconfig::UpdateVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        self.engine
+            .reconfigure(crate::reconfig::VoterChange::Update(req))
+            .await
     }
 
-    /// Resolves a voter's controller listener `<host>:<port>` from the
-    /// CONTROLLER endpoint of the static voter set. See
-    /// [`controller_endpoint_addr`].
+    /// Atomically append `KRaftVersionRecord` and the initial `VotersRecord`.
+    ///
+    /// # Errors
+    /// Returns an unsupported-version, leadership, timeout, or storage error.
+    pub async fn finalize_kraft_version(
+        &self,
+        version: u16,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        self.engine.finalize_kraft_version(version).await
+    }
+
+    /// Resolve a voter's controller listener `<host>:<port>` from the static
+    /// voter set's CONTROLLER endpoint. See [`controller_endpoint_addr`].
     fn voter_addr(&self, node_id: NodeId) -> Option<String> {
-        controller_endpoint_addr(&self.voters, node_id)
+        let voters = self.engine.quorum_snapshot().voters;
+        controller_endpoint_addr(&voters, node_id)
+            .or_else(|| controller_endpoint_addr(&self.voters, node_id))
     }
 
-    /// Opens a one-shot authenticated connection to the leader's controller
-    /// listener, sends a wincode-encoded `Vec<MetadataRecord>` as
-    /// `API_KEY_SUBMIT_CHANGE`, and translates the response into a `RaftError`.
+    /// Open a one-shot authenticated connection to the leader's controller
+    /// listener, send a wincode-encoded `Vec<MetadataRecord>` as
+    /// `API_KEY_SUBMIT_CHANGE`, and translate the response into a `RaftError`.
     ///
-    /// The path splits into three killable steps.
-    /// [`encode_submit_change_body`] builds the exact wire bytes. The
-    /// [`SubmitChangeTransport`] seam does the un-mockable round trip, which
-    /// dials the peer, calls `raw_request`, closes the connection, and hands
-    /// back the raw response body. [`translate_submit_change_response`] then
-    /// decodes that body and maps the transport `error_code` into a
-    /// `RaftError`.
+    /// Decomposed into three killable steps: [`encode_submit_change_body`] builds
+    /// the exact wire bytes, the [`SubmitChangeTransport`] seam performs the
+    /// (un-mockable) dial→`raw_request`→close round trip and hands back the raw
+    /// response body, and [`translate_submit_change_response`] decodes that body
+    /// and maps the transport `error_code` into a `RaftError`.
     // cargo-mutants: thin wrapper; builds the live DialerSubmitTransport, needs a real dialer
     #[cfg_attr(test, mutants::skip)]
     #[tracing::instrument(
@@ -370,9 +438,8 @@ impl ControllerHandle {
         forward_submit_via(&transport, leader, addr, records).await
     }
 
-    /// Dials a controller-listener `addr` and issues one
-    /// `API_KEY_METADATA_FETCH`. Broker-only observers use it to pull committed
-    /// `__cluster_metadata`.
+    /// Dial a controller-listener `addr` and issue one `API_KEY_METADATA_FETCH`.
+    /// Used by broker-only observers to pull committed `__cluster_metadata`.
     ///
     /// # Errors
     /// - [`RaftError::Network`] if the dial or request fails.
@@ -417,8 +484,7 @@ impl ControllerHandle {
         crate::wire::CrabkaMetadataFetchResponse::decode_v0(&mut cur).map_err(RaftError::Protocol)
     }
 
-    /// Drains the listener and stops the engine. It is idempotent in
-    /// practice.
+    /// Drain the listener and stop the engine. Idempotent in practice.
     pub async fn shutdown(self) {
         self.shutdown.cancel();
         self.engine.shutdown().await;
@@ -427,12 +493,10 @@ impl ControllerHandle {
         }
     }
 
-    /// Stops the engine and cancels the controller listener without a move of
-    /// `self`.
-    ///
-    /// `BrokerHandle::shutdown` uses it, because there the controller sits
-    /// behind an `Arc`. The method is idempotent. It awaits the listener task,
-    /// so the OS releases the port before the method returns.
+    /// Stop the engine and cancel the controller listener without consuming
+    /// `self`. Used by `BrokerHandle::shutdown` where the controller is behind
+    /// an `Arc`. Idempotent. Awaits the listener task so the OS port is released
+    /// before returning.
     pub async fn cancel(&self) {
         self.shutdown.cancel();
         self.engine.shutdown().await;
@@ -442,37 +506,32 @@ impl ControllerHandle {
     }
 }
 
-/// Resolves a voter's CONTROLLER-listener `<host>:<port>` from the voter set.
+/// Resolve a voter's CONTROLLER-listener `<host>:<port>` from the voter set,
+/// preferring the endpoint named `CONTROLLER` and falling back to the first.
 ///
-/// It prefers the endpoint named `CONTROLLER` and falls back to the first
-/// endpoint.
-///
-/// This function returns the host VERBATIM, as a DNS name, and never
-/// pre-resolves it to a `SocketAddr`. The dialer re-resolves it on each connect
-/// through `TcpStream::connect`, so a peer that restarts on a new pod IP stays
-/// reachable. A parse to a `SocketAddr` here would do two harmful things. It
-/// would freeze a restarted peer's boot-time IP, and it would fail outright on
-/// a non-literal hostname. That failure silently disables leader-forwarding of
-/// `submit_change`, for example on broker self-registration, because `parse()`
-/// returns `None` and the forward is then skipped.
+/// The host is returned VERBATIM (a DNS name), never pre-resolved to a
+/// `SocketAddr`. The dialer re-resolves it per connect (`TcpStream::connect`),
+/// so a peer that restarts on a new pod IP stays reachable. Parsing to a
+/// `SocketAddr` here would (a) freeze a restarted peer's boot-time IP and
+/// (b) fail outright on a non-literal hostname — which silently disabled
+/// leader-forwarding of `submit_change` (e.g. broker self-registration), since
+/// `parse()` returned `None` and the forward was skipped.
 fn controller_endpoint_addr(voters: &crabka_metadata::VoterSet, node_id: NodeId) -> Option<String> {
     let voter = voters.get(node_id)?;
     endpoint_addr_from_endpoints(&voter.endpoints)
 }
 
-/// The single un-mockable step of leader-forwarding a `submit_change`.
-///
-/// It dials the leader's controller listener, issues one
-/// `API_KEY_SUBMIT_CHANGE` request with the already-encoded `body`, and returns
-/// the raw response body bytes. The concrete
-/// [`crabka_client_core::Connection`] is opaque, because a test cannot build
-/// one, so this seam returns plain `Bytes`. Every serialize and translate
-/// decision around it therefore stays unit-testable against a mock.
+/// The single un-mockable step of leader-forwarding a `submit_change`: dial the
+/// leader's controller listener, issue one `API_KEY_SUBMIT_CHANGE` request with
+/// the already-encoded `body`, and return the raw response body bytes. The
+/// concrete [`crabka_client_core::Connection`] is opaque (it cannot be built in
+/// a test), so this seam returns plain `Bytes` — every serialize/translate
+/// decision around it stays unit-testable against a mock.
 #[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 trait SubmitChangeTransport: Send + Sync {
-    /// Round-trips the encoded `API_KEY_SUBMIT_CHANGE` `body` to the leader and
-    /// returns the raw response body.
+    /// Round-trip the encoded `API_KEY_SUBMIT_CHANGE` `body` to the leader and
+    /// return the raw response body.
     async fn send_submit_change(
         &self,
         leader: NodeId,
@@ -481,12 +540,10 @@ trait SubmitChangeTransport: Send + Sync {
     ) -> Result<bytes::Bytes, crabka_client_core::ClientError>;
 }
 
-/// Live [`SubmitChangeTransport`] over the injected [`OutboundDialer`].
-///
-/// It dials a one-shot authenticated connection, sends the request at
-/// `API_KEY_SUBMIT_CHANGE` version 0, closes the connection, and returns the
-/// response body. This is the only part of the forward path that touches a real
-/// socket.
+/// Live [`SubmitChangeTransport`] over the injected [`OutboundDialer`]: dials a
+/// one-shot authenticated connection, sends the request at `API_KEY_SUBMIT_CHANGE`
+/// version 0, closes the connection, and returns the response body. This is the
+/// only part of the forward path that touches a real socket.
 struct DialerSubmitTransport<'a> {
     dialer: &'a dyn OutboundDialer,
     client_id: &'a str,
@@ -527,12 +584,10 @@ impl SubmitChangeTransport for DialerSubmitTransport<'_> {
     }
 }
 
-/// The testable core of `forward_submit_to`: it serializes, sends through the
-/// injected [`SubmitChangeTransport`], then translates.
-///
-/// The real path supplies a [`DialerSubmitTransport`]. Tests supply a mock, so
-/// the serialize and translate decisions carry mutation signal without a live
-/// quorum.
+/// `forward_submit_to`'s testable core: serialize → send (via the injected
+/// [`SubmitChangeTransport`]) → translate. The real path supplies a
+/// [`DialerSubmitTransport`]; tests supply a mock so the serialize/translate
+/// decisions carry mutation signal without a live quorum.
 async fn forward_submit_via(
     transport: &dyn SubmitChangeTransport,
     leader: NodeId,
@@ -547,11 +602,10 @@ async fn forward_submit_via(
     translate_submit_change_response(&resp_body, leader)
 }
 
-/// Builds the exact `API_KEY_SUBMIT_CHANGE` v0 request body for `records`.
-///
-/// This function wincode-encodes the `Vec<MetadataRecord>`, then frames it with
-/// the length-prefixed [`crate::wire::CrabkaSubmitChangeRequest`] codec. It
-/// stays byte-for-byte identical to the inlined path, so the wire stays exact.
+/// Build the exact `API_KEY_SUBMIT_CHANGE` v0 request body for `records`:
+/// wincode-encode the `Vec<MetadataRecord>`, then frame it with the
+/// length-prefixed [`crate::wire::CrabkaSubmitChangeRequest`] codec. Kept
+/// byte-for-byte identical to the inlined path so the wire stays exact.
 fn encode_submit_change_body(
     records: &[crabka_metadata::MetadataRecord],
 ) -> Result<Vec<u8>, RaftError> {
@@ -567,16 +621,14 @@ fn encode_submit_change_body(
     Ok(body)
 }
 
-/// Decodes a `CrabkaSubmitChangeResponse` from the leader's `resp_body` and
-/// maps its transport `error_code` into the caller's `Result`:
-/// - `0` means applied, so this returns `Ok`.
-/// - `2` means the leader rejected the batch at apply time, because the topic
-///   already exists. The wire carries only a code, and the topic name is what
-///   the caller had in hand.
-/// - Any other value collapses to `NotLeader`, which `CreateTopics` maps to the
-///   retryable `NOT_CONTROLLER`. This function prefers the response's
-///   `leader_hint` when it is non-negative, and falls back to the dialed
-///   `leader`.
+/// Decode a `CrabkaSubmitChangeResponse` from the leader's `resp_body` and map
+/// its transport `error_code` into the caller's `Result`:
+/// - `0` → applied (`Ok`).
+/// - `2` → the leader rejected at apply-time (topic already exists). The wire
+///   carries only a code; the topic name is what the caller had in hand.
+/// - anything else → collapse to `NotLeader` (`CreateTopics` maps that to the
+///   retryable `NOT_CONTROLLER`), preferring the response's `leader_hint` when
+///   non-negative and falling back to the dialed `leader`.
 fn translate_submit_change_response(
     resp_body: &[u8],
     leader: NodeId,
@@ -598,65 +650,9 @@ fn translate_submit_change_response(
     }
 }
 
-#[async_trait::async_trait]
-impl crate::reconfig::ReconfigOps for ControllerHandle {
-    fn current_voters(&self) -> crabka_metadata::VoterSet {
-        let voters = self
-            .quorum_state()
-            .voter_nodes
-            .into_iter()
-            .map(|(id, node)| crabka_metadata::Voter {
-                id,
-                directory_id: node.directory_id,
-                endpoints: node.endpoints,
-                kraft_version: node.kraft_version,
-            });
-        crabka_metadata::VoterSet::from_voters(voters)
-    }
-
-    fn leader(&self) -> Option<NodeId> {
-        self.quorum_state().current_leader
-    }
-
-    fn is_leader(&self) -> bool {
-        self.quorum_state().current_leader == Some(self.self_node_id)
-    }
-
-    fn leader_last_index(&self) -> u64 {
-        self.quorum_state().last_applied_index
-    }
-
-    fn observer_index(&self, id: NodeId) -> Option<u64> {
-        self.quorum_state()
-            .per_voter_matched_index
-            .get(&id)
-            .copied()
-    }
-
-    async fn add_learner(&self, id: NodeId, node: crate::Node) -> Result<(), RaftError> {
-        ControllerHandle::add_learner(self, id, node).await
-    }
-
-    async fn change_membership(
-        &self,
-        ids: std::collections::BTreeSet<NodeId>,
-    ) -> Result<(), RaftError> {
-        ControllerHandle::change_membership(self, ids).await
-    }
-
-    async fn submit_records(
-        &self,
-        records: Vec<crabka_metadata::MetadataRecord>,
-    ) -> Result<(), RaftError> {
-        ControllerHandle::submit_change(self, records)
-            .await
-            .map(|_| ())
-    }
-}
-
-/// Scans `dir` for `<end_offset>-<epoch>.checkpoint` artifacts and returns the
-/// highest `(end_offset, epoch)` plus its raw bytes. This matches the
-/// bare-checkpoint format the engine writes, with no `.meta` sidecar.
+/// Scan `dir` for `<end_offset>-<epoch>.checkpoint` artifacts and return the
+/// highest `(end_offset, epoch)` plus its raw bytes. Matches the bare-checkpoint
+/// format the engine writes (no `.meta` sidecar).
 fn load_latest_checkpoint(dir: &std::path::Path) -> Option<((i64, i32), Vec<u8>)> {
     let ((off, ep), path) = std::fs::read_dir(dir)
         .ok()?
@@ -676,12 +672,12 @@ fn load_latest_checkpoint(dir: &std::path::Path) -> Option<((i64, i32), Vec<u8>)
 pub struct Controller;
 
 impl Controller {
-    /// Starts a controller node, opens the listener, and joins the quorum.
+    /// Start a controller node, open the listener, and begin participating in
+    /// the quorum.
     ///
-    /// `bootstrap_mode` governs cluster formation. `Bootstrap` seeds a fresh
-    /// quorum from `initial_voters`. `Join` and `Rejoin` recover or wait. A
-    /// mismatch between the mode and the on-disk log state returns
-    /// [`RaftError::Startup`].
+    /// `bootstrap_mode` governs cluster formation: `Bootstrap` seeds a fresh
+    /// quorum from `initial_voters`; `Join`/`Rejoin` recover or wait. Mismatches
+    /// between mode and on-disk log state return [`RaftError::Startup`].
     ///
     /// # Errors
     /// Returns an error if configuration, storage recovery, or startup fails.
@@ -689,9 +685,9 @@ impl Controller {
         Self::start_with_listener(config, None).await
     }
 
-    /// Works like [`Self::start`], but adopts a caller-supplied, already-bound
-    /// controller listener instead of a bind of `controller_listen_addr`
-    /// itself. The local address of the supplied listener MUST equal
+    /// Like [`Self::start`], but adopts a caller-supplied, already-bound
+    /// controller listener instead of binding `controller_listen_addr` itself.
+    /// The supplied listener's local address MUST equal
     /// `config.controller_listen_addr`.
     ///
     /// # Errors
@@ -712,16 +708,28 @@ impl Controller {
             )
             .map_err(RaftError::Startup)?;
 
-        // The static voter set for this node. Bootstrap/Join nodes carry it in
-        // `initial_voters`; a Rejoin node recovers the quorum-state file but the
-        // voter set is reconstructed from config (static voters).
-        let voters = config.initial_voters.clone();
-
         // First-boot orchestration validates mode against on-disk log state. The
         // metadata log lives directly under `log_dir` for the KraftLog engine.
         let data_dir = config.log_dir.clone();
         let log_exists = metadata_log_nonempty(&data_dir);
-        match (config.bootstrap_mode, log_exists) {
+        let snapshot_voters = load_latest_checkpoint(&crate::kraft::checkpoint_dir(&data_dir))
+            .and_then(|(_, bytes)| crate::snapshot::SnapshotReader::read(&bytes).ok())
+            .map(|snapshot| snapshot.control_state.voters)
+            .unwrap_or_default();
+        let voters = if config.initial_voters.is_empty() {
+            snapshot_voters
+        } else {
+            config.initial_voters.clone()
+        };
+        let bootstrap_mode = if config.bootstrap_mode == BootstrapMode::Bootstrap
+            && voters.is_empty()
+            && config.auto_join
+        {
+            BootstrapMode::Join
+        } else {
+            config.bootstrap_mode
+        };
+        match (bootstrap_mode, log_exists) {
             (BootstrapMode::Bootstrap, false) => {
                 if voters.is_empty() {
                     return Err(RaftError::Startup(
@@ -754,7 +762,8 @@ impl Controller {
             .clone()
             .unwrap_or_else(|| Arc::new(PlaintextDialer));
 
-        // The peer sender resolves voter endpoints from the static set.
+        // The peer sender starts from the bootstrap view. The engine replaces
+        // it immediately when it replays a dynamic voter control record.
         let peers = Arc::new(RealPeerSender::new(
             voters.clone(),
             config.client_id.clone(),
@@ -816,25 +825,23 @@ impl Controller {
             client_frame_max: config.client_frame_max,
             self_node_id: config.node_id,
             voters,
+            staged_learners: std::sync::Mutex::new(BTreeMap::new()),
             dialer,
             controller_bound_addr: actual_addr,
         })
     }
 }
 
-/// True when the metadata log under `dir` already holds durable raft state,
-/// which marks a previously-running node.
-///
-/// The check finds either a quorum-state file or any log segment. Either one
-/// shows a node that has persisted state.
+/// True when the metadata log under `dir` already holds durable raft state (a
+/// previously-running node). Detects either a quorum-state file or any log
+/// segment, indicating a node that has persisted state.
 ///
 /// `dir` is the controller data dir (`<log_dir>/__cluster_metadata`). The
-/// broker binary's `detect_bootstrap_mode` calls this function, so its
-/// Bootstrap or Rejoin choice can never disagree with the mode validation in
-/// [`Controller::start_with_listener`]. A node killed during an election, with
-/// its segment dir created but no `quorum-state` yet, therefore reads as
-/// un-formatted and Bootstraps again instead of dying with "Rejoin requires
-/// non-empty raft log".
+/// broker binary's `detect_bootstrap_mode` calls this so its Bootstrap/Rejoin
+/// choice can never disagree with [`Controller::start_with_listener`]'s mode
+/// validation — a node killed mid-election (segment dir created but no
+/// `quorum-state` yet) reads as un-formatted and re-Bootstraps rather than
+/// dying with "Rejoin requires non-empty raft log".
 #[must_use]
 pub fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
     let qs = dir.join("quorum-state");
@@ -862,7 +869,7 @@ mod bootstrap_mode_tests {
     /// Election timeout used by tests that want a leader elected promptly.
     const FAST_ELECTION_TIMEOUT: Time = millis(200);
 
-    /// A fetch budget large enough that it truncates no test log.
+    /// A fetch budget large enough that no test log is truncated by it.
     const UNBOUNDED_FETCH: ByteSize = gibibytes(1);
 
     #[test]
@@ -1081,67 +1088,32 @@ mod bootstrap_mode_tests {
     }
 
     #[tokio::test]
-    async fn unsupported_reconfig_ops_return_errors() {
-        let dir = TempDir::new().unwrap();
-        let cfg = ControllerConfig {
-            bootstrap_mode: BootstrapMode::Join,
-            initial_voters: crabka_metadata::VoterSet::from_voters(std::iter::empty()),
-            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
-        };
-        let ctrl = Controller::start(cfg).await.expect("join start");
-
-        let add_err = <ControllerHandle as crate::reconfig::ReconfigOps>::add_learner(
-            &ctrl,
-            NodeId(2),
-            Node::default(),
-        )
-        .await
-        .expect_err("static raft rejects add_learner");
-        assert2::assert!(matches!(add_err, RaftError::Unsupported(_)));
-
-        let change_err = <ControllerHandle as crate::reconfig::ReconfigOps>::change_membership(
-            &ctrl,
-            std::collections::BTreeSet::from([NodeId(1), NodeId(2)]),
-        )
-        .await
-        .expect_err("static raft rejects change_membership");
-        assert2::assert!(matches!(change_err, RaftError::Unsupported(_)));
-        ctrl.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn reconfig_ops_reflect_live_single_voter_state_and_submit_records() {
+    async fn quorum_view_reflects_live_single_voter_state_and_submitted_records() {
         let dir = TempDir::new().unwrap();
         let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
         cfg.election_timeout = FAST_ELECTION_TIMEOUT;
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         wait_for_leader(&ctrl).await;
 
-        let voters = <ControllerHandle as crate::reconfig::ReconfigOps>::current_voters(&ctrl);
+        let quorum = ctrl.quorum_state();
         check!(
             (
-                voters.contains(NodeId(1)),
-                <ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl),
-                <ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl),
+                quorum.voter_nodes.contains_key(&NodeId(1)),
+                quorum.current_leader,
+                quorum.current_leader == Some(NodeId(1)),
             ) == (true, Some(NodeId(1)), true)
         );
 
         tokio::time::timeout(
             TEST_OP_TIMEOUT.to_std(),
-            <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
-                &ctrl,
-                vec![committable_topic_record("ops-a")],
-            ),
+            ctrl.submit_change(vec![committable_topic_record("ops-a")]),
         )
         .await
         .expect("submit ops-a timed out")
         .expect("submit ops-a");
         tokio::time::timeout(
             TEST_OP_TIMEOUT.to_std(),
-            <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
-                &ctrl,
-                vec![committable_topic_record("ops-b")],
-            ),
+            ctrl.submit_change(vec![committable_topic_record("ops-b")]),
         )
         .await
         .expect("submit ops-b timed out")
@@ -1153,18 +1125,15 @@ mod bootstrap_mode_tests {
                 ctrl.current_image().topic("ops-b").is_some(),
             ) == (true, true)
         );
-        let leader_last =
-            <ControllerHandle as crate::reconfig::ReconfigOps>::leader_last_index(&ctrl);
+        let quorum = ctrl.quorum_state();
+        let leader_last = quorum.last_applied_index;
         assert2::assert!(leader_last >= 2);
-        assert2::assert!(
-            <ControllerHandle as crate::reconfig::ReconfigOps>::observer_index(&ctrl, NodeId(1))
-                == Some(leader_last)
-        );
+        assert2::assert!(quorum.per_voter_matched_index.get(&NodeId(1)) == Some(&leader_last));
         ctrl.shutdown().await;
     }
 
     #[tokio::test]
-    async fn reconfig_ops_report_join_node_is_not_leader() {
+    async fn quorum_view_reports_join_node_is_not_leader() {
         let dir = TempDir::new().unwrap();
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Join,
@@ -1173,12 +1142,7 @@ mod bootstrap_mode_tests {
         };
         let ctrl = Controller::start(cfg).await.expect("join start");
 
-        assert2::assert!(
-            (
-                <ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl),
-                <ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl),
-            ) == (None, false)
-        );
+        assert2::assert!(ctrl.quorum_state().current_leader.is_none());
         ctrl.shutdown().await;
     }
 

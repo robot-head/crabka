@@ -1,16 +1,15 @@
 //! `KafkaNodePool` reconciler.
 //!
 //! A `KafkaNodePool` describes a group of broker pods that share role,
-//! image, and resources. The reconciler renders one `StatefulSet` for each
-//! pool. The `StatefulSet` has an owner reference to the pool itself, and
-//! it is scheduled into the shared headless `Service` that the parent
-//! `Kafka` owns. The reconciler finds that `Service` with the
-//! `crabka.io/cluster` label.
+//! image, and resources. The reconciler renders one `StatefulSet` per
+//! pool, owner-ref'd to the pool itself, scheduled into the shared
+//! headless `Service` owned by the parent `Kafka` (looked up via the
+//! `crabka.io/cluster` label).
 //!
-//! Pools have three constraints. Pools must be mixed
-//! `{Controller, Broker}`. `replicas` must equal 1. `nodeIdStart` must lie
-//! in `0..=999_999`. A validation error becomes a `Ready=False` condition,
-//! and the reconciler does no further work on the pool.
+//! Constraints: pools must be mixed `{Controller, Broker}`,
+//! `replicas` must equal 1, and `nodeIdStart` must lie in `0..=999_999`.
+//! Validation errors surface as a `Ready=False` condition without
+//! attempting any further reconcile.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -23,13 +22,13 @@ use futures::StreamExt as _;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
-        core::v1::{PersistentVolumeClaim, ResourceRequirements},
+        core::v1::{PersistentVolumeClaim, Pod, ResourceRequirements, Secret},
     },
     apimachinery::pkg::api::resource::Quantity,
 };
 use kube::{
     Resource, ResourceExt as _,
-    api::Api,
+    api::{Api, ListParams, Patch, PatchParams},
     runtime::{
         controller::{Action, Controller},
         watcher,
@@ -48,19 +47,18 @@ use crate::{
     },
 };
 
-/// Container port that the broker binds for Prometheus `/metrics` when
-/// `Kafka.spec.metricsConfig` is `Some`.
-///
-/// This constant sits next to `BROKER_PORT` so that the pod-template
-/// renderer has both numbers in one place. `controller::metrics` reads it
-/// to build the `PodMonitor` and `ServiceMonitor` endpoints.
+/// Container port the broker binds for Prometheus `/metrics`
+/// when `Kafka.spec.metricsConfig` is `Some`. Kept here next to
+/// `BROKER_PORT` so the pod-template renderer has both numbers in one
+/// place; referenced by `controller::metrics` to build the
+/// `PodMonitor` / `ServiceMonitor` endpoints.
 pub(crate) const METRICS_PORT: i32 = 9404;
+const FINALIZER: &str = "crabka.io/kafka-node-pool-finalizer";
 
-/// Validation errors for a `KafkaNodePool`.
-///
-/// Each variant maps to a distinct condition reason. The operator reports
-/// the variant as `Ready=False` and does not attempt further reconcile
-/// until the user corrects the spec.
+/// Validation errors for a `KafkaNodePool`. Each variant maps to a
+/// distinct condition reason; the operator surfaces the variant as
+/// `Ready=False` and does not attempt further reconcile until the spec
+/// is corrected.
 #[derive(Debug, thiserror::Error)]
 pub enum PoolValidationError {
     #[error("spec.roles must equal {{Controller, Broker}}; got {0:?}")]
@@ -95,7 +93,7 @@ pub enum PoolValidationError {
     JbodVolumesImmutable,
 }
 
-/// Validates a `KafkaNodePool` spec against its invariants.
+/// Validate a `KafkaNodePool` spec against its invariants.
 pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> {
     let roles: HashSet<NodeRole> = pool.spec.roles.iter().copied().collect();
     let expected: HashSet<NodeRole> = [NodeRole::Controller, NodeRole::Broker]
@@ -139,11 +137,20 @@ pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> 
     Ok(())
 }
 
-/// Returns the JBOD volumes, sorted by id in ascending order.
-///
-/// The result is empty for storage that is not JBOD. The sort makes the
-/// rendered `StatefulSet` deterministic, whatever order the spec lists the
-/// disks in.
+fn select_quorum_bootstrap(pools: &[KafkaNodePool]) -> Option<common::QuorumBootstrapController> {
+    pools
+        .iter()
+        .filter(|pool| validate(pool).is_ok())
+        .min_by_key(|pool| (pool.spec.node_id_start, pool.name_any()))
+        .map(|pool| common::QuorumBootstrapController {
+            node_id: pool.spec.node_id_start,
+            pool: pool.name_any(),
+        })
+}
+
+/// JBOD volumes sorted ascending by id. Empty for non-JBOD storage.
+/// Sorting makes the rendered `StatefulSet` deterministic regardless of
+/// the order disks are listed in the spec.
 fn jbod_volumes_sorted(storage: Option<&Storage>) -> Vec<JbodVolume> {
     match storage {
         Some(Storage::Jbod(j)) => {
@@ -155,15 +162,11 @@ fn jbod_volumes_sorted(storage: Option<&Storage>) -> Vec<JbodVolume> {
     }
 }
 
-/// Returns the PVC-template name and the pod mount path for one JBOD
-/// disk.
-///
-/// The primary disk, which is the disk with the lowest id, keeps the name
-/// `data` and the path `/var/lib/crabka/data`. The metadata raft log, the
-/// init container, and the cluster-level broker TOML
-/// (`log_dir = "/var/lib/crabka/data"`) therefore stay unchanged. Every
-/// other disk with `id = N` lives at `data-{N}` and
-/// `/var/lib/crabka/data-{N}`.
+/// PVC-template name + pod mount path for one JBOD disk. The primary
+/// (lowest-id) disk reuses the `data` / `/var/lib/crabka/data`
+/// so the metadata raft log, the init container, and the cluster-level
+/// broker TOML (`log_dir = "/var/lib/crabka/data"`) are all unchanged.
+/// Every other disk `id = N` lives at `data-{N}` / `/var/lib/crabka/data-{N}`.
 fn jbod_mount(volume_id: i32, is_primary: bool) -> (String, String) {
     if is_primary {
         ("data".to_string(), "/var/lib/crabka/data".to_string())
@@ -175,12 +178,9 @@ fn jbod_mount(volume_id: i32, is_primary: bool) -> (String, String) {
     }
 }
 
-/// Returns `(name, mount_path)` for every non-primary JBOD disk, sorted
-/// by id.
-///
-/// The result is empty for storage that is not JBOD. These pairs become
-/// the extra `volumeMounts` of the broker container and the
-/// `CRABKA_EXTRA_LOG_DIRS` env value.
+/// `(name, mount_path)` for every non-primary JBOD disk, sorted by id.
+/// Empty for non-JBOD storage. These become the broker container's extra
+/// `volumeMounts` and the `CRABKA_EXTRA_LOG_DIRS` env value.
 fn jbod_extra_mounts(storage: Option<&Storage>) -> Vec<(String, String)> {
     jbod_volumes_sorted(storage)
         .iter()
@@ -206,7 +206,11 @@ NODE_ID=$((NODE_ID_START + ORDINAL))\n\
 mkdir -p /var/lib/crabka/data\n\
 rm -rf /var/lib/crabka/data/lost+found\n\
 if [ ! -f /var/lib/crabka/data/.formatted ]; then\n\
-  /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\" --release-version \"$CRABKA_METADATA_VERSION\"\n\
+  if [ \"$CRABKA_QUORUM_BOOTSTRAP_INITIALIZED\" != \"true\" ] && [ \"$NODE_ID\" = \"$CRABKA_QUORUM_BOOTSTRAP_NODE_ID\" ] && [ \"$CRABKA_POOL_NAME\" = \"$CRABKA_QUORUM_BOOTSTRAP_POOL\" ]; then\n\
+    /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\" --release-version \"$CRABKA_METADATA_VERSION\" --directory-id \"$CRABKA_DIRECTORY_ID\" --standalone --node-id \"$NODE_ID\" --controller-listener \"${HOSTNAME}.${CRABKA_HEADLESS_SERVICE}.${POD_NAMESPACE}.svc.cluster.local:9093\"\n\
+  else\n\
+    /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\" --release-version \"$CRABKA_METADATA_VERSION\" --directory-id \"$CRABKA_DIRECTORY_ID\" --no-initial-controllers\n\
+  fi\n\
   touch /var/lib/crabka/data/.formatted\n\
 fi\n\
 printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n";
@@ -226,17 +230,16 @@ NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n\
 cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n\
 exec /usr/bin/crabka-broker \\\n  --config-file=/run/crabka/broker.toml \\\n  --broker-id=\"${NODE_ID}\"\n";
 
-/// Builds the main shell script of the broker container.
+/// Build the broker container's main shell script. The disabled variant
+/// returns `MAIN_SCRIPT` byte-for-byte so a cluster with
+/// `metrics_config: None` produces a byte-identical pod template (the
+/// pod-template-hash stays put, so no broker pod rolls). The enabled
+/// variant appends `--metrics-listen-addr=0.0.0.0:9404` so the broker
+/// binds its Prometheus endpoint.
 ///
-/// The disabled variant returns `MAIN_SCRIPT` byte-for-byte, so a cluster
-/// with `metrics_config: None` gets a byte-identical pod template. The
-/// pod-template hash then stays the same, and no broker pod rolls. The
-/// enabled variant adds `--metrics-listen-addr=0.0.0.0:9404`, so that the
-/// broker binds its Prometheus endpoint.
-///
-/// The enabled variant is a separate string literal and uses no
-/// `format!`. A test failure therefore shows the full expected text
-/// inline instead of a templated fragment.
+/// The enabled variant is a separate string literal (no `format!`) so a
+/// test failure shows the full expected text inline rather than a
+/// templated fragment.
 fn build_main_script(
     metrics_enabled: bool,
     client_dispatch_queue_capacity: Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
@@ -284,6 +287,8 @@ fn build_main_script(
 fn render_init_container(
     broker_image: &str,
     secret_name: &str,
+    pool_name: &str,
+    headless_service_name: &str,
     node_id_start: i32,
     metadata_version: &str,
 ) -> serde_json::Value {
@@ -294,7 +299,14 @@ fn render_init_container(
         "args": [INIT_SCRIPT],
         "env": [
             { "name": "NODE_ID_START", "value": node_id_start.to_string() },
+            { "name": "POD_NAMESPACE", "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } } },
+            { "name": "CRABKA_POOL_NAME", "value": pool_name },
+            { "name": "CRABKA_HEADLESS_SERVICE", "value": headless_service_name },
             { "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } },
+            { "name": "CRABKA_DIRECTORY_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": common::quorum_directory_id_key(node_id_start) } } },
+            { "name": "CRABKA_QUORUM_BOOTSTRAP_NODE_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": common::QUORUM_BOOTSTRAP_NODE_ID_KEY } } },
+            { "name": "CRABKA_QUORUM_BOOTSTRAP_POOL", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": common::QUORUM_BOOTSTRAP_POOL_KEY } } },
+            { "name": "CRABKA_QUORUM_BOOTSTRAP_INITIALIZED", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": common::QUORUM_BOOTSTRAP_INITIALIZED_KEY } } },
             { "name": "CRABKA_METADATA_VERSION", "value": metadata_version.to_string() }
         ],
         "volumeMounts": [{ "name": "data", "mountPath": "/var/lib/crabka/data" }],
@@ -617,11 +629,9 @@ fn append_jbod_env(env: &mut Vec<serde_json::Value>, mounts: &[(String, String)]
     env.push(json!({ "name": "CRABKA_EXTRA_LOG_DIRS", "value": value }));
 }
 
-/// Builds one `volumeClaimTemplate` for a single PVC.
-///
-/// The template carries `accessModes`, the requested `size`, an optional
-/// `storageClassName`, and the inherited pod labels. The labels let the GC
-/// selector match the bound PVC.
+/// Build one `volumeClaimTemplate` for a single PVC: `accessModes`,
+/// requested `size`, optional `storageClassName`, and inherited pod
+/// labels (so the GC selector matches the bound PVC).
 fn pvc_template(
     name: &str,
     size: &str,
@@ -646,18 +656,16 @@ fn pvc_template(
     template
 }
 
-/// Builds the pod-volume entries and the `volumeClaimTemplates` of the
-/// `StatefulSet` from the `Storage` setting of the pool.
+/// Build the `StatefulSet`'s pod-volume entries and its
+/// `volumeClaimTemplates` based on the pool's `Storage` setting.
+/// Returns `(pod_volumes_json, volume_claim_templates)`. An empty
+/// templates vec means "no PVCs" (the `Ephemeral` path).
 ///
-/// This function returns `(pod_volumes_json, volume_claim_templates)`. An
-/// empty templates vec means that there are no PVCs. That is the
-/// `Ephemeral` path.
-///
-/// The returned `volumes` array always holds the `broker-config`
-/// `ConfigMap` volume. For `PersistentClaim` and `Jbod`, the function
-/// omits the `data` and `data-{id}` volume entries. The `StatefulSet`
-/// controller mounts each PVC into the pod under the template name by
-/// itself, so an explicit pod-volume entry would conflict.
+/// The returned `volumes` array always includes the `broker-config`
+/// `ConfigMap` volume (unconditional). For `PersistentClaim` / `Jbod` the
+/// `data` (and `data-{id}`) volume entries are omitted: the `StatefulSet`
+/// controller mounts each PVC into the pod under the template name
+/// automatically, so an explicit pod-volume entry would conflict.
 // each branch + secret mount is independent
 // pure render helper: each arg names one independent secret-mount / storage toggle
 type AuthenticationStorage<'a> = (
@@ -886,17 +894,15 @@ fn render_storage(
     (volumes, templates)
 }
 
-/// Builds the `persistentVolumeClaimRetentionPolicy` block of the
-/// `StatefulSet` when there is at least one PVC.
+/// Build the `StatefulSet`'s `persistentVolumeClaimRetentionPolicy`
+/// block when any PVC is in play. Returns `None` only when neither
+/// the pool's data storage nor the tier-storage cache is a PVC.
 ///
-/// This function returns `None` only when neither the data storage of the
-/// pool nor the tier-storage cache is a PVC.
-///
-/// The retention policy of a `StatefulSet` applies to every
-/// `volumeClaimTemplate` in the set. Earlier validation makes sure that
-/// the `delete_claim` flags of the data PVC and the tier PVC match when
-/// both exist. This function can therefore take the value of the pool
-/// when it is present, and the tier value if it is not.
+/// A `StatefulSet`'s retention policy applies set-wide to every
+/// `volumeClaimTemplate`. Validation upstream ensures that
+/// when both data and tier PVCs exist, their `delete_claim` flags
+/// match — so we can pick the pool's value when present and the tier
+/// value otherwise.
 fn render_pvc_retention_policy(
     storage: Option<&Storage>,
     tier_persistence: Option<&crate::crd::kafka::TieredStoragePersistence>,
@@ -915,12 +921,10 @@ fn render_pvc_retention_policy(
     }))
 }
 
-/// Overwrites the `volumes` field of `pod_spec` with the rendered
-/// `pod_volumes`.
-///
-/// The `pod_spec` template already carries an emptyDir `data` entry from
-/// the inline `json!` block. This function replaces that entry, so that
-/// the `PersistentClaim` path does not declare `data` two times.
+/// Overwrite `pod_spec`'s `volumes` field with the rendered
+/// `pod_volumes`. The `pod_spec` template already carries an emptyDir
+/// `data` entry from the inline `json!` block; this replaces it so the
+/// `PersistentClaim` path doesn't double-declare `data`.
 fn pod_spec_with_data_volume(
     mut pod_spec: serde_json::Value,
     pod_volumes: serde_json::Value,
@@ -929,12 +933,32 @@ fn pod_spec_with_data_volume(
     pod_spec
 }
 
-/// Renders the `StatefulSet` for a pool.
-///
-/// The name is `<parent>-<pool>`. The shared headless `Service` of the
-/// parent, `<parent>-broker-headless`, serves it. The owner reference
-/// points to the pool and not to the parent, so
-/// `kubectl delete knp <pool>` deletes the `StatefulSet` directly.
+fn resolved_metadata_version(parent: &Kafka) -> String {
+    let chosen = parent
+        .status
+        .as_ref()
+        .and_then(|status| status.metadata_version.as_deref())
+        .or(parent.spec.metadata_version.as_deref())
+        .unwrap_or(&parent.spec.kafka_version);
+    let normalized = crate::version::KafkaVersion::parse(chosen)
+        .map_or_else(|_| chosen.to_string(), |version| version.short());
+    if crabka_metadata::metadata_version::from_version_string(&normalized).is_some() {
+        normalized
+    } else {
+        crabka_metadata::metadata_version::from_feature_level(
+            crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+        )
+        .expect("MAX level is in the table")
+        .short()
+        .to_string()
+    }
+}
+
+/// Render the `StatefulSet` for a pool. Naming: `<parent>-<pool>`,
+/// served from the parent's shared headless `Service`
+/// `<parent>-broker-headless`. Owner-ref points to the pool, not the
+/// parent — `kubectl delete knp <pool>` deletes the `StatefulSet`
+/// directly.
 // linear render pipeline: pod template + storage + per-feature wiring
 pub(crate) fn render_statefulset(
     parent: &Kafka,
@@ -975,35 +999,15 @@ pub(crate) fn render_statefulset(
     // value to `status.metadataVersion` once version validation passes; on a
     // first-ever reconcile (status absent) we fall back to the spec pin, then
     // to the kafka_version so the formatter always receives a concrete level.
-    let chosen = parent
-        .status
-        .as_ref()
-        .and_then(|s| s.metadata_version.as_deref())
-        .or(parent.spec.metadata_version.as_deref())
-        .unwrap_or(&parent.spec.kafka_version);
-    // Normalize to major.minor — `crabka format --release-version` resolves
-    // a short form (e.g. "3.7"); a 3-part version string would not resolve.
-    let normalized = crate::version::KafkaVersion::parse(chosen)
-        .map_or_else(|_| chosen.to_string(), |v| v.short());
-    // `crabka format --release-version` hard-rejects a value outside the
-    // broker's supported metadata.version table, which would crash-loop the
-    // init container. The broker always supports [MIN, MAX] regardless of the
-    // kafka_version compat label, so clamp an unsupported/out-of-range value
-    // to MAX. (`evaluate` still surfaces the misconfig as KafkaVersionValid=False.)
-    let resolved_metadata_version =
-        if crabka_metadata::metadata_version::from_version_string(&normalized).is_some() {
-            normalized
-        } else {
-            crabka_metadata::metadata_version::from_feature_level(
-                crabka_metadata::metadata_version::METADATA_VERSION_MAX,
-            )
-            .expect("MAX level is in the table")
-            .short()
-            .to_string()
-        };
+    // Normalize to major.minor and clamp values outside the broker's
+    // supported metadata.version table to MAX. Version validation still
+    // surfaces an invalid user value before this renderer is reached.
+    let resolved_metadata_version = resolved_metadata_version(parent);
     let init = render_init_container(
         broker_image,
         &secret_name,
+        &pool_name,
+        &service_name,
         pool.spec.node_id_start,
         &resolved_metadata_version,
     );
@@ -1228,28 +1232,23 @@ fn default_resources() -> ResourceRequirements {
     }
 }
 
-/// Validates `spec.storage` monotonically against the observed
-/// `volumeClaimTemplates` of the live `StatefulSet`.
+/// Monotonic validation of `spec.storage` against the live
+/// `StatefulSet`'s observed `volumeClaimTemplates`. `observed` is
+/// `None` when no live `StatefulSet` exists yet (first reconcile — any
+/// spec is acceptable) and `Some(templates)` (possibly empty, for an
+/// `Ephemeral` pool) otherwise.
 ///
-/// `observed` is `None` when no live `StatefulSet` exists yet. That is the
-/// first reconcile, and any spec is acceptable. If not, `observed` is
-/// `Some(templates)`, and the templates can be empty for an `Ephemeral`
-/// pool.
+/// The observed storage *kind* is derived from the template count:
+/// `0 → Ephemeral`, `1 → PersistentClaim`, `>= 2 → Jbod` (JBOD always
+/// has >= 2 disks — see [`validate`]). Rejections (all map to
+/// `Ready=False, reason=StorageImmutable`):
+/// - storage-type switch (`Ephemeral` / `PersistentClaim` / `Jbod`).
+/// - `class` change on any matched disk.
+/// - `size` decrease on any matched disk.
+/// - JBOD disk-set change (adding/removing disks, deferred).
 ///
-/// This function derives the observed storage *kind* from the template
-/// count: `0 → Ephemeral`, `1 → PersistentClaim`, `>= 2 → Jbod`. JBOD
-/// always has 2 or more disks, as [`validate`] shows, so the count is an
-/// unambiguous discriminator. The function rejects these changes, and all
-/// of them map to `Ready=False, reason=StorageImmutable`:
-/// - a storage-type switch between `Ephemeral`, `PersistentClaim`, and
-///   `Jbod`.
-/// - a `class` change on any matched disk.
-/// - a `size` decrease on any matched disk.
-/// - a JBOD disk-set change. To add or remove disks is deferred work.
-///
-/// The function does *not* check `delete_claim`. That flag only affects
-/// the retention-policy field of the `StatefulSet`, which is mutable, and
-/// not the PVC templates that this function compares.
+/// `delete_claim` is *not* checked: it only affects the `StatefulSet`'s
+/// retention-policy field (mutable), not the PVC templates this compares.
 fn validate_storage_change(
     desired: Option<&Storage>,
     observed: Option<&[PersistentVolumeClaim]>,
@@ -1284,11 +1283,9 @@ fn validate_storage_change(
     }
 }
 
-/// Derives the observed storage kind from the `volumeClaimTemplates`
-/// count of the live `StatefulSet`.
-///
-/// JBOD must have 2 or more disks, as [`validate`] shows, so the count is
-/// an unambiguous discriminator.
+/// Derive the observed storage kind from the live `StatefulSet`'s
+/// `volumeClaimTemplates` count. JBOD is required to have >= 2 disks
+/// (see [`validate`]), so the count is an unambiguous discriminator.
 fn observed_storage_kind(templates: &[PersistentVolumeClaim]) -> &'static str {
     match templates.len() {
         0 => "Ephemeral",
@@ -1297,10 +1294,8 @@ fn observed_storage_kind(templates: &[PersistentVolumeClaim]) -> &'static str {
     }
 }
 
-/// Extracts `(size, class)` from a `volumeClaimTemplate`.
-///
-/// A missing spec or a missing request gives an empty size, which compares
-/// as 0 bytes.
+/// Extract `(size, class)` from a `volumeClaimTemplate`. A missing spec /
+/// request yields an empty size (compares as 0 bytes).
 fn size_class_from_pvc(pvc: &PersistentVolumeClaim) -> (String, Option<String>) {
     let Some(spec) = pvc.spec.as_ref() else {
         return (String::new(), None);
@@ -1315,7 +1310,7 @@ fn size_class_from_pvc(pvc: &PersistentVolumeClaim) -> (String, Option<String>) 
     (size, spec.storage_class_name.clone())
 }
 
-/// Rejects a `class` change or a `size` decrease on one matched disk.
+/// Reject a `class` change or `size` decrease on one matched disk.
 fn check_class_and_shrink(
     desired_size: &str,
     desired_class: Option<&str>,
@@ -1339,14 +1334,11 @@ fn check_class_and_shrink(
     Ok(())
 }
 
-/// Runs the monotonic check of one JBOD spec against another.
-///
-/// This function matches the disks by identity. The `data` template
-/// matches the desired primary, which is the disk with the lowest id, and
-/// each `data-{N}` template matches the desired disk with id `N`. The
-/// non-primary id set must be identical. To add disks, to remove disks,
-/// and to move the primary to another disk are all deferred work. The
-/// `class` and the `size` of each matched disk must obey
+/// JBOD-vs-JBOD monotonic check. Disks are matched by identity: the
+/// `data` template ↔ the desired primary (lowest id), and each
+/// `data-{N}` template ↔ desired disk id `N`. The non-primary id set
+/// must be identical (adding/removing disks — and reassigning the
+/// primary — is deferred), and each matched disk's `class`/`size` obey
 /// [`check_class_and_shrink`].
 fn validate_jbod_change(
     desired: &crate::crd::JbodSpec,
@@ -1404,11 +1396,9 @@ fn storage_kind(s: Option<&Storage>) -> &'static str {
     }
 }
 
-/// Maps a `PoolValidationError` to a `Ready=False` condition with a
-/// distinct `reason`.
-///
-/// The reason strings are the contract that admins and the e2e tests match
-/// on.
+/// Map a `PoolValidationError` to a `Ready=False` condition with a
+/// distinct `reason`. Reason strings are the contract that admins
+/// (and the e2e tests) match on.
 fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
     let (reason, message) = match err {
         PoolValidationError::RolesNotMixed(roles) => (
@@ -1462,7 +1452,7 @@ fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
     condition("Ready", "False", reason, &message)
 }
 
-/// Wraps `common::patch_status` with the pool-specific status shape.
+/// Wrap `common::patch_status` with the pool-specific status shape.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -1482,41 +1472,173 @@ async fn patch_status_for_pool(
     common::patch_status::<KafkaNodePool, KafkaNodePoolStatus>(pool_api, name, status).await
 }
 
-/// Shows whether the version model of the parent `Kafka` has cleared this
-/// pool to render, and thus to format, broker pods.
+fn has_finalizer(pool: &KafkaNodePool) -> bool {
+    pool.meta()
+        .finalizers
+        .as_ref()
+        .is_some_and(|values| values.iter().any(|value| value == FINALIZER))
+}
+
+async fn set_finalizer(
+    api: &Api<KafkaNodePool>,
+    name: &str,
+    present: bool,
+) -> Result<(), ReconcileError> {
+    let finalizers: Vec<&str> = if present { vec![FINALIZER] } else { Vec::new() };
+    let params = PatchParams {
+        field_manager: Some(common::FIELD_MANAGER.into()),
+        ..Default::default()
+    };
+    api.patch(
+        name,
+        &params,
+        &Patch::Merge(&json!({ "metadata": { "finalizers": finalizers } })),
+    )
+    .await?;
+    Ok(())
+}
+
+fn quorum_bootstrap_address(cluster: &str, namespace: &str) -> String {
+    format!(
+        "{cluster}-broker-headless.{namespace}.svc.cluster.local:{}",
+        common::CONTROLLER_PORT
+    )
+}
+
+async fn reconcile_deletion(
+    pool: &KafkaNodePool,
+    parent: Option<&Kafka>,
+    ctx: &Context,
+    pool_api: &Api<KafkaNodePool>,
+    namespace: &str,
+    cluster: &str,
+    name: &str,
+) -> Result<Action, ReconcileError> {
+    if !has_finalizer(pool) {
+        return Ok(Action::await_change());
+    }
+
+    let sts_name = format!("{cluster}-{name}");
+    let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), namespace);
+    if sts_api.get_opt(&sts_name).await?.is_some() {
+        let params = PatchParams {
+            field_manager: Some(common::FIELD_MANAGER.into()),
+            ..Default::default()
+        };
+        sts_api
+            .patch(
+                &sts_name,
+                &params,
+                &Patch::Merge(&json!({ "spec": { "replicas": 0 } })),
+            )
+            .await?;
+    }
+
+    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+    let pods = pod_api
+        .list(&ListParams::default().labels(&format!(
+            "app.kubernetes.io/instance={cluster},crabka.io/pool={name}"
+        )))
+        .await?;
+    if !pods.items.is_empty() {
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
+    }
+
+    if parent.is_none_or(|parent| parent.meta().deletion_timestamp.is_some()) {
+        set_finalizer(pool_api, name, false).await?;
+        return Ok(Action::await_change());
+    }
+
+    let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), namespace);
+    let secret = secret_api.get(&format!("{cluster}-cluster-id")).await?;
+    let cluster_id = common::uuid_from_secret(&secret)?;
+    let bootstrap = quorum_bootstrap_address(cluster, namespace);
+    let admin = match ctx.admin_client_for(cluster, &bootstrap).await {
+        Ok(admin) => admin,
+        Err(error) => {
+            tracing::warn!(%error, %cluster, "quorum admin connection failed during pool deletion");
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
+        }
+    };
+    let mut admin = admin.lock().await;
+    let quorum = match admin.describe_metadata_quorum().await {
+        Ok(quorum) => quorum,
+        Err(error) => {
+            tracing::warn!(%error, %cluster, "DescribeQuorum failed during pool deletion");
+            drop(admin);
+            ctx.drop_admin_client(cluster).await;
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
+        }
+    };
+    let target = quorum
+        .voters
+        .iter()
+        .find(|voter| voter.node_id == pool.spec.node_id_start)
+        .cloned();
+    let Some(target) = target else {
+        drop(admin);
+        set_finalizer(pool_api, name, false).await?;
+        return Ok(Action::await_change());
+    };
+    if quorum.voters.len() == 1 {
+        drop(admin);
+        patch_status_for_pool(
+            pool_api,
+            name,
+            condition(
+                "Ready",
+                "False",
+                "LastVoterDeletionBlocked",
+                "cannot delete the last metadata-quorum voter",
+            ),
+        )
+        .await?;
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
+    }
+    if let Err(error) = admin
+        .remove_raft_voter(cluster_id, target.node_id, target.directory_id)
+        .await
+    {
+        tracing::warn!(%error, node_id = target.node_id, "RemoveRaftVoter failed during pool deletion");
+        drop(admin);
+        ctx.drop_admin_client(cluster).await;
+        return Ok(common::requeue(ctx.config.controller_error_requeue));
+    }
+    Ok(common::requeue(ctx.config.controller_dependency_requeue))
+}
+
+/// Whether the parent `Kafka`'s version model has cleared this pool to
+/// render (and therefore format) broker pods.
 ///
-/// Version validation lives in the *Kafka* controller
-/// ([`kafka::reconcile`] → [`crate::version::evaluate`]). That controller
-/// publishes the verdict as the `KafkaVersionValid` condition of the
-/// parent and finalizes the resolved value in `status.metadataVersion`.
-/// The pool reconciler owns no version logic. It only reads the parent
-/// status that the operator already fetched, with no more API requests.
-/// This is the same status-from-the-watched-object posture that
-/// [`common::plan_rollout`] uses. The pool reconciler refuses to format
-/// pods until the model has cleared. If not, an invalid
-/// `spec.kafkaVersion` on a new cluster would bring the brokers up at a
-/// version that nobody validated, instead of a reported error and a wait.
+/// Version validation lives in the *Kafka* controller ([`kafka::reconcile`]
+/// → [`crate::version::evaluate`]), which publishes the verdict as the
+/// parent's `KafkaVersionValid` condition and finalizes the resolved value
+/// in `status.metadataVersion`. The pool reconciler owns no version logic;
+/// it only reads that already-fetched parent status (no extra API request,
+/// mirroring [`common::plan_rollout`]'s status-from-the-watched-object
+/// posture) and refuses to format pods until the model has cleared —
+/// otherwise an invalid `spec.kafkaVersion` on a brand-new cluster would
+/// bring the brokers up at an unvalidated version instead of surfacing the
+/// error and waiting.
 #[derive(Debug)]
 enum VersionGate {
-    /// The version model of the parent is valid, or the operator already
-    /// finalized it. Render the `StatefulSet` as normal.
+    /// The parent's version model is valid (or already finalized): render
+    /// the `StatefulSet` as normal.
     Cleared,
-    /// The version model of the parent has not cleared. Do not render, and
-    /// report `cond`, a `Ready=False`, on the pool.
+    /// The parent's version model has not cleared: refrain from rendering
+    /// and surface `cond` (a `Ready=False`) on the pool.
     Blocked(KafkaCondition),
 }
 
-/// Decides whether the version model of `parent` clears this pool to
-/// format pods.
+/// Decide whether `parent`'s version model clears this pool to format pods.
 ///
-/// The pool clears when the parent carries `KafkaVersionValid=True`, or
-/// when a finalized `status.metadataVersion` is present. The
-/// finalized-version fallback is deliberate. A value there means that an
-/// earlier reconcile already validated the model and formatted the pods.
-/// A *later* spec edit that flips `KafkaVersionValid=False` must therefore
-/// not tear a running cluster down. The Kafka controller holds the
-/// previous finalized version and declines to advance it. See the status
-/// patch in `kafka.rs`.
+/// Clears when EITHER the parent carries `KafkaVersionValid=True`, OR a
+/// finalized `status.metadataVersion` is present. The finalized-version
+/// fallback is deliberate: a value there means a prior reconcile already
+/// validated the model and formatted the pods, so a *later* spec edit that
+/// flips `KafkaVersionValid=False` must not tear a running cluster down —
+/// the Kafka controller holds the previous finalized version and simply
+/// declines to advance it (see `kafka.rs` status patch).
 fn version_gate(parent: &Kafka) -> VersionGate {
     // Not cleared. Distinguish "the parent declared the version invalid"
     // from "the parent hasn't published a verdict yet" so admins can tell
@@ -1548,7 +1670,7 @@ fn version_gate(parent: &Kafka) -> VersionGate {
     VersionGate::Blocked(cond)
 }
 
-/// Runs the `KafkaNodePool` controller forever. It returns only on an
+/// Run the `KafkaNodePool` controller forever. Returns only on
 /// irrecoverable stream error.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
@@ -1568,9 +1690,8 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reconcile entry point. It times the pass, records the reconcile
-/// counter and histogram, then calls the internal `reconcile_inner`
-/// operation.
+/// Reconcile entry point. Times the pass and records the reconcile
+/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -1629,7 +1750,20 @@ async fn reconcile_inner(
     };
 
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-    let Some(parent) = kafka_api.get_opt(&kafka_name).await? else {
+    let parent = kafka_api.get_opt(&kafka_name).await?;
+    if pool.meta().deletion_timestamp.is_some() {
+        return reconcile_deletion(
+            &pool,
+            parent.as_ref(),
+            &ctx,
+            &pool_api,
+            &ns,
+            &kafka_name,
+            &name,
+        )
+        .await;
+    }
+    let Some(parent) = parent else {
         let cond = condition(
             "Ready",
             "False",
@@ -1639,6 +1773,10 @@ async fn reconcile_inner(
         patch_status_for_pool(&pool_api, &name, cond).await?;
         return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
+    if !has_finalizer(&pool) {
+        set_finalizer(&pool_api, &name, true).await?;
+        return Ok(Action::requeue(std::time::Duration::ZERO));
+    }
 
     // Gate on the parent's version model. Version validation lives in
     //     the Kafka controller; until it has declared the version valid
@@ -1652,6 +1790,23 @@ async fn reconcile_inner(
         patch_status_for_pool(&pool_api, &name, cond).await?;
         return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     }
+
+    // Persist one deterministic standalone bootstrap controller before any
+    // StatefulSet is created. Once selected, the Secret value wins forever:
+    // a later lower-numbered pool must join the existing quorum rather than
+    // format an independent one.
+    let siblings = pool_api
+        .list(&ListParams::default().labels(&format!("crabka.io/cluster={kafka_name}")))
+        .await?;
+    let candidate = select_quorum_bootstrap(&siblings.items).ok_or_else(|| {
+        ReconcileError::Malformed("no valid KafkaNodePool available for quorum bootstrap".into())
+    })?;
+    let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+    let bootstrap =
+        common::ensure_quorum_bootstrap_state(&secret_api, &kafka_name, &candidate).await?;
+    let directory_id =
+        common::ensure_quorum_directory_id(&secret_api, &kafka_name, pool.spec.node_id_start)
+            .await?;
 
     // 3. Resolve broker image: spec override > operator default > built-in.
     let image = pool
@@ -1696,11 +1851,56 @@ async fn reconcile_inner(
     let live = sts_api.get_opt(&sts_name).await?;
     let (replicas, ready_replicas, reason, message) =
         derive_status(live.as_ref(), pool.spec.replicas);
-    let status_value = if reason == "Available" {
-        "True"
+    let (status_value, reason, message) = if reason == "Available" {
+        let bootstrap_address = quorum_bootstrap_address(&kafka_name, &ns);
+        match ctx.admin_client_for(&kafka_name, &bootstrap_address).await {
+            Ok(admin) => {
+                let mut admin = admin.lock().await;
+                match admin.describe_metadata_quorum().await {
+                    Ok(quorum)
+                        if quorum.voters.iter().any(|voter| {
+                            voter.node_id == pool.spec.node_id_start
+                                && voter.directory_id == directory_id
+                        }) =>
+                    {
+                        ("True", "Available", message)
+                    }
+                    Ok(_) => (
+                        "False",
+                        "QuorumMembershipPending",
+                        format!(
+                            "pod is ready but voter {}/{} is not committed",
+                            pool.spec.node_id_start, directory_id
+                        ),
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, pool = %name, "DescribeQuorum failed during readiness check");
+                        drop(admin);
+                        ctx.drop_admin_client(&kafka_name).await;
+                        (
+                            "False",
+                            "QuorumMembershipUnknown",
+                            format!("pod is ready but DescribeQuorum failed: {error}"),
+                        )
+                    }
+                }
+            }
+            Err(error) => (
+                "False",
+                "QuorumMembershipUnknown",
+                format!("pod is ready but quorum admin connection failed: {error}"),
+            ),
+        }
     } else {
-        "False"
+        ("False", reason, message)
     };
+    if status_value == "True"
+        && !bootstrap.initialized
+        && bootstrap.controller.node_id == pool.spec.node_id_start
+        && bootstrap.controller.pool == name
+    {
+        common::mark_quorum_bootstrap_initialized(&secret_api, &kafka_name).await?;
+    }
     let status = KafkaNodePoolStatus {
         conditions: vec![condition("Ready", status_value, reason, &message)],
         replicas,
@@ -1777,6 +1977,58 @@ mod tests {
         labels.insert("crabka.io/cluster".into(), parent.to_string());
         p.metadata.labels = Some(labels);
         p
+    }
+
+    #[test]
+    fn quorum_bootstrap_is_lowest_node_id_then_pool_name() {
+        let mut later = pool_fixture("later", "demo", 1);
+        later.spec.node_id_start = 7;
+        let mut tie_b = pool_fixture("b-pool", "demo", 1);
+        tie_b.spec.node_id_start = 3;
+        let mut tie_a = pool_fixture("a-pool", "demo", 1);
+        tie_a.spec.node_id_start = 3;
+
+        let selected = select_quorum_bootstrap(&[later, tie_b, tie_a]).expect("candidate");
+        assert!(
+            selected
+                == common::QuorumBootstrapController {
+                    node_id: 3,
+                    pool: "a-pool".into(),
+                }
+        );
+    }
+
+    #[test]
+    fn init_script_selects_standalone_once_and_dynamic_join_afterward() {
+        let init = render_init_container(
+            "img:tag",
+            "demo-cluster-id",
+            "controllers",
+            "demo-broker-headless",
+            4,
+            "4.0",
+        );
+        let script = init["args"][0].as_str().expect("init script");
+        assert!(script.contains("--standalone --node-id \"$NODE_ID\""));
+        assert!(script.contains("--no-initial-controllers"));
+        assert!(script.contains("CRABKA_QUORUM_BOOTSTRAP_INITIALIZED"));
+        assert!(script.contains(
+            "${HOSTNAME}.${CRABKA_HEADLESS_SERVICE}.${POD_NAMESPACE}.svc.cluster.local:9093"
+        ));
+
+        let env = init["env"].as_array().expect("init env");
+        for required in [
+            "CRABKA_POOL_NAME",
+            "CRABKA_HEADLESS_SERVICE",
+            "CRABKA_QUORUM_BOOTSTRAP_NODE_ID",
+            "CRABKA_QUORUM_BOOTSTRAP_POOL",
+            "CRABKA_QUORUM_BOOTSTRAP_INITIALIZED",
+        ] {
+            assert!(
+                env.iter().any(|entry| entry["name"] == required),
+                "missing {required}"
+            );
+        }
     }
 
     #[test]
@@ -1902,7 +2154,7 @@ mod tests {
 
     #[test]
     fn init_container_wires_metadata_version_env() {
-        let c = render_init_container("img:tag", "sec", 0, "4.0");
+        let c = render_init_container("img:tag", "sec", "brokers", "demo-headless", 0, "4.0");
         let env = c["env"].as_array().expect("env array");
         let mv = env
             .iter()
@@ -2614,7 +2866,7 @@ mod tests {
         }
     }
 
-    /// Builds the observed JBOD templates `data` and `data-{id}` for the
+    /// Build observed JBOD templates (`data` + `data-{id}`) for the
     /// monotonic-change tests.
     fn jbod_observed(volumes: &[(&str, &str, Option<&str>)]) -> Vec<PersistentVolumeClaim> {
         volumes
@@ -2985,10 +3237,10 @@ mod tests {
         assert!(rust_log.value.is_none());
     }
 
-    /// Without `spec.delegationToken`, the env list of the broker
-    /// container must NOT carry `CRABKA_DELEGATION_TOKEN_SECRET_KEY`. This
-    /// keeps the pod template byte-identical for clusters without that
-    /// field, so no pod rolls without a reason.
+    /// Without `spec.delegationToken`, the broker container's
+    /// env list must NOT carry `CRABKA_DELEGATION_TOKEN_SECRET_KEY` —
+    /// keeps the pod template byte-identical for clusters without it
+    /// (no spurious roll).
     #[test]
     fn render_statefulset_omits_dt_master_key_env_when_unset() {
         let parent = parent_fixture("demo");
@@ -3005,11 +3257,11 @@ mod tests {
         );
     }
 
-    /// With `spec.delegationToken.secretKeyRef`, the operator must wire
-    /// `CRABKA_DELEGATION_TOKEN_SECRET_KEY` with `valueFrom.secretKeyRef`.
-    /// It must NOT use a literal value, because a literal value would put
-    /// the Secret value into the `StatefulSet` manifest. With the key
-    /// unset, the default is `secret-key`.
+    /// With `spec.delegationToken.secretKeyRef`, the operator
+    /// must wire `CRABKA_DELEGATION_TOKEN_SECRET_KEY` via
+    /// `valueFrom.secretKeyRef` (NOT a literal value — otherwise the
+    /// Secret value leaks into the `StatefulSet` manifest). With the key
+    /// unset, it defaults to `secret-key`.
     #[test]
     fn render_statefulset_dt_master_key_env_from_secret_default_key() {
         use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
@@ -3043,7 +3295,7 @@ mod tests {
         assert!(secret_ref.key == "secret-key");
     }
 
-    /// An explicit `key` override shows in the `SecretKeySelector`.
+    /// Explicit `key` override surfaces in the `SecretKeySelector`.
     #[test]
     fn render_statefulset_dt_master_key_env_honors_explicit_key() {
         use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
@@ -3092,10 +3344,10 @@ mod tests {
         );
     }
 
-    /// Builds a Kafka CR with one OAuth listener whose
-    /// `tls_trusted_certificates` holds one entry. This exercises the
-    /// `Some(...)` branch of [`oauth_jwks_trust_secret_name`] from inside
-    /// the render path of the pool reconcile.
+    /// Build a Kafka CR with one OAuth listener whose
+    /// `tls_trusted_certificates` contains one entry — exercises the
+    /// `Some(...)` branch of [`oauth_jwks_trust_secret_name`] from
+    /// inside the pool reconcile's render path.
     fn parent_with_oauth_trust(name: &str) -> Kafka {
         use crate::crd::{
             Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
@@ -3272,15 +3524,15 @@ mod tests {
         );
     }
 
-    /// When the parent Kafka CR has an OAuth listener in introspection
-    /// mode, with `accessTokenIsJwt: false` and `clientSecret`, the
-    /// rendered `StatefulSet` must do two things:
-    /// - show the source Secret of the user as a pod volume with a
-    ///   projected `items` mapping. That mapping pins the key of the user
-    ///   to the fixed in-pod filename `client-secret`.
-    /// - mount that volume on the broker container at the canonical path
-    ///   `/etc/crabka/oauth-introspection`, which is the path in the
-    ///   broker TOML render.
+    /// When the parent Kafka CR has an OAuth listener
+    /// configured for introspection mode (`accessTokenIsJwt: false` +
+    /// `clientSecret`), the rendered `StatefulSet` must:
+    /// - expose the user's source Secret as a pod volume with a
+    ///   projected `items` mapping that pins the user's key to the
+    ///   fixed in-pod filename `client-secret`;
+    /// - mount that volume on the broker container at the canonical
+    ///   path `/etc/crabka/oauth-introspection` (matching the broker TOML
+    ///   render).
     #[test]
     fn render_statefulset_mounts_oauth_introspection_secret_when_introspection_mode() {
         use crate::crd::{
@@ -3368,12 +3620,11 @@ mod tests {
         );
     }
 
-    /// JWT-mode OAuth listeners are the default. They set
-    /// `accessTokenIsJwt: true` and no `clientSecret`, and they must NOT
-    /// make the operator render the introspection volume or mount. This
-    /// test confirms that the short-circuit in
-    /// `oauth_introspection_secret_mount` gives a byte-identical pod
-    /// template for the common JWT path.
+    /// JWT-mode OAuth listeners (the default —
+    /// `accessTokenIsJwt: true`, no `clientSecret`) must NOT cause the
+    /// introspection volume / mount to be rendered. Confirms the
+    /// short-circuit in `oauth_introspection_secret_mount` flows through
+    /// to a byte-identical pod template for the common JWT path.
     #[test]
     fn render_statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
         // parent_with_oauth_trust builds a JWT-mode OAuth listener with
@@ -3486,11 +3737,10 @@ mod tests {
 
     // ── S3 tiered storage env + volume gating ────────────────────────
 
-    /// An S3 backend with credentials must inject the AWS env vars from
-    /// the referenced Secret with `valueFrom.secretKeyRef`. The literal
-    /// env value must be empty, so that the secret never lands in the pod
-    /// spec JSON. This is the same guarantee as the delegation-token
-    /// wiring.
+    /// S3 backend with credentials must inject AWS env vars from the
+    /// referenced Secret via `valueFrom.secretKeyRef`. The literal env
+    /// value must be empty so the secret never lands in the pod spec
+    /// JSON (same guarantee as the delegation-token wiring).
     #[test]
     fn pod_template_injects_aws_credentials_env_from_secret_when_s3() {
         let parent = parent_with_s3_tiered_storage("demo", true);
@@ -3534,11 +3784,11 @@ mod tests {
         assert!(sk_ref.key == "secret-access-key");
     }
 
-    /// An S3 backend without `credentials` must give an env list that is
-    /// byte-identical to the no-tier baseline, apart from any other
-    /// tier-storage signal. The broker pod inherits IRSA or
-    /// instance-profile authentication from the cluster, and the operator
-    /// must not inject placeholder AWS env entries.
+    /// S3 backend without `credentials` must produce a byte-identical
+    /// env list to the no-tier baseline modulo any other tier-storage
+    /// signal — the broker pod inherits IRSA / instance-profile auth
+    /// from the cluster, and the operator must not inject placeholder
+    /// AWS env entries.
     #[test]
     fn pod_template_omits_aws_credentials_env_when_s3_credentials_absent() {
         let parent = parent_with_s3_tiered_storage("demo", false);
@@ -3558,10 +3808,9 @@ mod tests {
         );
     }
 
-    /// An S3 backend must NOT mount the local-tier `tier-storage`
-    /// emptyDir. That volume has a meaning only for
-    /// `LocalTieredStorage`, and it would waste pod-local disk on every S3
-    /// cluster.
+    /// S3 backend must NOT mount the local-tier `tier-storage`
+    /// emptyDir — that volume is meaningful only to `LocalTieredStorage`,
+    /// and shipping it on every S3 cluster would waste pod-local disk.
     #[test]
     fn pod_template_omits_tier_storage_volume_when_s3() {
         let parent = parent_with_s3_tiered_storage("demo", true);
@@ -3645,9 +3894,8 @@ mod tests {
     }
 
     /// GCS with an explicit service-account key Secret must mount that
-    /// Secret read-only as a FILE at `GCS_CREDENTIALS_DIR`. The mount
-    /// projects the referenced key to `key.json`. The operator adds no
-    /// AWS-style env vars.
+    /// Secret read-only as a FILE at `GCS_CREDENTIALS_DIR`, projecting the
+    /// referenced key to `key.json`. No AWS-style env vars are added.
     #[test]
     fn pod_template_mounts_gcs_credentials_file_when_creds_set() {
         let parent = parent_with_gcs_tiered_storage("demo", true);
@@ -3713,10 +3961,9 @@ mod tests {
         );
     }
 
-    /// Keyless GCS with Workload Identity or ADC. With `credentials`
-    /// unset, the operator adds no gcs-credentials volume, no mount, and
-    /// no env. The pod resolves the credentials from its bound KSA through
-    /// the metadata server.
+    /// Keyless GCS (Workload Identity / ADC): with `credentials` unset, no
+    /// gcs-credentials volume/mount and no env are added — the pod resolves
+    /// credentials from its bound KSA via the metadata server.
     #[test]
     fn pod_template_omits_gcs_credentials_when_keyless() {
         let parent = parent_with_gcs_tiered_storage("demo", false);
@@ -4122,9 +4369,8 @@ mod tests {
     // pods until the parent Kafka's version model has cleared. The decision is the pure
     // `version_gate`; the reconciler just acts on it. ---
 
-    /// Attaches a `KafkaVersionValid` condition and a finalized metadata
-    /// version to the status of a parent fixture. This is what `kafka.rs`
-    /// writes.
+    /// Attach a `KafkaVersionValid` condition + finalized metadata version
+    /// to a parent fixture's status, mirroring what `kafka.rs` writes.
     fn parent_with_version_status(
         name: &str,
         version_valid: Option<bool>,

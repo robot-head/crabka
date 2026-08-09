@@ -85,6 +85,17 @@ pub use kraft::MetadataFetchSlice;
 pub use network::{OutboundDialer, PlaintextDialer};
 pub use reconfig::{AddVoter, ReconfigOutcome, RemoveVoter, UpdateVoter};
 pub use types::{AppData, AppDataResponse, Node, NodeId, OffsetReservation, SubmitChangeResult};
+
+/// Serialize a Kafka metadata snapshot, including KIP-853 control state.
+///
+/// # Errors
+/// Returns an error if a metadata or control record cannot be encoded.
+pub fn serialize_metadata_snapshot(
+    image: &crabka_metadata::MetadataImage,
+    last_contained_log_timestamp: i64,
+) -> Result<bytes::Bytes, RaftError> {
+    snapshot::SnapshotWriter::serialize(image, last_contained_log_timestamp)
+}
 pub use wire::{
     API_KEY_METADATA_FETCH, API_KEY_SUBMIT_CHANGE, CrabkaMetadataFetchRequest,
     CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,

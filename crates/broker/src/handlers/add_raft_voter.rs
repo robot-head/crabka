@@ -3,21 +3,20 @@
 //!
 //! ## ACL
 //!
-//! `Alter` on `Cluster("kafka-cluster")`. A deny gives the whole response
+//! `Alter` on `Cluster("kafka-cluster")`. Deny → whole-response
 //! `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
 //!
-//! ## Error code for each outcome
+//! ## Outcome → error code (mirrors KIP-853 / JVM `KafkaApis`)
 //!
-//! This mapping mirrors KIP-853 and the JVM `KafkaApis`:
-//!
-//! - `Committed` gives `NONE (0)`.
-//! - `NotLeader` gives `NOT_LEADER_OR_FOLLOWER (6)`. The client retries on the
-//!   leader.
-//! - `VoterNotCaughtUp` gives `INVALID_REQUEST (42)`.
-//! - `ReconfigInProgress` gives `REQUEST_TIMED_OUT (7)`. Another reconfig
-//!   holds the serialization lock, and the client should retry.
-//! - `ReconfigRejected` gives `INVALID_REQUEST (42)`.
-//! - Any other raft error gives `UNKNOWN_SERVER_ERROR (-1)`.
+//! - `Committed` → `NONE (0)`
+//! - `NotLeader` → `NOT_LEADER_OR_FOLLOWER (6)` (client retries on the leader)
+//! - `VoterNotCaughtUp` → `INVALID_REQUEST (42)`
+//! - `ReconfigInProgress` → `REQUEST_TIMED_OUT (7)` (another reconfig holds
+//!   the serialization lock; the client should retry)
+//! - `ReconfigRejected` → `INVALID_REQUEST (42)`
+//! - any other raft error → `UNKNOWN_SERVER_ERROR (-1)`
+
+use std::collections::BTreeSet;
 
 use bytes::Bytes;
 use crabka_metadata::{Voter, VoterEndpoint};
@@ -25,6 +24,7 @@ use crabka_protocol::{
     Decode,
     owned::{
         add_raft_voter_request::AddRaftVoterRequest, add_raft_voter_response::AddRaftVoterResponse,
+        api_versions_request::ApiVersionsRequest,
     },
 };
 use crabka_raft::{
@@ -66,6 +66,22 @@ pub(crate) async fn handle(
         );
     }
 
+    let cluster_id = image.cluster_id().to_string();
+    if req
+        .cluster_id
+        .as_deref()
+        .is_some_and(|request_cluster| request_cluster != cluster_id)
+    {
+        return encode_resp(
+            version,
+            &AddRaftVoterResponse {
+                error_code: codes::INVALID_REQUEST,
+                error_message: Some("cluster_id does not match this cluster".into()),
+                ..Default::default()
+            },
+        );
+    }
+
     // Voter ids are non-negative; the wire field is signed.
     let Ok(id) = u64::try_from(req.voter_id) else {
         return encode_resp(
@@ -81,6 +97,61 @@ pub(crate) async fn handle(
         );
     };
 
+    if req.voter_directory_id == crabka_protocol::primitives::uuid::Uuid::ZERO
+        || req.listeners.is_empty()
+        || req.listeners.iter().any(|listener| {
+            listener.name.is_empty() || listener.host.is_empty() || listener.port == 0
+        })
+    {
+        return encode_resp(
+            version,
+            &AddRaftVoterResponse {
+                error_code: codes::INVALID_REQUEST,
+                error_message: Some("directory id and listeners must be valid".into()),
+                ..Default::default()
+            },
+        );
+    }
+    let listener_names: BTreeSet<_> = req
+        .listeners
+        .iter()
+        .map(|listener| listener.name.as_str())
+        .collect();
+    if listener_names.len() != req.listeners.len() {
+        return encode_resp(
+            version,
+            &AddRaftVoterResponse {
+                error_code: codes::INVALID_REQUEST,
+                error_message: Some("listener names must be unique".into()),
+                ..Default::default()
+            },
+        );
+    }
+    if image.kraft_version() >= 1 {
+        match probe_candidate(broker, &req.listeners, image.kraft_version()).await {
+            Ok(()) => {}
+            Err(CandidateProbeError::Unsupported(message)) => {
+                return encode_resp(
+                    version,
+                    &AddRaftVoterResponse {
+                        error_code: codes::UNSUPPORTED_VERSION,
+                        error_message: Some(message),
+                        ..Default::default()
+                    },
+                );
+            }
+            Err(CandidateProbeError::Unavailable(message)) => {
+                return encode_resp(
+                    version,
+                    &AddRaftVoterResponse {
+                        error_code: codes::REQUEST_TIMED_OUT,
+                        error_message: Some(message),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
     let voter = Voter {
         id: crabka_raft::NodeId(id),
         directory_id: uuid::Uuid::from_bytes(req.voter_directory_id.0),
@@ -96,8 +167,15 @@ pub(crate) async fn handle(
         kraft_version: crabka_metadata::KRaftVersionRange::default(),
     };
 
-    let (error_code, error_message) =
-        outcome_to_code(broker.controller.add_voter(AddVoter { voter }).await);
+    let (error_code, error_message) = outcome_to_code(
+        broker
+            .controller
+            .add_voter(AddVoter {
+                voter,
+                ack_when_committed: version == 0 || req.ack_when_committed,
+            })
+            .await,
+    );
 
     encode_resp(
         version,
@@ -109,9 +187,71 @@ pub(crate) async fn handle(
     )
 }
 
-/// Maps a coordinator outcome or a raft error onto a Kafka error code and an
-/// optional message. The Add, Remove, and Update handlers share it. Update can
-/// never produce `VoterNotCaughtUp`, but the arm is harmless there.
+enum CandidateProbeError {
+    Unsupported(String),
+    Unavailable(String),
+}
+
+async fn probe_candidate(
+    broker: &Broker,
+    listeners: &[crabka_protocol::owned::add_raft_voter_request::Listener],
+    finalized_version: u16,
+) -> Result<(), CandidateProbeError> {
+    let endpoint = listeners
+        .iter()
+        .find(|listener| listener.name.eq_ignore_ascii_case("CONTROLLER"))
+        .or_else(|| listeners.first())
+        .expect("validated non-empty listeners");
+    let server_name = broker
+        .config
+        .controller_server_name
+        .as_deref()
+        .unwrap_or(&endpoint.host);
+    let connection = broker
+        .inter_broker_client
+        .connect_as_connection(
+            &endpoint.host,
+            endpoint.port,
+            broker.config.controller_listener_protocol,
+            server_name,
+            crabka_client_core::ConnectionOptions {
+                client_id: "crabka-voter-probe".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| CandidateProbeError::Unavailable(error.to_string()))?;
+    let request = ApiVersionsRequest {
+        client_software_name: "crabka".into(),
+        client_software_version: env!("CARGO_PKG_VERSION").into(),
+        ..Default::default()
+    };
+    let response = connection
+        .send(request)
+        .await
+        .map_err(|error| CandidateProbeError::Unavailable(error.to_string()));
+    connection.close();
+    let response = response?;
+    let supported = response
+        .supported_features
+        .iter()
+        .find(|feature| feature.name == "kraft.version")
+        .is_some_and(|feature| {
+            i16::try_from(finalized_version).is_ok_and(|version| {
+                feature.min_version <= version && version <= feature.max_version
+            })
+        });
+    if !supported {
+        return Err(CandidateProbeError::Unsupported(format!(
+            "candidate does not support finalized kraft.version {finalized_version}"
+        )));
+    }
+    Ok(())
+}
+
+/// Map a coordinator outcome / raft error onto a Kafka error code +
+/// optional message. Shared by the Add/Remove/Update handlers (Update can
+/// never surface `VoterNotCaughtUp`, but the arm is harmless there).
 pub(crate) fn outcome_to_code(
     outcome: Result<ReconfigOutcome, RaftError>,
 ) -> (i16, Option<String>) {
@@ -133,6 +273,19 @@ pub(crate) fn outcome_to_code(
             Some("another reconfiguration is in progress".into()),
         ),
         Err(RaftError::ReconfigRejected(why)) => (codes::INVALID_REQUEST, Some(why)),
+        Err(RaftError::DuplicateVoter(id)) => (
+            codes::DUPLICATE_VOTER,
+            Some(format!("voter {id} already exists")),
+        ),
+        Err(RaftError::VoterNotFound(id)) => (
+            codes::VOTER_NOT_FOUND,
+            Some(format!("voter {id} was not found")),
+        ),
+        Err(RaftError::InvalidVoterUpdate(why)) => (codes::INVALID_UPDATE, Some(why)),
+        Err(RaftError::UnsupportedKraftVersion(_)) => (
+            codes::UNSUPPORTED_VERSION,
+            Some("dynamic voter changes require kraft.version 1".into()),
+        ),
         Err(e) => (codes::UNKNOWN_SERVER_ERROR, Some(e.to_string())),
     }
 }
@@ -217,9 +370,9 @@ mod tests {
         assert!(msg.as_deref() == Some("nope"));
     }
 
-    /// Round-trips a decode and then an encode at the minimum and the maximum
-    /// version. This guards against a response that fails to encode at either
-    /// end of the version range that the schema declares.
+    /// Decode→encode round-trip at min and max versions. Guards against
+    /// the response failing to encode at either end of the version range
+    /// the schema declares.
     #[test]
     fn response_round_trips_at_min_and_max_versions() {
         use crabka_protocol::owned::add_raft_voter_response::{self, AddRaftVoterResponse};
@@ -277,7 +430,9 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(&request(-7), version);
+        let mut request = request(-7);
+        request.cluster_id = Some(broker.controller.current_image().cluster_id().to_string());
+        let req_bytes = encode_request(&request, version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
@@ -306,18 +461,20 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(&request(2), version);
+        let mut request = request(2);
+        request.cluster_id = Some(broker.controller.current_image().cluster_id().to_string());
+        let req_bytes = encode_request(&request, version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
         assert!(
             resp.error_message
                 .as_deref()
-                .is_some_and(|m| m.contains("dynamic reconfig unsupported"))
+                .is_some_and(|m| m.contains("kraft.version 1"))
         );
         broker_handle.shutdown().await;
     }

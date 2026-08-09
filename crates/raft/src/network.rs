@@ -13,7 +13,10 @@
 //! Peer addresses are resolved from the static voter set's CONTROLLER
 //! endpoints.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -116,7 +119,7 @@ fn api_version_for(key: ApiKey) -> ApiVersion {
 /// connection, so the next send dials again.
 pub(crate) struct RealPeerSender {
     connections: DashMap<NodeId, Arc<Connection>>,
-    voters: VoterSet,
+    voters: RwLock<VoterSet>,
     client_id: String,
     dialer: Arc<dyn OutboundDialer>,
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
@@ -133,7 +136,7 @@ impl RealPeerSender {
     ) -> Self {
         Self {
             connections: DashMap::new(),
-            voters,
+            voters: RwLock::new(voters),
             client_id,
             dialer,
             dispatch_queue_capacity,
@@ -147,9 +150,15 @@ impl RealPeerSender {
         if let Some(c) = self.connections.get(&peer) {
             return Ok(Arc::clone(c.value()));
         }
-        let addr = controller_addr(&self.voters, peer).ok_or(RaftError::NotLeader {
-            current_leader: None,
-        })?;
+        let addr = {
+            let voters = self
+                .voters
+                .read()
+                .map_err(|_| RaftError::ChangeRejected("voter endpoint lock poisoned".into()))?;
+            controller_addr(&voters, peer).ok_or(RaftError::NotLeader {
+                current_leader: None,
+            })?
+        };
         let opts = ConnectionOptions {
             client_id: self.client_id.clone(),
             dispatch_queue_capacity: self.dispatch_queue_capacity,
@@ -180,6 +189,14 @@ impl PeerSender for RealPeerSender {
                 self.connections.remove(&peer);
                 Err(RaftError::Network(e))
             }
+        }
+    }
+
+    fn update_voters(&self, voters: &VoterSet) {
+        if let Ok(mut current) = self.voters.write() {
+            *current = voters.clone();
+            // Endpoint updates must force the next request through DNS/dialing.
+            self.connections.clear();
         }
     }
 }

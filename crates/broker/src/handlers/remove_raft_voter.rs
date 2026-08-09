@@ -57,6 +57,23 @@ pub(crate) async fn handle(
         );
     }
 
+    let cluster_id = image.cluster_id().to_string();
+    if req
+        .cluster_id
+        .as_deref()
+        .is_some_and(|request_cluster| request_cluster != cluster_id)
+        || req.voter_directory_id == crabka_protocol::primitives::uuid::Uuid::ZERO
+    {
+        return encode_resp(
+            version,
+            &RemoveRaftVoterResponse {
+                error_code: codes::INVALID_REQUEST,
+                error_message: Some("cluster_id and voter_directory_id must be valid".into()),
+                ..Default::default()
+            },
+        );
+    }
+
     let Ok(id) = u64::try_from(req.voter_id) else {
         return encode_resp(
             version,
@@ -191,7 +208,9 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(&request(-7), version);
+        let mut request = request(-7);
+        request.cluster_id = Some(broker.controller.current_image().cluster_id().to_string());
+        let req_bytes = encode_request(&request, version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await

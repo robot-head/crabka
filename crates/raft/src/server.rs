@@ -1,6 +1,6 @@
-//! Accept loop for the controller TCP listener. It receives inbound KIP-595
-//! RPCs (Fetch=1, Vote=52, BeginQuorumEpoch=53, EndQuorumEpoch=54) and the
-//! Crabka-private observer and forward RPCs, and it feeds them into the local
+//! Accept loop for the controller TCP listener. Receives inbound KIP-595 RPCs
+//! (Fetch=1, Vote=52, BeginQuorumEpoch=53, EndQuorumEpoch=54) plus the
+//! Crabka-private observer/forward RPCs and feeds them into the local
 //! [`KraftController`] engine.
 //!
 //! Wire shape matches `crabka_client_core::Connection::raw_request`:
@@ -9,9 +9,9 @@
 //! - Response: `len(i32) | correlation_id(i32) | tagged_fields(0u8) | body`
 //!
 //! `RequestHeader` v2 = `api_key(i16) api_version(i16) correlation_id(i32)
-//! client_id(NULLABLE_STRING) tagged_fields(varint=0)`. This module parses and
-//! discards everything but `api_key` and `correlation_id`. The engine's
-//! transport codec and the Crabka-private wire types decode the body.
+//! client_id(NULLABLE_STRING) tagged_fields(varint=0)`. We parse and discard
+//! everything but `api_key`/`correlation_id` (the body is decoded by the
+//! engine's transport codec / the Crabka-private wire types).
 
 use std::sync::Arc;
 
@@ -46,24 +46,27 @@ type CorrelationId = i32;
 /// handshake before any other request.
 const API_KEY_API_VERSIONS: i16 = 18;
 
-/// Highest `ApiVersions` request version this listener speaks. It is the
-/// advertised max in the `api_keys` table and the clamp on the response body
-/// codec. JVM controllers dial at v4, and Crabka's own client dials at v0.
+/// Highest `ApiVersions` request version this listener speaks: the advertised
+/// max in the `api_keys` table and the clamp applied to the response body codec
+/// (JVM controllers dial at v4; Crabka's own client at v0).
 const API_VERSIONS_MAX_VERSION: i16 = 4;
 
-/// `DescribeCluster` (KIP-919). The controller listener serves it, so an
+/// `DescribeCluster` (KIP-919) — served on the controller listener so an
 /// `AdminClient` bootstrapped with `--bootstrap-controller` can discover the
-/// quorum's controller endpoints, or its broker endpoints, directly from the
-/// leader.
+/// quorum's controller (or broker) endpoints directly from the leader.
 const API_KEY_DESCRIBE_CLUSTER: i16 = 60;
+const API_KEY_DESCRIBE_QUORUM: i16 = 55;
+const API_KEY_ADD_RAFT_VOTER: i16 = 80;
+const API_KEY_REMOVE_RAFT_VOTER: i16 = 81;
+const API_KEY_UPDATE_RAFT_VOTER: i16 = 82;
 
 /// `CrabkaSubmitChangeResponse::error_code`: the change was applied.
 const SUBMIT_CHANGE_APPLIED: i16 = 0;
-/// `CrabkaSubmitChangeResponse::error_code`: this node is not the leader, so
-/// read `leader_hint`.
+/// `CrabkaSubmitChangeResponse::error_code`: this node is not the leader;
+/// consult `leader_hint`.
 const SUBMIT_CHANGE_NOT_LEADER: i16 = 1;
 /// `CrabkaSubmitChangeResponse::error_code`: metadata validation rejected the
-/// records. This code also comes back when the wincode body fails to decode.
+/// records (also returned when the wincode body fails to decode).
 const SUBMIT_CHANGE_REJECTED: i16 = 2;
 /// `CrabkaSubmitChangeResponse::error_code`: any other engine failure.
 const SUBMIT_CHANGE_FAILED: i16 = 3;
@@ -153,7 +156,8 @@ where
                     // are flexible (compact array). Crabka's own client asks at
                     // v0; the JVM controller asks at v4. The generated codec
                     // speaks the raw `int16`, so unwrap the version here.
-                    let resp = api_versions_response_body(api_version.get());
+                    let kraft_version = engine.current_image().kraft_version();
+                    let resp = api_versions_response_body(api_version.get(), kraft_version);
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
@@ -164,6 +168,23 @@ where
                 if api_key_n == API_KEY_DESCRIBE_CLUSTER {
                     let resp =
                         describe_cluster_response_body(api_version.get(), &body, &engine).await?;
+                    write_response(&mut stream, correlation_id, resp).await?;
+                    continue;
+                }
+                if matches!(
+                    api_key_n.0,
+                    API_KEY_DESCRIBE_QUORUM
+                        | API_KEY_ADD_RAFT_VOTER
+                        | API_KEY_REMOVE_RAFT_VOTER
+                        | API_KEY_UPDATE_RAFT_VOTER
+                ) {
+                    let resp = kip853_admin_response(
+                        api_key_n.0,
+                        api_version.get(),
+                        &body,
+                        &engine,
+                    )
+                    .await?;
                     write_response(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
@@ -252,9 +273,8 @@ where
     write_response_frame(stream, correlation_id, body, true).await
 }
 
-/// Writes a response without the leading tagged-fields byte. Only the
-/// `ApiVersions` v0 path uses it, because that path decodes a
-/// `ResponseHeader v0`.
+/// Write a response without the leading tagged-fields byte. Used only by the
+/// `ApiVersions` v0 path, which decodes a `ResponseHeader v0`.
 async fn write_response_no_tagged_fields<S>(
     stream: &mut S,
     correlation_id: CorrelationId,
@@ -292,24 +312,25 @@ where
 
 /// `ApiVersionsResponse` advertising the controller-listener APIs.
 ///
-/// A real `mirror.gcr.io/apache/kafka:4.0.0` controller dials peers with
-/// `ApiVersions v4` over a flexible (v2) request header. It then reads the
-/// returned table to choose which version of `Vote`, `Fetch`, and the other
-/// RPCs to send. An EMPTY `api_keys` list makes the JVM treat every raft RPC as
-/// `UNSUPPORTED_VERSION` and refuse to send `Vote` on the wire. This listener
-/// therefore advertises the KIP-595 APIs at the versions Crabka's engine
-/// speaks, which lets compatible peers proceed to a real `Vote` and `Fetch`.
+/// A real `mirror.gcr.io/apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
+/// flexible (v2) request header, then consults the returned table to decide
+/// which version of `Vote`/`Fetch`/etc. to send. An EMPTY `api_keys` list made
+/// the JVM treat every raft RPC as `UNSUPPORTED_VERSION` and refuse to send
+/// `Vote` on the wire. Advertising the KIP-595 APIs at the versions Crabka's
+/// engine speaks lets compatible peers proceed to real `Vote`/`Fetch`.
 ///
-/// The body is the flexible (v3+) `ApiVersionsResponse` shape: `error_code(i16)`,
-/// an `api_keys` compact-array of `{api_key(i16), min(i16), max(i16),
-/// tagged(0)}`, `throttle_time_ms(i32)`, and a response-level `tagged(0)`. The
-/// response header stays at v0, with no leading tagged-fields byte, which is
-/// the documented Kafka asymmetry. This function therefore writes the response
-/// through [`write_response_no_tagged_fields`].
-fn api_versions_response_body(req_version: i16) -> Bytes {
+/// Body is the flexible (v3+) `ApiVersionsResponse` shape: `error_code(i16)`,
+/// `api_keys` compact-array of `{api_key(i16), min(i16), max(i16), tagged(0)}`,
+/// `throttle_time_ms(i32)`, response-level `tagged(0)`. Per the documented Kafka
+/// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
+/// so this is written via [`write_response_no_tagged_fields`].
+fn api_versions_response_body(req_version: i16, kraft_version: u16) -> Bytes {
     use crabka_protocol::{
         Encode,
-        owned::api_versions_response::{ApiVersion as ApiVersionEntry, ApiVersionsResponse},
+        owned::api_versions_response::{
+            ApiVersion as ApiVersionEntry, ApiVersionsResponse, FinalizedFeatureKey,
+            SupportedFeatureKey,
+        },
     };
     // (api_key, max_version) — min_version/error_code/throttle_time_ms are all
     // protocol defaults of 0, so leave them implicit. Each max_version is the
@@ -322,6 +343,10 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
         (api_key::END_QUORUM_EPOCH, 1),
         (api_key::FETCH_SNAPSHOT, 1),
         (API_KEY_DESCRIBE_CLUSTER, 2),
+        (API_KEY_DESCRIBE_QUORUM, 2),
+        (API_KEY_ADD_RAFT_VOTER, 1),
+        (API_KEY_REMOVE_RAFT_VOTER, 0),
+        (API_KEY_UPDATE_RAFT_VOTER, 0),
     ];
     let resp = ApiVersionsResponse {
         api_keys: KEYS
@@ -332,6 +357,19 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
                 ..Default::default()
             })
             .collect(),
+        supported_features: vec![SupportedFeatureKey {
+            name: crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE.into(),
+            min_version: 0,
+            max_version: 1,
+            ..Default::default()
+        }],
+        finalized_features_epoch: 0,
+        finalized_features: vec![FinalizedFeatureKey {
+            name: crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE.into(),
+            min_version_level: i16::try_from(kraft_version).unwrap_or(i16::MAX),
+            max_version_level: i16::try_from(kraft_version).unwrap_or(i16::MAX),
+            ..Default::default()
+        }],
         ..Default::default()
     };
     // JVM dials at v4 (flexible); Crabka's own client at v0 (non-flexible). The
@@ -345,12 +383,425 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
     buf.freeze()
 }
 
-/// Routes an inbound RPC body to the engine and produces the response body.
+fn reconfiguration_error_code(
+    result: Result<crate::reconfig::ReconfigOutcome, RaftError>,
+) -> (i16, Option<String>) {
+    use crate::reconfig::ReconfigOutcome;
+    match result {
+        Ok(ReconfigOutcome::Committed) => (0, None),
+        Ok(ReconfigOutcome::NotLeader { leader }) => (
+            6,
+            Some(leader.map_or_else(
+                || "not the raft leader".into(),
+                |leader| format!("not the raft leader; current leader is {leader}"),
+            )),
+        ),
+        Err(RaftError::ReconfigInProgress) => {
+            (7, Some("another reconfiguration is in progress".into()))
+        }
+        Err(RaftError::VoterNotCaughtUp { id, lag }) => {
+            (42, Some(format!("voter {id} not caught up (lag {lag})")))
+        }
+        Err(RaftError::DuplicateVoter(id)) => (139, Some(format!("voter {id} already exists"))),
+        Err(RaftError::VoterNotFound(id)) => (140, Some(format!("voter {id} was not found"))),
+        Err(RaftError::InvalidVoterUpdate(message)) => (141, Some(message)),
+        Err(RaftError::UnsupportedKraftVersion(_)) => (
+            35,
+            Some("dynamic voter changes require kraft.version 1".into()),
+        ),
+        Err(RaftError::ReconfigRejected(message)) => (42, Some(message)),
+        Err(error) => (-1, Some(error.to_string())),
+    }
+}
+
+fn valid_wire_listeners<'a>(listeners: impl IntoIterator<Item = (&'a str, &'a str, u16)>) -> bool {
+    let mut names = std::collections::BTreeSet::new();
+    let mut count = 0usize;
+    for (name, host, port) in listeners {
+        count += 1;
+        if name.is_empty() || host.is_empty() || port == 0 || !names.insert(name) {
+            return false;
+        }
+    }
+    count != 0
+}
+
+async fn probe_voter_candidate(
+    listeners: &[crabka_protocol::owned::add_raft_voter_request::Listener],
+    finalized_version: u16,
+) -> Result<(), (i16, String)> {
+    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+
+    let endpoint = listeners
+        .iter()
+        .find(|listener| listener.name.eq_ignore_ascii_case("CONTROLLER"))
+        .or_else(|| listeners.first())
+        .expect("validated non-empty listeners");
+    let address = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+        .await
+        .map_err(|error| (7, format!("candidate DNS lookup failed: {error}")))?
+        .next()
+        .ok_or_else(|| (7, "candidate DNS lookup returned no addresses".into()))?;
+    let connection = crabka_client_core::Connection::connect(
+        address,
+        crabka_client_core::ConnectionOptions {
+            client_id: "crabka-voter-probe".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| (7, format!("candidate ApiVersions probe failed: {error}")))?;
+    let response = connection
+        .send(ApiVersionsRequest {
+            client_software_name: "crabka".into(),
+            client_software_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| (7, format!("candidate ApiVersions probe failed: {error}")));
+    connection.close();
+    let response = response?;
+    let supported = response
+        .supported_features
+        .iter()
+        .find(|feature| feature.name == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE)
+        .is_some_and(|feature| {
+            i16::try_from(finalized_version).is_ok_and(|version| {
+                feature.min_version <= version && version <= feature.max_version
+            })
+        });
+    if supported {
+        Ok(())
+    } else {
+        Err((
+            35,
+            format!("candidate does not support finalized kraft.version {finalized_version}"),
+        ))
+    }
+}
+
+async fn kip853_admin_response(
+    api_key: i16,
+    version: i16,
+    body: &[u8],
+    engine: &KraftController,
+) -> Result<Bytes, RaftError> {
+    match api_key {
+        API_KEY_DESCRIBE_QUORUM => describe_quorum_response(version, body, engine).await,
+        API_KEY_ADD_RAFT_VOTER => add_raft_voter_response(version, body, engine).await,
+        API_KEY_REMOVE_RAFT_VOTER => remove_raft_voter_response(version, body, engine).await,
+        API_KEY_UPDATE_RAFT_VOTER => update_raft_voter_response(version, body, engine).await,
+        _ => unreachable!("filtered KIP-853 admin API key"),
+    }
+}
+
+async fn describe_quorum_response(
+    version: i16,
+    body: &[u8],
+    engine: &KraftController,
+) -> Result<Bytes, RaftError> {
+    use crabka_protocol::owned::{
+        common::describe_quorum_response::replica_state::ReplicaState,
+        describe_quorum_request::DescribeQuorumRequest,
+        describe_quorum_response::{
+            DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
+        },
+    };
+    use crabka_protocol::{Decode, Encode};
+
+    let mut input = body;
+    let request = DescribeQuorumRequest::decode(&mut input, version)?;
+    let quorum = engine.quorum_state().await?;
+    let topics = request
+        .topics
+        .into_iter()
+        .map(|topic| TopicData {
+            topic_name: topic.topic_name.clone(),
+            partitions: topic
+                .partitions
+                .into_iter()
+                .map(|partition| {
+                    if topic.topic_name != "__cluster_metadata" || partition.partition_index != 0 {
+                        return PartitionData {
+                            partition_index: partition.partition_index,
+                            error_code: 17,
+                            error_message: Some(
+                                "DescribeQuorum supports only __cluster_metadata".into(),
+                            ),
+                            leader_id: -1,
+                            leader_epoch: -1,
+                            high_watermark: -1,
+                            ..Default::default()
+                        };
+                    }
+                    let state = |id: crate::NodeId, directory_id: uuid::Uuid| ReplicaState {
+                        replica_id: i32::try_from(id.0).unwrap_or(-1),
+                        replica_directory_id: crabka_protocol::primitives::uuid::Uuid(
+                            *directory_id.as_bytes(),
+                        ),
+                        log_end_offset: quorum
+                            .per_replica_fetch_offset
+                            .get(&id)
+                            .copied()
+                            .unwrap_or(-1),
+                        ..Default::default()
+                    };
+                    PartitionData {
+                        partition_index: 0,
+                        leader_id: quorum
+                            .leader_id
+                            .and_then(|id| i32::try_from(id.0).ok())
+                            .unwrap_or(-1),
+                        leader_epoch: i32::try_from(quorum.leader_epoch).unwrap_or(i32::MAX),
+                        high_watermark: quorum.high_watermark,
+                        current_voters: quorum
+                            .voters
+                            .iter()
+                            .map(|voter| state(voter.id, voter.directory_id))
+                            .collect(),
+                        observers: quorum
+                            .observers
+                            .iter()
+                            .map(|id| state(*id, uuid::Uuid::nil()))
+                            .collect(),
+                        ..Default::default()
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+    let nodes = quorum
+        .voters
+        .iter()
+        .map(|voter| Node {
+            node_id: i32::try_from(voter.id.0).unwrap_or(-1),
+            listeners: voter
+                .endpoints
+                .iter()
+                .map(|endpoint| Listener {
+                    name: endpoint.name.clone(),
+                    host: endpoint.host.clone(),
+                    port: endpoint.port,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+    let mut output = BytesMut::new();
+    DescribeQuorumResponse {
+        topics,
+        nodes,
+        ..Default::default()
+    }
+    .encode(&mut output, version)?;
+    Ok(output.freeze())
+}
+
+async fn add_raft_voter_response(
+    version: i16,
+    body: &[u8],
+    engine: &KraftController,
+) -> Result<Bytes, RaftError> {
+    use crabka_protocol::owned::{
+        add_raft_voter_request::AddRaftVoterRequest, add_raft_voter_response::AddRaftVoterResponse,
+    };
+    use crabka_protocol::{Decode, Encode};
+
+    let mut input = body;
+    let request = AddRaftVoterRequest::decode(&mut input, version)?;
+    let image = engine.current_image();
+    let cluster_id = image.cluster_id().to_string();
+    let valid = request
+        .cluster_id
+        .as_deref()
+        .is_none_or(|request_cluster| request_cluster == cluster_id)
+        && request.voter_id >= 0
+        && request.voter_directory_id != crabka_protocol::primitives::uuid::Uuid::ZERO
+        && valid_wire_listeners(request.listeners.iter().map(|listener| {
+            (
+                listener.name.as_str(),
+                listener.host.as_str(),
+                listener.port,
+            )
+        }));
+    let probe = if valid && image.kraft_version() >= 1 {
+        probe_voter_candidate(&request.listeners, image.kraft_version()).await
+    } else {
+        Ok(())
+    };
+    let (error_code, error_message) = if !valid {
+        (42, Some("invalid AddRaftVoter request".into()))
+    } else if let Err((code, message)) = probe {
+        (code, Some(message))
+    } else {
+        let voter = crabka_metadata::Voter {
+            id: crate::NodeId(u64::try_from(request.voter_id).unwrap_or_default()),
+            directory_id: uuid::Uuid::from_bytes(request.voter_directory_id.0),
+            endpoints: request
+                .listeners
+                .into_iter()
+                .map(|listener| crabka_metadata::VoterEndpoint {
+                    name: listener.name,
+                    host: listener.host,
+                    port: listener.port,
+                })
+                .collect(),
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        };
+        reconfiguration_error_code(
+            engine
+                .reconfigure(crate::reconfig::VoterChange::Add(
+                    crate::reconfig::AddVoter {
+                        voter,
+                        ack_when_committed: version == 0 || request.ack_when_committed,
+                    },
+                ))
+                .await,
+        )
+    };
+    let mut output = BytesMut::new();
+    AddRaftVoterResponse {
+        error_code,
+        error_message,
+        ..Default::default()
+    }
+    .encode(&mut output, version)?;
+    Ok(output.freeze())
+}
+
+async fn remove_raft_voter_response(
+    version: i16,
+    body: &[u8],
+    engine: &KraftController,
+) -> Result<Bytes, RaftError> {
+    use crabka_protocol::owned::{
+        remove_raft_voter_request::RemoveRaftVoterRequest,
+        remove_raft_voter_response::RemoveRaftVoterResponse,
+    };
+    use crabka_protocol::{Decode, Encode};
+
+    let mut input = body;
+    let request = RemoveRaftVoterRequest::decode(&mut input, version)?;
+    let cluster_id = engine.current_image().cluster_id().to_string();
+    let validation_error = if request
+        .cluster_id
+        .as_deref()
+        .is_some_and(|request_cluster| request_cluster != cluster_id)
+    {
+        Some(format!(
+            "cluster_id {:?} does not match {cluster_id}",
+            request.cluster_id
+        ))
+    } else if request.voter_id < 0 {
+        Some(format!(
+            "voter_id must be non-negative, got {}",
+            request.voter_id
+        ))
+    } else if request.voter_directory_id == crabka_protocol::primitives::uuid::Uuid::ZERO {
+        Some("voter_directory_id must be non-zero".into())
+    } else {
+        None
+    };
+    let (error_code, error_message) = if let Some(message) = validation_error {
+        (42, Some(message))
+    } else {
+        reconfiguration_error_code(
+            engine
+                .reconfigure(crate::reconfig::VoterChange::Remove(
+                    crate::reconfig::RemoveVoter {
+                        id: crate::NodeId(u64::try_from(request.voter_id).unwrap_or_default()),
+                        directory_id: uuid::Uuid::from_bytes(request.voter_directory_id.0),
+                    },
+                ))
+                .await,
+        )
+    };
+    let mut output = BytesMut::new();
+    RemoveRaftVoterResponse {
+        error_code,
+        error_message,
+        ..Default::default()
+    }
+    .encode(&mut output, version)?;
+    Ok(output.freeze())
+}
+
+async fn update_raft_voter_response(
+    version: i16,
+    body: &[u8],
+    engine: &KraftController,
+) -> Result<Bytes, RaftError> {
+    use crabka_protocol::owned::{
+        update_raft_voter_request::UpdateRaftVoterRequest,
+        update_raft_voter_response::UpdateRaftVoterResponse,
+    };
+    use crabka_protocol::{Decode, Encode};
+
+    let mut input = body;
+    let request = UpdateRaftVoterRequest::decode(&mut input, version)?;
+    let cluster_id = engine.current_image().cluster_id().to_string();
+    let quorum = engine.quorum_state().await?;
+    let min = u16::try_from(request.k_raft_version_feature.min_supported_version);
+    let max = u16::try_from(request.k_raft_version_feature.max_supported_version);
+    let valid_range = matches!((&min, &max), (Ok(min), Ok(max)) if min <= max);
+    let valid = request.cluster_id.as_deref() == Some(cluster_id.as_str())
+        && request.voter_id >= 0
+        && request.voter_directory_id != crabka_protocol::primitives::uuid::Uuid::ZERO
+        && i64::from(request.current_leader_epoch) == i64::from(quorum.leader_epoch)
+        && valid_range
+        && valid_wire_listeners(request.listeners.iter().map(|listener| {
+            (
+                listener.name.as_str(),
+                listener.host.as_str(),
+                listener.port,
+            )
+        }));
+    let error_code = if valid {
+        let voter = crabka_metadata::Voter {
+            id: crate::NodeId(u64::try_from(request.voter_id).unwrap_or_default()),
+            directory_id: uuid::Uuid::from_bytes(request.voter_directory_id.0),
+            endpoints: request
+                .listeners
+                .into_iter()
+                .map(|listener| crabka_metadata::VoterEndpoint {
+                    name: listener.name,
+                    host: listener.host,
+                    port: listener.port,
+                })
+                .collect(),
+            kraft_version: crabka_metadata::KRaftVersionRange {
+                min: min.unwrap_or_default(),
+                max: max.unwrap_or_default(),
+            },
+        };
+        reconfiguration_error_code(
+            engine
+                .reconfigure(crate::reconfig::VoterChange::Update(
+                    crate::reconfig::UpdateVoter { voter },
+                ))
+                .await,
+        )
+        .0
+    } else {
+        141
+    };
+    let mut output = BytesMut::new();
+    UpdateRaftVoterResponse {
+        error_code,
+        ..Default::default()
+    }
+    .encode(&mut output, version)?;
+    Ok(output.freeze())
+}
+
+/// Route an inbound RPC body to the engine and produce the response body.
 ///
-/// The KIP-595 engine RPCs (1, 52, 53, 54) go through
-/// [`KraftController::deliver`]. That method decodes the body, runs the core,
-/// and replies on a oneshot with the encoded response body. The Crabka-private
-/// RPCs 1003 and 1004 keep their own request and response wire types.
+/// The KIP-595 engine RPCs (1/52/53/54) go through [`KraftController::deliver`],
+/// which decodes the body, runs the core, and replies on a oneshot with the
+/// encoded response body. The Crabka-private 1003/1004 keep their bespoke
+/// request/response wire types.
 #[cfg(test)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id().0, api_key = api_key_n.get()), err)]
 async fn dispatch(
@@ -400,7 +851,7 @@ async fn dispatch_with_router(
     }
 }
 
-/// Delivers an [`Inbound`] to the engine and awaits the encoded response body.
+/// Deliver an [`Inbound`] to the engine and await the encoded response body.
 async fn deliver_inbound<F>(engine: &KraftController, make: F) -> Result<Bytes, RaftError>
 where
     F: FnOnce(oneshot::Sender<Bytes>) -> Inbound,
@@ -410,12 +861,10 @@ where
     rx.await.map_err(|_| RaftError::Shutdown)
 }
 
-/// Handles a follower-forwarded `submit_change` (1003).
-///
-/// The forwarder wrapped a wincode-encoded `Vec<MetadataRecord>`. This function
-/// submits it to the local engine, which is normally the leader, and translates
-/// the result into the `error_code` enum: `0` for applied, `1` for not leader,
-/// together with `leader_hint`, and `2` for metadata-rejected.
+/// Handle a follower-forwarded `submit_change` (1003). The forwarder wrapped a
+/// wincode-encoded `Vec<MetadataRecord>`; we submit it to the local engine
+/// (presumably the leader) and translate the result into the `error_code` enum:
+/// `0` applied, `1` not leader (with `leader_hint`), `2` metadata-rejected.
 async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result<Bytes, RaftError> {
     let mut cur = body;
     let req = CrabkaSubmitChangeRequest::decode_v0(&mut cur)?;
@@ -471,8 +920,8 @@ async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result
     Ok(Bytes::from(out))
 }
 
-/// Serves a committed `__cluster_metadata` slice to a broker-only observer
-/// (1004) from the engine's `KraftLog`.
+/// Serve a committed `__cluster_metadata` slice to a broker-only observer (1004)
+/// from the engine's `KraftLog`.
 async fn dispatch_metadata_fetch(
     body: &[u8],
     engine: &KraftController,
@@ -504,14 +953,12 @@ async fn dispatch_metadata_fetch(
     Ok(Bytes::from(out))
 }
 
-/// Serves `DescribeCluster` (60, KIP-919) on the controller listener from the
-/// controller's metadata image.
-///
-/// `endpoint_type=2`, which is CONTROLLERS, projects the voter set, so a
-/// `--bootstrap-controller` `AdminClient` can discover the quorum. Any other
-/// value returns the registered brokers. The controller listener carries no
-/// principal or ACL context, because it is the inter-node trust boundary, the
-/// same as `metadata_fetch`. There is therefore no auth gate.
+/// Serve `DescribeCluster` (60, KIP-919) on the controller listener from the
+/// controller's metadata image. `endpoint_type=2` (CONTROLLERS) projects the
+/// voter set so a `--bootstrap-controller` `AdminClient` can discover the
+/// quorum; otherwise the registered brokers are returned. The controller
+/// listener carries no principal/ACL context (it is the inter-node trust
+/// boundary, like `metadata_fetch`), so there is no auth gate.
 // The broker-id `i32::try_from(node_id).unwrap_or(-1)` overflow fallback is
 // unreachable: the metadata layer rejects registering a `node_id` exceeding
 // `i32::MAX` (BrokerRegistrationRecord encode validation), so the `-1` sentinel
@@ -578,9 +1025,8 @@ async fn describe_cluster_response_body(
     )?)
 }
 
-/// Encodes a `DescribeClusterResponse` body for `version` from already-projected
-/// node tuples. The function is pure and touches no engine, so a unit test can
-/// cover the projection and the encode.
+/// Encode a `DescribeClusterResponse` body for `version` from already-projected
+/// node tuples. Pure (no engine), so the projection-and-encode is unit-testable.
 fn build_describe_cluster_body(
     version: i16,
     endpoint_type: i8,
@@ -646,8 +1092,8 @@ mod tests {
 
     use super::*;
 
-    /// Election timeout for the in-test engines. It is short, so a single
-    /// voter wins immediately.
+    /// Election timeout for the in-test engines: short, so a single voter wins
+    /// immediately.
     const TEST_ELECTION_TIMEOUT: Time = millis(50);
 
     /// How long a test waits for a leader to appear.
@@ -805,6 +1251,22 @@ mod tests {
     fn decode_metadata_fetch_response(body: &[u8]) -> CrabkaMetadataFetchResponse {
         let mut cur = body;
         CrabkaMetadataFetchResponse::decode_v0(&mut cur).expect("metadata fetch response")
+    }
+
+    async fn activate_dynamic_membership(engine: &KraftController) {
+        tokio::time::timeout(TEST_LEADER_DEADLINE.to_std(), async {
+            loop {
+                match engine.finalize_kraft_version(1).await {
+                    Ok(_) => return,
+                    Err(RaftError::ReconfigInProgress) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("activate kraft.version 1: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("dynamic membership activation");
     }
 
     #[test]
@@ -1142,11 +1604,86 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn kip853_controller_apis_describe_exact_identity_and_reject_last_removal() {
+        use crabka_protocol::{
+            Encode,
+            owned::{
+                describe_quorum_request::{
+                    DescribeQuorumRequest, PartitionData as RequestPartition,
+                    TopicData as RequestTopic,
+                },
+                describe_quorum_response::DescribeQuorumResponse,
+                remove_raft_voter_request::RemoveRaftVoterRequest,
+                remove_raft_voter_response::RemoveRaftVoterResponse,
+            },
+        };
+
+        let (engine, _dir) = single_voter_engine();
+        wait_for_leader(&engine).await;
+        activate_dynamic_membership(&engine).await;
+
+        let describe = DescribeQuorumRequest {
+            topics: vec![RequestTopic {
+                topic_name: "__cluster_metadata".into(),
+                partitions: vec![RequestPartition {
+                    partition_index: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut request_body = bytes::BytesMut::new();
+        describe.encode(&mut request_body, 2).unwrap();
+        let response_body =
+            super::kip853_admin_response(API_KEY_DESCRIBE_QUORUM, 2, &request_body, &engine)
+                .await
+                .expect("DescribeQuorum");
+        let mut response_bytes = response_body.as_ref();
+        let response = DescribeQuorumResponse::decode(&mut response_bytes, 2).unwrap();
+        let partition = &response.topics[0].partitions[0];
+        check!(
+            (
+                partition.leader_id,
+                partition.current_voters[0].replica_id,
+                partition.current_voters[0].replica_directory_id.0,
+                response.nodes[0].listeners[0].host.as_str(),
+            ) == (1, 1, *Uuid::from_u128(1).as_bytes(), "controller-1",)
+        );
+
+        let remove = RemoveRaftVoterRequest {
+            cluster_id: Some(engine.current_image().cluster_id().to_string()),
+            voter_id: 1,
+            voter_directory_id: crabka_protocol::primitives::uuid::Uuid(
+                *Uuid::from_u128(1).as_bytes(),
+            ),
+            ..Default::default()
+        };
+        let mut request_body = bytes::BytesMut::new();
+        remove.encode(&mut request_body, 0).unwrap();
+        let response_body =
+            super::kip853_admin_response(API_KEY_REMOVE_RAFT_VOTER, 0, &request_body, &engine)
+                .await
+                .expect("RemoveRaftVoter");
+        let mut response_bytes = response_body.as_ref();
+        let response = RemoveRaftVoterResponse::decode(&mut response_bytes, 0).unwrap();
+        assert2::assert!(response.error_code == 42);
+        assert2::assert!(
+            response
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("last voter"))
+        );
+
+        engine.shutdown().await;
+    }
+
     #[test]
     fn api_versions_body_advertises_kip595_set_both_shapes() {
         use crabka_protocol::{Decode, owned::api_versions_response::ApiVersionsResponse};
         for req_v in [0i16, 4i16] {
-            let body = super::api_versions_response_body(req_v);
+            let body = super::api_versions_response_body(req_v, 0);
             let v = req_v.clamp(0, 4);
             let mut cur = &body[..];
             let resp = ApiVersionsResponse::decode(&mut cur, v).expect("decode body");
@@ -1159,6 +1696,15 @@ mod tests {
             }
             let vote = resp.api_keys.iter().find(|k| k.api_key == 52).unwrap();
             assert2::assert!(vote.min_version == 0 && vote.max_version == 2);
+            if req_v >= 3 {
+                let kraft = resp
+                    .supported_features
+                    .iter()
+                    .find(|feature| feature.name == "kraft.version")
+                    .expect("kraft.version support");
+                assert2::assert!((kraft.min_version, kraft.max_version) == (0, 1));
+                assert2::assert!(resp.finalized_features[0].max_version_level == 0);
+            }
         }
     }
 
@@ -1173,7 +1719,7 @@ mod tests {
         };
 
         // DescribeCluster (60) is advertised so clients negotiate it (KIP-919).
-        let av = super::api_versions_response_body(4);
+        let av = super::api_versions_response_body(4, 1);
         let mut cur = &av[..];
         let avr = ApiVersionsResponse::decode(&mut cur, 4).unwrap();
         assert2::assert!(avr.api_keys.iter().any(|k| k.api_key == 60));

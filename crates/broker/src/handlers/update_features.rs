@@ -108,6 +108,35 @@ pub(crate) async fn handle(
         return finalize(results, version);
     }
 
+    let kraft_upgrade = image.kraft_version() == 0
+        && req.feature_updates.iter().any(|update| {
+            update.feature == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE
+                && update.max_version_level == 1
+        });
+    if kraft_upgrade {
+        match broker.controller.finalize_kraft_version(1).await {
+            Ok(crabka_raft::ReconfigOutcome::Committed) => {}
+            Ok(crabka_raft::ReconfigOutcome::NotLeader { .. })
+            | Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
+                return apply_request_wide(
+                    results,
+                    codes::NOT_CONTROLLER,
+                    "This broker is not the active controller.",
+                    version,
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "UpdateFeatures: kraft.version activation failed");
+                return apply_request_wide(
+                    results,
+                    codes::FEATURE_UPDATE_FAILED,
+                    "Failed to activate kraft.version.",
+                    version,
+                );
+            }
+        }
+    }
+
     if !records.is_empty() {
         match broker.controller.submit_change(records).await {
             Ok(_) => {}
@@ -162,6 +191,19 @@ fn validate_updates(
         };
 
         let level = upd.max_version_level;
+        if name == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE {
+            let current = i16::try_from(image.kraft_version()).unwrap_or(i16::MAX);
+            if level != 1 || current > level {
+                results.push(row(
+                    name,
+                    codes::INVALID_UPDATE_VERSION,
+                    "kraft.version can only be upgraded from 0 to 1.",
+                ));
+            } else {
+                results.push(row(name, codes::NONE, ""));
+            }
+            continue;
+        }
         let current = image.finalized_features().get(&name).copied();
         let allow_dg = downgrade_allowed(version, upd.allow_downgrade, upd.upgrade_type);
 

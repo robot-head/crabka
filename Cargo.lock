@@ -2466,6 +2466,7 @@ dependencies = [
  "crabka-gres-balancer",
  "crabka-gres-control",
  "crabka-metadata",
+ "crabka-raft",
  "crabka-security",
  "crabka-units",
  "derive_more",

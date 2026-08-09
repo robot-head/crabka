@@ -186,6 +186,22 @@ impl Feature for StreamsVersionFeature {
     // here, mirroring group.version / share.version.
 }
 
+/// `kraft.version` is finalized by a `KRaft` control record, never by a
+/// KIP-584 `FeatureLevelRecord`.
+pub struct KRaftVersionFeature;
+
+impl Feature for KRaftVersionFeature {
+    fn name(&self) -> &'static str {
+        crate::metadata_version::KRAFT_VERSION_FEATURE
+    }
+    fn supported_range(&self) -> (i16, i16) {
+        (0, 1)
+    }
+    fn default_level(&self, _bootstrap_mv: i16) -> i16 {
+        0
+    }
+}
+
 /// All features this broker supports finalizing. Single source of truth.
 #[must_use]
 pub fn feature_registry() -> &'static [&'static dyn Feature] {
@@ -195,6 +211,7 @@ pub fn feature_registry() -> &'static [&'static dyn Feature] {
         &TransactionVersionFeature,
         &ShareVersionFeature,
         &StreamsVersionFeature,
+        &KRaftVersionFeature,
     ];
     REGISTRY
 }
@@ -233,6 +250,7 @@ pub fn bootstrap_feature_records_with_overrides(
 ) -> Vec<crate::MetadataRecord> {
     feature_registry()
         .iter()
+        .filter(|f| f.name() != crate::metadata_version::KRAFT_VERSION_FEATURE)
         .filter_map(|f| {
             let level = overrides
                 .get(f.name())

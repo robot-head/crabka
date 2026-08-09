@@ -132,7 +132,7 @@ invented to pad a one-row-per-integer table.
 | KIP-630 | Kafka Raft snapshot + `FetchSnapshot` | kip630 spec |
 | KIP-631 | Quorum-based controller (metadata records, RPCs) | kip631 spec |
 | KIP-836 | `DescribeQuorum` voter-lag timestamps | schema v1 |
-| KIP-853 | Dynamic KRaft voters (Add/Remove/UpdateRaftVoter) | kip853 spec |
+| KIP-853 | Dynamic KRaft voters (Add/Remove/UpdateRaftVoter) | deterministic Raft model + snapshot recovery + operator lifecycle tests; Kafka 4.3.1 `kafka-features` and `kafka-metadata-quorum` oracle |
 | KIP-919 | AdminClient ↔ controller routing (`DescribeCluster` `EndpointType`; controller registration; `UnregisterBroker`) | schema `DescribeCluster` v1; api_key 64 |
 | KIP-1022 | Formatting & updating features (`crabka format --feature`) | JVM `kafka-features` validated |
 | KIP-1073 | `IncludeFencedBrokers` / `IsFenced` in `DescribeCluster` | schema v2 |

@@ -933,7 +933,10 @@ impl Args {
                 crabka_broker::NodeId(node_id),
                 controller_listen_addr.to_string(),
             )],
-            bootstrap_servers: std::mem::take(&mut self.controller_bootstrap_servers),
+            bootstrap_servers: std::mem::take(&mut self.controller_bootstrap_servers)
+                .into_iter()
+                .map(|endpoint| endpoint.to_string())
+                .collect(),
             directory_id: uuid::Uuid::nil(),
             auto_join: self.controller_auto_join,
             bootstrap_mode: BootstrapMode::Bootstrap,
@@ -990,9 +993,21 @@ fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
     ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
+const BROKER_MAIN_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let result = std::thread::Builder::new()
+        .name("crabka-broker-main".into())
+        .stack_size(BROKER_MAIN_STACK_BYTES)
+        .spawn(|| broker_main().map_err(|error| error.to_string()))?
+        .join()
+        .map_err(|_| "crabka-broker main thread panicked")?;
+    result.map_err(Into::into)
+}
+
 #[tokio::main]
 // binary entrypoint: linear startup wiring
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn broker_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
 
     // Install the tracing subscriber — stdout `fmt` plus an

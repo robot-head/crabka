@@ -38,6 +38,18 @@ pub enum RaftError {
     #[error("a reconfiguration is already in progress")]
     ReconfigInProgress,
 
+    #[error("voter {0} already exists")]
+    DuplicateVoter(NodeId),
+
+    #[error("voter {0} was not found")]
+    VoterNotFound(NodeId),
+
+    #[error("invalid voter update: {0}")]
+    InvalidVoterUpdate(String),
+
+    #[error("kraft.version {0} does not permit dynamic voter changes")]
+    UnsupportedKraftVersion(u16),
+
     #[error("voter {id} is not a caught-up observer (lag {lag})")]
     VoterNotCaughtUp { id: NodeId, lag: u64 },
 

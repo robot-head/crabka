@@ -51,13 +51,9 @@ async fn snapshot_then_restart_recovers_image() {
         // Commit real KIP-631 metadata-log records — a topic and a finalized
         // feature level — that must survive snapshot + restart.
         //
-        // The controller voter set is NOT submitted here: under KIP-595 static
-        // voters it is raft-control state living in the `QuorumState` (seeded
-        // from config — `for_tests` seeds voter 1), with no KIP-631 metadata-log
-        // counterpart, so `submit_change` rejects `V1Voters` / `V1KRaftVersion`.
-        // The voter set is re-derived from config on every boot and mirrored
-        // into the image, so its survival across restart is exercised below
-        // without a submitted record. `kraft.version` stays 0 (static KRaft).
+        // The controller voter set is NOT submitted here: it is Raft control
+        // state, not a KIP-631 metadata-log record. Snapshot serialization writes
+        // it as the leading KIP-853 VotersRecord alongside kraft.version 0.
         controller
             .submit_change(vec![
                 MetadataRecord::V1Topic(TopicRecord {
@@ -118,7 +114,7 @@ async fn snapshot_then_restart_recovers_image() {
             "finalized-features epoch must survive snapshot + restart, got {}",
             recovered.finalized_features_epoch()
         );
-        // The voter set is re-derived from config (`QuorumState`) on every boot
+        // The voter set is restored from the snapshot's KIP-853 control state
         // and mirrored into the image — it must be present after restart.
         check!(
             recovered.voters().contains(NodeId(1)),

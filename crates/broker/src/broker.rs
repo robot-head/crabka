@@ -303,9 +303,20 @@ fn prepare_initial_voters(
         mode = ?config.bootstrap_mode,
         "deriving static KIP-595 voters from controller_quorum_voters"
     );
-    bootstrap_records.extend(crabka_metadata::bootstrap_feature_records(
-        crabka_metadata::metadata_version::METADATA_VERSION_MAX,
-    ));
+    // An explicitly formatted bootstrap stream already contains the exact
+    // feature levels selected by `crabka format --feature`. KIP-853 keeps its
+    // voter controls in the checkpoint rather than this stream, so reaching
+    // the static discovery fallback does not mean the feature records are
+    // absent. Appending release defaults here would replay after the selected
+    // levels and overwrite them.
+    if !bootstrap_records
+        .iter()
+        .any(|record| matches!(record, crabka_metadata::MetadataRecord::V1FeatureLevel(_)))
+    {
+        bootstrap_records.extend(crabka_metadata::bootstrap_feature_records(
+            crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+        ));
+    }
     voters
 }
 
@@ -399,14 +410,8 @@ fn spawn_auto_join(
     if !config.is_controller() {
         return;
     }
-    let listener_protocol = config
-        .effective_listeners()
-        .iter()
-        .find(|listener| listener.name == config.inter_broker_listener_name)
-        .map_or(crabka_security::ListenerProtocol::Plaintext, |listener| {
-            listener.protocol
-        });
-    tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
+    let listener_protocol = config.controller_listener_protocol;
+    let params = crate::auto_join::AutoJoinParams {
         auto_join: config.auto_join,
         retry_backoff: config.auto_join_retry_backoff,
         voter_request_timeout: config.auto_join_voter_request_timeout,
@@ -415,10 +420,15 @@ fn spawn_auto_join(
         cluster_id: config.cluster_id,
         bootstrap_servers: config.bootstrap_servers.clone(),
         listener_protocol,
-        inter_broker_server_name: config.inter_broker_server_name.clone(),
+        inter_broker_server_name: config
+            .controller_server_name
+            .clone()
+            .unwrap_or_else(|| config.inter_broker_server_name.clone()),
         controller: Arc::clone(controller),
         inter_broker_client: Arc::clone(inter_broker_client),
-    }));
+    };
+    tokio::spawn(crate::auto_join::run(params.clone()));
+    tokio::spawn(crate::auto_join::run_voter_updates(params));
 }
 
 async fn wait_for_metadata_leader(
@@ -840,8 +850,10 @@ fn spawn_broker_gauge_updater(
 ) {
     let poll_interval = config.gauge_poll_interval;
     let default_min_insync_replicas = config.default_min_insync_replicas;
+    let static_voter_count = config.controller_quorum_voters.len();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(poll_interval.to_std());
+        let mut previous_voted_directory = None;
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -908,6 +920,31 @@ fn spawn_broker_gauge_updater(
             metrics
                 .active_controller
                 .set(i64::from(u8::from(is_controller)));
+            let ignored_static_voters =
+                usize::from(image.kraft_version() >= 1).saturating_mul(static_voter_count);
+            metrics
+                .ignored_static_voters
+                .set(i64::try_from(ignored_static_voters).unwrap_or(i64::MAX));
+            let voted_directory = controller.voted_directory_id();
+            if voted_directory != previous_voted_directory {
+                if let Some(directory_id) = previous_voted_directory {
+                    metrics
+                        .voted_directory
+                        .get_or_create(&crate::metrics::DirectoryLabel {
+                            directory_id: directory_id.to_string(),
+                        })
+                        .set(0);
+                }
+                if let Some(directory_id) = voted_directory {
+                    metrics
+                        .voted_directory
+                        .get_or_create(&crate::metrics::DirectoryLabel {
+                            directory_id: directory_id.to_string(),
+                        })
+                        .set(1);
+                }
+                previous_voted_directory = voted_directory;
+            }
         }
     });
 }
@@ -2892,6 +2929,13 @@ impl BrokerHandle {
         self.broker.controller.current_image().voters().len()
     }
 
+    /// Test-only: finalized `kraft.version` from the committed image.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    pub fn kraft_version_for_test(&self) -> u16 {
+        self.broker.controller.current_image().kraft_version()
+    }
+
     /// Test-only: the controller voter ids as seen by this broker's
     /// committed `MetadataImage`. The dynamic-voters shrink test uses this
     /// to pick a follower to remove.
@@ -2928,6 +2972,18 @@ impl BrokerHandle {
         req: crabka_raft::reconfig::RemoveVoter,
     ) -> Result<crabka_raft::reconfig::ReconfigOutcome, crabka_raft::RaftError> {
         self.broker.controller.remove_voter(req).await
+    }
+
+    /// Test-only: atomically activate dynamic controller membership.
+    ///
+    /// # Errors
+    /// Propagates validation, leadership, and persistence errors from Raft.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn finalize_kraft_version_for_test(
+        &self,
+        version: u16,
+    ) -> Result<crabka_raft::reconfig::ReconfigOutcome, crabka_raft::RaftError> {
+        self.broker.controller.finalize_kraft_version(version).await
     }
 
     /// Test-only: ask this broker's controller to generate a metadata
@@ -4293,7 +4349,7 @@ fn static_controller_voter_set(
     quorum_voters: &[(crabka_raft::NodeId, String)],
     self_node_id: crabka_raft::NodeId,
     self_directory_id: uuid::Uuid,
-    self_controller_listen: std::net::SocketAddr,
+    _self_controller_listen: std::net::SocketAddr,
 ) -> crabka_metadata::VoterSet {
     // Split a configured "<host>:<port>" into (host, port), keeping the host
     // verbatim (a DNS name resolved later, per dial). `file_config`
@@ -4323,31 +4379,19 @@ fn static_controller_voter_set(
         }
     }
 
-    if quorum_voters.len() > 1 {
-        // Static N-voter set: one `Voter` per configured `(node_id, host:port)`.
-        let voters: Vec<crabka_metadata::Voter> = quorum_voters
-            .iter()
-            .map(|(node_id, host_port)| {
-                let (host, port) = split_host_port(host_port);
-                let directory_id = if *node_id == self_node_id {
-                    self_directory_id
-                } else {
-                    uuid::Uuid::nil()
-                };
-                voter(*node_id, directory_id, host, port)
-            })
-            .collect();
-        crabka_metadata::VoterSet::from_voters(voters)
-    } else {
-        // Standalone single self-voter. Self is never dialed, so its endpoint
-        // uses this node's own controller listen address directly.
-        crabka_metadata::VoterSet::from_voters([voter(
-            self_node_id,
-            self_directory_id,
-            self_controller_listen.ip().to_string(),
-            self_controller_listen.port(),
-        )])
-    }
+    let voters: Vec<crabka_metadata::Voter> = quorum_voters
+        .iter()
+        .map(|(node_id, host_port)| {
+            let (configured_host, configured_port) = split_host_port(host_port);
+            let (host, port, directory_id) = if *node_id == self_node_id {
+                (configured_host, configured_port, self_directory_id)
+            } else {
+                (configured_host, configured_port, uuid::Uuid::nil())
+            };
+            voter(*node_id, directory_id, host, port)
+        })
+        .collect();
+    crabka_metadata::VoterSet::from_voters(voters)
 }
 
 /// Live-connection accounting backing the `max.connections` (global) and
@@ -5247,9 +5291,9 @@ mod tests {
     }
 
     #[test]
-    fn static_voter_set_single_self_voter_uses_listen_addr() {
-        // Standalone single-voter: the lone self endpoint uses this node's own
-        // controller listen address.
+    fn static_voter_set_single_self_voter_uses_configured_addr() {
+        // The configured endpoint is the advertised address. It can differ
+        // from the bind address when the controller runs behind DNS or NAT.
         let quorum = vec![(crabka_raft::NodeId(3), "127.0.0.1:9093".to_string())];
         let self_dir = uuid::Uuid::from_u128(3);
         let set = static_controller_voter_set(
@@ -5263,8 +5307,8 @@ mod tests {
             .get(crabka_audit::NodeId(3))
             .expect("self voter present");
         let ep = v.endpoints.iter().find(|e| e.name == "CONTROLLER").unwrap();
-        assert!(ep.host == "192.168.1.5");
-        assert!(ep.port == 9099);
+        assert!(ep.host == "127.0.0.1");
+        assert!(ep.port == 9093);
     }
 
     #[test]
@@ -5698,7 +5742,7 @@ protocol = "Plaintext"
             handle
                 .change_membership([crabka_raft::NodeId(1)].into_iter().collect())
                 .await
-                .is_err()
+                .is_ok()
         );
 
         let leader = handle.wait_until_controller_leader().await;
@@ -6084,7 +6128,7 @@ protocol = "Plaintext"
         )
         .await
         .expect("add_learner returned before timeout");
-        assert!(add_learner.is_err());
+        assert!(add_learner.is_ok());
 
         let own_directory = handle
             .voter_directory_id_for_test(crabka_raft::NodeId(handle.node_id()))

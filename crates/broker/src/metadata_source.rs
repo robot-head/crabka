@@ -23,6 +23,10 @@ pub trait MetadataSource: Send + Sync {
     fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>>;
     fn watch_leader(&self) -> watch::Receiver<Option<NodeId>>;
     fn quorum_state(&self) -> QuorumState;
+    /// Directory identity voted for in the current controller epoch.
+    fn voted_directory_id(&self) -> Option<uuid::Uuid> {
+        None
+    }
     async fn submit_change(
         &self,
         records: Vec<MetadataRecord>,
@@ -44,6 +48,11 @@ pub trait MetadataSource: Send + Sync {
     async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError>;
     async fn remove_voter(&self, req: RemoveVoter) -> Result<ReconfigOutcome, RaftError>;
     async fn update_voter(&self, req: UpdateVoter) -> Result<ReconfigOutcome, RaftError>;
+    async fn finalize_kraft_version(&self, _version: u16) -> Result<ReconfigOutcome, RaftError> {
+        Err(RaftError::NotLeader {
+            current_leader: None,
+        })
+    }
     async fn cancel(&self);
 }
 
@@ -60,6 +69,9 @@ impl MetadataSource for ControllerHandle {
     }
     fn quorum_state(&self) -> QuorumState {
         ControllerHandle::quorum_state(self)
+    }
+    fn voted_directory_id(&self) -> Option<uuid::Uuid> {
+        ControllerHandle::voted_directory_id(self)
     }
     async fn submit_change(
         &self,
@@ -90,6 +102,9 @@ impl MetadataSource for ControllerHandle {
     }
     async fn update_voter(&self, req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
         ControllerHandle::update_voter(self, req).await
+    }
+    async fn finalize_kraft_version(&self, version: u16) -> Result<ReconfigOutcome, RaftError> {
+        ControllerHandle::finalize_kraft_version(self, version).await
     }
     async fn cancel(&self) {
         ControllerHandle::cancel(self).await;
@@ -535,10 +550,10 @@ mod tests {
         wait_for_controller_leader(&ctrl).await;
         let source: &dyn MetadataSource = &ctrl;
 
-        assert!(matches!(
-            source.add_learner(NodeId(2), Node::default()).await,
-            Err(RaftError::Unsupported(_))
-        ));
+        source
+            .add_learner(NodeId(2), Node::default())
+            .await
+            .expect("stage learner identity");
         source
             .submit_change(vec![topic_record("snapshot-topic")])
             .await

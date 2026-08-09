@@ -96,6 +96,12 @@ pub enum Command {
         records: Vec<crabka_metadata::MetadataRecord>,
         reply: oneshot::Sender<Result<crate::SubmitChangeResult, RaftError>>,
     },
+    /// Handle op: append a KIP-853 control batch and optionally wait for it to
+    /// commit under the new voter set.
+    Reconfigure {
+        change: crate::reconfig::VoterChange,
+        reply: oneshot::Sender<Result<crate::reconfig::ReconfigOutcome, RaftError>>,
+    },
     /// Handle op: snapshot the current image to a checkpoint.
     TriggerSnapshot {
         reply: oneshot::Sender<Result<(), RaftError>>,
@@ -163,9 +169,14 @@ pub struct QuorumStateSnapshot {
     /// Log-start offset. It rises past 0 once the log has been pruned below a
     /// snapshot under KIP-630.
     pub log_start_offset: i64,
-    pub voters: Vec<NodeId>,
-    /// Per-follower fetch offset, populated only on the leader.
-    pub per_voter_fetch_offset: std::collections::BTreeMap<NodeId, i64>,
+    pub voters: crabka_metadata::VoterSet,
+    /// Directory identity voted for in the current epoch, if any.
+    pub voted_directory_id: Option<uuid::Uuid>,
+    /// Replicas that have fetched from the leader but are not current voters.
+    pub observers: Vec<NodeId>,
+    /// Per-replica fetch offset, populated on the leader for voters and
+    /// observers.
+    pub per_replica_fetch_offset: std::collections::BTreeMap<NodeId, i64>,
 }
 
 /// Outbound peer RPC sender.
@@ -184,6 +195,9 @@ pub trait PeerSender: Send + Sync {
     /// # Errors
     /// Returns [`RaftError`] if the peer is unreachable or the RPC fails.
     async fn send(&self, peer: NodeId, api_key: i16, body: Bytes) -> Result<Bytes, RaftError>;
+
+    /// Replace the peer endpoint table after applying a `VotersRecord`.
+    fn update_voters(&self, _voters: &crabka_metadata::VoterSet) {}
 }
 
 /// A no-op `PeerSender` for single-voter and no-network tests. Every send fails

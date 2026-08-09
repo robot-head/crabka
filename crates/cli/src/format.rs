@@ -1,29 +1,32 @@
 //! `crabka format` subcommand.
 //!
-//! This command writes bootstrap metadata for a fresh broker:
-//! - a cluster id, either random or supplied by the operator
-//! - any seed SCRAM credentials from `--add-scram`
+//! Writes bootstrap metadata for a fresh broker:
+//! - a randomly-generated (or operator-supplied) cluster id
+//! - any seed SCRAM credentials supplied via `--add-scram`
 //!
 //! ## Bootstrap output format
 //!
-//! This command does not write a real raft-log snapshot. The bootstrap
-//! state is still coupled to the live openraft engine's `initialize`
-//! call. The command writes a placeholder manifest instead, and the
-//! manifest lists the records the broker should pre-load. The output is:
+//! Non-Raft metadata is written as a bootstrap stream for the broker to
+//! pre-load. Dynamic KIP-853 modes additionally write the authoritative
+//! offset-zero metadata checkpoint. The output is:
 //!
 //! - `<log_dir>/bootstrap.json` — a human-readable manifest with the
 //!   cluster id and a base64'd `serde_wincode` blob per metadata record.
 //! - `<log_dir>/bootstrap.records.bin` — the same records concatenated
 //!   as length-prefixed `serde_wincode<SerdeCompat<MetadataRecord>>`
-//!   payloads, so the broker can read them as a stream and does not
-//!   parse JSON.
+//!   payloads, so the broker can stream them without touching JSON.
+//! - `<log_dir>/__cluster_metadata/@metadata-0/00000000000000000000-0000000000.checkpoint`
+//!   — the KIP-630/KIP-853 bootstrap snapshot for dynamic membership.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use clap::Args;
 use crabka_metadata::{
     AclEntry, KRaftVersionRange, KRaftVersionRecord, MetadataRecord, ScramCredentialRecord, Voter,
-    VoterEndpoint, VoterSet, VotersRecord,
+    VoterEndpoint, VoterSet, VotersRecord, metadata_version::KRAFT_VERSION_FEATURE,
 };
 use crabka_security::{
     SaslMechanism,
@@ -47,13 +50,14 @@ const EXIT_LOW_ITERATIONS: i32 = 2;
 const EXIT_DIRTY_LOG_DIR: i32 = 3;
 const EXIT_BOOTSTRAP_FAIL: i32 = 4;
 const EXIT_INVALID_FEATURE: i32 = 5;
+const ZERO_CHECKPOINT_NAME: &str = "00000000000000000000-0000000000.checkpoint";
 
 #[derive(Args, Debug)]
 pub struct FormatArgs {
     /// Directory to format. Must be empty or non-existent.
     #[arg(long)]
     log_dir: PathBuf,
-    /// Cluster id. Generated if not supplied.
+    /// Cluster id. Generated if not provided.
     #[arg(long)]
     cluster_id: Option<Uuid>,
     /// Bootstrap `metadata.version` (KIP-778), e.g. `4.0` or `4.0-IV3`.
@@ -61,15 +65,15 @@ pub struct FormatArgs {
     #[arg(long)]
     release_version: Option<String>,
     /// Set an individual feature's finalized level at format time (KIP-1022),
-    /// e.g. `--feature transaction.version=2`. May be repeated. It combines with
-    /// `--release-version`, which sets the base release, for every feature
+    /// e.g. `--feature transaction.version=2`. May be repeated. Combines with
+    /// `--release-version` (which sets the base release) for every feature
     /// except `metadata.version`, where the two conflict.
     #[arg(long = "feature", value_parser = parse_feature_spec)]
     feature: Vec<(String, i16)>,
     /// Seed a SCRAM credential. May be repeated.
     /// Format: `SCRAM-SHA-256=[name=<u>,password=<p>,iterations=<n>]`
     /// or `SCRAM-SHA-512=[name=<u>,password=<p>,iterations=<n>]`
-    /// Iterations default to 4096 when omitted.
+    /// (iterations defaults to 4096 when omitted)
     #[arg(long, value_parser = parse_scram_spec)]
     add_scram: Vec<ScramSpec>,
     /// Seed an ACL entry. May be repeated.
@@ -77,18 +81,35 @@ pub struct FormatArgs {
     /// Pattern defaults to `Literal`.
     #[arg(long, value_parser = parse_acl_spec)]
     add_acl: Vec<AclEntry>,
-    /// This node's raft id. Required with `--standalone`: KIP-853 must know
-    /// which voter this node is when it seeds the singleton set.
+    /// This node's raft id. Required with `--standalone` and
+    /// `--initial-controllers` so the local directory id can be persisted.
     #[arg(long, value_parser = parse_node_id)]
     node_id: Option<crabka_metadata::NodeId>,
+    /// Stable directory identity. Intended for orchestrators that must verify
+    /// the exact node incarnation before declaring it ready.
+    #[arg(long, value_parser = parse_directory_id)]
+    directory_id: Option<DirectoryId>,
     /// Format this node as the sole initial controller voter.
-    #[arg(long, conflicts_with = "initial_controllers")]
+    #[arg(
+        long,
+        conflicts_with_all = ["initial_controllers", "no_initial_controllers"]
+    )]
     standalone: bool,
-    /// Explicit initial controllers: `id@host:port:dir-uuid`, comma-separated.
-    #[arg(long, value_delimiter = ',')]
+    /// Explicit initial controllers: `id@host:port:directory-id`, comma-separated.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        conflicts_with_all = ["standalone", "no_initial_controllers"]
+    )]
     initial_controllers: Vec<String>,
-    /// This node's controller listener as `host:port`. The command writes it
-    /// into the `VotersRecord` when you give `--standalone`.
+    /// Format a dynamic controller that will join an existing quorum.
+    #[arg(
+        long,
+        conflicts_with_all = ["standalone", "initial_controllers"]
+    )]
+    no_initial_controllers: bool,
+    /// This node's controller listener (`host:port`) — written into the
+    /// `VotersRecord` when `--standalone`.
     #[arg(long)]
     controller_listener: Option<String>,
 }
@@ -101,9 +122,8 @@ pub struct ScramSpec {
     iterations: u32,
 }
 
-/// Maps a release string to a supported `metadata.version` feature level.
-///
-/// Returns an error if the string is unknown or outside `[MIN, MAX]`.
+/// Map a release string to a supported `metadata.version` feature level,
+/// erroring if it is unknown or outside `[MIN, MAX]`.
 fn resolve_release_level(s: &str) -> Result<i16, String> {
     let mv = crabka_metadata::metadata_version::from_version_string(s)
         .ok_or_else(|| format!("unknown metadata.version {s:?}"))?;
@@ -116,13 +136,19 @@ fn resolve_release_level(s: &str) -> Result<i16, String> {
     Ok(level)
 }
 
-/// Parses a node id: a bare `u64` inside the `NodeId` newtype.
+/// Parse a node id: a bare `u64` wrapped in the `NodeId` newtype.
 fn parse_node_id(s: &str) -> Result<crabka_metadata::NodeId, String> {
     let id: u64 = s.trim().parse().map_err(|e| format!("node id: {e}"))?;
     Ok(crabka_metadata::NodeId(id))
 }
 
-/// Parses one `--feature NAME=LEVEL` spec into `(name, level)`.
+fn parse_directory_id(s: &str) -> Result<DirectoryId, String> {
+    Uuid::parse_str(s)
+        .map(DirectoryId)
+        .map_err(|error| format!("directory id: {error}"))
+}
+
+/// Parse one `--feature NAME=LEVEL` spec into `(name, level)`.
 fn parse_feature_spec(s: &str) -> Result<(String, i16), String> {
     let (name, level) = s
         .split_once('=')
@@ -138,18 +164,16 @@ fn parse_feature_spec(s: &str) -> Result<(String, i16), String> {
     Ok((name.to_string(), level))
 }
 
-/// Resolves `crabka format`'s KIP-1022 feature flags.
+/// Resolve `crabka format`'s KIP-1022 feature flags into the bootstrap
+/// `metadata.version` level and the per-feature override map, applying the
+/// validation `kafka-storage format` performs:
 ///
-/// The result is the bootstrap `metadata.version` level and the per-feature
-/// override map. This function applies the same validation that
-/// `kafka-storage format` does:
-///
-/// - every `--feature` must name a registered feature, finalized in its
-///   supported range, and any other name is rejected;
+/// - every `--feature` names a registered feature, finalized in its supported
+///   range (else reject);
 /// - `--feature metadata.version=X` conflicts with `--release-version`;
-/// - `bootstrap_mv` is `--feature metadata.version` if set, else
-///   `--release-version`, else the newest supported level, the latest stable;
-/// - the fully-resolved feature set must satisfy every KIP-1022 dependency.
+/// - `bootstrap_mv` = `--feature metadata.version` if set, else
+///   `--release-version`, else the newest supported level (latest stable);
+/// - the fully-resolved feature set satisfies every KIP-1022 dependency.
 fn resolve_format_features(
     release_version: Option<&str>,
     features: &[(String, i16)],
@@ -160,6 +184,11 @@ fn resolve_format_features(
     let mut feature_mv: Option<i16> = None;
 
     for (name, level) in features {
+        // KIP-853 persists kraft.version as a raft control record, never as a
+        // FeatureLevelRecord. Its mode-specific validation happens separately.
+        if name == KRAFT_VERSION_FEATURE {
+            continue;
+        }
         let Some(feat) = crabka_metadata::feature(name) else {
             let mut known: Vec<&str> = crabka_metadata::feature_registry()
                 .iter()
@@ -213,6 +242,43 @@ fn resolve_format_features(
     crabka_metadata::validate_feature_dependencies(&resolved)?;
 
     Ok((bootstrap_mv, overrides))
+}
+
+/// Resolve the KIP-853 format mode and validate its kraft.version selection.
+///
+/// The three explicit quorum flags select dynamic membership and therefore
+/// imply level 1. Omitting all three retains the static level-0 path.
+fn is_dynamic_format(args: &FormatArgs) -> Result<bool, String> {
+    let dynamic =
+        args.standalone || !args.initial_controllers.is_empty() || args.no_initial_controllers;
+    let mut requested = None;
+    for (name, level) in &args.feature {
+        if name != KRAFT_VERSION_FEATURE {
+            continue;
+        }
+        if requested.replace(*level).is_some() {
+            return Err("feature kraft.version specified more than once".into());
+        }
+        if !(0..=1).contains(level) {
+            return Err(format!(
+                "feature kraft.version={level} is outside the supported range 0..=1"
+            ));
+        }
+    }
+
+    match (dynamic, requested) {
+        (true, None | Some(1)) => Ok(true),
+        (true, Some(0)) => Err(
+            "--standalone, --initial-controllers, and --no-initial-controllers require kraft.version=1"
+                .into(),
+        ),
+        (false, None | Some(0)) => Ok(false),
+        (false, Some(1)) => Err(
+            "kraft.version=1 requires --standalone, --initial-controllers, or --no-initial-controllers"
+                .into(),
+        ),
+        _ => unreachable!("kraft.version range was validated above"),
+    }
 }
 
 fn parse_scram_spec(s: &str) -> Result<ScramSpec, String> {
@@ -326,18 +392,26 @@ fn parse_acl_spec(spec: &str) -> Result<AclEntry, String> {
     })
 }
 
-/// Parses one `--initial-controllers` entry: `id@host:port:dir-uuid`.
+/// Parse one `--initial-controllers` entry: `id@host:port:directory-id`.
 ///
-/// The directory uuid is the last colon-delimited field. This function
-/// removes it from the right first, then splits `host:port` from the
-/// remainder.
+/// The directory uuid is the trailing colon-delimited field, so we split
+/// it off the right first, then peel `host:port` off the remainder.
 fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
     let (id_part, rest) = spec.split_once('@').ok_or("missing '@'")?;
     let id = crabka_metadata::NodeId(id_part.parse::<u64>().map_err(|_| "bad id")?);
     let (host_port, dir_part) = rest.rsplit_once(':').ok_or("missing directory uuid")?;
     let dir: Uuid = dir_part.parse().map_err(|_| "bad directory uuid")?;
+    if dir.is_nil() {
+        return Err("directory uuid must not be nil".into());
+    }
     let (host, port) = host_port.rsplit_once(':').ok_or("missing host:port")?;
+    if host.is_empty() {
+        return Err("host must not be empty".into());
+    }
     let port: u16 = port.parse().map_err(|_| "bad port")?;
+    if port == 0 {
+        return Err("port must not be zero".into());
+    }
     Ok(Voter {
         id,
         directory_id: dir,
@@ -350,13 +424,12 @@ fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
     })
 }
 
-/// Derives the initial controller voter set from the format arguments.
+/// Derive the initial controller voter set from the format args.
 ///
-/// - `--standalone`: a singleton set that holds only this node. It needs
-///   `--node-id` and `--controller-listener`.
-/// - `--initial-controllers`: the voters in the list.
-/// - neither: an empty set. This node is a joiner and uses auto-join to
-///   enter a cluster that is already bootstrapped.
+/// - `--standalone`: a singleton set holding just this node (requires
+///   `--node-id` + `--controller-listener`).
+/// - `--initial-controllers`: the explicitly-listed voters.
+/// - `--no-initial-controllers` or static mode: an empty set.
 fn build_initial_voters(args: &FormatArgs, directory_id: DirectoryId) -> Result<VoterSet, String> {
     if args.standalone {
         let id = args.node_id.ok_or("--standalone requires --node-id")?;
@@ -367,7 +440,13 @@ fn build_initial_voters(args: &FormatArgs, directory_id: DirectoryId) -> Result<
         let (host, port) = listener
             .rsplit_once(':')
             .ok_or("--controller-listener must be host:port")?;
+        if host.is_empty() {
+            return Err("--controller-listener host must not be empty".into());
+        }
         let port: u16 = port.parse().map_err(|_| "bad --controller-listener port")?;
+        if port == 0 {
+            return Err("--controller-listener port must not be zero".into());
+        }
         Ok(VoterSet::from_voters([Voter {
             id,
             // `Voter.directory_id` is a raw `Uuid` (owned by `crabka_voters`);
@@ -381,21 +460,41 @@ fn build_initial_voters(args: &FormatArgs, directory_id: DirectoryId) -> Result<
             kraft_version: KRaftVersionRange::default(),
         }]))
     } else if !args.initial_controllers.is_empty() {
-        let voters: Result<Vec<_>, _> = args
+        let voters: Vec<_> = args
             .initial_controllers
             .iter()
             .map(|s| parse_initial_controller(s))
-            .collect();
-        Ok(VoterSet::from_voters(voters?))
+            .collect::<Result<_, _>>()?;
+        let mut node_ids = BTreeSet::new();
+        let mut directory_ids = BTreeSet::new();
+        for voter in &voters {
+            if !node_ids.insert(voter.id) {
+                return Err(format!("duplicate initial controller id {}", voter.id));
+            }
+            if !directory_ids.insert(voter.directory_id) {
+                return Err(format!(
+                    "duplicate initial controller directory id {}",
+                    voter.directory_id
+                ));
+            }
+        }
+        let voters = VoterSet::from_voters(voters);
+        let node_id = args
+            .node_id
+            .ok_or("--initial-controllers requires --node-id")?;
+        if !voters.contains(node_id) {
+            return Err(format!(
+                "--initial-controllers does not contain local --node-id {node_id}"
+            ));
+        }
+        Ok(voters)
     } else {
         Ok(VoterSet::default())
     }
 }
 
-/// Writes `meta.properties.json` to disk.
-///
-/// The broker recovers `directory_id` from this file on every boot. The
-/// directory id is the KIP-853 voter identity.
+/// Persist `meta.properties.json` — the broker recovers `directory_id`
+/// from it on every boot (KIP-853 voter identity).
 #[tracing::instrument(
     level = "debug",
     name = "cli.write_meta_properties",
@@ -422,18 +521,16 @@ fn write_meta_properties(
 /// Human-readable manifest written to `<log_dir>/bootstrap.json`.
 #[derive(Debug, Serialize)]
 struct BootstrapManifest {
-    /// Schema version of this bootstrap manifest. It increases when the
-    /// layout changes. The broker's future consumer will reject an unknown
-    /// value.
+    /// Schema version of this bootstrap manifest. Bumped if the layout
+    /// changes; the broker's future consumer will reject unknown values.
     schema: u32,
     // `ClusterId` is `#[serde(transparent)]`, so this serializes as the bare
     // UUID string exactly as the previous `Uuid` field did.
     cluster_id: ClusterId,
     record_count: usize,
-    /// Base64-encoded `SerdeCompat<MetadataRecord>` payloads, one per seed
-    /// record. These payloads mirror the contents of
-    /// `bootstrap.records.bin`, so an operator can read the file without a
-    /// hex editor.
+    /// Base64-encoded `SerdeCompat<MetadataRecord>` payloads, one per
+    /// seed record. Mirrors the contents of `bootstrap.records.bin` so
+    /// operators can inspect the file without a hex editor.
     records_b64: Vec<String>,
 }
 
@@ -448,6 +545,14 @@ struct BootstrapManifest {
     fields(log_dir = %args.log_dir.display(), standalone = args.standalone)
 )]
 pub async fn run(args: FormatArgs) -> i32 {
+    let dynamic_format = match is_dynamic_format(&args) {
+        Ok(dynamic) => dynamic,
+        Err(e) => {
+            eprintln!("crabka format: {e}");
+            return EXIT_INVALID_FEATURE;
+        }
+    };
+
     // Refuse to overwrite a non-empty directory. We treat "exists with
     // any entry" as non-empty; an empty dir or missing path is OK.
     if args.log_dir.exists() {
@@ -484,31 +589,50 @@ pub async fn run(args: FormatArgs) -> i32 {
     // KIP-853: generate + persist this replica's stable directory id. The
     // broker reads it back from `meta.properties.json` on every boot; it is
     // the identity component of every `Voter` this node ever appears as.
-    let directory_id = DirectoryId(Uuid::new_v4());
-    if let Err(e) = write_meta_properties(&args.log_dir, cluster_id, directory_id) {
-        eprintln!("crabka format: {e}");
-        return EXIT_BOOTSTRAP_FAIL;
-    }
-
-    // KIP-853 dynamic-voter seed records. These lead the bootstrap record
-    // stream (before SCRAM/ACL) so the controller's first committed batch
-    // establishes the kraft.version + initial membership.
-    let initial_voters = match build_initial_voters(&args, directory_id) {
-        Ok(v) => v,
+    let generated_directory_id = args
+        .directory_id
+        .unwrap_or_else(|| DirectoryId(Uuid::new_v4()));
+    let initial_voters = match build_initial_voters(&args, generated_directory_id) {
+        Ok(voters) => voters,
         Err(e) => {
             eprintln!("crabka format: {e}");
             return EXIT_BOOTSTRAP_FAIL;
         }
     };
-    let mut records: Vec<MetadataRecord> = Vec::new();
-    records.push(MetadataRecord::V1KRaftVersion(KRaftVersionRecord {
-        kraft_version: 1,
-    }));
-    if !initial_voters.is_empty() {
-        records.push(MetadataRecord::V1Voters(VotersRecord {
-            voters: initial_voters,
-        }));
+    let directory_id = if args.initial_controllers.is_empty() {
+        generated_directory_id
+    } else {
+        DirectoryId(
+            initial_voters
+                .get(args.node_id.expect("validated initial controller node id"))
+                .expect("validated local initial controller")
+                .directory_id,
+        )
+    };
+    if args.directory_id.is_some() && directory_id != generated_directory_id {
+        eprintln!("crabka format: --directory-id must match the local --initial-controllers entry");
+        return EXIT_BOOTSTRAP_FAIL;
     }
+    if let Err(e) = write_meta_properties(&args.log_dir, cluster_id, directory_id) {
+        eprintln!("crabka format: {e}");
+        return EXIT_BOOTSTRAP_FAIL;
+    }
+
+    // KIP-853 control records live in the offset-zero metadata checkpoint,
+    // separate from the non-Raft bootstrap record stream.
+    let mut raft_control_records = Vec::new();
+    if dynamic_format {
+        raft_control_records.push(MetadataRecord::V1KRaftVersion(KRaftVersionRecord {
+            kraft_version: 1,
+        }));
+        if !initial_voters.is_empty() {
+            raft_control_records.push(MetadataRecord::V1Voters(VotersRecord {
+                voters: initial_voters,
+            }));
+        }
+    }
+
+    let mut records: Vec<MetadataRecord> = Vec::new();
 
     // KIP-584 / KIP-778 / KIP-1022 bootstrap: finalize each registered feature
     // at its `--feature` override, else its per-release default for the
@@ -568,6 +692,14 @@ pub async fn run(args: FormatArgs) -> i32 {
         records.push(MetadataRecord::V1AccessControlEntry(acl));
     }
 
+    if dynamic_format
+        && let Err(e) =
+            write_dynamic_checkpoint(&args.log_dir, cluster_id, &raft_control_records, &records)
+    {
+        eprintln!("crabka format: checkpoint failed: {e}");
+        return EXIT_BOOTSTRAP_FAIL;
+    }
+
     if let Err(e) = write_bootstrap_files(&args.log_dir, cluster_id, &records) {
         eprintln!("crabka format: bootstrap failed: {e}");
         return EXIT_BOOTSTRAP_FAIL;
@@ -582,9 +714,29 @@ pub async fn run(args: FormatArgs) -> i32 {
     EXIT_OK
 }
 
-/// Serializes the manifest and the records to disk under `log_dir`.
-///
-/// Returns the first I/O or encoding error.
+/// Write the authoritative KIP-630/KIP-853 offset-zero checkpoint for a
+/// dynamically formatted controller.
+fn write_dynamic_checkpoint(
+    log_dir: &std::path::Path,
+    cluster_id: ClusterId,
+    control_records: &[MetadataRecord],
+    metadata_records: &[MetadataRecord],
+) -> Result<(), String> {
+    let mut image = crabka_metadata::MetadataImage::new(cluster_id.into());
+    for record in control_records.iter().chain(metadata_records) {
+        image.apply(record);
+    }
+    let bytes = crabka_raft::serialize_metadata_snapshot(&image, 0)
+        .map_err(|e| format!("serialize offset-zero checkpoint: {e}"))?;
+    let checkpoint_dir = crabka_raft::kraft::checkpoint_dir(&log_dir.join("__cluster_metadata"));
+    std::fs::create_dir_all(&checkpoint_dir)
+        .map_err(|e| format!("create checkpoint directory: {e}"))?;
+    std::fs::write(checkpoint_dir.join(ZERO_CHECKPOINT_NAME), bytes)
+        .map_err(|e| format!("write offset-zero checkpoint: {e}"))
+}
+
+/// Serialize the manifest + records to disk under `log_dir`. Returns the
+/// first I/O or encoding error encountered.
 #[tracing::instrument(
     level = "debug",
     name = "cli.write_bootstrap_files",
@@ -632,11 +784,10 @@ fn write_bootstrap_files(
     Ok(())
 }
 
-/// Self-contained base64 encoder: standard alphabet, padded.
-///
-/// Crabka does not add the `base64` crate only for the manifest mirror.
-/// The records are base64-encoded for human readers alone. The
-/// authoritative copy is in `bootstrap.records.bin`.
+/// Tiny self-contained base64 encoder (standard alphabet, padded). We
+/// don't pull in the `base64` crate just for the manifest mirror — the
+/// records are only base64'd for human readability; the authoritative
+/// copy lives in `bootstrap.records.bin`.
 fn base64_encode(input: &[u8]) -> String {
     const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);

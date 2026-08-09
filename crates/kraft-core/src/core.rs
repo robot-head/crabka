@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crabka_units::prelude::{Time, TimeExt as _};
+use crabka_voters::VoterSet;
 
 use crate::{
     action::{Action, TimerKind},
@@ -97,6 +98,99 @@ impl QuorumStateMachine {
     #[must_use]
     pub fn is_voter(&self) -> bool {
         self.state.voters.contains(self.me)
+    }
+
+    /// Apply the latest voter set read from the Raft log or a snapshot.
+    ///
+    /// KIP-853 requires replicas to use an uncommitted `VotersRecord`
+    /// immediately. The durable engine owns record history and invokes this
+    /// method again with the preceding set if the log is truncated.
+    pub fn apply_voter_set(&mut self, voters: VoterSet, now: SimInstant) -> Vec<Action> {
+        let was_voter = self.is_voter();
+        let leader_id = self.state.leader_id;
+        self.state.voters = voters;
+
+        if let Role::Leader { replicas, .. } = &mut self.role {
+            replicas.retain(|id, _| self.state.voters.contains(*id) && *id != self.me);
+            for id in self.state.voters.ids() {
+                if id != self.me {
+                    replicas.entry(id).or_default();
+                }
+            }
+            return Vec::new();
+        }
+
+        match (was_voter, self.is_voter()) {
+            (true, false) => {
+                let fetch_deadline = now.saturating_add_ms(self.election_timeout_ms);
+                self.role = Role::Observer {
+                    leader_id,
+                    fetch_deadline,
+                };
+                let mut actions = vec![Action::TransitionedTo(self.role.name())];
+                if let Some(leader_id) = leader_id {
+                    actions.push(Action::SendFetch { leader_id });
+                    actions.push(Action::ResetTimer {
+                        kind: TimerKind::Fetch,
+                        deadline: fetch_deadline,
+                    });
+                }
+                actions
+            }
+            (false, true) => {
+                if let Some(leader_id) = leader_id {
+                    let fetch_deadline = now.saturating_add_ms(self.election_timeout_ms);
+                    self.role = Role::Follower {
+                        leader_id,
+                        fetch_deadline,
+                    };
+                    vec![
+                        Action::TransitionedTo(self.role.name()),
+                        Action::SendFetch { leader_id },
+                        Action::ResetTimer {
+                            kind: TimerKind::Fetch,
+                            deadline: fetch_deadline,
+                        },
+                    ]
+                } else {
+                    let election_deadline = self.election_deadline(now);
+                    self.role = Role::Unattached { election_deadline };
+                    vec![
+                        Action::TransitionedTo(self.role.name()),
+                        Action::ResetTimer {
+                            kind: TimerKind::Election,
+                            deadline: election_deadline,
+                        },
+                    ]
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Apply a committed `KRaftVersionRecord`.
+    pub fn set_kraft_version(&mut self, version: u16) {
+        self.state.kraft_version = version;
+    }
+
+    /// Complete removal of the local leader after the reduced voter set has
+    /// committed. Fetch serving continues until the engine invokes this edge.
+    pub fn finish_local_leader_removal(&mut self, now: SimInstant) -> Vec<Action> {
+        if self.is_voter() || !self.role.is_leader() {
+            return Vec::new();
+        }
+        let epoch = self.state.leader_epoch;
+        self.state.leader_id = None;
+        let fetch_deadline = now.saturating_add_ms(self.election_timeout_ms);
+        self.role = Role::Observer {
+            leader_id: None,
+            fetch_deadline,
+        };
+        vec![
+            Action::SendEndQuorumEpoch { epoch },
+            Action::PersistQuorumState,
+            Action::TransitionedTo(self.role.name()),
+        ]
     }
 
     #[cfg(test)]
@@ -268,17 +362,30 @@ impl QuorumStateMachine {
         // leader's log end, and the leader's HWM is always within its log.
         // Both are invariants of correct operation; clamping makes them
         // locally evident instead of a distributed assumption.
-        let follower_offsets: Vec<i64> = replicas
+        let mut follower_offsets: Vec<i64> = replicas
             .values()
             .map(|progress| progress.fetch_offset.min(log_end))
             .collect();
-        let new_hwm = crabka_verified::recompute_high_watermark(
-            log_end,
-            &follower_offsets,
-            self.state.majority(),
-            *epoch_start_offset,
-            (*high_watermark).min(log_end),
-        );
+        let new_hwm = if self.is_voter() {
+            crabka_verified::recompute_high_watermark(
+                log_end,
+                &follower_offsets,
+                self.state.majority(),
+                *epoch_start_offset,
+                (*high_watermark).min(log_end),
+            )
+        } else {
+            // A leader removed by its own VotersRecord continues serving Fetch
+            // until the record commits, but its local log cannot count toward
+            // the new configuration's majority.
+            follower_offsets.sort_unstable_by(|a, b| b.cmp(a));
+            follower_offsets
+                .get(self.state.majority().saturating_sub(1))
+                .copied()
+                .filter(|offset| *offset > *epoch_start_offset)
+                .unwrap_or(*high_watermark)
+                .max(*high_watermark)
+        };
         debug_assert!(
             new_hwm <= log_end,
             "HWM {new_hwm} must not exceed leader log end {log_end}"
@@ -347,22 +454,10 @@ impl QuorumStateMachine {
         leader_epoch: Epoch,
         now: SimInstant,
     ) -> Vec<Action> {
-        // KIP-595 / leadership-hijack defense: only adopt a leader that belongs
-        // to our current applied voter set. A peer with network access must not
-        // be able to install an arbitrary `leader_id` we will then fetch from
-        // and replicate metadata from. Guard on a NON-EMPTY voter set so a
-        // bootstrapping node that has not yet learned its voters is unaffected
-        // (it has no basis to reject), and so KIP-853 add/remove-voter — which
-        // legitimately changes the set — is honored by reading the *current*
-        // voter set rather than a stale view.
-        if !self.state.voters.is_empty() && !self.state.voters.contains(leader_id) {
-            tracing::warn!(
-                rejected_leader = leader_id.0,
-                leader_epoch,
-                "rejecting BeginQuorumEpoch from non-voter leader (not in current voter set)"
-            );
-            return Vec::new();
-        }
+        // Do not reject a leader solely because it is absent from our local
+        // voter view. During a KIP-853 transition the leader and follower may
+        // temporarily have adjacent voter sets; the epoch and log checks fence
+        // stale or forged announcements.
         // Accept a strictly-higher epoch, or an equal epoch only if we do not
         // already know a leader for it (one leader per epoch). Otherwise ignore.
         let accept = leader_epoch > self.state.leader_epoch
@@ -661,20 +756,9 @@ impl QuorumStateMachine {
             );
             return Vec::new();
         }
-        // Leadership-hijack defense: only consider a vote from a candidate that
-        // belongs to our current applied voter set. Guarded on a NON-EMPTY voter
-        // set so a bootstrapping node is unaffected, and read from the current
-        // set so KIP-853 reconfiguration is honored. A non-voter candidate is
-        // ignored (no reply), mirroring the JVM which drops votes from replicas
-        // it does not recognize as voters.
-        if !self.state.voters.is_empty() && !self.state.voters.contains(candidate) {
-            tracing::warn!(
-                candidate = candidate.0,
-                candidate_epoch,
-                "ignoring Vote from non-voter candidate (not in current voter set)"
-            );
-            return Vec::new();
-        }
+        // KIP-853 removes voter-set membership as a Vote grant precondition.
+        // Adjacent configurations may disagree temporarily; epoch, prior-vote,
+        // and log freshness checks below remain authoritative.
         // Fenced: candidate is behind our epoch.
         if candidate_epoch < self.state.leader_epoch {
             actions.push(Action::ReplyVote {
@@ -1533,10 +1617,9 @@ mod tests {
     }
 
     #[test]
-    fn begin_quorum_epoch_from_non_voter_leader_rejected() {
-        // C-2: a BeginQuorumEpoch claiming a leader_id that is not in our
-        // (non-empty) voter set must NOT be adopted — no leader installed, no
-        // role transition, no actions.
+    fn begin_quorum_epoch_from_adjacent_voter_view_is_accepted() {
+        // KIP-853: a newly elected leader may be absent from our temporarily
+        // stale local voter view. Adopt the higher epoch and fetch its log.
         let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
@@ -1552,11 +1635,16 @@ mod tests {
         );
         check!(
             (
-                actions.is_empty(),
                 m.quorum_state().leader_id,
                 m.quorum_state().leader_epoch,
                 matches!(m.role(), Role::Follower { .. }),
-            ) == (true, None, 0, false)
+                actions.iter().any(|action| matches!(
+                    action,
+                    Action::SendFetch {
+                        leader_id: NodeId(99)
+                    }
+                )),
+            ) == (Some(NodeId(99)), 4, true, true)
         );
     }
 
@@ -1593,9 +1681,9 @@ mod tests {
     }
 
     #[test]
-    fn vote_from_non_voter_candidate_not_granted() {
-        // C-2: a Vote whose candidate is not in our (non-empty) voter set is
-        // ignored — no reply, no vote recorded.
+    fn vote_from_adjacent_voter_view_is_granted_when_up_to_date() {
+        // KIP-853 permits an up-to-date candidate from an adjacent voter view;
+        // only the local latest set determines whether this replica may vote.
         let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
@@ -1616,7 +1704,16 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert2::assert!((actions.is_empty(), m.quorum_state().voted_key) == (true, None));
+        assert2::assert!(
+            m.quorum_state()
+                .voted_key
+                .is_some_and(|key| key.id == NodeId(99))
+        );
+        assert2::assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, Action::ReplyVote { granted: true, .. }))
+        );
     }
 
     #[test]

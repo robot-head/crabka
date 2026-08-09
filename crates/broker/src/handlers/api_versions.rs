@@ -40,17 +40,14 @@ fn supported_feature_keys() -> Vec<SupportedFeatureKey> {
         .iter()
         .map(|f| SupportedFeatureKey {
             name: f.name.to_string(),
-            // Kafka's wire invariant: `SupportedVersionRange` (and the JVM
-            // client's `NodeApiVersions` parser) requires `minVersion >= 1`,
-            // so the ApiVersions `SupportedFeatures` advertisement clamps the
-            // min to 1. Features whose registry min is 0 (e.g. `group.version`,
-            // `transaction.version`, where level 0 means "disabled") are still
-            // *finalizable* at 0 via `UpdateFeatures` — 0 is only inexpressible
-            // on this specific wire field. Advertising min=0 here makes a
-            // pre-4.0 JVM admin client throw `IllegalArgumentException` and
-            // fail the whole ApiVersions handshake; real cp-kafka 4.0 advertises
-            // min=1 for the same reason.
-            min_version: f.min_version.max(1),
+            // `kraft.version` is the KIP-853 exception whose supported range
+            // includes level zero. Other disable-at-zero features keep the
+            // legacy JVM-compatible clamp.
+            min_version: if f.name == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE {
+                f.min_version
+            } else {
+                f.min_version.max(1)
+            },
             max_version: f.max_version,
             ..Default::default()
         })
@@ -58,7 +55,7 @@ fn supported_feature_keys() -> Vec<SupportedFeatureKey> {
 }
 
 fn finalized_feature_keys(image: &crabka_metadata::MetadataImage) -> Vec<FinalizedFeatureKey> {
-    image
+    let mut features: Vec<_> = image
         .finalized_features()
         .iter()
         .map(|(name, level)| FinalizedFeatureKey {
@@ -69,7 +66,15 @@ fn finalized_feature_keys(image: &crabka_metadata::MetadataImage) -> Vec<Finaliz
             min_version_level: *level,
             ..Default::default()
         })
-        .collect()
+        .collect();
+    let kraft_version = i16::try_from(image.kraft_version()).unwrap_or(i16::MAX);
+    features.push(FinalizedFeatureKey {
+        name: crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE.into(),
+        max_version_level: kraft_version,
+        min_version_level: kraft_version,
+        ..Default::default()
+    });
+    features
 }
 
 /// KIP-511 client-information validity check. Matches the JVM
@@ -220,15 +225,23 @@ mod tests {
             .expect("metadata.version advertised");
         assert!(mv.min_version == crate::features::METADATA_VERSION_MIN);
         assert!(mv.max_version == crate::features::METADATA_VERSION_MAX);
+        let kraft = keys
+            .iter()
+            .find(|key| key.name == "kraft.version")
+            .expect("kraft.version advertised");
+        assert!((kraft.min_version, kraft.max_version) == (0, 1));
     }
 
     #[test]
-    fn fresh_image_surfaces_no_finalized_features() {
+    fn fresh_image_surfaces_finalized_kraft_version_zero() {
         // A fresh metadata image (no `UpdateFeatures` ever applied) has no
         // finalized features and the schema sentinel epoch `-1`, which JVM
         // clients consume as `MetadataVersion.UNKNOWN`.
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
-        assert!(finalized_feature_keys(&image).is_empty());
+        let features = finalized_feature_keys(&image);
+        assert!(features.len() == 1);
+        assert!(features[0].name == "kraft.version");
+        assert!(features[0].min_version_level == 0 && features[0].max_version_level == 0);
         assert!(image.finalized_features_epoch() == -1);
     }
 
@@ -246,7 +259,7 @@ mod tests {
 
         let keys = finalized_feature_keys(&image);
 
-        assert!(keys.len() == 2, "{keys:?}");
+        assert!(keys.len() == 3, "{keys:?}");
         let mv = keys
             .iter()
             .find(|k| k.name == "metadata.version")

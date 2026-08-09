@@ -19,12 +19,14 @@ pub mod configs;
 pub mod delegation_tokens;
 pub mod groups;
 pub mod log_dirs;
+pub mod quorum;
 pub mod quotas;
 pub mod topics;
 pub mod users;
 
 pub use configs::{AlterConfigsOutcome, IncrementalAlterOp, TopicConfigOverrides};
 pub use log_dirs::{AlterReplicaLogDirOutcome, LogDirInfo, LogDirPartitionInfo, LogDirTopicInfo};
+pub use quorum::{MetadataQuorum, QuorumReplica};
 pub use quotas::{QuotaOp, UserQuotaConfig, diff_user_quotas};
 pub use topics::{
     CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,
@@ -48,6 +50,23 @@ pub use users::{
 /// which needs unique access.
 #[async_trait::async_trait]
 pub trait AdminClientLike: Send {
+    /// Read committed metadata-quorum membership.
+    async fn describe_metadata_quorum(&mut self) -> Result<MetadataQuorum, AdminError> {
+        Err(AdminError::Protocol(
+            "DescribeQuorum is not implemented by this admin client".into(),
+        ))
+    }
+    /// Remove one exact metadata-quorum voter identity.
+    async fn remove_raft_voter(
+        &mut self,
+        _cluster_id: uuid::Uuid,
+        _node_id: i32,
+        _directory_id: uuid::Uuid,
+    ) -> Result<(), AdminError> {
+        Err(AdminError::Protocol(
+            "RemoveRaftVoter is not implemented by this admin client".into(),
+        ))
+    }
     async fn metadata(&mut self, topics: &[&str]) -> Result<TopicMetadata, AdminError>;
     async fn create_topics(
         &mut self,
@@ -137,6 +156,19 @@ pub trait AdminClientLike: Send {
 
 #[async_trait::async_trait]
 impl AdminClientLike for AdminClient {
+    async fn describe_metadata_quorum(&mut self) -> Result<MetadataQuorum, AdminError> {
+        AdminClient::describe_metadata_quorum(self).await
+    }
+
+    async fn remove_raft_voter(
+        &mut self,
+        cluster_id: uuid::Uuid,
+        node_id: i32,
+        directory_id: uuid::Uuid,
+    ) -> Result<(), AdminError> {
+        AdminClient::remove_raft_voter(self, cluster_id, node_id, directory_id).await
+    }
+
     async fn metadata(&mut self, topics: &[&str]) -> Result<TopicMetadata, AdminError> {
         AdminClient::metadata(self, topics).await
     }
