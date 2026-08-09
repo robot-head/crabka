@@ -527,14 +527,16 @@ async fn describe_quorum_response(
     body: &[u8],
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
-    use crabka_protocol::owned::{
-        common::describe_quorum_response::replica_state::ReplicaState,
-        describe_quorum_request::DescribeQuorumRequest,
-        describe_quorum_response::{
-            DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            common::describe_quorum_response::replica_state::ReplicaState,
+            describe_quorum_request::DescribeQuorumRequest,
+            describe_quorum_response::{
+                DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
+            },
         },
     };
-    use crabka_protocol::{Decode, Encode};
 
     let mut input = body;
     let request = DescribeQuorumRequest::decode(&mut input, version)?;
@@ -631,10 +633,13 @@ async fn add_raft_voter_response(
     body: &[u8],
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
-    use crabka_protocol::owned::{
-        add_raft_voter_request::AddRaftVoterRequest, add_raft_voter_response::AddRaftVoterResponse,
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            add_raft_voter_request::AddRaftVoterRequest,
+            add_raft_voter_response::AddRaftVoterResponse,
+        },
     };
-    use crabka_protocol::{Decode, Encode};
 
     let mut input = body;
     let request = AddRaftVoterRequest::decode(&mut input, version)?;
@@ -703,11 +708,13 @@ async fn remove_raft_voter_response(
     body: &[u8],
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
-    use crabka_protocol::owned::{
-        remove_raft_voter_request::RemoveRaftVoterRequest,
-        remove_raft_voter_response::RemoveRaftVoterResponse,
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            remove_raft_voter_request::RemoveRaftVoterRequest,
+            remove_raft_voter_response::RemoveRaftVoterResponse,
+        },
     };
-    use crabka_protocol::{Decode, Encode};
 
     let mut input = body;
     let request = RemoveRaftVoterRequest::decode(&mut input, version)?;
@@ -760,11 +767,13 @@ async fn update_raft_voter_response(
     body: &[u8],
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
-    use crabka_protocol::owned::{
-        update_raft_voter_request::UpdateRaftVoterRequest,
-        update_raft_voter_response::UpdateRaftVoterResponse,
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            update_raft_voter_request::UpdateRaftVoterRequest,
+            update_raft_voter_response::UpdateRaftVoterResponse,
+        },
     };
-    use crabka_protocol::{Decode, Encode};
 
     let mut input = body;
     let request = UpdateRaftVoterRequest::decode(&mut input, version)?;
