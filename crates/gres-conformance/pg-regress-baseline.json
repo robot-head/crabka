@@ -517,10 +517,10 @@
       "sha256": "524893a2ab82087b12cdc36144984bdb4319c82d0cc20ba93079f57e7c621cb9"
     },
     "join": {
-      "changed_lines": 8017,
+      "changed_lines": 8011,
       "expected": "join.out",
-      "hunks": 247,
-      "sha256": "8da3da5f83c1c569bcc76d313b38e67f1e5f459475cbafe6cd05edcfb1464c35"
+      "hunks": 248,
+      "sha256": "a5d32d1238feb36bd83f6213bcef5bad96304d9b0ff4a019447856d304abe4f5"
     },
     "join_hash": {
       "changed_lines": 845,
@@ -1030,13 +1030,13 @@
       "changed_lines": 925,
       "expected": "timestamp.out",
       "hunks": 27,
-      "sha256": "2de25035ab78bb670166bcb3ce8cb2e9d3fbdb4a556b4ccf0ae6099ce3b50e96"
+      "sha256": "b8c2f526cce23158ffe418ce81c49073926bd86beedb52243030224fa573a438"
     },
     "timestamptz": {
       "changed_lines": 1292,
       "expected": "timestamptz.out",
       "hunks": 45,
-      "sha256": "28092824f150fadceae5714bfefaaa8a9c9e95c6efbd5fbc6f6ca64bb1609f92"
+      "sha256": "f12c7a017b7be7048adc13c0dac25d080da3068c33c2a22c43de96d987207696"
     },
     "timetz": {
       "changed_lines": 84,
