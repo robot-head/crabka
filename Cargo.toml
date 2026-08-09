@@ -39,7 +39,7 @@ arrow = { version = "59", default-features = false, features = ["ipc"] }
 # Parquet blocks on object storage. Pinned to apache/datafusion `main` because
 # that revision tracks arrow 59 / parquet 59 / object_store 0.13.2, matching the
 # workspace pins. The latest released datafusion line is on an older arrow major.
-datafusion = { git = "https://github.com/apache/datafusion", rev = "ad1a26002b8bac436a8f20761f42713e23dc70b2", version = "54" }
+datafusion = { git = "https://github.com/apache/datafusion", rev = "0062b4b409a1c556c84746b840fd65e1cdd151c9", version = "54" }
 parquet = { version = "59", default-features = false, features = ["arrow", "async", "object_store"] }
 url = "2"
 # PromQL parser only; Crabka supplies the PromQL-to-DataFusion planner.
