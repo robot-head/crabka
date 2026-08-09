@@ -3524,6 +3524,8 @@ dependencies = [
  "hex",
  "jiff",
  "md-5 0.11.0",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "pglz",
  "regex",
  "rust-stemmers",
@@ -3591,7 +3593,7 @@ dependencies = [
  "jiff",
  "proptest",
  "quick-xml 0.41.0",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6835,8 +6837,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link",
+ "windows-result",
 ]
 
 [[package]]

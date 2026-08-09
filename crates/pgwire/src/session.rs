@@ -956,6 +956,14 @@ where
                 FrontendMessage::Terminate => return Ok(()),
                 FrontendMessage::Query { sql } => {
                     let _statement_activity = activity.begin_statement().await;
+                    let statement_span = telemetry::statement_span(StatementProtocol::Simple);
+                    // The simple protocol carries its SQL, so this is where a
+                    // sqlcommenter tag is read. The text itself is left alone:
+                    // the parser skips comments without emitting a token, and it
+                    // keeps the original string so a syntax error's byte offset
+                    // still points where the client expects.
+                    let _ingress =
+                        telemetry::ingress_from_sql(config.ingress_trace, &sql, &statement_span);
                     match begin_simple_copy(&mut session, &sql, &cancel).await {
                         Ok(SimpleCopy::In(response)) => {
                             write_notices(&mut out, notices.as_mut());

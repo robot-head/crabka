@@ -2157,6 +2157,40 @@ impl MaintenanceCommand {
     }
 }
 
+/// Fold a statement's outcome onto its span: `ERROR` plus the SQLSTATE on
+/// failure, the row counts on success.
+///
+/// Only `ERROR` is ever recorded. A successful statement leaves the span
+/// `Unset`, as the OpenTelemetry specification asks. `span.is_none()` is the
+/// cheap early out that keeps this free when the target is disabled. The
+/// `ExecError` clone below only happens on a traced failure.
+fn record_statement_status(span: &tracing::Span, result: &Result<QueryResult, ExecError>) {
+    if span.is_none() {
+        return;
+    }
+    match result {
+        Ok(result) => record_statement_rows(span, result),
+        Err(error) => {
+            let error = error.clone().into_pg();
+            crate::telemetry::record_error(span, &error.code, &error.message);
+        }
+    }
+}
+
+fn record_statement_rows(span: &tracing::Span, result: &QueryResult) {
+    use crate::telemetry::command_tag_row_count;
+
+    match result {
+        QueryResult::Rows { rows, tag, .. } => {
+            crate::telemetry::record_rows(span, Some(rows.len()), command_tag_row_count(tag));
+        }
+        QueryResult::Command { tag } => {
+            crate::telemetry::record_rows(span, None, command_tag_row_count(tag));
+        }
+        QueryResult::Empty => {}
+    }
+}
+
 /// The command tag PostgreSQL names in `cannot execute <tag> in a read-only
 /// transaction`. Only the statements a read-only block can refuse need one, and
 /// [`statement_has_effects`] decides which those are.
@@ -6040,16 +6074,21 @@ impl SqlSession {
     /// parse fails. `PostgreSQL` aborts the block on a syntax error exactly as
     /// it does on any other error, so the parse cannot sit outside that rule.
     fn parse_for_session(&mut self, sql: &str) -> Result<Vec<Statement>, PgError> {
+        let span = crate::telemetry::parse_span(sql.len());
+        let _entered = span.enter();
         let parsed = self.type_search_schemas().and_then(|schemas| {
             crabka_pgparser::parse_with_type_schemas(sql, &schemas).map_err(ExecError::from)
         });
         match parsed {
-            Ok(statements) => Ok(statements),
+            Ok(statements) => {
+                crate::telemetry::record_parse_statements(&span, statements.len());
+                Ok(statements)
+            }
             Err(error) => {
-                let error = ExecError::from(error).into_pg();
+                let error = error.into_pg();
                 crate::telemetry::record_error(&span, &error.code, &error.message);
                 self.mark_transaction_failed();
-                Err(error.into_pg())
+                Err(error)
             }
         }
     }
@@ -13676,7 +13715,7 @@ impl Session for SqlSession {
         let mut results = Vec::with_capacity(statements.len());
         let single = statements.len() == 1;
         for stmt in statements {
-            match self.run_one(&stmt).await {
+            match self.run_one_with_source(&stmt, Some(sql)).await {
                 Ok(result) => results.push(result),
                 Err(error) => {
                     let error = error.into_pg();
@@ -13726,7 +13765,7 @@ impl Session for SqlSession {
                 continue;
             }
             let result = self
-                .run_one(stmt)
+                .run_one_with_source(stmt, Some(sql))
                 .await
                 .map_err(ExecError::into_pg)
                 .map_err(|error| {

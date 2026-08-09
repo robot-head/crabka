@@ -177,7 +177,7 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::Delete { .. } => "DELETE",
         Statement::Merge { .. } => "MERGE",
         Statement::CreateTableAs { .. } => "CREATE TABLE AS",
-        Statement::Vacuum => "VACUUM",
+        Statement::Vacuum(_) => "VACUUM",
         Statement::Truncate { .. } => "TRUNCATE TABLE",
         Statement::Set { .. } => "SET",
         Statement::Show { .. } => "SHOW",
@@ -242,15 +242,41 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::CreateDomain { .. } => "CREATE DOMAIN",
         Statement::AlterDomain { .. } => "ALTER DOMAIN",
         Statement::DropDomain { .. } => "DROP DOMAIN",
+        Statement::Cluster(_) => "CLUSTER",
+        Statement::AlterRole { .. } => "ALTER ROLE",
+        Statement::GrantSchemaPrivileges { .. } => "GRANT",
+        Statement::RevokeSchemaPrivileges { .. } => "REVOKE",
+        Statement::GrantRoles { .. } => "GRANT ROLES",
+        Statement::RevokeRoles { .. } => "REVOKE ROLES",
+        Statement::AlterIndexTablespace { .. } => "ALTER INDEX",
+        Statement::AlterView { .. } => "ALTER VIEW",
+        Statement::CreateMaterializedView { .. } => "CREATE MATERIALIZED VIEW",
+        Statement::RefreshMaterializedView { .. } => "REFRESH MATERIALIZED VIEW",
+        Statement::DropMaterializedView { .. } => "DROP MATERIALIZED VIEW",
+        Statement::Copy(_) => "COPY",
+        Statement::CreateAggregate(_) => "CREATE AGGREGATE",
+        Statement::DropAggregate { .. } => "DROP AGGREGATE",
+        Statement::AlterAggregate { .. } => "ALTER AGGREGATE",
+        Statement::CreatePolicy(_) => "CREATE POLICY",
+        Statement::AlterPolicy { .. } => "ALTER POLICY",
+        Statement::DropPolicy { .. } => "DROP POLICY",
         Statement::Utility(utility) => match utility {
-            UtilityStatement::Analyze => "ANALYZE",
-            UtilityStatement::Cluster => "CLUSTER",
+            UtilityStatement::Analyze(_) => "ANALYZE",
             UtilityStatement::Reindex => "REINDEX",
+            UtilityStatement::CreateOperatorFamily { .. } => "CREATE OPERATOR FAMILY",
+            UtilityStatement::CreateOperatorClass { .. } => "CREATE OPERATOR CLASS",
+            UtilityStatement::AlterOperatorObject { .. } => "ALTER OPERATOR",
+            UtilityStatement::DropOperatorObject { .. } => "DROP OPERATOR",
+            UtilityStatement::Load { .. } => "LOAD",
+            UtilityStatement::SecurityLabel { .. } => "SECURITY LABEL",
+            UtilityStatement::CreateTablespace { .. } => "CREATE TABLESPACE",
+            UtilityStatement::DropTablespace { .. } => "DROP TABLESPACE",
+            UtilityStatement::AlterTablespace { .. } => "ALTER TABLESPACE",
+            UtilityStatement::TextSearch(_) => "TEXT SEARCH",
             UtilityStatement::Checkpoint => "CHECKPOINT",
             UtilityStatement::AlterSystem { .. } => "ALTER SYSTEM",
             UtilityStatement::SetConstraints { .. } => "SET CONSTRAINTS",
             UtilityStatement::SetSessionAuthorization { .. } => "SET SESSION AUTHORIZATION",
-            UtilityStatement::TextSearch(_) => "TEXT SEARCH",
         },
     }
 }
@@ -273,9 +299,9 @@ pub fn statement_relation(stmt: &Statement) -> Option<&RelationRef> {
         | Statement::AlterTable { table, .. }
         | Statement::AlterTrigger { table, .. }
         | Statement::DropTrigger { table, .. }
-        | Statement::CreateIndex { table, .. }
-        | Statement::GrantTablePrivileges { table, .. }
-        | Statement::RevokeTablePrivileges { table, .. } => Some(table),
+        | Statement::CreateIndex { table, .. } => Some(table),
+        Statement::GrantTablePrivileges { tables, .. }
+        | Statement::RevokeTablePrivileges { tables, .. } => tables.first(),
         Statement::CreateTable { name, .. }
         | Statement::CreateTableAs { name, .. }
         | Statement::CreateView { name, .. }
@@ -287,8 +313,8 @@ pub fn statement_relation(stmt: &Statement) -> Option<&RelationRef> {
         | Statement::AlterType { name, .. }
         | Statement::CreateDomain { name, .. }
         | Statement::AlterDomain { name, .. } => Some(name),
+        Statement::Truncate { targets, .. } => targets.first().map(|t| &t.name),
         Statement::DropTable { names, .. }
-        | Statement::Truncate { names, .. }
         | Statement::LockTable { tables: names, .. }
         | Statement::DropType { names, .. }
         | Statement::DropDomain { names, .. } => names.first(),
@@ -323,7 +349,7 @@ fn query_relation(query: &QueryExpr) -> Option<&RelationRef> {
             TableExpr::Table { name, .. } => Some(name),
             TableExpr::Join { left, .. } => from_table_expr(left),
             TableExpr::Derived { subquery, .. } => from_set_expr(&subquery.body),
-            TableExpr::Function { .. } => None,
+            TableExpr::Function { .. } | TableExpr::JsonTable(_) => None,
         }
     }
 

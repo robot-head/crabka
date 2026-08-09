@@ -58,7 +58,13 @@ const DEADLOCK_SQLSTATE: &str = "40P01";
 /// span exists here exactly when there was one.
 ///
 /// TRACE, because even contended acquires are frequent on a hot key.
-fn wait_span(key: &LockKey, mode: LockMode, my_xid: u64) -> tracing::Span {
+fn wait_span(key: &LockKey, mode: LockMode, owner: LockOwner) -> tracing::Span {
+    // A session lock has no transaction id; record the id it does have, so the
+    // span still names who waited.
+    let (my_xid, owner_kind) = match owner {
+        LockOwner::Xid(xid) => (xid, "xid"),
+        LockOwner::Session(id) => (id, "session"),
+    };
     let span = tracing::trace_span!(
         target: crate::telemetry::EXEC_TARGET,
         "pg.lock.row",
@@ -75,6 +81,7 @@ fn wait_span(key: &LockKey, mode: LockMode, my_xid: u64) -> tracing::Span {
         pg.lock.holder_xid = tracing::field::Empty,
         pg.lock.outcome = tracing::field::Empty,
         pg.txn.xid = crate::telemetry::integer(my_xid),
+        pg.lock.owner_kind = owner_kind,
     );
     match key {
         LockKey::Row(table, rowid) => {
@@ -88,6 +95,12 @@ fn wait_span(key: &LockKey, mode: LockMode, my_xid: u64) -> tracing::Span {
         // recorded at all.
         LockKey::UniqueKey(_) => {
             span.record("pg.lock.key_kind", "unique_key");
+        }
+        // The relation-wide gate a unique-index build takes. It names only the
+        // relation, so there is no rowid to record.
+        LockKey::UniqueIndexRelation(table) => {
+            span.record("pg.lock.key_kind", "unique_index_relation");
+            span.record("pg.table_id", crate::telemetry::integer(*table));
         }
     }
     span
@@ -316,21 +329,31 @@ impl RowLockManager {
                 match try_acquire_locked(&mut g, key.clone(), mode, owner) {
                     Acquire::Acquired => {
                         g.wait_for.remove(&owner); // no longer waiting
+                        wait.record("pg.lock.outcome", "granted");
                         return Ok(());
                     }
                     Acquire::Conflict(holder) => {
                         if wait.is_none() {
-                            wait = wait_span(&key, mode, my_xid);
+                            wait = wait_span(&key, mode, owner);
                         }
                         // The holder can differ between rounds, so this names
                         // the transaction most recently waited on rather than
                         // the first one.
-                        wait.record("pg.lock.holder_xid", crate::telemetry::integer(holder));
+                        let holder_id = match holder {
+                            LockOwner::Xid(xid) | LockOwner::Session(xid) => xid,
+                        };
+                        wait.record("pg.lock.holder_xid", crate::telemetry::integer(holder_id));
                         if matches!(
                             check_cycle(&g.wait_for, holder, owner),
                             CycleCheck::Deadlock
                         ) {
                             g.wait_for.remove(&owner);
+                            wait.record("pg.lock.outcome", "deadlock");
+                            crate::telemetry::record_error(
+                                &wait,
+                                DEADLOCK_SQLSTATE,
+                                "deadlock detected",
+                            );
                             return Err(AcquireError::Deadlock);
                         }
                         g.wait_for.insert(owner, holder);

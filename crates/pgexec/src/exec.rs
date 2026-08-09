@@ -16,6 +16,7 @@ use crabka_pgparser::ast::{
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::{Cell, FieldDescription, QueryResult};
 use crabka_units::prelude::ByteSizeExt as _;
+use tracing::Instrument as _;
 use zerocopy::{FromBytes, byteorder::big_endian::U64};
 
 use crate::{
@@ -23765,9 +23766,10 @@ impl Kv for StagedKv<'_> {
 }
 
 impl AlterTableState {
-    fn new(table: Table) -> Self {
+    fn new(table: Table, own_xid: Option<u64>) -> Self {
         Self {
             table,
+            own_xid,
             rows: None,
             ops: Vec::new(),
             dropped_indexes: Vec::new(),
@@ -23809,7 +23811,7 @@ impl AlterTableState {
     ) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
         self.rows_mut(kv)?;
         let versions = self.rows.as_ref().expect("row versions were just loaded");
-        let mut live = live_row_versions(kv, &self.table, versions)?;
+        let mut live = live_row_versions(kv, &self.table, versions, self.own_xid)?;
         for (_, _, row) in &mut live {
             expand_virtual_generated_row(&self.table, row, ctx)?;
         }
@@ -24033,7 +24035,7 @@ fn alter_table_ops(
         .iter()
         .map(|column| column.name.clone())
         .collect();
-    let mut state = AlterTableState::new(table);
+    let mut state = AlterTableState::new(table, fctx.own_xid);
     let mut ordered_actions = actions.iter().collect::<Vec<_>>();
     ordered_actions.sort_by_key(|action| alter_table_action_pass(action));
     for action in &ordered_actions {
@@ -24271,7 +24273,7 @@ fn alter_descendant_ops(
     actions: &[&crabka_pgparser::ast::AlterTableAction],
     fctx: ForeignCtx<'_>,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
-    let mut state = AlterTableState::new(crabka_pgcatalog::get_table(kv, name)?);
+    let mut state = AlterTableState::new(crabka_pgcatalog::get_table(kv, name)?, fctx.own_xid);
     for action in actions {
         alter_descendant_action_ops(kv, &mut state, action, parent, fctx)?;
     }
