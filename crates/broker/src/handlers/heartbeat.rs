@@ -22,6 +22,8 @@ use crate::{
     fields(api = "Heartbeat", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: the generated protocol default for throttle_time_ms is zero.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

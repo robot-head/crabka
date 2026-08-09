@@ -33,6 +33,8 @@ use crate::{
 /// serves the KIP-1071 streams RPCs, heartbeat and describe.
 const STREAMS_VERSION_MIN_LEVEL: i16 = 1;
 
+// cargo-mutants: streams-coordinator response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

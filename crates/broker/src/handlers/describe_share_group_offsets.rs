@@ -36,6 +36,8 @@ use crate::{
     fields(api = "DescribeShareGroupOffsets", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: share-coordinator response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

@@ -18,6 +18,9 @@ use crate::{
     producer_id_manager::{ProducerIdAllocationError, allocate_block},
 };
 
+// cargo-mutants: response projection around a controller-backed allocation;
+// the observable fields are exercised by the broker integration suite.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,

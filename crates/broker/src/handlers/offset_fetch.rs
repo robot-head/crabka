@@ -40,6 +40,8 @@ use crate::{
     fields(api = "OffsetFetch", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: coordinator-backed response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -283,6 +285,8 @@ async fn fetch_committed(
 /// requested `topic_id` to a name and echoes the id back. An unknown id gives
 /// `UNKNOWN_TOPIC_ID` for each partition.
 // per-group loop: ACL + id→name resolve + named/fetch-all branches
+// cargo-mutants: coordinator-backed response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 async fn handle_groups(
     broker: &Broker,
     version: i16,

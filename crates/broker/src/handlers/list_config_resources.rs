@@ -296,6 +296,10 @@ mod tests {
         let out = collect_resources(&image, 1, &[RESOURCE_TYPE_GROUP]);
         assert!(
             out.iter()
+                .all(|resource| resource.resource_type == RESOURCE_TYPE_GROUP)
+        );
+        assert!(
+            out.iter()
                 .map(|resource| resource.resource_name.as_str())
                 .collect::<Vec<_>>()
                 == vec!["streams-a", "streams-b"]

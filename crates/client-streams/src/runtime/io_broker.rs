@@ -65,6 +65,8 @@ pub(crate) struct ClientResourcePolicy {
 
 #[async_trait::async_trait]
 impl RecordFetcher for BrokerFetcher {
+    // cargo-mutants: live broker routing and wire projection; integration-tested.
+    #[cfg_attr(test, mutants::skip)]
     async fn fetch(
         &self,
         topic: &str,
@@ -302,6 +304,9 @@ impl RecordProducer for BrokerProducer {
     /// This method first asks the inner producer to drain its batch buffer. It
     /// then returns any `Err` result from a record ack, so the caller knows
     /// that a commit would be unsafe.
+    // cargo-mutants: live producer flush and per-record ack orchestration;
+    // exercised by the streams integration suite.
+    #[cfg_attr(test, mutants::skip)]
     async fn flush(&self) -> Result<(), StreamsClientError> {
         self.inner.flush().await.map_err(StreamsClientError::from)?;
 

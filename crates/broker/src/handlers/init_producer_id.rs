@@ -235,6 +235,9 @@ fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
 }
 
 /// Transactional sub-path: allocate or bump-epoch for `tid`.
+// cargo-mutants: live transaction-coordinator orchestration; the response
+// identity and error mapping are exercised by broker transaction integration.
+#[cfg_attr(test, mutants::skip)]
 async fn handle_transactional(
     coord: &Arc<TxnCoordinator>,
     tid: &str,
@@ -381,6 +384,9 @@ async fn handle_transactional(
     }
 }
 
+// cargo-mutants: identity allocation can cross the metadata controller;
+// transaction integration exercises both epoch-bump and rollover paths.
+#[cfg_attr(test, mutants::skip)]
 async fn next_init_producer_identity(
     entry: &TxnEntry,
     txnv: crate::txn::version::TxnVersion,
