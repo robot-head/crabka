@@ -223,9 +223,10 @@ struct OrderEvent {
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#arrow-codec -->
 ```rust
-/// Source codec: each Kafka record value is an Arrow-IPC `RecordBatch`; decode
-/// them into one Polars `DataFrame` the columnar engine can process. Bridges
-/// arrow-rs -> polars explicitly (different Arrow memory libraries).
+/// Source codec. Each Kafka record value is an Arrow-IPC `RecordBatch`, and this
+/// codec decodes them into one Polars `DataFrame` that the columnar engine can
+/// process. It bridges arrow-rs to polars explicitly, because the two use
+/// different Arrow memory libraries.
 struct ArrowBlobCodec;
 
 impl BatchCodec for ArrowBlobCodec {
