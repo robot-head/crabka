@@ -334,7 +334,7 @@ impl Producer {
     /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
     /// - [`ProducerError::InvalidTransactionState`] — not currently in a transaction.
     /// - [`ProducerError::FencedProducer`] — broker returned `INVALID_PRODUCER_EPOCH (47)`.
-    /// - [`ProducerError::ConcurrentTransactions`] — broker returned `CONCURRENT_TRANSACTIONS (49)`. The caller may retry.
+    /// - [`ProducerError::ConcurrentTransactions`] — broker returned `CONCURRENT_TRANSACTIONS (51)`; caller may retry.
     /// - [`ProducerError::Server`] — any other broker error code.
     #[tracing::instrument(
         level = "info",
@@ -414,7 +414,7 @@ impl Producer {
                 *state = TxnState::Fenced;
                 Err(ProducerError::FencedProducer)
             }
-            49 /* CONCURRENT_TRANSACTIONS */ => {
+            51 /* CONCURRENT_TRANSACTIONS */ => {
                 *state = TxnState::InTransaction; // Caller can retry.
                 Err(ProducerError::ConcurrentTransactions)
             }
@@ -795,28 +795,16 @@ impl Producer {
             let _ = tx.send(Err(error));
             return rx;
         }
-        // try_append currently only ever returns `Appended`; if a future
-        // change adds `BatchFull` we want a compile error, so match
-        // exhaustively rather than `let ... else`.
-        let (rx, wakes_sender) = match a.try_append(
+        let AppendResult {
+            receiver: rx,
+            wakes_sender,
+        } = a.try_append(
             record.key,
             record.value,
             record.headers,
             timestamp,
             transaction_generation,
-        ) {
-            AppendResult::Appended {
-                receiver,
-                wakes_sender,
-            } => (receiver, wakes_sender),
-            AppendResult::BatchFull => {
-                // Should not happen with the current implementation; treat
-                // as transient and fail the caller rather than panic.
-                let (tx, rx) = oneshot::channel();
-                let _ = tx.send(Err(ProducerError::BufferFull));
-                (rx, false)
-            }
-        };
+        );
         wake_sender_after_append(&self.wake_tx, self.linger, wakes_sender);
         rx
     }
@@ -1057,18 +1045,12 @@ mod tests {
         let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(4);
 
         let mut coalesced = Accumulator::new(1024);
-        let AppendResult::Appended { wakes_sender, .. } =
-            coalesced.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None)
-        else {
-            panic!("unexpected BatchFull");
-        };
+        let AppendResult { wakes_sender, .. } =
+            coalesced.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
         wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
         assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
-        let AppendResult::Appended { wakes_sender, .. } =
-            coalesced.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None)
-        else {
-            panic!("unexpected BatchFull");
-        };
+        let AppendResult { wakes_sender, .. } =
+            coalesced.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None);
         wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
         assert_eq!(
             wake_rx.try_recv(),
@@ -1077,11 +1059,8 @@ mod tests {
 
         let mut rollover = Accumulator::new(20);
         let _ = rollover.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
-        let AppendResult::Appended { wakes_sender, .. } =
-            rollover.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None)
-        else {
-            panic!("unexpected BatchFull");
-        };
+        let AppendResult { wakes_sender, .. } =
+            rollover.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None);
         wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
         assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
 

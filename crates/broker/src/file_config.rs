@@ -445,6 +445,8 @@ pub struct RuntimeFileConfig {
     pub future_log_move_read_chunk: Option<ByteSize>,
     pub share_state_num_partitions: Option<i32>,
     pub share_state_replication_factor: Option<i16>,
+    pub offsets_topic_num_partitions: Option<i32>,
+    pub offsets_topic_replication_factor: Option<i16>,
     pub transaction_state_num_partitions: Option<i32>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
@@ -2484,6 +2486,15 @@ impl RuntimeFileConfig {
         if let Some(value) = runtime.share_state_replication_factor {
             cfg.share_coordinator.state_topic_replication_factor =
                 positive_i16("share_state_replication_factor", value)?;
+        }
+        set_runtime_i32!(
+            runtime,
+            offsets_topic_num_partitions,
+            cfg.offsets_topic_num_partitions
+        );
+        if let Some(value) = runtime.offsets_topic_replication_factor {
+            cfg.offsets_topic_replication_factor =
+                positive_i16("offsets_topic_replication_factor", value)?;
         }
         set_runtime_i32!(
             runtime,

@@ -296,6 +296,9 @@ async fn process_one_txn(
     };
 
     let mut entry = entry_mutex.lock().await;
+    if entry.has_staged_producer_identity() {
+        return per_topic_with_denied(topics, denied, codes::INVALID_TXN_STATE);
+    }
     if entry.producer_id != producer_id || entry.producer_epoch != producer_epoch {
         return per_topic_with_denied(topics, denied, codes::INVALID_PRODUCER_EPOCH);
     }

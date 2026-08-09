@@ -40,8 +40,8 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 
 use crate::network::auth::{
-    ConnectionAuth, SaslExchange, handle_authenticate_plain, handle_authenticate_scram,
-    handle_handshake, is_pre_auth_allowed,
+    ConnectionAuth, SaslExchange, handle_authenticate_gssapi, handle_authenticate_plain,
+    handle_authenticate_scram, handle_handshake, is_pre_auth_allowed,
 };
 
 /// Late-bound handle to the broker's [`ControllerHandle`].
@@ -90,6 +90,7 @@ pub struct BrokerRaftHandshake {
     pub tls_acceptor: Option<TlsAcceptor>,
     pub plain_credentials: HashMap<String, String>,
     pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
+    pub gssapi: Option<crabka_security::gssapi::GssapiConfig>,
     pub protocol: ListenerProtocol,
     pub controller: ControllerHandleArc,
     /// Authorizer that gates controller RPCs after authentication (H-1).
@@ -309,12 +310,14 @@ async fn run_inbound_sasl(
                             "OAUTHBEARER is not supported on the controller listener".into(),
                         ));
                     }
-                    // GSSAPI server-side accept on the controller listener is
-                    // wired in a later GSSAPI task.
                     SaslMechanism::Gssapi => {
-                        return Err(RaftHandshakeError::Sasl(
-                            "GSSAPI is not yet wired on the controller listener".into(),
-                        ));
+                        let config = cfg.gssapi.as_ref().ok_or_else(|| {
+                            RaftHandshakeError::Sasl(
+                                "GSSAPI enabled on controller listener without configuration"
+                                    .into(),
+                            )
+                        })?;
+                        handle_authenticate_gssapi(&req, &mut auth, config)
                     }
                 };
                 let error_code = resp.error_code;
@@ -606,6 +609,7 @@ mod tests {
             tls_acceptor: None,
             plain_credentials,
             enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+            gssapi: None,
             protocol: ListenerProtocol::SaslPlaintext,
             controller: Arc::new(OnceCell::new()),
             authorizer: Arc::new(crate::authorizer::AllowAllAuthorizer),
@@ -648,6 +652,7 @@ mod tests {
             tls_acceptor: None,
             plain_credentials: HashMap::new(),
             enabled_sasl_mechanisms: vec![],
+            gssapi: None,
             protocol: ListenerProtocol::Plaintext,
             controller: Arc::new(OnceCell::new()),
             authorizer: Arc::new(crate::authorizer::AllowAllAuthorizer),
@@ -677,6 +682,7 @@ mod tests {
             tls_acceptor: None,
             plain_credentials: HashMap::new(),
             enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+            gssapi: None,
             protocol: ListenerProtocol::SaslPlaintext,
             controller: controller_cell,
             authorizer: Arc::new(DenyAll),

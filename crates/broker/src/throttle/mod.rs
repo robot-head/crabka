@@ -4,6 +4,7 @@ pub use crabka_throttle::{ThrottleState, TokenBucket};
 
 mod refresh;
 use crabka_metadata::{MetadataImage, NodeId};
+pub(crate) use refresh::apply_image;
 pub use refresh::{ImageWatcher, run};
 
 /// Topic-level `*.throttled.replicas` config value.
@@ -80,6 +81,8 @@ pub const LEADER_THROTTLED_REPLICAS_KEY: &str = "leader.replication.throttled.re
 pub const FOLLOWER_THROTTLED_REPLICAS_KEY: &str = "follower.replication.throttled.replicas";
 pub const LEADER_THROTTLED_RATE_KEY: &str = "leader.replication.throttled.rate";
 pub const FOLLOWER_THROTTLED_RATE_KEY: &str = "follower.replication.throttled.rate";
+pub const ALTER_LOG_DIRS_THROTTLED_RATE_KEY: &str =
+    "replica.alter.log.dirs.io.max.bytes.per.second";
 
 #[cfg(test)]
 mod tests {

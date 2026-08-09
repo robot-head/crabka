@@ -40,6 +40,8 @@ use crate::{
     fields(api = "DescribeGroups", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: coordinator-backed response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -68,6 +70,14 @@ pub(crate) async fn handle(
             groups.push(DescribedGroup {
                 group_id: gid,
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                ..Default::default()
+            });
+            continue;
+        }
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &gid) {
+            groups.push(DescribedGroup {
+                group_id: gid,
+                error_code,
                 ..Default::default()
             });
             continue;
@@ -169,6 +179,5 @@ fn state_to_str(s: GroupState) -> &'static str {
         GroupState::PreparingRebalance => "PreparingRebalance",
         GroupState::CompletingRebalance => "CompletingRebalance",
         GroupState::Stable => "Stable",
-        GroupState::Dead => "Dead",
     }
 }

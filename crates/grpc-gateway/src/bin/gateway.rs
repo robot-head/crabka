@@ -375,7 +375,7 @@ async fn main() -> anyhow::Result<()> {
 
     let bearer = build_bearer(&args)?;
 
-    let result = run(config, bearer).await;
+    let result = Box::pin(run(config, bearer)).await;
     telemetry.shutdown();
     result
 }
@@ -666,13 +666,13 @@ async fn run(
     // subscriptions can de-frame Confluent-framed values to JSON).
     spawn_outbound_subscriptions(&config, &shutdown, codec.clone()).await?;
 
-    let produce = ProduceCore::new_with_policy(
+    let produce = Box::pin(ProduceCore::new_with_policy(
         &config.bootstrap,
         &config.client_id,
         codec.clone(),
         config.broker_security.clone(),
         &config.runtime,
-    )
+    ))
     .await?
     .with_dedup(engine)
     .with_forwarding(

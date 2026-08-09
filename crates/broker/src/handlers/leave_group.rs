@@ -21,6 +21,8 @@ use crate::{
     fields(api = "LeaveGroup", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: coordinator-backed response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -54,6 +56,18 @@ pub(crate) async fn handle(
                     version,
                 );
             }
+        }
+
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(
+                &LeaveGroupResponse {
+                    error_code,
+                    throttle_time_ms: 0,
+                    members: Vec::new(),
+                    ..Default::default()
+                },
+                version,
+            );
         }
 
         let members = match coordinator.find(&req.group_id) {

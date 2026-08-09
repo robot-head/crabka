@@ -12,8 +12,8 @@ use std::{
 use bytes::Bytes;
 use crabka_log::Offset;
 
-/// Five-state machine for a consumer group. It matches the Apache Kafka
-/// classic protocol (KIP-62 and KIP-394).
+/// Four-state machine for a live consumer group, matching the Apache Kafka
+/// classic protocol (KIP-62 / KIP-394).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GroupState {
     /// No members and no committed offsets.
@@ -26,10 +26,6 @@ pub enum GroupState {
     CompletingRebalance,
     /// `SyncGroup` completed. Members send heartbeats.
     Stable,
-    /// The broker deleted the group, for example after the last member left
-    /// and an optional retention period passed. This state is reserved. The
-    /// MVP does not transition into it.
-    Dead,
 }
 
 /// One member of a [`Group`].
@@ -430,7 +426,7 @@ impl ClassicGroup {
         // equal to the initial rebalance delay). With the default session timeout
         // 45s and a 3s rebalance delay this race is impossible in practice, and
         // real Kafka expires members regardless of group state.
-        if matches!(self.state, GroupState::Empty | GroupState::Dead) {
+        if self.state == GroupState::Empty {
             return Vec::new();
         }
         let dropped: Vec<String> = self

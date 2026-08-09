@@ -959,7 +959,7 @@ async fn flush_pending(
         return Ok(());
     }
     let batch = pending.into_batch(&state.group_id, now_ms);
-    offsets_log.append(batch).await?;
+    offsets_log.append(&state.group_id, batch).await?;
     coordinator.update_share_cache(&state.group_id, snapshot_seed(state));
     Ok(())
 }

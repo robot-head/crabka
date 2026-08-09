@@ -18,6 +18,7 @@ use crate::{
         kgrouped::mint_store_name,
         ktable::KTable,
         names,
+        sliding_windowed_kgrouped::sliding_suppress_factory,
         windows::{SlidingWindows, TimeWindowedSerde, Windowed},
     },
     processor::serde::Serde,
@@ -61,15 +62,8 @@ where
     /// Sliding-windowed terminal aggregation. It produces a
     /// `KTable<Windowed<K>, VOut>`.
     ///
-    /// The store retention uses the KIP-450 formula
-    /// `size = 2 * timeDifferenceMs`. This matches
-    /// `sliding_windowed_kgrouped.rs::lower_aggregate`.
-    ///
-    /// Note: the returned table carries no suppress factory, so a
-    /// `.suppress(...)` call on it fails at topology-build time. Suppress on
-    /// windowed cogroup outputs is a deferred follow-up. The emit semantics are
-    /// emit-on-update across the cogroup surface, which is the KIP-150 slice
-    /// scope.
+    /// Store retention uses the KIP-450 formula: `size = 2 * timeDifferenceMs`
+    /// (matching `sliding_windowed_kgrouped.rs::lower_aggregate`).
     pub fn aggregate_explicit<KS, VS, I>(
         self,
         init: I,
@@ -82,6 +76,11 @@ where
     {
         let materialized = materialized.into();
         let store_name = mint_store_name(&self.builder, &materialized, names::AGGREGATE_STORE);
+        let suppress_factory = sliding_suppress_factory::<K, VOut, KS, VS>(
+            materialized.key_serde.clone(),
+            materialized.value_serde.clone(),
+            self.windows,
+        );
         let Materialized {
             key_serde,
             value_serde,
@@ -133,6 +132,7 @@ where
             value_serde,
         )
         .with_window_grace(Some(self.windows.grace))
+        .with_suppress_factory(Some(suppress_factory))
     }
 }
 
@@ -142,7 +142,7 @@ mod caching_tests {
     use crabka_units::prelude::*;
 
     use crate::{
-        I64Serde, Materialized, Produced, SlidingWindows, StringSerde,
+        BufferConfig, I64Serde, Materialized, Produced, SlidingWindows, StringSerde, Suppressed,
         dsl::{StreamsBuilder, windows::TimeWindowedSerde},
         store::backend::StoreBackend,
     };
@@ -163,6 +163,7 @@ mod caching_tests {
             || 0i64,
             Materialized::with(StringSerde, I64Serde).as_store("cg"),
         )
+        .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
         .to_stream()
         .to_explicit(
             "out",

@@ -10,7 +10,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use crabka_ids::{LeaderEpoch, Offset, ProducerId};
 use crabka_protocol::records::{HEADER_LEN, RecordBatch};
-use crabka_units::prelude::{ByteSize, ByteSizeExt, bytes};
+use crabka_units::prelude::{ByteSize, ByteSizeExt, TimeExt as _, bytes};
 use tracing::instrument;
 
 use crate::{
@@ -368,7 +368,7 @@ impl Log {
         span.record("segments", segments.len() + 1);
         span.record("log_end", lso.0);
 
-        Ok(Self {
+        let mut log = Self {
             dir,
             config,
             segments,
@@ -382,7 +382,48 @@ impl Log {
             active_stamp_index: None,
             epoch_checkpoint,
             reconciled_frontier: Offset(0),
-        })
+        };
+        log.rebuild_transaction_state()?;
+        Ok(log)
+    }
+
+    /// Reconstruct open transactions and the LSO from durable batches. The
+    /// in-memory `pending` map is not itself persisted, so a restart must replay
+    /// transactional data and control markers before serving read-committed
+    /// fetches or accepting a delayed transaction marker.
+    fn rebuild_transaction_state(&mut self) -> Result<(), LogError> {
+        self.pending.clear();
+        let mut next = self.log_start_offset();
+        let end = self.log_end_offset();
+        while next < end {
+            let read = self.read(next, crabka_units::mebibytes(1))?;
+            if read.batches.is_empty() {
+                break;
+            }
+            let mut advanced_to = next;
+            for batch in &read.batches {
+                let producer_id = ProducerId(batch.producer_id);
+                if batch.attributes.is_control_batch() {
+                    self.pending.remove(&producer_id);
+                } else if batch.attributes.is_transactional() && !producer_id.is_none() {
+                    self.pending
+                        .entry(producer_id)
+                        .or_insert(Offset(batch.base_offset));
+                }
+                advanced_to = Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
+            }
+            if advanced_to <= next {
+                break;
+            }
+            next = advanced_to;
+        }
+        self.lso = self
+            .pending
+            .values()
+            .copied()
+            .min()
+            .unwrap_or_else(|| self.log_end_offset());
+        Ok(())
     }
 
     /// Directory this log was opened against. The broker's intra-broker
@@ -532,8 +573,15 @@ impl Log {
         self.lso
     }
 
-    /// Close all segments. Drop runs automatically when `self` moves. This
-    /// method only gives the operation a name.
+    /// First offset of `producer_id`'s currently open transaction on this
+    /// partition, or `None` when no transaction from that producer is pending.
+    #[must_use]
+    pub fn pending_transaction_start(&self, producer_id: ProducerId) -> Option<Offset> {
+        self.pending.get(&producer_id).copied()
+    }
+
+    /// Close all segments. Drop runs automatically when `self` moves;
+    /// this method just names the operation explicitly.
     pub fn close(self) {
         drop(self);
     }
@@ -1520,12 +1568,10 @@ impl Log {
         Ok(result)
     }
 
-    /// Periodic maintenance: apply time-based and size-based retention to
-    /// the sealed segments.
-    ///
-    /// This method never deletes the active segment. If retention would evict
-    /// every segment, the log keeps at least one. Active-roll-on-age is a
-    /// placeholder in the plan, so this method skips it.
+    /// Periodic maintenance: roll an old active segment, then apply time- and
+    /// size-based retention to sealed segments. The active segment is never
+    /// deleted, and if every segment would otherwise be evicted we retain at
+    /// least one.
     #[instrument(
         level = "debug",
         skip_all,
@@ -1537,6 +1583,18 @@ impl Log {
     /// # Panics
     /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn tick(&mut self, now: SystemTime) -> Result<(), LogError> {
+        let segment_roll_interval = self.config.read().unwrap().segment_roll_interval;
+        let roll_cutoff =
+            retention::now_ms(now).saturating_sub(segment_roll_interval.millis_i64_trunc());
+        let should_roll = self.active.as_ref().is_some_and(|segment| {
+            segment
+                .offset_for_timestamp(i64::MIN)
+                .is_some_and(|(_, first_timestamp)| first_timestamp < roll_cutoff)
+        });
+        if should_roll {
+            self.roll_active_segment()?;
+        }
+
         // Tiered topics' segment lifecycle is owned by the RemoteLogManager.
         if self.config.read().unwrap().remote_storage_enable {
             return Ok(());
@@ -2694,6 +2752,68 @@ mod tests {
     }
 
     #[test]
+    fn tick_rolls_active_segment_when_first_record_is_old() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_roll_interval: secs(10),
+            retention: None,
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        let mut batch = sample_batch(2);
+        batch.base_timestamp = 1_000;
+        batch.max_timestamp = 1_000;
+        log.append(&mut batch).unwrap();
+
+        log.tick(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12))
+            .unwrap();
+
+        assert2::assert!(log.segments.len() == 1);
+        assert2::assert!(log.active.as_ref().unwrap().base_offset() == Offset(2));
+    }
+
+    #[test]
+    fn tick_keeps_active_segment_at_roll_boundary() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_roll_interval: secs(10),
+            retention: None,
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        let mut batch = sample_batch(1);
+        batch.base_timestamp = 1_000;
+        batch.max_timestamp = 1_000;
+        log.append(&mut batch).unwrap();
+
+        log.tick(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(11))
+            .unwrap();
+
+        assert2::assert!(log.segments.is_empty());
+        assert2::assert!(log.active.as_ref().unwrap().base_offset() == Offset(0));
+    }
+
+    #[test]
+    fn tick_rolls_tiered_segment_without_local_eviction() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_roll_interval: secs(1),
+            retention: Some(secs(1)),
+            remote_storage_enable: true,
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        let mut batch = sample_batch(1);
+        log.append(&mut batch).unwrap();
+
+        log.tick(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10))
+            .unwrap();
+
+        assert2::assert!(log.segments.len() == 1);
+        assert2::assert!(log.active.as_ref().unwrap().base_offset() == Offset(1));
+    }
+
+    #[test]
     fn segment_rolls_when_bytes_exceeded() {
         let dir = tempdir().unwrap();
         let config = LogConfig {
@@ -2807,6 +2927,30 @@ mod tests {
         let mut commit = commit_marker(1000, 0);
         log.append(&mut commit).unwrap();
         assert2::assert!(log.lso() == log.log_end_offset());
+    }
+
+    #[test]
+    fn reopen_rebuilds_pending_transactions_and_lso() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            log.append(&mut transactional_batch(1000, 4, &["a", "b"]))
+                .unwrap();
+            assert2::assert!(log.pending_transaction_start(ProducerId(1000)) == Some(Offset(0)));
+            assert2::assert!(log.lso() == Offset(0));
+        }
+
+        let mut reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert2::assert!(reopened.pending_transaction_start(ProducerId(1000)) == Some(Offset(0)));
+        assert2::assert!(reopened.lso() == Offset(0));
+
+        reopened.append(&mut commit_marker(1000, 4)).unwrap();
+        assert2::assert!(
+            reopened
+                .pending_transaction_start(ProducerId(1000))
+                .is_none()
+        );
+        assert2::assert!(reopened.lso() == reopened.log_end_offset());
     }
 
     // ---- .stampindex append-path wiring tests ----
@@ -3856,11 +4000,12 @@ mod tests {
     }
 
     #[test]
-    fn tick_skips_retention_when_remote_storage_enable_is_true() {
+    fn tick_rolls_but_skips_retention_when_remote_storage_enable_is_true() {
         use std::time::Duration;
         let far_future = SystemTime::now() + Duration::from_hours(365 * 24);
 
-        // Tiered topic: tick must NOT delete anything.
+        // Tiered topic: tick rolls the old active segment but must not delete
+        // any segment. The remote-log manager owns local eviction.
         let dir_tiered = tempdir().unwrap();
         let mut tiered = rolled_log(
             dir_tiered.path(),
@@ -3873,7 +4018,7 @@ mod tests {
         let sealed_before = tiered.tierable_segments().len();
         assert2::assert!(sealed_before > 0);
         tiered.tick(far_future).unwrap();
-        assert2::assert!(tiered.tierable_segments().len() == sealed_before);
+        assert2::assert!(tiered.tierable_segments().len() == sealed_before + 1);
 
         // Non-tiered baseline: tick should still evict aggressively.
         let dir_plain = tempdir().unwrap();

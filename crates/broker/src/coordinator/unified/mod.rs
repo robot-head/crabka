@@ -440,12 +440,11 @@ impl GroupCoordinator {
     /// Get the one actor for `group_id`, and spawn it with `initial_kind` when
     /// it is absent.
     ///
-    /// The kind argument decides the spawn kind for a brand-new group only.
-    /// Both families route to one actor, and the actor rejects the family it
-    /// does not serve at that moment. A later slice lets the actor flip kind
-    /// in place, so a group is no longer pinned to its spawn kind. This method
-    /// keeps two paths: the respawn after a dead actor with a closed tx, and
-    /// the consumer re-hydrate from the seed.
+    /// The kind argument only decides the spawn kind for a brand-new group.
+    /// Both families route to one actor; the actor rejects the family it does
+    /// not currently serve and can change kind in place, so a group is not
+    /// pinned to its spawn kind. Keeps the dead-actor
+    /// (closed tx) respawn and the consumer re-hydrate-from-seed paths.
     #[must_use]
     pub fn get_or_create_group(
         self: &Arc<Self>,
@@ -638,7 +637,7 @@ impl GroupCoordinator {
         // `self.groups` so its committed_offsets remain accessible to
         // `OffsetFetch` without a full replay cycle.
         let batch = classic_group_metadata_tombstone_batch(group_id, now_ms);
-        self.offsets_log.append(batch).await?;
+        self.offsets_log.append(group_id, batch).await?;
         self.mark_streams_after_upgrade(group_id);
         Ok(ConvertOutcome::Converted)
     }
@@ -692,7 +691,7 @@ impl GroupCoordinator {
         // when those members left/expired, so no member ids are needed here. The
         // offset-home `groups` entry stays.
         let batch = streams_records_tombstone_batch(group_id, &[], now_ms);
-        self.offsets_log.append(batch).await?;
+        self.offsets_log.append(group_id, batch).await?;
         self.mark_classic_after_streams_downgrade(group_id);
         self.streams_groups.remove(group_id);
         Ok(DowngradeOutcome::Converted)
@@ -853,7 +852,7 @@ impl GroupCoordinator {
             crate::time_util::now_ms(),
         );
         self.offsets_log
-            .append(batch)
+            .append(group_id, batch)
             .await
             .map_err(|_| DeleteGroupError::Internal)?;
         self.streams_groups.remove(group_id);

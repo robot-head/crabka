@@ -85,11 +85,11 @@ impl BinaryOp {
             T_LSS => Ok(Self::Lt),
             T_GTE => Ok(Self::Gte),
             T_LTE => Ok(Self::Lte),
-            T_LAND | T_LOR | T_LUNLESS => Err(PromqlError::Unsupported(format!(
-                "set operator `{token}` is not implemented yet"
+            T_LAND | T_LOR | T_LUNLESS => Err(PromqlError::Plan(format!(
+                "set operator `{token}` reached the arithmetic operator path"
             ))),
             _ => Err(PromqlError::Unsupported(format!(
-                "binary operator `{token}` is not implemented yet"
+                "unsupported binary operator `{token}`"
             ))),
         }
     }
@@ -277,8 +277,8 @@ fn validate_set_modifier(modifier: Option<&BinModifier>) -> Result<()> {
         return Ok(());
     };
     if modifier.fill_values.lhs.is_some() || modifier.fill_values.rhs.is_some() {
-        return Err(PromqlError::Unsupported(
-            "binary fill modifiers are not implemented yet".to_string(),
+        return Err(PromqlError::Plan(
+            "fill modifiers are invalid for set operators".to_string(),
         ));
     }
     Ok(())

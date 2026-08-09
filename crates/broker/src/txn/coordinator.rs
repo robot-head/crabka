@@ -17,36 +17,31 @@ use crabka_ids::PartitionIndex;
 use crabka_log::{Offset, ProducerId};
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
+use crabka_security::ListenerProtocol;
 use crabka_units::ByteSize;
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 use crate::{
-    coordinator::unified::classic_state::OffsetEntry,
     error::BrokerError,
     partition_registry::PartitionRegistry,
     txn::{
         bootstrap,
-        handlers::end_txn::next_producer_identity,
+        handlers::{
+            end_txn::{
+                MarkerDispatchContext, completion_producer_identity, dispatch_markers,
+                prepare_completion_identities,
+            },
+            write_txn_markers::append_marker_and_materialize,
+        },
+        marker::MarkerType,
         partitioner::partition_for_tid,
         state::{TxnEntry, TxnState},
         two_pc::should_abort_idle_txn,
         version::TxnVersion,
     },
 };
-
-/// A consumer-group committed-offset key: `(topic, partition)`.
-pub(crate) type OffsetKey = (String, i32);
-
-/// Buffered transactional offsets for one producer, grouped by consumer
-/// `group_id`.
-///
-/// A producer may put offset commits for several groups into one transaction,
-/// because each `TxnOffsetCommit` carries its own `group_id`. The buffer
-/// therefore keys by group inside one producer's pending set.
-pub(crate) type PendingTxnOffsets =
-    std::collections::HashMap<String, Vec<(OffsetKey, OffsetEntry)>>;
 
 /// Live-dependency seam for the KIP-939 idle-transaction reaper.
 ///
@@ -86,9 +81,9 @@ pub(crate) trait ReaperBackend: Send + Sync {
     /// must not be reaped, or when the persistence failed.
     async fn prepare_abort(&self, tid: &str, now_ms: i64, txnv: TxnVersion) -> Option<TxnEntry>;
 
-    /// Fans out abort markers for `entry` to the partition leaders this
-    /// broker hosts. The method logs and skips remote leaders.
-    async fn dispatch_abort_markers(&self, entry: &TxnEntry);
+    /// Fan out abort markers for `entry`. Returns `false` if any marker could
+    /// not be written, leaving the transaction in `PrepareAbort` for retry.
+    async fn dispatch_abort_markers(&self, entry: &TxnEntry) -> bool;
 
     /// Moves `PrepareAbort → CompleteAbort` under `tid`'s entry lock,
     /// atomically.
@@ -128,6 +123,9 @@ fn apply_complete_abort(entry: &mut TxnEntry, new_pid: ProducerId, new_epoch: i1
     entry.state = TxnState::CompleteAbort;
     entry.producer_id = new_pid;
     entry.producer_epoch = new_epoch;
+    entry.next_producer_id = ProducerId(-1);
+    entry.next_producer_epoch = -1;
+    entry.partitions.clear();
     entry.last_update_ms = now_ms;
 }
 
@@ -169,7 +167,9 @@ async fn sweep_with_backend<B: ReaperBackend + ?Sized>(
         };
 
         // Phase 2: fan out abort markers to local partition leaders.
-        backend.dispatch_abort_markers(&prepared).await;
+        if !backend.dispatch_abort_markers(&prepared).await {
+            continue;
+        }
 
         // Phase 3: PrepareAbort → CompleteAbort, re-validating identity + state
         // under the lock so a concurrent EndTxn / InitProducerId is not
@@ -201,21 +201,16 @@ pub(crate) struct TxnCoordinator {
     /// Reverse lookup: `producer_id` → `transactional_id`. The Produce
     /// handler reads it to verify transactional batches (KIP-1319 v2).
     pid_to_tid: DashMap<ProducerId, String>,
-    /// KIP-447 transactional consumer offsets, buffered for each
-    /// `producer_id` until the transaction's COMMIT or ABORT marker.
-    ///
-    /// `TxnOffsetCommit` appends the offset records to `__consumer_offsets`,
-    /// held under the LSO, AND records them here. On COMMIT, that is, `EndTxn`
-    /// with `committed=true`, the coordinator drains the buffer into the
-    /// owning group's in-memory `committed_offsets`, the map that
-    /// `OffsetFetch` reads. This matches Kafka's "visible only after the
-    /// commit marker" semantics. On ABORT the coordinator drops the buffer
-    /// without applying it.
-    ///
-    /// The map keys by `producer_id`, because that is the identity `EndTxn`
-    /// finalizes on. The value groups offsets by the `group_id` that each
-    /// `TxnOffsetCommit` named.
-    pending_txn_offsets: DashMap<ProducerId, PendingTxnOffsets>,
+    marker_transport: Option<MarkerTransport>,
+    group_coordinator: Option<Arc<crate::coordinator::GroupCoordinator>>,
+}
+
+struct MarkerTransport {
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
+    inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    protocol: ListenerProtocol,
+    listener_name: String,
+    server_name: String,
 }
 
 impl TxnCoordinator {
@@ -235,47 +230,96 @@ impl TxnCoordinator {
             state: DashMap::new(),
             leader_partitions: RwLock::new(HashSet::new()),
             pid_to_tid: DashMap::new(),
-            pending_txn_offsets: DashMap::new(),
+            marker_transport: None,
+            group_coordinator: None,
         }
     }
 
-    /// Buffers a `TxnOffsetCommit`'s offsets for `producer_id` under
-    /// `group_id`, until the transaction's commit marker arrives.
-    ///
-    /// The `TxnOffsetCommit` handler calls this after it appends the offset
-    /// records to `__consumer_offsets`. Several commits for the same
-    /// `(producer_id, group_id)` inside one transaction accumulate. At
-    /// materialization, the last entry for a given `(topic, partition)` wins,
-    /// the same as for a non-transactional re-commit.
-    pub(crate) fn buffer_txn_offsets(
-        &self,
-        producer_id: ProducerId,
-        group_id: &str,
-        entries: Vec<(OffsetKey, OffsetEntry)>,
+    pub(crate) fn configure_marker_transport(
+        &mut self,
+        controller: Arc<dyn crate::metadata_source::MetadataSource>,
+        inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+        protocol: ListenerProtocol,
+        listener_name: String,
+        server_name: String,
+        group_coordinator: Arc<crate::coordinator::GroupCoordinator>,
     ) {
-        if entries.is_empty() {
-            return;
-        }
-        self.pending_txn_offsets
-            .entry(producer_id)
-            .or_default()
-            .entry(group_id.to_string())
-            .or_default()
-            .extend(entries);
+        self.marker_transport = Some(MarkerTransport {
+            controller,
+            inter_broker_client,
+            protocol,
+            listener_name,
+            server_name,
+        });
+        self.group_coordinator = Some(group_coordinator);
     }
 
-    /// Removes and returns all buffered transactional offsets for
-    /// `producer_id`, grouped by `group_id`.
-    ///
-    /// `EndTxn` calls this method. On COMMIT it materializes the returned
-    /// offsets into each group's `committed_offsets`. On ABORT it still calls
-    /// this method, to drop the buffer, and discards the result. Returns an
-    /// empty map if the producer buffered no transactional offsets.
-    pub(crate) fn take_txn_offsets(&self, producer_id: ProducerId) -> PendingTxnOffsets {
-        self.pending_txn_offsets
-            .remove(&producer_id)
-            .map(|(_, v)| v)
-            .unwrap_or_default()
+    pub(crate) async fn dispatch_transaction_markers(
+        &self,
+        entry: &TxnEntry,
+        marker_type: MarkerType,
+    ) -> Result<(), BrokerError> {
+        let Some(transport) = &self.marker_transport else {
+            return self.dispatch_local_markers(entry, marker_type).await;
+        };
+        let image = transport.controller.current_image();
+        let coordinator_partition = self.partition_for(&entry.transactional_id);
+        let coordinator_epoch = image
+            .partition(bootstrap::TOPIC, coordinator_partition.get())
+            .ok_or_else(|| {
+                BrokerError::Txn(format!(
+                    "transaction coordinator partition {}-{} is missing from metadata",
+                    bootstrap::TOPIC,
+                    coordinator_partition.get()
+                ))
+            })?
+            .leader_epoch
+            .get();
+        dispatch_markers(
+            MarkerDispatchContext {
+                node_id: self.node_id,
+                coordinator_epoch,
+                image: &image,
+                inter_broker_client: &transport.inter_broker_client,
+                inter_broker_protocol: transport.protocol,
+                inter_broker_listener_name: &transport.listener_name,
+                inter_broker_server_name: &transport.server_name,
+                group_coordinator: self.group_coordinator.as_ref(),
+            },
+            &self.partitions,
+            entry,
+            marker_type,
+        )
+        .await
+    }
+
+    async fn dispatch_local_markers(
+        &self,
+        entry: &TxnEntry,
+        marker_type: MarkerType,
+    ) -> Result<(), BrokerError> {
+        for tp in &entry.partitions {
+            let part = self
+                .partitions
+                .get(&tp.topic, tp.partition)
+                .ok_or_else(|| {
+                    BrokerError::Txn(format!(
+                        "transaction marker transport is not configured for remote partition {}-{}",
+                        tp.topic,
+                        tp.partition.get()
+                    ))
+                })?;
+            append_marker_and_materialize(
+                &part,
+                self.group_coordinator.as_ref(),
+                &tp.topic,
+                entry.producer_id,
+                entry.producer_epoch,
+                marker_type,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Recomputes which `__transaction_state` partitions this broker leads,
@@ -314,22 +358,16 @@ impl TxnCoordinator {
         self.pid_to_tid.get(&pid).map(|e| e.value().clone())
     }
 
-    /// Evicts the stale `prev_producer_id -> tid` mapping after a KIP-890
-    /// epoch-overflow roll.
-    ///
-    /// When the producer epoch is exhausted, the `EndTxn` completion path
-    /// allocates a new `producer_id` and records the prior id as
-    /// `entry.prev_producer_id`. See `next_producer_identity`. Without this
-    /// eviction, the old id's mapping would leak one entry for each roll.
-    ///
-    /// The method is idempotent. It does nothing once the old id is gone, and
-    /// it skips entries that never rolled, where `prev == -1`. pids are
-    /// globally unique, so the prior id only ever mapped to this tid, and
-    /// removing it cannot affect another transaction.
-    fn evict_rolled_pid(pid_to_tid: &DashMap<ProducerId, String>, entry: &TxnEntry) {
-        if entry.prev_producer_id >= 0 && entry.prev_producer_id != entry.producer_id {
-            pid_to_tid.remove(&entry.prev_producer_id);
-        }
+    /// Keep only the current transaction and staged recovery producer IDs for
+    /// this transactional ID. Repeated KIP-939 recovery calls can rotate the
+    /// staged ID before the transaction completes; retaining the superseded
+    /// mapping would let that fenced ID bypass coordinator validation.
+    fn evict_superseded_pids(pid_to_tid: &DashMap<ProducerId, String>, entry: &TxnEntry) {
+        pid_to_tid.retain(|pid, tid| {
+            tid != &entry.transactional_id
+                || *pid == entry.producer_id
+                || *pid == entry.next_producer_id
+        });
     }
 
     /// Snapshots every locally-coordinated `TxnEntry`.
@@ -399,9 +437,13 @@ impl TxnCoordinator {
 
         part.produce_batch(batch).await?;
 
-        Self::evict_rolled_pid(&self.pid_to_tid, &entry);
+        Self::evict_superseded_pids(&self.pid_to_tid, &entry);
         self.pid_to_tid
             .insert(entry.producer_id, entry.transactional_id.clone());
+        if !entry.next_producer_id.is_none() {
+            self.pid_to_tid
+                .insert(entry.next_producer_id, entry.transactional_id.clone());
+        }
         self.state.insert(tid, Arc::new(Mutex::new(entry)));
         Ok(())
     }
@@ -416,14 +458,13 @@ impl TxnCoordinator {
     /// the decision; it is the exhaustively model-checked core. See
     /// [`crate::txn::two_pc_model`].
     ///
-    /// Each abort runs the same two-step transition and marker fan-out as an
-    /// `EndTxn(committed=false)`, and bumps the producer epoch on completion
-    /// at `TV_2`, so the broker fences the timed-out producer. Marker fan-out
-    /// is local only: the reaper logs and skips remote partitions, as the
-    /// `InitProducerId` abort-on-stale-Ongoing path does. If a concurrent
-    /// caller changed the entry, the reaper abandons the reap of that tid,
-    /// because it re-checks the entry before the Complete write. Returns the
-    /// tids it finalized.
+    /// Each abort runs the same two-step transition + marker fan-out as an
+    /// `EndTxn(committed=false)` and bumps the producer epoch on completion (at
+    /// `TV_2`) so the timed-out producer is fenced. A marker failure leaves the
+    /// entry in `PrepareAbort`; the next sweep retries the fan-out. A concurrent
+    /// caller that changed the entry out from under us aborts this reap of that
+    /// tid (re-validated before the Complete write). Returns the tids it
+    /// finalized.
     // cargo-mutants: I/O orchestration over live DashMap/partition state
     #[cfg_attr(test, mutants::skip)]
     #[tracing::instrument(
@@ -532,6 +573,10 @@ impl TxnCoordinator {
                         };
                         self.pid_to_tid
                             .insert(entry.producer_id, entry.transactional_id.clone());
+                        if !entry.next_producer_id.is_none() {
+                            self.pid_to_tid
+                                .insert(entry.next_producer_id, entry.transactional_id.clone());
+                        }
                         self.state
                             .insert(entry.transactional_id.clone(), Arc::new(Mutex::new(entry)));
                     }
@@ -567,10 +612,19 @@ impl ReaperBackend for TxnCoordinator {
         let handle = self.get(tid)?;
         let prepared = {
             let mut entry = handle.lock().await;
+            if entry.state == TxnState::PrepareAbort {
+                return Some(entry.clone());
+            }
             if !should_abort_idle_txn(entry.state, entry.txn_timeout_ms, entry.start_ms, now_ms) {
                 return None;
             }
             apply_prepare_abort(&mut entry, now_ms);
+            if let Err(error) =
+                prepare_completion_identities(&mut entry, txnv, &self.producer_ids).await
+            {
+                warn!(tid, %error, "txn reaper: failed to allocate completion identity");
+                return None;
+            }
             entry.clone()
         };
         if let Err(e) = self.put(prepared.clone(), txnv).await {
@@ -582,31 +636,19 @@ impl ReaperBackend for TxnCoordinator {
 
     // cargo-mutants: writes abort markers to live partition logs
     #[cfg_attr(test, mutants::skip)]
-    async fn dispatch_abort_markers(&self, entry: &TxnEntry) {
-        use crate::txn::marker::{MarkerType, build_marker_batch};
-        for tp in &entry.partitions {
-            let Some(part) = self.partitions.get(&tp.topic, tp.partition) else {
+    async fn dispatch_abort_markers(&self, entry: &TxnEntry) -> bool {
+        match self
+            .dispatch_transaction_markers(entry, MarkerType::Abort)
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
                 warn!(
-                    topic = %tp.topic,
-                    partition = tp.partition.get(),
-                    "txn reaper: partition not locally led; abort marker needs inter-broker \
-                     WriteTxnMarkers (not yet wired), skipping"
+                    tid = %entry.transactional_id,
+                    %error,
+                    "txn reaper: abort marker fan-out failed; will retry"
                 );
-                continue;
-            };
-            let marker = build_marker_batch(
-                entry.producer_id,
-                entry.producer_epoch,
-                part.log_end_offset(),
-                MarkerType::Abort,
-            );
-            if let Err(e) = part.produce_batch(marker).await {
-                warn!(
-                    topic = %tp.topic,
-                    partition = tp.partition.get(),
-                    error = %e,
-                    "txn reaper: failed to write abort marker"
-                );
+                false
             }
         }
     }
@@ -627,20 +669,15 @@ impl ReaperBackend for TxnCoordinator {
                 // Someone advanced the entry underneath us; don't finalize.
                 return None;
             }
-            let (new_pid, new_epoch) = next_producer_identity(
-                txnv,
-                entry.producer_id,
-                entry.producer_epoch,
-                &self.producer_ids,
-            );
+            let (new_pid, new_epoch) = completion_producer_identity(&entry);
             apply_complete_abort(&mut entry, new_pid, new_epoch, now_ms);
             entry.clone()
         };
-        if let Err(e) = self.put(complete, txnv).await {
+        if let Err(e) = self.put(complete.clone(), txnv).await {
             warn!(tid, error = %e, "txn reaper: failed to persist CompleteAbort; skipping");
             return None;
         }
-        Some(prepared.clone())
+        Some(complete)
     }
 }
 
@@ -662,6 +699,32 @@ mod tests {
             num_partitions,
             crabka_units::mebibytes(1),
         )
+    }
+
+    #[tokio::test]
+    async fn reaper_retries_an_existing_prepare_abort() {
+        let coordinator = test_coordinator();
+        let mut prepared =
+            TxnEntry::new_empty("tid-retry".to_string(), ProducerId(1000), 2, 60_000, 0);
+        prepared.state = TxnState::PrepareAbort;
+        coordinator.state.insert(
+            prepared.transactional_id.clone(),
+            Arc::new(Mutex::new(prepared.clone())),
+        );
+
+        let retried = ReaperBackend::prepare_abort(
+            &coordinator,
+            &prepared.transactional_id,
+            1,
+            TxnVersion::Verified,
+        )
+        .await
+        .expect("prepared abort should be retried");
+
+        check!(retried.transactional_id == prepared.transactional_id);
+        check!(retried.producer_id == prepared.producer_id);
+        check!(retried.producer_epoch == prepared.producer_epoch);
+        check!(retried.state == TxnState::PrepareAbort);
     }
 
     #[test]
@@ -697,7 +760,7 @@ mod tests {
 
         // A roll: new pid 2000, prev = 1000. The stale 1000 mapping is evicted;
         // put then inserts 2000 (mirrored here).
-        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
+        TxnCoordinator::evict_superseded_pids(&map, &entry(2000, 1000));
         map.insert(ProducerId(2000), "tid-a".into());
 
         assert!(
@@ -712,10 +775,10 @@ mod tests {
         let map: DashMap<ProducerId, String> = DashMap::new();
         map.insert(ProducerId(1000), "tid-a".into());
         // Never rolled: prev == -1 → nothing evicted.
-        TxnCoordinator::evict_rolled_pid(&map, &entry(1000, -1));
+        TxnCoordinator::evict_superseded_pids(&map, &entry(1000, -1));
         assert!(map.get(&ProducerId(1000)).is_some());
         // prev == current (defensive): nothing evicted.
-        TxnCoordinator::evict_rolled_pid(&map, &entry(1000, 1000));
+        TxnCoordinator::evict_superseded_pids(&map, &entry(1000, 1000));
         assert!(map.get(&ProducerId(1000)).is_some());
     }
 
@@ -724,10 +787,25 @@ mod tests {
         let map: DashMap<ProducerId, String> = DashMap::new();
         map.insert(ProducerId(2000), "tid-a".into());
         // prev=1000 already absent → repeated evictions are harmless no-ops.
-        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
-        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
+        TxnCoordinator::evict_superseded_pids(&map, &entry(2000, 1000));
+        TxnCoordinator::evict_superseded_pids(&map, &entry(2000, 1000));
         assert!(map.get(&ProducerId(1000)).is_none());
         assert!(map.get(&ProducerId(2000)).is_some());
+    }
+
+    #[test]
+    fn evict_superseded_pids_removes_a_rotated_recovery_identity() {
+        let map: DashMap<ProducerId, String> = DashMap::new();
+        map.insert(ProducerId(1000), "tid-a".into());
+        map.insert(ProducerId(2000), "tid-a".into());
+
+        let mut current = entry(1000, -1);
+        current.next_producer_id = ProducerId(3000);
+        current.next_producer_epoch = 0;
+        TxnCoordinator::evict_superseded_pids(&map, &current);
+
+        assert!(map.get(&ProducerId(1000)).is_some());
+        assert!(map.get(&ProducerId(2000)).is_none());
     }
 
     // ── Pure transition / guard helpers ───────────────────────────────────
@@ -748,11 +826,16 @@ mod tests {
         let mut e = entry(1000, -1);
         e.state = TxnState::PrepareAbort;
         e.producer_epoch = 4;
+        e.partitions.insert(crate::txn::state::TopicPartition {
+            topic: "orders".into(),
+            partition: PartitionIndex(2),
+        });
         apply_complete_abort(&mut e, ProducerId(1000), 5, 42);
         check!(e.state == TxnState::CompleteAbort);
         check!(e.producer_id == 1000);
         check!(e.producer_epoch == 5);
         check!(e.prev_producer_id == -1, "no roll must not set prev");
+        check!(e.partitions.is_empty());
         check!(e.last_update_ms == 42);
 
         // Roll: fresh pid at epoch 0 → prior pid recorded as prev.
@@ -816,7 +899,7 @@ mod tests {
             .expect_dispatch_abort_markers()
             .times(1)
             .withf(|e| e.transactional_id == "tid-a" && e.state == TxnState::PrepareAbort)
-            .returning(|_| ());
+            .returning(|_| true);
         backend
             .expect_complete_abort()
             .times(1)
@@ -885,7 +968,7 @@ mod tests {
         backend
             .expect_dispatch_abort_markers()
             .times(1)
-            .returning(|_| ());
+            .returning(|_| true);
         // ...but Phase 3 lost the race → not finalized, not reported.
         backend
             .expect_complete_abort()
@@ -913,7 +996,7 @@ mod tests {
             .expect_prepare_abort()
             .withf(|t, _, _| t == "tid-a")
             .returning(|t, _, _| Some(prepared_entry(t, 1000, 3)));
-        backend.expect_dispatch_abort_markers().returning(|_| ());
+        backend.expect_dispatch_abort_markers().returning(|_| true);
         backend
             .expect_complete_abort()
             .returning(|e, _, _| Some(e.clone()));
@@ -926,5 +1009,26 @@ mod tests {
         )
         .await;
         check!(out == vec!["tid-a".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn sweep_does_not_complete_when_marker_fanout_fails() {
+        let mut backend = MockReaperBackend::new();
+        backend.expect_is_coordinator_for().returning(|_| true);
+        backend
+            .expect_prepare_abort()
+            .returning(|t, _, _| Some(prepared_entry(t, 1000, 3)));
+        backend.expect_dispatch_abort_markers().returning(|_| false);
+        backend.expect_complete_abort().never();
+
+        let out = sweep_with_backend(
+            &backend,
+            vec!["tid-a".to_owned()],
+            1_000,
+            TxnVersion::Verified,
+        )
+        .await;
+
+        assert!(out.is_empty());
     }
 }

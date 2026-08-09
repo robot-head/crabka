@@ -30,6 +30,7 @@ use crabka_protocol::{
         write_txn_markers_request::{
             WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
         },
+        write_txn_markers_response::WriteTxnMarkersResponse,
     },
 };
 use crabka_security::ListenerProtocol;
@@ -38,12 +39,12 @@ use crate::{
     authorizer::{AuthorizationRequest, AuthorizationResult},
     broker::Broker,
     codes,
-    coordinator::unified::actor::{GroupActorMessage, GroupKindTag},
     error::BrokerError,
     network::client::InterBrokerClient,
     txn::{
         decision::{CompletionDecision, decide_end_txn_completion, decide_phase1_transition},
-        marker::{MarkerType, build_marker_batch},
+        handlers::write_txn_markers::append_marker_and_materialize,
+        marker::MarkerType,
         state::{TopicPartition, TxnEntry, TxnState},
         util::now_millis,
         version::TxnVersion,
@@ -56,11 +57,6 @@ const NO_PRODUCER_ID: i64 = -1;
 
 /// Kafka wire sentinel: "no producer epoch" (`RecordBatch.NO_PRODUCER_EPOCH`).
 const NO_PRODUCER_EPOCH: i16 = -1;
-
-/// Coordinator epoch stamped on outgoing `WriteTxnMarkers`. Apache Kafka
-/// increments it on each coordinator leadership change. Coordinator failover
-/// tracking is not implemented yet, so every marker carries the initial epoch.
-const INITIAL_COORDINATOR_EPOCH: i32 = 0;
 
 #[tracing::instrument(
     name = "handle_end_txn",
@@ -78,7 +74,6 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
-    let partitions = broker.partitions.clone();
     let authorizer = broker.config.authorizer.as_ref();
     let mut cur: &[u8] = req_bytes;
     let req = EndTxnRequest::decode(&mut cur, version)?;
@@ -91,7 +86,10 @@ pub(crate) async fn handle(
 
     let tid = req.transactional_id.as_str();
     let entry_mutex = match validate_end_txn(&coord, authorizer, &image, ctx, &req).await {
-        Ok(entry) => entry,
+        Ok(EndTxnValidation::Proceed(entry)) => entry,
+        Ok(EndTxnValidation::AlreadyComplete(pid, epoch)) => {
+            return encode_ok(version, pid.get(), epoch);
+        }
         Err(code) => return encode_err(version, code),
     };
 
@@ -105,10 +103,7 @@ pub(crate) async fn handle(
 
     // ── Phase 2: Fan out WriteTxnMarkers ──────────────────────────────
 
-    if let Err(code) =
-        dispatch_transaction_markers(broker, &image, &partitions, &prepare_snap, marker_type, tid)
-            .await
-    {
+    if let Err(code) = dispatch_transaction_markers(broker, &prepare_snap, marker_type, tid).await {
         return encode_err(version, code);
     }
 
@@ -136,45 +131,46 @@ pub(crate) async fn handle(
         return encode_err(version, codes::INVALID_PRODUCER_ID_MAPPING);
     };
 
-    // The (pid, epoch) returned to the producer (see `next_producer_identity`).
-    // At TV_2 the epoch is bumped by one on completion; on epoch exhaustion the
-    // producer rolls to a new producer_id at epoch 0. Below TV_2 both are the
-    // producer's current values unchanged. Both are assigned on the Proceed
-    // path below (the other re-acquire branches return early).
+    // The completion identity was selected and persisted with the Prepare
+    // state. Phase 3 adopts that identity after marker fan-out; it does not
+    // allocate or increment it again.
     let response_pid;
     let response_epoch;
+    let (prepared_completion_pid, prepared_completion_epoch) =
+        completion_producer_identity(&prepare_snap);
 
     let complete_snap: TxnEntry = {
         let mut entry = current_mutex.lock().await;
-        // KIP-890: on the Proceed path `decide_end_txn_completion` bumps the
-        // producer epoch (at TV_2) so a zombie holding the old epoch is fenced
-        // WITHOUT a fresh InitProducerId. The bump is applied AFTER the Phase-2
-        // marker fan-out (markers were written with the old/current epoch); only
-        // the persisted and returned identity reflects it. On epoch exhaustion
-        // the producer rolls to a freshly-allocated producer_id at epoch 0.
+        // The Prepare record already contains both identities: the marker uses
+        // the incremented epoch of the producer that wrote the transaction,
+        // while the staged completion identity is returned to the client. This
+        // revalidation prevents Phase 3 from adopting a stale staged identity.
         match decide_end_txn_completion(
             &entry,
-            ProducerId(req.producer_id),
-            req.producer_epoch,
+            prepare_snap.producer_id,
+            prepare_snap.producer_epoch,
+            prepared_completion_pid,
+            prepared_completion_epoch,
             prepare,
             complete,
-            txnv,
-            &coord.producer_ids,
         ) {
             CompletionDecision::Proceed {
                 next_state,
                 response_pid: new_pid,
                 response_epoch: new_epoch,
             } => {
-                if new_pid != entry.producer_id {
+                if new_pid != ProducerId(req.producer_id) {
                     // Epoch rolled over to a new producer_id: record the prior id
                     // so the transition is traceable (KIP-890 PreviousProducerId).
-                    entry.prev_producer_id = entry.producer_id;
+                    entry.prev_producer_id = ProducerId(req.producer_id);
                 }
                 entry.state = next_state;
                 entry.last_update_ms = now_millis();
                 entry.producer_id = new_pid;
                 entry.producer_epoch = new_epoch;
+                entry.next_producer_id = ProducerId(-1);
+                entry.next_producer_epoch = -1;
+                entry.partitions.clear();
                 response_pid = new_pid;
                 response_epoch = new_epoch;
                 entry.clone()
@@ -220,31 +216,13 @@ pub(crate) async fn handle(
         return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
     }
 
-    // ── KIP-447: materialize buffered transactional consumer offsets ──────
-    //
-    // A consume-process-produce producer folds its source offsets into the
-    // transaction via `AddOffsetsToTxn` + `TxnOffsetCommit`, which appended
-    // them to `__consumer_offsets` (held under the LSO) AND buffered them on
-    // the txn coordinator keyed by `producer_id`. The Phase-2 marker fan-out
-    // above just wrote the COMMIT/ABORT marker to those partitions; nothing
-    // else surfaces the buffered offsets into the group coordinator's
-    // in-memory `committed_offsets` (the map `OffsetFetch` reads). Do it here,
-    // exactly at the commit-marker boundary (Kafka makes txn offsets visible
-    // to `OffsetFetch` only AFTER the commit marker):
-    //
-    // - COMMIT (`req.committed`): drain the producer's buffer and apply each
-    //   group's offsets via the same `UpdateCommitted` actor message a normal
-    //   `OffsetCommit` uses, so a restarting EOS consumer resumes from them.
-    // - ABORT: still drain (to free the buffer) but discard — aborted offsets
-    //   must never become committed.
-    //
-    // Keyed by `req.producer_id` (the buffer key from `TxnOffsetCommit`), not
-    // the post-completion `response_pid`, which may have been epoch-bumped or
-    // rolled to a fresh id at TV_2.
-    materialize_txn_offsets(broker, ProducerId(req.producer_id), req.committed).await;
-
     // Unwrap the post-completion `ProducerId` into the raw-`i64` wire response.
     encode_ok(version, response_pid.get(), response_epoch)
+}
+
+enum EndTxnValidation {
+    Proceed(std::sync::Arc<tokio::sync::Mutex<TxnEntry>>),
+    AlreadyComplete(ProducerId, i16),
 }
 
 async fn validate_end_txn(
@@ -253,7 +231,7 @@ async fn validate_end_txn(
     image: &MetadataImage,
     context: &crate::handlers::RequestContext<'_>,
     request: &EndTxnRequest,
-) -> Result<std::sync::Arc<tokio::sync::Mutex<TxnEntry>>, i16> {
+) -> Result<EndTxnValidation, i16> {
     let transactional_id = request.transactional_id.as_str();
     let authorization = AuthorizationRequest {
         principal: context.principal,
@@ -273,13 +251,31 @@ async fn validate_end_txn(
         .ok_or(codes::INVALID_PRODUCER_ID_MAPPING)?;
     {
         let state = entry.lock().await;
-        if state.producer_id != request.producer_id
-            || state.producer_epoch != request.producer_epoch
-        {
+        if matches!(
+            state.state,
+            TxnState::PrepareCommit | TxnState::PrepareAbort
+        ) {
+            return Err(codes::CONCURRENT_TRANSACTIONS);
+        }
+        let request_pid = ProducerId(request.producer_id);
+        let request_epoch = request.producer_epoch;
+        if matches!(
+            state.state,
+            TxnState::CompleteCommit | TxnState::CompleteAbort
+        ) {
+            let same_result = matches!(state.state, TxnState::CompleteCommit) == request.committed;
+            if same_result && is_completed_end_txn_retry(&state, request_pid, request_epoch) {
+                return Ok(EndTxnValidation::AlreadyComplete(
+                    state.producer_id,
+                    state.producer_epoch,
+                ));
+            }
+        }
+        if client_producer_identity(&state) != (request_pid, request_epoch) {
             return Err(codes::INVALID_PRODUCER_EPOCH);
         }
     }
-    Ok(entry)
+    Ok(EndTxnValidation::Proceed(entry))
 }
 
 async fn prepare_transaction(
@@ -297,6 +293,16 @@ async fn prepare_transaction(
     let (prepare, complete, snapshot) = {
         let mut state = entry.lock().await;
         let (prepare, complete) = decide_phase1_transition(&mut state, committed)?;
+        prepare_completion_identities(&mut state, version, &coordinator.producer_ids)
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    tid = transactional_id,
+                    %error,
+                    "EndTxn: failed to allocate completion producer identity"
+                );
+                codes::UNKNOWN_SERVER_ERROR
+            })?;
         state.last_update_ms = now_millis();
         (prepare, complete, state.clone())
     };
@@ -314,108 +320,129 @@ async fn prepare_transaction(
 
 async fn dispatch_transaction_markers(
     broker: &Broker,
-    image: &MetadataImage,
-    partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
     snapshot: &TxnEntry,
     marker_type: MarkerType,
     transactional_id: &str,
 ) -> Result<(), i16> {
-    dispatch_markers(
-        MarkerDispatchContext {
-            node_id: broker.config.node_id,
-            image,
-            inter_broker_client: &broker.inter_broker_client,
-            inter_broker_protocol: broker.inter_broker_listener_protocol,
-            inter_broker_listener_name: &broker.config.inter_broker_listener_name,
-            inter_broker_server_name: &broker.config.inter_broker_server_name,
-        },
-        partitions,
-        snapshot,
-        marker_type,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!(
-            tid = transactional_id,
-            error = %error,
-            "EndTxn: WriteTxnMarkers fan-out failed; returning retriable error"
-        );
-        codes::UNKNOWN_SERVER_ERROR
-    })
-}
-
-/// Apply (on COMMIT) or drop (on ABORT) the transactional consumer offsets
-/// buffered for `producer_id` under each consumer `group_id`. On COMMIT the
-/// handler writes the offsets into the owning group's in-memory
-/// `committed_offsets` through the group actor's `UpdateCommitted` message.
-/// That is the same path a normal `OffsetCommit` uses and the same map
-/// `OffsetFetch` reads, so the offsets become visible to `OffsetFetch` only
-/// now, after the commit marker. The handler always drains the buffer, even on
-/// abort, so a producer's pending offsets cannot leak.
-///
-/// In the single-broker MVP every consumer group is local, so this broker
-/// finds or creates the owning group's actor. A multi-broker future would
-/// route each group's offsets to its `__consumer_offsets`-partition leader.
-async fn materialize_txn_offsets(broker: &Broker, producer_id: ProducerId, committed: bool) {
-    let pending = broker.txn_coordinator.take_txn_offsets(producer_id);
-    if !committed || pending.is_empty() {
-        // Abort (or nothing buffered): the take above already dropped it.
-        return;
-    }
-    for (group_id, entries) in pending {
-        if entries.is_empty() {
-            continue;
-        }
-        let handle = broker.group_coordinator.find(&group_id).unwrap_or_else(|| {
-            broker
-                .group_coordinator
-                .get_or_create_group(&group_id, GroupKindTag::Classic)
-        });
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if handle
-            .tx
-            .send(GroupActorMessage::UpdateCommitted { entries, reply: tx })
-            .await
-            .is_ok()
-        {
-            let _ = rx.await;
-        } else {
-            tracing::warn!(
-                group = %group_id,
-                producer_id = producer_id.get(),
-                "EndTxn: group actor unavailable; could not materialize txn offsets"
+    broker
+        .txn_coordinator
+        .dispatch_transaction_markers(snapshot, marker_type)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                tid = transactional_id,
+                error = %error,
+                "EndTxn: WriteTxnMarkers fan-out failed; returning retriable error"
             );
-        }
-    }
+            codes::UNKNOWN_SERVER_ERROR
+        })
 }
 
 /// KIP-890: the `(producer_id, producer_epoch)` a producer continues with after
 /// a transaction completes.
 ///
-/// - Below `TV_2`: unchanged. The epoch only moves on `InitProducerId` reuse.
-/// - `TV_2`, normal: same `producer_id`, `epoch + 1`. A bump on completion
-///   fences a zombie that holds the old epoch, without a fresh
-///   `InitProducerId`.
-/// - `TV_2`, epoch exhaustion (`epoch == i16::MAX`): the epoch cannot bump, so
-///   the coordinator allocates a *new* `producer_id` and resets `epoch` to 0.
-///   The caller records
-///   the old id as the entry's `prev_producer_id` so the transition is
-///   traceable. The `EndTxn` v5 response returns the new pair and the producer
-///   adopts it for its next transaction.
-pub(crate) fn next_producer_identity(
+/// - Below `TV_2`: unchanged — the epoch only moves on `InitProducerId` reuse.
+/// - `TV_2`, normal: same `producer_id`, `epoch + 1` — bumping on completion
+///   fences a zombie holding the old epoch without a fresh `InitProducerId`.
+/// - `TV_2`, marker-epoch boundary (`epoch >= i16::MAX - 1`): `i16::MAX` is
+///   reserved for the transaction marker, so a *new* `producer_id` is allocated
+///   at epoch 0 before the client can receive the reserved epoch. The caller
+///   records the old id as `prev_producer_id`; `EndTxn` v5 returns the new pair.
+pub(crate) async fn next_producer_identity(
     txnv: TxnVersion,
     pid: ProducerId,
     epoch: i16,
     ids: &crate::producer_id_manager::ProducerIdManager,
-) -> (ProducerId, i16) {
+) -> Result<(ProducerId, i16), BrokerError> {
+    let fresh = if txnv.verified() && epoch >= i16::MAX - 1 {
+        Some(ids.allocate().await?.0)
+    } else {
+        None
+    };
+    Ok(next_producer_identity_with_fresh(txnv, pid, epoch, fresh)
+        .expect("fresh producer ID supplied at the rotation boundary"))
+}
+
+fn next_producer_identity_with_fresh(
+    txnv: TxnVersion,
+    pid: ProducerId,
+    epoch: i16,
+    fresh: Option<ProducerId>,
+) -> Option<(ProducerId, i16)> {
     if !txnv.verified() {
-        return (pid, epoch);
+        Some((pid, epoch))
+    } else if epoch < i16::MAX - 1 {
+        Some((pid, epoch + 1))
+    } else {
+        fresh.map(|producer_id| (producer_id, 0))
     }
-    match epoch.checked_add(1) {
-        Some(bumped) => (pid, bumped),
-        // Epoch exhausted: roll to a fresh producer_id at epoch 0 (KIP-890).
-        None => ids.allocate(),
+}
+
+pub(crate) fn client_producer_identity(entry: &TxnEntry) -> (ProducerId, i16) {
+    if entry.has_staged_producer_identity() {
+        (entry.next_producer_id, entry.next_producer_epoch)
+    } else {
+        (entry.producer_id, entry.producer_epoch)
     }
+}
+
+pub(crate) fn completion_producer_identity(entry: &TxnEntry) -> (ProducerId, i16) {
+    client_producer_identity(entry)
+}
+
+pub(crate) async fn prepare_completion_identities(
+    entry: &mut TxnEntry,
+    txnv: TxnVersion,
+    ids: &crate::producer_id_manager::ProducerIdManager,
+) -> Result<(), BrokerError> {
+    let (_, client_epoch) = client_producer_identity(entry);
+    let fresh = if txnv.verified() && client_epoch >= i16::MAX - 1 {
+        Some(ids.allocate().await?.0)
+    } else {
+        None
+    };
+    prepare_completion_identities_with_fresh(entry, txnv, fresh)
+        .expect("fresh producer ID supplied at the rotation boundary");
+    Ok(())
+}
+
+pub(crate) fn prepare_completion_identities_with_fresh(
+    entry: &mut TxnEntry,
+    txnv: TxnVersion,
+    fresh: Option<ProducerId>,
+) -> Option<()> {
+    if !txnv.verified() {
+        return Some(());
+    }
+
+    let had_recovery_identity = entry.has_staged_producer_identity();
+    let (client_pid, client_epoch) = client_producer_identity(entry);
+    let (completion_pid, completion_epoch) =
+        next_producer_identity_with_fresh(txnv, client_pid, client_epoch, fresh)?;
+
+    // The transaction marker fences the identity that wrote the transaction.
+    // i16::MAX is reserved for this final marker epoch.
+    entry.producer_epoch = entry.producer_epoch.saturating_add(1);
+
+    if had_recovery_identity || completion_pid != entry.producer_id {
+        entry.next_producer_id = completion_pid;
+        entry.next_producer_epoch = completion_epoch;
+    } else {
+        entry.next_producer_id = ProducerId(-1);
+        entry.next_producer_epoch = -1;
+    }
+    Some(())
+}
+
+fn is_completed_end_txn_retry(
+    entry: &TxnEntry,
+    request_pid: ProducerId,
+    request_epoch: i16,
+) -> bool {
+    (entry.producer_id == request_pid && request_epoch.checked_add(1) == Some(entry.producer_epoch))
+        || (entry.prev_producer_id == request_pid
+            && request_epoch == i16::MAX - 1
+            && entry.producer_epoch == 0)
 }
 
 /// Decision for the Phase-3 (Complete) re-acquire re-validation. See
@@ -492,16 +519,18 @@ pub(crate) fn validate_complete_reacquire(
 /// live in `entry.partitions`, because Kafka's model has no separate group
 /// list. The same loop therefore fans them out with the data partitions.
 #[derive(Clone, Copy)]
-struct MarkerDispatchContext<'a> {
-    node_id: NodeId,
-    image: &'a MetadataImage,
-    inter_broker_client: &'a InterBrokerClient,
-    inter_broker_protocol: ListenerProtocol,
-    inter_broker_listener_name: &'a str,
-    inter_broker_server_name: &'a str,
+pub(crate) struct MarkerDispatchContext<'a> {
+    pub(crate) node_id: NodeId,
+    pub(crate) coordinator_epoch: i32,
+    pub(crate) image: &'a MetadataImage,
+    pub(crate) inter_broker_client: &'a InterBrokerClient,
+    pub(crate) inter_broker_protocol: ListenerProtocol,
+    pub(crate) inter_broker_listener_name: &'a str,
+    pub(crate) inter_broker_server_name: &'a str,
+    pub(crate) group_coordinator: Option<&'a std::sync::Arc<crate::coordinator::GroupCoordinator>>,
 }
 
-async fn dispatch_markers(
+pub(crate) async fn dispatch_markers(
     context: MarkerDispatchContext<'_>,
     partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
     entry: &TxnEntry,
@@ -522,22 +551,22 @@ async fn dispatch_markers(
         if leader == node_id {
             // Local path: directly append a marker batch to each partition.
             for tp in &tps {
-                let Some(part) = partitions.get(&tp.topic, tp.partition) else {
-                    tracing::warn!(
-                        topic = %tp.topic,
-                        partition = tp.partition.get(),
-                        "EndTxn: local partition not found; skipping marker"
-                    );
-                    continue;
-                };
-                let base_offset = part.log_end_offset();
-                let marker = build_marker_batch(
+                let part = partitions.get(&tp.topic, tp.partition).ok_or_else(|| {
+                    BrokerError::Txn(format!(
+                        "transaction marker target {}-{} is led locally but is not materialized",
+                        tp.topic,
+                        tp.partition.get()
+                    ))
+                })?;
+                append_marker_and_materialize(
+                    &part,
+                    context.group_coordinator,
+                    &tp.topic,
                     entry.producer_id,
                     entry.producer_epoch,
-                    base_offset,
                     marker_type,
-                );
-                part.produce_batch(marker).await?;
+                )
+                .await?;
             }
         } else {
             // Remote path: send WriteTxnMarkersRequest to the leader.
@@ -562,14 +591,8 @@ async fn dispatch_markers(
 ///
 /// ## Coordinator epoch
 ///
-/// Apache Kafka tracks a per-coordinator epoch that increments on each
-/// leadership change. Leader-election-on-failure is not yet implemented, so
-/// this code hard-codes `coordinator_epoch = 0`. Once coordinator failover is
-/// implemented, the caller must supply the real epoch.
-// The `WriteTxnMarkersRequest` is built inline and immediately dispatched over a
-// live inter-broker connection; the `markers` field never surfaces as a return
-// value, so dropping it (→ empty Default vec) is only observable through the
-// remote RPC. Exercised by the live txn marker-fanout / differential suite.
+/// The caller resolves the current `__transaction_state` partition leader epoch
+/// from the metadata image and stamps it on every marker.
 #[cfg_attr(test, mutants::skip)]
 async fn send_write_txn_markers(
     context: MarkerDispatchContext<'_>,
@@ -580,11 +603,13 @@ async fn send_write_txn_markers(
 ) -> Result<(), BrokerError> {
     let MarkerDispatchContext {
         node_id: my_node_id,
+        coordinator_epoch,
         image,
         inter_broker_client,
         inter_broker_protocol,
         inter_broker_listener_name,
         inter_broker_server_name,
+        ..
     } = context;
     let Some(broker_info) = image.broker(leader_node) else {
         return Err(BrokerError::Txn(format!(
@@ -606,38 +631,7 @@ async fn send_write_txn_markers(
             |e| (e.host.clone(), e.port),
         );
 
-    // Group tps by topic for the nested WritableTxnMarkerTopic structure.
-    let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
-    for tp in tps {
-        by_topic
-            .entry(tp.topic.clone())
-            .or_default()
-            .push(tp.partition.get());
-    }
-
-    let topics: Vec<WritableTxnMarkerTopic> = by_topic
-        .into_iter()
-        .map(|(name, partition_indexes)| WritableTxnMarkerTopic {
-            name,
-            partition_indexes,
-            ..Default::default()
-        })
-        .collect();
-
-    let req = WriteTxnMarkersRequest {
-        markers: vec![WritableTxnMarker {
-            // Unwrap into the raw-`i64` wire field.
-            producer_id: entry.producer_id.get(),
-            producer_epoch: entry.producer_epoch,
-            transaction_result: marker_type == MarkerType::Commit,
-            topics,
-            // Coordinator leader-change tracking (real epoch increment on
-            // failover) is not yet implemented; see the constant's doc.
-            coordinator_epoch: INITIAL_COORDINATOR_EPOCH,
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    let req = build_write_txn_markers_request(entry, marker_type, tps, coordinator_epoch);
 
     let opts = crabka_client_core::ConnectionOptions {
         client_id: format!("crabka-broker-txn-{my_node_id}"),
@@ -656,12 +650,95 @@ async fn send_write_txn_markers(
 
     // `Connection::send` negotiates the wire version from the broker-advertised
     // ApiVersions table established during connect.
-    let _resp = conn
+    let resp = conn
         .send(req)
         .await
         .map_err(|e| BrokerError::Txn(format!("EndTxn: WriteTxnMarkers to {host}:{port}: {e}")))?;
 
     conn.close();
+    validate_marker_response(entry, tps, &resp)
+}
+
+fn build_write_txn_markers_request(
+    entry: &TxnEntry,
+    marker_type: MarkerType,
+    tps: &[TopicPartition],
+    coordinator_epoch: i32,
+) -> WriteTxnMarkersRequest {
+    // Group tps by topic for the nested WritableTxnMarkerTopic structure.
+    let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
+    for tp in tps {
+        by_topic
+            .entry(tp.topic.clone())
+            .or_default()
+            .push(tp.partition.get());
+    }
+
+    let topics: Vec<WritableTxnMarkerTopic> = by_topic
+        .into_iter()
+        .map(|(name, partition_indexes)| WritableTxnMarkerTopic {
+            name,
+            partition_indexes,
+            ..Default::default()
+        })
+        .collect();
+
+    WriteTxnMarkersRequest {
+        markers: vec![WritableTxnMarker {
+            // Unwrap into the raw-`i64` wire field.
+            producer_id: entry.producer_id.get(),
+            producer_epoch: entry.producer_epoch,
+            transaction_result: marker_type == MarkerType::Commit,
+            topics,
+            coordinator_epoch,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn validate_marker_response(
+    entry: &TxnEntry,
+    tps: &[TopicPartition],
+    response: &WriteTxnMarkersResponse,
+) -> Result<(), BrokerError> {
+    let marker = response
+        .markers
+        .iter()
+        .find(|marker| marker.producer_id == entry.producer_id.get())
+        .ok_or_else(|| {
+            BrokerError::Txn(format!(
+                "WriteTxnMarkers response omitted producer {}",
+                entry.producer_id.get()
+            ))
+        })?;
+    for tp in tps {
+        let result = marker
+            .topics
+            .iter()
+            .find(|topic| topic.name == tp.topic)
+            .and_then(|topic| {
+                topic
+                    .partitions
+                    .iter()
+                    .find(|partition| partition.partition_index == tp.partition.get())
+            })
+            .ok_or_else(|| {
+                BrokerError::Txn(format!(
+                    "WriteTxnMarkers response omitted {}-{}",
+                    tp.topic,
+                    tp.partition.get()
+                ))
+            })?;
+        if result.error_code != codes::NONE {
+            return Err(BrokerError::Txn(format!(
+                "WriteTxnMarkers failed for {}-{} with error code {}",
+                tp.topic,
+                tp.partition.get(),
+                result.error_code
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -706,7 +783,16 @@ mod tests {
     use assert2::assert;
     use crabka_ids::PartitionIndex;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
-    use crabka_protocol::{UnknownTaggedFields, owned::end_txn_response::EndTxnResponse};
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            end_txn_response::EndTxnResponse,
+            write_txn_markers_response::{
+                WritableTxnMarkerPartitionResult, WritableTxnMarkerResult,
+                WritableTxnMarkerTopicResult,
+            },
+        },
+    };
 
     fn decode_response(bytes: &Bytes, version: i16) -> EndTxnResponse {
         crate::test_support::decode_response(bytes, version)
@@ -748,8 +834,8 @@ mod tests {
         assert!(resp == expected);
     }
 
-    #[test]
-    fn epoch_bumps_only_at_tv2() {
+    #[tokio::test]
+    async fn epoch_bumps_only_at_tv2() {
         use crate::txn::version::TxnVersion;
         let ids = crate::producer_id_manager::ProducerIdManager::new();
         let cases = [
@@ -761,31 +847,56 @@ mod tests {
         ];
         for (version, want) in cases {
             assert!(
-                next_producer_identity(version, ProducerId(7), 3, &ids) == want,
+                next_producer_identity(version, ProducerId(7), 3, &ids)
+                    .await
+                    .unwrap()
+                    == want,
                 "txn version {version:?}"
             );
         }
     }
 
-    #[test]
-    fn epoch_overflow_at_tv2_allocates_new_pid_at_epoch_zero() {
+    #[tokio::test]
+    async fn epoch_overflow_at_tv2_allocates_new_pid_at_epoch_zero() {
         use crate::txn::version::TxnVersion;
         let ids = crate::producer_id_manager::ProducerIdManager::new();
-        // At i16::MAX the epoch can't bump: a fresh producer_id is allocated
-        // (monotonic from PID_BASE) and the epoch resets to 0. No panic.
+        // MAX is reserved for the marker epoch, so the client rotates at
+        // MAX-1 and receives a fresh producer_id at epoch 0.
         let (new_pid, new_epoch) =
-            next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
+            next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX - 1, &ids)
+                .await
+                .unwrap();
         assert!(new_pid != 7);
         assert!(new_epoch == 0);
         // The allocator hands out a distinct pid on the next overflow too.
         let (next_pid, _) =
-            next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
+            next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids)
+                .await
+                .unwrap();
         assert!(next_pid != new_pid);
         // Below TV_2 at i16::MAX: no roll, epoch stays (no bump path taken).
         assert!(
             next_producer_identity(TxnVersion::Classic, ProducerId(7), i16::MAX, &ids)
+                .await
+                .unwrap()
                 == (ProducerId(7), i16::MAX)
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_recovery_uses_marker_identity_and_fences_the_recovery_client() {
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        let mut entry = entry(7, 3, TxnState::PrepareCommit);
+        entry.next_producer_id = ProducerId(7);
+        entry.next_producer_epoch = 4;
+
+        prepare_completion_identities(&mut entry, TxnVersion::Verified, &ids)
+            .await
+            .unwrap();
+
+        assert!(entry.producer_id == 7);
+        assert!(entry.producer_epoch == 4, "marker identity must advance");
+        assert!(completion_producer_identity(&entry) == (ProducerId(7), 5));
     }
 
     // ── Phase-3 re-validation: validate_complete_reacquire ──────────────────
@@ -906,9 +1017,58 @@ mod tests {
         }]
     }
 
-    /// A client with no TLS connector and no SASL creds. That is correct here,
-    /// because every case fails at the TCP connect on an unreachable address,
-    /// before any handshake would run.
+    fn marker_response(error_code: i16) -> WriteTxnMarkersResponse {
+        WriteTxnMarkersResponse {
+            markers: vec![WritableTxnMarkerResult {
+                producer_id: 7,
+                topics: vec![WritableTxnMarkerTopicResult {
+                    name: "t".to_string(),
+                    partitions: vec![WritableTxnMarkerPartitionResult {
+                        partition_index: 0,
+                        error_code,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn marker_response_requires_every_partition_to_succeed() {
+        let entry = marker_entry();
+        let partitions = tps();
+        assert!(
+            validate_marker_response(&entry, &partitions, &marker_response(codes::NONE)).is_ok()
+        );
+        assert!(
+            validate_marker_response(
+                &entry,
+                &partitions,
+                &marker_response(codes::NOT_LEADER_OR_FOLLOWER)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_marker_response(&entry, &partitions, &WriteTxnMarkersResponse::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn marker_request_uses_current_coordinator_epoch() {
+        let request =
+            build_write_txn_markers_request(&marker_entry(), MarkerType::Abort, &tps(), 42);
+
+        assert!(request.markers.len() == 1);
+        assert!(request.markers[0].coordinator_epoch == 42);
+    }
+
+    /// A client with no TLS connector and no SASL creds — fine here, every
+    /// case fails at the TCP connect (unreachable address) before any
+    /// handshake would run.
     fn plaintext_client() -> InterBrokerClient {
         InterBrokerClient::new(None, None)
     }
@@ -924,11 +1084,13 @@ mod tests {
         send_write_txn_markers(
             MarkerDispatchContext {
                 node_id: NodeId(1),
+                coordinator_epoch: 0,
                 image,
                 inter_broker_client: &client,
                 inter_broker_protocol: ListenerProtocol::Plaintext,
                 inter_broker_listener_name: listener_name,
                 inter_broker_server_name: "localhost",
+                group_coordinator: None,
             },
             leader,
             &entry,
@@ -1071,11 +1233,13 @@ mod tests {
         let result = send_write_txn_markers(
             MarkerDispatchContext {
                 node_id: NodeId(1),
+                coordinator_epoch: 0,
                 image: &image,
                 inter_broker_client: &client,
                 inter_broker_protocol: ListenerProtocol::Ssl,
                 inter_broker_listener_name: "INTERNAL",
                 inter_broker_server_name: "broker.internal",
+                group_coordinator: None,
             },
             NodeId(2),
             &entry,

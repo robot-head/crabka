@@ -42,7 +42,7 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
 
     let client = Client::try_default().await?;
 
-    leader_election::acquire(
+    let mut leadership = leader_election::acquire(
         client.clone(),
         &config.operator_namespace,
         &config.lease_name,
@@ -97,6 +97,10 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
     });
 
     tokio::select! {
+        res = leadership.wait() => {
+            health_state.mark_not_ready();
+            return Err(res.err().unwrap_or_else(|| anyhow::anyhow!("leader-election renewal stopped")));
+        },
         res = health_handle => match res {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "health server exited with error"),
@@ -154,6 +158,7 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
         },
         () = shutdown_signal() => tracing::info!("shutdown signal received"),
     }
+    health_state.mark_not_ready();
     Ok(())
 }
 

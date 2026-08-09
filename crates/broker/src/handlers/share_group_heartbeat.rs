@@ -56,6 +56,10 @@ pub(crate) async fn handle(
             }
         }
 
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(&error(error_code), version);
+        }
+
         if !share_enabled {
             return crate::handlers::encode_response(&error(codes::UNSUPPORTED_VERSION), version);
         }

@@ -376,8 +376,14 @@ impl OperatorConfig {
         if i32::try_from(lease_seconds).is_err() {
             return Err("leader lease duration exceeds Kubernetes i32 seconds".to_owned());
         }
-        if self.leader_retry_interval > self.leader_lease_duration {
-            return Err("leader retry interval exceeds lease duration".to_owned());
+        if self.leader_lease_duration <= crabka_units::Time::ZERO {
+            return Err("leader lease duration must be positive".to_owned());
+        }
+        if self.leader_retry_interval <= crabka_units::Time::ZERO {
+            return Err("leader retry interval must be positive".to_owned());
+        }
+        if self.leader_retry_interval >= self.leader_lease_duration {
+            return Err("leader retry interval must be shorter than lease duration".to_owned());
         }
         if self.rebalancer_poll_interval > self.rebalancer_idle_interval {
             return Err("rebalancer poll interval exceeds idle interval".to_owned());

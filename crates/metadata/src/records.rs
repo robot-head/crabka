@@ -175,6 +175,14 @@ pub struct ClientMetricsConfigRecord {
     pub configs: std::collections::BTreeMap<String, String>,
 }
 
+/// KIP-1071 dynamic configuration for one group resource. Each record is the
+/// authoritative override map for `group_id`; an empty map clears the resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupConfigRecord {
+    pub group_id: String,
+    pub configs: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaEntity {
     pub entity_type: String,
@@ -187,6 +195,15 @@ pub struct ClientQuotaRecord {
     pub entity: Vec<QuotaEntity>,
     pub config_key: String,
     pub config_value: Option<f64>,
+}
+
+/// Durable controller state for cluster-wide producer-ID block allocation.
+/// `next_producer_id` is the first ID not covered by any committed block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProducerIdsRecord {
+    pub broker_id: NodeId,
+    pub broker_epoch: i64,
+    pub next_producer_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +310,7 @@ pub enum MetadataRecord {
     V1DeleteAccessControlEntry(crate::AclEntryFilter),
     V1BrokerConfig(BrokerConfigRecord),
     V1ClientQuota(ClientQuotaRecord),
+    V1ProducerIds(ProducerIdsRecord),
     V1DelegationToken(DelegationTokenRecord),
     V1DeleteDelegationToken(DeleteDelegationTokenRecord),
     V1UnregisterBroker(UnregisterBrokerRecord),
@@ -310,6 +328,8 @@ pub enum MetadataRecord {
     /// Diskless offset-sequencer delta (see [`PartitionOffsetAdvanceRecord`]).
     /// Applied as an increment to the partition's committed next-offset.
     V1PartitionOffsetAdvance(PartitionOffsetAdvanceRecord),
+    /// KIP-1071 dynamic GROUP resource configuration.
+    V1GroupConfig(GroupConfigRecord),
 }
 
 #[cfg(test)]
@@ -330,6 +350,28 @@ mod tests {
         let r = MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "metadata.version".into(),
             level: 1,
+        });
+        assert2::assert!(round_trip(&r) == r);
+    }
+
+    #[test]
+    fn group_config_round_trip() {
+        let r = MetadataRecord::V1GroupConfig(GroupConfigRecord {
+            group_id: "streams-app".into(),
+            configs: std::collections::BTreeMap::from([(
+                "streams.num.standby.replicas".into(),
+                "1".into(),
+            )]),
+        });
+        assert2::assert!(round_trip(&r) == r);
+    }
+
+    #[test]
+    fn producer_ids_round_trip() {
+        let r = MetadataRecord::V1ProducerIds(ProducerIdsRecord {
+            broker_id: NodeId(3),
+            broker_epoch: 9,
+            next_producer_id: 2_000,
         });
         assert2::assert!(round_trip(&r) == r);
     }

@@ -343,7 +343,7 @@ mod tests {
         ($name:ident, borrowed, $finish:ident) => {
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
             async fn $name() {
-                let end_txn_error = Arc::new(AtomicI16::new(49));
+                let end_txn_error = Arc::new(AtomicI16::new(51));
                 let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
                 let txn = producer
                     .begin_transaction()
@@ -364,7 +364,7 @@ mod tests {
         ($name:ident, owned, $finish:ident) => {
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
             async fn $name() {
-                let end_txn_error = Arc::new(AtomicI16::new(49));
+                let end_txn_error = Arc::new(AtomicI16::new(51));
                 let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
                 let producer = Arc::new(producer);
                 let txn = producer
@@ -386,7 +386,7 @@ mod tests {
         };
     }
 
-    // CONCURRENT_TRANSACTIONS (49) proves `commit`/`abort` drive the broker
+    // CONCURRENT_TRANSACTIONS (51) proves `commit`/`abort` drive the broker
     // round trip, and the returned guard remains usable once the broker clears
     // the condition.
     end_txn_retry_test!(

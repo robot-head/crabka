@@ -21,10 +21,55 @@ use serde_json::Value;
 use crate::{
     codec::{SchemaFormat, SchemaMeta},
     consume::ConsumeSession,
-    handlers::{anonymous_principal, authorize_resource, to_gateway_record, unknown_host},
+    handlers::{
+        anonymous_principal, authorize_resource, producer_acks_from_pb, to_gateway_record,
+        unknown_host,
+    },
     pb,
     state::AppState,
 };
+
+type TopicPartition = (String, i32);
+type DeliveredOffsets = std::collections::HashMap<TopicPartition, std::collections::BTreeSet<i64>>;
+
+fn validate_ack(
+    delivered: &DeliveredOffsets,
+    acknowledged: &std::collections::HashMap<TopicPartition, i64>,
+    topic: &str,
+    partition: i32,
+    offset: i64,
+) -> Result<bool, String> {
+    let key = (topic.to_string(), partition);
+    if acknowledged
+        .get(&key)
+        .is_some_and(|previous| offset <= *previous)
+    {
+        return Ok(false);
+    }
+    if offset < 0 || !delivered.get(&key).is_some_and(|set| set.contains(&offset)) {
+        return Err(format!(
+            "Ack targets a record that was not delivered: {topic}-{partition}@{offset}"
+        ));
+    }
+    Ok(true)
+}
+
+fn mark_acknowledged(
+    delivered: &mut DeliveredOffsets,
+    acknowledged: &mut std::collections::HashMap<TopicPartition, i64>,
+    topic: String,
+    partition: i32,
+    offset: i64,
+) {
+    let key = (topic, partition);
+    acknowledged.insert(key.clone(), offset);
+    if let Some(offsets) = delivered.get_mut(&key) {
+        offsets.retain(|delivered_offset| *delivered_offset > offset);
+        if offsets.is_empty() {
+            delivered.remove(&key);
+        }
+    }
+}
 
 struct CompiledPredicates(Vec<CompiledPredicate>);
 
@@ -183,6 +228,13 @@ pub fn send_stream_inner(
                 Ok(r) => r,
                 Err(e) => { yield Err(e); break; }
             };
+            let Some(acks) = producer_acks_from_pb(send_req.acks) else {
+                yield Err(ConnectError::new_invalid_argument(format!(
+                    "unknown acknowledgement mode {}",
+                    send_req.acks
+                )));
+                break;
+            };
             let mut results = Vec::with_capacity(send_req.records.len());
             for r in send_req.records {
                 let rec = to_gateway_record(r);
@@ -203,7 +255,7 @@ pub fn send_stream_inner(
                     ));
                     continue;
                 }
-                let result = match state.produce.produce(rec, &principal).await {
+                let result = match state.produce.produce_with_acks(rec, &principal, acks).await {
                     Ok(o) => pb::RecordResult {
                         partition: o.partition.into(),
                         offset: o.offset.into(),
@@ -246,13 +298,12 @@ pub async fn send_stream(
 /// commit, which gives at-least-once. The subscription ends when the control
 /// stream closes or errors.
 ///
-/// Commit semantics: on `Ack`, the session commits its *current* consumed
-/// positions for all assigned partitions. The `Ack`'s `topic`, `partition`, and
-/// `offset` fields are currently advisory. Per-offset commit is a follow-up and
-/// waits on an offset-specific commit API on the consumer. With `auto_commit`,
-/// the session commits after each non-empty poll, at enqueue, which is slightly
-/// weaker than a commit on receipt. For strict at-least-once, the caller
-/// should ack synchronously for each received batch.
+/// Commit semantics: on `Ack`, the session commits `offset + 1` for only the
+/// named topic-partition after checking that the offset was delivered. Repeated
+/// or out-of-order acknowledgements never move a committed position backwards.
+/// With `auto_commit`, the session commits after each non-empty poll (at enqueue, slightly weaker
+/// than on-receipt). For strict at-least-once, the caller should ack
+/// synchronously per received batch.
 pub fn subscribe_inner(
     mut frames: Streaming<pb::SubscribeFrame>,
     state: Arc<AppState>,
@@ -298,18 +349,37 @@ pub fn subscribe_inner(
             Err(e) => { yield Err(ConnectError::new_internal(e.to_string())); return; }
         };
         let auto_commit = start.auto_commit;
+        let mut delivered_offsets = DeliveredOffsets::new();
+        let mut acknowledged_offsets = std::collections::HashMap::<(String, i32), i64>::new();
 
         loop {
             // BORROW NOTE: do NOT call session.commit() inside a select! arm —
             // session.poll(..) holds a &mut borrow across the select. Instead set
             // flags inside the select and commit AFTER it resolves.
             let mut commit = false;
+            let mut explicit_commit: Option<(String, i32, i64)> = None;
+            let mut frame_error: Option<ConnectError> = None;
             let mut stop = false;
             let mut to_emit: Vec<pb::Inbound> = Vec::new();
             tokio::select! {
                 frame = frames.next() => {
                     match frame {
-                        Some(Ok(pb::SubscribeFrame { frame: Some(pb::subscribe_frame::Frame::Ack(_)) })) => commit = true,
+                        Some(Ok(pb::SubscribeFrame { frame: Some(pb::subscribe_frame::Frame::Ack(ack)) })) => {
+                            match validate_ack(
+                                &delivered_offsets,
+                                &acknowledged_offsets,
+                                &ack.topic,
+                                ack.partition,
+                                ack.offset,
+                            ) {
+                                Ok(true) => explicit_commit = Some((ack.topic, ack.partition, ack.offset)),
+                                Ok(false) => {}
+                                Err(message) => {
+                                    frame_error = Some(ConnectError::new_invalid_argument(message));
+                                    stop = true;
+                                }
+                            }
+                        }
                         Some(Ok(_)) => {}
                         Some(Err(e)) => { yield Err(e); stop = true; }
                         None => stop = true,
@@ -318,13 +388,18 @@ pub fn subscribe_inner(
                 batch = session.poll(state.config.runtime.consumer_poll_timeout) => {
                     match batch {
                         Ok(records) => {
+                            let polled_records = !records.is_empty();
                             for r in records {
                                 if !structured_json_matches(&predicates, r.json.as_ref()) {
                                     continue;
                                 }
+                                delivered_offsets
+                                    .entry((r.topic.clone(), r.partition.0))
+                                    .or_default()
+                                    .insert(r.offset.0);
                                 to_emit.push(inbound_from_decoded_record(r));
                             }
-                            if !to_emit.is_empty() && auto_commit { commit = true; }
+                            if polled_records && auto_commit { commit = true; }
                         }
                         Err(e) => { yield Err(ConnectError::new_internal(e.to_string())); stop = true; }
                     }
@@ -333,11 +408,34 @@ pub fn subscribe_inner(
             for msg in to_emit {
                 yield Ok(msg);
             }
-            if commit
-                && let Err(e) = session.commit().await
-            {
-                yield Err(ConnectError::new_internal(e.to_string()));
+            if let Some(error) = frame_error {
+                yield Err(error);
                 break;
+            }
+            if let Some((topic, partition, offset)) = explicit_commit {
+                if let Err(e) = session.commit_record(topic.clone(), partition, offset).await {
+                    yield Err(ConnectError::new_internal(e.to_string()));
+                    break;
+                }
+                mark_acknowledged(
+                    &mut delivered_offsets,
+                    &mut acknowledged_offsets,
+                    topic,
+                    partition,
+                    offset,
+                );
+            }
+            if commit {
+                if let Err(e) = session.commit().await {
+                    yield Err(ConnectError::new_internal(e.to_string()));
+                    break;
+                }
+                for (key, offsets) in &delivered_offsets {
+                    if let Some(offset) = offsets.last() {
+                        acknowledged_offsets.insert(key.clone(), *offset);
+                    }
+                }
+                delivered_offsets.clear();
             }
             if stop { break; }
         }
@@ -512,5 +610,45 @@ mod tests {
                     }),
                 }
         );
+    }
+
+    #[test]
+    fn subscribe_ack_requires_an_exact_delivered_offset() {
+        let delivered = DeliveredOffsets::from([(
+            ("topic".to_string(), 2),
+            std::collections::BTreeSet::from([10, 12]),
+        )]);
+        let acknowledged = std::collections::HashMap::new();
+
+        assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, 10) == Ok(true));
+        assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, 11).is_err());
+        assert2::assert!(validate_ack(&delivered, &acknowledged, "other", 2, 10).is_err());
+        assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, -1).is_err());
+    }
+
+    #[test]
+    fn subscribe_ack_never_regresses_and_prunes_committed_offsets() {
+        let mut delivered = DeliveredOffsets::from([(
+            ("topic".to_string(), 2),
+            std::collections::BTreeSet::from([10, 11, 12]),
+        )]);
+        let mut acknowledged = std::collections::HashMap::new();
+
+        mark_acknowledged(
+            &mut delivered,
+            &mut acknowledged,
+            "topic".to_string(),
+            2,
+            11,
+        );
+
+        assert2::assert!(acknowledged.get(&("topic".to_string(), 2)) == Some(&11));
+        assert2::assert!(
+            delivered.get(&("topic".to_string(), 2))
+                == Some(&std::collections::BTreeSet::from([12]))
+        );
+        assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, 10) == Ok(false));
+        assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, 11) == Ok(false));
+        assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, 12) == Ok(true));
     }
 }

@@ -123,12 +123,16 @@ mod tests {
         PrimaryState {
             is_primary: true,
             primary_url: Some(url.into()),
+            generation_id: Some(1),
+            member_id: Some("member".into()),
         }
     }
     fn secondary(url: &str) -> PrimaryState {
         PrimaryState {
             is_primary: false,
             primary_url: Some(url.into()),
+            generation_id: None,
+            member_id: None,
         }
     }
 
@@ -137,6 +141,8 @@ mod tests {
         let no_primary = PrimaryState {
             is_primary: false,
             primary_url: None,
+            generation_id: None,
+            member_id: None,
         };
         for (_name, method, forwarded, state, expected) in [
             (

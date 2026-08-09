@@ -436,7 +436,7 @@ where
     }
 }
 
-fn sliding_suppress_factory<K, VA, KS, VS>(
+pub(crate) fn sliding_suppress_factory<K, VA, KS, VS>(
     key_serde: KS,
     value_serde: VS,
     windows: SlidingWindows,

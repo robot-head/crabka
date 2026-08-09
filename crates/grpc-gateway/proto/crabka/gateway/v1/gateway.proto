@@ -108,9 +108,8 @@ message SubscribeStart {
   repeated FieldPredicate predicates = 4;
 }
 
-// An Ack triggers a commit of the consumer's current consumed positions. The
-// topic/partition/offset fields are advisory in the current implementation
-// (per-offset commit is a follow-up).
+// An Ack commits offset + 1 for this topic-partition. The server rejects an
+// offset that it has not delivered and never moves the committed offset back.
 message SubscribeAck {
   string topic = 1;
   int32 partition = 2;

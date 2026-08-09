@@ -4,8 +4,11 @@
 use assert2::{assert, check};
 mod support;
 
-use bytes::Bytes;
+use std::time::Duration;
+
+use bytes::{BufMut, Bytes, BytesMut};
 use crabka_protocol::{
+    Encode,
     owned::{
         api_versions_request::ApiVersionsRequest,
         create_topics_request::{CreatableTopic, CreateTopicsRequest},
@@ -16,6 +19,7 @@ use crabka_protocol::{
     },
     records::{Record, RecordBatch},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Build a `RecordBatch` with one entry per provided value. Codegen's
 /// `PartitionProduceData.records` is `Option<RecordsPayload>`. Callers
@@ -276,6 +280,116 @@ async fn end_to_end_create_produce_fetch_delete() {
         .expect("v2 records present after produce");
     let total: usize = batches.iter().map(|b| b.records.len()).sum();
     assert!(total == 3);
+
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn produce_acks_zero_sends_no_frame_and_keeps_connection_usable() {
+    let p = support::start().await;
+    let create = p
+        .client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "one-way-produce".into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("create topic");
+    assert!(create.topics[0].error_code == 0);
+
+    let mut stream = tokio::net::TcpStream::connect(p.broker.listen_addr())
+        .await
+        .expect("connect raw client");
+    let produce = ProduceRequest {
+        acks: 0,
+        timeout_ms: 5_000,
+        topic_data: vec![TopicProduceData {
+            name: "one-way-produce".into(),
+            partition_data: vec![PartitionProduceData {
+                index: 0,
+                records: Some(record_batch_with_values(&["value"]).into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut body = BytesMut::new();
+    produce.encode(&mut body, 9).expect("encode Produce v9");
+    let client_id = b"acks-zero-test";
+    let mut frame = BytesMut::new();
+    frame.put_i16(0);
+    frame.put_i16(9);
+    frame.put_i32(1);
+    frame.put_i16(i16::try_from(client_id.len()).unwrap());
+    frame.put_slice(client_id);
+    frame.put_u8(0);
+    frame.put_slice(&body);
+    stream
+        .write_u32(u32::try_from(frame.len()).unwrap())
+        .await
+        .unwrap();
+    stream.write_all(&frame).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let unexpected_response =
+        tokio::time::timeout(Duration::from_millis(150), stream.readable()).await;
+    assert!(
+        unexpected_response.is_err(),
+        "acks=0 must not make a response frame readable"
+    );
+
+    let mut metadata_body = BytesMut::new();
+    MetadataRequest::default()
+        .encode(&mut metadata_body, 12)
+        .expect("encode Metadata v12");
+    let mut metadata_frame = BytesMut::new();
+    metadata_frame.put_i16(3);
+    metadata_frame.put_i16(12);
+    metadata_frame.put_i32(2);
+    metadata_frame.put_i16(i16::try_from(client_id.len()).unwrap());
+    metadata_frame.put_slice(client_id);
+    metadata_frame.put_u8(0);
+    metadata_frame.put_slice(&metadata_body);
+    stream
+        .write_u32(u32::try_from(metadata_frame.len()).unwrap())
+        .await
+        .unwrap();
+    stream.write_all(&metadata_frame).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let response_len = tokio::time::timeout(Duration::from_secs(5), stream.read_u32())
+        .await
+        .expect("Metadata response arrives")
+        .expect("read Metadata frame length");
+    let mut response = vec![0u8; response_len as usize];
+    stream.read_exact(&mut response).await.unwrap();
+    assert!(i32::from_be_bytes(response[..4].try_into().unwrap()) == 2);
+
+    let latest = p
+        .client
+        .send(ListOffsetsRequest {
+            replica_id: -1,
+            topics: vec![ListOffsetsTopic {
+                name: "one-way-produce".into(),
+                partitions: vec![ListOffsetsPartition {
+                    partition_index: 0,
+                    timestamp: -1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("read log end");
+    assert!(latest.topics[0].partitions[0].offset == 1);
 
     p.broker.shutdown().await;
 }

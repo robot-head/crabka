@@ -6,7 +6,7 @@ use k8s_openapi::{
 };
 use kube::{
     Client,
-    api::{Api, Patch, PatchParams, PostParams},
+    api::{Api, PostParams},
 };
 
 fn now() -> jiff::Timestamp {
@@ -20,11 +20,32 @@ fn lease_duration_seconds(extent: Time) -> anyhow::Result<i32> {
     i32::try_from(extent.secs_i64()).map_err(Into::into)
 }
 
-/// Block until this process holds the Lease.
-///
-/// The implementation is simple. It polls every 2s and tries to take the
-/// Lease if the Lease is unowned or expired. If not, it waits. A precise
-/// KIP-style election can be a follow-up if needed.
+/// A held Kubernetes lease. Its background task renews the lease until
+/// leadership is lost or the guard is dropped.
+pub struct Leadership {
+    renewer: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl Leadership {
+    /// Wait until the lease can no longer be renewed safely.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason leadership was lost or the renewal task failed.
+    pub async fn wait(&mut self) -> anyhow::Result<()> {
+        (&mut self.renewer)
+            .await
+            .map_err(|error| anyhow::anyhow!("leader-election renewal task failed: {error}"))?
+    }
+}
+
+impl Drop for Leadership {
+    fn drop(&mut self) {
+        self.renewer.abort();
+    }
+}
+
+/// Block until this process holds the Lease, then keep it renewed.
 ///
 /// # Errors
 ///
@@ -38,7 +59,7 @@ pub async fn acquire(
     identity: &str,
     lease_duration: Time,
     retry_interval: Time,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Leadership> {
     let api: Api<Lease> = Api::namespaced(client, namespace);
     let lease_duration_seconds = lease_duration_seconds(lease_duration)?;
     loop {
@@ -61,7 +82,7 @@ pub async fn acquire(
                 match api.create(&PostParams::default(), &lease).await {
                     Ok(_) => {
                         tracing::info!(%name, %identity, "acquired lease (created)");
-                        return Ok(());
+                        break;
                     }
                     Err(kube::Error::Api(e)) if e.code == 409 => {
                         // Race; another replica created it. Retry.
@@ -69,30 +90,23 @@ pub async fn acquire(
                     Err(e) => return Err(e.into()),
                 }
             }
-            Some(existing) => {
+            Some(mut existing) => {
                 if held_by_us(&existing, identity) {
                     tracing::info!(%name, %identity, "re-confirmed lease ownership");
-                    return Ok(());
+                    break;
                 }
                 if is_expired(&existing, lease_duration) {
-                    let patch = serde_json::json!({
-                        "spec": {
-                            "holderIdentity": identity,
-                            "leaseDurationSeconds": lease_duration_seconds,
-                            "acquireTime": MicroTime(now()),
-                            "renewTime": MicroTime(now()),
-                        }
-                    });
-                    match api
-                        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-                        .await
-                    {
+                    claim(&mut existing, identity, lease_duration_seconds);
+                    match api.replace(name, &PostParams::default(), &existing).await {
                         Ok(_) => {
                             tracing::info!(%name, %identity, "acquired expired lease");
-                            return Ok(());
+                            break;
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, %name, "takeover patch failed; will retry");
+                        Err(kube::Error::Api(error)) if error.code == 409 => {
+                            tracing::debug!(%name, "lease takeover raced; retrying");
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, %name, "lease takeover failed; will retry");
                         }
                     }
                 }
@@ -101,6 +115,93 @@ pub async fn acquire(
             }
         }
     }
+
+    let renew_name = name.to_owned();
+    let renew_identity = identity.to_owned();
+    let renewer = tokio::spawn(async move {
+        renew_loop(
+            api,
+            renew_name,
+            renew_identity,
+            lease_duration,
+            retry_interval,
+            lease_duration_seconds,
+        )
+        .await
+    });
+    Ok(Leadership { renewer })
+}
+
+fn claim(lease: &mut Lease, identity: &str, lease_duration_seconds: i32) {
+    let spec = lease.spec.get_or_insert_with(LeaseSpec::default);
+    let changed_holder = spec.holder_identity.as_deref() != Some(identity);
+    let timestamp = MicroTime(now());
+    spec.holder_identity = Some(identity.to_owned());
+    spec.lease_duration_seconds = Some(lease_duration_seconds);
+    spec.acquire_time = Some(timestamp.clone());
+    spec.renew_time = Some(timestamp);
+    if changed_holder {
+        spec.lease_transitions = Some(spec.lease_transitions.unwrap_or(0).saturating_add(1));
+    }
+}
+
+async fn renew_loop(
+    api: Api<Lease>,
+    name: String,
+    identity: String,
+    lease_duration: Time,
+    retry_interval: Time,
+    lease_duration_seconds: i32,
+) -> anyhow::Result<()> {
+    let mut last_success = tokio::time::Instant::now();
+    loop {
+        tokio::time::sleep(retry_interval.to_std()).await;
+        match renew_once(&api, &name, &identity, lease_duration_seconds).await {
+            Ok(()) => last_success = tokio::time::Instant::now(),
+            Err(RenewError::Lost(reason)) => {
+                anyhow::bail!("lost leader-election lease {name}: {reason}");
+            }
+            Err(RenewError::Retry(error)) => {
+                if last_success.elapsed() >= lease_duration.to_std() {
+                    anyhow::bail!(
+                        "could not renew leader-election lease {name} before its deadline: {error}"
+                    );
+                }
+                tracing::warn!(%error, %name, "lease renewal failed; retrying before deadline");
+            }
+        }
+    }
+}
+
+enum RenewError {
+    Lost(String),
+    Retry(kube::Error),
+}
+
+async fn renew_once(
+    api: &Api<Lease>,
+    name: &str,
+    identity: &str,
+    lease_duration_seconds: i32,
+) -> Result<(), RenewError> {
+    let Some(mut lease) = api.get_opt(name).await.map_err(RenewError::Retry)? else {
+        return Err(RenewError::Lost("lease was deleted".to_owned()));
+    };
+    if !held_by_us(&lease, identity) {
+        let holder = lease
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.holder_identity.as_deref())
+            .unwrap_or("<none>");
+        return Err(RenewError::Lost(format!("holder changed to {holder}")));
+    }
+    let spec = lease.spec.get_or_insert_with(LeaseSpec::default);
+    spec.lease_duration_seconds = Some(lease_duration_seconds);
+    spec.renew_time = Some(MicroTime(now()));
+    api.replace(name, &PostParams::default(), &lease)
+        .await
+        .map(|_| ())
+        .map_err(RenewError::Retry)
 }
 
 fn held_by_us(lease: &Lease, identity: &str) -> bool {
@@ -177,5 +278,18 @@ mod tests {
         assert!(lease_duration_seconds(secs(15)).unwrap() == 15);
         assert!(lease_duration_seconds(crabka_units::minutes(2)).unwrap() == 120);
         assert!(lease_duration_seconds(crabka_units::days(365 * 100)).is_err());
+    }
+
+    #[test]
+    fn claim_updates_owner_timestamps_and_transition_count() {
+        let old = jiff::Timestamp::from_second(now().as_second() - 60).unwrap();
+        let mut lease = lease_with("old", old);
+        claim(&mut lease, "new", 30);
+        let spec = lease.spec.unwrap();
+        assert!(spec.holder_identity.as_deref() == Some("new"));
+        assert!(spec.lease_duration_seconds == Some(30));
+        assert!(spec.lease_transitions == Some(2));
+        assert!(spec.acquire_time == spec.renew_time);
+        assert!(spec.renew_time.unwrap().0 > old);
     }
 }

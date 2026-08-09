@@ -156,6 +156,7 @@ async fn start_secure_node(bootstrap: &str) -> Node {
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();
     let primary = Election::start(&cfg, cancel.clone()).await.unwrap();
+    store.install_primary(primary.clone());
 
     let auth = AuthState {
         basic: Some(Arc::new(BasicAuthStore::from_users(alice_users()))),
@@ -351,6 +352,7 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();
     let primary = Election::start(&cfg, cancel.clone()).await.unwrap();
+    store.install_primary(primary.clone());
 
     let auth = AuthState {
         basic: None,
@@ -506,6 +508,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();
     let mut primary = Election::start(&cfg, cancel.clone()).await.unwrap();
+    store.install_primary(primary.clone());
     let auth = AuthState {
         basic: Some(Arc::new(BasicAuthStore::from_users(alice_users()))),
         bearer: None,
@@ -810,6 +813,7 @@ async fn start_jwks_node(
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();
     let primary = Election::start(&cfg, cancel.clone()).await.unwrap();
+    store.install_primary(primary.clone());
 
     let bearer_validator = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
     let auth = AuthState {

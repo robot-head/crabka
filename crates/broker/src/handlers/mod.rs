@@ -94,6 +94,25 @@ pub(crate) fn group_read_denied(
     )
 }
 
+/// Return the Kafka routing error for a group RPC sent to the wrong broker,
+/// or `None` when this broker leads the group's offsets partition.
+pub(crate) fn group_coordinator_error(
+    broker: &crate::broker::Broker,
+    group_id: &str,
+) -> Option<i16> {
+    use crate::coordinator::partitioner::{GroupRoutingError, local_partition_for_group};
+
+    match local_partition_for_group(
+        &broker.controller.current_image(),
+        broker.config.node_id,
+        group_id,
+    ) {
+        Ok(_) => None,
+        Err(GroupRoutingError::Unavailable) => Some(crate::codes::COORDINATOR_NOT_AVAILABLE),
+        Err(GroupRoutingError::NotCoordinator) => Some(crate::codes::NOT_COORDINATOR),
+    }
+}
+
 pub(crate) fn cluster_alter_denied(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &crabka_metadata::MetadataImage,
@@ -126,6 +145,7 @@ pub(crate) fn parse_advertised_host_port(addr: &str) -> (String, u16) {
 pub(crate) mod acl_wire;
 // KIP-853 dynamic-quorum reconfiguration (api_keys 80/81/82).
 pub(crate) mod add_raft_voter;
+pub(crate) mod allocate_producer_ids;
 pub(crate) mod alter_client_quotas;
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;

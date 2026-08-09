@@ -10,30 +10,27 @@
 //! Broker-side integration tests for KIP-13/124/257 client quotas.
 //!
 //! Tests:
-//! 1. `alter_then_describe_round_trip`. `AlterClientQuotas` sets
-//!    `(user=alice) producer_byte_rate=1024`. `DescribeClientQuotas` returns it.
-//! 2. `producer_byte_rate_throttles_produce`. Set a low `producer_byte_rate`
-//!    for alice. Produce a large payload. Assert `throttle_time_ms` > 0.
-//! 3. `consumer_byte_rate_throttles_fetch`. Set a low `consumer_byte_rate` for
-//!    alice. Produce and then fetch a large payload. Assert
-//!    `throttle_time_ms` > 0.
-//! 4. `user_specific_overrides_user_default`. Set (user=alice)
-//!    `producer_byte_rate=128` AND (user=<default>) `producer_byte_rate=8192`.
-//!    Produce as alice. The tight alice-specific limit fires, not the default.
-//! 5. `non_super_user_denied`. alice has no ACLs and calls
-//!    `AlterClientQuotas`. Every entry must carry
-//!    `CLUSTER_AUTHORIZATION_FAILED` (31).
-//! 6. `request_percentage_throttles_produce`. Set a tiny `request_percentage`
-//!    from KIP-124 for alice with NO byte-rate quota. Produce a small payload.
-//!    Assert `throttle_time_ms` > 0. This test proves that the broker sends the
-//!    request-quota throttle in the response, as KIP-219 throttle-then-respond
-//!    needs, and does not only mute the channel.
+//! 1. `alter_then_describe_round_trip` — `AlterClientQuotas` sets
+//!    `(user=alice) producer_byte_rate=1024`; `DescribeClientQuotas` returns it.
+//! 2. `producer_byte_rate_throttles_produce` — Set low `producer_byte_rate` for
+//!    alice; produce a large payload; assert `throttle_time_ms` > 0.
+//! 3. `consumer_byte_rate_throttles_fetch` — Set low `consumer_byte_rate` for
+//!    alice; produce then fetch a large payload; assert `throttle_time_ms` > 0.
+//! 4. `user_client_tuple_overrides_user_specific` — Set
+//!    (user=alice, client-id=crabka-quota-test) `producer_byte_rate=128` AND
+//!    (user=alice) `producer_byte_rate=8192`; produce with that client id; the
+//!    tight tuple limit fires, not the user-only limit.
+//! 5. `non_super_user_denied` — alice (no ACLs) calls `AlterClientQuotas`;
+//!    must receive `CLUSTER_AUTHORIZATION_FAILED` (31) on every entry.
+//! 6. `request_percentage_throttles_produce` — Set a tiny `request_percentage`
+//!    (KIP-124) for alice with NO byte-rate quota; produce a small payload;
+//!    assert `throttle_time_ms` > 0. Proves the request-quota throttle is
+//!    communicated in the response (KIP-219 throttle-then-respond) and not
+//!    just silently muted.
 //!
-//! Test 4 uses the Option B approach: a user-specific value overrides a
-//! user-default value. Unit tests in `quota/lookup.rs` cover the
-//! (user, client-id) tuple precedence. The `client_id` plumbing gap in the
-//! Produce and Fetch handlers is a known limitation. A future cleanup slice
-//! removes it.
+//! Test 4 exercises header `client_id` propagation through Produce and the
+//! tuple-over-user precedence rule end to end. Fetch uses the same request
+//! context field and has a focused handler test for tuple matching.
 //!
 //! These tests are gated to non-Windows to match the multi-broker test
 //! convention from slices 10b/12b/14/15/15b.
@@ -917,19 +914,9 @@ async fn consumer_byte_rate_throttles_fetch() {
     handle.shutdown().await;
 }
 
-/// Test 4, Option B: a user-specific value overrides a user-default value.
-///
-/// Set `(user=alice) producer_byte_rate=128` AND
-/// `(user=<default>) producer_byte_rate=8192`. Produce as alice. The tight
-/// alice-specific rate of 128 fires, not the lenient default of 8192.
-///
-/// This test avoids the (user, client-id) tuple limitation above. The unit
-/// tests of the lookup module already cover the path where the tuple wins over
-/// a user-only value. That test is `pair_specific_wins_over_user_only` in
-/// `quota/lookup.rs`. A future cleanup slice removes the client-id plumbing gap
-/// in the Produce and Fetch handlers.
+/// Test 4: a `(user, client-id)` quota overrides a user-only quota.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn user_specific_overrides_user_default() {
+async fn user_client_tuple_overrides_user_specific() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
         "admin",
         &[("admin", "admin-secret"), ("alice", "alice-secret")],
@@ -941,56 +928,61 @@ async fn user_specific_overrides_user_default() {
     wait_partition_exists(&handle, "precedence-topic", 0).await;
     seed_alice_write_acl(&handle, "precedence-topic").await;
 
-    // Set lenient default quota (user=<default>) producer_byte_rate=8192.
-    let alter_default = drive_alter_client_quotas_sasl(
-        addr,
-        "admin",
-        "admin-secret",
-        vec![(
-            vec![("user".into(), None)], // None = <default>
-            vec![("producer_byte_rate".into(), 8192.0, false)],
-        )],
-        false,
-    )
-    .await;
-    assert!(alter_default[0].1 == 0, "alter default quota must succeed");
-
-    // Set tight user-specific quota (user=alice) producer_byte_rate=128.
-    let alter_alice = drive_alter_client_quotas_sasl(
+    // Set a lenient user-only quota.
+    let alter_user = drive_alter_client_quotas_sasl(
         addr,
         "admin",
         "admin-secret",
         vec![(
             vec![("user".into(), Some("alice".into()))],
+            vec![("producer_byte_rate".into(), 8192.0, false)],
+        )],
+        false,
+    )
+    .await;
+    assert!(alter_user[0].1 == 0, "alter user quota must succeed");
+
+    // Set a tight tuple quota for the client id written by `round_trip`.
+    let alter_tuple = drive_alter_client_quotas_sasl(
+        addr,
+        "admin",
+        "admin-secret",
+        vec![(
+            vec![
+                ("user".into(), Some("alice".into())),
+                ("client-id".into(), Some("crabka-quota-test".into())),
+            ],
             vec![("producer_byte_rate".into(), 128.0, false)],
         )],
         false,
     )
     .await;
-    assert!(alter_alice[0].1 == 0, "alter alice quota must succeed");
+    assert!(alter_tuple[0].1 == 0, "alter tuple quota must succeed");
 
     // Wait for both quotas to appear in the image.
     handle
         .wait_for_image(|img| {
-            let alice_key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
-            let default_key: crabka_metadata::EntityKey = vec![("user".into(), None)];
-            let alice_rate = img
+            let user_key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
+            let tuple_key: crabka_metadata::EntityKey = vec![
+                ("client-id".into(), Some("crabka-quota-test".into())),
+                ("user".into(), Some("alice".into())),
+            ];
+            let user_rate = img
                 .client_quotas()
-                .get(&alice_key)
+                .get(&user_key)
                 .and_then(|c| c.get("producer_byte_rate"))
                 .copied();
-            let default_rate = img
+            let tuple_rate = img
                 .client_quotas()
-                .get(&default_key)
+                .get(&tuple_key)
                 .and_then(|c| c.get("producer_byte_rate"))
                 .copied();
-            alice_rate == Some(128.0) && default_rate == Some(8192.0)
+            user_rate == Some(8192.0) && tuple_rate == Some(128.0)
         })
         .await;
 
-    // Alice produces 8 KB. The alice-specific rate (128 bytes/sec) should
-    // cause throttling. The default rate (8192) would NOT cause throttling for
-    // this payload size within the burst window.
+    // Alice produces 8 KB with `crabka-quota-test`. The 128-byte tuple quota
+    // throttles it; the 8192-byte user-only quota would fit in the burst window.
     let deadline = Instant::now() + Duration::from_secs(15);
     let resp = loop {
         let r =
@@ -1017,12 +1009,9 @@ async fn user_specific_overrides_user_default() {
         "produce must succeed, error_code={}",
         part.error_code
     );
-    // The alice-specific 128-byte-rate quota fires → throttle_time_ms > 0.
-    // If only the default (8192) applied, 8 KB would fit in the burst window
-    // and throttle_time_ms would be 0.
     assert!(
         resp.throttle_time_ms > 0,
-        "expected throttle_time_ms > 0 because alice-specific rate=128 applies; got {}",
+        "expected throttle_time_ms > 0 because the user/client tuple rate applies; got {}",
         resp.throttle_time_ms
     );
 

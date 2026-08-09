@@ -786,19 +786,13 @@ mod tests {
     }
 
     struct GatedWal {
-        log: Arc<Mutex<Log>>,
         sync_started: Mutex<Option<oneshot::Sender<()>>>,
         release_sync: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
     }
 
     impl GatedWal {
-        fn new(
-            log: Arc<Mutex<Log>>,
-            sync_started: oneshot::Sender<()>,
-            release_sync: oneshot::Receiver<()>,
-        ) -> Self {
+        fn new(sync_started: oneshot::Sender<()>, release_sync: oneshot::Receiver<()>) -> Self {
             Self {
-                log,
                 sync_started: Mutex::new(Some(sync_started)),
                 release_sync: tokio::sync::Mutex::new(Some(release_sync)),
             }
@@ -807,16 +801,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::wal::WalStore for GatedWal {
-        async fn append(
-            &self,
-            datas: Vec<ProduceData>,
-        ) -> Result<
-            (Vec<Result<Offset, crate::error::BrokerError>>, Offset),
-            crate::error::BrokerError,
-        > {
-            run_produce_append_batch(self.log.clone(), datas).await
-        }
-
         async fn sync_durable(&self, leo: Offset) -> Result<Offset, crate::error::BrokerError> {
             if let Some(started) = self.sync_started.lock().unwrap().take() {
                 let _ = started.send(());
@@ -965,11 +949,8 @@ mod tests {
         ));
         let (sync_started_tx, sync_started_rx) = oneshot::channel();
         let (release_sync_tx, release_sync_rx) = oneshot::channel();
-        let wal: Option<crate::wal::SharedWal> = Some(Arc::new(GatedWal::new(
-            log.clone(),
-            sync_started_tx,
-            release_sync_rx,
-        )));
+        let wal: Option<crate::wal::SharedWal> =
+            Some(Arc::new(GatedWal::new(sync_started_tx, release_sync_rx)));
         let (tx, rx) = mpsc::channel(1);
         let append_notify = Arc::new(Notify::new());
         let replica_state = Arc::new(tokio::sync::Mutex::new(ReplicaState::new()));
@@ -1120,8 +1101,7 @@ mod tests {
         ));
         let (sync_started_tx, sync_started_rx) = oneshot::channel();
         let (_release_sync_tx, release_sync_rx) = oneshot::channel();
-        let wal: crate::wal::SharedWal =
-            Arc::new(GatedWal::new(log.clone(), sync_started_tx, release_sync_rx));
+        let wal: crate::wal::SharedWal = Arc::new(GatedWal::new(sync_started_tx, release_sync_rx));
         let (tx, rx) = mpsc::channel(3);
 
         for _ in 0..3 {

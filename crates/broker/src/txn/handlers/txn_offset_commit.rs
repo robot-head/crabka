@@ -44,16 +44,16 @@ use crate::{
     broker::Broker,
     codes,
     coordinator::{
-        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
+        bootstrap::OFFSETS_TOPIC,
+        partitioner::{GroupRoutingError, local_partition_for_group},
         persistence::OffsetCommitValue,
         unified::{
             actor::{GroupKindTag, validate_group_commit},
-            classic_state::OffsetEntry,
             streams::actor::validate_streams_group_commit,
         },
     },
     error::BrokerError,
-    txn::{coordinator::OffsetKey, util::now_millis},
+    txn::util::now_millis,
 };
 
 #[tracing::instrument(
@@ -125,12 +125,26 @@ pub(crate) async fn handle(
         })
         .collect();
 
-    // 1. Verify the group coordinator is this broker.  In the current
-    //    single-broker MVP every group is local. We check that the group
-    //    exists (or create it) — if the partition for __consumer_offsets
-    //    is not present we'll detect that below and return NOT_COORDINATOR.
-    //    For a multi-broker future this would route to the leader for
-    //    hash(group_id) % __consumer_offsets.partition_count.
+    if let Some(entry) = broker.txn_coordinator.get(&req.transactional_id)
+        && entry.lock().await.has_staged_producer_identity()
+    {
+        return encode_err_all(version, &req, codes::INVALID_TXN_STATE);
+    }
+
+    // 1. Verify that this broker leads the group's offsets partition before
+    //    creating or accessing its actor.
+    let offsets_partition = {
+        let image = broker.controller.current_image();
+        match local_partition_for_group(&image, broker.config.node_id, &req.group_id) {
+            Ok(partition) => partition,
+            Err(GroupRoutingError::Unavailable) => {
+                return encode_err_all(version, &req, codes::COORDINATOR_NOT_AVAILABLE);
+            }
+            Err(GroupRoutingError::NotCoordinator) => {
+                return encode_err_all(version, &req, codes::NOT_COORDINATOR);
+            }
+        }
+    };
     let handle = broker
         .group_coordinator
         .find(&req.group_id)
@@ -181,26 +195,11 @@ pub(crate) async fn handle(
     //    Topics denied by the per-topic Read ACL are skipped from the
     //    batch and surfaced as TOPIC_AUTHORIZATION_FAILED in the response.
     let now_ms = now_millis();
-    let buffered = match append_txn_batch(&req, &partitions, now_ms, &denied_topics).await {
-        Ok(entries) => entries,
-        Err(code) => {
-            return encode_resp(version, &build_response(&req, code, &denied_topics));
-        }
-    };
-
-    // 3b. Buffer the committed offsets on the txn coordinator, keyed by the
-    //     producer_id, pending the transaction's COMMIT/ABORT marker. They are
-    //     NOT yet visible to OffsetFetch (Kafka: a transactional offset becomes
-    //     visible only after the commit marker). `EndTxn` materializes the
-    //     buffer into the group's `committed_offsets` on COMMIT, or drops it on
-    //     ABORT. The records are already in `__consumer_offsets` (held under the
-    //     LSO) from the append above; this buffer is the in-memory bridge to the
-    //     group coordinator that the commit marker has no other way to drive.
-    broker.txn_coordinator.buffer_txn_offsets(
-        crabka_log::ProducerId(req.producer_id),
-        &req.group_id,
-        buffered,
-    );
+    if let Err(code) =
+        append_txn_batch(&req, &partitions, offsets_partition, now_ms, &denied_topics).await
+    {
+        return encode_resp(version, &build_response(&req, code, &denied_topics));
+    }
 
     // 4. Success — per-(topic, partition) error_code = NONE for allowed,
     //    TOPIC_AUTHORIZATION_FAILED for denied.
@@ -209,19 +208,18 @@ pub(crate) async fn handle(
 
 // ── batch construction ────────────────────────────────────────────────────────
 
-/// Appends the transactional offset records to `__consumer_offsets`, and
-/// returns the same rows, which map `(topic, partition)` to an `OffsetEntry`.
-///
-/// The caller buffers those rows on the txn coordinator. The coordinator
-/// materializes them into the group's committed offsets when the COMMIT marker
-/// arrives. The returned vec is empty when the authorizer denied every topic,
-/// because this function then appended nothing.
+/// Append the transactional offset records to `__consumer_offsets`.
+/// The offsets partition's `WriteTxnMarkers` handler materializes these records
+/// into the owning group actor after the commit marker is durable. This keeps
+/// visibility on the group-coordinator broker even when the transaction
+/// coordinator is a different broker.
 async fn append_txn_batch(
     req: &TxnOffsetCommitRequest,
     partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
+    offsets_partition: i32,
     now_ms: i64,
     denied_topics: &std::collections::HashSet<String>,
-) -> Result<Vec<(OffsetKey, OffsetEntry)>, i16> {
+) -> Result<(), i16> {
     let mut batch = RecordBatch {
         attributes: Attributes::default().with_transactional(true),
         max_timestamp: now_ms,
@@ -229,7 +227,6 @@ async fn append_txn_batch(
         producer_epoch: req.producer_epoch,
         ..RecordBatch::default()
     };
-    let mut entries: Vec<(OffsetKey, OffsetEntry)> = Vec::new();
     let mut delta: i32 = 0;
     for topic in &req.topics {
         if denied_topics.contains(&topic.name) {
@@ -253,27 +250,18 @@ async fn append_txn_batch(
                 value: Some(value.encode_value()),
                 ..Default::default()
             });
-            entries.push((
-                (topic.name.clone(), part.partition_index),
-                OffsetEntry {
-                    offset: value.offset,
-                    leader_epoch: value.leader_epoch,
-                    metadata: value.metadata.clone(),
-                    commit_timestamp_ms: value.commit_timestamp_ms,
-                },
-            ));
             delta += 1;
         }
     }
 
     // If every topic was denied, there's nothing to append; succeed silently.
     if batch.records.is_empty() {
-        return Ok(entries);
+        return Ok(());
     }
 
     batch.last_offset_delta = (delta - 1).max(0);
 
-    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION)) else {
+    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, PartitionIndex(offsets_partition)) else {
         // __consumer_offsets not hosted here — report NOT_COORDINATOR.
         return Err(codes::NOT_COORDINATOR);
     };
@@ -282,7 +270,7 @@ async fn append_txn_batch(
     part_handle
         .produce_batch(batch)
         .await
-        .map(|_| entries)
+        .map(|_| ())
         .map_err(|e| {
             tracing::error!(
                 group = %req.group_id,
@@ -359,7 +347,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::partition_registry::PartitionRegistry;
+    use crate::{coordinator::bootstrap::OFFSETS_PARTITION, partition_registry::PartitionRegistry};
 
     fn request() -> TxnOffsetCommitRequest {
         TxnOffsetCommitRequest {
@@ -482,37 +470,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_txn_batch_writes_transactional_batch_and_buffers_entries() {
+    async fn append_txn_batch_writes_transactional_offset_records() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let registry = Arc::new(PartitionRegistry::new());
         open_offsets_partition(&registry, dir.path());
         let req = request();
 
-        let entries = append_txn_batch(&req, &registry, 12_345, &HashSet::new())
+        append_txn_batch(&req, &registry, OFFSETS_PARTITION, 12_345, &HashSet::new())
             .await
             .expect("append batch");
-
-        // `OffsetEntry` has no `PartialEq`, so project each row into a tuple
-        // covering the key plus every `OffsetEntry` field.
-        let rows: Vec<(&str, i32, i64, i32, &str, i64)> = entries
-            .iter()
-            .map(|((topic, partition), e)| {
-                (
-                    topic.as_str(),
-                    *partition,
-                    e.offset.0,
-                    e.leader_epoch,
-                    e.metadata.as_str(),
-                    e.commit_timestamp_ms,
-                )
-            })
-            .collect();
-        assert!(
-            rows == vec![
-                ("orders", 2, 103, 7, "first", 12_345),
-                ("orders", 3, 107, 8, "second", 12_345),
-            ]
-        );
 
         let part = registry
             .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
@@ -551,11 +517,9 @@ mod tests {
         let req = request();
         let denied = HashSet::from(["orders".to_string()]);
 
-        let entries = append_txn_batch(&req, &registry, 12_345, &denied)
+        append_txn_batch(&req, &registry, OFFSETS_PARTITION, 12_345, &denied)
             .await
             .expect("all denied succeeds");
-
-        assert!(entries.is_empty());
         let part = registry
             .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
             .expect("offsets partition");
@@ -569,9 +533,15 @@ mod tests {
     #[tokio::test]
     async fn append_txn_batch_returns_not_coordinator_when_offsets_partition_missing() {
         let registry = Arc::new(PartitionRegistry::new());
-        let err = append_txn_batch(&request(), &registry, 12_345, &HashSet::new())
-            .await
-            .expect_err("missing offsets partition");
+        let err = append_txn_batch(
+            &request(),
+            &registry,
+            OFFSETS_PARTITION,
+            12_345,
+            &HashSet::new(),
+        )
+        .await
+        .expect_err("missing offsets partition");
 
         assert!(err == codes::NOT_COORDINATOR);
     }

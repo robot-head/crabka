@@ -38,6 +38,8 @@ pub struct KafkaStore {
     writer: writer::SchemaWriter,
     write_gate: Mutex<()>,
     schemas_topic: String,
+    election_group: String,
+    primary: RwLock<Option<watch::Receiver<crate::election::PrimaryState>>>,
 }
 
 pub struct RegisterSchema<'a> {
@@ -51,15 +53,8 @@ pub struct RegisterSchema<'a> {
 }
 
 impl KafkaStore {
-    /// Create `_schemas`, start the reader, build the writer.
-    ///
-    /// NOTE: this function does not block for full initial replay before
-    /// serving. A freshly-promoted primary whose reader has not yet drained the
-    /// prior primary's last records can briefly mis-assign ids and versions
-    /// until it catches up. Catch-up-before-write on promotion, and the fence
-    /// for the brief rebalance multi-writer window, are documented deferred
-    /// limitations of the HA support. Tests start from a fresh, empty
-    /// `_schemas`, so there is nothing to replay.
+    /// Create `_schemas`, start the reader, build the writer, and wait until the
+    /// reader has replayed through an ordering barrier before serving.
     #[tracing::instrument(
         level = "info",
         name = "kafkastore.start",
@@ -81,14 +76,73 @@ impl KafkaStore {
             cfg.runtime.default_compatibility_level.clone(),
             cfg.runtime.default_mode.clone(),
         );
-        let r = reader::spawn(cfg, topic_id, initial_state, security.clone(), cancel);
+        let r = reader::spawn(
+            cfg,
+            topic_id,
+            initial_state,
+            security.clone(),
+            cancel.clone(),
+        );
         let writer = writer::SchemaWriter::start(cfg, security).await?;
+        let initial_barrier = writer.barrier().await?;
+        await_applied_rx(r.applied_rx.clone(), initial_barrier, &cancel).await?;
         Ok(Arc::new(Self {
             store: r.store,
             applied_rx: r.applied_rx,
             writer,
             write_gate: Mutex::new(()),
             schemas_topic: cfg.schemas_topic.clone(),
+            election_group: cfg.group_id.clone(),
+            primary: RwLock::new(None),
+        }))
+    }
+
+    /// Install the election watch before the REST server begins accepting
+    /// requests. Direct store tests can omit this and use the unfenced writer.
+    pub fn install_primary(&self, primary: watch::Receiver<crate::election::PrimaryState>) {
+        *self.primary.write() = Some(primary);
+    }
+
+    async fn prepare_write(
+        &self,
+    ) -> Result<Option<crabka_client_producer::ConsumerGroupMetadata>, SrError> {
+        let Some(primary) = self.primary.read().clone() else {
+            return Ok(None);
+        };
+        let before = primary.borrow().clone();
+        let (Some(generation_id), Some(member_id)) =
+            (before.generation_id, before.member_id.clone())
+        else {
+            return Err(SrError::Backend("node is not the elected primary".into()));
+        };
+        if !before.is_primary {
+            return Err(SrError::Backend("node is not the elected primary".into()));
+        }
+
+        // The barrier is ordered after every record committed by the previous
+        // primary. Waiting for the local reader to apply it makes all following
+        // id/version decisions use a caught-up StoreState.
+        let barrier = self
+            .writer
+            .barrier()
+            .await
+            .map_err(|error| SrError::Backend(error.to_string()))?;
+        self.await_applied(barrier).await?;
+
+        let after = primary.borrow().clone();
+        if !after.is_primary
+            || after.generation_id != Some(generation_id)
+            || after.member_id.as_deref() != Some(member_id.as_str())
+        {
+            return Err(SrError::Backend(
+                "primary election changed while synchronizing the schema store".into(),
+            ));
+        }
+        Ok(Some(crabka_client_producer::ConsumerGroupMetadata {
+            group_id: self.election_group.clone(),
+            generation_id,
+            member_id,
+            group_instance_id: None,
         }))
     }
 
@@ -133,6 +187,7 @@ impl KafkaStore {
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn register(&self, req: RegisterSchema<'_>) -> Result<Registered, SrError> {
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         let RegisterSchema {
             subject,
             ty,
@@ -172,10 +227,10 @@ impl KafkaStore {
             );
             let offset = self
                 .writer
-                .produce(key, value)
+                .produce(key, value, primary.as_ref())
                 .await
                 .map_err(|e| SrError::Backend(e.to_string()))?;
-            self.await_applied(offset).await;
+            self.await_applied(offset).await?;
             let span = tracing::Span::current();
             span.record("id", id.0);
             span.record("version", version.0);
@@ -218,10 +273,10 @@ impl KafkaStore {
         );
         let offset = self
             .writer
-            .produce(key, value)
+            .produce(key, value, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         let span = tracing::Span::current();
         span.record("id", reg.id.0);
         span.record("version", reg.version.0);
@@ -252,6 +307,7 @@ impl KafkaStore {
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn delete_subject_compat(&self, subject: &str) -> Result<Option<String>, SrError> {
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         let current = self
             .store
             .read()
@@ -263,16 +319,17 @@ impl KafkaStore {
         let key = record::config_key(Some(subject));
         let offset = self
             .writer
-            .produce_tombstone(key)
+            .produce_tombstone(key, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         Ok(Some(level))
     }
 
     #[tracing::instrument(level = "info", name = "kafkastore.set_compat", skip_all, fields(subject = subject.unwrap_or("global"), level = %level, mode = tracing::field::Empty), err)]
     async fn set_compat(&self, subject: Option<&str>, level: String) -> Result<(), SrError> {
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         let mode = match subject {
             Some(s) => self.store.read().effective_mode(s).to_string(),
             None => self.store.read().global_mode().to_string(),
@@ -286,10 +343,10 @@ impl KafkaStore {
         let (key, value) = record::encode_config(subject, &level);
         let offset = self
             .writer
-            .produce(key, value)
+            .produce(key, value, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         Ok(())
     }
 
@@ -303,6 +360,7 @@ impl KafkaStore {
         version: SchemaVersion,
     ) -> Result<SchemaVersion, SrError> {
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         self.ensure_writable(subject)?;
         let found = {
             let s = self.store.read();
@@ -332,10 +390,10 @@ impl KafkaStore {
         );
         let offset = self
             .writer
-            .produce(key, value)
+            .produce(key, value, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         Ok(found.version)
     }
 
@@ -349,6 +407,7 @@ impl KafkaStore {
         version: SchemaVersion,
     ) -> Result<SchemaVersion, SrError> {
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         self.ensure_writable(subject)?;
         {
             let s = self.store.read();
@@ -377,10 +436,10 @@ impl KafkaStore {
         let key = record::encode_tombstone(subject, version);
         let offset = self
             .writer
-            .produce_tombstone(key)
+            .produce_tombstone(key, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         Ok(version)
     }
 
@@ -390,6 +449,7 @@ impl KafkaStore {
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn soft_delete_subject(&self, subject: &str) -> Result<Vec<SchemaVersion>, SrError> {
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         self.ensure_writable(subject)?;
         let versions = {
             let s = self.store.read();
@@ -418,10 +478,10 @@ impl KafkaStore {
         let (key, value) = record::encode_delete_subject(subject, max);
         let offset = self
             .writer
-            .produce(key, value)
+            .produce(key, value, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         Ok(versions)
     }
 
@@ -435,6 +495,7 @@ impl KafkaStore {
         subject: &str,
     ) -> Result<Vec<SchemaVersion>, SrError> {
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         self.ensure_writable(subject)?;
         let all_versions = {
             let s = self.store.read();
@@ -462,12 +523,12 @@ impl KafkaStore {
             let key = record::encode_tombstone(subject, *v);
             last_offset = self
                 .writer
-                .produce_tombstone(key)
+                .produce_tombstone(key, primary.as_ref())
                 .await
                 .map_err(|e| SrError::Backend(e.to_string()))?;
         }
         if last_offset >= 0 {
-            self.await_applied(last_offset).await;
+            self.await_applied(last_offset).await?;
         }
         Ok(all_versions)
     }
@@ -481,16 +542,17 @@ impl KafkaStore {
             return Err(SrError::InvalidMode(mode));
         }
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         if mode == "IMPORT" && !self.store.read().subjects(true).is_empty() {
             return Err(SrError::OperationNotPermitted("registry not empty".into()));
         }
         let (key, value) = record::encode_mode(None, &mode);
         let offset = self
             .writer
-            .produce(key, value)
+            .produce(key, value, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         Ok(())
     }
 
@@ -503,16 +565,17 @@ impl KafkaStore {
             return Err(SrError::InvalidMode(mode));
         }
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         if mode == "IMPORT" && self.store.read().versions(subject, true).is_some() {
             return Err(SrError::OperationNotPermitted(subject.to_string()));
         }
         let (key, value) = record::encode_mode(Some(subject), &mode);
         let offset = self
             .writer
-            .produce(key, value)
+            .produce(key, value, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         Ok(())
     }
 
@@ -522,24 +585,28 @@ impl KafkaStore {
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn clear_subject_mode(&self, subject: &str) -> Result<(), SrError> {
         let _gate = self.write_gate.lock().await;
+        let primary = self.prepare_write().await?;
         let key = record::mode_key(Some(subject));
         let offset = self
             .writer
-            .produce_tombstone(key)
+            .produce_tombstone(key, primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
-        self.await_applied(offset).await;
+        self.await_applied(offset).await?;
         Ok(())
     }
 
     /// Block until the reader has applied the record at `offset`.
-    async fn await_applied(&self, offset: i64) {
+    async fn await_applied(&self, offset: i64) -> Result<(), SrError> {
         let mut rx = self.applied_rx.clone();
         while *rx.borrow() < offset {
             if rx.changed().await.is_err() {
-                break;
+                return Err(SrError::Backend(
+                    "schema-store reader stopped before applying the write".into(),
+                ));
             }
         }
+        Ok(())
     }
 
     /// Return the name of the backing `_schemas` topic.
@@ -547,4 +614,21 @@ impl KafkaStore {
     pub fn topic(&self) -> &str {
         &self.schemas_topic
     }
+}
+
+async fn await_applied_rx(
+    mut rx: watch::Receiver<i64>,
+    offset: i64,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    while *rx.borrow() < offset {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => anyhow::bail!("schema-store startup cancelled during replay"),
+            changed = rx.changed() => {
+                changed.map_err(|_| anyhow::anyhow!("schema-store reader stopped during initial replay"))?;
+            }
+        }
+    }
+    Ok(())
 }

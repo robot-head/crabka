@@ -366,7 +366,7 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
             Some((aggregate_expr_sql(agg)?, *op, *value)),
         ),
         _ => Err(TraceqlError::Unsupported(format!(
-            "pipeline shape {pipeline:?} is not implemented yet"
+            "pipeline shape is not valid for trace search: {pipeline:?}"
         ))),
     }
 }

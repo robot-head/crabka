@@ -115,7 +115,7 @@ impl ElectionClient {
     ) -> anyhow::Result<()> {
         loop {
             let (generation, assignment) = self.join_and_sync(coord, member_id).await?;
-            self.publish(&assignment);
+            self.publish(&assignment, generation, member_id);
             // heartbeat until a rebalance/error forces a rejoin
             loop {
                 tokio::select! {
@@ -271,7 +271,7 @@ impl ElectionClient {
         Ok((jg.generation_id, sg.assignment))
     }
 
-    fn publish(&self, assignment: &Bytes) {
+    fn publish(&self, assignment: &Bytes, generation_id: i32, member_id: &str) {
         let parsed: SchemaRegistryGroupAssignment =
             serde_json::from_slice(assignment).unwrap_or_default();
         // cp's assignment carries the master's identity; we're primary iff it
@@ -286,6 +286,8 @@ impl ElectionClient {
         let _ = self.tx.send(PrimaryState {
             is_primary,
             primary_url,
+            generation_id: is_primary.then_some(generation_id),
+            member_id: is_primary.then(|| member_id.to_owned()),
         });
     }
 }

@@ -17,6 +17,10 @@ use crate::config::RegistryConfig;
 pub struct PrimaryState {
     pub is_primary: bool,
     pub primary_url: Option<String>,
+    /// Classic-group generation that elected this primary.
+    pub generation_id: Option<i32>,
+    /// This node's member id in `generation_id` when it is the primary.
+    pub member_id: Option<String>,
 }
 
 /// The election handle: spawns the group-membership task and exposes the

@@ -229,16 +229,6 @@ enum Target {
     Ruler,
 }
 
-fn runnable_targets() -> &'static [Target] {
-    &[
-        Target::Distributor,
-        Target::Compactor,
-        Target::Querier,
-        Target::QueryFrontend,
-        Target::Ruler,
-    ]
-}
-
 fn build_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, Box<dyn std::error::Error>> {
     let parsed = url::Url::parse(url)?;
     let (store, _prefix) = object_store::parse_url_opts(&parsed, std::env::vars())?;
@@ -267,10 +257,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    if !runnable_targets().contains(&cli.target) {
-        eprintln!("metrics target {:?} is not implemented yet", cli.target);
-        std::process::exit(2);
-    }
     match cli.target {
         Target::Distributor => run_distributor(cli, metrics).await?,
         Target::Compactor => run_compactor(cli, metrics).await?,
@@ -783,21 +769,6 @@ mod tests {
         let cli = Cli::try_parse_from(["crabka-metrics", "--target", "query-frontend"]).unwrap();
 
         assert!(matches!(cli.target, Target::QueryFrontend));
-    }
-
-    #[test]
-    fn querier_target_is_runnable() {
-        assert!(runnable_targets().contains(&Target::Querier));
-    }
-
-    #[test]
-    fn query_frontend_target_is_runnable() {
-        assert!(runnable_targets().contains(&Target::QueryFrontend));
-    }
-
-    #[test]
-    fn ruler_target_is_runnable() {
-        assert!(runnable_targets().contains(&Target::Ruler));
     }
 
     #[tokio::test]

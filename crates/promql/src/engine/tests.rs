@@ -2464,7 +2464,7 @@ async fn instant_sum_and_avg_aggregations_omit_mixed_float_and_histogram_groups(
 }
 
 #[tokio::test]
-async fn instant_sum_aggregation_rejects_incompatible_native_histograms() {
+async fn instant_sum_aggregation_downscales_native_histograms() {
     let mut left = native_histogram(4.0, 10.0);
     left.positive_spans = vec![BucketSpan {
         offset: 0,
@@ -2502,17 +2502,26 @@ async fn instant_sum_aggregation_rejects_incompatible_native_histograms() {
     );
 
     let engine = PromqlEngine::new(Arc::new(store), EngineOpts::default());
-    let error = engine
+    let result = engine
         .query_instant(
             "tenant-a",
             "sum by (job) (request_duration_seconds)",
             10_000,
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert2::assert!(matches!(error, PromqlError::Unsupported(_)));
-    assert2::assert!(format!("{error}").contains("incompatible native histogram"));
+    let QueryResult::InstantVector(samples) = result else {
+        panic!("expected instant vector");
+    };
+    assert2::assert!(samples.len() == 1);
+    let SampleValue::Histogram(histogram) = &samples[0].value else {
+        panic!("expected histogram");
+    };
+    assert2::assert!(histogram.schema == 0);
+    assert2::assert!((histogram.count - 10.0).abs() < f64::EPSILON);
+    assert2::assert!((histogram.sum - 30.0).abs() < f64::EPSILON);
+    assert2::assert!(&histogram.positive_counts == &vec![3.0]);
 }
 
 #[tokio::test]

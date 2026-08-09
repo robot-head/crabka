@@ -7,6 +7,8 @@
 //! registry, one persistence path, and one actor model.
 
 pub(crate) mod bootstrap;
+pub(crate) mod leadership;
+pub(crate) mod partitioner;
 
 pub use bootstrap::AUDIT_TOPIC;
 pub mod unified;

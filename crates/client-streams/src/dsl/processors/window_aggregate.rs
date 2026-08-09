@@ -19,6 +19,10 @@ use crate::{
 /// Variance-neutral marker for multi-param processor structs.
 type Marker<T> = PhantomData<fn() -> T>;
 
+fn window_is_closed(window_start: i64, window_size: i64, window_close_time: i64) -> bool {
+    window_start.saturating_add(window_size) < window_close_time
+}
+
 /// Aggregate records into a windowed accumulator stored in a `WindowStore`.
 ///
 /// The behavior depends on the
@@ -78,14 +82,16 @@ where
         // and grace extents cross into that coordinate space here.
         let size = self.windows.size.millis_i64();
         self.stream_time = self.stream_time.max(r.timestamp);
-        let window_close_time = self.stream_time - self.windows.grace.millis_i64();
+        let window_close_time = self
+            .stream_time
+            .saturating_sub(self.windows.grace.millis_i64());
         // Stash the source record context BEFORE the store borrow so a cached
         // store attaches it to the deduped change it forwards on flush.
         let rc = ctx.record_context().clone();
 
         for ws in self.windows.windows_for(r.timestamp) {
-            // Emit-final drops updates for windows that already closed.
-            if self.emit.is_on_close() && ws + size < self.last_emitted_close {
+            // Kafka drops expired-window records for every emit strategy.
+            if window_is_closed(ws, size, window_close_time) {
                 continue;
             }
             // Borrow the store, do the async fetch + put, then drop the borrow
@@ -237,13 +243,15 @@ where
         // and grace extents cross into that coordinate space here.
         let size = self.windows.size.millis_i64();
         self.stream_time = self.stream_time.max(r.timestamp);
-        let window_close_time = self.stream_time - self.windows.grace.millis_i64();
+        let window_close_time = self
+            .stream_time
+            .saturating_sub(self.windows.grace.millis_i64());
         // Stash the source record context for cached writes (see aggregate proc).
         let rc = ctx.record_context().clone();
 
         for ws in self.windows.windows_for(r.timestamp) {
-            // Emit-final drops updates for windows that already closed.
-            if self.emit.is_on_close() && ws + size < self.last_emitted_close {
+            // Kafka drops expired-window records for every emit strategy.
+            if window_is_closed(ws, size, window_close_time) {
                 continue;
             }
             // Borrow the store, do the async fetch + put, then drop the borrow
@@ -349,6 +357,12 @@ mod tests {
         },
         store::{registry::StoreRegistry, window::WindowBytesStore},
     };
+
+    #[test]
+    fn window_close_boundary_is_strict() {
+        assert2::check!(!window_is_closed(0, 10, 10));
+        assert2::check!(window_is_closed(0, 10, 11));
+    }
 
     #[tokio::test]
     async fn windowed_count_tumbling_emits_per_window() {

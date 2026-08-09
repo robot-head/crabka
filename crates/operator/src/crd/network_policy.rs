@@ -10,14 +10,8 @@ use serde::{Deserialize, Serialize};
 /// Cluster-level opt-in for the `NetworkPolicy` generation that the
 /// operator manages.
 ///
-/// A value in `Kafka.spec.networkPolicy`, also `{}`, enables the
-/// generation. `None` disables it and starts a one-shot orphan cleanup.
-/// That cleanup runs only after a previous
-/// `NetworkPolicyReady=Available` condition.
-///
-/// The struct carries no fields today, and this is on purpose. Future work
-/// can add `metrics_peers`, `controller_peers`, and more without a
-/// breaking schema change.
+/// This is an explicit opt-in marker. Policy details come from listener and
+/// namespace configuration, so user-supplied fields are rejected.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkPolicySpec {}

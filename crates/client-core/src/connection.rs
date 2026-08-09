@@ -470,6 +470,34 @@ impl Connection {
         Ok(resp)
     }
 
+    /// Encode and enqueue a typed request that intentionally has no response.
+    /// Kafka Produce with `acks=0` is the standard use case.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if version negotiation or encoding fails, or if the
+    /// connection writer has stopped before accepting the frame.
+    pub async fn send_no_response<R: ProtocolRequest>(&self, req: R) -> Result<(), ClientError> {
+        let version = self.inner.versions.negotiate::<R>()?;
+        let corr_id = self.inner.next_corr_id.fetch_add(1, Ordering::Relaxed);
+        let body_flexible = version >= R::FLEXIBLE_MIN;
+        let mut frame = build_request_header(
+            ApiKey(R::API_KEY),
+            ApiVersion(version),
+            corr_id,
+            &self.inner.options.client_id,
+            body_flexible,
+        );
+        req.encode(&mut frame, version)?;
+        self.inner
+            .writer_tx
+            .send(DispatchItem {
+                bytes: frame.freeze(),
+            })
+            .await
+            .map_err(|_| ClientError::Disconnected)
+    }
+
     /// Send a hand-framed request and await the raw response body.
     ///
     /// This method bypasses the typed [`ProtocolRequest`] codegen path so
@@ -902,7 +930,14 @@ mod secured_tests {
 mod io_task_tests {
     use std::time::{Duration, Instant};
 
-    use crabka_protocol::{Encode, owned::api_versions_response::ApiVersionsResponse};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            metadata_request::MetadataRequest,
+            metadata_response::MetadataResponse,
+        },
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -966,6 +1001,81 @@ mod io_task_tests {
             started.elapsed() < Duration::from_secs(4),
             "drain must be prompt (reader EOF), not a request-timeout stall"
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_response_request_does_not_capture_the_next_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let handshake_len = socket.read_u32().await.unwrap();
+            let mut handshake = vec![0u8; handshake_len as usize];
+            socket.read_exact(&mut handshake).await.unwrap();
+            let handshake_corr =
+                i32::from_be_bytes([handshake[4], handshake[5], handshake[6], handshake[7]]);
+            let mut handshake_body = BytesMut::new();
+            ApiVersionsResponse {
+                api_keys: vec![ApiVersion {
+                    api_key: MetadataRequest::API_KEY,
+                    min_version: 0,
+                    max_version: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .encode(&mut handshake_body, 0)
+            .unwrap();
+            let mut handshake_response = BytesMut::new();
+            handshake_response.put_i32(handshake_corr);
+            handshake_response.put_slice(&handshake_body);
+            socket
+                .write_u32(u32::try_from(handshake_response.len()).unwrap())
+                .await
+                .unwrap();
+            socket.write_all(&handshake_response).await.unwrap();
+            socket.flush().await.unwrap();
+
+            let one_way_len = socket.read_u32().await.unwrap();
+            let mut one_way = vec![0u8; one_way_len as usize];
+            socket.read_exact(&mut one_way).await.unwrap();
+            let one_way_corr = i32::from_be_bytes([one_way[4], one_way[5], one_way[6], one_way[7]]);
+
+            let request_len = socket.read_u32().await.unwrap();
+            let mut request = vec![0u8; request_len as usize];
+            socket.read_exact(&mut request).await.unwrap();
+            let request_corr = i32::from_be_bytes([request[4], request[5], request[6], request[7]]);
+            assert2::assert!(request_corr == one_way_corr.wrapping_add(1));
+
+            let mut body = BytesMut::new();
+            MetadataResponse::default().encode(&mut body, 0).unwrap();
+            let mut response = BytesMut::new();
+            response.put_i32(request_corr);
+            response.put_slice(&body);
+            socket
+                .write_u32(u32::try_from(response.len()).unwrap())
+                .await
+                .unwrap();
+            socket.write_all(&response).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let conn = Connection::from_stream(Box::new(stream), ConnectionOptions::default())
+            .await
+            .expect("plaintext from_stream completes");
+        conn.send_no_response(MetadataRequest::default())
+            .await
+            .expect("one-way request enqueues");
+        let response = conn
+            .send(MetadataRequest::default())
+            .await
+            .expect("subsequent response remains correlated");
+        assert2::assert!(response == MetadataResponse::default());
+
+        conn.close();
         server.await.unwrap();
     }
 }

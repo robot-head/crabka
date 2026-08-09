@@ -4,11 +4,13 @@ use std::{
 };
 
 use crabka_blockstore::{Labels, SeriesFingerprint};
-use crabka_metrics::{BucketSpan, NativeHistogram};
+use crabka_metrics::NativeHistogram;
 use promql_parser::parser::LabelModifier;
 
 use super::{MomentReduction, QueryShardReducer, RankReduction};
-use crate::{PromqlError, QueryResult, RangeSeries, SampleValue};
+use crate::{
+    PromqlError, QueryResult, RangeSeries, SampleValue, engine::add_compatible_native_histogram,
+};
 
 /// Merges range-matrix subquery results back into one Prometheus matrix.
 ///
@@ -340,117 +342,6 @@ fn aggregate_labels(input: &Labels, modifier: Option<&LabelModifier>) -> Labels 
         None => {}
     }
     labels
-}
-
-fn add_compatible_native_histogram(
-    left: &mut NativeHistogram,
-    right: &NativeHistogram,
-) -> Result<(), PromqlError> {
-    if !native_histograms_are_compatible(left, right) {
-        return Err(PromqlError::Unsupported(
-            "incompatible native histogram query-frontend merge is not implemented yet".to_string(),
-        ));
-    }
-
-    left.zero_count += right.zero_count;
-    left.count += right.count;
-    left.sum += right.sum;
-    (left.positive_spans, left.positive_counts) = add_spanned_histogram_counts(
-        &left.positive_spans,
-        &left.positive_counts,
-        &right.positive_spans,
-        &right.positive_counts,
-    );
-    (left.negative_spans, left.negative_counts) = add_spanned_histogram_counts(
-        &left.negative_spans,
-        &left.negative_counts,
-        &right.negative_spans,
-        &right.negative_counts,
-    );
-    left.start_timestamp_ms = match (left.start_timestamp_ms, right.start_timestamp_ms) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(left), None) => Some(left),
-        (None, Some(right)) => Some(right),
-        (None, None) => None,
-    };
-    Ok(())
-}
-
-fn native_histograms_are_compatible(left: &NativeHistogram, right: &NativeHistogram) -> bool {
-    left.schema == right.schema
-        && left.is_float == right.is_float
-        && left.reset_hint == right.reset_hint
-        && left.zero_threshold.to_bits() == right.zero_threshold.to_bits()
-        && left.custom_values == right.custom_values
-}
-
-fn add_spanned_histogram_counts(
-    left_spans: &[BucketSpan],
-    left_counts: &[f64],
-    right_spans: &[BucketSpan],
-    right_counts: &[f64],
-) -> (Vec<BucketSpan>, Vec<f64>) {
-    let mut buckets = spanned_histogram_counts(left_spans, left_counts);
-    for (index, count) in spanned_histogram_counts(right_spans, right_counts) {
-        *buckets.entry(index).or_insert(0.0) += count;
-    }
-    compact_spanned_histogram_counts(buckets)
-}
-
-fn spanned_histogram_counts(spans: &[BucketSpan], counts: &[f64]) -> BTreeMap<i32, f64> {
-    let mut buckets = BTreeMap::new();
-    let mut index = 0_i32;
-    let mut count_index = 0_usize;
-    for (span_index, span) in spans.iter().enumerate() {
-        if span_index == 0 {
-            index = span.offset;
-        } else {
-            index += span.offset;
-        }
-        for _ in 0..span.length {
-            let Some(count) = counts.get(count_index).copied() else {
-                return buckets;
-            };
-            buckets.insert(index, count);
-            index += 1;
-            count_index += 1;
-        }
-    }
-    buckets
-}
-
-fn compact_spanned_histogram_counts(buckets: BTreeMap<i32, f64>) -> (Vec<BucketSpan>, Vec<f64>) {
-    let buckets = buckets
-        .into_iter()
-        .filter(|(_, count)| *count != 0.0)
-        .collect::<Vec<_>>();
-    let mut spans = Vec::new();
-    let mut counts = Vec::with_capacity(buckets.len());
-    let mut span_start = None;
-    let mut previous_index = 0_i32;
-    let mut previous_span_end = 0_i32;
-    for (index, count) in buckets {
-        if span_start.is_none() {
-            span_start = Some(index);
-        } else if index != previous_index + 1 {
-            let start = span_start.expect("checked is_some");
-            spans.push(BucketSpan {
-                offset: start - previous_span_end,
-                length: u32::try_from(previous_index - start + 1).unwrap_or(u32::MAX),
-            });
-            previous_span_end = previous_index + 1;
-            span_start = Some(index);
-        }
-        counts.push(count);
-        previous_index = index;
-    }
-    if let Some(start) = span_start {
-        spans.push(BucketSpan {
-            offset: start - previous_span_end,
-            length: u32::try_from(previous_index - start + 1).unwrap_or(u32::MAX),
-        });
-    }
-    (spans, counts)
 }
 
 fn scaled_native_histogram(histogram: &NativeHistogram, factor: f64) -> NativeHistogram {

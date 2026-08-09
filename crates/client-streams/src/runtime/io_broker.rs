@@ -1,32 +1,17 @@
 //! Real broker-backed implementations of the [`RecordFetcher`],
 //! [`RecordProducer`], and [`OffsetStore`] I/O traits.
-//!
-//! # Multi-broker routing limitation
-//!
-//! `BrokerFetcher` opens one connection to the bootstrap address. It uses that
-//! connection for every `fetch_partition` call. In a single-node broker setup,
-//! the common test scenario, this is always correct, because the bootstrap
-//! broker is the leader for all partitions. In a multi-broker cluster the
-//! fetch can go to a broker that is not the partition leader. That broker then
-//! returns `NOT_LEADER_OR_FOLLOWER` errors.
-//!
-//! TODO: implement per-partition leader routing for `BrokerFetcher` to support
-//! multi-broker deployments. Look up `leader_id` from metadata, then dial the
-//! correct broker connection from a pool.
 
 use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use crabka_client_core::{
-    Client, ClientDnsTimeout, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
-    ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX, FetchMinBytes, IsolatedFetch,
-    fetch_partition_with_isolation,
+    Client, ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity,
+    DEFAULT_FETCH_RESPONSE_MAX, FetchMinBytes, IsolatedFetch,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_protocol::{
     owned::{
         list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
-        metadata_request::{MetadataRequest, MetadataRequestTopic},
         offset_commit_request::{
             OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
         },
@@ -52,20 +37,23 @@ use crate::{
 
 /// A [`RecordFetcher`] backed by a real Kafka broker.
 ///
-/// This fetcher uses one connection to the bootstrap broker for all fetch
-/// calls. See the module-level doc for the multi-broker routing limitation.
+/// Routes each fetch to the partition leader learned from broker metadata.
 pub(crate) struct BrokerFetcher {
-    /// Dedicated connection used for every `fetch_partition` call.
-    conn: Connection,
-    /// Metadata client used to resolve `topic_id` on cache miss.
+    /// Metadata client and per-broker connection pool.
     client: Client,
-    /// Cache of topic name → `topic_id`. A metadata refresh fills it lazily.
-    topic_ids: Mutex<HashMap<String, WireUuid>>,
+    /// Topic ids and partition leaders, replaced atomically on metadata refresh.
+    routes: Mutex<HashMap<String, TopicRoute>>,
     /// Maximum time the broker waits before returning an empty fetch.
     max_wait: Time,
     /// Maximum size the broker returns for each partition for each fetch.
     partition_max: ByteSize,
     fetch_min: FetchMinBytes,
+}
+
+#[derive(Debug, Clone)]
+struct TopicRoute {
+    topic_id: WireUuid,
+    leaders: HashMap<i32, i32>,
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +65,8 @@ pub(crate) struct ClientResourcePolicy {
 
 #[async_trait::async_trait]
 impl RecordFetcher for BrokerFetcher {
+    // cargo-mutants: live broker routing and wire projection; integration-tested.
+    #[cfg_attr(test, mutants::skip)]
     async fn fetch(
         &self,
         topic: &str,
@@ -84,7 +74,7 @@ impl RecordFetcher for BrokerFetcher {
         offset: i64,
         isolation: IsolationLevel,
     ) -> Result<FetchBatch, StreamsClientError> {
-        let topic_id = self.resolve_topic_id(topic).await?;
+        let route = self.resolve_route(topic, partition).await?;
 
         // Map the runtime isolation level to the Kafka `Fetch.isolation_level`
         // wire value (READ_UNCOMMITTED = 0, READ_COMMITTED = 1).
@@ -93,23 +83,41 @@ impl RecordFetcher for BrokerFetcher {
             IsolationLevel::ReadCommitted => 1,
         };
 
-        let fetched = fetch_partition_with_isolation(
-            &self.conn,
-            IsolatedFetch {
-                topic,
-                topic_id,
-                partition,
-                fetch_offset: offset,
-                // `IsolatedFetch` mirrors the Kafka `Fetch` wire fields, so the
-                // quantities render back to raw integers here.
-                max_wait: self.max_wait,
-                max: DEFAULT_FETCH_RESPONSE_MAX,
-                partition_max: self.partition_max,
-                fetch_min: self.fetch_min,
-                isolation_level,
-            },
-        )
-        .await?;
+        let request = IsolatedFetch {
+            topic,
+            topic_id: route.topic_id,
+            partition,
+            fetch_offset: offset,
+            // `IsolatedFetch` mirrors the Kafka `Fetch` wire fields, so the
+            // quantities render back to raw integers here.
+            max_wait: self.max_wait,
+            max: DEFAULT_FETCH_RESPONSE_MAX,
+            partition_max: self.partition_max,
+            fetch_min: self.fetch_min,
+            isolation_level,
+        };
+        let fetched = match self
+            .client
+            .fetch_partition_with_isolation_on(route.leader_id, request)
+            .await
+        {
+            Err(crabka_client_core::ClientError::Server { error_code })
+                if is_stale_route_error(error_code) =>
+            {
+                self.refresh_routes().await?;
+                let route = self.cached_route(topic, partition).await?;
+                self.client
+                    .fetch_partition_with_isolation_on(
+                        route.leader_id,
+                        IsolatedFetch {
+                            topic_id: route.topic_id,
+                            ..request
+                        },
+                    )
+                    .await?
+            }
+            other => other?,
+        };
 
         let records = fetched
             .into_iter()
@@ -124,66 +132,113 @@ impl RecordFetcher for BrokerFetcher {
         Ok(FetchBatch { records })
     }
 
-    /// Resolves the real partition list for `topic` with a topic-scoped
-    /// `MetadataRequest` and returns `0..partition_count`.
-    ///
-    /// The global consumer reads every partition to materialize the
-    /// fully-replicated global store. The default `vec![0]` would silently drop
-    /// records on any partition > 0.
+    /// Resolve the real partition list for `topic` from broker metadata. The
+    /// global consumer reads every partition to materialize the fully-replicated
+    /// global store, so the default `vec![0]` would silently drop records on any
+    /// partition greater than zero.
     async fn partitions(&self, topic: &str) -> Result<Vec<i32>, StreamsClientError> {
-        let resp = self
-            .client
-            .send(MetadataRequest {
-                topics: Some(vec![MetadataRequestTopic {
-                    name: Some(topic.to_string()),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            })
-            .await?;
-
-        let count = resp
-            .topics
-            .iter()
-            .find(|t| t.name.as_deref() == Some(topic))
-            .map(|t| t.partitions.len())
-            .ok_or_else(|| {
-                StreamsClientError::Runtime(format!(
-                    "Metadata: topic {topic} not present in response"
-                ))
-            })?;
-
-        // Fall back to a single partition if the broker reports none (e.g. a
-        // not-yet-created topic) so the consumer still reads partition 0.
-        let count = i32::try_from(count.max(1)).unwrap_or(1);
-        Ok((0..count).collect())
+        self.refresh_routes().await?;
+        let routes = self.routes.lock().await;
+        let mut partitions: Vec<i32> = routes
+            .get(topic)
+            .ok_or_else(|| missing_topic(topic))?
+            .leaders
+            .keys()
+            .copied()
+            .collect();
+        partitions.sort_unstable();
+        if partitions.is_empty() {
+            return Err(StreamsClientError::Runtime(format!(
+                "Metadata: topic {topic} has no partitions"
+            )));
+        }
+        Ok(partitions)
     }
 }
 
 impl BrokerFetcher {
-    /// Looks up the `topic_id` in the local cache.
-    ///
-    /// On a cache miss, this method refreshes metadata from the broker and
-    /// fills the cache.
-    async fn resolve_topic_id(&self, topic: &str) -> Result<WireUuid, StreamsClientError> {
+    async fn resolve_route(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Result<PartitionRoute, StreamsClientError> {
         {
-            let cache = self.topic_ids.lock().await;
-            if let Some(&id) = cache.get(topic) {
-                return Ok(id);
+            let routes = self.routes.lock().await;
+            if let Some(route) = route_for(&routes, topic, partition) {
+                return Ok(route);
             }
         }
-
-        // Cache miss — fetch fresh metadata.
-        let meta = self.client.refresh_metadata().await?;
-        let mut cache = self.topic_ids.lock().await;
-        for t in &meta.topics {
-            if let Some(name) = &t.name {
-                cache.insert(name.clone(), t.topic_id);
-            }
-        }
-        // Return the id for the requested topic (fall back to ZERO if not found).
-        Ok(cache.get(topic).copied().unwrap_or_default())
+        self.refresh_routes().await?;
+        self.cached_route(topic, partition).await
     }
+
+    async fn cached_route(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Result<PartitionRoute, StreamsClientError> {
+        route_for(&*self.routes.lock().await, topic, partition).ok_or_else(|| {
+            StreamsClientError::Runtime(format!(
+                "Metadata: partition {topic}-{partition} not present in response"
+            ))
+        })
+    }
+
+    async fn refresh_routes(&self) -> Result<(), StreamsClientError> {
+        let meta = self.client.refresh_metadata().await?;
+        *self.routes.lock().await = routes_from_metadata(&meta);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartitionRoute {
+    topic_id: WireUuid,
+    leader_id: i32,
+}
+
+fn route_for(
+    routes: &HashMap<String, TopicRoute>,
+    topic: &str,
+    partition: i32,
+) -> Option<PartitionRoute> {
+    let topic = routes.get(topic)?;
+    Some(PartitionRoute {
+        topic_id: topic.topic_id,
+        leader_id: *topic.leaders.get(&partition)?,
+    })
+}
+
+fn routes_from_metadata(
+    metadata: &crabka_protocol::owned::metadata_response::MetadataResponse,
+) -> HashMap<String, TopicRoute> {
+    metadata
+        .topics
+        .iter()
+        .filter(|topic| topic.error_code == 0)
+        .filter_map(|topic| {
+            Some((
+                topic.name.clone()?,
+                TopicRoute {
+                    topic_id: topic.topic_id,
+                    leaders: topic
+                        .partitions
+                        .iter()
+                        .filter(|partition| partition.error_code == 0 && partition.leader_id >= 0)
+                        .map(|partition| (partition.partition_index, partition.leader_id))
+                        .collect(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn missing_topic(topic: &str) -> StreamsClientError {
+    StreamsClientError::Runtime(format!("Metadata: topic {topic} not present in response"))
+}
+
+fn is_stale_route_error(error_code: i16) -> bool {
+    matches!(error_code, 3 | 5 | 6 | 100)
 }
 
 // ─── BrokerProducer ───────────────────────────────────────────────────────────
@@ -249,21 +304,17 @@ impl RecordProducer for BrokerProducer {
     /// This method first asks the inner producer to drain its batch buffer. It
     /// then returns any `Err` result from a record ack, so the caller knows
     /// that a commit would be unsafe.
+    // cargo-mutants: live producer flush and per-record ack orchestration;
+    // exercised by the streams integration suite.
+    #[cfg_attr(test, mutants::skip)]
     async fn flush(&self) -> Result<(), StreamsClientError> {
-        self.inner
-            .flush()
-            .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+        self.inner.flush().await.map_err(StreamsClientError::from)?;
 
         let receivers: Vec<_> = std::mem::take(&mut *self.pending.lock().await);
         for rx in receivers {
             match rx.await {
                 Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    return Err(StreamsClientError::Runtime(format!(
-                        "produce ack failed: {e}"
-                    )));
-                }
+                Ok(Err(e)) => return Err(e.into()),
                 Err(_) => {
                     return Err(StreamsClientError::Runtime(
                         "produce ack receiver dropped".to_string(),
@@ -376,14 +427,14 @@ impl TransactionalProducer for BrokerTransactionalProducer {
         self.inner
             .init_transactions()
             .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+            .map_err(StreamsClientError::from)
     }
 
     async fn begin_transaction(&self) -> Result<(), StreamsClientError> {
         let t = Arc::clone(&self.inner)
             .begin_transaction_owned()
             .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+            .map_err(StreamsClientError::from)?;
         *self.txn.lock().await = Some(t);
         Ok(())
     }
@@ -403,7 +454,7 @@ impl TransactionalProducer for BrokerTransactionalProducer {
         self.inner
             .send_offsets_to_transaction(off, &meta)
             .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+            .map_err(StreamsClientError::from)
     }
 
     async fn commit_transaction(&self) -> Result<(), StreamsClientError> {
@@ -421,9 +472,9 @@ impl TransactionalProducer for BrokerTransactionalProducer {
         match t.commit().await {
             Ok(()) => Ok(()),
             Err(e) => {
-                let source = e.source.to_string();
+                let source = StreamsClientError::from(e.source);
                 *self.txn.lock().await = Some(e.transaction);
-                Err(StreamsClientError::Runtime(source))
+                Err(source)
             }
         }
     }
@@ -437,9 +488,9 @@ impl TransactionalProducer for BrokerTransactionalProducer {
         match t.abort().await {
             Ok(()) => Ok(()),
             Err(e) => {
-                let source = e.source.to_string();
+                let source = StreamsClientError::from(e.source);
                 *self.txn.lock().await = Some(e.transaction);
-                Err(StreamsClientError::Runtime(source))
+                Err(source)
             }
         }
     }
@@ -733,47 +784,7 @@ impl OffsetStore for BrokerOffsetStore {
 
 // ─── build ────────────────────────────────────────────────────────────────────
 
-async fn lookup_first<F, I>(
-    bootstrap: &str,
-    dns_timeout: ClientDnsTimeout,
-    lookup: F,
-) -> Result<std::net::SocketAddr, StreamsClientError>
-where
-    F: std::future::Future<Output = std::io::Result<I>>,
-    I: Iterator<Item = std::net::SocketAddr>,
-{
-    let mut addrs = tokio::time::timeout(dns_timeout.time().to_std(), lookup)
-        .await
-        .map_err(|_| {
-            StreamsClientError::Runtime(format!(
-                "DNS lookup {bootstrap} timed out after {} ms",
-                dns_timeout.milliseconds(),
-            ))
-        })?
-        .map_err(|error| {
-            StreamsClientError::Runtime(format!("failed to resolve bootstrap {bootstrap}: {error}"))
-        })?;
-    addrs.next().ok_or_else(|| {
-        StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
-    })
-}
-
-fn fetch_connection_options(
-    client_id: &str,
-    broker_dns_timeout: ClientDnsTimeout,
-    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
-    frame_max: ClientFrameMax,
-) -> ConnectionOptions {
-    ConnectionOptions {
-        client_id: client_id.to_owned(),
-        dns_timeout: broker_dns_timeout,
-        dispatch_queue_capacity,
-        frame_max,
-        ..ConnectionOptions::default()
-    }
-}
-
-/// Constructs the three broker-backed I/O trait objects from one bootstrap
+/// Construct the three broker-backed I/O trait objects from a single bootstrap
 /// address.
 ///
 /// Returns `(BrokerFetcher, Arc<BrokerProducer>, Arc<BrokerOffsetStore>)`.
@@ -801,26 +812,7 @@ pub(crate) async fn build(
         .build()
         .await?;
 
-    // 2. Dedicated fetch connection (single bootstrap broker).
-    // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
-    let addr = lookup_first(
-        bootstrap,
-        broker_dns_timeout,
-        tokio::net::lookup_host(bootstrap),
-    )
-    .await?;
-    let fetch_conn = Connection::connect_with_options(
-        addr,
-        fetch_connection_options(
-            client_id,
-            broker_dns_timeout,
-            dispatch_queue_capacity,
-            frame_max,
-        ),
-    )
-    .await?;
-
-    // 3. Idempotent producer.
+    // 2. Idempotent producer.
     let producer = Producer::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-producer"))
@@ -833,7 +825,7 @@ pub(crate) async fn build(
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
 
-    // 4. Offset client — re-use a second Client for offset RPCs so the
+    // 3. Offset client — re-use a second Client for offset RPCs so the
     //    metadata client's connection isn't head-of-line-blocked by slow
     //    OffsetFetch or OffsetCommit calls.
     let offset_client = Client::builder()
@@ -846,9 +838,8 @@ pub(crate) async fn build(
         .await?;
 
     let fetcher = BrokerFetcher {
-        conn: fetch_conn,
         client: metadata_client,
-        topic_ids: Mutex::new(HashMap::new()),
+        routes: Mutex::new(HashMap::new()),
         max_wait: millis(500),
         partition_max: mebibytes(1),
         fetch_min,
@@ -902,26 +893,7 @@ pub(crate) async fn build_eos(
         .build()
         .await?;
 
-    // 2. Dedicated fetch connection (single bootstrap broker).
-    // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
-    let addr = lookup_first(
-        bootstrap,
-        broker_dns_timeout,
-        tokio::net::lookup_host(bootstrap),
-    )
-    .await?;
-    let fetch_conn = Connection::connect_with_options(
-        addr,
-        fetch_connection_options(
-            client_id,
-            broker_dns_timeout,
-            dispatch_queue_capacity,
-            frame_max,
-        ),
-    )
-    .await?;
-
-    // 3. Transactional producer (idempotence is implied by transactions).
+    // 2. Transactional producer (idempotence is implied by transactions).
     let producer = Producer::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-producer"))
@@ -935,7 +907,7 @@ pub(crate) async fn build_eos(
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
 
-    // 4. Offset client — re-use a second Client for offset RPCs so the
+    // 3. Offset client — re-use a second Client for offset RPCs so the
     //    metadata client's connection isn't head-of-line-blocked by slow
     //    OffsetFetch or OffsetCommit calls.
     let offset_client = Client::builder()
@@ -948,9 +920,8 @@ pub(crate) async fn build_eos(
         .await?;
 
     let fetcher = BrokerFetcher {
-        conn: fetch_conn,
         client: metadata_client,
-        topic_ids: Mutex::new(HashMap::new()),
+        routes: Mutex::new(HashMap::new()),
         max_wait: millis(500),
         partition_max: mebibytes(1),
         fetch_min,
@@ -969,20 +940,21 @@ pub(crate) async fn build_eos(
 #[cfg(test)]
 mod tests {
 
-    use std::{net::SocketAddr, sync::Arc, time::Duration};
+    use std::sync::Arc;
 
     use bytes::Bytes;
     use crabka_broker::{Broker, BrokerConfig};
-    use crabka_client_core::{
-        Client, ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity,
-    };
+    use crabka_client_core::Client;
     use crabka_client_producer::Producer;
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_units::{kibibytes, millis};
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        metadata_response::{MetadataResponse, MetadataResponsePartition, MetadataResponseTopic},
+    };
     use tokio::sync::Mutex;
 
     use super::{
-        BrokerOffsetStore, BrokerTransactionalProducer, fetch_connection_options, lookup_first,
+        BrokerOffsetStore, BrokerTransactionalProducer, is_stale_route_error, route_for,
+        routes_from_metadata,
     };
     use crate::{
         error::StreamsClientError,
@@ -1021,72 +993,52 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn raw_lookup_stops_at_the_configured_deadline() {
-        let timeout = ClientDnsTimeout::new(millis(37)).expect("positive timeout");
-        let started = tokio::time::Instant::now();
-        let error = lookup_first(
-            "broker.example:9092",
-            timeout,
-            std::future::pending::<std::io::Result<std::vec::IntoIter<SocketAddr>>>(),
-        )
-        .await
-        .expect_err("pending resolver must time out");
+    #[test]
+    fn metadata_routes_include_only_usable_partition_leaders() {
+        let topic_id = crabka_protocol::primitives::uuid::Uuid([7; 16]);
+        let metadata = MetadataResponse {
+            topics: vec![MetadataResponseTopic {
+                name: Some("orders".into()),
+                topic_id,
+                partitions: vec![
+                    MetadataResponsePartition {
+                        partition_index: 0,
+                        leader_id: 2,
+                        ..Default::default()
+                    },
+                    MetadataResponsePartition {
+                        partition_index: 1,
+                        leader_id: -1,
+                        ..Default::default()
+                    },
+                    MetadataResponsePartition {
+                        error_code: 3,
+                        partition_index: 2,
+                        leader_id: 3,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
 
-        assert2::assert!(started.elapsed() == Duration::from_millis(37));
-        assert2::assert!(
-            error.to_string()
-                == "runtime error: DNS lookup broker.example:9092 timed out after 37 ms"
-        );
-    }
+        let routes = routes_from_metadata(&metadata);
 
-    #[tokio::test]
-    async fn raw_lookup_preserves_resolver_and_empty_result_context() {
-        let timeout = ClientDnsTimeout::default();
-        let resolver_error = lookup_first(
-            "bad.example:9092",
-            timeout,
-            std::future::ready(Err::<std::vec::IntoIter<SocketAddr>, _>(
-                std::io::Error::other("resolver failed"),
-            )),
-        )
-        .await
-        .expect_err("resolver error");
-        assert2::assert!(
-            resolver_error.to_string()
-                == "runtime error: failed to resolve bootstrap bad.example:9092: resolver failed"
-        );
-
-        let empty = lookup_first(
-            "empty.example:9092",
-            timeout,
-            std::future::ready(Ok(Vec::<SocketAddr>::new().into_iter())),
-        )
-        .await
-        .expect_err("empty result");
-        assert2::assert!(
-            empty.to_string()
-                == "runtime error: no addresses resolved for bootstrap: empty.example:9092"
-        );
+        assert2::assert!(route_for(&routes, "orders", 0).unwrap().topic_id == topic_id);
+        assert2::assert!(route_for(&routes, "orders", 0).unwrap().leader_id == 2);
+        assert2::assert!(route_for(&routes, "orders", 1).is_none());
+        assert2::assert!(route_for(&routes, "orders", 2).is_none());
     }
 
     #[test]
-    fn fetch_connection_options_carry_client_policy() {
-        let timeout = ClientDnsTimeout::new(millis(41)).expect("positive timeout");
-        let dispatch = ConnectionDispatchQueueCapacity::new(7).unwrap();
-        let frame_max = ClientFrameMax::try_from(kibibytes(32)).unwrap();
-        let options = fetch_connection_options("streams-fetch", timeout, dispatch, frame_max);
-
-        assert2::assert!(options.client_id == "streams-fetch");
-        assert2::assert!(options.dns_timeout == timeout);
-        assert2::assert!(options.dispatch_queue_capacity == dispatch);
-        assert2::assert!(options.frame_max == frame_max);
-        assert2::assert!(
-            options.connect_timeout == crabka_client_core::DEFAULT_CLIENT_CONNECT_TIMEOUT
-        );
-        assert2::assert!(
-            options.request_timeout == crabka_client_core::DEFAULT_CLIENT_REQUEST_TIMEOUT
-        );
+    fn stale_partition_routes_refresh_only_for_metadata_errors() {
+        for code in [3, 5, 6, 100] {
+            assert2::assert!(is_stale_route_error(code), "code {code}");
+        }
+        for code in [0, 1, 29, 45] {
+            assert2::assert!(!is_stale_route_error(code), "code {code}");
+        }
     }
 
     /// Round-trip test: `committed` returns `None` before any commit, and

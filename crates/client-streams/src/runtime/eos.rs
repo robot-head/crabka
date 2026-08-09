@@ -87,6 +87,8 @@ pub(crate) mod mock {
         /// `(topic, partition, key, value)` of each `send`. A test-only record log.
         pub sent: Mutex<Vec<SentRecord>>,
         pub fail_at: Mutex<Option<Step>>,
+        /// Return the fatal producer-fenced error the first time this step runs.
+        pub fence_at: Mutex<Option<Step>>,
     }
     impl MockTransactionalProducer {
         fn record(&self, s: Step) -> Result<(), StreamsClientError> {
@@ -95,6 +97,12 @@ pub(crate) mod mock {
             if *f == Some(s) {
                 *f = None;
                 return Err(StreamsClientError::Runtime(format!("mock fail at {s:?}")));
+            }
+            drop(f);
+            let mut fenced = self.fence_at.lock().unwrap();
+            if *fenced == Some(s) {
+                *fenced = None;
+                return Err(crabka_client_producer::ProducerError::FencedProducer.into());
             }
             Ok(())
         }

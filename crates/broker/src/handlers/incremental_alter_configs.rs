@@ -13,8 +13,8 @@
 
 use bytes::Bytes;
 use crabka_metadata::{
-    AclOperation, BrokerConfigRecord, ClientMetricsConfigRecord, MetadataImage, MetadataRecord,
-    NodeId, ResourceType, TopicConfigRecord,
+    AclOperation, BrokerConfigRecord, ClientMetricsConfigRecord, GroupConfigRecord, MetadataImage,
+    MetadataRecord, NodeId, ResourceType, TopicConfigRecord,
 };
 use crabka_protocol::{
     Decode,
@@ -37,21 +37,18 @@ use crate::{
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
+const RESOURCE_TYPE_GROUP: i8 = 32;
 const OP_SET: i8 = 0;
 const OP_DELETE: i8 = 1;
 
-/// Returns `true` if `name` is a broker-scoped config key that this
-/// broker accepts. The broker accepts the two KIP-73 throttle rate keys, which
-/// it persists, and `replica.alter.log.dirs.io.max.bytes.per.second`, which
-/// Kafka's `kafka-reassign-partitions --verify` also clears. The broker accepts
-/// that third key silently and does not store it, because there is no log-dir
-/// throttle implementation.
+/// Returns `true` if `name` is a broker-scoped config key accepted by this
+/// broker.
 fn is_known_broker_config(name: &str) -> bool {
     matches!(
         name,
         crate::throttle::LEADER_THROTTLED_RATE_KEY
             | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
-            | "replica.alter.log.dirs.io.max.bytes.per.second"
+            | crate::throttle::ALTER_LOG_DIRS_THROTTLED_RATE_KEY
     )
 }
 
@@ -61,7 +58,8 @@ fn is_known_broker_config(name: &str) -> bool {
 fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
     match name {
         crate::throttle::LEADER_THROTTLED_RATE_KEY
-        | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY => value
+        | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
+        | crate::throttle::ALTER_LOG_DIRS_THROTTLED_RATE_KEY => value
             .parse::<i64>()
             .map(|_| ())
             .map_err(|e| format!("invalid rate: {e}")),
@@ -142,6 +140,16 @@ async fn process_resource(
                 operation: AclOperation::AlterConfigs,
             },
         ),
+        RESOURCE_TYPE_GROUP => broker.config.authorizer.authorize(
+            image,
+            &AuthorizationRequest {
+                principal: ctx.principal,
+                host: ctx.peer,
+                resource_type: ResourceType::Group,
+                resource_name: &resource.resource_name,
+                operation: AclOperation::AlterConfigs,
+            },
+        ),
         _ => {
             out.error_code = codes::INVALID_RESOURCE_TYPE;
             out.error_message = Some(format!(
@@ -154,6 +162,7 @@ async fn process_resource(
     if acl_result == AuthorizationResult::Deny {
         out.error_code = match resource.resource_type {
             RESOURCE_TYPE_TOPIC => codes::TOPIC_AUTHORIZATION_FAILED,
+            RESOURCE_TYPE_GROUP => codes::GROUP_AUTHORIZATION_FAILED,
             _ => codes::CLUSTER_AUTHORIZATION_FAILED,
         };
         return out;
@@ -179,6 +188,18 @@ async fn process_resource(
         }
         RESOURCE_TYPE_CLIENT_METRICS => {
             handle_client_metrics_scoped(&resource, image, &mut out, &mut to_submit);
+            if out.error_code != codes::NONE {
+                return out;
+            }
+        }
+        RESOURCE_TYPE_GROUP => {
+            handle_group_scoped(
+                &resource,
+                image,
+                &broker.config.streams_group,
+                &mut out,
+                &mut to_submit,
+            );
             if out.error_code != codes::NONE {
                 return out;
             }
@@ -213,6 +234,58 @@ async fn process_resource(
         }
     }
     out
+}
+
+fn handle_group_scoped(
+    resource: &AlterConfigsResource,
+    image: &MetadataImage,
+    defaults: &crate::coordinator::unified::streams::config::StreamsGroupConfig,
+    out: &mut AlterConfigsResourceResponse,
+    to_submit: &mut Vec<MetadataRecord>,
+) {
+    use crate::coordinator::unified::streams::config::GROUP_CONFIG_KEYS;
+
+    if resource.resource_name.is_empty() {
+        out.error_code = codes::INVALID_REQUEST;
+        out.error_message = Some("group id must not be empty".into());
+        return;
+    }
+    let mut merged = image
+        .group_config(&resource.resource_name)
+        .cloned()
+        .unwrap_or_default();
+    for cfg in &resource.configs {
+        if !GROUP_CONFIG_KEYS.contains(&cfg.name.as_str()) {
+            out.error_code = codes::INVALID_CONFIG;
+            out.error_message = Some(format!("unknown group config `{}`", cfg.name));
+            return;
+        }
+        match cfg.config_operation {
+            OP_SET => {
+                merged.insert(cfg.name.clone(), cfg.value.clone().unwrap_or_default());
+            }
+            OP_DELETE => {
+                merged.remove(&cfg.name);
+            }
+            op => {
+                out.error_code = codes::INVALID_CONFIG;
+                out.error_message = Some(format!(
+                    "config_operation={op} is not valid for group config `{}`",
+                    cfg.name
+                ));
+                return;
+            }
+        }
+    }
+    if let Err(reason) = defaults.with_group_overrides(&merged) {
+        out.error_code = codes::INVALID_CONFIG;
+        out.error_message = Some(reason);
+        return;
+    }
+    to_submit.push(MetadataRecord::V1GroupConfig(GroupConfigRecord {
+        group_id: resource.resource_name.clone(),
+        configs: merged,
+    }));
 }
 
 fn topic_config_record(
@@ -294,17 +367,10 @@ fn handle_broker_scoped(
             out.error_message = Some(format!("unknown broker config {}", cfg.name));
             return; // halt processing this resource
         }
-        // Keys we accept but don't persist (no implementation yet): silently
-        // skip — just validate that the operation is valid.
-        let persist = matches!(
-            cfg.name.as_str(),
-            crate::throttle::LEADER_THROTTLED_RATE_KEY
-                | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
-        );
         let new_value = match cfg.config_operation {
             OP_SET => {
                 let v = cfg.value.clone().unwrap_or_default();
-                if persist && let Err(e) = validate_broker_config_value(&cfg.name, &v) {
+                if let Err(e) = validate_broker_config_value(&cfg.name, &v) {
                     out.error_code = codes::INVALID_CONFIG;
                     out.error_message = Some(e);
                     return;
@@ -321,13 +387,11 @@ fn handle_broker_scoped(
                 return;
             }
         };
-        if persist {
-            to_submit.push(MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-                node_id,
-                config_name: cfg.name.clone(),
-                config_value: new_value,
-            }));
-        }
+        to_submit.push(MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id,
+            config_name: cfg.name.clone(),
+            config_value: new_value,
+        }));
     }
 }
 
@@ -408,6 +472,9 @@ mod tests {
         ));
         assert!(is_known_broker_config(
             crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
+        ));
+        assert!(is_known_broker_config(
+            crate::throttle::ALTER_LOG_DIRS_THROTTLED_RATE_KEY
         ));
     }
 
@@ -534,6 +601,31 @@ mod tests {
             config_value: Some("2048".to_string()),
         })];
         assert!(to_submit == expected);
+    }
+
+    #[test]
+    fn broker_scoped_log_dir_rate_is_validated_and_persisted() {
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
+        let resource = make_resource(
+            "1",
+            vec![make_set_cfg(
+                crate::throttle::ALTER_LOG_DIRS_THROTTLED_RATE_KEY,
+                "4096",
+            )],
+        );
+        let mut out = AlterConfigsResourceResponse::default();
+        let mut to_submit = Vec::new();
+        handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
+
+        assert!(out.error_code == codes::NONE);
+        assert!(
+            to_submit
+                == vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                    node_id: crabka_audit::NodeId(1),
+                    config_name: crate::throttle::ALTER_LOG_DIRS_THROTTLED_RATE_KEY.to_string(),
+                    config_value: Some("4096".to_string()),
+                })]
+        );
     }
 
     #[test]
@@ -667,5 +759,71 @@ mod tests {
             }
             other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn group_config_set_validates_and_stages_authoritative_map() {
+        use crate::coordinator::unified::streams::config::{
+            KEY_NUM_STANDBY_REPLICAS, StreamsGroupConfig,
+        };
+
+        let resource = AlterConfigsResource {
+            resource_type: RESOURCE_TYPE_GROUP,
+            resource_name: "streams-app".into(),
+            configs: vec![AlterableConfig {
+                name: KEY_NUM_STANDBY_REPLICAS.into(),
+                config_operation: OP_SET,
+                value: Some("1".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut out = AlterConfigsResourceResponse::default();
+        let mut records = Vec::new();
+        handle_group_scoped(
+            &resource,
+            &MetadataImage::new(uuid::Uuid::nil()),
+            &StreamsGroupConfig::default(),
+            &mut out,
+            &mut records,
+        );
+        assert!(out.error_code == codes::NONE);
+        assert!(matches!(
+            records.as_slice(),
+            [MetadataRecord::V1GroupConfig(record)]
+                if record.group_id == "streams-app"
+                    && record.configs.get(KEY_NUM_STANDBY_REPLICAS).map(String::as_str)
+                        == Some("1")
+        ));
+    }
+
+    #[test]
+    fn group_config_rejects_values_outside_broker_bounds() {
+        use crate::coordinator::unified::streams::config::{
+            KEY_SESSION_TIMEOUT_MS, StreamsGroupConfig,
+        };
+
+        let resource = AlterConfigsResource {
+            resource_type: RESOURCE_TYPE_GROUP,
+            resource_name: "streams-app".into(),
+            configs: vec![AlterableConfig {
+                name: KEY_SESSION_TIMEOUT_MS.into(),
+                config_operation: OP_SET,
+                value: Some("1000".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut out = AlterConfigsResourceResponse::default();
+        let mut records = Vec::new();
+        handle_group_scoped(
+            &resource,
+            &MetadataImage::new(uuid::Uuid::nil()),
+            &StreamsGroupConfig::default(),
+            &mut out,
+            &mut records,
+        );
+        assert!(out.error_code == codes::INVALID_CONFIG);
+        assert!(records.is_empty());
     }
 }

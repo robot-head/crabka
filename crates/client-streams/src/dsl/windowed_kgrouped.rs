@@ -473,12 +473,10 @@ where
 }
 
 /// Build the suppress-store factory for a windowed-aggregation result table.
-///
-/// The factory captures the windowed key serde ([`TimeWindowedSerde`]) and the
-/// aggregate value serde. A downstream `suppress` can then register a
-/// `SuppressBytesStore<Windowed<K>, VA>` with the correct serdes and changelog
-/// config.
-fn windowed_suppress_factory<K, VA, KS, VS>(
+/// Captures the windowed key serde ([`TimeWindowedSerde`]) + the aggregate value
+/// serde so a downstream `suppress` can register a
+/// `SuppressBytesStore<Windowed<K>, VA>` with the right serdes + changelog config.
+pub(crate) fn windowed_suppress_factory<K, VA, KS, VS>(
     key_serde: KS,
     value_serde: VS,
     windows: TimeWindows,

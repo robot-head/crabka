@@ -4,13 +4,9 @@
 //! `ListClientMetricsResources` (KIP-714) and returned only client-metrics
 //! subscriptions. v1 generalises it with a `resource_types` filter.
 //!
-//! Crabka surfaces three resource types: `TOPIC` (2), `BROKER` (4), and
-//! `CLIENT_METRICS` (16). `BROKER_LOGGER` (8) and `GROUP` (32) are
-//! deliberately omitted. Dynamic per-broker `log4j`-style loggers are not a
-//! concept here, because the broker reads `RUST_LOG` from its `ConfigMap`,
-//! and Crabka has no group-config knobs today. A client that filters for those
-//! types gets an empty list, which is the same surface the JVM client expects
-//! when the broker does not recognise the type.
+//! Crabka surfaces `TOPIC` (2), `BROKER` (4), `CLIENT_METRICS` (16), and
+//! `GROUP` (32). `BROKER_LOGGER` (8) is intentionally omitted because the
+//! broker reads its logging filter from `RUST_LOG`.
 //!
 //! `CLIENT_METRICS` enumerates configured subscription names from the
 //! metadata image (see `MetadataImage::client_metrics_subscriptions`).
@@ -37,14 +33,16 @@ use crate::{
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
+const RESOURCE_TYPE_GROUP: i8 = 32;
 
 /// Default set returned when v1 callers omit `resource_types` (KIP-1142).
-/// It mirrors the JVM admin client's expectation, which is every supported
-/// type that the broker can describe configs for.
-const DEFAULT_RESOURCE_TYPES: [i8; 3] = [
+/// Mirrors the JVM admin client's expectation: every supported type the
+/// broker can describe configs for.
+const DEFAULT_RESOURCE_TYPES: [i8; 4] = [
     RESOURCE_TYPE_TOPIC,
     RESOURCE_TYPE_BROKER,
     RESOURCE_TYPE_CLIENT_METRICS,
+    RESOURCE_TYPE_GROUP,
 ];
 
 #[tracing::instrument(
@@ -148,7 +146,16 @@ fn collect_resources(
                     });
                 }
             }
-            // Unknown types (BROKER_LOGGER, GROUP, anything new) silently drop.
+            RESOURCE_TYPE_GROUP => {
+                for (group_id, _cfgs) in image.group_configs() {
+                    out.push(ConfigResource {
+                        resource_name: group_id.clone(),
+                        resource_type: RESOURCE_TYPE_GROUP,
+                        ..Default::default()
+                    });
+                }
+            }
+            // Unknown types (BROKER_LOGGER, anything new) silently drop.
             _ => {}
         }
     }
@@ -266,6 +273,40 @@ mod tests {
     }
 
     #[test]
+    fn v1_group_filter_returns_configured_groups() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1GroupConfig(
+            crabka_metadata::GroupConfigRecord {
+                group_id: "streams-b".into(),
+                configs: std::collections::BTreeMap::from([(
+                    "streams.num.standby.replicas".into(),
+                    "1".into(),
+                )]),
+            },
+        ));
+        image.apply(&MetadataRecord::V1GroupConfig(
+            crabka_metadata::GroupConfigRecord {
+                group_id: "streams-a".into(),
+                configs: std::collections::BTreeMap::from([(
+                    "streams.num.standby.replicas".into(),
+                    "1".into(),
+                )]),
+            },
+        ));
+        let out = collect_resources(&image, 1, &[RESOURCE_TYPE_GROUP]);
+        assert!(
+            out.iter()
+                .all(|resource| resource.resource_type == RESOURCE_TYPE_GROUP)
+        );
+        assert!(
+            out.iter()
+                .map(|resource| resource.resource_name.as_str())
+                .collect::<Vec<_>>()
+                == vec!["streams-a", "streams-b"]
+        );
+    }
+
+    #[test]
     fn v1_empty_filter_returns_default_set() {
         let img = image_with_topics_and_brokers(&["t-a", "t-b"], &[1, 2]);
         let out = collect_resources(&img, 1, &[]);
@@ -330,8 +371,8 @@ mod tests {
     #[test]
     fn v1_unknown_resource_type_returns_empty() {
         let img = image_with_topics_and_brokers(&["t-a"], &[1]);
-        // type 8 = BROKER_LOGGER, type 32 = GROUP — neither supported.
-        let out = collect_resources(&img, 1, &[8, 32]);
+        // type 8 = BROKER_LOGGER; not supported.
+        let out = collect_resources(&img, 1, &[8]);
         assert!(
             out.is_empty(),
             "unsupported resource types silently drop; got {out:?}"

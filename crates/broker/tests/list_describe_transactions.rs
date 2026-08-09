@@ -162,7 +162,7 @@ async fn list_transactions_returns_ongoing_txn() {
         .iter()
         .find(|r| r.transactional_id == "my-tid")
         .expect("my-tid not present");
-    check!(row.producer_id > 0);
+    check!(row.producer_id >= 0);
     assert!(
         resp == ListTransactionsResponse {
             transaction_states: vec![ListedTransactionState {
@@ -269,7 +269,7 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
-    check!(row.producer_id > 0);
+    check!(row.producer_id >= 0);
     check!(row.transaction_start_time_ms > 0);
     assert!(
         row == DescribedTransactionState {

@@ -14,10 +14,18 @@ use crabka_units::prelude::*;
 
 use crate::{metrics::metrics, pb, state::AppState};
 
-/// The principal the gateway uses when the request carries no authenticated
-/// identity, for example on a plaintext listener or with no proxy-injected
-/// identity. It matches Kafka's `ANONYMOUS` principal, so an ACL can target it
-/// explicitly.
+pub(crate) fn producer_acks_from_pb(acks: i32) -> Option<crabka_client_producer::Acks> {
+    match pb::Acks::try_from(acks) {
+        Ok(pb::Acks::All) => Some(crabka_client_producer::Acks::All),
+        Ok(pb::Acks::Leader) => Some(crabka_client_producer::Acks::One),
+        Ok(pb::Acks::None) => Some(crabka_client_producer::Acks::Zero),
+        Err(_) => None,
+    }
+}
+
+/// The principal used when no authenticated identity is present on the request
+/// (plaintext listener, or no proxy-injected identity). Mirrors Kafka's
+/// `ANONYMOUS` principal so ACLs can target it explicitly.
 pub(crate) fn anonymous_principal() -> Principal {
     Principal {
         name: "ANONYMOUS".into(),
@@ -190,13 +198,13 @@ pub async fn send(
     // guard decrements + observes on drop (covering every return path).
     let _req = metrics().begin_request("send");
     let msg = req.0;
+    let acks = producer_acks_from_pb(msg.acks).ok_or_else(|| {
+        ConnectError::new_invalid_argument(format!("unknown acknowledgement mode {}", msg.acks))
+    })?;
     // Effective identity: the proxy-injected principal (P4 mTLS / parallel
     // bearer task) or ANONYMOUS; the caller's peer address or the unknown host.
     let eff = principal.map_or_else(anonymous_principal, |Extension(p)| p);
     let host = peer.map_or_else(unknown_host, |Extension(a)| a);
-    // NOTE (P0–P2): `msg.acks` is accepted on the wire but not yet honored —
-    // every record is produced with acks=all, which the dedup/EOS path
-    // requires anyway. Per-acks handling on the plain path is deferred.
     let mut results = Vec::with_capacity(msg.records.len());
     for r in msg.records {
         let rec = crate::handlers::to_gateway_record(r);
@@ -218,7 +226,7 @@ pub async fn send(
             continue;
         }
         let t0 = std::time::Instant::now();
-        let produce_result = state.produce.produce(rec, &eff).await;
+        let produce_result = state.produce.produce_with_acks(rec, &eff, acks).await;
         metrics().observe_produce_latency(t0.elapsed().as_time());
         let result = match produce_result {
             Ok(ref o) if o.deduplicated => {
@@ -251,4 +259,26 @@ pub async fn send(
         results.push(result);
     }
     Ok(ConnectResponse::new(pb::SendResponse { results }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn producer_ack_wire_values_map_to_native_modes() {
+        assert2::assert!(
+            producer_acks_from_pb(pb::Acks::All as i32).expect("ACKS_ALL maps")
+                == crabka_client_producer::Acks::All
+        );
+        assert2::assert!(
+            producer_acks_from_pb(pb::Acks::Leader as i32).expect("ACKS_LEADER maps")
+                == crabka_client_producer::Acks::One
+        );
+        assert2::assert!(
+            producer_acks_from_pb(pb::Acks::None as i32).expect("ACKS_NONE maps")
+                == crabka_client_producer::Acks::Zero
+        );
+        assert2::assert!(producer_acks_from_pb(i32::MAX).is_none());
+    }
 }

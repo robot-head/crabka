@@ -137,8 +137,8 @@ pub(super) fn apply_simple_aggregate(
             SampleValue::Histogram(_) if op.counts_histograms() => state.push_observation(),
             SampleValue::Histogram(_) if op.ignores_histograms() => {}
             SampleValue::Histogram(_) => {
-                return Err(PromqlError::Unsupported(
-                    "histogram aggregation is not implemented yet".to_string(),
+                return Err(PromqlError::Plan(
+                    "native histogram reached an invalid aggregate classification".to_string(),
                 ));
             }
         }
@@ -420,7 +420,7 @@ impl AggregateOp {
             T_STDDEV => Ok(Self::Stddev),
             T_STDVAR => Ok(Self::Stdvar),
             _ => Err(PromqlError::Unsupported(format!(
-                "aggregation `{token}` is not implemented yet"
+                "unsupported simple aggregation `{token}`"
             ))),
         }
     }

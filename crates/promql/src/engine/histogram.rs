@@ -514,31 +514,25 @@ fn native_histogram_stdvar(hist: &NativeHistogram) -> f64 {
         / hist.count
 }
 
-pub(super) fn add_compatible_native_histogram(
+pub(crate) fn add_compatible_native_histogram(
     left: &mut NativeHistogram,
     right: &NativeHistogram,
 ) -> Result<()> {
-    if !native_histograms_have_compatible_metadata(left, right) {
+    if left.is_nhcb() != right.is_nhcb() {
         return Err(PromqlError::Unsupported(
-            "incompatible native histogram aggregation is not implemented yet".to_string(),
+            "cannot combine exponential and custom-bucket native histograms".to_string(),
         ));
     }
 
-    left.zero_count += right.zero_count;
+    left.reset_hint = combined_reset_hint(left.reset_hint, right.reset_hint);
+    left.is_float |= right.is_float;
     left.count += right.count;
     left.sum += right.sum;
-    (left.positive_spans, left.positive_counts) = add_spanned_histogram_counts(
-        &left.positive_spans,
-        &left.positive_counts,
-        &right.positive_spans,
-        &right.positive_counts,
-    );
-    (left.negative_spans, left.negative_counts) = add_spanned_histogram_counts(
-        &left.negative_spans,
-        &left.negative_counts,
-        &right.negative_spans,
-        &right.negative_counts,
-    );
+    if left.is_nhcb() {
+        add_custom_histogram(left, right);
+    } else {
+        add_exponential_histogram(left, right);
+    }
     left.start_timestamp_ms = match (left.start_timestamp_ms, right.start_timestamp_ms) {
         (Some(left), Some(right)) => Some(left.min(right)),
         (Some(left), None) => Some(left),
@@ -548,15 +542,168 @@ pub(super) fn add_compatible_native_histogram(
     Ok(())
 }
 
-fn native_histograms_have_compatible_metadata(
-    left: &NativeHistogram,
-    right: &NativeHistogram,
-) -> bool {
-    left.schema == right.schema
-        && left.is_float == right.is_float
-        && left.reset_hint == right.reset_hint
-        && left.zero_threshold.to_bits() == right.zero_threshold.to_bits()
-        && left.custom_values == right.custom_values
+fn combined_reset_hint(left: ResetHint, right: ResetHint) -> ResetHint {
+    match (left, right) {
+        (left, right) if left == right => left,
+        (ResetHint::Gauge, _) | (_, ResetHint::Gauge) => ResetHint::Gauge,
+        _ => ResetHint::Unknown,
+    }
+}
+
+fn add_exponential_histogram(left: &mut NativeHistogram, right: &NativeHistogram) {
+    let mut threshold = left.zero_threshold.max(right.zero_threshold);
+    let (left_zero_count, right_zero_count) = loop {
+        let (left_count, left_threshold) = zero_count_at_threshold(left, threshold);
+        let (right_count, right_threshold) = zero_count_at_threshold(right, threshold);
+        let reconciled = left_threshold.max(right_threshold);
+        if reconciled.to_bits() == threshold.to_bits() {
+            break (left_count, right_count);
+        }
+        threshold = reconciled;
+    };
+
+    let target_schema = left.schema.min(right.schema);
+    let left_positive = reduced_counts_outside_zero(
+        left,
+        &left.positive_spans,
+        &left.positive_counts,
+        threshold,
+        target_schema,
+    );
+    let right_positive = reduced_counts_outside_zero(
+        right,
+        &right.positive_spans,
+        &right.positive_counts,
+        threshold,
+        target_schema,
+    );
+    let left_negative = reduced_counts_outside_zero(
+        left,
+        &left.negative_spans,
+        &left.negative_counts,
+        threshold,
+        target_schema,
+    );
+    let right_negative = reduced_counts_outside_zero(
+        right,
+        &right.negative_spans,
+        &right.negative_counts,
+        threshold,
+        target_schema,
+    );
+
+    left.schema = target_schema;
+    left.zero_threshold = threshold;
+    left.zero_count = left_zero_count + right_zero_count;
+    (left.positive_spans, left.positive_counts) = add_bucket_maps(left_positive, right_positive);
+    (left.negative_spans, left.negative_counts) = add_bucket_maps(left_negative, right_negative);
+    left.custom_values = None;
+}
+
+fn zero_count_at_threshold(histogram: &NativeHistogram, mut threshold: f64) -> (f64, f64) {
+    loop {
+        let mut count = histogram.zero_count;
+        let mut expanded = threshold;
+        for buckets in [
+            spanned_histogram_counts(&histogram.positive_spans, &histogram.positive_counts),
+            spanned_histogram_counts(&histogram.negative_spans, &histogram.negative_counts),
+        ] {
+            for (index, bucket_count) in buckets {
+                let lower = standard_histogram_bound(index - 1, histogram.schema);
+                if lower >= threshold {
+                    break;
+                }
+                count += bucket_count;
+                let upper = standard_histogram_bound(index, histogram.schema);
+                if bucket_count != 0.0 && upper > expanded {
+                    expanded = upper;
+                }
+            }
+        }
+        if expanded.to_bits() == threshold.to_bits() {
+            return (count, threshold);
+        }
+        threshold = expanded;
+    }
+}
+
+fn reduced_counts_outside_zero(
+    histogram: &NativeHistogram,
+    spans: &[BucketSpan],
+    counts: &[f64],
+    zero_threshold: f64,
+    target_schema: i8,
+) -> BTreeMap<i32, f64> {
+    let schema_delta =
+        u32::try_from(i16::from(histogram.schema) - i16::from(target_schema)).unwrap_or_default();
+    let divisor = 1_i32.checked_shl(schema_delta).unwrap_or(i32::MAX);
+    let mut out = BTreeMap::new();
+    for (index, count) in spanned_histogram_counts(spans, counts) {
+        if standard_histogram_bound(index - 1, histogram.schema) < zero_threshold {
+            continue;
+        }
+        let quotient = index.div_euclid(divisor);
+        let target_index = quotient + i32::from(index.rem_euclid(divisor) != 0);
+        *out.entry(target_index).or_insert(0.0) += count;
+    }
+    out
+}
+
+fn add_bucket_maps(
+    mut left: BTreeMap<i32, f64>,
+    right: BTreeMap<i32, f64>,
+) -> (Vec<BucketSpan>, Vec<f64>) {
+    for (index, count) in right {
+        *left.entry(index).or_insert(0.0) += count;
+    }
+    compact_spanned_histogram_counts(left)
+}
+
+fn add_custom_histogram(left: &mut NativeHistogram, right: &NativeHistogram) {
+    let left_values = left.custom_values.as_deref().unwrap_or_default();
+    let right_values = right.custom_values.as_deref().unwrap_or_default();
+    let target_values = left_values
+        .iter()
+        .copied()
+        .filter(|value| right_values.contains(value))
+        .collect::<Vec<_>>();
+    let left_counts = remap_custom_counts(
+        &left.positive_spans,
+        &left.positive_counts,
+        left_values,
+        &target_values,
+    );
+    let right_counts = remap_custom_counts(
+        &right.positive_spans,
+        &right.positive_counts,
+        right_values,
+        &target_values,
+    );
+    (left.positive_spans, left.positive_counts) = add_bucket_maps(left_counts, right_counts);
+    left.custom_values = Some(target_values);
+    left.zero_threshold = 0.0;
+    left.zero_count = 0.0;
+    left.negative_spans.clear();
+    left.negative_counts.clear();
+}
+
+fn remap_custom_counts(
+    spans: &[BucketSpan],
+    counts: &[f64],
+    source_values: &[f64],
+    target_values: &[f64],
+) -> BTreeMap<i32, f64> {
+    let mut out = BTreeMap::new();
+    for (index, count) in spanned_histogram_counts(spans, counts) {
+        let upper = custom_histogram_bound(index, source_values);
+        let target_index = target_values
+            .iter()
+            .position(|bound| bound.total_cmp(&upper).is_ge())
+            .unwrap_or(target_values.len());
+        let target_index = i32::try_from(target_index).unwrap_or(i32::MAX);
+        *out.entry(target_index).or_insert(0.0) += count;
+    }
+    out
 }
 
 pub(super) fn native_histograms_are_range_compatible(
@@ -571,19 +718,6 @@ pub(super) fn native_histograms_are_range_compatible(
         && left.negative_spans == right.negative_spans
         && left.positive_counts.len() == right.positive_counts.len()
         && left.negative_counts.len() == right.negative_counts.len()
-}
-
-fn add_spanned_histogram_counts(
-    left_spans: &[BucketSpan],
-    left_counts: &[f64],
-    right_spans: &[BucketSpan],
-    right_counts: &[f64],
-) -> (Vec<BucketSpan>, Vec<f64>) {
-    let mut buckets = spanned_histogram_counts(left_spans, left_counts);
-    for (index, count) in spanned_histogram_counts(right_spans, right_counts) {
-        *buckets.entry(index).or_insert(0.0) += count;
-    }
-    compact_spanned_histogram_counts(buckets)
 }
 
 fn spanned_histogram_counts(spans: &[BucketSpan], counts: &[f64]) -> BTreeMap<i32, f64> {
@@ -866,4 +1000,132 @@ pub(super) fn histogram_accessor_from_function_name(name: &str) -> Option<Histog
         "histogram_stdvar" => HistogramAccessor::Stdvar,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn histogram(schema: i8, reset_hint: ResetHint) -> NativeHistogram {
+        NativeHistogram {
+            schema,
+            is_float: true,
+            reset_hint,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count: 0.0,
+            sum: 0.0,
+            positive_spans: Vec::new(),
+            positive_counts: Vec::new(),
+            negative_spans: Vec::new(),
+            negative_counts: Vec::new(),
+            custom_values: (schema == -53).then(Vec::new),
+            start_timestamp_ms: None,
+        }
+    }
+
+    #[test]
+    fn add_downscales_exponential_buckets() {
+        let mut left = histogram(1, ResetHint::No);
+        left.positive_spans = vec![BucketSpan {
+            offset: -1,
+            length: 4,
+        }];
+        left.positive_counts = vec![1.0, 2.0, 4.0, 8.0];
+        let mut right = histogram(0, ResetHint::No);
+        right.positive_spans = vec![BucketSpan {
+            offset: 0,
+            length: 2,
+        }];
+        right.positive_counts = vec![10.0, 20.0];
+
+        add_compatible_native_histogram(&mut left, &right).unwrap();
+
+        assert2::assert!(left.schema == 0);
+        assert2::assert!(
+            left.positive_spans
+                == vec![BucketSpan {
+                    offset: 0,
+                    length: 2
+                }]
+        );
+        assert2::assert!(left.positive_counts == vec![13.0, 32.0]);
+    }
+
+    #[test]
+    fn add_expands_zero_bucket_to_populated_bucket_boundary() {
+        let mut left = histogram(0, ResetHint::No);
+        left.zero_count = 1.0;
+        left.positive_spans = vec![BucketSpan {
+            offset: 0,
+            length: 1,
+        }];
+        left.positive_counts = vec![2.0];
+        let mut right = histogram(0, ResetHint::No);
+        right.zero_threshold = 0.75;
+        right.zero_count = 3.0;
+
+        add_compatible_native_histogram(&mut left, &right).unwrap();
+
+        assert2::assert!((left.zero_threshold - 1.0).abs() < f64::EPSILON);
+        assert2::assert!((left.zero_count - 6.0).abs() < f64::EPSILON);
+        assert2::assert!(left.positive_spans.is_empty());
+        assert2::assert!(left.positive_counts.is_empty());
+    }
+
+    #[test]
+    fn add_reconciles_custom_bucket_bounds() {
+        let mut left = histogram(-53, ResetHint::No);
+        left.custom_values = Some(vec![1.0, 2.0, 4.0]);
+        left.positive_spans = vec![BucketSpan {
+            offset: 0,
+            length: 4,
+        }];
+        left.positive_counts = vec![1.0, 2.0, 3.0, 4.0];
+        let mut right = histogram(-53, ResetHint::No);
+        right.custom_values = Some(vec![1.0, 3.0, 4.0]);
+        right.positive_spans = vec![BucketSpan {
+            offset: 0,
+            length: 4,
+        }];
+        right.positive_counts = vec![10.0, 20.0, 30.0, 40.0];
+
+        add_compatible_native_histogram(&mut left, &right).unwrap();
+
+        assert2::assert!(left.custom_values == Some(vec![1.0, 4.0]));
+        assert2::assert!(
+            left.positive_spans
+                == vec![BucketSpan {
+                    offset: 0,
+                    length: 3
+                }]
+        );
+        assert2::assert!(left.positive_counts == vec![11.0, 55.0, 44.0]);
+    }
+
+    #[test]
+    fn add_reconciles_counter_reset_hints() {
+        let cases = [
+            (ResetHint::No, ResetHint::No, ResetHint::No),
+            (ResetHint::Yes, ResetHint::No, ResetHint::Unknown),
+            (ResetHint::Unknown, ResetHint::No, ResetHint::Unknown),
+            (ResetHint::No, ResetHint::Gauge, ResetHint::Gauge),
+        ];
+        for (left_hint, right_hint, expected) in cases {
+            let mut left = histogram(0, left_hint);
+            let right = histogram(0, right_hint);
+            add_compatible_native_histogram(&mut left, &right).unwrap();
+            assert2::assert!(left.reset_hint == expected);
+        }
+    }
+
+    #[test]
+    fn add_rejects_exponential_and_custom_bucket_mix() {
+        let mut exponential = histogram(0, ResetHint::No);
+        let custom = histogram(-53, ResetHint::No);
+
+        let error = add_compatible_native_histogram(&mut exponential, &custom).unwrap_err();
+
+        assert2::assert!(format!("{error}").contains("exponential and custom-bucket"));
+    }
 }

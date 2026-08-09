@@ -10,15 +10,15 @@
 //!     that topic gets `TOPIC_AUTHORIZATION_FAILED`.
 //!
 //! Semantics:
-//!   - a missing group gives `GROUP_ID_NOT_FOUND` for the whole response
-//!   - a missing topic, or a partition out of range, gives
-//!     `UNKNOWN_TOPIC_OR_PARTITION` for that partition
-//!   - a group with live members, where the consumer-protocol subscription of
-//!     any member holds the topic, gives `GROUP_SUBSCRIBED_TO_TOPIC` (86) for
-//!     each partition
-//!   - otherwise the handler appends a tombstone to `__consumer_offsets-0`,
-//!     with key = `OffsetCommitKey` and value = null, removes the entry from
-//!     `Group.committed_offsets`, and returns `NONE` for that partition.
+//!   - missing group → whole-response `GROUP_ID_NOT_FOUND`
+//!   - missing topic / partition out of range → per-partition
+//!     `UNKNOWN_TOPIC_OR_PARTITION`
+//!   - group has live members AND any member's consumer-protocol
+//!     subscription contains the topic → per-partition
+//!     `GROUP_SUBSCRIBED_TO_TOPIC` (86)
+//!   - otherwise: append a tombstone (key = `OffsetCommitKey`, value =
+//!     null) to the group's `__consumer_offsets` partition, remove the entry from
+//!     `Group.committed_offsets`, per-partition `NONE`.
 
 use std::collections::HashSet;
 
@@ -42,7 +42,8 @@ use crate::{
     broker::Broker,
     codes,
     coordinator::{
-        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
+        bootstrap::OFFSETS_TOPIC,
+        partitioner::{GroupRoutingError, local_partition_for_group},
         persistence::OffsetCommitValue,
         unified::{actor::GroupActorMessage, classic_state::GroupState},
     },
@@ -85,6 +86,20 @@ pub(crate) async fn handle(
         );
     }
 
+    let offsets_partition =
+        match local_partition_for_group(&image, broker.config.node_id, &req.group_id) {
+            Ok(partition) => partition,
+            Err(GroupRoutingError::Unavailable) => {
+                return encode(
+                    version,
+                    &whole_error(&req, codes::COORDINATOR_NOT_AVAILABLE),
+                );
+            }
+            Err(GroupRoutingError::NotCoordinator) => {
+                return encode(version, &whole_error(&req, codes::NOT_COORDINATOR));
+            }
+        };
+
     // Group must exist.
     let Some(group_handle) = broker.group_coordinator.find(&req.group_id) else {
         return encode(version, &whole_error(&req, codes::GROUP_ID_NOT_FOUND));
@@ -121,7 +136,7 @@ pub(crate) async fn handle(
             .await
             .is_ok()
             && let Ok(view) = rx.await
-            && !matches!(view.state, GroupState::Empty | GroupState::Dead)
+            && view.state != GroupState::Empty
             && view.protocol_type.as_deref() == Some("consumer")
         {
             view.members
@@ -161,7 +176,7 @@ pub(crate) async fn handle(
             records: tombstone_records,
             ..RecordBatch::default()
         };
-        if let Err(code) = append_tombstones(broker, tombstones).await {
+        if let Err(code) = append_tombstones(broker, offsets_partition, tombstones).await {
             return encode(version, &rewrite_success_as(topics_out, code));
         }
         let (tx, rx) = oneshot::channel();
@@ -212,8 +227,11 @@ fn whole_error(req: &OffsetDeleteRequest, code: i16) -> OffsetDeleteResponse {
     }
 }
 
-/// Pure helper that builds the per-topic and per-partition response rows for a
-/// decoded `OffsetDeleteRequest`.
+/// Pure helper: build the per-topic / per-partition response rows for a
+/// decoded `OffsetDeleteRequest`, plus the tombstone records that need to
+/// be appended to the group's `__consumer_offsets` partition and the `(topic, partition)`
+/// keys to remove from in-memory `Group.committed_offsets` once the
+/// append succeeds.
 ///
 /// It also returns the tombstone records to append to `__consumer_offsets-0`,
 /// and the `(topic, partition)` keys to remove from the in-memory
@@ -315,10 +333,14 @@ fn rewrite_success_as(topics: Vec<OffsetDeleteResponseTopic>, code: i16) -> Offs
     }
 }
 
-async fn append_tombstones(broker: &Broker, batch: RecordBatch) -> Result<(), i16> {
+async fn append_tombstones(
+    broker: &Broker,
+    offsets_partition: i32,
+    batch: RecordBatch,
+) -> Result<(), i16> {
     let Some(part_handle) = broker
         .partitions
-        .get(OFFSETS_TOPIC, crabka_ids::PartitionIndex(OFFSETS_PARTITION))
+        .get(OFFSETS_TOPIC, crabka_ids::PartitionIndex(offsets_partition))
     else {
         return Err(codes::UNKNOWN_SERVER_ERROR);
     };

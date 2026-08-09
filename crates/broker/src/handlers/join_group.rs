@@ -33,6 +33,8 @@ use crate::{
     fields(api = "JoinGroup", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: coordinator-backed response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -64,6 +66,16 @@ pub(crate) async fn handle(
                 },
             );
         }
+    }
+
+    if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+        return encode(
+            version,
+            &JoinGroupResponse {
+                error_code,
+                ..Default::default()
+            },
+        );
     }
 
     // Route to the one actor for this id, spawning a classic-kind actor if the

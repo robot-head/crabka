@@ -31,7 +31,21 @@ pub enum StreamsClientError {
     /// A runtime failure in processing, produce, or commit.
     #[error("runtime error: {0}")]
     Runtime(String),
+    /// The transactional or idempotent producer was fenced by a newer epoch.
+    /// This is fatal for the stream thread and must never enter retry rollback.
+    #[error(transparent)]
+    Producer(#[from] crabka_client_producer::ProducerError),
     /// An interactive query failed.
     #[error(transparent)]
     InteractiveQuery(#[from] crate::runtime::iq::IqError),
+}
+
+impl StreamsClientError {
+    #[must_use]
+    pub(crate) fn is_producer_fenced(&self) -> bool {
+        matches!(
+            self,
+            Self::Producer(crabka_client_producer::ProducerError::FencedProducer)
+        )
+    }
 }
