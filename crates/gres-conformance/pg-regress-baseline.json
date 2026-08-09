@@ -517,10 +517,10 @@
       "sha256": "524893a2ab82087b12cdc36144984bdb4319c82d0cc20ba93079f57e7c621cb9"
     },
     "join": {
-      "changed_lines": 8011,
+      "changed_lines": 8017,
       "expected": "join.out",
-      "hunks": 248,
-      "sha256": "a5d32d1238feb36bd83f6213bcef5bad96304d9b0ff4a019447856d304abe4f5"
+      "hunks": 247,
+      "sha256": "8da3da5f83c1c569bcc76d313b38e67f1e5f459475cbafe6cd05edcfb1464c35"
     },
     "join_hash": {
       "changed_lines": 845,
@@ -691,10 +691,10 @@
       "sha256": "c2fc0127695fc231b5cb9d27101932c3704d584c2346a1a670cd81c483197f6d"
     },
     "partition_join": {
-      "changed_lines": 4215,
+      "changed_lines": 4199,
       "expected": "partition_join.out",
-      "hunks": 94,
-      "sha256": "d41ac4085c0545374cbd99cd4466c53ebb97934e457a8168e7cdddf769137142"
+      "hunks": 95,
+      "sha256": "deafa5318e8395dfba073a4c17710f22821f9d05ec31b0b3a86a1df7fcd95fcc"
     },
     "partition_prune": {
       "changed_lines": 4083,
