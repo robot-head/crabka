@@ -1081,8 +1081,9 @@ impl ScalarInterpreter<'_> {
                         .as_ref()
                         .map(|expr| self.eval(expr))
                         .transpose()?
+                        .filter(|value| !value.is_null())
                         .map_or_else(
-                            || "assertion failed".into(),
+                            || DEFAULT_ASSERT_MESSAGE.to_string(),
                             |value| {
                                 String::from_utf8_lossy(
                                     &crabka_pgtypes::encoding::encode_text(
@@ -1476,6 +1477,9 @@ impl ScalarInterpreter<'_> {
             .iter()
             .map(|expr| {
                 self.eval(expr).map(|value| {
+                    if value.is_null() {
+                        return NULL_RAISE_PARAMETER.to_string();
+                    }
                     String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
                         &value,
                         &self.ctx.time_zone,
@@ -1488,18 +1492,18 @@ impl ScalarInterpreter<'_> {
             .options
             .iter()
             .map(|(name, expr)| {
-                self.eval(expr).map(|value| {
-                    (
-                        name.as_str(),
-                        String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
-                            &value,
-                            &self.ctx.time_zone,
-                        ))
-                        .into_owned(),
-                    )
-                })
+                let value = self.eval(expr)?;
+                reject_null_raise_option(&value)?;
+                Ok((
+                    name.as_str(),
+                    String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
+                        &value,
+                        &self.ctx.time_zone,
+                    ))
+                    .into_owned(),
+                ))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, ExecError>>()?;
         let diagnostic =
             build_raise_diagnostic(raise, &values, options)?.with_context(self.context.clone());
         Err(ExecError::Remote(diagnostic))
@@ -1746,11 +1750,11 @@ impl Interpreter<'_> {
                         Ok(Flow::Next)
                     } else {
                         let message = match message {
-                            Some(expr) => {
-                                let value = self.eval_async(expr).await?.0;
-                                self.session.plpgsql_render(&value)
-                            }
-                            None => "assertion failed".into(),
+                            Some(expr) => match self.eval_async(expr).await?.0 {
+                                Datum::Null => DEFAULT_ASSERT_MESSAGE.to_string(),
+                                value => self.session.plpgsql_render(&value),
+                            },
+                            None => DEFAULT_ASSERT_MESSAGE.to_string(),
                         };
                         Err(ExecError::FunctionError {
                             sqlstate: "P0004",
@@ -2674,6 +2678,7 @@ impl Interpreter<'_> {
         let mut options = Vec::with_capacity(raise.options.len());
         for (name, value) in &raise.options {
             let value = self.eval_async(value).await?.0;
+            reject_null_raise_option(&value)?;
             let value = self.session.plpgsql_render(&value);
             options.push((name.as_str(), value));
         }
@@ -2778,6 +2783,30 @@ fn call_output_target(expr: &Expr) -> Option<PlPgSqlTarget> {
         _ => None,
     }
 }
+
+/// The spelling `PostgreSQL` substitutes for a NULL `RAISE` format parameter.
+///
+/// `RAISE NOTICE '%', NULL` prints `<NULL>` there. A NULL is not a value the
+/// text output functions can render — it travels out of band on the wire — so
+/// every rendering path in a `RAISE` has to name it explicitly rather than hand
+/// it to `encode_text`, which panics on one.
+pub(crate) const NULL_RAISE_PARAMETER: &str = "<NULL>";
+
+/// A NULL `USING` option value is an error, not a `<NULL>`: `PostgreSQL` reports
+/// 22004 rather than putting the word into the DETAIL or HINT.
+fn reject_null_raise_option(value: &Datum) -> Result<(), ExecError> {
+    if value.is_null() {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22004",
+            message: "RAISE statement option cannot be null".into(),
+        });
+    }
+    Ok(())
+}
+
+/// `ASSERT cond, message` with a NULL message falls back to the default text,
+/// exactly as `PostgreSQL` does — the NULL is not rendered at all.
+const DEFAULT_ASSERT_MESSAGE: &str = "assertion failed";
 
 fn build_raise_diagnostic<'a>(
     raise: &PlPgSqlRaise,

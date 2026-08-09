@@ -3604,7 +3604,15 @@ impl SqlSession {
         Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, false)).await?
     }
 
+    /// Render a PL/pgSQL value the way a `RAISE` format parameter is rendered.
+    ///
+    /// NULL is `<NULL>` rather than a panic: it travels out of band on the wire,
+    /// so the text output functions never see one and
+    /// [`crabka_pgtypes::encoding::encode_text`] aborts on it.
     pub(crate) fn plpgsql_render(&self, value: &Datum) -> String {
+        if value.is_null() {
+            return crate::plpgsql::NULL_RAISE_PARAMETER.to_string();
+        }
         let ctx = self.eval_ctx();
         String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
             value,

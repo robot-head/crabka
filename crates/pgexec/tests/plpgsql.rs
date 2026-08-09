@@ -1361,3 +1361,73 @@ async fn current_diagnostics_reports_the_routine_oid() {
             == Some("t".into())
     );
 }
+
+/// A NULL reaching a `RAISE` is a rendering question, not an abort.
+///
+/// `PostgreSQL` substitutes `<NULL>` for a NULL format parameter, refuses a NULL
+/// `USING` option outright, and falls back to the default text for a NULL
+/// `ASSERT` message. NULL travels out of band on the wire, so the text output
+/// functions never see one — handing a NULL to one of them aborted the whole
+/// server rather than the statement.
+#[tokio::test]
+async fn a_null_reaching_a_raise_is_rendered_rather_than_fatal() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+
+    execute(&mut session, "DO $$ BEGIN RAISE NOTICE 'v=%', NULL; END $$").await;
+    assert!(notices.try_recv().expect("one notice").message == "v=<NULL>");
+
+    let error = session
+        .simple_query("DO $$ BEGIN RAISE EXCEPTION 'v=%', NULL; END $$")
+        .await
+        .expect_err("RAISE EXCEPTION must fail");
+    assert!(error.message == "v=<NULL>", "{error:?}");
+
+    // A NULL option is an error rather than the word `<NULL>` in the DETAIL.
+    for option in ["DETAIL", "HINT"] {
+        let sql = format!("DO $$ BEGIN RAISE EXCEPTION 'boom' USING {option} = NULL; END $$");
+        let error = session
+            .simple_query(&sql)
+            .await
+            .expect_err("a NULL RAISE option must fail");
+        assert!(error.code == "22004", "{option}: {error:?}");
+        assert!(
+            error.message == "RAISE statement option cannot be null",
+            "{option}: {error:?}"
+        );
+    }
+
+    // A NULL ASSERT message is not rendered at all.
+    let error = session
+        .simple_query("DO $$ BEGIN ASSERT false, NULL; END $$")
+        .await
+        .expect_err("false ASSERT must fail");
+    assert!(error.code == "P0004", "{error:?}");
+    assert!(error.message == "assertion failed", "{error:?}");
+
+    // The session is still usable, which a panicking backend would not be.
+    assert!(scalar(&mut session, "SELECT 1").await == Some("1".into()));
+}
+
+/// The range-table entry a DML statement adds is aliased to the relation's bare
+/// name, whatever schema the statement reached it through.
+#[tokio::test]
+async fn returning_binds_a_schema_qualified_target_under_its_bare_name() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE SCHEMA rq").await;
+    execute(&mut session, "CREATE TABLE rq.t (a int, b text)").await;
+
+    let cases = [
+        ("INSERT INTO rq.t VALUES (1, 'x') RETURNING t.a", "1"),
+        ("UPDATE rq.t SET b = 'y' RETURNING t.b", "y"),
+        ("DELETE FROM rq.t RETURNING t.a", "1"),
+    ];
+    for (sql, expected) in cases {
+        assert!(
+            scalar(&mut session, sql).await == Some(expected.into()),
+            "{sql}"
+        );
+    }
+}

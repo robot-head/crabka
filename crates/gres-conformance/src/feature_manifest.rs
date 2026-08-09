@@ -301,6 +301,17 @@ pub const FEATURE_PROBES: &[FeatureProbe] = &[
         message_fragment: None,
     },
     FeatureProbe {
+        item: "Whole-row references",
+        // `feature_t` names no column here, so it can only resolve against the
+        // range table — and the cast proves the value really is the composite
+        // row rather than something the scope happened to hold.
+        sql: "SELECT feature_t::text FROM feature_t",
+        behavior: FeatureBehavior::SessionExecute,
+        setup: TABLE_ID_ROW,
+        sqlstate: None,
+        message_fragment: None,
+    },
+    FeatureProbe {
         item: "GROUPING SETS / ROLLUP / CUBE",
         sql: "SELECT id, grouping(id), count(*) FROM feature_t GROUP BY ROLLUP(id)",
         behavior: FeatureBehavior::SessionExecute,

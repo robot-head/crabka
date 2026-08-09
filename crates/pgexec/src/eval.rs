@@ -45,6 +45,21 @@ const MAX_EVAL_DEPTH: usize = 100;
 const EVAL_STACK_SWITCH_DEPTH: usize = 51;
 const DEEP_EVAL_STACK_BYTES: usize = 8 * 1024 * 1024;
 
+/// The relation a failed column reference may still name as a *whole row*.
+///
+/// `PostgreSQL` tries the range table only after the column search comes up
+/// empty, and only for an unqualified name — `s.t` is read as "column `t` of
+/// range-table entry `s`" and reports a missing FROM entry for `s`, never as the
+/// whole row of `s.t`. An ambiguous name (42702) is already an error there too,
+/// so only 42703 opens this door.
+fn whole_row_reference<'a>(
+    qualifier: Option<&str>,
+    name: &'a str,
+    error: &ExecError,
+) -> Option<&'a str> {
+    (qualifier.is_none() && matches!(error, ExecError::UndefinedColumn(_))).then_some(name)
+}
+
 /// Evaluate `expr` against a row (`values`, aligned to `scope.columns`). `ctx`
 /// carries the session time zone and the transaction/statement clock; non-temporal
 /// evaluation ignores it (UTC/epoch reproduces prior behavior).
@@ -181,8 +196,14 @@ fn eval_depth_inner(
                     eval_depth(e, scope, values, ctx, d)
                 });
             }
-            let idx = scope.resolve(table.as_deref(), name)?;
-            Ok(values[idx].clone())
+            match scope.resolve(table.as_deref(), name) {
+                Ok(idx) => Ok(values[idx].clone()),
+                // A bare name that is no column may still name a relation in the
+                // FROM clause, and then it is that relation's whole row.
+                Err(error) => whole_row_reference(table.as_deref(), name, &error)
+                    .and_then(|q| scope.whole_row_value(q, values))
+                    .ok_or(error),
+            }
         }
         Expr::Unary { op, expr } => {
             let v = eval_depth(expr, scope, values, ctx, d)?;
@@ -284,6 +305,20 @@ fn eval_depth_inner(
                 return Ok(result);
             }
             let v = eval_depth(expr, scope, values, ctx, d)?;
+            // A whole-row reference is a composite operand, which PostgreSQL
+            // tests field by field exactly as it tests a row constructor: `t IS
+            // NOT NULL` is false for a row with any NULL field.
+            if let Expr::Column { table: None, name } = &**expr
+                && let Datum::Record(record) = &v
+                && scope.resolve(None, name).is_err()
+                && scope.whole_row(name).is_some()
+            {
+                return Ok(Datum::Bool(if *negated {
+                    record.values.iter().all(|f| !f.is_null())
+                } else {
+                    record.values.iter().all(Datum::is_null)
+                }));
+            }
             Ok(Datum::Bool(v.is_null() ^ *negated))
         }
         Expr::InList {
@@ -3835,8 +3870,16 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             {
                 return crate::func::scalar_result_type(&call, scope);
             }
-            let idx = scope.resolve(table.as_deref(), name)?;
-            Ok(scope.ty_at(idx))
+            match scope.resolve(table.as_deref(), name) {
+                Ok(idx) => Ok(scope.ty_at(idx)),
+                Err(error) => whole_row_reference(table.as_deref(), name, &error)
+                    .filter(|q| scope.whole_row(q).is_some())
+                    // The relation's composite type is not registered in
+                    // `pg_type` here, so a whole row reports the anonymous
+                    // `record` rather than PostgreSQL's per-relation row type.
+                    .map(|_| ColumnType::Record(None))
+                    .ok_or(error),
+            }
         }
         Expr::Unary { op, expr } => match op {
             UnaryOp::Not => Ok(ColumnType::Bool),

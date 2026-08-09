@@ -257,7 +257,7 @@ async fn alter_schema_rename_remains_refused() {
 
 #[tokio::test]
 async fn every_major_feature_probe_matches_its_typed_behavior() {
-    assert!(FEATURE_PROBES.len() == 49);
+    assert!(FEATURE_PROBES.len() == 50);
     for probe in FEATURE_PROBES {
         if probe.behavior == FeatureBehavior::ParserRejectPending {
             assert!(

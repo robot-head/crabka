@@ -6,7 +6,7 @@
 //! slice used.
 
 use crabka_pgcatalog::Table;
-use crabka_pgtypes::ColumnType;
+use crabka_pgtypes::{ColumnType, Datum, RecordValue};
 
 use crate::error::ExecError;
 
@@ -160,6 +160,58 @@ impl Scope {
             return Err(ExecError::MissingFromEntry(q.to_string()));
         }
         Err(ExecError::UndefinedColumn(name.to_string()))
+    }
+
+    /// Resolve a *whole-row* reference: the flat indices, in row order, of every
+    /// column carrying `qualifier`.
+    ///
+    /// `SELECT t FROM t` does not name a column at all. `PostgreSQL` resolves a
+    /// bare name that matches no column against the range table, and a match
+    /// there becomes a `Var` with `varattno` 0 — the entire row as one composite
+    /// value, whose fields are that relation's columns in declaration order.
+    ///
+    /// A column always wins: `SELECT shadow FROM shadow` reads the column, so
+    /// this is only ever consulted after [`Scope::resolve`] has reported 42703.
+    /// Only an UNQUALIFIED name can be a whole-row reference — `PostgreSQL`
+    /// reads `s.t` as `table s, column t` and reports a missing FROM entry for
+    /// `s`, never as the whole row of `s.t`.
+    ///
+    /// `None` when nothing in scope carries that qualifier, which keeps the
+    /// caller's 42703 exactly as it was.
+    pub fn whole_row(&self, qualifier: &str) -> Option<Vec<usize>> {
+        // The internal qualifiers name a *column* by position or by ordinal, so
+        // they are not relations and have no whole row. Neither can be spelled
+        // by a user reference (a `$` cannot begin an unquoted identifier), but a
+        // caller holding a name from elsewhere must not reach them either.
+        if qualifier == POSITION_QUALIFIER || qualifier == CORRELATED_QUALIFIER {
+            return None;
+        }
+        let indices: Vec<usize> = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.qualifier.as_deref() == Some(qualifier))
+            .map(|(i, _)| i)
+            .collect();
+        (!indices.is_empty()).then_some(indices)
+    }
+
+    /// The composite value of a whole-row reference over one row of this scope.
+    ///
+    /// The field names are the relation's column names, which is what
+    /// `row_to_json(t)` and `(t).c` read; the type is the anonymous `record`,
+    /// because a relation's composite type is not registered here.
+    pub fn whole_row_value(&self, qualifier: &str, values: &[Datum]) -> Option<Datum> {
+        let indices = self.whole_row(qualifier)?;
+        let names: std::sync::Arc<[String]> = indices
+            .iter()
+            .map(|i| self.columns[*i].name.clone())
+            .collect();
+        let fields = indices
+            .iter()
+            .map(|i| values[*i].clone())
+            .collect::<Vec<_>>();
+        Some(Datum::Record(RecordValue::named(None, names, fields)))
     }
 }
 

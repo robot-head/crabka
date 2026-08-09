@@ -4277,13 +4277,7 @@ async fn partitioned_insert(
         )?;
         inserted += 1;
     }
-    let spec = ReturningSpec::new(
-        &parent,
-        &parent.name.to_string(),
-        returning.as_ref(),
-        None,
-        false,
-    )?;
+    let spec = ReturningSpec::new(&parent, &parent.name.name, returning.as_ref(), None, false)?;
     Ok((
         spec.outcome(format!("INSERT 0 {inserted}"), returned_rows, ctx)?,
         ops,
@@ -5161,8 +5155,7 @@ async fn execute_write_body(
                 inserted_or_updated += 1;
             }
             let tag = format!("INSERT 0 {inserted_or_updated}");
-            let spec =
-                ReturningSpec::new(&t, &t.name.to_string(), returning.as_ref(), None, false)?;
+            let spec = ReturningSpec::new(&t, &t.name.name, returning.as_ref(), None, false)?;
             Ok((spec.outcome(tag, returned_rows, ctx)?, ops))
         }
         Statement::Update {
@@ -21834,13 +21827,10 @@ pub(crate) fn describe_returning(
 
     // Describe resolves against the target alone: OLD/NEW image columns mirror
     // its types, and a joined FROM/USING adds columns the caller must qualify.
-    let spec = ReturningSpec::new(
-        &table,
-        &table.name.to_string(),
-        Some(returning),
-        None,
-        merge,
-    )?;
+    // The range-table entry a DML statement adds is aliased to the relation's
+    // BARE name, never its schema-qualified spelling: `INSERT INTO s.t …
+    // RETURNING t.c` binds in PostgreSQL, and `s.t.c` does not even parse there.
+    let spec = ReturningSpec::new(&table, &table.name.name, Some(returning), None, merge)?;
     let (fields, _exprs, _tys) = resolve_projection(&spec.items, &spec.scope)?;
     Ok(fields)
 }

@@ -393,6 +393,20 @@ pub(crate) fn create(
                 "transition tables can only be specified for AFTER non-constraint triggers",
             ));
         }
+        // TRUNCATE removes every row at once and has no per-row images to
+        // collect, so PostgreSQL rejects the clause outright rather than
+        // reaching the OLD/NEW event rules below — which would otherwise report
+        // "OLD TABLE can only be specified for …" for a TRUNCATE trigger.
+        // TRUNCATE removes every row at once and has no per-row images to
+        // collect, so PostgreSQL rejects the clause outright rather than
+        // reaching the OLD/NEW event rules below — which would otherwise report
+        // "OLD TABLE can only be specified for …" for a TRUNCATE trigger.
+        if events.truncate {
+            return Err(trigger_error(
+                "0A000",
+                "TRUNCATE triggers with transition tables are not supported",
+            ));
+        }
         if !events.update_columns.is_empty() {
             return Err(trigger_error(
                 "42P17",
