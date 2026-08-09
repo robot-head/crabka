@@ -3394,6 +3394,7 @@ mod tests {
             name: name.to_string(),
             distinct: false,
             args: FuncArgs::Exprs(args),
+            order_by: Vec::new(),
             filter: None,
         }
     }

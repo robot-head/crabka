@@ -573,11 +573,13 @@ struct AggSpec {
     value_arg: Option<Expr>,
     arg_type: Option<ColumnType>,
     distinct: bool,
-    /// `agg(...) FILTER (WHERE predicate)`.
-    ///
-    /// The predicate is evaluated per source row before the argument is read,
-    /// so a row the predicate rejects never reaches the accumulator and never
-    /// joins the `DISTINCT` buffer.
+    /// `agg(args ORDER BY key [, …])` — the order this aggregate's own input is
+    /// folded in, within each group. Empty for the far commoner unordered call,
+    /// which then keeps folding row by row without buffering anything.
+    order_by: Vec<crabka_pgparser::ast::OrderItem>,
+    /// `agg(...) FILTER (WHERE predicate)` — evaluated per source row before the
+    /// argument is even looked at, so a row the predicate rejects never reaches
+    /// the accumulator and never joins the `DISTINCT` buffer.
     filter: Option<Expr>,
     /// The compiled user-defined aggregate, when `func` is [`AggFunc::User`].
     /// Boxed because it is far larger than any built-in spec and almost every
@@ -585,12 +587,69 @@ struct AggSpec {
     user: Option<Box<crate::useragg::UserAggregate>>,
 }
 
-/// Build the spec for one aggregate call.
+/// Validate `agg(args ORDER BY key [, …])`, whichever aggregate it names.
 ///
-/// This function validates the arity, the argument type and the
-/// no-nested-aggregate rule.
+/// Runs only once the call's name and arguments have resolved, because that is
+/// the order `PostgreSQL` reports in: `nosuchagg(DISTINCT a ORDER BY b)` is
+/// 42883 and `array_agg(DISTINCT nosuchcol ORDER BY b)` is 42703, never the
+/// sort's own 42P10.
+///
+/// A sort key is an ordinary expression over the same rows the arguments are
+/// read from — never an output-column position, and never an output label:
+/// `array_agg(a ORDER BY 1)` sorts every row by the constant one (i.e. keeps
+/// them in arrival order), and `array_agg(a ORDER BY x) AS x` is 42703. That is
+/// `PostgreSQL`'s SQL99 rule for the clause, and it is the one place a sort in
+/// this engine does NOT resolve the SQL92 shorthands.
+///
+/// `DISTINCT` narrows it further: the rows are deduplicated on the argument
+/// tuple, so a sort key that is not one of the arguments would order rows that
+/// no longer exist by the time the fold runs. `PostgreSQL` refuses that outright
+/// rather than picking a representative, and so does this.
+fn validate_aggregate_order_by(fc: &FuncCall, scope: &Scope) -> Result<(), ExecError> {
+    if fc.order_by.is_empty() {
+        return Ok(());
+    }
+    for item in &fc.order_by {
+        reject_nested_aggregate(&item.expr)?;
+        let ty = crate::eval::infer_type(&item.expr, scope)?;
+        crate::eval::require_ordering_operator(ty)?;
+    }
+    if !fc.distinct {
+        return Ok(());
+    }
+    let args: &[Expr] = match &fc.args {
+        FuncArgs::Star => &[],
+        FuncArgs::Exprs(args) => args,
+    };
+    // An argument is resolved against the aggregate's parameter type; a sort key
+    // is resolved on its own. So a literal with no type of its own — a bare
+    // string, `NULL`, a bit string — is still `unknown` when the two are matched
+    // and can never be one of the arguments, however it is spelled:
+    // `string_agg(DISTINCT b, ',' ORDER BY ',')` is 42P10 in PostgreSQL even
+    // though the delimiter reads identically. An integer or numeric literal
+    // carries its own type in both places and does match.
+    let matches_an_argument = |item: &crabka_pgparser::ast::OrderItem| {
+        !matches!(
+            item.expr,
+            Expr::StringLiteral(_) | Expr::BitStringLiteral(_) | Expr::NullLiteral
+        ) && args.contains(&item.expr)
+    };
+    if fc.order_by.iter().all(matches_an_argument) {
+        return Ok(());
+    }
+    Err(ExecError::FunctionError {
+        sqlstate: "42P10",
+        message: "in an aggregate with DISTINCT, ORDER BY expressions must appear \
+                  in argument list"
+            .into(),
+    })
+}
+
+/// Build the spec for one aggregate call, validating arity, argument type, and
+/// the no-nested-aggregate rule.
 fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
     if let Some(user) = resolve_user(fc, scope)? {
+        validate_aggregate_order_by(fc, scope)?;
         for arg in &user.args {
             reject_nested_aggregate(arg)?;
         }
@@ -600,6 +659,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             value_arg: None,
             arg_type: None,
             distinct: fc.distinct,
+            order_by: fc.order_by.clone(),
             filter: fc.filter.as_deref().cloned(),
             user: Some(Box::new(user)),
         });
@@ -637,6 +697,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: None,
                 arg_type: None,
                 distinct: fc.distinct,
+                order_by: fc.order_by.clone(),
                 filter: fc.filter.as_deref().cloned(),
                 user: None,
             }),
@@ -649,6 +710,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                     value_arg: None,
                     arg_type: Some(arg_type),
                     distinct: fc.distinct,
+                    order_by: fc.order_by.clone(),
                     filter: fc.filter.as_deref().cloned(),
                     user: None,
                 })
@@ -672,6 +734,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: None,
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
+                order_by: fc.order_by.clone(),
                 filter: fc.filter.as_deref().cloned(),
                 user: None,
             })
@@ -694,6 +757,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: Some(value.clone()),
                 arg_type: Some(key_type),
                 distinct: fc.distinct,
+                order_by: fc.order_by.clone(),
                 filter: fc.filter.as_deref().cloned(),
                 user: None,
             })
@@ -729,6 +793,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: None,
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
+                order_by: fc.order_by.clone(),
                 filter: fc.filter.as_deref().cloned(),
                 user: None,
             })
@@ -751,6 +816,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: Some(delimiter.clone()),
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
+                order_by: fc.order_by.clone(),
                 filter: fc.filter.as_deref().cloned(),
                 user: None,
             })
@@ -767,6 +833,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: Some(x.clone()),
                 arg_type: Some(ColumnType::Float8),
                 distinct: fc.distinct,
+                order_by: fc.order_by.clone(),
                 filter: fc.filter.as_deref().cloned(),
                 user: None,
             })
@@ -786,11 +853,13 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: None,
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
+                order_by: fc.order_by.clone(),
                 filter: fc.filter.as_deref().cloned(),
                 user: None,
             })
         }
     }?;
+    validate_aggregate_order_by(fc, scope)?;
     if spec.distinct {
         if let Some(ty) = spec.arg_type {
             crate::eval::require_equality_operator(ty)?;
@@ -967,8 +1036,10 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
         Expr::Func(fc) if aggregate_func(&fc.name).is_some() => {
             // A FILTER predicate has to be evaluated per source row, which the
             // streaming path does not do — it would silently aggregate every row.
-            // Fall back to the general path, which applies the predicate.
-            if fc.distinct || fc.filter.is_some() {
+            // A sort needs the whole group buffered before the first fold, which
+            // is the opposite of streaming. Fall back to the general path, which
+            // does both.
+            if fc.distinct || fc.filter.is_some() || !fc.order_by.is_empty() {
                 return false;
             }
             if !calls.contains(fc) {
@@ -1501,21 +1572,23 @@ fn eval_grouped_depth(
 
 /// One group's running accumulator for one aggregate.
 ///
-/// The accumulator holds the running [`AccState`]. For a `DISTINCT` aggregate
-/// it also holds the argument tuples it has yet to fold.
-///
-/// PostgreSQL implements `DISTINCT` by a sort of the WHOLE argument tuple and a
-/// drop of adjacent duplicates. A `DISTINCT` aggregate therefore buffers its
-/// rows and folds them at [`Acc::finish`] instead of on arrival. Two results
-/// follow that a fold-on-arrival "first value seen" set gets wrong.
-/// `jsonb_object_agg(DISTINCT k, v)` over `('k',1),('k',2)` keeps BOTH pairs,
-/// so the object's last value is `2`, not `1`. `array_agg(DISTINCT x)` and
-/// `jsonb_agg(DISTINCT x)` emit sorted order, not first-appearance order.
+/// PostgreSQL implements `DISTINCT` by sorting the WHOLE argument tuple and
+/// dropping adjacent duplicates, so a `DISTINCT` aggregate buffers its rows and
+/// folds them at [`Acc::finish`] instead of on arrival. Two things follow that a
+/// fold-on-arrival "first value seen" set gets wrong:
+/// `jsonb_object_agg(DISTINCT k, v)` over `('k',1),('k',2)` keeps BOTH pairs (so
+/// the object's last value is `2`, not `1`), and `array_agg(DISTINCT x)` /
+/// `jsonb_agg(DISTINCT x)` emit sorted — not first-appearance — order.
+/// An aggregate ORDER BY buffers for the same reason and folds at the same
+/// point, holding each row's sort key alongside its argument tuple.
 struct Acc {
     state: AccState,
-    /// `Some` if and only if the spec is `DISTINCT`. It holds each row's
+    /// `Some` iff the spec is `DISTINCT` and carries no sort: each row's
     /// evaluated argument tuple.
     distinct: Option<Vec<Vec<Datum>>>,
+    /// `Some` iff the spec carries a sort: each row's evaluated sort key tuple
+    /// beside its argument tuple.
+    ordered: Option<Vec<(Vec<Datum>, Vec<Datum>)>>,
 }
 
 /// The running value of one aggregate.
@@ -1650,9 +1723,13 @@ enum StringAggAcc {
 
 impl Acc {
     fn new(spec: &AggSpec) -> Acc {
+        let ordered = !spec.order_by.is_empty();
         Acc {
             state: AccState::new(spec),
-            distinct: spec.distinct.then(Vec::new),
+            // A sorted `DISTINCT` aggregate buffers once, not twice: the sorted
+            // buffer already carries the argument tuples the dedup runs over.
+            distinct: (spec.distinct && !ordered).then(Vec::new),
+            ordered: ordered.then(Vec::new),
         }
     }
 
@@ -1692,6 +1769,14 @@ impl Acc {
         if !spec.func.keeps_nulls() && args.iter().any(Datum::is_null) {
             return Ok(());
         }
+        if let Some(rows) = &mut self.ordered {
+            let mut keys = Vec::with_capacity(spec.order_by.len());
+            for item in &spec.order_by {
+                keys.push(crate::eval::eval(&item.expr, scope, row, ctx)?);
+            }
+            rows.push((keys, args));
+            return Ok(());
+        }
         match &mut self.distinct {
             Some(tuples) => {
                 tuples.push(args);
@@ -1701,11 +1786,14 @@ impl Acc {
         }
     }
 
-    /// This aggregate's value for the group.
-    ///
-    /// This method first sorts, deduplicates and folds any buffered `DISTINCT`
-    /// tuples.
+    /// This aggregate's value for the group: any buffered tuples are ordered,
+    /// deduplicated where `DISTINCT` asks for it, and folded first.
     fn finish(&mut self, spec: &AggSpec, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+        if let Some(rows) = self.ordered.take() {
+            for args in sorted_input(rows, spec)? {
+                self.state.fold_args(spec, &args, ctx)?;
+            }
+        }
         if let Some(tuples) = self.distinct.take() {
             for args in sorted_distinct(tuples)? {
                 self.state.fold_args(spec, &args, ctx)?;
@@ -1715,12 +1803,53 @@ impl Acc {
     }
 }
 
-/// PostgreSQL's `DISTINCT` input for an aggregate.
+/// The rows a sorted aggregate folds, in the order it folds them.
 ///
-/// These are the argument tuples sorted ascending, with adjacent duplicates
-/// dropped. The sort is what makes `array_agg(DISTINCT x)` emit ascending
-/// order. A comparison, instead of a hash, is what makes `1.0` and `1.00` one
-/// `numeric` value.
+/// The sort is [`crate::exec::order_cmp`] — the very comparison a query-level
+/// `ORDER BY` runs — over the keys evaluated per row, so an aggregate's sort
+/// agrees with the engine's own on direction, NULL placement and value order.
+/// `sort_by` is stable, so rows that tie on every key keep arrival order, which
+/// is what makes `array_agg(a ORDER BY 1)` read out unsorted.
+///
+/// Under `DISTINCT` the whole argument tuple joins the key list as a trailing
+/// ascending tiebreak. Every sort key is already one of the arguments there (the
+/// spec refuses otherwise), so appending them cannot reorder anything the
+/// written sort decided — it only brings rows with equal arguments together, so
+/// that dropping adjacent duplicates deduplicates the group exactly.
+fn sorted_input(
+    mut rows: Vec<(Vec<Datum>, Vec<Datum>)>,
+    spec: &AggSpec,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut items = spec.order_by.clone();
+    if spec.distinct {
+        let widest = rows.iter().map(|(_, args)| args.len()).max().unwrap_or(0);
+        items.extend((0..widest).map(|_| crabka_pgparser::ast::OrderItem {
+            expr: Expr::NullLiteral,
+            asc: true,
+            nulls_first: false,
+        }));
+        for (keys, args) in &mut rows {
+            keys.extend(args.iter().cloned());
+        }
+    }
+    rows.sort_by(|a, b| crate::exec::order_cmp(&a.0, &b.0, &items));
+    let mut out: Vec<Vec<Datum>> = Vec::with_capacity(rows.len());
+    for (_, args) in rows {
+        if spec.distinct
+            && let Some(prev) = out.last()
+            && compare_tuples(prev, &args)? == Ordering::Equal
+        {
+            continue;
+        }
+        out.push(args);
+    }
+    Ok(out)
+}
+
+/// PostgreSQL's `DISTINCT` input for an aggregate: the argument tuples sorted
+/// ascending with adjacent duplicates dropped. Sorting is what makes
+/// `array_agg(DISTINCT x)` emit ascending order, and comparing (rather than
+/// hashing) is what makes `1.0` and `1.00` one `numeric` value.
 fn sorted_distinct(mut tuples: Vec<Vec<Datum>>) -> Result<Vec<Vec<Datum>>, ExecError> {
     // `sort_by` needs a total order, so an incomparable pair is recorded and
     // reported once the sort is over rather than panicking inside it.
@@ -2447,6 +2576,7 @@ fn build_jsonb(builder: &str, args: Vec<Datum>, ctx: &EvalCtx) -> Result<Datum, 
                 })
                 .collect(),
         ),
+        order_by: Vec::new(),
         filter: None,
     };
     crate::json_fn::eval_json(&call, ctx, |e| match e {

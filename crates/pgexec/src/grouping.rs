@@ -852,6 +852,7 @@ pub(crate) fn rewrite(
             name,
             distinct,
             args,
+            order_by,
             filter,
         }) => Expr::Func(FuncCall {
             name: name.clone(),
@@ -860,6 +861,11 @@ pub(crate) fn rewrite(
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(rewrite_all(args, fold, into_aggregates)?),
             },
+            // An aggregate's sort keys are ordinary expressions over the input
+            // rows, so they take the same rewrite the arguments take — column
+            // canonicalization above all, which is what lets a sort key be
+            // matched against the argument list under DISTINCT.
+            order_by: rewrite_order_by(order_by, fold, into_aggregates)?,
             // A FILTER predicate is an ordinary expression over the same rows, so
             // it is rewritten exactly like the arguments.
             filter: match filter {
@@ -1034,6 +1040,25 @@ fn rewrite_all(
     exprs
         .iter()
         .map(|e| rewrite(e, fold, into_aggregates))
+        .collect()
+}
+
+/// [`rewrite_all`] over a sort list, keeping each item's direction and NULL
+/// placement.
+fn rewrite_order_by(
+    order_by: &[crabka_pgparser::ast::OrderItem],
+    fold: &mut impl FnMut(&Expr) -> Result<Option<Expr>, ExecError>,
+    into_aggregates: bool,
+) -> Result<Vec<crabka_pgparser::ast::OrderItem>, ExecError> {
+    order_by
+        .iter()
+        .map(|item| {
+            Ok(crabka_pgparser::ast::OrderItem {
+                expr: rewrite(&item.expr, fold, into_aggregates)?,
+                asc: item.asc,
+                nulls_first: item.nulls_first,
+            })
+        })
         .collect()
 }
 

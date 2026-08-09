@@ -1208,6 +1208,7 @@ impl Parser {
                 name: "timezone".into(),
                 distinct: false,
                 args: crate::ast::FuncArgs::Exprs(vec![zone, lhs]),
+                order_by: Vec::new(),
                 filter: None,
             });
             return Ok((lhs, true));
@@ -1429,6 +1430,7 @@ impl Parser {
                     name: "current_user".into(),
                     distinct: false,
                     args: crate::ast::FuncArgs::Exprs(vec![]),
+                    order_by: Vec::new(),
                     filter: None,
                 }))
             }
@@ -1504,6 +1506,7 @@ impl Parser {
                         name: lower,
                         distinct: false,
                         args: crate::ast::FuncArgs::Exprs(vec![]),
+                        order_by: Vec::new(),
                         filter: None,
                     }));
                 }
@@ -1758,11 +1761,13 @@ impl Parser {
     fn func_call(&mut self, name: String) -> Result<Expr, ParseError> {
         use crate::ast::{FuncArgs, FuncCall};
         self.expect(&Token::LParen)?;
-        // `f(*)` — the star form (no DISTINCT, no other args).
-        let (distinct, args, ordered) = if *self.peek() == Token::Star {
+        // `f(*)` — the star form (no DISTINCT, no other args, and no sort:
+        // `count(* ORDER BY x)` is a syntax error in `PostgreSQL` too, which the
+        // `)` this branch demands reports.
+        let (distinct, args, order_by) = if *self.peek() == Token::Star {
             self.bump();
             self.expect(&Token::RParen)?;
-            (false, FuncArgs::Star, false)
+            (false, FuncArgs::Star, Vec::new())
         } else {
             let distinct = if self.eat_keyword(Keyword::Distinct) {
                 true
@@ -1806,23 +1811,25 @@ impl Parser {
                     self.peek_pos(),
                 )?);
             }
-            let ordered = self.eat_aggregate_order_by()?;
+            // The sort inside the parentheses is spelled exactly like a
+            // query-level one, so it is parsed by the same routine and reaches
+            // the executor as the same `OrderItem`s.
+            let order_by = self.parse_order_by()?;
             self.expect(&Token::RParen)?;
-            (distinct, FuncArgs::Exprs(args), ordered)
+            (distinct, FuncArgs::Exprs(args), order_by)
         };
         let filter = self.opt_filter_clause()?;
         let over = self.opt_over_clause()?;
-        if ordered {
+        if !order_by.is_empty() && over.is_some() {
             // `PostgreSQL` refuses the windowed spelling itself, with this
-            // SQLSTATE and this message. The plain spelling it executes; this
-            // engine's aggregate path cannot order the values it accumulates, so
-            // that one is refused here too rather than silently ignoring the sort.
-            let message = if over.is_some() {
-                "aggregate ORDER BY is not implemented for window functions"
-            } else {
-                "aggregate ORDER BY is not supported"
-            };
-            return Err(ParseError::new_sqlstate("0A000", message, self.peek_pos()));
+            // SQLSTATE and this message. A window's own frame already fixes the
+            // order its rows arrive in, so there is nothing for a per-call sort
+            // to mean there.
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "aggregate ORDER BY is not implemented for window functions",
+                self.peek_pos(),
+            ));
         }
         let Some(over) = over else {
             // `FILTER` without `OVER` is the plain aggregate spelling; the call
@@ -1833,6 +1840,7 @@ impl Parser {
                 name,
                 distinct,
                 args,
+                order_by,
                 filter: filter.map(Box::new),
             }));
         };
@@ -1843,33 +1851,6 @@ impl Parser {
             filter,
             over,
         })
-    }
-
-    /// `ORDER BY <sort item> [, …]` inside an aggregate's argument list, which
-    /// orders the values fed to the aggregate. The parser consumes and discards
-    /// it, because the caller refuses the call. So a malformed sort list is
-    /// still a syntax error at the right place.
-    fn eat_aggregate_order_by(&mut self) -> Result<bool, ParseError> {
-        if !self.eat_keyword(Keyword::Order) {
-            return Ok(false);
-        }
-        self.expect(&Token::Keyword(Keyword::By))?;
-        loop {
-            self.expr(0)?;
-            if self.eat_keyword(Keyword::Using) {
-                self.expr(0)?;
-            } else if !self.eat_keyword(Keyword::Desc) {
-                self.eat_keyword(Keyword::Asc);
-            }
-            if self.eat_ident_eq("nulls") && !self.eat_ident_eq("first") {
-                self.expect_ident_eq("last")?;
-            }
-            if self.eat_comma() {
-                continue;
-            }
-            break;
-        }
-        Ok(true)
     }
 
     /// Record a window call against the `SELECT` currently being parsed and
@@ -2248,6 +2229,7 @@ impl Parser {
         use crate::ast::{FuncArgs, FuncCall};
 
         self.expect(&Token::LParen)?;
+        let mut order_by = Vec::new();
         let args = if name == "json_objectagg" {
             let key = self.expr(0)?;
             if !(self.eat_word_eq("value") || self.eat_token(&Token::Colon)) {
@@ -2262,7 +2244,10 @@ impl Parser {
         } else {
             let item = self.expr(0)?;
             self.opt_format_json();
-            let _ = self.parse_order_by()?;
+            // `JSON_ARRAYAGG(e ORDER BY k)` is the standard spelling of the same
+            // sort the plain aggregates take, so it lowers onto it rather than
+            // being dropped — an ignored sort would silently reorder the array.
+            order_by = self.parse_order_by()?;
             vec![item]
         };
         // The modifiers are parsed and refused rather than silently ignored:
@@ -2284,6 +2269,7 @@ impl Parser {
             },
             distinct: false,
             args: FuncArgs::Exprs(args),
+            order_by,
             filter: None,
         }))
     }
@@ -2519,6 +2505,7 @@ impl Parser {
             name: "extract".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral(field), source]),
+            order_by: Vec::new(),
             filter: None,
         }))
     }
@@ -2891,6 +2878,7 @@ impl Parser {
             name: name.into(),
             distinct: false,
             args: crate::ast::FuncArgs::Exprs(args),
+            order_by: Vec::new(),
             filter: None,
         })
     }
@@ -16249,26 +16237,28 @@ mod tests {
             "localtime",
             "current_timestamp",
         ] {
-            assert_eq!(
-                expr(name),
-                Expr::Func(FuncCall {
-                    name: name.into(),
-                    distinct: false,
-                    args: FuncArgs::Exprs(vec![]),
-                    filter: None,
-                }),
+            assert2::assert!(
+                expr(name)
+                    == Expr::Func(FuncCall {
+                        name: name.into(),
+                        distinct: false,
+                        args: FuncArgs::Exprs(vec![]),
+                        order_by: Vec::new(),
+                        filter: None,
+                    }),
                 "niladic `{name}`"
             );
         }
         // The paren forms still parse via the normal func-call path.
-        assert_eq!(
-            expr("now()"),
-            Expr::Func(FuncCall {
-                name: "now".into(),
-                distinct: false,
-                args: FuncArgs::Exprs(vec![]),
-                filter: None,
-            })
+        assert2::assert!(
+            expr("now()")
+                == Expr::Func(FuncCall {
+                    name: "now".into(),
+                    distinct: false,
+                    args: FuncArgs::Exprs(vec![]),
+                    order_by: Vec::new(),
+                    filter: None,
+                })
         );
         match expr("current_timestamp(0)") {
             Expr::Func(FuncCall { name, args, .. }) => {
@@ -16668,10 +16658,11 @@ mod tests {
                     ref name,
                     distinct: false,
                     args: FuncArgs::Star,
+                    ref order_by,
                     filter: None,
                 }),
                 ..
-            } if name == "count"
+            } if name == "count" && order_by.is_empty()
         ));
         assert_eq!(
             s.group_by,
@@ -16696,12 +16687,14 @@ mod tests {
                         name,
                         distinct,
                         args,
+                        order_by,
                         filter: None,
                     }),
                 ..
             } => {
                 assert_eq!(name, "count");
                 assert!(*distinct);
+                assert!(order_by.is_empty());
                 match args {
                     FuncArgs::Exprs(v) => assert_eq!(v.len(), 1),
                     other @ FuncArgs::Star => panic!("expected Exprs, got {other:?}"),
@@ -18103,7 +18096,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_order_by_is_refused_as_unsupported() {
+    fn aggregate_order_by_is_refused_over_a_window() {
         use assert2::assert;
         // PostgreSQL refuses the windowed spelling itself, with this SQLSTATE and
         // this message.
@@ -18119,18 +18112,72 @@ mod tests {
                 "{sql}"
             );
         }
-        // The plain spelling PostgreSQL executes; this engine cannot order an
-        // aggregate's inputs, so it says so rather than ignoring the sort.
-        for sql in [
-            "SELECT string_agg(g, ',' ORDER BY g) FROM w",
-            "SELECT array_agg(DISTINCT v ORDER BY v) FROM w",
-        ] {
-            let error = parse(sql).expect_err("aggregate ORDER BY");
-            assert!(error.sqlstate() == "0A000", "{sql}");
-            assert!(
-                error.message == "aggregate ORDER BY is not supported",
-                "{sql}"
-            );
+        // `count(*)` takes no sort at all: PostgreSQL's grammar has no place for
+        // one after the star, and neither has this one.
+        assert!(parse("SELECT count(* ORDER BY g) FROM w").is_err());
+    }
+
+    /// The sort inside an aggregate call parses into the very same `OrderItem`s
+    /// a query-level `ORDER BY` does, defaults included.
+    #[test]
+    fn aggregate_order_by_parses_into_order_items() {
+        use assert2::assert;
+
+        use crate::ast::{Expr, OrderItem};
+        let sort_of = |sql: &str| -> Vec<OrderItem> {
+            let Expr::Func(call) = expr(sql) else {
+                panic!("{sql} is not a function call");
+            };
+            call.order_by
+        };
+        let column = |name: &str| Expr::Column {
+            table: None,
+            name: name.to_string(),
+        };
+        let cases: [(&str, Vec<OrderItem>); 5] = [
+            ("array_agg(v)", vec![]),
+            (
+                "array_agg(v ORDER BY g)",
+                vec![OrderItem {
+                    expr: column("g"),
+                    asc: true,
+                    nulls_first: false,
+                }],
+            ),
+            (
+                "array_agg(DISTINCT v ORDER BY v DESC)",
+                vec![OrderItem {
+                    expr: column("v"),
+                    asc: false,
+                    nulls_first: true,
+                }],
+            ),
+            (
+                "string_agg(g, ',' ORDER BY g DESC NULLS LAST, v NULLS FIRST)",
+                vec![
+                    OrderItem {
+                        expr: column("g"),
+                        asc: false,
+                        nulls_first: false,
+                    },
+                    OrderItem {
+                        expr: column("v"),
+                        asc: true,
+                        nulls_first: true,
+                    },
+                ],
+            ),
+            (
+                "array_agg(v ORDER BY g USING >)",
+                vec![OrderItem {
+                    expr: column("g"),
+                    asc: false,
+                    nulls_first: true,
+                }],
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(sort_of(sql) == expected, "{sql}");
         }
         // An ordinary trailing ORDER BY is untouched.
         assert!(parse("SELECT array_agg(v) FROM w ORDER BY 1").is_ok());

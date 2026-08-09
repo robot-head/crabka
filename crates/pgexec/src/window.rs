@@ -320,6 +320,9 @@ fn plan_call(
         name: call.name.clone(),
         distinct: false,
         args: call.args.clone(),
+        // A window call cannot carry a per-call sort: the parser refuses
+        // `agg(x ORDER BY y) OVER (…)` exactly as PostgreSQL does.
+        order_by: Vec::new(),
         filter: None,
     };
     let args = match &plain.args {
@@ -896,6 +899,9 @@ fn split(expr: &Expr, leaves: &mut Vec<Expr>) -> Result<Expr, ExecError> {
                 name: call.name.clone(),
                 distinct: call.distinct,
                 args: FuncArgs::Exprs(lowered),
+                // An aggregate's own sort travels with it when a sibling window
+                // call is lifted out of the same expression.
+                order_by: call.order_by.clone(),
                 filter: call.filter.clone(),
             })
         }

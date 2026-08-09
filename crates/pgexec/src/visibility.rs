@@ -765,6 +765,7 @@ mod tests {
             args: crabka_pgparser::ast::FuncArgs::Exprs(vec![
                 crabka_pgparser::ast::Expr::IntLiteral("0".into()),
             ]),
+            order_by: Vec::new(),
             filter: None,
         };
         let publishable =

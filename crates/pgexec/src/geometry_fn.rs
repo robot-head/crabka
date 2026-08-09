@@ -716,6 +716,7 @@ mod tests {
             name: name.to_string(),
             distinct: false,
             args: FuncArgs::Exprs(exprs),
+            order_by: Vec::new(),
             filter: None,
         };
         let ctx = EvalCtx::test_default();

@@ -302,6 +302,7 @@ pub(crate) fn niladic_keyword_call(name: &str) -> Option<FuncCall> {
         name: name.to_string(),
         distinct: false,
         args: FuncArgs::Exprs(Vec::new()),
+        order_by: Vec::new(),
         filter: None,
     })
 }
@@ -326,6 +327,15 @@ fn distinct_not_aggregate(name: &str) -> ExecError {
     ))
 }
 
+/// A sort inside the parentheses orders the rows an aggregate accumulates. A
+/// scalar function sees one row at a time and has nothing to order, so
+/// `PostgreSQL` reports 42809 for it — the same class as a misplaced `DISTINCT`.
+fn order_by_not_aggregate(name: &str) -> ExecError {
+    ExecError::WrongObjectType(format!(
+        "ORDER BY specified, but {name} is not an aggregate function"
+    ))
+}
+
 /// The positional argument list of a scalar call. `f(*)` is never valid for a
 /// scalar function (only `count(*)` is), so it is an undefined-function error.
 fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
@@ -335,11 +345,15 @@ fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     }
 }
 
-/// Reject the `DISTINCT` modifier (42809) and return the call's argument list.
-/// Shared front-door check for both `scalar_result_type` and `eval_scalar`.
+/// Reject the aggregate-only modifiers (42809) and return the call's argument
+/// list. Shared front-door check for both `scalar_result_type` and
+/// `eval_scalar`.
 pub(crate) fn checked_args(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     if fc.distinct {
         return Err(distinct_not_aggregate(&fc.name));
+    }
+    if !fc.order_by.is_empty() {
+        return Err(order_by_not_aggregate(&fc.name));
     }
     exprs_of(fc)
 }

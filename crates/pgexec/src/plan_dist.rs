@@ -592,8 +592,11 @@ pub(crate) fn partial_aggregate_for_call(
 ) -> Option<PartialAggregateSpec> {
     // A FILTER predicate is evaluated per row against the full scope, which the
     // scan-level partial aggregate cannot do — pushing the call down without it
-    // would aggregate every row and silently ignore the filter.
-    if call.distinct || call.filter.is_some() {
+    // would aggregate every row and silently ignore the filter. A sort is the
+    // same kind of loss: the partial states merge in range order, so a call that
+    // asks for a fold order the pushdown cannot promise stays on the general
+    // path instead.
+    if call.distinct || call.filter.is_some() || !call.order_by.is_empty() {
         return None;
     }
     let column = match &call.args {

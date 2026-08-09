@@ -3670,9 +3670,16 @@ pub struct FuncCall {
     /// `true` for `f(DISTINCT …)`. `ALL` (the default) parses to `false`.
     pub distinct: bool,
     pub args: FuncArgs,
-    /// `agg(args) FILTER (WHERE predicate)`: the aggregate receives only the
-    /// rows for which the predicate is true. `None` when the call had no
-    /// clause.
+    /// `agg(args ORDER BY key [, …])` — the order the rows are fed to the
+    /// aggregate in, within each group. Empty when the call had no clause.
+    ///
+    /// The items are the very same [`OrderItem`]s a query-level `ORDER BY`
+    /// produces, so the executor sorts an aggregate's input with the identical
+    /// key evaluation, direction and NULL placement it sorts a result set with.
+    /// Only an aggregate may carry one; a scalar call with a sort is `42809`.
+    pub order_by: Vec<OrderItem>,
+    /// `agg(args) FILTER (WHERE predicate)` — only rows for which the predicate
+    /// is true are fed to the aggregate. `None` when the call had no clause.
     ///
     /// Meaningful only for an aggregate (and, in `PostgreSQL`, an aggregate used
     /// as a window function). A plain scalar call cannot carry one, and any

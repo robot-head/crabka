@@ -2354,7 +2354,21 @@ fn substitute(binding: &Binding, expr: &Expr) -> Result<Expr, ExecError> {
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(list(args)?),
             },
-            filter: None,
+            // A routine body may aggregate, so its sort keys and its FILTER are
+            // substituted into like every other sub-expression. Dropping either
+            // would silently change the body's answer rather than fail.
+            order_by: call
+                .order_by
+                .iter()
+                .map(|item| {
+                    Ok(crabka_pgparser::ast::OrderItem {
+                        expr: sub(&item.expr)?,
+                        asc: item.asc,
+                        nulls_first: item.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
+            filter: call.filter.as_deref().map(boxed).transpose()?,
         }),
         Expr::IsNull { expr, negated } => Expr::IsNull {
             expr: boxed(expr)?,
@@ -4511,6 +4525,7 @@ mod tests {
                 Expr::IntLiteral("1".into()),
                 Expr::IntLiteral("2".into()),
             ]),
+            order_by: Vec::new(),
             filter: None,
         };
         let inlined = inline_scalar(&kv, &call)
@@ -4543,6 +4558,7 @@ mod tests {
             name: "named".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("4".into())]),
+            order_by: Vec::new(),
             filter: None,
         };
         let inlined = inline_scalar(&kv, &call)
@@ -4568,6 +4584,7 @@ mod tests {
             name: "upper".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral("x".into())]),
+            order_by: Vec::new(),
             filter: None,
         };
         assert!(inline_scalar(&kv, &call).expect("no error").is_none());
@@ -4590,6 +4607,7 @@ mod tests {
                 Expr::IntLiteral("23".into()),
                 Expr::IntLiteral("23".into()),
             ]),
+            order_by: Vec::new(),
             filter: None,
         });
         let scope = crate::scope::Scope::empty();
@@ -4616,6 +4634,7 @@ mod tests {
             name: "md5".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral("value".into())]),
+            order_by: Vec::new(),
             filter: None,
         });
 
@@ -4680,6 +4699,7 @@ mod tests {
                     })
                     .collect(),
             ),
+            order_by: Vec::new(),
             filter: None,
         };
         assert!(inline_scalar(catalog.as_ref(), &call)?.is_none());
@@ -4864,6 +4884,7 @@ mod tests {
             name: "binary_coercible".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![text("a"), text("b")]),
+            order_by: Vec::new(),
             filter: None,
         });
         let scope = crate::scope::Scope::empty();
@@ -4997,6 +5018,7 @@ mod tests {
             name: "p".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("1".into())]),
+            order_by: Vec::new(),
             filter: None,
         };
         let error = inline_scalar(&kv, &call).expect_err("a procedure is not selectable");

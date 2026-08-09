@@ -3059,6 +3059,19 @@ fn rewrite_expr_with(
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(list(args)?),
             },
+            // An aggregate's sort keys may name the very variables this rewrite
+            // substitutes, so they travel through it like the arguments.
+            order_by: call
+                .order_by
+                .iter()
+                .map(|item| {
+                    Ok(crabka_pgparser::ast::OrderItem {
+                        expr: one(&item.expr)?,
+                        asc: item.asc,
+                        nulls_first: item.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
             filter: call.filter.as_deref().map(boxed).transpose()?,
         }),
         Expr::IsNull { expr, negated } => Expr::IsNull {

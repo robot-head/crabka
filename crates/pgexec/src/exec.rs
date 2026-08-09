@@ -6156,6 +6156,17 @@ fn rewrite_image_refs(expr: &Expr, aliases: &ImageAliases<'_>) -> Expr {
                     crabka_pgparser::ast::FuncArgs::Exprs(recurse_all(args))
                 }
             },
+            // An aggregate's own sort keys are ordinary expressions over the
+            // same rows, so they are rewritten exactly like its arguments.
+            order_by: fc
+                .order_by
+                .iter()
+                .map(|item| crabka_pgparser::ast::OrderItem {
+                    expr: *recurse(&item.expr),
+                    asc: item.asc,
+                    nulls_first: item.nulls_first,
+                })
+                .collect(),
             // The FILTER predicate is rewritten like an argument; dropping it
             // would turn a filtered aggregate into an unfiltered one.
             filter: fc.filter.as_deref().map(recurse),
@@ -11811,6 +11822,11 @@ pub(crate) fn expr_children(expr: &Expr) -> Vec<&Expr> {
             if let FuncArgs::Exprs(args) = &call.args {
                 owned.extend(args);
             }
+            // An aggregate's sort keys are sub-expressions like any other: they
+            // name columns (which privilege collection must see), they may hold
+            // a subquery (which planning must reach), and they are part of what
+            // a stored view depends on.
+            owned.extend(call.order_by.iter().map(|item| &item.expr));
             owned.extend(call.filter.iter().map(std::convert::AsRef::as_ref));
         }
         Expr::InList { expr, list, .. } => {
@@ -11881,6 +11897,7 @@ pub(crate) fn expr_children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
             if let FuncArgs::Exprs(args) = &mut call.args {
                 owned.extend(args);
             }
+            owned.extend(call.order_by.iter_mut().map(|item| &mut item.expr));
             owned.extend(call.filter.iter_mut().map(std::convert::AsMut::as_mut));
         }
         Expr::InList { expr, list, .. } => {
@@ -12760,6 +12777,7 @@ fn initplan_marker(index: usize, lhs: Option<Expr>) -> Expr {
         name: INITPLAN_MARKER.into(),
         distinct: false,
         args: FuncArgs::Exprs(args),
+        order_by: Vec::new(),
         filter: None,
     })
 }
@@ -12769,12 +12787,13 @@ fn initplan_parts(expr: &Expr) -> Option<(usize, Option<&Expr>)> {
         name,
         distinct: false,
         args: FuncArgs::Exprs(args),
+        order_by,
         filter: None,
     }) = expr
     else {
         return None;
     };
-    if name != INITPLAN_MARKER {
+    if name != INITPLAN_MARKER || !order_by.is_empty() {
         return None;
     }
     if !(1..=2).contains(&args.len()) {
@@ -12791,6 +12810,7 @@ fn scalar_lookup_marker(index: usize, key: Expr) -> Expr {
         name: SCALAR_LOOKUP_MARKER.into(),
         distinct: false,
         args: FuncArgs::Exprs(vec![Expr::IntLiteral(index.to_string()), key]),
+        order_by: Vec::new(),
         filter: None,
     })
 }
@@ -12800,12 +12820,13 @@ fn scalar_lookup_parts(expr: &Expr) -> Option<(usize, &Expr)> {
         name,
         distinct: false,
         args: FuncArgs::Exprs(args),
+        order_by,
         filter: None,
     }) = expr
     else {
         return None;
     };
-    if name != SCALAR_LOOKUP_MARKER || args.len() != 2 {
+    if name != SCALAR_LOOKUP_MARKER || args.len() != 2 || !order_by.is_empty() {
         return None;
     }
     let Expr::IntLiteral(index) = &args[0] else {

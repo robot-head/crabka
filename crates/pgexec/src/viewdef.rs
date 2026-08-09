@@ -1350,8 +1350,21 @@ fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
             .collect::<Vec<_>>()
             .join(", "),
     };
+    // An aggregate's sort and its FILTER both change the rows it folds, so both
+    // print: a definition that read them back without one would compute a
+    // different answer from the view it came from.
+    let order_by = if call.order_by.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", order_list(&call.order_by, ctx))
+    };
+    let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
+        // `get_agg_expr` adds no parentheses of its own around the predicate;
+        // the operator node it holds brings whatever it needs.
+        format!(" FILTER (WHERE {})", expr_text(predicate, ctx))
+    });
     format!(
-        "{}({}{args})",
+        "{}({}{args}{order_by}){filter}",
         call.name,
         if call.distinct { "DISTINCT " } else { "" }
     )

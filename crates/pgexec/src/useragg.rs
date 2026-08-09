@@ -758,6 +758,7 @@ fn compile_call(kv: &dyn Kv, name: &str, args: &[Expr], scope: &Scope) -> Result
         name: name.to_string(),
         distinct: false,
         args: FuncArgs::Exprs(args.to_vec()),
+        order_by: Vec::new(),
         filter: None,
     };
     let given = crate::eval::static_arg_types(args, scope)?;

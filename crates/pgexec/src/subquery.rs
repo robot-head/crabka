@@ -338,6 +338,19 @@ pub(crate) fn resolve_expr_skipping(
                             .collect::<Result<_, _>>()?,
                     ),
                 },
+                // An aggregate's sort keys resolve like its arguments — they
+                // may name the very columns this pass rewrites.
+                order_by: fc
+                    .order_by
+                    .iter()
+                    .map(|item| {
+                        Ok(crabka_pgparser::ast::OrderItem {
+                            expr: resolve_expr_skipping(ctx, &item.expr, should_skip)?,
+                            asc: item.asc,
+                            nulls_first: item.nulls_first,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?,
                 // The FILTER predicate resolves like an argument; dropping it here
                 // would silently turn a filtered aggregate into an unfiltered one.
                 filter: match &fc.filter {
@@ -739,6 +752,17 @@ fn resolve_types_in_call(
                     .collect::<Result<_, _>>()?,
             ),
         },
+        order_by: fc
+            .order_by
+            .iter()
+            .map(|item| {
+                Ok(crabka_pgparser::ast::OrderItem {
+                    expr: resolve_types_in_expr(catalog_kv, resolution, &item.expr, ctes)?,
+                    asc: item.asc,
+                    nulls_first: item.nulls_first,
+                })
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
         filter: match &fc.filter {
             Some(predicate) => Some(Box::new(resolve_types_in_expr(
                 catalog_kv, resolution, predicate, ctes,
