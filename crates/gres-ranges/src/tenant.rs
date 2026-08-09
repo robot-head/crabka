@@ -6674,6 +6674,22 @@ fn route_statement(
 ) -> Result<StatementRoute, PgError> {
     let normalized = sql.trim_start().to_ascii_lowercase();
     let kind = route_statement_kind(&normalized);
+
+    // `CLUSTER` rewrites a relation's rows at new hidden rowids. It names its
+    // relation with neither `FROM` nor `INTO` nor `UPDATE`, so the token router
+    // below cannot find the table and would classify it `Local` — sending it to
+    // the coordinator's own store, where a relation owned by another range has
+    // no rows at all. That reads as a successful CLUSTER that moved nothing.
+    // Refuse it rather than route it wrongly; a single-range tenant is the one
+    // case where the coordinator really does own everything.
+    if normalized.starts_with("cluster") && range_map.ranges().len() > 1 {
+        return Err(PgError::error(
+            "0A000",
+            "CLUSTER is not supported on a multi-range tenant: the statement does not name its \
+             relation in a form the gateway can route",
+        ));
+    }
+
     if matches!(
         kind,
         StatementKind::Begin
@@ -6698,21 +6714,6 @@ fn route_statement(
             table_id: None,
             scatter_ranges: None,
         });
-    }
-
-    // `CLUSTER` rewrites a relation's rows at new hidden rowids. It names its
-    // relation with neither `FROM` nor `INTO` nor `UPDATE`, so the token router
-    // below cannot find the table and would classify it `Local` — sending it to
-    // the coordinator's own store, where a relation owned by another range has
-    // no rows at all. That reads as a successful CLUSTER that moved nothing.
-    // Refuse it rather than route it wrongly; a single-range tenant is the one
-    // case where the coordinator really does own everything.
-    if normalized.starts_with("cluster") && range_map.ranges().len() > 1 {
-        return Err(PgError::error(
-            "0A000",
-            "CLUSTER is not supported on a multi-range tenant: the statement does not name its \
-             relation in a form the gateway can route",
-        ));
     }
 
     let kind = if starts_with_any(&normalized, &["insert", "update", "delete"]) {
