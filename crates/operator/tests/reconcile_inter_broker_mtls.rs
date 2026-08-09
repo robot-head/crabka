@@ -231,23 +231,25 @@ fn pool_cr_labeled(
     );
     pool.metadata.namespace = Some(namespace.into());
     pool.metadata.uid = Some("pool-uid".into());
+    pool.metadata.finalizers = Some(vec!["crabka.io/kafka-node-pool-finalizer".into()]);
     let mut labels = std::collections::BTreeMap::new();
     labels.insert("crabka.io/cluster".into(), parent.into());
     pool.metadata.labels = Some(labels);
     pool
 }
 
-/// Build the happy-path rules for a pool reconcile: parent GET, STS pre-apply
-/// GET, STS PATCH, STS status GET, and pool status PATCH.
+/// Build the happy-path rules for a pool reconcile.
 fn pool_reconcile_rules(parent: &str, pool_name: &str, ns: &str) -> Vec<MockRule> {
     use shared::fake_parent_kafka_body;
+
     let sts_name = format!("{parent}-{pool_name}");
-    vec![
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/kafkas/{parent}"),
-            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
-        },
+    let mut rules = vec![MockRule {
+        method: Method::GET,
+        path_substr: format!("/kafkas/{parent}"),
+        response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+    }];
+    rules.extend(shared::dynamic_quorum_rules(parent, pool_name, ns));
+    rules.extend([
         MockRule {
             method: Method::GET,
             path_substr: format!("/statefulsets/{sts_name}"),
@@ -260,19 +262,20 @@ fn pool_reconcile_rules(parent: &str, pool_name: &str, ns: &str) -> Vec<MockRule
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/statefulsets/{sts_name}"),
-            response: json_response(200, &shared::fake_sts_body(&sts_name, ns, 1, Some(1))),
+            response: json_response(200, &shared::fake_sts_body(&sts_name, ns, 1, Some(0))),
         },
         MockRule {
             method: Method::GET,
             path_substr: format!("/statefulsets/{sts_name}"),
-            response: json_response(200, &shared::fake_sts_body(&sts_name, ns, 1, Some(1))),
+            response: json_response(200, &shared::fake_sts_body(&sts_name, ns, 1, Some(0))),
         },
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/kafkanodepools/{pool_name}/status"),
             response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
         },
-    ]
+    ]);
+    rules
 }
 
 /// The `StatefulSet` pod spec must include
