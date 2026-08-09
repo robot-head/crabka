@@ -171,7 +171,16 @@ fn plan_select(select: &SelectStmt) -> PlanNode {
         }
         node = aggregate.with_child(node);
     } else if aggregated {
-        node = PlanNode::new("Aggregate").with_child(node);
+        // An ungrouped `HAVING` is still a predicate the aggregate node applies
+        // — the engine folds every row, then tests the one result row and emits
+        // nothing when it fails — so it prints as this node's `Filter`, exactly
+        // as the grouped branch above does. Leaving it off claimed a plan that
+        // returns the aggregate unconditionally.
+        let mut aggregate = PlanNode::new("Aggregate");
+        if let Some(having) = &select.having {
+            aggregate = aggregate.detail("Filter", deparse(having));
+        }
+        node = aggregate.with_child(node);
     }
     match &select.distinct {
         DistinctClause::All => {}
@@ -313,10 +322,19 @@ fn expr_list(exprs: &[Expr]) -> String {
 }
 
 fn sort_key(items: &[OrderItem]) -> String {
+    sort_key_with(items, true)
+}
+
+/// A sort-key list under an explicit qualification choice.
+///
+/// This is the one place the direction and NULL-placement spelling lives, so an
+/// aggregate's own `ORDER BY` prints them exactly as a query-level `ORDER BY`
+/// does — which is what `PostgreSQL` does, both being `get_rule_orderby`.
+fn sort_key_with(items: &[OrderItem], qualify: bool) -> String {
     items
         .iter()
         .map(|item| {
-            let mut key = deparse_bare(&item.expr);
+            let mut key = deparse_bare_with(&item.expr, qualify);
             if !item.asc {
                 key.push_str(" DESC");
             }
@@ -406,17 +424,43 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
             "{} COLLATE \"{collation}\"",
             deparse_bare_with(expr, qualify)
         ),
-        Expr::Func(call) => match &call.args {
-            FuncArgs::Star => format!("{}(*)", call.name),
-            FuncArgs::Exprs(args) => format!(
-                "{}({})",
-                call.name,
-                args.iter()
+        // An aggregate's `DISTINCT`, its own `ORDER BY` and its `FILTER` all
+        // change which rows it folds and in what order, so all three print:
+        // `count(*)` and `count(*) FILTER (WHERE …)` are different aggregates,
+        // and a plan line that spelled them alike would describe neither.
+        //
+        // `viewdef::func_text` renders the same envelope for `pg_get_viewdef`,
+        // against the same oracle. The two are deliberately separate today —
+        // that module's version also rewrites the XML constructors and the SQL
+        // value functions, neither of which belongs in a plan line — but they
+        // must not drift: this arm dropping all three modifiers while its
+        // sibling printed them is exactly the bug this comment exists to stop
+        // recurring.
+        Expr::Func(call) => {
+            let args = match &call.args {
+                FuncArgs::Star => "*".to_string(),
+                FuncArgs::Exprs(args) => args
+                    .iter()
                     .map(|arg| deparse_bare_with(arg, qualify))
                     .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        },
+                    .join(", "),
+            };
+            let order_by = if call.order_by.is_empty() {
+                String::new()
+            } else {
+                format!(" ORDER BY {}", sort_key_with(&call.order_by, qualify))
+            };
+            // `get_agg_expr` adds no parentheses of its own around the
+            // predicate; the operator node it holds brings whatever it needs.
+            let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
+                format!(" FILTER (WHERE {})", deparse_with(predicate, qualify))
+            });
+            format!(
+                "{}({}{args}{order_by}){filter}",
+                call.name,
+                if call.distinct { "DISTINCT " } else { "" }
+            )
+        }
         Expr::Cast { expr, ty } => format!("{}::{}", deparse_bare_with(expr, qualify), ty.name()),
         Expr::Unary { op, expr } => match op {
             UnaryOp::Neg => format!("-{}", deparse_bare_with(expr, qualify)),
