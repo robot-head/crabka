@@ -7,8 +7,8 @@ test files, not the adopted corpus's statement matches. The checked-in floor has
 been ratcheted from `6/231` to `28/231` against this certification, overriding
 the tool's per-file monotone guard on the evidence recorded in
 `docs/PG_COMPAT_MATRIX.md`. Serial completes all 231 files with zero infrastructure
-failures, leaving 199 semantic failures across 122767 canonical changed lines
-and 4928 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
+failures, leaving 199 semantic failures across 122623 canonical changed lines
+and 4933 hunks. Both PostgreSQL self-check modes pass 231/231, the Gres
 postflight probe succeeds, and the infrastructure report is empty.
 
 The measurement immediately before this wave was `22/231` at 176686 changed
