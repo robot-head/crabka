@@ -130,7 +130,10 @@ regex = "1"
 rust-stemmers = "1"
 memmap2 = "0.9"
 testcontainers = "0.28"
-testcontainers-modules = { version = "0.15", features = ["kafka"] }
+# The latest crates.io release still requires testcontainers 0.27, whose
+# bollard-stubs version conflicts with testcontainers 0.28. Pin the upstream
+# compatibility update until the next testcontainers-modules release.
+testcontainers-modules = { git = "https://github.com/testcontainers/testcontainers-rs-modules-community", rev = "032bcf88c6564824e81ada9a416d4da9ed3f4dc4", features = ["kafka"] }
 async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-stream = "0.1"
