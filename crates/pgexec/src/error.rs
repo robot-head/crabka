@@ -125,6 +125,14 @@ pub enum ExecError {
     /// [`ExecError::DuplicateColumn`] there is no relation to name: the first
     /// has none yet, and `PostgreSQL` leaves it out of the second.
     DuplicateOutputColumn(String),
+    /// An `ANALYZE`/`VACUUM ANALYZE` column list names one column twice
+    /// (42701). Distinct from [`ExecError::DuplicateColumn`], which reports a
+    /// collision with a column that is already there; here both mentions are
+    /// in the statement.
+    RepeatedMaintenanceColumn {
+        column: String,
+        table: String,
+    },
     /// A named object already exists (42710).
     DuplicateObject(String),
     /// A named object does not exist (42704).
@@ -1064,6 +1072,10 @@ impl ExecError {
             ExecError::DuplicateOutputColumn(column) => PgError::error(
                 "42701",
                 format!("column \"{column}\" specified more than once"),
+            ),
+            ExecError::RepeatedMaintenanceColumn { column, table } => PgError::error(
+                "42701",
+                format!("column \"{column}\" of relation \"{table}\" appears more than once"),
             ),
             ExecError::DuplicateObject(m) => PgError::error("42710", m),
             ExecError::UndefinedObject(m) => PgError::error("42704", m),

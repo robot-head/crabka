@@ -2130,37 +2130,30 @@ fn with_guc_runtime<T>(
     })
 }
 
-/// Fold a statement's outcome onto its span: `ERROR` plus the SQLSTATE on
-/// failure, the row counts on success.
-///
-/// Only `ERROR` is ever recorded. A successful statement leaves the span
-/// `Unset`, as the OpenTelemetry specification asks. `span.is_none()` is the
-/// cheap early out that keeps this free when the target is disabled. The
-/// `ExecError` clone below only happens on a traced failure.
-fn record_statement_status(span: &tracing::Span, result: &Result<QueryResult, ExecError>) {
-    if span.is_none() {
-        return;
-    }
-    match result {
-        Ok(result) => record_statement_rows(span, result),
-        Err(error) => {
-            let error = error.clone().into_pg();
-            crate::telemetry::record_error(span, &error.code, &error.message);
-        }
-    }
+/// Which of the two maintenance commands [`SqlSession::run_maintenance`] is
+/// running. They share a grammar and every check, and differ only in what they
+/// call themselves — in the command tag, and in the skip warning's wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaintenanceCommand {
+    Analyze,
+    Vacuum,
 }
 
-fn record_statement_rows(span: &tracing::Span, result: &QueryResult) {
-    use crate::telemetry::command_tag_row_count;
+impl MaintenanceCommand {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Analyze => "ANALYZE",
+            Self::Vacuum => "VACUUM",
+        }
+    }
 
-    match result {
-        QueryResult::Rows { rows, tag, .. } => {
-            crate::telemetry::record_rows(span, Some(rows.len()), command_tag_row_count(tag));
+    /// The verb inside `cannot analyze non-tables …` / `cannot vacuum
+    /// non-tables …`.
+    fn lowercase(self) -> &'static str {
+        match self {
+            Self::Analyze => "analyze",
+            Self::Vacuum => "vacuum",
         }
-        QueryResult::Command { tag } => {
-            crate::telemetry::record_rows(span, None, command_tag_row_count(tag));
-        }
-        QueryResult::Empty => {}
     }
 }
 
@@ -2218,7 +2211,7 @@ fn statement_has_effects(stmt: &Statement) -> bool {
         | Statement::Reset { .. }
         | Statement::SetRole { .. }
         | Statement::Discard { .. }
-        | Statement::Vacuum
+        | Statement::Vacuum(_)
         | Statement::Listen { .. }
         | Statement::Notify { .. }
         | Statement::Unlisten { .. }
@@ -2337,7 +2330,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::SetRole { .. }
         // VACUUM is refused inside a transaction block, so it never marks one
         // active.
-        | Statement::Vacuum
+        | Statement::Vacuum(_)
         // PostgreSQL deliberately skips the snapshot push for LISTEN/NOTIFY/
         // UNLISTEN (PortalRunUtility's exclusion list), so they never set
         // FirstSnapshotSet and never block a later SET TRANSACTION.
@@ -5017,14 +5010,111 @@ impl SqlSession {
         Ok(QueryResult::Command { tag: tag.into() })
     }
 
+    /// `ANALYZE` and `VACUUM`'s shared front half: everything `PostgreSQL`
+    /// checks before it touches the first relation.
+    ///
+    /// For this engine that front half *is* the command. There are no planner
+    /// statistics to collect and reclamation is autonomous, so neither has any
+    /// work left to do — but the checks still have to run, because they are
+    /// what decide whether `PostgreSQL` reports success at all, and a
+    /// statement that cannot name its target must not answer `ANALYZE`.
+    ///
+    /// The order below is `PostgreSQL`'s, and every step of it is observable:
+    ///
+    /// 1. The column list needs `ANALYZE`, checked on the written statement
+    ///    before any name is looked at — `VACUUM nosuch (a)` is `0A000`, not
+    ///    `42P01`.
+    /// 2. Every name resolves, all of them, before anything else happens.
+    ///    `ANALYZE good, nosuch` collects no statistics for `good`, and a
+    ///    relation that would be skipped further down does not get to warn.
+    /// 3. Then, relation by relation in written order: a kind that cannot be
+    ///    analyzed is skipped with a `WARNING` rather than refused, and only
+    ///    then are its columns checked.
+    async fn run_maintenance(
+        &mut self,
+        command: MaintenanceCommand,
+        stmt: &crabka_pgparser::ast::MaintenanceStmt,
+    ) -> Result<QueryResult, ExecError> {
+        if !stmt.analyze && stmt.targets.iter().any(|t| t.columns.is_some()) {
+            return Err(ExecError::Unsupported(
+                "ANALYZE option must be specified when a column list is provided".into(),
+            ));
+        }
+        let resolution = self.resolution_scope();
+        let mut resolved = Vec::with_capacity(stmt.targets.len());
+        for target in &stmt.targets {
+            let name = crate::relname::resolve_relation(
+                &*self.catalog_kv,
+                &resolution,
+                &target.name,
+                crate::relname::SchemaDisposition::Utility,
+            )?;
+            // A synthesised catalog relation is present without being stored,
+            // and `PostgreSQL` neither refuses nor skips `ANALYZE pg_class`.
+            if !crate::exec::is_virtual_relation(&name)
+                && !crabka_pgcatalog::relation_exists(&*self.catalog_kv, &name)?
+            {
+                return Err(
+                    crabka_pgcatalog::CatalogError::UndefinedTable(name.to_string()).into(),
+                );
+            }
+            resolved.push((name, target));
+        }
+        for (name, target) in resolved {
+            // Only a stored table carries columns to collect statistics for.
+            // Anything else that shares the relation namespace — a view, a
+            // sequence, an index — is skipped, and a foreign table is skipped
+            // by `VACUUM` because there is nothing local to reclaim.
+            let table = if crate::exec::is_virtual_relation(&name) {
+                None
+            } else {
+                let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name).ok();
+                let vacuuming_foreign = command == MaintenanceCommand::Vacuum
+                    && table.as_ref().is_some_and(|t| t.foreign.is_some());
+                if table.is_none() || vacuuming_foreign {
+                    self.plpgsql_notice(PgError::warning(format!(
+                        "skipping \"{}\" --- cannot {} non-tables or special system tables",
+                        name.name,
+                        command.lowercase(),
+                    )))?;
+                    continue;
+                }
+                table
+            };
+            let (Some(columns), Some(table)) = (target.columns.as_ref(), table) else {
+                continue;
+            };
+            let mut seen: Vec<&str> = Vec::with_capacity(columns.len());
+            for column in columns {
+                if !table.columns.iter().any(|c| &c.name == column) {
+                    return Err(ExecError::UndefinedTableColumn {
+                        column: column.clone(),
+                        table: name.name.clone(),
+                    });
+                }
+                if seen.contains(&column.as_str()) {
+                    return Err(ExecError::RepeatedMaintenanceColumn {
+                        column: column.clone(),
+                        table: name.name.clone(),
+                    });
+                }
+                seen.push(column);
+            }
+        }
+        Ok(QueryResult::Command {
+            tag: command.tag().into(),
+        })
+    }
+
     /// The P5/D6/D8 utility bucket: documented mappings and documented refusals.
     async fn utility(&mut self, utility: &UtilityStatement) -> Result<QueryResult, ExecError> {
         match utility {
+            UtilityStatement::Analyze(stmt) => {
+                self.run_maintenance(MaintenanceCommand::Analyze, stmt)
+                    .await
+            }
             // Reclamation and index maintenance are autonomous here, and there
             // are no planner statistics to collect, so these are accepted hints.
-            UtilityStatement::Analyze => Ok(QueryResult::Command {
-                tag: "ANALYZE".into(),
-            }),
             UtilityStatement::Reindex => Ok(QueryResult::Command {
                 tag: "REINDEX".into(),
             }),
@@ -6314,20 +6404,18 @@ impl SqlSession {
             Statement::RefreshMaterializedView { .. } => {
                 self.run_refresh_materialized_view(stmt).await
             }
-            Statement::Vacuum => {
-                // PostgreSQL refuses VACUUM inside a transaction block. The
-                // reclamation itself is autonomous here (adaptive background
-                // vacuum with idle drain), so outside a block the accepted
-                // hint returns immediately.
+            Statement::Vacuum(vacuum) => {
+                // PostgreSQL refuses VACUUM inside a transaction block, and it
+                // refuses it *first*: `VACUUM nosuch` inside a block is 25001,
+                // never the 42P01 the name would earn outside one.
                 if matches!(self.state, TxnState::InTransaction(_)) {
                     return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
                         "25001",
                         "VACUUM cannot run inside a transaction block",
                     )));
                 }
-                Ok(QueryResult::Command {
-                    tag: "VACUUM".into(),
-                })
+                self.run_maintenance(MaintenanceCommand::Vacuum, vacuum)
+                    .await
             }
             Statement::Copy(copy) => self.run_copy(copy).await,
             Statement::Query(q) if q.locking.is_some() => self.run_query_locking(q).await,
@@ -20912,5 +21000,198 @@ mod session_conformance_tests {
                 == "{serializable,\"repeatable read\"}"
         );
         assert!(render_text_array(&["", "null", "a,b"]) == "{\"\",\"null\",\"a,b\"}");
+    }
+
+    /// The fixtures both maintenance-command tests name.
+    async fn maintenance_fixtures(session: &mut SqlSession) {
+        for sql in [
+            "CREATE SCHEMA other",
+            "CREATE TABLE t1 (i int, j text)",
+            "CREATE TABLE t2 (i int)",
+            "CREATE TABLE other.t3 (i int, k int)",
+            "CREATE VIEW v1 AS SELECT * FROM t1",
+            "CREATE SEQUENCE s1",
+            "CREATE INDEX t1_idx ON t1 (i)",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+    }
+
+    /// `ANALYZE` and `VACUUM` resolve their names the way every other
+    /// statement does, and report what `PostgreSQL` reports when a name, a
+    /// schema or a column resolves to nothing.
+    ///
+    /// The ordering cases are the load-bearing ones: each pairs two faults in
+    /// one statement, so it fails if the checks run in the wrong order even
+    /// though every individual check is right.
+    #[tokio::test]
+    async fn maintenance_commands_resolve_every_name_they_are_given() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        maintenance_fixtures(&mut session).await;
+
+        let cases = [
+            // The defect itself: a name that resolves to nothing.
+            ("ANALYZE nope", "42P01"),
+            ("VACUUM nope", "42P01"),
+            ("ANALYZE (VERBOSE) nope", "42P01"),
+            ("VACUUM FULL nope", "42P01"),
+            ("VACUUM (FULL, ANALYZE) nope", "42P01"),
+            ("ANALYZE ONLY nope", "42P01"),
+            ("VACUUM ONLY nope", "42P01"),
+            // A written qualifier is resolved strictly, as for every other
+            // utility statement: the missing schema is reported as such.
+            ("ANALYZE nosch.t", "3F000"),
+            ("VACUUM nosch.t", "3F000"),
+            ("ANALYZE public.nope", "42P01"),
+            // Names that do resolve, including through a qualifier — which
+            // did not even parse before.
+            ("ANALYZE t1", "00000"),
+            ("VACUUM t1", "00000"),
+            ("ANALYZE other.t3", "00000"),
+            ("VACUUM (FULL) other.t3", "00000"),
+            ("ANALYZE", "00000"),
+            ("VACUUM", "00000"),
+            ("ANALYZE t1, t2", "00000"),
+            ("ANALYZE t1, t1", "00000"),
+            // Every name is resolved before any of them is acted on, so the
+            // position of the bad one does not change the answer.
+            ("ANALYZE t1, nope", "42P01"),
+            ("ANALYZE nope, t1", "42P01"),
+            ("VACUUM t1, nope, t2", "42P01"),
+            // Columns, checked left to right: existence before repetition.
+            ("ANALYZE t1 (i)", "00000"),
+            ("ANALYZE t1 (i, j)", "00000"),
+            ("ANALYZE t1 (nosuchcol)", "42703"),
+            ("ANALYZE t1 (i, i)", "42701"),
+            ("ANALYZE t1 (i, i, nosuchcol)", "42701"),
+            ("ANALYZE t1 (nosuchcol, i, i)", "42703"),
+            ("ANALYZE other.t3 (nosuchcol)", "42703"),
+            // A missing relation outranks a bad column, whichever comes first,
+            // because resolution happens before any column is looked at.
+            ("ANALYZE t1 (nosuchcol), nope", "42P01"),
+            ("ANALYZE nope, t1 (nosuchcol)", "42P01"),
+            // A column list is only meaningful with a statistics pass, and
+            // that is settled before any name is resolved.
+            ("VACUUM t1 (i)", "0A000"),
+            ("VACUUM nope (i)", "0A000"),
+            ("VACUUM nosch.t (i)", "0A000"),
+            ("VACUUM FULL t1 (i)", "0A000"),
+            ("VACUUM (ANALYZE FALSE) t1 (i)", "0A000"),
+            ("VACUUM ANALYZE t1 (i)", "00000"),
+            ("VACUUM (ANALYZE) t1 (i)", "00000"),
+            // A synthesised catalog relation is neither missing nor skipped.
+            ("ANALYZE pg_class", "00000"),
+            ("VACUUM pg_class", "00000"),
+            ("ANALYZE pg_catalog.pg_class", "00000"),
+        ];
+        for (sql, expected) in cases {
+            assert!(state(&mut session, sql).await == expected, "case: {sql}");
+        }
+
+        // The messages the two commonest faults produce, which the SQLSTATE
+        // alone would not pin down.
+        assert!(message(&mut session, "ANALYZE nope").await == "relation \"nope\" does not exist");
+        assert!(
+            message(&mut session, "ANALYZE t1 (i, i)").await
+                == "column \"i\" of relation \"t1\" appears more than once"
+        );
+        assert!(
+            message(&mut session, "ANALYZE t1 (nosuchcol)").await
+                == "column \"nosuchcol\" of relation \"t1\" does not exist"
+        );
+    }
+
+    /// `VACUUM` is refused inside a transaction block before its names are
+    /// looked at, so a block turns a would-be `42P01` into `25001`. `ANALYZE`
+    /// is allowed in a block and reports the name fault there as anywhere.
+    #[tokio::test]
+    async fn vacuum_refuses_a_transaction_block_before_resolving_anything() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        maintenance_fixtures(&mut session).await;
+
+        session.simple_query("BEGIN").await.expect("begin");
+        assert!(state(&mut session, "VACUUM nope").await == "25001");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        session.simple_query("BEGIN").await.expect("begin");
+        assert!(state(&mut session, "VACUUM t1").await == "25001");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        session.simple_query("BEGIN").await.expect("begin");
+        assert!(state(&mut session, "ANALYZE nope").await == "42P01");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        session.simple_query("BEGIN").await.expect("begin");
+        assert!(state(&mut session, "ANALYZE t1").await == "00000");
+        session.simple_query("COMMIT").await.expect("commit");
+    }
+
+    /// A relation of a kind that holds no statistics is skipped with a
+    /// `WARNING`, not refused — and only after every name in the statement has
+    /// resolved, so one bad name suppresses the warnings the others would have
+    /// produced.
+    #[tokio::test]
+    async fn maintenance_commands_skip_the_kinds_they_cannot_process() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        maintenance_fixtures(&mut session).await;
+        while notices.try_recv().is_ok() {}
+
+        let cases = [
+            (
+                "ANALYZE v1",
+                "skipping \"v1\" --- cannot analyze non-tables or special system tables",
+            ),
+            (
+                "ANALYZE s1",
+                "skipping \"s1\" --- cannot analyze non-tables or special system tables",
+            ),
+            (
+                "ANALYZE t1_idx",
+                "skipping \"t1_idx\" --- cannot analyze non-tables or special system tables",
+            ),
+            (
+                "VACUUM v1",
+                "skipping \"v1\" --- cannot vacuum non-tables or special system tables",
+            ),
+            (
+                "VACUUM s1",
+                "skipping \"s1\" --- cannot vacuum non-tables or special system tables",
+            ),
+            // The report names the relation, never the qualifier it was
+            // written with.
+            (
+                "VACUUM public.v1",
+                "skipping \"v1\" --- cannot vacuum non-tables or special system tables",
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(state(&mut session, sql).await == "00000", "case: {sql}");
+            let warning = notices.try_recv().expect(sql);
+            assert!(
+                warning.severity == crabka_pgwire::error::Severity::Warning,
+                "case: {sql}"
+            );
+            assert!(warning.message == expected, "case: {sql}");
+            assert!(notices.try_recv().is_err(), "case: {sql}");
+        }
+
+        // A column list on a skipped relation is never reached.
+        assert!(state(&mut session, "ANALYZE v1 (whatever)").await == "00000");
+        assert!(
+            notices
+                .try_recv()
+                .expect("skip warning")
+                .message
+                .starts_with("skipping")
+        );
+
+        // A name that resolves to nothing fails before the skip warning the
+        // earlier target would have emitted.
+        assert!(state(&mut session, "ANALYZE v1, nope").await == "42P01");
+        assert!(notices.try_recv().is_err());
     }
 }

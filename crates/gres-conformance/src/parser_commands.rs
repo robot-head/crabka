@@ -1094,7 +1094,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Merge { .. } => "Merge",
         Statement::CreateTableAs { .. } => "CreateTableAs",
         Statement::Truncate { .. } => "Truncate",
-        Statement::Vacuum => "Vacuum",
+        Statement::Vacuum(_) => "Vacuum",
         Statement::Listen { .. } => "Listen",
         Statement::Notify { .. } => "Notify",
         Statement::Unlisten { .. } => "Unlisten",
@@ -1119,7 +1119,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Cluster(_) => "Cluster",
         Statement::Explain { .. } => "Explain",
         Statement::Utility(utility) => match utility {
-            crabka_pgparser::ast::UtilityStatement::Analyze => "Analyze",
+            crabka_pgparser::ast::UtilityStatement::Analyze(_) => "Analyze",
             crabka_pgparser::ast::UtilityStatement::Reindex => "Reindex",
             crabka_pgparser::ast::UtilityStatement::Checkpoint => "Checkpoint",
             crabka_pgparser::ast::UtilityStatement::Load { .. } => "Load",

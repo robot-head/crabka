@@ -5618,26 +5618,95 @@ impl Parser {
         }
     }
 
-    /// P5: `ANALYZE [ ( <option>, … ) ] [VERBOSE] [ <table> [ ( <col>, … ) ] [, …] ]`.
+    /// P5: `ANALYZE [ ( <option>, … ) ] [VERBOSE]
+    /// [ [ONLY] <table> [ ( <col>, … ) ] [, …] ]`.
     fn analyze_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.bump(); // analyze
-        self.eat_utility_option_list()?;
+        self.maintenance_option_list()?;
         self.eat_ident_eq("verbose");
-        if matches!(self.peek(), Token::Ident(_)) {
-            loop {
-                self.expect_ident()?;
-                if *self.peek() == Token::LParen {
-                    self.parse_ident_list()?;
-                }
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
-            }
-        }
+        let targets = self.maintenance_targets()?;
         Ok(crate::ast::Statement::Utility(
-            crate::ast::UtilityStatement::Analyze,
+            crate::ast::UtilityStatement::Analyze(crate::ast::MaintenanceStmt {
+                targets,
+                analyze: true,
+            }),
         ))
+    }
+
+    /// The `( <name> [<value>] [, …] )` option list `ANALYZE` and `VACUUM`
+    /// share, reporting whether `ANALYZE` was among the options switched on.
+    ///
+    /// It cannot reuse [`Self::eat_utility_option_list`] for one reason:
+    /// `FULL` lexes as a keyword here (it is the one in `FULL JOIN`), so
+    /// `VACUUM (FULL) t` needs an option name that is not required to be an
+    /// identifier.
+    fn maintenance_option_list(&mut self) -> Result<bool, ParseError> {
+        if *self.peek() != Token::LParen {
+            return Ok(false);
+        }
+        self.bump();
+        let mut analyze = false;
+        loop {
+            let name = match self.peek() {
+                Token::Keyword(Keyword::Full) => {
+                    self.bump();
+                    "full".to_string()
+                }
+                _ => self.expect_ident()?,
+            };
+            // An option's value is optional and defaults to on, so `ANALYZE`
+            // and `ANALYZE TRUE` mean the same thing and `ANALYZE FALSE` does
+            // not. The value's shape is validated and otherwise discarded.
+            let enabled = if matches!(self.peek(), Token::Comma | Token::RParen) {
+                true
+            } else {
+                let value = self.storage_parameter_value()?;
+                !matches!(value.to_ascii_lowercase().as_str(), "false" | "off" | "0")
+            };
+            if name.eq_ignore_ascii_case("analyze") {
+                analyze = enabled;
+            }
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(analyze)
+    }
+
+    /// The `[ONLY] <table> [ ( <col>, … ) ] [, …]` list both maintenance
+    /// commands end with, empty when the statement named nothing.
+    fn maintenance_targets(&mut self) -> Result<Vec<crate::ast::MaintenanceTarget>, ParseError> {
+        // The same set [`Self::expect_ident`] accepts: `public` and `data` are
+        // promoted to keywords by this lexer alone, so `ANALYZE public.t` has
+        // to start a target list like any other name.
+        if !matches!(
+            self.peek(),
+            Token::Ident(_) | Token::Keyword(Keyword::Public | Keyword::Data)
+        ) {
+            return Ok(Vec::new());
+        }
+        let mut targets = Vec::new();
+        loop {
+            let only = self.eat_only();
+            let name = self.relation_ref()?;
+            let columns = if *self.peek() == Token::LParen {
+                Some(self.parse_ident_list()?)
+            } else {
+                None
+            };
+            targets.push(crate::ast::MaintenanceTarget {
+                name,
+                only,
+                columns,
+            });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        Ok(targets)
     }
 
     /// P5: `CLUSTER [ ( <option>, … ) ] [VERBOSE] [ <table> [ USING <index> ] ]`,
@@ -9659,49 +9728,45 @@ impl Parser {
     }
 
     /// `VACUUM [ ( option [value] [, ...] ) ] [FULL] [FREEZE] [VERBOSE]
-    /// [ANALYZE] [name [, ...]]`. The parser validates the whole tail for shape
-    /// and discards it. Reclamation is autonomous, so the command is a hint.
+    /// [ANALYZE] [ [ONLY] name [ ( column, … ) ] [, ...] ]`.
+    ///
+    /// The options are validated for shape and otherwise discarded —
+    /// reclamation is autonomous, so there is nothing for them to steer — with
+    /// the single exception of `ANALYZE`, which decides whether a column list
+    /// is legal. The target list is kept whole: the names have to be resolved
+    /// before the statement can report success.
     fn vacuum(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("vacuum")?;
-        if *self.peek() == Token::LParen {
-            self.bump();
-            loop {
-                self.expect_ident()?;
-                if !matches!(self.peek(), Token::Comma | Token::RParen) {
-                    self.storage_parameter_value()?;
+        let mut analyze = self.maintenance_option_list()?;
+        // The unparenthesized spelling. `FULL` lexes as a keyword (the one in
+        // `FULL JOIN`); the rest are plain idents.
+        loop {
+            match self.peek() {
+                Token::Keyword(Keyword::Full) => {
+                    self.bump();
                 }
-                if self.eat_comma() {
-                    continue;
+                Token::Ident(word) if matches!(word.as_str(), "freeze" | "verbose") => {
+                    self.bump();
                 }
-                break;
-            }
-            self.expect(&Token::RParen)?;
-        } else {
-            // `FULL` lexes as a keyword (FULL JOIN); the rest are plain idents.
-            loop {
-                match self.peek() {
-                    Token::Keyword(Keyword::Full) => {
-                        self.bump();
-                    }
-                    Token::Ident(word)
-                        if matches!(word.as_str(), "freeze" | "verbose" | "analyze") =>
-                    {
-                        self.bump();
-                    }
-                    _ => break,
+                // Taken as the keyword whatever follows it, which is what
+                // PostgreSQL's grammar does: `VACUUM analyze (i)` is a syntax
+                // error there rather than the table called `analyze`, because
+                // the keyword wins and a column list cannot start a target
+                // list. Divergence: the lexer resolves quoting, so
+                // `VACUUM "analyze"` reads as the keyword here too, where
+                // PostgreSQL reads it as the table of that name.
+                Token::Ident(word) if word == "analyze" => {
+                    self.bump();
+                    analyze = true;
                 }
+                _ => break,
             }
         }
-        if matches!(self.peek(), Token::Ident(_)) {
-            loop {
-                self.expect_ident()?;
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
-            }
-        }
-        Ok(crate::ast::Statement::Vacuum)
+        let targets = self.maintenance_targets()?;
+        Ok(crate::ast::Statement::Vacuum(crate::ast::MaintenanceStmt {
+            targets,
+            analyze,
+        }))
     }
 
     /// `LISTEN <channel>`. `listen` and the channel are plain identifiers, so
@@ -16388,21 +16453,109 @@ mod tests {
         assert!(crate::parse("DROP TABLE a, b,").is_err());
     }
 
+    /// `ONLY`, the qualifier and the column list each bind to one name, and
+    /// `ANALYZE` is the one option that survives parsing, so every shape is
+    /// checked as a whole [`crate::ast::MaintenanceStmt`] rather than field by
+    /// field.
     #[test]
-    fn parses_vacuum_shapes_as_a_hint() {
+    fn parses_vacuum_and_analyze_target_lists() {
         use assert2::assert;
-        // pgbench -i's statement verbatim, plus the bare-option, parenthesized,
-        // and table-list forms; the whole tail is discarded.
-        for sql in [
-            "vacuum analyze pgbench_branches",
-            "VACUUM",
-            "VACUUM FULL FREEZE VERBOSE ANALYZE",
-            "VACUUM (ANALYZE, VERBOSE off) t1, t2",
-            "VACUUM t1, t2",
-        ] {
-            assert!(one(sql) == Statement::Vacuum, "case: {sql}");
+
+        use crate::ast::{MaintenanceStmt, MaintenanceTarget, RelationRef, UtilityStatement};
+
+        fn plain(name: &str) -> MaintenanceTarget {
+            MaintenanceTarget {
+                name: RelationRef::bare(name),
+                only: false,
+                columns: None,
+            }
         }
-        for sql in ["VACUUM (", "VACUUM ()", "VACUUM t1,", "VACUUM (analyze,) t"] {
+        fn stmt(analyze: bool, targets: Vec<MaintenanceTarget>) -> MaintenanceStmt {
+            MaintenanceStmt { targets, analyze }
+        }
+
+        let cases = [
+            ("VACUUM", stmt(false, vec![])),
+            ("VACUUM t1, t2", stmt(false, vec![plain("t1"), plain("t2")])),
+            // pgbench -i's statement verbatim.
+            (
+                "vacuum analyze pgbench_branches",
+                stmt(true, vec![plain("pgbench_branches")]),
+            ),
+            ("VACUUM FULL FREEZE VERBOSE ANALYZE", stmt(true, vec![])),
+            (
+                "VACUUM (ANALYZE, VERBOSE off) t1, t2",
+                stmt(true, vec![plain("t1"), plain("t2")]),
+            ),
+            // `FULL` lexes as a keyword, so it has to be admitted as an option
+            // name; before it was, every parenthesized `FULL` was a syntax
+            // error.
+            ("VACUUM (FULL) t1", stmt(false, vec![plain("t1")])),
+            (
+                "VACUUM (INDEX_CLEANUP TRUE, FULL TRUE) t1",
+                stmt(false, vec![plain("t1")]),
+            ),
+            // An explicit `FALSE` switches the statistics pass back off, which
+            // is what makes a column list illegal again.
+            ("VACUUM (ANALYZE FALSE) t1", stmt(false, vec![plain("t1")])),
+            (
+                "VACUUM ANALYZE s.t (a, b)",
+                stmt(
+                    true,
+                    vec![MaintenanceTarget {
+                        name: RelationRef::qualified("s", "t"),
+                        only: false,
+                        columns: Some(vec!["a".into(), "b".into()]),
+                    }],
+                ),
+            ),
+            (
+                "VACUUM ONLY t1",
+                stmt(
+                    false,
+                    vec![MaintenanceTarget {
+                        name: RelationRef::bare("t1"),
+                        only: true,
+                        columns: None,
+                    }],
+                ),
+            ),
+            ("ANALYZE", stmt(true, vec![])),
+            ("ANALYZE (VERBOSE) t1", stmt(true, vec![plain("t1")])),
+            // Each modifier binds to its own name, never to the list.
+            (
+                "ANALYZE ONLY a (x), b",
+                stmt(
+                    true,
+                    vec![
+                        MaintenanceTarget {
+                            name: RelationRef::bare("a"),
+                            only: true,
+                            columns: Some(vec!["x".into()]),
+                        },
+                        plain("b"),
+                    ],
+                ),
+            ),
+        ];
+        for (sql, expected) in cases {
+            let parsed = match one(sql) {
+                Statement::Vacuum(parsed)
+                | Statement::Utility(UtilityStatement::Analyze(parsed)) => parsed,
+                other => panic!("case {sql}: parsed as {other:?}"),
+            };
+            assert!(parsed == expected, "case: {sql}");
+        }
+
+        for sql in [
+            "VACUUM (",
+            "VACUUM ()",
+            "VACUUM t1,",
+            "VACUUM (analyze,) t",
+            // An empty column list is a syntax error upstream too.
+            "ANALYZE t ()",
+            "ANALYZE a.b.c",
+        ] {
             assert!(crate::parse(sql).is_err(), "case: {sql}");
         }
     }

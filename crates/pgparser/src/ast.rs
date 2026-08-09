@@ -275,6 +275,39 @@ pub struct TruncateTarget {
     pub only: bool,
 }
 
+/// One `[ONLY] name [ ( column, … ) ]` entry of an `ANALYZE` or `VACUUM`
+/// target list.
+///
+/// `ONLY` and the column list both bind to a single name, so
+/// `ANALYZE ONLY a, b (c)` restricts `a` alone and lists a column for `b`
+/// alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceTarget {
+    pub name: RelationRef,
+    /// `ANALYZE ONLY t` — the named relation alone, without descending into
+    /// its partitions or inheritance children.
+    pub only: bool,
+    /// The columns written after the name, when any were. Never `Some` of an
+    /// empty list: `PostgreSQL` reads `t ()` as a syntax error and so does
+    /// this grammar.
+    pub columns: Option<Vec<String>>,
+}
+
+/// What `ANALYZE` and `VACUUM` carry, which is the same thing twice: both take
+/// the `[ONLY] name [ ( column, … ) ]` target list, and `VACUUM ANALYZE` is
+/// `VACUUM` with the statistics pass switched on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaintenanceStmt {
+    /// The targets in written order. Empty for the bare `ANALYZE` / `VACUUM`,
+    /// which stand for every relation the caller may touch rather than for
+    /// none.
+    pub targets: Vec<MaintenanceTarget>,
+    /// Whether statistics were asked for: always true for `ANALYZE`, and true
+    /// for `VACUUM` only when `ANALYZE` was written, as an option or as the
+    /// bare keyword. It is what decides whether a column list is legal.
+    pub analyze: bool,
+}
+
 /// The relation `CLUSTER` was pointed at, plus the index to order it by.
 ///
 /// `PostgreSQL` accepts three spellings that all land here: `CLUSTER t USING i`,
@@ -686,10 +719,14 @@ pub enum Statement {
         with_data: bool,
         tablespace: Option<String>,
     },
-    /// `VACUUM` with any option/table tail, accepted as a hint: reclamation is
-    /// autonomous (adaptive background vacuum with idle drain), so the command
-    /// carries no payload.
-    Vacuum,
+    /// `VACUUM [ ( option [, …] ) ] [FULL] [FREEZE] [VERBOSE] [ANALYZE]
+    /// [ [ONLY] table [ ( column, … ) ] [, …] ]`.
+    ///
+    /// Reclamation is autonomous here (adaptive background vacuum with idle
+    /// drain), so the options say nothing this engine acts on. The *names* are
+    /// kept all the same: `PostgreSQL` resolves and checks them before it
+    /// reclaims anything, so they decide whether the statement succeeds at all.
+    Vacuum(MaintenanceStmt),
     /// `COPY … FROM …` / `COPY … TO …`, in either the table or the
     /// parenthesized-query spelling. Boxed because [`CopyStmt`] is by far the
     /// widest variant and every other statement would otherwise carry its size.
@@ -1140,8 +1177,13 @@ pub enum AlterDomainAction {
 /// A `PostgreSQL` utility command accepted as a documented mapping or refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UtilityStatement {
-    /// `ANALYZE [ ( option … ) ] [VERBOSE] [table [(cols)] [, …]]`.
-    Analyze,
+    /// `ANALYZE [ ( option … ) ] [VERBOSE]
+    /// [ [ONLY] table [ ( column, … ) ] [, …] ]`.
+    ///
+    /// There are no planner statistics to collect, but the names and columns
+    /// are still resolved and checked, because that is what decides whether
+    /// `PostgreSQL` reports success.
+    Analyze(MaintenanceStmt),
     /// `REINDEX [ ( option … ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM } [CONCURRENTLY] [name]`.
     Reindex,
     /// `CHECKPOINT`.
