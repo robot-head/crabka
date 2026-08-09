@@ -3343,7 +3343,10 @@ mod tests {
                 (point.x - want_x).abs() < 1e-12 && (point.y - want_y).abs() < 1e-12,
                 "vertex {i}: {point:?} is not on the circle at angle {angle}"
             );
-            assert!((point.x.hypot(point.y) - 2.0).abs() < 1e-12, "vertex {i} radius");
+            assert!(
+                (point.x.hypot(point.y) - 2.0).abs() < 1e-12,
+                "vertex {i} radius"
+            );
         }
 
         // A zero-radius circle has no polygon: `circle_poly` reports 0A000, not
