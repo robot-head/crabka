@@ -170,6 +170,26 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
     }
 }
 
+/// Rewrite a probe's tablespace location to one the host calls absolute.
+///
+/// `CREATE TABLESPACE` requires an absolute path, and `Path::is_absolute` is
+/// platform-aware: Windows wants a drive letter, so the `/tmp/...` the probe
+/// manifest documents is rejected there. The manifest keeps the POSIX spelling
+/// -- it is the pinned, published form -- and only execution is localised.
+fn localise(statement: &str) -> String {
+    let Some((head, rest)) = statement.split_once("LOCATION '/tmp/") else {
+        return statement.to_string();
+    };
+    let Some((name, tail)) = rest.split_once('\'') else {
+        return statement.to_string();
+    };
+    let path = std::env::temp_dir().join(name);
+    format!(
+        "{head}LOCATION '{}'{tail}",
+        path.to_string_lossy().replace('\'', "''")
+    )
+}
+
 async fn execute_probe(command: &str, sql: &str) {
     let mut engine = SqlEngine::new();
     engine.set_foreign_scanner(Arc::new(EmptyImporter));
@@ -177,7 +197,8 @@ async fn execute_probe(command: &str, sql: &str) {
 
     let setup: &[&str] = probe_setup(command);
     for statement in setup {
-        session.simple_query(statement).await.expect(statement);
+        let statement = localise(statement);
+        session.simple_query(&statement).await.expect(&statement);
     }
 
     if command == "COPY" {
@@ -195,7 +216,8 @@ async fn execute_probe(command: &str, sql: &str) {
             .await
             .expect("COPY representative must execute");
     } else {
-        session.simple_query(sql).await.expect(sql);
+        let sql = localise(sql);
+        session.simple_query(&sql).await.expect(&sql);
     }
 }
 

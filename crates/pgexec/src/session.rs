@@ -20840,15 +20840,27 @@ mod session_conformance_tests {
         );
     }
 
+    /// An absolute location for `CREATE TABLESPACE`, spelled the way the host
+    /// spells absolute. `Path::is_absolute` is platform-aware -- Windows wants a
+    /// drive letter -- so a hard-coded `/tmp/...` tests the platform, not the
+    /// rule.
+    fn tablespace_location(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .replace('\'', "''")
+    }
+
     #[tokio::test]
     async fn created_tablespaces_are_catalog_visible() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
         session
-            .simple_query(
-                "CREATE TABLESPACE user_space LOCATION '/tmp/user_space' \
-                 WITH (random_page_cost = 3.0)",
-            )
+            .simple_query(&format!(
+                "CREATE TABLESPACE user_space LOCATION '{}' \
+                     WITH (random_page_cost = 3.0)",
+                tablespace_location("user_space")
+            ))
             .await
             .expect("create tablespace");
         assert!(
@@ -20867,12 +20879,15 @@ mod session_conformance_tests {
                  WHERE spcname = 'user_space'",
             )
             .await
-                == "/tmp/user_space"
+                == tablespace_location("user_space")
         );
         assert!(
             state(
                 &mut session,
-                "CREATE TABLESPACE user_space LOCATION '/tmp/other_space'",
+                &format!(
+                    "CREATE TABLESPACE user_space LOCATION '{}'",
+                    tablespace_location("other_space")
+                ),
             )
             .await
                 == "42710"
@@ -20925,7 +20940,10 @@ mod session_conformance_tests {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
         session
-            .simple_query("CREATE TABLESPACE placed LOCATION '/tmp/placed'")
+            .simple_query(&format!(
+                "CREATE TABLESPACE placed LOCATION '{}'",
+                tablespace_location("placed")
+            ))
             .await
             .expect("create tablespace");
         let oid = scalar(
