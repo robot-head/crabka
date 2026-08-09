@@ -26,6 +26,9 @@ use crate::{broker::Broker, codes, error::BrokerError};
 /// `client_software_name` and `client_software_version` fields.
 const CLIENT_INFO_MIN_VERSION: i16 = 3;
 
+/// First `ApiVersions` version whose JVM client accepts `kraft.version` minimum zero.
+const KRAFT_ZERO_MIN_API_VERSION: i16 = 4;
+
 // KIP-584 feature surface. `supported_features` advertises `metadata.version`
 // over the full Kafka-faithful range MIN=7 (3.3-IV3) .. MAX=25 (4.0-IV3),
 // sourced from the `crabka_metadata::metadata_version` table via
@@ -35,7 +38,7 @@ const CLIENT_INFO_MIN_VERSION: i16 = 3;
 // `V1FeatureLevel` is seeded by `crabka format --release-version` or
 // `UpdateFeatures` (api_key 57) lands one.
 
-fn supported_feature_keys() -> Vec<SupportedFeatureKey> {
+fn supported_feature_keys(api_version: i16) -> Vec<SupportedFeatureKey> {
     crate::features::supported_features()
         .iter()
         .map(|f| SupportedFeatureKey {
@@ -43,7 +46,9 @@ fn supported_feature_keys() -> Vec<SupportedFeatureKey> {
             // `kraft.version` is the KIP-853 exception whose supported range
             // includes level zero. Other disable-at-zero features keep the
             // legacy JVM-compatible clamp.
-            min_version: if f.name == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE {
+            min_version: if f.name == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE
+                && api_version >= KRAFT_ZERO_MIN_API_VERSION
+            {
                 f.min_version
             } else {
                 f.min_version.max(1)
@@ -153,7 +158,7 @@ pub(crate) fn handle(
             // surfaces no finalized features and epoch `-1`
             // (`MetadataVersion.UNKNOWN` to JVM clients) until
             // `UpdateFeatures` (api_key 57) lands a `V1FeatureLevel` record.
-            supported_features: supported_feature_keys(),
+            supported_features: supported_feature_keys(version),
             finalized_features_epoch: image.finalized_features_epoch(),
             finalized_features: finalized_feature_keys(&image),
             ..Default::default()
@@ -217,8 +222,8 @@ mod tests {
     // ── KIP-584 feature surface ────────────────────────────────────────────
 
     #[test]
-    fn supported_features_advertise_metadata_version() {
-        let keys = supported_feature_keys();
+    fn supported_features_advertise_version_compatible_kraft_range() {
+        let keys = supported_feature_keys(4);
         let mv = keys
             .iter()
             .find(|k| k.name == "metadata.version")
@@ -230,6 +235,12 @@ mod tests {
             .find(|key| key.name == "kraft.version")
             .expect("kraft.version advertised");
         assert!((kraft.min_version, kraft.max_version) == (0, 1));
+
+        let legacy_kraft = supported_feature_keys(3)
+            .into_iter()
+            .find(|key| key.name == "kraft.version")
+            .expect("kraft.version advertised");
+        assert!((legacy_kraft.min_version, legacy_kraft.max_version) == (1, 1));
     }
 
     #[test]
