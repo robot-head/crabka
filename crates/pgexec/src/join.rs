@@ -14,12 +14,12 @@
 use std::collections::HashMap;
 
 use crabka_pgparser::ast::{BinaryOp, Expr, JoinConstraint, JoinKind};
-use crabka_pgtypes::Datum;
+use crabka_pgtypes::{ColumnType, Datum};
 
 use crate::{
     bind::BoundExpr,
     error::ExecError,
-    scope::{ColumnBinding, Exposure, Scope},
+    scope::{ColumnBinding, Exposure, LIVE_QUALIFIER, Scope},
 };
 
 /// A materialized relation: an ordered `Scope` (the schema) plus its rows, each
@@ -206,7 +206,11 @@ impl JoinCondition {
         constraint: &JoinConstraint,
     ) -> Result<Self, ExecError> {
         for column in &right.scope.columns {
+            // A liveness marker's qualifier is the internal `$live`, which both
+            // sides of a nested outer join carry and which names no relation, so
+            // it is not the duplicate alias this rejects.
             if let Some(qualifier) = &column.qualifier
+                && column.exposure != Exposure::LiveMarker
                 && left
                     .scope
                     .columns
@@ -277,6 +281,42 @@ impl JoinCondition {
     }
 }
 
+/// The qualifiers on a side an outer join can null-extend that carry no liveness
+/// marker yet, in row order.
+///
+/// A side that is itself an outer join already marks the qualifiers *it* can
+/// invent, and null-extending the side nulls those markers along with everything
+/// else in it, so a nested join adds only what is missing. A `USING`/`NATURAL`
+/// join's merged columns belong to no relation and have no whole row, so they
+/// need none.
+fn missing_live_markers(side: &Scope) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for column in &side.columns {
+        if let Some(qualifier) = &column.qualifier
+            && column.exposure != Exposure::LiveMarker
+            && side.live_marker(qualifier).is_none()
+            && !out.contains(qualifier)
+        {
+            out.push(qualifier.clone());
+        }
+    }
+    out
+}
+
+/// The hidden column carrying one qualifier's liveness. See [`LIVE_QUALIFIER`].
+fn live_marker_binding(qualifier: &str) -> ColumnBinding {
+    ColumnBinding {
+        qualifier: Some(LIVE_QUALIFIER.to_string()),
+        name: qualifier.to_string(),
+        ty: ColumnType::Bool,
+        exposure: Exposure::LiveMarker,
+    }
+}
+
+/// A live side's marker value; a null-extended side's is NULL, like the rest of
+/// the row the join invented for it.
+const LIVE: Datum = Datum::Bool(true);
+
 fn join_relations_impl(
     left: Relation,
     right: &Relation,
@@ -288,6 +328,26 @@ fn join_relations_impl(
 ) -> Result<Relation, ExecError> {
     let condition = JoinCondition::new(&left, right, constraint)?;
     let lw = left.scope.width();
+
+    // Only an outer join invents rows, so only an outer join adds markers: an
+    // inner or cross join's output rows are exactly as wide as before. `Left`
+    // keeps unmatched LEFT rows, which means it is the RIGHT side it invents.
+    let (left_markers, right_markers) = match kind {
+        JoinKind::Inner | JoinKind::Cross => (Vec::new(), Vec::new()),
+        JoinKind::Left => (Vec::new(), missing_live_markers(&right.scope)),
+        JoinKind::Right => (missing_live_markers(&left.scope), Vec::new()),
+        JoinKind::Full => (
+            missing_live_markers(&left.scope),
+            missing_live_markers(&right.scope),
+        ),
+    };
+    let (nl, nr) = (left_markers.len(), right_markers.len());
+    // Appended left-side markers first, then right-side, after every real column
+    // of the combined row.
+    let mark = |row: &mut Vec<Datum>, left_live: &Datum, right_live: &Datum| {
+        row.resize(row.len() + nl, left_live.clone());
+        row.resize(row.len() + nr, right_live.clone());
+    };
 
     let built_index = prepared
         .is_none()
@@ -346,6 +406,7 @@ fn join_relations_impl(
                         right_matched[ri] = true;
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
+                        mark(&mut row, &LIVE, &LIVE);
                         push_bounded_join_row(
                             &mut rows,
                             &mut result_bytes,
@@ -357,6 +418,7 @@ fn join_relations_impl(
                 if !any && want_left {
                     let mut row = l.clone();
                     row.extend(vec![Datum::Null; rw]);
+                    mark(&mut row, &LIVE, &Datum::Null);
                     push_bounded_join_row(
                         &mut rows,
                         &mut result_bytes,
@@ -370,6 +432,7 @@ fn join_relations_impl(
                     if !right_matched[ri] {
                         let mut row = vec![Datum::Null; lw];
                         row.extend(r.iter().cloned());
+                        mark(&mut row, &Datum::Null, &LIVE);
                         push_bounded_join_row(
                             &mut rows,
                             &mut result_bytes,
@@ -382,13 +445,21 @@ fn join_relations_impl(
         }
     }
 
+    // The markers sit after every real column, in the order the rows carry them,
+    // so binding the `ON` predicate against the marker-free combined scope above
+    // resolved to the same indices it does here.
+    let markers: Vec<ColumnBinding> = left_markers
+        .iter()
+        .chain(&right_markers)
+        .map(|qualifier| live_marker_binding(qualifier))
+        .collect();
+
     // USING/NATURAL: coalesce + reorder the join columns. Otherwise the combined
     // left ++ right schema is the result.
     if condition.pairs.is_empty() {
-        Ok(Relation {
-            scope: condition.combined_scope,
-            rows,
-        })
+        let mut scope = condition.combined_scope;
+        scope.columns.extend(markers);
+        Ok(Relation { scope, rows })
     } else {
         Ok(coalesce_join_columns(
             &left.scope,
@@ -397,6 +468,7 @@ fn join_relations_impl(
             &condition.pairs,
             &condition.join_cols,
             rows,
+            markers,
         ))
     }
 }
@@ -1064,7 +1136,8 @@ fn coalesce_join_columns(
     kind: JoinKind,
     pairs: &[(usize, usize)], // (left_idx, right_idx) per join column, in join order
     join_names: &[String],
-    rows: Vec<Vec<Datum>>, // combined left ++ right rows
+    rows: Vec<Vec<Datum>>, // combined left ++ right ++ liveness-marker rows
+    markers: Vec<ColumnBinding>,
 ) -> Relation {
     let lw = left_scope.width();
     let merged_width = pairs.len();
@@ -1125,6 +1198,10 @@ fn coalesce_join_columns(
             merged: (merged_from == MergedFrom::Right).then_some(join_index),
         };
     }
+    // Last, as in the rows: prepending the merged columns shifts every real
+    // column by `merged_width` and leaves the markers where they were, at the
+    // end of both the scope and the row.
+    columns.extend(markers);
     let scope = Scope { columns };
 
     let new_rows = rows
@@ -1272,11 +1349,33 @@ mod tests {
                     (Datum::Int4(x), Datum::Int4(y), Datum::Int4(k)) => *k == x + y,
                     _ => false,
                 });
-            let actual = join_relations(left.clone(), right.clone(), kind, &constraint, &tctx())
-                .expect("indexed join")
-                .rows;
+            let actual = visible(
+                &join_relations(left.clone(), right.clone(), kind, &constraint, &tctx())
+                    .expect("indexed join"),
+            );
             assert2::assert!(actual == expected, "{kind:?}");
         }
+    }
+
+    /// The rows as a query sees them.
+    ///
+    /// An outer join's liveness markers are internal bookkeeping, not columns of
+    /// the relation — a bare name and `*` both skip them — so what a join
+    /// produces is compared without them.
+    fn visible(relation: &Relation) -> Vec<Vec<Datum>> {
+        let keep: Vec<usize> = relation
+            .scope
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.exposure != Exposure::LiveMarker)
+            .map(|(i, _)| i)
+            .collect();
+        relation
+            .rows
+            .iter()
+            .map(|row| keep.iter().map(|i| row[*i].clone()).collect())
+            .collect()
     }
 
     /// The nested loop the index is supposed to be indistinguishable from.
@@ -1384,8 +1483,8 @@ mod tests {
         let j = join_relations(a, b, JoinKind::Left, &on_eq("a", "id", "b", "id"), &tctx())
             .expect("left join");
         // id=1 has no match -> (1, NULL); 2,3 match.
-        assert!(j.rows.contains(&vec![Datum::Int4(1), Datum::Null]));
-        assert_eq!(j.rows.len(), 3);
+        assert!(visible(&j).contains(&vec![Datum::Int4(1), Datum::Null]));
+        assert!(visible(&j).len() == 3);
     }
 
     #[test]
@@ -1394,8 +1493,8 @@ mod tests {
         let b = rel("b", &["id"], vec![vec![1], vec![2]]);
         let j = join_relations(a, b, JoinKind::Right, &on_eq("a", "id", "b", "id"), &tctx())
             .expect("right join");
-        assert!(j.rows.contains(&vec![Datum::Null, Datum::Int4(1)]));
-        assert_eq!(j.rows.len(), 2);
+        assert!(visible(&j).contains(&vec![Datum::Null, Datum::Int4(1)]));
+        assert!(visible(&j).len() == 2);
     }
 
     #[test]
@@ -1404,10 +1503,10 @@ mod tests {
         let b = rel("b", &["id"], vec![vec![2], vec![3]]);
         let j = join_relations(a, b, JoinKind::Full, &on_eq("a", "id", "b", "id"), &tctx())
             .expect("full join");
-        assert!(j.rows.contains(&vec![Datum::Int4(1), Datum::Null])); // unmatched left
-        assert!(j.rows.contains(&vec![Datum::Null, Datum::Int4(3)])); // unmatched right
-        assert!(j.rows.contains(&vec![Datum::Int4(2), Datum::Int4(2)])); // matched
-        assert_eq!(j.rows.len(), 3);
+        assert!(visible(&j).contains(&vec![Datum::Int4(1), Datum::Null])); // unmatched left
+        assert!(visible(&j).contains(&vec![Datum::Null, Datum::Int4(3)])); // unmatched right
+        assert!(visible(&j).contains(&vec![Datum::Int4(2), Datum::Int4(2)])); // matched
+        assert!(visible(&j).len() == 3);
     }
 
     #[test]
@@ -1508,7 +1607,7 @@ mod tests {
         .expect("full using");
         // [merged id, a.id, b.id] — the merged column is 1 where b.id is NULL
         // and 3 where a.id is NULL, so it equals neither raw column throughout.
-        let mut rows = j.rows.clone();
+        let mut rows = visible(&j);
         rows.sort_by_key(|r| format!("{:?}", r[0]));
         assert!(
             rows == vec![
@@ -1555,7 +1654,7 @@ mod tests {
         // the merged column would pass every inner-join test and break the
         // `WHERE b.id IS NULL` anti-join idiom.
         assert!(
-            j.rows
+            visible(&j)
                 == vec![
                     vec![
                         Datum::Int4(1),
@@ -1645,9 +1744,10 @@ mod tests {
             let left = keyed("a", &left_keys);
             let right = keyed("b", &right_keys);
             let expected = reference_join(&left, &right, kind);
-            let actual = join_relations(left, right, kind, &on_eq("a", "k", "b", "k"), &tctx())
-                .expect("join")
-                .rows;
+            let actual = visible(
+                &join_relations(left, right, kind, &on_eq("a", "k", "b", "k"), &tctx())
+                    .expect("join"),
+            );
             assert2::assert!(actual == expected, "{kind:?}");
         }
     }
@@ -1736,9 +1836,10 @@ mod tests {
             JoinKind::Right,
             JoinKind::Full,
         ] {
-            let actual = join_relations(left.clone(), right.clone(), kind, &constraint, &tctx())
-                .expect("OR equijoin")
-                .rows;
+            let actual = visible(
+                &join_relations(left.clone(), right.clone(), kind, &constraint, &tctx())
+                    .expect("OR equijoin"),
+            );
             let expected = reference(kind);
             assert2::assert!(actual == expected, "{kind:?}");
             assert2::assert!(

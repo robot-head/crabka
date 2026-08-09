@@ -48,13 +48,26 @@ pub(crate) enum Exposure {
     /// a FULL one, and why `pg_get_viewdef` prints the merged column of a RIGHT
     /// join as `jb.x`.
     JoinInput { merged: Option<usize> },
+    /// The hidden liveness marker an outer join adds for one qualifier on the
+    /// side it can null-extend. Its qualifier is [`LIVE_QUALIFIER`] and its name
+    /// is the qualifier it marks; see [`Scope::live_marker`].
+    LiveMarker,
 }
 
 impl ColumnBinding {
-    /// Is this the raw input column of a `USING`/`NATURAL` join, which a bare
-    /// name and `*` must both skip?
+    /// Is this column hidden from a bare name and from `*`?
+    ///
+    /// Two kinds are: a `USING`/`NATURAL` join's raw input column, which a bare
+    /// name and `*` skip in favour of the merged column, and an outer join's
+    /// liveness marker, which is not a column of the relation at all. Both stay
+    /// in the row — the first so `ja.x` and `SELECT ja` still see the side's own
+    /// value, the second so a whole-row reference can tell a null-extended row
+    /// from a stored one.
+    ///
+    /// The name predates the marker; every caller wants "skip what `*` skips",
+    /// which is what this answers.
     pub(crate) fn is_join_input(&self) -> bool {
-        matches!(self.exposure, Exposure::JoinInput { .. })
+        !matches!(self.exposure, Exposure::Output)
     }
 }
 
@@ -81,6 +94,31 @@ pub(crate) const POSITION_QUALIFIER: &str = "$pos";
 /// unquoted identifier, so no user relation can collide with this qualifier,
 /// and `*` skips the columns carrying it.
 pub(crate) const CORRELATED_QUALIFIER: &str = "$corr";
+
+/// The qualifier of the liveness markers an outer join adds: `$live.jb` is "was
+/// `jb`'s side of the join a real row for this output row, or was it invented by
+/// null-extension?".
+///
+/// A whole-row reference to the null-extended side of an outer join is NULL *as
+/// a whole* — `count(jb)` skips it and `jb::text` renders nothing — while a
+/// stored row whose every column happens to be NULL is an ordinary composite
+/// that renders `(,)` and is counted. `IS NULL` is true for both (it is
+/// field-wise, as PostgreSQL's `argisrow` test is), so nothing about the values
+/// tells them apart; only where the row came from does. `ja LEFT JOIN jb ON
+/// true` puts both in one result, so the distinction cannot be a property of the
+/// query either — it is per row.
+///
+/// `PostgreSQL` carries it the same way, one level lower: `EXPLAIN VERBOSE` of
+/// `SELECT jb FROM ja LEFT JOIN jb ON …` shows the scan of `jb` emitting `jb.*`
+/// as a real output column, which the join then null-extends along with the
+/// rest. The marker is that column with the payload dropped — the composite is
+/// cheap to rebuild from the columns already in the row, and its liveness is
+/// not.
+///
+/// As with [`POSITION_QUALIFIER`], a `$` cannot begin an unquoted identifier, so
+/// no user relation can collide with this qualifier, and both `*` and a bare
+/// name skip the columns carrying it.
+pub(crate) const LIVE_QUALIFIER: &str = "$live";
 
 /// The ordered schema of a relation. Flat indices line up with the combined row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -263,7 +301,10 @@ impl Scope {
         // they are not relations and have no whole row. Neither can be spelled
         // by a user reference (a `$` cannot begin an unquoted identifier), but a
         // caller holding a name from elsewhere must not reach them either.
-        if qualifier == POSITION_QUALIFIER || qualifier == CORRELATED_QUALIFIER {
+        if qualifier == POSITION_QUALIFIER
+            || qualifier == CORRELATED_QUALIFIER
+            || qualifier == LIVE_QUALIFIER
+        {
             return None;
         }
         let indices: Vec<usize> = self
@@ -276,13 +317,58 @@ impl Scope {
         (!indices.is_empty()).then_some(indices)
     }
 
+    /// The flat index of `qualifier`'s liveness marker, when an outer join above
+    /// it added one. See [`LIVE_QUALIFIER`].
+    ///
+    /// Absent for every relation no outer join can null-extend, which is why a
+    /// query without one pays nothing for this.
+    pub fn live_marker(&self, qualifier: &str) -> Option<usize> {
+        self.columns.iter().position(|c| {
+            c.exposure == Exposure::LiveMarker
+                && c.qualifier.as_deref() == Some(LIVE_QUALIFIER)
+                && c.name == qualifier
+        })
+    }
+
     /// The composite value of a whole-row reference over one row of this scope.
     ///
     /// The field names are the relation's column names, which is what
     /// `row_to_json(t)` and `(t).c` read; the type is the anonymous `record`,
     /// because a relation's composite type is not registered here.
+    ///
+    /// A row an outer join invented for this side has no whole row to speak of,
+    /// so the reference is NULL rather than a composite of NULLs — see
+    /// [`LIVE_QUALIFIER`]. Every consumer then gets that for free: `count(jb)`
+    /// skips it, `row_to_json(jb)` is NULL, `jb::text` renders nothing,
+    /// `COALESCE(jb::text, 'none')` takes the fallback, and the wire encoder
+    /// sends NULL.
+    ///
+    /// One pass over the scope collects the qualifier's columns and reads its
+    /// marker together, because this runs per row: it is the same single scan
+    /// [`Scope::whole_row`] alone used to cost, and an invented row now leaves
+    /// before any name or field is cloned.
     pub fn whole_row_value(&self, qualifier: &str, values: &[Datum]) -> Option<Datum> {
-        let indices = self.whole_row(qualifier)?;
+        if qualifier == POSITION_QUALIFIER
+            || qualifier == CORRELATED_QUALIFIER
+            || qualifier == LIVE_QUALIFIER
+        {
+            return None;
+        }
+        let mut indices: Vec<usize> = Vec::new();
+        let mut invented = false;
+        for (i, c) in self.columns.iter().enumerate() {
+            if c.exposure == Exposure::LiveMarker {
+                invented |= c.name == qualifier && values[i].is_null();
+            } else if c.qualifier.as_deref() == Some(qualifier) {
+                indices.push(i);
+            }
+        }
+        if indices.is_empty() {
+            return None;
+        }
+        if invented {
+            return Some(Datum::Null);
+        }
         let names: std::sync::Arc<[String]> = indices
             .iter()
             .map(|i| self.columns[*i].name.clone())
