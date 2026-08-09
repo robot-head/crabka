@@ -1706,34 +1706,56 @@ pub(crate) fn fire_after_row(
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     let mut recorded = Vec::new();
-    let mut relation = table.clone();
-    let mut transition_old = old.map(|row| row.to_vec());
-    let mut transition_new = new.map(|row| row.to_vec());
-    loop {
+    // A relation may sit under a partitioned parent, under one or more
+    // inheritance parents, or under a mixture, so the ancestry is a DAG and not
+    // the single chain a partition alone forms: `d INHERITS (b, c)` reaches a
+    // shared grandparent by two routes. Recording an image once per *relation*
+    // rather than once per route is what stops the grandparent's transition
+    // table showing that row twice. Both routes reshape by column name, so
+    // whichever arrives first produces the same image.
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![(
+        table.clone(),
+        old.map(<[crabka_pgtypes::Datum]>::to_vec),
+        new.map(<[crabka_pgtypes::Datum]>::to_vec),
+    )];
+    while let Some((relation, transition_old, transition_new)) = pending.pop() {
+        if !seen.insert(relation.id) {
+            continue;
+        }
         recorded.push(TransitionChange {
             table_id: relation.id,
             operation: operation_name(event).into(),
             old: transition_old.clone(),
             new: transition_new.clone(),
         });
-        let Some((parent_name, _)) = crate::partition::parent_of(kv, &relation.name)? else {
-            break;
-        };
-        let parent = crabka_pgcatalog::get_table(kv, &parent_name)?;
-        let ordinals = crate::exec::column_mapping(&parent, &relation)?;
-        let reshape = |row: Vec<crabka_pgtypes::Datum>| {
-            ordinals
-                .iter()
-                .map(|ordinal| {
-                    row.get(*ordinal)
-                        .cloned()
-                        .unwrap_or(crabka_pgtypes::Datum::Null)
-                })
-                .collect()
-        };
-        transition_old = transition_old.map(&reshape);
-        transition_new = transition_new.map(reshape);
-        relation = parent;
+        let mut ancestors = Vec::new();
+        if let Some((parent_name, _)) = crate::partition::parent_of(kv, &relation.name)? {
+            ancestors.push(parent_name);
+        }
+        ancestors.extend(crate::inheritance::parents_of(kv, &relation.name)?);
+        for parent_name in ancestors {
+            let parent = crabka_pgcatalog::get_table(kv, &parent_name)?;
+            // The ancestor's columns, read out of this relation's row by name:
+            // a child may store them in a different order and may add its own,
+            // and the ancestor's transition table shows neither.
+            let ordinals = crate::exec::column_mapping(&parent, &relation)?;
+            let reshape = |row: &Vec<crabka_pgtypes::Datum>| {
+                ordinals
+                    .iter()
+                    .map(|ordinal| {
+                        row.get(*ordinal)
+                            .cloned()
+                            .unwrap_or(crabka_pgtypes::Datum::Null)
+                    })
+                    .collect()
+            };
+            pending.push((
+                parent,
+                transition_old.as_ref().map(&reshape),
+                transition_new.as_ref().map(&reshape),
+            ));
+        }
     }
     TRANSITION_CHANGES.with(|changes| {
         if let Some(changes) = changes.borrow_mut().as_mut() {

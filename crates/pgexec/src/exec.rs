@@ -213,9 +213,33 @@ pub(crate) struct WriteContext<'a> {
     /// of the seven write paths that statement takes — every one of which
     /// already builds its per-row check through [`WriteContext::row_check`].
     pub view_checks: &'a [crate::viewwrite::ViewCheck],
+    /// The relation whose privileges and row-security policies decide this
+    /// write, when the rows it touches are stored in a different one.
+    ///
+    /// `UPDATE parent` over an inheritance tree or a partitioned table writes
+    /// each descendant's own storage, but `PostgreSQL` takes both decisions
+    /// from the relation the statement *named*. A role holding `UPDATE` on the
+    /// parent and nothing at all on a child still writes the child's rows
+    /// through the parent, and the parent's policies filter those rows even
+    /// when the child has row security disabled — so resolving either against
+    /// the relation being physically written denies writes `PostgreSQL` allows
+    /// and shows rows it hides.
+    ///
+    /// The qual this yields is bound by column *name* against whichever
+    /// relation is actually being scanned, so a child that stores the parent's
+    /// columns in a different order is still filtered on the right ones.
+    ///
+    /// `None` — the ordinary case — means the written relation governs itself.
+    pub governing: Option<&'a Table>,
 }
 
 impl<'a> WriteContext<'a> {
+    /// The relation whose ACL and policies this write answers to: the one the
+    /// statement named, which is the written relation itself unless a tree
+    /// write set [`WriteContext::governing`].
+    fn governor<'b>(&'b self, written: &'b Table) -> &'b Table {
+        self.governing.unwrap_or(written)
+    }
     /// The read context a write's feeding query runs under: the write's own
     /// snapshot and xid, so it sees this transaction's earlier statements but
     /// not this statement's own (uncommitted, unwritten) rows.
@@ -255,16 +279,17 @@ impl<'a> WriteContext<'a> {
         table: &Table,
         command: crabka_pgcatalog::policy::PolicyCommand,
     ) -> Result<crate::rls::WriteChecks, ExecError> {
+        let governor = self.governor(table);
         crate::privilege::require(
             &self.privileges(),
-            &table.name,
-            &table.owner,
+            &governor.name,
+            &governor.owner,
             crate::privilege::RelationKind::Table,
             crate::privilege::Privilege::for_written_row(command),
         )?;
         let security = crate::rls::RowSecurityCheck::compile(
             &self.rls(),
-            table,
+            governor,
             command,
             crate::rls::CheckSubject::NewRow,
         )?;
@@ -3655,16 +3680,41 @@ async fn execute_write_with_ctes(
     Ok((outcome, ops))
 }
 
-/// The relations a `TRUNCATE` names, dropping each target's `ONLY` flag.
+/// Every relation a `TRUNCATE` empties, before `CASCADE` is consulted.
 ///
-/// `TRUNCATE` empties exactly what it is given and never walks down an
-/// inheritance tree, so `ONLY` asks for the behaviour that is already in force
-/// and its absence promises nothing extra. The flag is parsed and kept on the
-/// statement so the two spellings stop being a syntax error apart.
+/// A target without `ONLY` stands for its whole inheritance tree, exactly as it
+/// does for `UPDATE` and `DELETE`: `TRUNCATE parent` leaves an inheritance
+/// child empty in `PostgreSQL`, and `TRUNCATE ONLY parent` is the spelling that
+/// spares it. Both call sites read this list — the one that empties the
+/// relations and the one that collects their statement triggers — so a child
+/// pulled in here is both truncated and gets its `BEFORE TRUNCATE` trigger
+/// fired, which is what `PostgreSQL` does.
+///
+/// Names are deduplicated: two targets in one list may share a descendant, and
+/// so may the two routes to one relation in a multiple-inheritance DAG.
 fn truncate_names(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     targets: &[crabka_pgparser::ast::TruncateTarget],
-) -> Vec<crabka_pgparser::ast::RelationRef> {
-    targets.iter().map(|target| target.name.clone()).collect()
+) -> Result<Vec<crabka_pgparser::ast::RelationRef>, ExecError> {
+    let mut out = Vec::with_capacity(targets.len());
+    let mut seen = HashSet::new();
+    for target in targets {
+        let named = resolve_relation(kv, resolution, &target.name, SchemaDisposition::Utility)?;
+        let mut tree = vec![named.clone()];
+        if !target.only {
+            tree.extend(crate::inheritance::descendants(kv, &named)?);
+        }
+        for relation in tree {
+            if seen.insert(relation.clone()) {
+                out.push(crabka_pgparser::ast::RelationRef::qualified(
+                    &relation.schema,
+                    &relation.name,
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn statement_trigger_targets(
@@ -3675,7 +3725,11 @@ fn statement_trigger_targets(
         targets, cascade, ..
     } = stmt
     {
-        let written = truncate_names(targets);
+        let written = truncate_names(
+            write_ctx.catalog_kv,
+            write_ctx.eval_ctx.resolution(),
+            targets,
+        )?;
         let names = resolve_relations(
             write_ctx.catalog_kv,
             write_ctx.eval_ctx.resolution(),
@@ -4087,24 +4141,20 @@ async fn partitioned_dml(
                  columns in a different order than its parent: partition \"{leaf}\" does"
             )));
         }
-        let mut per_leaf = stmt.clone();
-        match &mut per_leaf {
-            Statement::Update { table, .. } | Statement::Delete { table, .. } => {
-                *table = crabka_pgparser::ast::RelationRef::qualified(&leaf.schema, &leaf.name);
-            }
-            _ => unreachable!("the caller matched an UPDATE or a DELETE"),
-        }
+        let per_leaf = retarget_tree_dml(stmt, &leaf, &parent);
+        // The partitioned parent owns no rows, but it is the relation the
+        // statement named, so it is the one whose ACL and policies decide the
+        // write. See [`WriteContext::governing`].
+        let leaf_ctx = WriteContext {
+            governing: Some(write_ctx.governing.unwrap_or(&parent_table)),
+            ..*write_ctx
+        };
         let (outcome, leaf_ops) =
-            Box::pin(execute_write_body(write_ctx, ctes, &per_leaf, writes)).await?;
+            Box::pin(execute_write_body(&leaf_ctx, ctes, &per_leaf, writes)).await?;
         ops.extend(leaf_ops);
         // The per-leaf body already rendered its own count into the tag; the
         // parent's tag is their sum.
-        affected += outcome
-            .tag
-            .rsplit(' ')
-            .next()
-            .and_then(|count| count.parse::<u64>().ok())
-            .unwrap_or_default();
+        affected += affected_from_tag(&outcome.tag);
         if let Some(rows) = outcome.returning {
             match &mut returned {
                 Some(accumulated) => accumulated.rows.extend(rows.rows),
@@ -4119,6 +4169,232 @@ async fn partitioned_dml(
         },
         ops,
     ))
+}
+
+/// The row count a completed write rendered into its command tag.
+fn affected_from_tag(tag: &str) -> u64 {
+    tag.rsplit(' ')
+        .next()
+        .and_then(|count| count.parse::<u64>().ok())
+        .unwrap_or_default()
+}
+
+/// Point one relation's `UPDATE`/`DELETE` at a single relation below it.
+///
+/// Two things travel with the target beyond its name.
+///
+/// `only` is set because the caller has already enumerated the whole tree:
+/// without it a child with children of its own would expand again and write
+/// every grandchild once per path to it.
+///
+/// The alias is the subtle one. Every expression in the statement resolves
+/// against [`table_qualifier`], which falls back to the *table's own name* when
+/// no alias is given — so simply renaming the target silently moves the
+/// qualifier from `parent` to `child`, and `UPDATE parent SET … WHERE
+/// parent.x = 1` stops resolving with "missing FROM-clause entry for table
+/// parent". Pinning the alias to the name the statement was written against
+/// keeps every qualified reference — in the filter, in a `SET` right-hand side
+/// and in `RETURNING` — resolving to the same thing it did before the rewrite.
+fn retarget_tree_dml(
+    stmt: &Statement,
+    target: &crabka_pgcatalog::RelationName,
+    named: &crabka_pgcatalog::RelationName,
+) -> Statement {
+    let mut per_relation = stmt.clone();
+    match &mut per_relation {
+        Statement::Update {
+            table, only, alias, ..
+        }
+        | Statement::Delete {
+            table, only, alias, ..
+        } => {
+            *table = crabka_pgparser::ast::RelationRef::qualified(&target.schema, &target.name);
+            *only = true;
+            if alias.is_none() {
+                *alias = Some(named.name.clone());
+            }
+        }
+        _ => unreachable!("the caller matched an UPDATE or a DELETE"),
+    }
+    per_relation
+}
+
+/// `UPDATE parent` / `DELETE FROM parent` over a table-inheritance tree, which
+/// `PostgreSQL` applies to the parent *and* every relation below it unless the
+/// statement said `ONLY`.
+///
+/// This mirrors [`inherited_scan`] on the read side, and has to: leaving it out
+/// is not a missing feature but a wrong answer, because `SELECT count(*) FROM
+/// parent` already counts the child rows that `DELETE FROM parent` then walks
+/// past. The tree is a DAG rather than a chain — `d INHERITS (b, c)` under
+/// `b, c INHERITS a` is reachable from `a` twice — so the relation list comes
+/// from [`crate::inheritance::descendants`], which names each one once, and in
+/// the same order the read side appends them.
+///
+/// Unlike a partitioned write, this never moves a row: `PostgreSQL` updates an
+/// inheritance child's row in place even when the new value would have suited
+/// the parent, so each relation's rows are simply written where they already
+/// live.
+async fn inherited_dml(
+    write_ctx: &WriteContext<'_>,
+    ctes: &crate::cte::CteContext,
+    stmt: &Statement,
+    writes: &mut StatementWrites,
+) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let resolution = write_ctx.eval_ctx.resolution();
+    let (named, verb) = match stmt {
+        Statement::Update { table, .. } => (table, "UPDATE"),
+        Statement::Delete { table, .. } => (table, "DELETE"),
+        _ => unreachable!("the caller matched an UPDATE or a DELETE"),
+    };
+    let named = resolve_relation(
+        write_ctx.catalog_kv,
+        resolution,
+        named,
+        SchemaDisposition::Reference,
+    )?;
+    let parent = crabka_pgcatalog::get_table(write_ctx.catalog_kv, &named)?;
+    let mut relations = vec![named.clone()];
+    relations.extend(crate::inheritance::descendants(
+        write_ctx.catalog_kv,
+        &named,
+    )?);
+    let stmt = &reshape_returning_for_tree(write_ctx, stmt, &parent, &relations)?;
+    let mut ops = Vec::new();
+    let mut affected: u64 = 0;
+    let mut returned: Option<Relation> = None;
+    for relation in relations {
+        let per_relation = retarget_tree_dml(stmt, &relation, &named);
+        // Every relation in the tree is written under the named parent's ACL
+        // and policies. See [`WriteContext::governing`].
+        let child_ctx = WriteContext {
+            governing: Some(write_ctx.governing.unwrap_or(&parent)),
+            ..*write_ctx
+        };
+        let (outcome, child_ops) =
+            Box::pin(execute_write_body(&child_ctx, ctes, &per_relation, writes)).await?;
+        ops.extend(child_ops);
+        affected += affected_from_tag(&outcome.tag);
+        if let Some(rows) = outcome.returning {
+            match &mut returned {
+                Some(accumulated) => accumulated.rows.extend(rows.rows),
+                None => returned = Some(rows),
+            }
+        }
+    }
+    Ok((
+        WriteOutcome {
+            tag: format!("{verb} {affected}"),
+            returning: returned,
+        },
+        ops,
+    ))
+}
+
+/// Pin a tree write's `RETURNING *` to the parent's column list.
+///
+/// A `*` is expanded per relation against whatever that relation stores, so a
+/// child declared `(b, a)` would contribute its rows in the wrong order and a
+/// child with an extra column would contribute an extra field —
+/// `PostgreSQL` reports every row of the hierarchy in the *parent's* shape.
+/// Naming the parent's columns explicitly, once, makes each relation produce
+/// that shape; they resolve in every child because inheritance guarantees the
+/// name is there, whatever ordinal it sits at.
+///
+/// The rewrite is skipped when no relation below the parent departs from its
+/// column list, which is the overwhelmingly common case (`CREATE TABLE c ()
+/// INHERITS (p)`) — there `*` already expands identically everywhere, and the
+/// statement is passed through untouched.
+fn reshape_returning_for_tree(
+    write_ctx: &WriteContext<'_>,
+    stmt: &Statement,
+    parent: &Table,
+    relations: &[crabka_pgcatalog::RelationName],
+) -> Result<Statement, ExecError> {
+    let (returning, from, alias) = match stmt {
+        Statement::Update {
+            returning,
+            from,
+            alias,
+            ..
+        } => (returning, from.as_slice(), alias),
+        Statement::Delete {
+            returning,
+            using,
+            alias,
+            ..
+        } => (returning, using.as_slice(), alias),
+        _ => unreachable!("the caller matched an UPDATE or a DELETE"),
+    };
+    let qualifier = alias.clone().unwrap_or_else(|| parent.name.name.clone());
+    let Some(returning) = returning else {
+        return Ok(stmt.clone());
+    };
+    let spans_target = |item: &SelectItem| match item {
+        SelectItem::Wildcard => true,
+        SelectItem::QualifiedWildcard(q) => *q == qualifier,
+        SelectItem::Expr { .. } => false,
+    };
+    if !returning.items.iter().any(spans_target) {
+        return Ok(stmt.clone());
+    }
+    let mut uniform = true;
+    for relation in relations {
+        let child = crabka_pgcatalog::get_table(write_ctx.catalog_kv, relation)?;
+        uniform &= child.columns.len() == parent.columns.len()
+            && column_mapping(parent, &child)?
+                .iter()
+                .enumerate()
+                .all(|(expected, actual)| expected == *actual);
+    }
+    if uniform {
+        return Ok(stmt.clone());
+    }
+    // A bare `*` also spans the FROM/USING relations, and their columns cannot
+    // be named here without resolving each source item's own shape. Refusing is
+    // the honest answer: silently dropping them would report the wrong row.
+    if !from.is_empty() && returning.items.contains(&SelectItem::Wildcard) {
+        return Err(ExecError::Unsupported(format!(
+            "RETURNING * over an inheritance tree is not supported alongside FROM/USING when a \
+             relation below \"{}\" declares the parent's columns differently; name the columns \
+             explicitly",
+            parent.name
+        )));
+    }
+    let target_columns: Vec<SelectItem> = parent
+        .columns
+        .iter()
+        .map(|column| SelectItem::Expr {
+            expr: Expr::Column {
+                table: Some(qualifier.clone()),
+                name: column.name.clone(),
+            },
+            alias: Some(column.name.clone()),
+        })
+        .collect();
+    let items = returning
+        .items
+        .iter()
+        .flat_map(|item| {
+            if spans_target(item) {
+                target_columns.clone()
+            } else {
+                vec![item.clone()]
+            }
+        })
+        .collect();
+    let reshaped = crabka_pgparser::ast::Returning {
+        items,
+        ..returning.clone()
+    };
+    let mut out = stmt.clone();
+    match &mut out {
+        Statement::Update { returning, .. } | Statement::Delete { returning, .. } => {
+            *returning = Some(reshaped);
+        }
+        _ => unreachable!("the caller matched an UPDATE or a DELETE"),
+    }
+    Ok(out)
 }
 
 /// A row written straight into a leaf partition must still satisfy that leaf's
@@ -4985,6 +5261,19 @@ async fn execute_write_body(
         {
             Box::pin(partitioned_dml(write_ctx, ctes, stmt, writes)).await
         }
+        // After the partitioned guard, so a target that is both a partitioned
+        // parent and an inheritance parent routes by partition first. `ONLY`
+        // asks for exactly the un-expanded write, and a childless target has
+        // nothing to expand into, so both fall through to the plain arms and
+        // pay one children-index probe.
+        Statement::Update {
+            table, only: false, ..
+        }
+        | Statement::Delete {
+            table, only: false, ..
+        } if has_inheritance_children(catalog_kv, resolution, table)? => {
+            Box::pin(inherited_dml(write_ctx, ctes, stmt, writes)).await
+        }
         Statement::Merge { table, .. } if is_partitioned_ref(catalog_kv, resolution, table)? => {
             Err(ExecError::Unsupported(
                 "MERGE into a partitioned table is not supported: a source row that matches no \
@@ -5468,11 +5757,10 @@ async fn execute_write_body(
             // Validate every name (and refuse sharded targets) before touching
             // any table: the statement is all-or-nothing across the list.
             //
-            // A target's `ONLY` is not consulted: `TRUNCATE` empties exactly the
-            // relations named plus whatever `CASCADE` pulls in, and never
-            // descends into inheritance children, so writing `ONLY` asks for
-            // what it already does.
-            let written = truncate_names(targets);
+            // A target without `ONLY` stands for its whole inheritance tree, so
+            // this list is already wider than the one written down; `CASCADE`
+            // widens it further below.
+            let written = truncate_names(catalog_kv, resolution, targets)?;
             let mut named = Vec::with_capacity(written.len());
             for name in
                 resolve_relations(catalog_kv, resolution, &written, SchemaDisposition::Utility)?
@@ -9538,9 +9826,15 @@ fn write_candidate_rows(
     filter: Option<&Expr>,
     reads_target_columns: bool,
 ) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
-    crate::privilege::require_write(&write_ctx.privileges(), table, action, reads_target_columns)?;
+    let governor = write_ctx.governor(table);
+    crate::privilege::require_write(
+        &write_ctx.privileges(),
+        governor,
+        action,
+        reads_target_columns,
+    )?;
     let using =
-        crate::rls::RowSecurityUsing::compile(&write_ctx.rls(), table, action.policy_command())?;
+        crate::rls::RowSecurityUsing::compile(&write_ctx.rls(), governor, action.policy_command())?;
     let mut rows: Vec<(u64, u64, Vec<Datum>)> = if let Some((index, value)) =
         choose_write_index_probe(write_ctx.catalog_kv, table, filter)?
     {
@@ -9600,6 +9894,25 @@ pub(crate) fn execute_timestamp_write(
             ));
         }
         _ => {}
+    }
+    // A sharded write is planned against exactly one relation, so it cannot
+    // descend an inheritance tree the way the ordinary write path does. Left
+    // alone it would silently write the parent's own rows and report a count
+    // that omits the children's — the very wrong answer the tree write exists
+    // to remove — so the combination is refused until the timestamp planner
+    // can carry more than one relation.
+    if let Statement::Update { table, only, .. } | Statement::Delete { table, only, .. } = stmt
+        && !*only
+    {
+        let name = resolve_relation(catalog_kv, resolution, table, SchemaDisposition::Reference)?;
+        if crate::inheritance::has_children(catalog_kv, &name)? {
+            return Err(ExecError::Unsupported(format!(
+                "UPDATE/DELETE on sharded table \"{name}\" is not supported while it has \
+                 inheritance children: the statement would have to write every relation below it, \
+                 and a sharded write is planned against one. Write ONLY \"{name}\", or each child, \
+                 instead"
+            )));
+        }
     }
     // ON CONFLICT arbitration probes and locks a unique key on the local range;
     // a sharded table's unique keys live on other ranges, so the conflict can
@@ -26036,6 +26349,20 @@ fn is_partitioned_ref(
 ) -> Result<bool, ExecError> {
     let name = resolve_relation(kv, resolution, reference, SchemaDisposition::Reference)?;
     crate::partition::is_partitioned(kv, &name)
+}
+
+/// Whether a write target has table-inheritance children to descend into.
+///
+/// This runs on every `UPDATE` and `DELETE`, so it stops at the first child key
+/// rather than reading the child list: a relation with no direct children has no
+/// descendants either, which is the answer nearly every write gets.
+fn has_inheritance_children(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<bool, ExecError> {
+    let name = resolve_relation(kv, resolution, reference, SchemaDisposition::Reference)?;
+    crate::inheritance::has_children(kv, &name)
 }
 
 /// The ops that clear the foreign keys blocking a `DROP TABLE`, or the 2BP01

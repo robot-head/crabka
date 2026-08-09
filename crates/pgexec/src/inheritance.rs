@@ -97,6 +97,33 @@ pub(crate) fn children_of(
         .collect()
 }
 
+/// Whether `parent` has any direct inheritance child.
+///
+/// Every `UPDATE` and `DELETE` in the engine asks this to decide whether it is
+/// a tree write, and almost every one of them is answered "no" — so it stops at
+/// the first key and reads none of the values, rather than building the child
+/// list through [`children_of`] and throwing it away. The names are read later,
+/// once, by the writes that turn out to need them.
+pub(crate) fn has_children(kv: &dyn Kv, parent: &RelationName) -> Result<bool, ExecError> {
+    let start = relation_key(CHILDREN_PREFIX, parent);
+    let mut end = start.clone();
+    // The exclusive bound above every key starting with `start`. The prefix ends
+    // in a length-prefixed name, so it can never be all-`0xff` and the increment
+    // always lands.
+    for byte in end.iter_mut().rev() {
+        if *byte == u8::MAX {
+            *byte = 0;
+        } else {
+            *byte += 1;
+            break;
+        }
+    }
+    let seen = kv
+        .for_each_key(&start, &end, 1, &mut |_| ())
+        .map_err(ExecError::Kv)?;
+    Ok(seen > 0)
+}
+
 /// Every relation below `parent`, each named once.
 ///
 /// The visited set is load-bearing rather than defensive: multiple inheritance

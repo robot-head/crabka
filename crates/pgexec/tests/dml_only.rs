@@ -1,11 +1,12 @@
 //! `UPDATE ONLY`, `DELETE FROM ONLY` and `TRUNCATE ONLY`.
 //!
 //! `ONLY` restricts a statement to the named relation instead of its whole
-//! inheritance tree. These three commands do not walk down an inheritance tree
-//! at all yet, so writing `ONLY` asks for the behaviour already in force — but
-//! it has to *parse*, and it used to not: `only` was taken as the table name and
-//! the real table became its alias, which surfaced as `relation "only" does not
-//! exist`.
+//! inheritance tree, and the two spellings genuinely differ: without it all
+//! three commands descend into every relation below the target.
+//!
+//! `ONLY` also has to *parse*, and it used to not: `only` was taken as the table
+//! name and the real table became its alias, which surfaced as `relation "only"
+//! does not exist`.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -111,25 +112,44 @@ async fn truncate_only_binds_per_name() {
     assert!(query(&mut session, "SELECT id FROM child").await == rows(&["2"]));
 }
 
-/// **A known divergence, pinned deliberately.** `PostgreSQL` descends into
-/// inheritance children when `ONLY` is *absent*; this engine never does, on any
-/// of the three commands. So the two spellings currently do the same thing, and
-/// the child's row survives an `UPDATE`/`DELETE`/`TRUNCATE` written without
-/// `ONLY`. The flag is carried on the statement so that DML recursion — which is
-/// separate, unstarted work — has something to honour; when it lands, these
-/// assertions are the ones that should fail.
+/// Omitting `ONLY` reaches the children, on all three commands.
+///
+/// This is the case that made the flag worth honouring: `SELECT count(*) FROM
+/// parent` has always counted the child's row, so a `DELETE FROM parent` that
+/// walked past it left the hierarchy holding rows the same statement claimed to
+/// have removed.
 #[tokio::test]
-async fn omitting_only_does_not_yet_reach_the_children() {
+async fn omitting_only_reaches_the_children() {
     let mut session = tree().await;
     run(&mut session, "UPDATE parent SET tag = 'x'").await;
-    assert!(query(&mut session, "SELECT tag FROM child").await == rows(&["c"]));
+    assert!(query(&mut session, "SELECT tag FROM child").await == rows(&["x"]));
 
     run(&mut session, "DELETE FROM parent").await;
-    assert!(query(&mut session, "SELECT id FROM child").await == rows(&["2"]));
+    assert!(query(&mut session, "SELECT id FROM child").await == rows(&[]));
 
     run(&mut session, "INSERT INTO parent VALUES (1, 'p')").await;
+    run(&mut session, "INSERT INTO child VALUES (2, 'c')").await;
     run(&mut session, "TRUNCATE parent").await;
-    assert!(query(&mut session, "SELECT id FROM child").await == rows(&["2"]));
+    assert!(query(&mut session, "SELECT id FROM child").await == rows(&[]));
+}
+
+/// The command tag counts every row the statement touched, across the tree.
+#[tokio::test]
+async fn the_command_tag_counts_the_whole_tree() {
+    let cases = [
+        ("UPDATE parent SET tag = 'x'", "UPDATE 2"),
+        ("UPDATE ONLY parent SET tag = 'x'", "UPDATE 1"),
+        ("DELETE FROM parent", "DELETE 2"),
+        ("DELETE FROM ONLY parent", "DELETE 1"),
+    ];
+    for (sql, expected) in cases {
+        let mut session = tree().await;
+        let tag = match &run(&mut session, sql).await[0] {
+            QueryResult::Command { tag } | QueryResult::Rows { tag, .. } => tag.clone(),
+            other @ QueryResult::Empty => panic!("expected a tag from {sql}, got {other:?}"),
+        };
+        assert!(tag == expected, "{sql} reported {tag}, expected {expected}");
+    }
 }
 
 /// `only` is still an ordinary identifier when no name follows it, so a table
