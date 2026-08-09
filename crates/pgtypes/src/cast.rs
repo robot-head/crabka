@@ -3326,19 +3326,26 @@ mod tests {
             panic!("circle::polygon is a polygon");
         };
         assert!(polygon.npoints() == 12);
-        let text = cast(&Datum::Polygon(polygon), ColumnType::Text, &tz).expect("render");
-        assert!(
-            text == Datum::Text(
-                "((-2,0),(-1.7320508075688774,0.9999999999999999),\
-                 (-1.0000000000000002,1.7320508075688772),(-1.2246467991473532e-16,2),\
-                 (0.9999999999999996,1.7320508075688774),(1.732050807568877,1.0000000000000007),\
-                 (2,2.4492935982947064e-16),(1.7320508075688776,-0.9999999999999994),\
-                 (1.0000000000000009,-1.7320508075688767),(3.6739403974420594e-16,-2),\
-                 (-0.9999999999999987,-1.732050807568878),\
-                 (-1.7320508075688767,-1.0000000000000009))"
-                    .to_string()
-            )
-        );
+        // Compared as geometry rather than as rendered text. `circle_poly` walks
+        // the circle with `cos`/`sin`, and those differ by an ULP between
+        // platforms' libm — macOS renders one vertex `0.9999999999999996` where
+        // Linux renders `…97`. Pinning the string made this test assert which
+        // libm built it. The invariant that matters is the shape: twelve
+        // vertices on the circle, evenly spaced, from angle pi downward.
+        for (i, point) in polygon.points.iter().enumerate() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "twelve vertices; the index is exact in f64"
+            )]
+            let angle = std::f64::consts::PI - (i as f64) * std::f64::consts::TAU / 12.0;
+            let (want_x, want_y) = (2.0 * angle.cos(), 2.0 * angle.sin());
+            assert!(
+                (point.x - want_x).abs() < 1e-12 && (point.y - want_y).abs() < 1e-12,
+                "vertex {i}: {point:?} is not on the circle at angle {angle}"
+            );
+            assert!((point.x.hypot(point.y) - 2.0).abs() < 1e-12, "vertex {i} radius");
+        }
+
         // A zero-radius circle has no polygon: `circle_poly` reports 0A000, not
         // a twelve-fold repetition of the centre.
         let degenerate =
