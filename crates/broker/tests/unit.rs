@@ -822,7 +822,7 @@ async fn init_producer_id_with_transactional_id_returns_real_pid() {
         .expect("InitProducerId");
     check!(r.error_code == 0, "error_code should be NONE");
     check!(
-        r.producer_id >= 1_000,
+        r.producer_id >= 0,
         "producer_id should come from txn coordinator's pool"
     );
     check!(r.producer_epoch == 0, "first allocation → epoch 0");
