@@ -318,12 +318,18 @@ async fn deleting_pool_removes_exact_committed_voter() {
     let parent = "demo";
     let pool_name = "brokers";
     let ns = "y";
-    let mut rules = stopped_pool_rules(parent, pool_name, &fake_parent_kafka_body(parent, ns));
-    rules.push(MockRule {
-        method: Method::GET,
-        path_substr: format!("/secrets/{parent}-cluster-id"),
-        response: json_response(200, &dynamic_secret_body(parent, pool_name, ns)),
-    });
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &dynamic_secret_body(parent, pool_name, ns)),
+        },
+    ];
     let state = MockState::new(rules);
     let ctx = fixture_ctx(mock_client(&state, ns), ns);
     let admin = Arc::new(tokio::sync::Mutex::new(
@@ -382,8 +388,12 @@ async fn deleting_last_voter_keeps_finalizer_and_reports_blocked() {
     let parent = "demo";
     let pool_name = "brokers";
     let ns = "y";
-    let mut rules = stopped_pool_rules(parent, pool_name, &fake_parent_kafka_body(parent, ns));
-    rules.extend([
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{parent}-cluster-id"),
@@ -394,7 +404,7 @@ async fn deleting_last_voter_keeps_finalizer_and_reports_blocked() {
             path_substr: format!("/kafkanodepools/{pool_name}/status"),
             response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
         },
-    ]);
+    ];
     let state = MockState::new(rules);
     let ctx = fixture_ctx(mock_client(&state, ns), ns);
     let admin = shared::fake_admin::FakeAdminClient::new();

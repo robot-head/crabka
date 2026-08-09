@@ -3,7 +3,7 @@
 //! tracking, committed-read filtering for KIP-595 `Fetch`, and divergence
 //! lookup. The controller uses it as the metadata log.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crabka_ids::{LeaderEpoch, Offset};
 use crabka_log::{Log, LogConfig, RawRead};
@@ -20,7 +20,10 @@ pub struct KraftLog {
     /// Highest committed offset. This is consensus state, and crabka-log does
     /// not track it.
     hwm: Offset,
+    hwm_path: PathBuf,
 }
+
+const HIGH_WATERMARK_FILE: &str = "high-watermark.checkpoint";
 
 impl KraftLog {
     /// Opens or creates the metadata log under `dir/@metadata-0`.
@@ -29,11 +32,17 @@ impl KraftLog {
     /// Returns [`RaftError`] if the log directory cannot be created or the
     /// underlying `crabka_log::Log` fails to open.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, RaftError> {
+        let hwm_path = dir.as_ref().join(HIGH_WATERMARK_FILE);
         let log_dir = dir.as_ref().join("@metadata-0");
         std::fs::create_dir_all(&log_dir).map_err(crabka_log::LogError::Io)?;
         let log = Log::open(&log_dir, LogConfig::default())?;
-        let hwm = log.log_start_offset();
-        Ok(Self { log, hwm })
+        let hwm = std::fs::read_to_string(&hwm_path)
+            .ok()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .map_or_else(|| log.log_start_offset(), Offset)
+            .max(log.log_start_offset())
+            .min(log.log_end_offset());
+        Ok(Self { log, hwm, hwm_path })
     }
 
     #[must_use]
@@ -118,7 +127,11 @@ impl KraftLog {
     /// past the log end.
     pub fn advance_hwm(&mut self, new_hwm: Offset) {
         let clamped = new_hwm.min(self.log.log_end_offset());
-        self.hwm = self.hwm.max(clamped);
+        let next = self.hwm.max(clamped);
+        if next > self.hwm {
+            self.hwm = next;
+            self.persist_hwm();
+        }
         debug_assert!(self.hwm <= self.log.log_end_offset());
     }
 
@@ -131,6 +144,7 @@ impl KraftLog {
         debug_assert!(offset >= self.log.log_start_offset());
         self.log.truncate_to(offset)?;
         self.hwm = self.hwm.min(offset);
+        self.persist_hwm();
         Ok(())
     }
 
@@ -160,7 +174,14 @@ impl KraftLog {
     pub fn install_snapshot(&mut self, end_offset: Offset) -> Result<(), RaftError> {
         self.log.reset_to(end_offset)?;
         self.hwm = end_offset;
+        self.persist_hwm();
         Ok(())
+    }
+
+    fn persist_hwm(&self) {
+        if let Err(error) = std::fs::write(&self.hwm_path, self.hwm.0.to_string()) {
+            tracing::error!(?error, path = %self.hwm_path.display(), "kraft: persist high watermark failed");
+        }
     }
 }
 

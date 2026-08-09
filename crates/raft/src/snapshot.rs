@@ -55,7 +55,9 @@ impl SnapshotControlState {
 /// metadata records.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SnapshotContents {
-    pub(crate) control_state: SnapshotControlState,
+    /// KIP-853 controls. Snapshots written before dynamic membership omit
+    /// these batches and recover membership from the level-0 configuration.
+    pub(crate) control_state: Option<SnapshotControlState>,
     pub(crate) metadata_records: Vec<MetadataRecord>,
 }
 
@@ -320,7 +322,12 @@ impl SnapshotReader {
                             voters = Some(voter_set_from_wire(&record)?);
                             stage = SnapshotReadStage::MetadataOrFooter;
                         }
-                        (SnapshotReadStage::MetadataOrFooter, ControlRecord::SnapshotFooter(_)) => {
+                        (
+                            SnapshotReadStage::MetadataOrFooter
+                            | SnapshotReadStage::KRaftVersion
+                            | SnapshotReadStage::LegacyMetadataOrFooter,
+                            ControlRecord::SnapshotFooter(_),
+                        ) => {
                             stage = SnapshotReadStage::Done;
                         }
                         _ => return Err(invalid_snapshot_order()),
@@ -328,7 +335,13 @@ impl SnapshotReader {
                 }
                 continue;
             }
-            if stage != SnapshotReadStage::MetadataOrFooter {
+            if stage == SnapshotReadStage::KRaftVersion {
+                stage = SnapshotReadStage::LegacyMetadataOrFooter;
+            }
+            if !matches!(
+                stage,
+                SnapshotReadStage::MetadataOrFooter | SnapshotReadStage::LegacyMetadataOrFooter
+            ) {
                 return Err(invalid_snapshot_order());
             }
             for rec in &batch.records {
@@ -345,9 +358,13 @@ impl SnapshotReader {
             return Err(invalid_snapshot_order());
         }
         Ok(SnapshotContents {
-            control_state: SnapshotControlState {
-                kraft_version: kraft_version.ok_or_else(invalid_snapshot_order)?,
-                voters: voters.ok_or_else(invalid_snapshot_order)?,
+            control_state: match (kraft_version, voters) {
+                (Some(kraft_version), Some(voters)) => Some(SnapshotControlState {
+                    kraft_version,
+                    voters,
+                }),
+                (None, None) => None,
+                _ => return Err(invalid_snapshot_order()),
             },
             metadata_records: records,
         })
@@ -370,6 +387,7 @@ enum SnapshotReadStage {
     KRaftVersion,
     Voters,
     MetadataOrFooter,
+    LegacyMetadataOrFooter,
     Done,
 }
 
@@ -577,15 +595,42 @@ mod tests {
 
         assert2::assert!(
             snapshot.control_state
-                == SnapshotControlState {
+                == Some(SnapshotControlState {
                     kraft_version: 1,
                     voters,
-                }
+                })
         );
         assert2::assert!(snapshot.metadata_records.iter().all(|record| !matches!(
             record,
             MetadataRecord::V1KRaftVersion(_) | MetadataRecord::V1Voters(_)
         )));
+        assert2::assert!(snapshot.metadata_records.len() == 1);
+    }
+
+    #[test]
+    fn reader_accepts_legacy_header_data_footer_snapshot() {
+        let mut image = MetadataImage::new(Uuid::new_v4());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "legacy".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 0,
+            replication_factor: 1,
+        }));
+        let encoded = SnapshotWriter::serialize(&image, 0).expect("serialize current snapshot");
+        let mut input = encoded.as_ref();
+        let mut legacy = BytesMut::new();
+        while !input.is_empty() {
+            let batch = RecordBatch::decode(&mut input).expect("decode current batch");
+            if !matches!(
+                batch.base_offset,
+                SNAPSHOT_KRAFT_VERSION_BASE_OFFSET | SNAPSHOT_VOTERS_BASE_OFFSET
+            ) {
+                batch.encode(&mut legacy).expect("encode legacy batch");
+            }
+        }
+
+        let snapshot = SnapshotReader::read(&legacy).expect("read legacy snapshot");
+        assert2::assert!(snapshot.control_state.is_none());
         assert2::assert!(snapshot.metadata_records.len() == 1);
     }
 

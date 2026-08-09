@@ -196,8 +196,28 @@ pub trait PeerSender: Send + Sync {
     /// Returns [`RaftError`] if the peer is unreachable or the RPC fails.
     async fn send(&self, peer: NodeId, api_key: i16, body: Bytes) -> Result<Bytes, RaftError>;
 
+    /// Probe an advertised candidate endpoint through the configured outbound
+    /// security dialer and verify its finalized `kraft.version` support.
+    async fn probe_kraft_version(
+        &self,
+        _address: &str,
+        _finalized_version: u16,
+    ) -> Result<bool, RaftError> {
+        Err(RaftError::ChangeRejected(
+            "candidate probing is unavailable on this transport".into(),
+        ))
+    }
+
     /// Replace the peer endpoint table after applying a `VotersRecord`.
     fn update_voters(&self, _voters: &crabka_metadata::VoterSet) {}
+
+    /// Transport-only bootstrap peers used by an observer with no voter view.
+    fn discovery_peers(&self) -> Vec<NodeId> {
+        Vec::new()
+    }
+
+    /// Associate a leader id with the endpoint used for its discovery reply.
+    fn remember_peer(&self, _source: NodeId, _actual: NodeId) {}
 }
 
 /// A no-op `PeerSender` for single-voter and no-network tests. Every send fails

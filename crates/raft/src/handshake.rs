@@ -18,6 +18,13 @@ use tokio::{
 pub trait DuplexStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + ?Sized> DuplexStream for T {}
 
+/// Authenticated controller-listener connection plus request-level grants.
+pub struct RaftConnection {
+    pub stream: Box<dyn DuplexStream>,
+    /// Whether the principal may alter cluster membership.
+    pub cluster_alter_authorized: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum RaftHandshakeError {
     #[error("io: {0}")]
@@ -38,6 +45,5 @@ pub enum RaftHandshakeError {
 /// listener then drops the connection at debug level.
 #[async_trait::async_trait]
 pub trait RaftListenerHandshake: Send + Sync {
-    async fn upgrade(&self, stream: TcpStream)
-    -> Result<Box<dyn DuplexStream>, RaftHandshakeError>;
+    async fn upgrade(&self, stream: TcpStream) -> Result<RaftConnection, RaftHandshakeError>;
 }

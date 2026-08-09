@@ -277,6 +277,7 @@ pub struct KraftController {
     image_rx: watch::Receiver<Arc<MetadataImage>>,
     leader_rx: watch::Receiver<Option<NodeId>>,
     quorum_rx: watch::Receiver<QuorumStateSnapshot>,
+    peers: Arc<dyn PeerSender>,
     me: NodeId,
 }
 
@@ -755,6 +756,7 @@ impl KraftController {
             election_timeout,
         );
 
+        let engine_peers = Arc::clone(&peers);
         let engine = Engine {
             me,
             core,
@@ -794,6 +796,7 @@ impl KraftController {
             image_rx,
             leader_rx,
             quorum_rx,
+            peers: engine_peers,
             me,
         }
     }
@@ -831,27 +834,37 @@ impl KraftController {
         metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
     ) -> Result<Self, RaftError> {
         std::fs::create_dir_all(&data_dir).map_err(crabka_log::LogError::Io)?;
+        let legacy_quorum_state = std::fs::metadata(data_dir.join(QUORUM_STATE_FILE))
+            .is_ok_and(|metadata| metadata.len() == 54);
         let mut log = KraftLog::open(&data_dir)?;
+        if legacy_quorum_state {
+            // The predecessor format treated a cleanly reopened log as fully
+            // committed. Capture that boundary once while migrating its
+            // binary quorum state; all subsequent restarts use the persisted
+            // high-watermark checkpoint.
+            log.advance_hwm(log.log_end_offset());
+        }
 
-        // Recover the image: latest checkpoint, then replay committed batches
-        // past it. The committed prefix is the whole log on a clean restart
-        // (the HWM is not persisted separately; the log only holds committed
-        // metadata here, so we apply the full log end).
+        // Recover the image from the checkpoint plus only the durable committed
+        // prefix. An uncommitted voter record can remain at the log end after a
+        // crash and must not become authoritative during restart.
         let mut image = MetadataImage::new(cluster_id);
         let mut snapshot_control = None;
         let mut last_snapshot_end_offset = Offset(0);
         if let Some(bytes) = load_latest_checkpoint(&checkpoint_dir(&data_dir))? {
             let contents = crate::snapshot::SnapshotReader::read(&bytes)?;
             image = MetadataImage::from_records(cluster_id, &contents.metadata_records);
-            image.apply(&MetadataRecord::V1KRaftVersion(
-                crabka_metadata::KRaftVersionRecord {
-                    kraft_version: contents.control_state.kraft_version,
-                },
-            ));
-            image.apply(&MetadataRecord::V1Voters(VotersRecord {
-                voters: contents.control_state.voters.clone(),
-            }));
-            snapshot_control = Some(contents.control_state);
+            if let Some(control) = contents.control_state {
+                image.apply(&MetadataRecord::V1KRaftVersion(
+                    crabka_metadata::KRaftVersionRecord {
+                        kraft_version: control.kraft_version,
+                    },
+                ));
+                image.apply(&MetadataRecord::V1Voters(VotersRecord {
+                    voters: control.voters.clone(),
+                }));
+                snapshot_control = Some(control);
+            }
             if let Some((off, _ep)) = latest_checkpoint_id(&checkpoint_dir(&data_dir)) {
                 // Checkpoint filenames encode the raw offset (on-disk boundary).
                 last_snapshot_end_offset = Offset(off);
@@ -862,7 +875,6 @@ impl KraftController {
             // checkpoint-offset cursor.
         }
         replay_committed(&log, &mut image, Offset(0), metadata_raft_fetch_max);
-        log.advance_hwm(log.log_end_offset());
 
         // Seed the durable quorum state from the file, falling back to a fresh
         // bootstrap when absent.
@@ -898,6 +910,18 @@ impl KraftController {
     #[must_use]
     pub fn node_id(&self) -> NodeId {
         self.me
+    }
+
+    /// Probe a proposed voter through the controller's configured TLS/SASL
+    /// dialer rather than opening an unauthenticated plaintext connection.
+    pub(crate) async fn probe_kraft_version(
+        &self,
+        address: &str,
+        finalized_version: u16,
+    ) -> Result<bool, RaftError> {
+        self.peers
+            .probe_kraft_version(address, finalized_version)
+            .await
     }
 
     /// A snapshot of the latest applied [`MetadataImage`].
@@ -1241,6 +1265,7 @@ impl Engine {
             .ids()
             .into_iter()
             .find(|id| *id != self.me)
+            .or_else(|| self.peers.discovery_peers().into_iter().next())
     }
 
     #[tracing::instrument(
@@ -2057,6 +2082,7 @@ impl Engine {
         if !self.controls.commit_to(high_watermark.0) {
             return;
         }
+        self.core.commit_voter_set();
         self.core.set_kraft_version(self.controls.committed_version);
         self.image.apply(&MetadataRecord::V1KRaftVersion(
             crabka_metadata::KRaftVersionRecord {
@@ -2523,7 +2549,7 @@ impl Engine {
         else {
             return;
         };
-        let _ = from;
+        self.peers.remember_peer(from, leader_id);
 
         // The leader signalled our fetch offset is below its pruned log-start:
         // we must fetch the snapshot instead of replicating from the log. Start
@@ -2682,27 +2708,27 @@ impl Engine {
         }
         let cluster_id = self.image.cluster_id();
         let mut new_image = MetadataImage::from_records(cluster_id, &contents.metadata_records);
-        new_image.apply(&MetadataRecord::V1KRaftVersion(
-            crabka_metadata::KRaftVersionRecord {
-                kraft_version: contents.control_state.kraft_version,
-            },
-        ));
-        new_image.apply(&MetadataRecord::V1Voters(VotersRecord {
-            voters: contents.control_state.voters.clone(),
-        }));
+        if let Some(control) = &contents.control_state {
+            new_image.apply(&MetadataRecord::V1KRaftVersion(
+                crabka_metadata::KRaftVersionRecord {
+                    kraft_version: control.kraft_version,
+                },
+            ));
+            new_image.apply(&MetadataRecord::V1Voters(VotersRecord {
+                voters: control.voters.clone(),
+            }));
+        }
         write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset, epoch, bytes)?;
         self.image = new_image;
-        self.controls = KraftControlState::new(
-            contents.control_state.voters.clone(),
-            contents.control_state.kraft_version,
-        );
-        self.core
-            .set_kraft_version(contents.control_state.kraft_version);
-        let actions = self
-            .core
-            .apply_voter_set(contents.control_state.voters.clone(), self.now());
-        self.peers.update_voters(&contents.control_state.voters);
-        self.execute(actions);
+        if let Some(control) = contents.control_state {
+            self.controls = KraftControlState::new(control.voters.clone(), control.kraft_version);
+            self.core.set_kraft_version(control.kraft_version);
+            let actions = self
+                .core
+                .apply_voter_set(control.voters.clone(), self.now());
+            self.peers.update_voters(&control.voters);
+            self.execute(actions);
+        }
         self.log.install_snapshot(end_offset_pos)?;
         self.last_snapshot_end_offset = end_offset_pos;
         self.installed_snapshot_epoch = Some(u32::try_from(epoch).unwrap_or(0));
@@ -2905,7 +2931,7 @@ fn replay_committed(
     max: MetadataRaftFetchMax,
 ) {
     let mut cursor = from;
-    let target = log.log_end_offset();
+    let target = log.hwm();
     while cursor < target {
         match log.read_decoded(cursor, max.size()) {
             Ok(batches) => {
@@ -2914,6 +2940,9 @@ fn replay_committed(
                     break;
                 }
                 for batch in &batches {
+                    if Offset(batch.base_offset) >= target {
+                        continue;
+                    }
                     if batch.attributes.is_control_batch() {
                         continue;
                     }
@@ -2943,7 +2972,7 @@ fn replay_committed(
 
 fn replay_control_records(log: &KraftLog, state: &mut QuorumState, max: MetadataRaftFetchMax) {
     let mut cursor = log.log_start_offset();
-    let target = log.log_end_offset();
+    let target = log.hwm();
     while cursor < target {
         match log.read_decoded(cursor, max.size()) {
             Ok(batches) => {
@@ -2952,6 +2981,9 @@ fn replay_control_records(log: &KraftLog, state: &mut QuorumState, max: Metadata
                     break;
                 }
                 for batch in &batches {
+                    if Offset(batch.base_offset) >= target {
+                        continue;
+                    }
                     if !batch.attributes.is_control_batch() {
                         continue;
                     }
@@ -3066,6 +3098,31 @@ fn load_quorum_state(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(RaftError::Storage(crabka_log::LogError::Io(e))),
     };
+    // Releases before Kafka-compatible QuorumStateData used a fixed 54-byte
+    // binary record. Migrate it in place so an upgrade keeps the durable term
+    // and vote instead of silently restarting from epoch zero.
+    if bytes.len() == 54 {
+        let mut cluster = [0_u8; 16];
+        cluster.copy_from_slice(&bytes[..16]);
+        let leader_epoch = u32::from_be_bytes(bytes[16..20].try_into().unwrap_or_default());
+        let voted = bytes[29] != 0;
+        let voted_id = u64::from_be_bytes(bytes[30..38].try_into().unwrap_or_default());
+        let mut voted_directory = [0_u8; 16];
+        voted_directory.copy_from_slice(&bytes[38..54]);
+        let state = QuorumState {
+            cluster_id: Uuid::from_bytes(cluster),
+            kraft_version: 0,
+            leader_epoch,
+            leader_id: None,
+            voted_key: voted.then(|| ReplicaKey {
+                id: NodeId(voted_id),
+                directory_id: Uuid::from_bytes(voted_directory),
+            }),
+            voters: voters.clone(),
+        };
+        save_quorum_state(dir, &state)?;
+        return Ok(Some(state));
+    }
     let Ok(json) = std::str::from_utf8(&bytes) else {
         return Ok(None);
     };
@@ -3313,6 +3370,34 @@ mod tests {
         assert!(controls.latest_voters() == &two_voters);
         assert!(!controls.commit_to(8));
         assert!(controls.committed_voters == two_voters);
+    }
+
+    #[test]
+    fn restart_replays_control_records_only_through_persisted_high_watermark() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let initial = voter_set(&[NodeId(1)]);
+        let committed = voter_set(&[NodeId(1), NodeId(2)]);
+        let uncommitted = voter_set(&[NodeId(1), NodeId(3)]);
+        {
+            let mut log = KraftLog::open(dir.path()).expect("open log");
+            let mut batch =
+                typed_control_batch(1, &[ControlRecord::Voters(voter_set_to_wire(&committed))])
+                    .expect("committed voter batch");
+            log.append(&mut batch)
+                .expect("append committed voter batch");
+            log.advance_hwm(log.log_end_offset());
+            let mut batch =
+                typed_control_batch(1, &[ControlRecord::Voters(voter_set_to_wire(&uncommitted))])
+                    .expect("uncommitted voter batch");
+            log.append(&mut batch)
+                .expect("append uncommitted voter batch");
+        }
+
+        let log = KraftLog::open(dir.path()).expect("reopen log");
+        assert2::assert!(log.hwm() < log.log_end_offset());
+        let mut state = QuorumState::bootstrap(uuid::Uuid::nil(), initial);
+        replay_control_records(&log, &mut state, MetadataRaftFetchMax::default());
+        assert2::assert!(state.voters == committed);
     }
 
     fn build(me: NodeId, ids: &[NodeId]) -> (KraftController, tempfile::TempDir) {
@@ -5085,6 +5170,46 @@ mod tests {
             .unwrap();
         assert2::assert!(loaded.kraft_version == 1);
         assert2::assert!(loaded.voted_key == state.voted_key);
+    }
+
+    #[test]
+    fn legacy_binary_quorum_state_migrates_without_losing_epoch_or_vote() {
+        use bytes::BufMut as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cluster_id = uuid::Uuid::from_u128(0x1234);
+        let voted_directory = uuid::Uuid::from_u128(0x5678);
+        let mut bytes = Vec::with_capacity(54);
+        bytes.extend_from_slice(cluster_id.as_bytes());
+        bytes.put_u32(17);
+        bytes.put_u8(1);
+        bytes.put_u64(2);
+        bytes.put_u8(1);
+        bytes.put_u64(3);
+        bytes.extend_from_slice(voted_directory.as_bytes());
+        std::fs::write(dir.path().join(QUORUM_STATE_FILE), bytes).expect("write legacy state");
+
+        let loaded = load_quorum_state(
+            dir.path(),
+            uuid::Uuid::nil(),
+            &voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
+        )
+        .expect("load legacy state")
+        .expect("legacy state exists");
+
+        assert2::assert!(loaded.cluster_id == cluster_id);
+        assert2::assert!(loaded.leader_epoch == 17);
+        assert2::assert!(loaded.leader_id.is_none());
+        assert2::assert!(
+            loaded.voted_key
+                == Some(ReplicaKey {
+                    id: NodeId(3),
+                    directory_id: voted_directory,
+                })
+        );
+        let migrated = std::fs::read_to_string(dir.path().join(QUORUM_STATE_FILE))
+            .expect("read migrated JSON");
+        assert2::assert!(migrated.starts_with('{'));
     }
 
     #[test]

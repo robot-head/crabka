@@ -714,7 +714,7 @@ impl Controller {
         let log_exists = metadata_log_nonempty(&data_dir);
         let snapshot_voters = load_latest_checkpoint(&crate::kraft::checkpoint_dir(&data_dir))
             .and_then(|(_, bytes)| crate::snapshot::SnapshotReader::read(&bytes).ok())
-            .map(|snapshot| snapshot.control_state.voters)
+            .and_then(|snapshot| snapshot.control_state.map(|state| state.voters))
             .unwrap_or_default();
         let voters = if config.initial_voters.is_empty() {
             snapshot_voters
@@ -766,6 +766,7 @@ impl Controller {
         // it immediately when it replays a dynamic voter control record.
         let peers = Arc::new(RealPeerSender::new(
             voters.clone(),
+            &config.bootstrap_servers,
             config.client_id.clone(),
             Arc::clone(&dialer),
             config.client_dispatch_queue_capacity,

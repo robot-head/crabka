@@ -108,11 +108,18 @@ pub(crate) async fn handle(
         return finalize(results, version);
     }
 
+    // Activation must be derived from the validated row. Looking at the raw
+    // request here would let a duplicate or otherwise rejected kraft.version
+    // row activate the Raft feature despite its error response.
     let kraft_upgrade = image.kraft_version() == 0
-        && req.feature_updates.iter().any(|update| {
-            update.feature == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE
-                && update.max_version_level == 1
-        });
+        && req
+            .feature_updates
+            .iter()
+            .zip(&results)
+            .any(|(update, result)| {
+                update.feature == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE
+                    && result.error_code == codes::NONE
+            });
     if kraft_upgrade {
         match broker.controller.finalize_kraft_version(1).await {
             Ok(crabka_raft::ReconfigOutcome::Committed) => {}

@@ -876,7 +876,7 @@ pub struct Context {
     /// histograms, and gauges. A clone is cheap. The handles are
     /// registered against `registry`.
     pub metrics: ControllerMetrics,
-    /// Per-cluster admin-client cache, keyed by `Kafka` resource name.
+    /// Per-cluster-and-endpoint admin-client cache.
     /// The cache replaces a broken connection at the next use.
     pub admin_clients: Arc<Mutex<HashMap<String, AdminClientHandle>>>,
     /// Per-endpoint rebalancer-client cache, keyed by the resolved Connect
@@ -938,7 +938,8 @@ impl Context {
         bootstrap: &str,
     ) -> Result<AdminClientHandle, crabka_client_admin::AdminError> {
         let mut map = self.admin_clients.lock().await;
-        if let Some(client) = map.get(cluster) {
+        let key = format!("{cluster}\0{bootstrap}");
+        if let Some(client) = map.get(&key).or_else(|| map.get(cluster)) {
             return Ok(client.clone());
         }
         let admin = AdminClient::connect_with_options(
@@ -957,7 +958,7 @@ impl Context {
         )
         .await?;
         let entry: AdminClientHandle = Arc::new(Mutex::new(admin));
-        map.insert(cluster.to_string(), entry.clone());
+        map.insert(key, entry.clone());
         Ok(entry)
     }
 
@@ -966,7 +967,8 @@ impl Context {
     /// Reconcile calls this when a Transport error shows that the
     /// connection died. The next call opens a new connection.
     pub async fn drop_admin_client(&self, cluster: &str) {
-        self.admin_clients.lock().await.remove(cluster);
+        let mut clients = self.admin_clients.lock().await;
+        clients.retain(|key, _| key != cluster && !key.starts_with(&format!("{cluster}\0")));
     }
 
     /// Fills the admin-client cache with a handle from the caller. This is

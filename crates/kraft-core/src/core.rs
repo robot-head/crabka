@@ -36,6 +36,9 @@ pub fn election_jitter_ms(me: NodeId, epoch: Epoch, base_ms: u64) -> u64 {
 pub struct QuorumStateMachine {
     me: NodeId,
     state: QuorumState,
+    /// The other side of the one in-flight KIP-853 transition. Requests from
+    /// this explicitly adjacent set remain valid until the voter record commits.
+    adjacent_voters: Option<VoterSet>,
     role: Role,
     /// Base election timeout, in whole milliseconds.
     ///
@@ -77,6 +80,7 @@ impl QuorumStateMachine {
         Self {
             me,
             state,
+            adjacent_voters: None,
             role,
             election_timeout_ms: u64::try_from(election_timeout.millis_i64()).unwrap_or(0),
         }
@@ -108,6 +112,9 @@ impl QuorumStateMachine {
     pub fn apply_voter_set(&mut self, voters: VoterSet, now: SimInstant) -> Vec<Action> {
         let was_voter = self.is_voter();
         let leader_id = self.state.leader_id;
+        if self.state.voters != voters {
+            self.adjacent_voters = Some(self.state.voters.clone());
+        }
         self.state.voters = voters;
 
         if let Role::Leader { replicas, .. } = &mut self.role {
@@ -171,6 +178,19 @@ impl QuorumStateMachine {
     /// Apply a committed `KRaftVersionRecord`.
     pub fn set_kraft_version(&mut self, version: u16) {
         self.state.kraft_version = version;
+    }
+
+    /// Forget the preceding voter view once the latest voter record commits.
+    pub fn commit_voter_set(&mut self) {
+        self.adjacent_voters = None;
+    }
+
+    fn current_or_adjacent_voter(&self, id: NodeId) -> bool {
+        self.state.voters.contains(id)
+            || self
+                .adjacent_voters
+                .as_ref()
+                .is_some_and(|voters| voters.contains(id))
     }
 
     /// Complete removal of the local leader after the reduced voter set has
@@ -454,10 +474,17 @@ impl QuorumStateMachine {
         leader_epoch: Epoch,
         now: SimInstant,
     ) -> Vec<Action> {
-        // Do not reject a leader solely because it is absent from our local
-        // voter view. During a KIP-853 transition the leader and follower may
-        // temporarily have adjacent voter sets; the epoch and log checks fence
-        // stale or forged announcements.
+        // A never-initialized joiner has no membership view yet and discovers
+        // its first leader through configured bootstrap endpoints. Once a view
+        // exists, accept only the current or explicitly adjacent KIP-853 set.
+        let membership_known = !self.state.voters.is_empty()
+            || self
+                .adjacent_voters
+                .as_ref()
+                .is_some_and(|voters| !voters.is_empty());
+        if membership_known && !self.current_or_adjacent_voter(leader_id) {
+            return Vec::new();
+        }
         // Accept a strictly-higher epoch, or an equal epoch only if we do not
         // already know a leader for it (one leader per epoch). Otherwise ignore.
         let accept = leader_epoch > self.state.leader_epoch
@@ -756,9 +783,16 @@ impl QuorumStateMachine {
             );
             return Vec::new();
         }
-        // KIP-853 removes voter-set membership as a Vote grant precondition.
-        // Adjacent configurations may disagree temporarily; epoch, prior-vote,
-        // and log freshness checks below remain authoritative.
+        // Only a member of the local latest set may cast a vote. The candidate
+        // can be in either side of the one adjacent KIP-853 transition.
+        if !self.is_voter() || !self.current_or_adjacent_voter(candidate) {
+            actions.push(Action::ReplyVote {
+                to: from,
+                epoch: self.state.leader_epoch,
+                granted: false,
+            });
+            return actions;
+        }
         // Fenced: candidate is behind our epoch.
         if candidate_epoch < self.state.leader_epoch {
             actions.push(Action::ReplyVote {
@@ -1621,6 +1655,7 @@ mod tests {
         // KIP-853: a newly elected leader may be absent from our temporarily
         // stale local voter view. Adopt the higher epoch and fetch its log.
         let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        let _ = m.apply_voter_set(voters(&[NodeId(1), NodeId(2), NodeId(99)]), SimInstant(0));
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
@@ -1685,6 +1720,7 @@ mod tests {
         // KIP-853 permits an up-to-date candidate from an adjacent voter view;
         // only the local latest set determines whether this replica may vote.
         let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        let _ = m.apply_voter_set(voters(&[NodeId(1), NodeId(2), NodeId(99)]), SimInstant(0));
         let log = FakeLog {
             end: 5,
             last_epoch: 1,

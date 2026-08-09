@@ -1481,16 +1481,24 @@ fn has_finalizer(pool: &KafkaNodePool) -> bool {
 
 async fn set_finalizer(
     api: &Api<KafkaNodePool>,
-    name: &str,
+    pool: &KafkaNodePool,
     present: bool,
 ) -> Result<(), ReconcileError> {
-    let finalizers: Vec<&str> = if present { vec![FINALIZER] } else { Vec::new() };
+    let name = pool.name_any();
+    let mut finalizers = pool.meta().finalizers.clone().unwrap_or_default();
+    if present {
+        if !finalizers.iter().any(|value| value == FINALIZER) {
+            finalizers.push(FINALIZER.into());
+        }
+    } else {
+        finalizers.retain(|value| value != FINALIZER);
+    }
     let params = PatchParams {
         field_manager: Some(common::FIELD_MANAGER.into()),
         ..Default::default()
     };
     api.patch(
-        name,
+        &name,
         &params,
         &Patch::Merge(&json!({ "metadata": { "finalizers": finalizers } })),
     )
@@ -1518,37 +1526,45 @@ async fn reconcile_deletion(
         return Ok(Action::await_change());
     }
 
-    let sts_name = format!("{cluster}-{name}");
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), namespace);
-    if sts_api.get_opt(&sts_name).await?.is_some() {
-        let params = PatchParams {
-            field_manager: Some(common::FIELD_MANAGER.into()),
-            ..Default::default()
-        };
-        sts_api
-            .patch(
-                &sts_name,
-                &params,
-                &Patch::Merge(&json!({ "spec": { "replicas": 0 } })),
-            )
-            .await?;
-    }
-
-    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
-    let pods = pod_api
-        .list(&ListParams::default().labels(&format!(
-            "app.kubernetes.io/instance={cluster},crabka.io/pool={name}"
-        )))
-        .await?;
-    if !pods.items.is_empty() {
-        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
-    }
+    let sts_name = format!("{cluster}-{name}");
+    let scale_down = async {
+        if sts_api.get_opt(&sts_name).await?.is_some() {
+            let params = PatchParams {
+                field_manager: Some(common::FIELD_MANAGER.into()),
+                ..Default::default()
+            };
+            sts_api
+                .patch(
+                    &sts_name,
+                    &params,
+                    &Patch::Merge(&json!({ "spec": { "replicas": 0 } })),
+                )
+                .await?;
+        }
+        Ok::<(), ReconcileError>(())
+    };
 
     if parent.is_none_or(|parent| parent.meta().deletion_timestamp.is_some()) {
-        set_finalizer(pool_api, name, false).await?;
+        scale_down.await?;
+        let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+        let pods = pod_api
+            .list(&ListParams::default().labels(&format!(
+                "app.kubernetes.io/instance={cluster},crabka.io/pool={name}"
+            )))
+            .await?;
+        if !pods.items.is_empty() {
+            return Ok(common::requeue(ctx.config.controller_dependency_requeue));
+        }
+        set_finalizer(pool_api, pool, false).await?;
         return Ok(Action::await_change());
     }
 
+    /*
+     * Keep the voter alive until the reduced voter set commits. In particular,
+     * stopping either member of a two-voter quorum first would leave no
+     * majority able to commit its removal.
+     */
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), namespace);
     let secret = secret_api.get(&format!("{cluster}-cluster-id")).await?;
     let cluster_id = common::uuid_from_secret(&secret)?;
@@ -1575,36 +1591,47 @@ async fn reconcile_deletion(
         .iter()
         .find(|voter| voter.node_id == pool.spec.node_id_start)
         .cloned();
-    let Some(target) = target else {
-        drop(admin);
-        set_finalizer(pool_api, name, false).await?;
-        return Ok(Action::await_change());
-    };
-    if quorum.voters.len() == 1 {
-        drop(admin);
-        patch_status_for_pool(
-            pool_api,
-            name,
-            condition(
-                "Ready",
-                "False",
-                "LastVoterDeletionBlocked",
-                "cannot delete the last metadata-quorum voter",
-            ),
-        )
-        .await?;
+    if let Some(target) = target {
+        if quorum.voters.len() == 1 {
+            drop(admin);
+            patch_status_for_pool(
+                pool_api,
+                name,
+                condition(
+                    "Ready",
+                    "False",
+                    "LastVoterDeletionBlocked",
+                    "cannot delete the last metadata-quorum voter",
+                ),
+            )
+            .await?;
+            return Ok(common::requeue(ctx.config.controller_dependency_requeue));
+        }
+        if let Err(error) = admin
+            .remove_raft_voter(cluster_id, target.node_id, target.directory_id)
+            .await
+        {
+            tracing::warn!(%error, node_id = target.node_id, "RemoveRaftVoter failed during pool deletion");
+            drop(admin);
+            ctx.drop_admin_client(cluster).await;
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
+        }
         return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     }
-    if let Err(error) = admin
-        .remove_raft_voter(cluster_id, target.node_id, target.directory_id)
-        .await
-    {
-        tracing::warn!(%error, node_id = target.node_id, "RemoveRaftVoter failed during pool deletion");
-        drop(admin);
-        ctx.drop_admin_client(cluster).await;
-        return Ok(common::requeue(ctx.config.controller_error_requeue));
+    drop(admin);
+
+    scale_down.await?;
+    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+    let pods = pod_api
+        .list(&ListParams::default().labels(&format!(
+            "app.kubernetes.io/instance={cluster},crabka.io/pool={name}"
+        )))
+        .await?;
+    if !pods.items.is_empty() {
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     }
-    Ok(common::requeue(ctx.config.controller_dependency_requeue))
+    set_finalizer(pool_api, pool, false).await?;
+    Ok(Action::await_change())
 }
 
 /// Whether the parent `Kafka`'s version model has cleared this pool to
@@ -1774,7 +1801,7 @@ async fn reconcile_inner(
         return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
     if !has_finalizer(&pool) {
-        set_finalizer(&pool_api, &name, true).await?;
+        set_finalizer(&pool_api, &pool, true).await?;
         return Ok(Action::requeue(std::time::Duration::ZERO));
     }
 

@@ -28,7 +28,9 @@ use crabka_protocol::{
         sasl_handshake_request::SaslHandshakeRequest,
     },
 };
-use crabka_raft::{ControllerHandle, DuplexStream, RaftHandshakeError, RaftListenerHandshake};
+use crabka_raft::{
+    ControllerHandle, DuplexStream, RaftConnection, RaftHandshakeError, RaftListenerHandshake,
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -155,14 +157,38 @@ impl BrokerRaftHandshake {
         }
         Ok(())
     }
+
+    fn authorize_cluster_alter(
+        &self,
+        principal: &crabka_security::Principal,
+        peer: &std::net::SocketAddr,
+    ) -> Result<bool, RaftHandshakeError> {
+        use crabka_metadata::{AclOperation, ResourceType};
+
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
+
+        let controller = self.controller.get().ok_or_else(|| {
+            RaftHandshakeError::Sasl(
+                "controller handle not initialised for Alter authorization".into(),
+            )
+        })?;
+        let image = controller.current_image();
+        Ok(self.authorizer.authorize(
+            &*image,
+            &AuthorizationRequest {
+                principal,
+                host: peer,
+                resource_type: ResourceType::Cluster,
+                resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
+                operation: AclOperation::Alter,
+            },
+        ) == AuthorizationResult::Allow)
+    }
 }
 
 #[async_trait::async_trait]
 impl RaftListenerHandshake for BrokerRaftHandshake {
-    async fn upgrade(
-        &self,
-        stream: TcpStream,
-    ) -> Result<Box<dyn DuplexStream>, RaftHandshakeError> {
+    async fn upgrade(&self, stream: TcpStream) -> Result<RaftConnection, RaftHandshakeError> {
         // Capture the peer address before the stream is consumed by TLS
         // termination — it is the `host` of the authorization request.
         let peer = stream
@@ -192,11 +218,16 @@ impl RaftListenerHandshake for BrokerRaftHandshake {
         //    authenticated identity to authorize at this layer — we do not
         //    extract an mTLS client-cert principal here — so the
         //    CLUSTER_ACTION gate is skipped for it (an unusual config).
+        let mut cluster_alter_authorized = true;
         if self.protocol.requires_sasl() {
             let principal = run_inbound_sasl(&mut *stream, self).await?;
             self.authorize_cluster_action(&principal, &peer)?;
+            cluster_alter_authorized = self.authorize_cluster_alter(&principal, &peer)?;
         }
-        Ok(stream)
+        Ok(RaftConnection {
+            stream,
+            cluster_alter_authorized,
+        })
     }
 }
 

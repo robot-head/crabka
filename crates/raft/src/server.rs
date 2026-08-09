@@ -96,7 +96,7 @@ pub(crate) async fn run(
                         let handshake = handshake.clone();
                         let shard_router = shard_router.clone();
                         tokio::spawn(async move {
-                            let boxed: Box<dyn crate::DuplexStream> = if let Some(hs) = handshake {
+                            let connection = if let Some(hs) = handshake {
                                 match hs.upgrade(stream).await {
                                     Ok(s) => s,
                                     Err(e) => {
@@ -105,9 +105,18 @@ pub(crate) async fn run(
                                     }
                                 }
                             } else {
-                                Box::new(stream) as Box<dyn crate::DuplexStream>
+                                crate::RaftConnection {
+                                    stream: Box::new(stream) as Box<dyn crate::DuplexStream>,
+                                    cluster_alter_authorized: true,
+                                }
                             };
-                            if let Err(e) = handle_conn(boxed, engine, shutdown, shard_router).await {
+                            if let Err(e) = handle_conn(
+                                connection.stream,
+                                engine,
+                                shutdown,
+                                shard_router,
+                                connection.cluster_alter_authorized,
+                            ).await {
                                 error!(%peer, error = %e, "controller connection error");
                             }
                         });
@@ -126,6 +135,7 @@ async fn handle_conn<S>(
     engine: KraftController,
     shutdown: CancellationToken,
     shard_router: Option<Arc<dyn crate::RaftShardRouter>>,
+    cluster_alter_authorized: bool,
 ) -> Result<(), RaftError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -178,6 +188,20 @@ where
                         | API_KEY_REMOVE_RAFT_VOTER
                         | API_KEY_UPDATE_RAFT_VOTER
                 ) {
+                    if matches!(
+                        api_key_n.0,
+                        API_KEY_ADD_RAFT_VOTER
+                            | API_KEY_REMOVE_RAFT_VOTER
+                            | API_KEY_UPDATE_RAFT_VOTER
+                    ) && !cluster_alter_authorized
+                    {
+                        let resp = kip853_authorization_failure(
+                            api_key_n.0,
+                            api_version.get(),
+                        )?;
+                        write_response(&mut stream, correlation_id, resp).await?;
+                        continue;
+                    }
                     let resp = kip853_admin_response(
                         api_key_n.0,
                         api_version.get(),
@@ -429,47 +453,18 @@ fn valid_wire_listeners<'a>(listeners: impl IntoIterator<Item = (&'a str, &'a st
 async fn probe_voter_candidate(
     listeners: &[crabka_protocol::owned::add_raft_voter_request::Listener],
     finalized_version: u16,
+    engine: &KraftController,
 ) -> Result<(), (i16, String)> {
-    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-
     let endpoint = listeners
         .iter()
         .find(|listener| listener.name.eq_ignore_ascii_case("CONTROLLER"))
         .or_else(|| listeners.first())
         .expect("validated non-empty listeners");
-    let address = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+    let address = format!("{}:{}", endpoint.host, endpoint.port);
+    let supported = engine
+        .probe_kraft_version(&address, finalized_version)
         .await
-        .map_err(|error| (7, format!("candidate DNS lookup failed: {error}")))?
-        .next()
-        .ok_or_else(|| (7, "candidate DNS lookup returned no addresses".into()))?;
-    let connection = crabka_client_core::Connection::connect(
-        address,
-        crabka_client_core::ConnectionOptions {
-            client_id: "crabka-voter-probe".into(),
-            ..Default::default()
-        },
-    )
-    .await
-    .map_err(|error| (7, format!("candidate ApiVersions probe failed: {error}")))?;
-    let response = connection
-        .send(ApiVersionsRequest {
-            client_software_name: "crabka".into(),
-            client_software_version: env!("CARGO_PKG_VERSION").into(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|error| (7, format!("candidate ApiVersions probe failed: {error}")));
-    connection.close();
-    let response = response?;
-    let supported = response
-        .supported_features
-        .iter()
-        .find(|feature| feature.name == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE)
-        .is_some_and(|feature| {
-            i16::try_from(finalized_version).is_ok_and(|version| {
-                feature.min_version <= version && version <= feature.max_version
-            })
-        });
+        .map_err(|error| (7, format!("candidate ApiVersions probe failed: {error}")))?;
     if supported {
         Ok(())
     } else {
@@ -493,6 +488,38 @@ async fn kip853_admin_response(
         API_KEY_UPDATE_RAFT_VOTER => update_raft_voter_response(version, body, engine).await,
         _ => unreachable!("filtered KIP-853 admin API key"),
     }
+}
+
+fn kip853_authorization_failure(api_key: i16, version: i16) -> Result<Bytes, RaftError> {
+    use crabka_protocol::{Encode, owned};
+
+    let mut output = BytesMut::new();
+    let message = Some("Cluster authorization failed.".into());
+    match api_key {
+        API_KEY_ADD_RAFT_VOTER => owned::add_raft_voter_response::AddRaftVoterResponse {
+            error_code: 31,
+            error_message: message,
+            ..Default::default()
+        }
+        .encode(&mut output, version)?,
+        API_KEY_REMOVE_RAFT_VOTER => {
+            owned::remove_raft_voter_response::RemoveRaftVoterResponse {
+                error_code: 31,
+                error_message: message,
+                ..Default::default()
+            }
+            .encode(&mut output, version)?;
+        }
+        API_KEY_UPDATE_RAFT_VOTER => {
+            owned::update_raft_voter_response::UpdateRaftVoterResponse {
+                error_code: 31,
+                ..Default::default()
+            }
+            .encode(&mut output, version)?;
+        }
+        _ => unreachable!("authorization helper called for non-mutating API"),
+    }
+    Ok(output.freeze())
 }
 
 async fn describe_quorum_response(
@@ -627,7 +654,7 @@ async fn add_raft_voter_response(
             )
         }));
     let probe = if valid && image.kraft_version() >= 1 {
-        probe_voter_candidate(&request.listeners, image.kraft_version()).await
+        probe_voter_candidate(&request.listeners, image.kraft_version(), engine).await
     } else {
         Ok(())
     };
