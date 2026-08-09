@@ -28,11 +28,13 @@ use crate::{
     partition_registry::PartitionRegistry,
     txn::{
         bootstrap,
-        handlers::end_txn::{
-            MarkerDispatchContext, completion_producer_identity, dispatch_markers,
-            prepare_completion_identities,
+        handlers::{
+            end_txn::{
+                MarkerDispatchContext, completion_producer_identity, dispatch_markers,
+                prepare_completion_identities,
+            },
+            write_txn_markers::append_marker_and_materialize,
         },
-        handlers::write_txn_markers::append_marker_and_materialize,
         marker::MarkerType,
         partitioner::partition_for_tid,
         state::{TxnEntry, TxnState},

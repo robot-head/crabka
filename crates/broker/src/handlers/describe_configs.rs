@@ -541,10 +541,11 @@ mod tests {
 
     #[test]
     fn group_describe_merges_dynamic_overrides_with_defaults() {
+        use crabka_metadata::GroupConfigRecord;
+
         use crate::coordinator::unified::streams::config::{
             KEY_NUM_STANDBY_REPLICAS, KEY_SESSION_TIMEOUT_MS, StreamsGroupConfig,
         };
-        use crabka_metadata::GroupConfigRecord;
 
         let mut image = MetadataImage::new(Uuid::nil());
         image.apply(&MetadataRecord::V1GroupConfig(GroupConfigRecord {

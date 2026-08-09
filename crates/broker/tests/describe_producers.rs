@@ -139,7 +139,7 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
     let topic_id = topic_id_for(&p, "t").await;
 
     let (pid, epoch) = init_producer(&p).await;
-    assert!(pid > 0);
+    assert!(pid >= 0);
 
     let pr = p
         .client

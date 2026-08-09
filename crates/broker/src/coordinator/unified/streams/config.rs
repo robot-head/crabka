@@ -1,7 +1,5 @@
 //! KIP-1071 Streams rebalance-protocol configuration.
-use std::time::Duration;
-
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 pub const KEY_SESSION_TIMEOUT_MS: &str = "streams.session.timeout.ms";
 pub const KEY_HEARTBEAT_INTERVAL_MS: &str = "streams.heartbeat.interval.ms";
