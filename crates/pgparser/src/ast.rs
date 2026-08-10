@@ -251,6 +251,37 @@ pub enum AlterEventTriggerAction {
     RenameTo(String),
 }
 
+/// A role named in a position `PostgreSQL`'s grammar spells `RoleSpec`: a
+/// grantee, a `GRANT`/`REVOKE ROLE` member, an `OWNER TO` recipient, a
+/// `CREATE SCHEMA AUTHORIZATION`.
+///
+/// The keyword spellings are settled here rather than downstream because only
+/// the parser can still see how the name was written. `CURRENT_USER` and
+/// `"current_user"` are different roles to `PostgreSQL` — the first is the
+/// session's, the second is an ordinary name nobody holds — and by the time a
+/// name has been folded to a `String` the two are the same six characters. The
+/// engine has no `pg_authid` row to tell them apart with either, so a
+/// `String` grantee cannot be resolved correctly at all.
+///
+/// Which role each keyword *means* is deliberately not decided here. The
+/// parser has no session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleSpec {
+    /// A written name, folded by the lexer's usual identifier rules.
+    Name(String),
+    /// `CURRENT_USER`.
+    CurrentUser,
+    /// `CURRENT_ROLE`, `PostgreSQL`'s synonym for `CURRENT_USER`.
+    CurrentRole,
+    /// `SESSION_USER` — the role the session authenticated as, which `SET ROLE`
+    /// does not move.
+    SessionUser,
+    /// `PUBLIC`, the pseudo-role. Reached from the bare keyword and from the
+    /// exact written name `public`, quoted or not, because `gram.y` folds that
+    /// one spelling and no other: `"PUBLIC"` stays an ordinary name.
+    Public,
+}
+
 /// The boolean attributes a `CREATE`/`ALTER ROLE … WITH` list may set. `None`
 /// leaves the current value alone, which is what `ALTER ROLE` needs: only the
 /// options actually written are applied.
@@ -432,7 +463,7 @@ pub enum ViewOptionSetting {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterViewAction {
     /// `OWNER TO role` — moves the identity the view's body runs under.
-    OwnerTo(String),
+    OwnerTo(RoleSpec),
     /// `SET (name = value, …)`; a bare boolean name is `true`, as in
     /// `CREATE VIEW`.
     SetOptions(Vec<ViewOptionSetting>),
@@ -640,7 +671,7 @@ pub enum Statement {
         /// `None` for `CREATE SCHEMA AUTHORIZATION role`, whose schema takes
         /// the role's own name.
         name: Option<String>,
-        authorization: Option<String>,
+        authorization: Option<RoleSpec>,
         if_not_exists: bool,
         /// The `CREATE TABLE`/`CREATE VIEW`/`GRANT` statements written inside
         /// the `CREATE SCHEMA`, in order. They run after the schema exists.
@@ -825,24 +856,24 @@ pub enum Statement {
         /// One statement may name several relations, and `PostgreSQL` applies
         /// the whole privilege set to each of them.
         tables: Vec<RelationRef>,
-        grantees: Vec<String>,
+        grantees: Vec<RoleSpec>,
     },
     /* SQL parity matrix row: GRANT. */ GrantSchemaPrivileges {
         privileges: Vec<String>,
         schemas: Vec<String>,
-        grantees: Vec<String>,
+        grantees: Vec<RoleSpec>,
     },
     /* SQL parity matrix row: REVOKE. */ RevokeTablePrivileges {
         privileges: Vec<String>,
         /// One statement may name several relations, and `PostgreSQL` applies
         /// the whole privilege set to each of them.
         tables: Vec<RelationRef>,
-        grantees: Vec<String>,
+        grantees: Vec<RoleSpec>,
     },
     /* SQL parity matrix row: REVOKE. */ RevokeSchemaPrivileges {
         privileges: Vec<String>,
         schemas: Vec<String>,
-        grantees: Vec<String>,
+        grantees: Vec<RoleSpec>,
     },
     /// `GRANT <role> [, …] TO <member> [, …] [WITH ADMIN OPTION]` — role
     /// membership, which shares its storage with `CREATE ROLE … IN ROLE`.
@@ -850,7 +881,7 @@ pub enum Statement {
         /// The roles being handed out; each member gains their privileges.
         roles: Vec<String>,
         /// The roles receiving the membership.
-        members: Vec<String>,
+        members: Vec<RoleSpec>,
         /// `WITH ADMIN OPTION` was written. The catalog has no column for it —
         /// membership is a bare key with no payload — so it is parsed for
         /// fidelity and discarded by the executor.
@@ -859,7 +890,7 @@ pub enum Statement {
     /// `REVOKE [ADMIN OPTION FOR] <role> [, …] FROM <member> [, …]`.
     /* SQL parity matrix row: REVOKE. */ RevokeRoles {
         roles: Vec<String>,
-        members: Vec<String>,
+        members: Vec<RoleSpec>,
         /// `ADMIN OPTION FOR` was written, which in `PostgreSQL` strips the
         /// admin right and leaves the membership. Nothing stores the admin
         /// right here, so see [`Statement::GrantRoles`].
@@ -2077,7 +2108,7 @@ pub enum AlterTableAction {
     /// `RESET (param, …)`.
     ResetStorageParameters(Vec<String>),
     SetTablespace(String),
-    OwnerTo(String),
+    OwnerTo(RoleSpec),
     SetTriggerMode {
         selector: TriggerSelector,
         mode: TriggerEnableMode,
@@ -2191,7 +2222,7 @@ pub enum RangeBoundValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterSchemaAction {
     RenameTo(String),
-    OwnerTo(String),
+    OwnerTo(RoleSpec),
 }
 
 /// `ON COMMIT` disposition for a temporary table.

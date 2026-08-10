@@ -4317,11 +4317,11 @@ pub fn grant_role_memberships_ops(
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let mut ops = Vec::with_capacity(roles.len() * members.len());
     for role in roles {
-        if !role_exists(kv, role)? {
+        if !role_is_nameable(kv, role)? {
             return Err(CatalogError::UndefinedObject(role.clone()));
         }
         for member in members {
-            if !role_exists(kv, member)? {
+            if !role_is_nameable(kv, member)? {
                 return Err(CatalogError::UndefinedObject(member.clone()));
             }
             ops.push(WriteOp::Put {
@@ -4349,11 +4349,11 @@ pub fn revoke_role_memberships_ops(
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let mut ops = Vec::with_capacity(roles.len() * members.len());
     for role in roles {
-        if !role_exists(kv, role)? {
+        if !role_is_nameable(kv, role)? {
             return Err(CatalogError::UndefinedObject(role.clone()));
         }
         for member in members {
-            if !role_exists(kv, member)? {
+            if !role_is_nameable(kv, member)? {
                 return Err(CatalogError::UndefinedObject(member.clone()));
             }
             ops.push(WriteOp::Delete {
@@ -4478,6 +4478,25 @@ pub fn get_role(kv: &dyn Kv, name: &str) -> Result<Role, CatalogError> {
         .get(&role_key(name))?
         .ok_or_else(|| CatalogError::UndefinedObject(name.to_string()))?;
     deserialize_role(&bytes)
+}
+
+/// Whether a name may stand in a role position: it has a stored record, or it
+/// is one of the two roles every cluster has without one.
+///
+/// `PUBLIC` and the bootstrap superuser hold no `pg_authid` row. Validating
+/// either against stored records would reject the two names every cluster
+/// always answers for — `GRANT … TO PUBLIC`, and a grant to the role an
+/// unauthenticated session acts as.
+///
+/// Whether a *pseudo*-role is admissible in a particular position is not
+/// settled here: `PUBLIC` is a grantee of privileges and never a member of
+/// anything, and only the caller knows which of the two it is asking about.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn role_is_nameable(kv: &dyn Kv, name: &str) -> Result<bool, CatalogError> {
+    Ok(name == PUBLIC_ROLE || name == BOOTSTRAP_ROLE || role_exists(kv, name)?)
 }
 
 /// Return whether a role exists.
@@ -4621,11 +4640,8 @@ fn table_privilege_ops(
     // key here, and `PostgreSQL` grants on those too.
     let mut ops = Vec::new();
     for grantee in grantees {
-        // `PUBLIC` and the bootstrap superuser are roles with no `pg_authid`
-        // row, so validating them against stored records would reject the two
-        // grantees any cluster always has.
-        if grantee != PUBLIC_ROLE && grantee != BOOTSTRAP_ROLE {
-            let _ = get_role(kv, grantee)?;
+        if !role_is_nameable(kv, grantee)? {
+            return Err(CatalogError::UndefinedObject(grantee.clone()));
         }
         for privilege in expand_table_privileges(privileges) {
             let key = table_privilege_key(table, grantee, &privilege);
@@ -4762,7 +4778,9 @@ fn schema_privilege_ops(
             return Err(CatalogError::UndefinedSchema(schema.clone()));
         }
         for grantee in grantees {
-            let _ = get_role(kv, grantee)?;
+            if !role_is_nameable(kv, grantee)? {
+                return Err(CatalogError::UndefinedObject(grantee.clone()));
+            }
             for privilege in expand_schema_privileges(privileges) {
                 let key = schema_privilege_key(schema, grantee, privilege);
                 ops.push(if grant {

@@ -195,15 +195,26 @@ async fn owner_to_survives_the_rest_of_the_statement_and_a_later_rename() {
     assert!(ownership_of(&mut session, "relocated").await == owned_by("keeper"));
 }
 
-/// `CURRENT_USER` and `USER` in an owner position name the session's role.
+/// The role-name keywords in an owner position name the session's role.
+///
+/// `PostgreSQL`'s `RoleSpec` admits exactly three, and `SET ROLE` separates
+/// them: `SESSION_USER` stays with whoever authenticated while `CURRENT_USER`
+/// and its synonym `CURRENT_ROLE` follow the role in force.
 #[tokio::test]
-async fn owner_to_current_user_names_the_session_role() {
-    for spelling in ["CURRENT_USER", "USER"] {
+async fn owner_to_a_role_keyword_names_the_session_role() {
+    for (spelling, expected) in [
+        ("CURRENT_USER", "assumed"),
+        ("CURRENT_ROLE", "assumed"),
+        ("SESSION_USER", "claimant"),
+    ] {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
         run(&mut session, "CREATE ROLE claimant LOGIN").await;
+        run(&mut session, "CREATE ROLE assumed").await;
+        run(&mut session, "GRANT assumed TO claimant").await;
         run(&mut session, "CREATE TABLE claimed (id int4)").await;
         run(&mut session, "SET SESSION AUTHORIZATION claimant").await;
+        run(&mut session, "SET ROLE assumed").await;
 
         run(
             &mut session,
@@ -211,7 +222,10 @@ async fn owner_to_current_user_names_the_session_role() {
         )
         .await;
 
-        assert!(ownership_of(&mut session, "claimed").await == owned_by("claimant"));
+        assert!(
+            ownership_of(&mut session, "claimed").await == owned_by(expected),
+            "OWNER TO {spelling}"
+        );
     }
 }
 

@@ -59,6 +59,12 @@ pub struct TimestampWritePlan {
 pub(crate) struct ForeignCtx<'a> {
     pub scanner: Option<&'a Arc<dyn ForeignScanner>>,
     pub current_user: &'a str,
+    /// The role the session authenticated as, which `SET ROLE` does not move.
+    ///
+    /// It rides alongside [`ForeignCtx::current_user`] because `SESSION_USER`
+    /// and `CURRENT_USER` are different grantees under `SET ROLE`, and a
+    /// grantee resolved from the wrong one writes the grant to the wrong role.
+    pub session_user: &'a str,
     /// The session's name-resolution scope, so every DDL statement resolves an
     /// unqualified name against the same `search_path` a `SELECT` does.
     pub resolution: &'a crate::relname::ResolutionScope,
@@ -101,6 +107,7 @@ impl ForeignCtx<'_> {
         Self {
             scanner: None,
             current_user: "public",
+            session_user: "public",
             resolution: crate::relname::ResolutionScope::default_scope(),
             catalog: None,
             reserved_table_ids: None,
@@ -857,17 +864,18 @@ pub(crate) fn execute_ddl(
             if_not_exists,
             elements,
         } => {
-            // `CREATE SCHEMA AUTHORIZATION role` names the schema after the role.
-            let owner = authorization.as_deref().unwrap_or(fctx.current_user);
+            // `CREATE SCHEMA AUTHORIZATION role` names the schema after the
+            // role, so the keyword spellings have to be resolved before the
+            // name is taken: `AUTHORIZATION CURRENT_ROLE` names the schema
+            // after the session's role, not after the word `current_role`.
+            let owner = match authorization {
+                Some(spec) => resolve_new_owner(kv, fctx, spec)?,
+                None => fctx.current_user.to_string(),
+            };
             let name = match name {
                 Some(name) => name.clone(),
-                None => owner.to_string(),
+                None => owner.clone(),
             };
-            if let Some(role) = authorization
-                && !crabka_pgcatalog::role_exists(kv, role)?
-            {
-                return Err(ExecError::UndefinedObject(format!("role \"{role}\"")));
-            }
             if !elements.is_empty() {
                 return Err(ExecError::Unsupported(
                     "CREATE SCHEMA with a schema-element list is not supported: DDL commits one \
@@ -879,7 +887,7 @@ pub(crate) fn execute_ddl(
             // `IF NOT EXISTS` waives only the duplicate: an unacceptable name is
             // still unacceptable, so the reserved-prefix refusal has to come out
             // of `create_schema_ops` rather than be short-circuited before it.
-            let ops = match crabka_pgcatalog::create_schema_ops(kv, &name, owner) {
+            let ops = match crabka_pgcatalog::create_schema_ops(kv, &name, &owner) {
                 Err(crabka_pgcatalog::CatalogError::DuplicateSchema(_)) if *if_not_exists => {
                     Vec::new()
                 }
@@ -891,7 +899,12 @@ pub(crate) fn execute_ddl(
             use crabka_pgparser::ast::AlterSchemaAction;
             let ops = match action {
                 AlterSchemaAction::OwnerTo(owner) => {
-                    crabka_pgcatalog::set_schema_owner_ops(kv, name, owner)?
+                    // A schema's new owner is checked the way a relation's is.
+                    // Before this shared a resolver with `ALTER TABLE`, a
+                    // schema could be handed to a name no role held, leaving it
+                    // owned by something no ownership test can match.
+                    let owner = resolve_new_owner(kv, fctx, owner)?;
+                    crabka_pgcatalog::set_schema_owner_ops(kv, name, &owner)?
                 }
                 AlterSchemaAction::RenameTo(_) => {
                     if !crabka_pgcatalog::schema_exists(kv, name)? {
@@ -1586,15 +1599,12 @@ pub(crate) fn execute_ddl(
             tables,
             grantees,
         } => {
-            // One statement naming several relations is several grants, each
-            // carrying the whole privilege set, so every name is resolved and
-            // applied before any of them is written.
+            let names = resolve_grantable_relations(kv, resolution, tables)?;
+            let grantees = resolve_grantees(kv, fctx, grantees)?;
             let mut ops = Vec::new();
-            for table in tables {
-                let name = resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
-                require_grantable_relation(kv, &name)?;
+            for name in &names {
                 ops.extend(crabka_pgcatalog::grant_table_privileges_ops(
-                    kv, &name, grantees, privileges,
+                    kv, name, &grantees, privileges,
                 )?);
             }
             Ok((command("GRANT"), ops))
@@ -1607,14 +1617,14 @@ pub(crate) fn execute_ddl(
             members,
             admin_option: _,
         } => {
-            require_role_memberships(
+            let members = require_role_memberships(
                 kv,
-                &fctx,
+                fctx,
                 roles,
                 members,
                 crate::privilege::RoleGrant::Grant,
             )?;
-            let ops = crabka_pgcatalog::grant_role_memberships_ops(kv, roles, members)?;
+            let ops = crabka_pgcatalog::grant_role_memberships_ops(kv, roles, &members)?;
             Ok((command("GRANT ROLE"), ops))
         }
         Statement::RevokeRoles {
@@ -1622,9 +1632,9 @@ pub(crate) fn execute_ddl(
             members,
             admin_option,
         } => {
-            require_role_memberships(
+            let members = require_role_memberships(
                 kv,
-                &fctx,
+                fctx,
                 roles,
                 members,
                 crate::privilege::RoleGrant::Revoke,
@@ -1632,7 +1642,7 @@ pub(crate) fn execute_ddl(
             // The names are checked either way; `ADMIN OPTION FOR` then keeps
             // the membership and strips only the admin right, which is all this
             // catalog does not hold, so it writes nothing.
-            let ops = crabka_pgcatalog::revoke_role_memberships_ops(kv, roles, members)?;
+            let ops = crabka_pgcatalog::revoke_role_memberships_ops(kv, roles, &members)?;
             let ops = if *admin_option { Vec::new() } else { ops };
             Ok((command("REVOKE ROLE"), ops))
         }
@@ -1641,8 +1651,9 @@ pub(crate) fn execute_ddl(
             schemas,
             grantees,
         } => {
+            let grantees = resolve_grantees(kv, fctx, grantees)?;
             let ops =
-                crabka_pgcatalog::grant_schema_privileges_ops(kv, schemas, grantees, privileges)?;
+                crabka_pgcatalog::grant_schema_privileges_ops(kv, schemas, &grantees, privileges)?;
             Ok((command("GRANT"), ops))
         }
         Statement::RevokeTablePrivileges {
@@ -1650,15 +1661,12 @@ pub(crate) fn execute_ddl(
             tables,
             grantees,
         } => {
-            // One statement naming several relations is several grants, each
-            // carrying the whole privilege set, so every name is resolved and
-            // applied before any of them is written.
+            let names = resolve_grantable_relations(kv, resolution, tables)?;
+            let grantees = resolve_grantees(kv, fctx, grantees)?;
             let mut ops = Vec::new();
-            for table in tables {
-                let name = resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
-                require_grantable_relation(kv, &name)?;
+            for name in &names {
                 ops.extend(crabka_pgcatalog::revoke_table_privileges_ops(
-                    kv, &name, grantees, privileges,
+                    kv, name, &grantees, privileges,
                 )?);
             }
             Ok((command("REVOKE"), ops))
@@ -1668,8 +1676,9 @@ pub(crate) fn execute_ddl(
             schemas,
             grantees,
         } => {
+            let grantees = resolve_grantees(kv, fctx, grantees)?;
             let ops =
-                crabka_pgcatalog::revoke_schema_privileges_ops(kv, schemas, grantees, privileges)?;
+                crabka_pgcatalog::revoke_schema_privileges_ops(kv, schemas, &grantees, privileges)?;
             Ok((command("REVOKE"), ops))
         }
         Statement::CreateFdw { name, options } => {
@@ -19720,8 +19729,8 @@ fn pg_prepared_statement_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
-/// Check that the session may move membership in every role a `GRANT`/`REVOKE
-/// ROLE` names.
+/// Resolve every member a `GRANT`/`REVOKE ROLE` names and check that the
+/// session may move membership in every role it hands out.
 ///
 /// The names come first and the rights come second, which is the order
 /// `PostgreSQL` reports them in: it resolves the grantees, then resolves and
@@ -19729,21 +19738,41 @@ fn pg_prepared_statement_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
 /// exist says so rather than reporting a denial for a name that means nothing.
 /// Every name is checked before any membership is written, so a statement that
 /// fails on its second role writes nothing for its first.
+///
+/// # Errors
+///
+/// Returns 42704 for a member or role no role holds — `PUBLIC` included, which
+/// is a grantee of privileges but never a member of anything — or
+/// storage/corruption errors from the catalog KV seam.
 fn require_role_memberships(
     kv: &dyn Kv,
-    fctx: &ForeignCtx,
+    fctx: ForeignCtx<'_>,
     roles: &[String],
-    members: &[String],
+    members: &[crabka_pgparser::ast::RoleSpec],
     direction: crate::privilege::RoleGrant,
-) -> Result<(), ExecError> {
+) -> Result<Vec<String>, ExecError> {
+    // `PUBLIC` has no membership to move, on either side: `GRANT r TO PUBLIC`
+    // and `GRANT PUBLIC TO r` are both 42704 in PostgreSQL, even though
+    // `GRANT SELECT … TO PUBLIC` is the ordinary way to open a relation to
+    // everyone. Membership needs a role with a record, and it has none.
+    let holds_membership = |name: &str| -> Result<bool, ExecError> {
+        Ok(name != crabka_pgcatalog::PUBLIC_ROLE && crabka_pgcatalog::role_is_nameable(kv, name)?)
+    };
+    let mut resolved = Vec::with_capacity(members.len());
     for member in members {
-        crabka_pgcatalog::get_role(kv, member)?;
+        let member = role_spec_name(member, fctx);
+        if !holds_membership(member)? {
+            return Err(undefined_role(member));
+        }
+        resolved.push(member.to_string());
     }
     for role in roles {
-        crabka_pgcatalog::get_role(kv, role)?;
+        if !holds_membership(role)? {
+            return Err(undefined_role(role));
+        }
         crate::privilege::require_role_grant(kv, fctx.effective_role(), role, direction)?;
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// Fold a written `CREATE`/`ALTER ROLE` option list onto stored attributes,
@@ -24821,8 +24850,107 @@ fn alter_action_wrong_kind(
     Some(relkind_not_supported(message, kind))
 }
 
-/// The role an `OWNER TO` clause names, validated the way `PostgreSQL`
-/// validates one.
+/// The name a parsed [`RoleSpec`] denotes for this session.
+///
+/// This is the one place a session concept meets a role position. The parser
+/// cannot do it — it has no session — and the catalog must not, because
+/// `CURRENT_USER` is not a fact about stored records. `PUBLIC` resolves to its
+/// own name and is refused, or not, by whichever caller knows whether a
+/// pseudo-role is admissible there.
+///
+/// `CURRENT_ROLE` is `PostgreSQL`'s synonym for `CURRENT_USER`, not a third
+/// role.
+///
+/// [`RoleSpec`]: crabka_pgparser::ast::RoleSpec
+fn role_spec_name<'a>(spec: &'a crabka_pgparser::ast::RoleSpec, fctx: ForeignCtx<'a>) -> &'a str {
+    use crabka_pgparser::ast::RoleSpec;
+    // A session carrying `PUBLIC` authenticated as nobody and acts as the
+    // bootstrap superuser, so both keyword spellings answer with that rather
+    // than with a pseudo-role that owns nothing. This is
+    // [`ForeignCtx::effective_role`]'s rule, restated for a borrow that has to
+    // outlive the context value.
+    let held = |name: &'a str| {
+        if name == crabka_pgcatalog::PUBLIC_ROLE {
+            crabka_pgcatalog::BOOTSTRAP_ROLE
+        } else {
+            name
+        }
+    };
+    match spec {
+        RoleSpec::Name(name) => name,
+        RoleSpec::CurrentUser | RoleSpec::CurrentRole => held(fctx.current_user),
+        RoleSpec::SessionUser => held(fctx.session_user),
+        RoleSpec::Public => crabka_pgcatalog::PUBLIC_ROLE,
+    }
+}
+
+/// `PostgreSQL`'s refusal of a role name nobody holds.
+///
+/// The catalog seam calls this an undefined *object*, because it answers for
+/// every kind of record it stores. In a role position `PostgreSQL` says `role`,
+/// and the regression corpus compares the sentence.
+fn undefined_role(role: &str) -> ExecError {
+    ExecError::UndefinedObject(format!("role \"{role}\" does not exist"))
+}
+
+/// Every relation a `GRANT`/`REVOKE` of privileges names, resolved and checked
+/// before any grantee is.
+///
+/// One statement naming several relations is several grants, each carrying the
+/// whole privilege set, and none of them is written unless all the names are
+/// good. The whole list also comes before the grantee list, which is the order
+/// `PostgreSQL` reports the two in: `GRANT … ON t, nosuchtable TO nosuchrole`
+/// names the relation, not the role.
+///
+/// # Errors
+///
+/// Returns 42P01 for a relation that does not exist, 42809 for one that holds
+/// no privileges to grant, or storage/corruption errors from the catalog KV
+/// seam.
+fn resolve_grantable_relations(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    tables: &[crabka_pgparser::ast::RelationRef],
+) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
+    tables
+        .iter()
+        .map(|table| {
+            let name = resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
+            require_grantable_relation(kv, &name)?;
+            Ok(name)
+        })
+        .collect()
+}
+
+/// The grantees a `GRANT`/`REVOKE` of privileges names.
+///
+/// `PUBLIC` is a grantee here — it is the one role every session holds — so it
+/// passes through as its own name and the catalog stores the grant under it.
+///
+/// # Errors
+///
+/// Returns 42704 for a name no role holds, or storage/corruption errors from
+/// the catalog KV seam.
+fn resolve_grantees(
+    kv: &dyn Kv,
+    fctx: ForeignCtx<'_>,
+    grantees: &[crabka_pgparser::ast::RoleSpec],
+) -> Result<Vec<String>, ExecError> {
+    grantees
+        .iter()
+        .map(|spec| {
+            let role = role_spec_name(spec, fctx);
+            if crabka_pgcatalog::role_is_nameable(kv, role)? {
+                Ok(role.to_string())
+            } else {
+                Err(undefined_role(role))
+            }
+        })
+        .collect()
+}
+
+/// The role an `OWNER TO` or `CREATE SCHEMA AUTHORIZATION` clause names,
+/// validated the way `PostgreSQL` validates one.
 ///
 /// Shared by every relation kind that can be handed over, so a view and a table
 /// cannot disagree about who may receive one.
@@ -24831,29 +24959,18 @@ fn alter_action_wrong_kind(
 ///
 /// Returns 42704 when the name is `PUBLIC` or belongs to no role, or
 /// storage/corruption errors from the catalog KV seam.
-fn resolve_new_owner(kv: &dyn Kv, fctx: ForeignCtx<'_>, role: &str) -> Result<String, ExecError> {
-    // `CURRENT_USER`/`USER` in an owner position name the session's role, the
-    // same spelling `ALTER TABLESPACE … OWNER TO` accepts.
-    let role = match role {
-        "current_user" | "user" => fctx.effective_role(),
-        named => named,
-    };
+fn resolve_new_owner(
+    kv: &dyn Kv,
+    fctx: ForeignCtx<'_>,
+    spec: &crabka_pgparser::ast::RoleSpec,
+) -> Result<String, ExecError> {
+    let role = role_spec_name(spec, fctx);
     // `PUBLIC` is a pseudo-role with no `pg_authid` row, so PostgreSQL answers
     // a handover to it the same way it answers a handover to a name nobody
     // holds. Letting it through would leave a relation owned by something no
     // ownership test can ever match.
-    //
-    // The bootstrap role is the opposite case. It has no stored record either,
-    // but it is the default owner of every relation, so refusing to name it
-    // would reject `OWNER TO CURRENT_USER` from an unauthenticated session —
-    // whose effective role is exactly that — while the relation it names is
-    // already owned by it.
-    let known =
-        role == crabka_pgcatalog::BOOTSTRAP_ROLE || crabka_pgcatalog::role_exists(kv, role)?;
-    if role == crabka_pgcatalog::PUBLIC_ROLE || !known {
-        return Err(ExecError::UndefinedObject(format!(
-            "role \"{role}\" does not exist"
-        )));
+    if role == crabka_pgcatalog::PUBLIC_ROLE || !crabka_pgcatalog::role_is_nameable(kv, role)? {
+        return Err(undefined_role(role));
     }
     Ok(role.to_string())
 }

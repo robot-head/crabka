@@ -3840,7 +3840,7 @@ impl Parser {
         }
         if self.eat_ident_eq("owner") {
             self.expect_keyword_or_ident(Keyword::To, "to")?;
-            return Ok(AlterTableAction::OwnerTo(self.expect_object_name()?));
+            return Ok(AlterTableAction::OwnerTo(self.role_spec()?));
         }
         if self.peek_ident_eq("attach")
             && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("partition"))
@@ -4239,9 +4239,9 @@ impl Parser {
         // the two are told apart the way PostgreSQL's grammar does: by whether
         // `ON` or `TO` closes the list.
         if self.at_role_grant_list() {
-            let roles = self.object_name_list()?;
+            let roles = self.granted_role_list()?;
             self.expect(&Token::Keyword(Keyword::To))?;
-            let members = self.object_name_list()?;
+            let members = self.role_spec_list()?;
             let admin_option = self.eat_with_admin_option()?;
             return Ok(crate::ast::Statement::GrantRoles {
                 roles,
@@ -4254,7 +4254,7 @@ impl Parser {
         if self.eat_keyword(Keyword::Schema) {
             let schemas = self.object_name_list()?;
             self.expect(&Token::Keyword(Keyword::To))?;
-            let grantees = self.object_name_list()?;
+            let grantees = self.grantee_list()?;
             return Ok(crate::ast::Statement::GrantSchemaPrivileges {
                 privileges,
                 schemas,
@@ -4266,7 +4266,7 @@ impl Parser {
         self.eat_keyword(Keyword::Table);
         let tables = self.relation_ref_list()?;
         self.expect(&Token::Keyword(Keyword::To))?;
-        let grantees = self.object_name_list()?;
+        let grantees = self.grantee_list()?;
         Ok(crate::ast::Statement::GrantTablePrivileges {
             privileges,
             tables,
@@ -4287,9 +4287,9 @@ impl Parser {
             self.bump();
         }
         if admin_option || self.at_role_grant_list() {
-            let roles = self.object_name_list()?;
+            let roles = self.granted_role_list()?;
             self.expect(&Token::Keyword(Keyword::From))?;
-            let members = self.object_name_list()?;
+            let members = self.role_spec_list()?;
             return Ok(crate::ast::Statement::RevokeRoles {
                 roles,
                 members,
@@ -4301,7 +4301,7 @@ impl Parser {
         if self.eat_keyword(Keyword::Schema) {
             let schemas = self.object_name_list()?;
             self.expect(&Token::Keyword(Keyword::From))?;
-            let grantees = self.object_name_list()?;
+            let grantees = self.grantee_list()?;
             return Ok(crate::ast::Statement::RevokeSchemaPrivileges {
                 privileges,
                 schemas,
@@ -4311,7 +4311,7 @@ impl Parser {
         self.eat_keyword(Keyword::Table);
         let tables = self.relation_ref_list()?;
         self.expect(&Token::Keyword(Keyword::From))?;
-        let grantees = self.object_name_list()?;
+        let grantees = self.grantee_list()?;
         Ok(crate::ast::Statement::RevokeTablePrivileges {
             privileges,
             tables,
@@ -4472,6 +4472,106 @@ impl Parser {
                 format!("expected object name, found {other:?}"),
                 self.peek_pos(),
             )),
+        }
+    }
+
+    /// Whether the token at the cursor was written inside double quotes.
+    ///
+    /// The lexer folds a bare word to lower case and hands a quoted identifier
+    /// through verbatim, and both arrive as [`Token::Ident`], so `SESSION_USER`
+    /// and `"session_user"` are the same token. `PostgreSQL` tells them apart —
+    /// the first is a reserved keyword and the second is an ordinary name — and
+    /// a role position is where that distinction decides which role is meant.
+    ///
+    /// Reading the source is exact rather than a heuristic: the lexer records
+    /// the offset of the opening quote as a quoted identifier's position, and
+    /// no other lexeme can start with one.
+    fn ident_is_quoted(&self) -> bool {
+        self.source.as_bytes().get(self.peek_pos()) == Some(&b'"')
+    }
+
+    /// One role name, in a position `PostgreSQL`'s grammar spells `RoleSpec`.
+    ///
+    /// `gram.y` admits `CURRENT_ROLE`, `CURRENT_USER`, `SESSION_USER` and a
+    /// `NonReservedWord`, and folds the written word `public` to the pseudo-role.
+    /// Everything reserved is therefore a syntax error here, `USER` included:
+    /// `GRANT … TO USER` is `42601` in `PostgreSQL`, not a role nobody holds,
+    /// and neither is `OWNER TO USER`.
+    fn role_spec(&mut self) -> Result<crate::ast::RoleSpec, ParseError> {
+        use crate::ast::RoleSpec;
+        let quoted = self.ident_is_quoted();
+        let position = self.peek_pos();
+        match self.bump() {
+            Token::Keyword(Keyword::Public) => Ok(RoleSpec::Public),
+            Token::Keyword(Keyword::CurrentUser) => Ok(RoleSpec::CurrentUser),
+            // These two are reserved words to `PostgreSQL` but ordinary
+            // identifiers to this lexer, so the quoting is what separates the
+            // keyword from a name that happens to read like one.
+            Token::Ident(name) if !quoted && name == "session_user" => Ok(RoleSpec::SessionUser),
+            Token::Ident(name) if !quoted && name == "current_role" => Ok(RoleSpec::CurrentRole),
+            // `RoleSpec: NonReservedWord` compares the *written* name against
+            // `public` after the lexer has folded it, so `"public"` is the
+            // pseudo-role and `"PUBLIC"` is a name nobody holds.
+            Token::Ident(name) if name == "public" => Ok(RoleSpec::Public),
+            Token::Ident(name) => Ok(RoleSpec::Name(name)),
+            other => Err(ParseError::new(
+                format!("expected a role name, found {other:?}"),
+                position,
+            )),
+        }
+    }
+
+    /// The comma-separated member list of a `GRANT`/`REVOKE ROLE`.
+    fn role_spec_list(&mut self) -> Result<Vec<crate::ast::RoleSpec>, ParseError> {
+        let mut names = vec![self.role_spec()?];
+        while self.eat_comma() {
+            names.push(self.role_spec()?);
+        }
+        Ok(names)
+    }
+
+    /// The comma-separated list of roles a `GRANT`/`REVOKE ROLE` hands out.
+    ///
+    /// This is not a `RoleSpec` list. `PostgreSQL` reaches it through
+    /// `privilege_list`, whose members are ordinary words, so the keyword
+    /// spellings are `42601` here rather than the session's role: `GRANT
+    /// CURRENT_USER TO r` is a syntax error where `GRANT r TO CURRENT_USER` is
+    /// not. `PUBLIC` does get this far, and is refused later as the role nobody
+    /// holds.
+    fn granted_role_list(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut names = Vec::new();
+        loop {
+            let position = self.peek_pos();
+            match self.bump() {
+                Token::Ident(name) => names.push(name),
+                Token::Keyword(Keyword::Public) => names.push("public".into()),
+                other => {
+                    return Err(ParseError::new(
+                        format!("expected a role name, found {other:?}"),
+                        position,
+                    ));
+                }
+            }
+            if !self.eat_comma() {
+                return Ok(names);
+            }
+        }
+    }
+
+    /// The comma-separated grantee list of a `GRANT`/`REVOKE` of privileges.
+    ///
+    /// `GROUP` before a name is `PostgreSQL`'s pre-8.1 spelling of the same
+    /// grantee and carries no meaning of its own; `gram.y` still accepts it and
+    /// drops it. It is confined to this list: `GRANT <role> TO GROUP <member>`
+    /// and `OWNER TO GROUP <role>` are both `42601`.
+    fn grantee_list(&mut self) -> Result<Vec<crate::ast::RoleSpec>, ParseError> {
+        let mut names = Vec::new();
+        loop {
+            self.eat_keyword(Keyword::Group);
+            names.push(self.role_spec()?);
+            if !self.eat_comma() {
+                return Ok(names);
+            }
         }
     }
 
@@ -7021,7 +7121,7 @@ impl Parser {
             Some(self.expect_object_name()?)
         };
         let authorization = if self.eat_ident_eq("authorization") {
-            Some(self.expect_object_name()?)
+            Some(self.role_spec()?)
         } else {
             None
         };
@@ -7061,7 +7161,7 @@ impl Parser {
             AlterSchemaAction::RenameTo(self.expect_object_name()?)
         } else if self.eat_ident_eq("owner") {
             self.expect_keyword_or_ident(Keyword::To, "to")?;
-            AlterSchemaAction::OwnerTo(self.expect_object_name()?)
+            AlterSchemaAction::OwnerTo(self.role_spec()?)
         } else {
             return Err(ParseError::new(
                 format!("expected RENAME TO or OWNER TO, found {:?}", self.peek()),
@@ -8785,7 +8885,7 @@ impl Parser {
             return Ok(crate::ast::Statement::AlterView {
                 name,
                 if_exists,
-                action: AlterViewAction::OwnerTo(self.expect_object_name()?),
+                action: AlterViewAction::OwnerTo(self.role_spec()?),
             });
         }
         if self.eat_keyword(Keyword::Set) {
@@ -14997,12 +15097,104 @@ mod tests {
         ));
     }
 
+    /// A role position keeps the spelling `PostgreSQL`'s `RoleSpec` production
+    /// keeps.
+    ///
+    /// The three keywords are not names, and a quoted identifier is not a
+    /// keyword: `CURRENT_USER` is the session's role and `"current_user"` is an
+    /// ordinary role nobody holds. The lexer folds a bare word and hands a
+    /// quoted one through, so both arrive as the same six characters — which is
+    /// why the distinction has to be settled here, where the quoting is still
+    /// visible, and not from the string downstream.
+    #[test]
+    fn a_role_position_keeps_the_written_spelling() {
+        use assert2::assert;
+
+        use crate::ast::RoleSpec;
+        let cases: &[(&str, RoleSpec)] = &[
+            ("CURRENT_USER", RoleSpec::CurrentUser),
+            ("current_user", RoleSpec::CurrentUser),
+            ("Current_User", RoleSpec::CurrentUser),
+            ("CURRENT_ROLE", RoleSpec::CurrentRole),
+            ("SESSION_USER", RoleSpec::SessionUser),
+            ("PUBLIC", RoleSpec::Public),
+            ("public", RoleSpec::Public),
+            // `gram.y` folds the written name, so a quoted `public` is still
+            // the pseudo-role and a quoted `PUBLIC` is not.
+            ("\"public\"", RoleSpec::Public),
+            ("\"PUBLIC\"", RoleSpec::Name("PUBLIC".into())),
+            ("\"current_user\"", RoleSpec::Name("current_user".into())),
+            ("\"session_user\"", RoleSpec::Name("session_user".into())),
+            ("\"current_role\"", RoleSpec::Name("current_role".into())),
+            ("alice", RoleSpec::Name("alice".into())),
+            ("\"Alice\"", RoleSpec::Name("Alice".into())),
+        ];
+        for (spelling, want) in cases {
+            let Statement::GrantTablePrivileges { grantees, .. } =
+                one(&format!("GRANT SELECT ON t TO {spelling}"))
+            else {
+                panic!("case: {spelling}");
+            };
+            assert!(grantees == vec![want.clone()], "case: {spelling}");
+
+            let Statement::AlterTable { actions, .. } =
+                one(&format!("ALTER TABLE t OWNER TO {spelling}"))
+            else {
+                panic!("case: {spelling}");
+            };
+            assert!(
+                actions == vec![crate::ast::AlterTableAction::OwnerTo(want.clone())],
+                "owner case: {spelling}"
+            );
+        }
+    }
+
+    /// Everything reserved is a syntax error in a role position, and `GROUP`
+    /// belongs to the privilege-grantee list alone.
+    #[test]
+    fn a_role_position_refuses_what_postgresql_reserves() {
+        use assert2::assert;
+
+        let refused = [
+            "GRANT SELECT ON t TO USER",
+            "REVOKE SELECT ON t FROM USER",
+            "GRANT USAGE ON SCHEMA s TO USER",
+            "GRANT r TO USER",
+            "ALTER TABLE t OWNER TO USER",
+            "ALTER SCHEMA s OWNER TO USER",
+            "CREATE SCHEMA x AUTHORIZATION USER",
+            // The list a role grant hands out is reached through
+            // `privilege_list`, so no keyword spelling survives there either.
+            "GRANT CURRENT_USER TO r",
+            // `GROUP` prefixes a grantee of privileges and nothing else.
+            "GRANT r TO GROUP m",
+            "ALTER TABLE t OWNER TO GROUP r",
+            "CREATE SCHEMA x AUTHORIZATION GROUP r",
+        ];
+        for sql in refused {
+            let error = crate::parse(sql).expect_err(sql);
+            assert!(error.sqlstate() == "42601", "case: {sql}");
+        }
+
+        let accepted = [
+            "GRANT SELECT ON t TO GROUP r",
+            "REVOKE SELECT ON t FROM GROUP r",
+            "GRANT SELECT ON t TO GROUP r, GROUP s",
+            "GRANT USAGE ON SCHEMA s TO GROUP r",
+        ];
+        for sql in accepted {
+            assert!(crate::parse(sql).is_ok(), "case: {sql}");
+        }
+    }
+
     /// `GRANT a TO b` is role membership, not a privilege grant. Both open with
     /// a comma-separated word list, so what closes it — `ON` for a privilege,
     /// `TO`/`FROM` for a role — is what tells them apart.
     #[test]
     fn grant_and_revoke_split_role_membership_from_privileges() {
         use assert2::assert;
+
+        use crate::ast::RoleSpec;
         struct Case {
             sql: &'static str,
             want: Statement,
@@ -15012,7 +15204,7 @@ mod tests {
                 sql: "GRANT r1 TO r2",
                 want: Statement::GrantRoles {
                     roles: vec!["r1".into()],
-                    members: vec!["r2".into()],
+                    members: vec![RoleSpec::Name("r2".into())],
                     admin_option: false,
                 },
             },
@@ -15020,7 +15212,7 @@ mod tests {
                 sql: "GRANT r1, r2 TO r3, PUBLIC WITH ADMIN OPTION",
                 want: Statement::GrantRoles {
                     roles: vec!["r1".into(), "r2".into()],
-                    members: vec!["r3".into(), "public".into()],
+                    members: vec![RoleSpec::Name("r3".into()), RoleSpec::Public],
                     admin_option: true,
                 },
             },
@@ -15028,7 +15220,7 @@ mod tests {
                 sql: "REVOKE r1 FROM r2",
                 want: Statement::RevokeRoles {
                     roles: vec!["r1".into()],
-                    members: vec!["r2".into()],
+                    members: vec![RoleSpec::Name("r2".into())],
                     admin_option: false,
                 },
             },
@@ -15036,7 +15228,7 @@ mod tests {
                 sql: "REVOKE ADMIN OPTION FOR r1, r2 FROM r3",
                 want: Statement::RevokeRoles {
                     roles: vec!["r1".into(), "r2".into()],
-                    members: vec!["r3".into()],
+                    members: vec![RoleSpec::Name("r3".into())],
                     admin_option: true,
                 },
             },
@@ -15245,13 +15437,13 @@ mod tests {
                 "ALTER VIEW v OWNER TO bob",
                 "v",
                 false,
-                Action::OwnerTo("bob".into()),
+                Action::OwnerTo(crate::ast::RoleSpec::Name("bob".into())),
             ),
             (
                 "ALTER VIEW IF EXISTS s.v OWNER TO CURRENT_USER",
                 "v",
                 true,
-                Action::OwnerTo("current_user".into()),
+                Action::OwnerTo(crate::ast::RoleSpec::CurrentUser),
             ),
             (
                 "ALTER VIEW v SET (security_invoker = true)",
@@ -20651,7 +20843,12 @@ mod tests {
             ),
             (
                 "ALTER TABLE t OWNER TO bob",
-                alter_table_stmt("t", vec![AlterTableAction::OwnerTo("bob".into())]),
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::OwnerTo(crate::ast::RoleSpec::Name(
+                        "bob".into(),
+                    ))],
+                ),
             ),
             (
                 "ALTER TABLE t SET (fillfactor = 70, autovacuum_enabled)",
@@ -22897,7 +23094,7 @@ mod q1_statement_completeness_tests {
             (
                 "ALTER MATERIALIZED VIEW m OWNER TO bob",
                 relation("m"),
-                vec![Action::OwnerTo("bob".into())],
+                vec![Action::OwnerTo(crate::ast::RoleSpec::Name("bob".into()))],
             ),
             (
                 "ALTER MATERIALIZED VIEW m SET TABLESPACE ts",

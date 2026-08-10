@@ -3414,6 +3414,7 @@ impl SqlSession {
                 // session's own role, not as the `public` placeholder a
                 // context with no scanner otherwise carries.
                 current_user: &self.current_role,
+                session_user: &self.session_user,
                 row_security: self.guc.row_security(),
                 // `INSERT … SELECT` builds its source relation through the
                 // ordinary read path, which resolves an unqualified name
@@ -7457,6 +7458,7 @@ impl SqlSession {
         let blocking_query_memory = self.blocking_query_memory;
         let own_start_ts = self.timestamp_own_start_ts;
         let current_role = self.current_role.clone();
+        let session_user = self.session_user.clone();
         let resolution = self.resolution_scope();
         let session_locks = Arc::clone(&self.session_locks);
         let session_lock_id = self.session_lock_id;
@@ -7489,6 +7491,7 @@ impl SqlSession {
             let fctx = crate::exec::ForeignCtx {
                 scanner: foreign_scanner.as_ref(),
                 current_user: &current_role,
+                session_user: &session_user,
                 resolution: &resolution,
                 catalog: None,
                 reserved_table_ids: None,
@@ -8796,6 +8799,7 @@ impl SqlSession {
         let fctx = crate::exec::ForeignCtx {
             scanner: self.foreign_scanner.as_ref(),
             current_user: &self.current_role,
+            session_user: &self.session_user,
             resolution: &resolution,
             catalog: Some(&self.catalog_kv),
             reserved_table_ids: Some(&self.reserved_table_ids),
@@ -9059,6 +9063,7 @@ impl SqlSession {
         let lock_wait_cap = self.lock_wait_cap;
         let lock_owner = self.lock_owner;
         let current_role = self.current_role.clone();
+        let session_user = self.session_user.clone();
         let row_security = self.guc.row_security();
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
@@ -9084,6 +9089,7 @@ impl SqlSession {
             let ctes = crate::cte::CteContext::empty();
             let fctx = crate::exec::ForeignCtx {
                 current_user: &current_role,
+                session_user: &session_user,
                 row_security,
                 ..crate::exec::ForeignCtx::none()
             };
@@ -9145,6 +9151,7 @@ impl SqlSession {
         let lock_wait_cap = self.lock_wait_cap;
         let lock_owner = self.lock_owner;
         let current_role = self.current_role.clone();
+        let session_user = self.session_user.clone();
         let guc_values = self.guc.effective_map();
         let row_security = self.guc.row_security();
         let guc_settings = self.guc.settings();
@@ -9199,6 +9206,7 @@ impl SqlSession {
                 lock_wait_cap,
                 fctx: crate::exec::ForeignCtx {
                     current_user: &current_role,
+                    session_user: &session_user,
                     row_security,
                     // `INSERT … SELECT` builds its source relation through the
                     // ordinary read path, which resolves an unqualified name
