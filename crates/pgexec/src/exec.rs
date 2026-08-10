@@ -826,6 +826,14 @@ pub(crate) fn execute_ddl(
                     if let Some(error) = drop_kind_mismatch(kv, name, "table") {
                         return Err(error);
                     }
+                    // The kind matched, so a synthesised catalog relation that
+                    // reaches here is a system catalog, and `PostgreSQL`'s
+                    // `DropErrorMsgWrongType` has already had its say: what is
+                    // left is the privilege refusal, which `IF EXISTS` does not
+                    // waive either.
+                    if let Some(error) = system_catalog_wrong_kind(name) {
+                        return Err(error);
+                    }
                     match crabka_pgcatalog::get_table(kv, name) {
                         Ok(table) => ops.extend(drop_table_and_dependents_ops(
                             kv, &table, &dropping, *cascade,
@@ -1250,6 +1258,16 @@ pub(crate) fn execute_ddl(
                 return Ok((command("CREATE SEQUENCE"), ops));
             }
             let table = &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
+            // `DefineIndex` opens the relation, refuses the relkinds that carry
+            // no index, and only then consults `allowSystemTableMods`, so the
+            // kind is reported ahead of the privilege for a relation that is
+            // both.
+            if let Some(error) = create_index_wrong_kind(kv, table) {
+                return Err(error);
+            }
+            if let Some(error) = system_catalog_wrong_kind(table) {
+                return Err(error);
+            }
             // An index name is never qualified: an index lands in its table's
             // schema, so only the sequence spelling above can carry one.
             let index = name
@@ -1404,6 +1422,20 @@ pub(crate) fn execute_ddl(
         }
         Statement::AlterIndexTablespace { name, tablespace } => {
             let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?;
+            if let Some(error) = system_catalog_wrong_kind(name) {
+                return Err(error);
+            }
+            // A relation of another kind is 42809 naming what was asked for,
+            // not the index catalog's 42704: `ALTER INDEX t` on a table has to
+            // say `"t" is not an index` rather than claim no index is there.
+            // No `HINT` rides this one — that is `DROP`'s family alone.
+            if let Some(error) = wrong_kind(kv, name, |kind| {
+                (kind != "index").then(|| {
+                    ExecError::WrongObjectType(format!("\"{}\" is not an index", name.name))
+                })
+            }) {
+                return Err(error);
+            }
             crabka_pgcatalog::get_index(kv, name)?;
             let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
             Ok((
@@ -1432,14 +1464,23 @@ pub(crate) fn execute_ddl(
                 }
                 // A relation of that name which is not a view is PostgreSQL's
                 // 42809, not a missing-relation report: `ALTER VIEW t` on a
-                // table must say so rather than claim `t` does not exist.
-                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
-                    if crabka_pgcatalog::get_table(kv, name).is_ok() =>
-                {
-                    return Err(ExecError::WrongObjectType(format!(
-                        "\"{}\" is not a view",
-                        name.name
-                    )));
+                // table must say so rather than claim `t` does not exist. The
+                // system-catalog refusal outranks it, as it does for every
+                // other `ALTER` spelling.
+                Err(error @ crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+                    return Err(system_catalog_wrong_kind(name).unwrap_or_else(|| {
+                        // A synthesised *view* is the one kind that reaches
+                        // here and is not a mismatch: it is a view with no
+                        // record to rewrite, so it keeps the lookup's own
+                        // error rather than being told it is not a view.
+                        match relation_kind(kv, name) {
+                            Some(kind) if kind != "view" => ExecError::WrongObjectType(format!(
+                                "\"{}\" is not a view",
+                                name.name
+                            )),
+                            _ => error.into(),
+                        }
+                    }));
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -1551,9 +1592,7 @@ pub(crate) fn execute_ddl(
             let mut ops = Vec::new();
             for table in tables {
                 let name = resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
-                if let Some(error) = grant_wrong_kind(kv, &name) {
-                    return Err(error);
-                }
+                require_grantable_relation(kv, &name)?;
                 ops.extend(crabka_pgcatalog::grant_table_privileges_ops(
                     kv, &name, grantees, privileges,
                 )?);
@@ -1617,9 +1656,7 @@ pub(crate) fn execute_ddl(
             let mut ops = Vec::new();
             for table in tables {
                 let name = resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
-                if let Some(error) = grant_wrong_kind(kv, &name) {
-                    return Err(error);
-                }
+                require_grantable_relation(kv, &name)?;
                 ops.extend(crabka_pgcatalog::revoke_table_privileges_ops(
                     kv, &name, grantees, privileges,
                 )?);
@@ -1738,6 +1775,14 @@ pub(crate) fn execute_ddl(
             // A foreign table shares the ordinary table catalog key, so `drop_table`
             // removes it (catalog entry + sequence + any rows).
             let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?;
+            // Sharing that key is exactly why the kind has to be checked here:
+            // without it `DROP FOREIGN TABLE t` dropped an ordinary table, and
+            // `DROP FOREIGN TABLE mv` a materialized view, where `PostgreSQL`
+            // reports the kind and points at the command that would have
+            // worked. `IF EXISTS` does not waive it — the relation exists.
+            if let Some(error) = drop_kind_mismatch(kv, name, "foreign table") {
+                return Err(error);
+            }
             let ops = match crabka_pgcatalog::drop_table_ops(kv, name) {
                 Ok(ops) => ops,
                 Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => Vec::new(),
@@ -8441,7 +8486,15 @@ pub(crate) fn inheritance_merge_notices(
     let mut notices = Vec::new();
     for parent in inherits {
         let name = resolve_relation(kv, resolution, parent, SchemaDisposition::Reference)?;
-        for column in crabka_pgcatalog::get_table(kv, &name)?.columns {
+        // A parent this cannot read is not reported here. The notices are
+        // cosmetic and this runs ahead of the definition, so raising the lookup
+        // failure would hand back `relation does not exist` for a name the
+        // definition refuses by kind — which is how `INHERITS (<view>)` came to
+        // claim the view was absent.
+        let Ok(table) = crabka_pgcatalog::get_table(kv, &name) else {
+            continue;
+        };
+        for column in table.columns {
             if !seen.insert(column.name.clone()) && !notices.contains(&column.name) {
                 notices.push(column.name);
             }
@@ -17570,6 +17623,69 @@ pub(crate) fn is_virtual_relation(name: &crabka_pgcatalog::RelationName) -> bool
     virtual_table(&virtual_lookup_key(name)).is_some()
 }
 
+/// The relation kind a synthesised relation answers to, in the word
+/// `PostgreSQL` writes in a message about it, or `None` when the engine
+/// synthesises no relation of that name.
+///
+/// The split is the same one [`virtual_pg_class_properties`] already projects
+/// into `pg_class.relkind`, so a relation cannot be a table to a refusal and a
+/// view to `\d`. It carries more than the word: measured over all 71
+/// synthesised relations, `relkind = 'r'` holds exactly for the ones
+/// `PostgreSQL` has pinned, and pinned is what its `allowSystemTableMods` guard
+/// tests. So a synthesised *table* is a system catalog and a synthesised *view*
+/// is an ordinary view — the two answers this whole family of statements needs.
+pub(crate) fn virtual_relation_kind(name: &crabka_pgcatalog::RelationName) -> Option<&'static str> {
+    let relation = virtual_table(&virtual_lookup_key(name))?;
+    Some(match virtual_pg_class_properties(relation, 0).0 {
+        "v" => "view",
+        _ => "table",
+    })
+}
+
+/// The synthesised relation `name` denotes, as the `Table` record every other
+/// relation would be read from, or `None` when the engine synthesises none of
+/// that name.
+///
+/// A statement that only needs the column list — `COMMENT ON COLUMN`, a
+/// `COPY`'s target list — can then treat a synthesised relation exactly as it
+/// treats a stored one, instead of carrying a second spelling for it.
+pub(crate) fn virtual_relation_table(
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<crabka_pgcatalog::Table> {
+    virtual_table(&virtual_lookup_key(name)).map(virtual_catalog_table)
+}
+
+/// True when `name` is a synthesised relation `PostgreSQL` protects with
+/// `allowSystemTableMods` — every synthesised relation whose kind is `table`.
+///
+/// Asked before any catalog read, because it needs none: the answer is a
+/// property of the name.
+fn is_system_catalog(name: &crabka_pgcatalog::RelationName) -> bool {
+    virtual_relation_kind(name) == Some("table")
+}
+
+/// `PostgreSQL`'s `allowSystemTableMods` refusal, which every statement that
+/// would write a system catalog's *definition* reports.
+///
+/// It is a 42501 rather than a 42809 because `PostgreSQL` words it as a
+/// privilege the session does not have, not as a kind mismatch — and it names
+/// the relation bare, since the name in the message is the one the statement
+/// wrote.
+fn system_catalog_refusal(name: &crabka_pgcatalog::RelationName) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("permission denied: \"{}\" is a system catalog", name.name),
+    ))
+}
+
+/// The `allowSystemTableMods` refusal `name` owes, or `None` when it is not a
+/// system catalog.
+pub(crate) fn system_catalog_wrong_kind(
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    is_system_catalog(name).then(|| system_catalog_refusal(name))
+}
+
 fn virtual_table(name: &str) -> Option<&'static str> {
     match name.strip_prefix("pg_catalog.").unwrap_or(name) {
         "pg_namespace" => Some("pg_namespace"),
@@ -22389,7 +22505,24 @@ fn inherited_table_definition(
     let mut merged = Vec::<Column>::new();
     let mut inherited_checks = Vec::new();
     for parent_name in parents {
-        let parent = crabka_pgcatalog::get_table(kv, parent_name)?;
+        let fetched = crabka_pgcatalog::get_table(kv, parent_name);
+        // A materialized view arrives through the `Ok` side, so the fetched
+        // record is asked for its kind rather than the lookup being trusted to
+        // have answered only for tables.
+        let kind = match &fetched {
+            Ok(table) => Some(stored_relation_kind(table)),
+            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+                relation_kind(kv, parent_name)
+            }
+            Err(_) => None,
+        };
+        if let Some(kind) = kind
+            && kind != "table"
+            && kind != "foreign table"
+        {
+            return Err(inherit_wrong_kind(parent_name, kind));
+        }
+        let parent = fetched?;
         for column in parent.columns {
             if let Some(existing) = merged.iter_mut().find(|item| item.name == column.name) {
                 if existing.ty != column.ty {
@@ -24079,6 +24212,16 @@ fn alter_table_ops(
     use crabka_pgparser::ast::AlterTableAction as Action;
 
     let resolution = fctx.resolution;
+
+    // `PostgreSQL` tests this in the range-var callback every `ALTER` spelling
+    // shares, before the subcommand list is looked at and before the relkind
+    // is, so a system catalog gets the same privilege refusal whichever
+    // subcommand was written — `ALTER SEQUENCE pg_class` included, which would
+    // otherwise be a kind mismatch. `IF EXISTS` does not suppress it, because
+    // the relation exists.
+    if let Some(error) = system_catalog_wrong_kind(table_name) {
+        return Err(error);
+    }
 
     // RENAME TO is a statement of its own in PostgreSQL's grammar, so it never
     // shares a comma list and keeps its dedicated catalog path.
@@ -27238,6 +27381,12 @@ fn constraint_index_named(
 /// a foreign table and a materialized view both satisfy `get_table`, and
 /// reporting either as `table` is what let `COMMENT ON TABLE` accept a foreign
 /// table before this distinction existed.
+///
+/// A synthesised catalog relation is a relation with no record under any of
+/// those keys, so it is asked for last — once every stored lookup has already
+/// missed. That ordering is what keeps an ordinary relation's cost unchanged:
+/// the extra question is answered from the name alone, and only a name no
+/// stored key holds ever reaches it.
 pub(crate) fn relation_kind(
     kv: &dyn Kv,
     name: &crabka_pgcatalog::RelationName,
@@ -27251,7 +27400,7 @@ pub(crate) fn relation_kind(
     } else if crabka_pgcatalog::get_sequence(kv, name).is_ok() {
         Some("sequence")
     } else {
-        None
+        virtual_relation_kind(name)
     }
 }
 
@@ -27373,6 +27522,11 @@ pub(crate) fn relkind_not_supported(message: String, kind: &str) -> ExecError {
 /// `PostgreSQL`'s `truncate_check_rel` refuses every kind it cannot empty with
 /// the one wording, so a view, a sequence, an index and a materialized view all
 /// get `"x" is not a table`.
+///
+/// Its system-catalog guard runs *after* that kind test, in that same function,
+/// which is the whole reason the order here is observable: `TRUNCATE pg_class`
+/// is a privilege refusal and `TRUNCATE pg_settings` a kind refusal, though
+/// both name relations no `TRUNCATE` can empty.
 pub(crate) fn truncate_wrong_kind(
     kv: &dyn Kv,
     name: &crabka_pgcatalog::RelationName,
@@ -27380,6 +27534,7 @@ pub(crate) fn truncate_wrong_kind(
     wrong_kind(kv, name, |kind| {
         (kind != "table" && kind != "foreign table").then(|| wrong_relation_kind_write_error(name))
     })
+    .or_else(|| system_catalog_wrong_kind(name))
 }
 
 /// `CLUSTER` against a relation of the wrong kind.
@@ -27387,6 +27542,11 @@ pub(crate) fn truncate_wrong_kind(
 /// `PostgreSQL` rejects a relation with no heap while the name is still being
 /// opened. A materialized view has one and gets past this, to be refused later
 /// for having no clustered index.
+///
+/// A synthesised catalog relation whose kind is `table` gets past it too, and
+/// then lands on that same later refusal — `CLUSTER pg_class` is 42704, not the
+/// privilege refusal the mutating statements earn, because reordering a heap
+/// does not rewrite a catalog's definition.
 pub(crate) fn cluster_wrong_kind(
     kv: &dyn Kv,
     name: &crabka_pgcatalog::RelationName,
@@ -27399,6 +27559,7 @@ pub(crate) fn cluster_wrong_kind(
             ))
         })
     })
+    .or_else(|| is_virtual_relation(name).then(|| no_clustered_index(name)))
 }
 
 /// `LOCK TABLE` against a relation of the wrong kind.
@@ -27458,6 +27619,78 @@ pub(crate) fn grant_wrong_kind(
     })
 }
 
+/// `CREATE INDEX ON name` where `name` is a relation that cannot carry one.
+///
+/// A materialized view can, which is why this cannot be phrased as "anything
+/// that is not a table". An index gets [`open_wrong_kind`]'s wording instead,
+/// because `PostgreSQL` rejects it while the relation is still being opened,
+/// before `DefineIndex` has a relkind to complain about.
+pub(crate) fn create_index_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    wrong_kind(kv, name, |kind| match kind {
+        "index" => Some(relkind_not_supported(
+            format!("cannot open relation \"{}\"", name.name),
+            kind,
+        )),
+        "view" | "sequence" => Some(relkind_not_supported(
+            format!("cannot create index on relation \"{}\"", name.name),
+            kind,
+        )),
+        _ => None,
+    })
+}
+
+/// `CREATE TABLE … INHERITS (name)` where `name` is a relation that cannot be
+/// inherited from.
+///
+/// Only a table and a foreign table can be, and `PostgreSQL` words the refusal
+/// after the relation name rather than after the command. An index is the
+/// exception: it never gets that far, because `relation_open` locks its relkind
+/// out first — the same split [`open_wrong_kind`] documents.
+///
+/// A materialized view is why this exists. It is stored under the table key
+/// here, so `get_table` hands one back and the clause inherited its columns:
+/// `CREATE TABLE c () INHERITS (mv)` built a child of a materialized view that
+/// `PostgreSQL` refuses outright.
+fn inherit_wrong_kind(name: &crabka_pgcatalog::RelationName, kind: &str) -> ExecError {
+    if kind == "index" {
+        return relkind_not_supported(format!("cannot open relation \"{}\"", name.name), kind);
+    }
+    ExecError::WrongObjectType(format!(
+        "inherited relation \"{}\" is not a table or foreign table",
+        name.name
+    ))
+}
+
+/// Refuse `GRANT`/`REVOKE … ON <relation>` unless the relation is there and is
+/// a kind that holds privileges.
+///
+/// Existence is asked here rather than inside the catalog's op builder because
+/// a synthesised catalog relation holds no record under any stored key and
+/// `PostgreSQL` still grants on it — `GRANT SELECT ON pg_proc` succeeds. Only
+/// this side of the seam knows which names the engine synthesises.
+///
+/// # Errors
+///
+/// Returns 42P01 when no relation of that name exists, or 42809 when the
+/// relation holds no privileges to grant.
+fn require_grantable_relation(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<(), ExecError> {
+    if let Some(error) = grant_wrong_kind(kv, name) {
+        return Err(error);
+    }
+    if crabka_pgcatalog::relation_exists(kv, name)? || is_virtual_relation(name) {
+        return Ok(());
+    }
+    Err(ExecError::Catalog(
+        crabka_pgcatalog::CatalogError::UndefinedTable(name.to_string()),
+    ))
+}
+
 /// `INSERT`/`UPDATE`/`DELETE` against a relation of the wrong kind.
 ///
 /// A sequence has its own wording, and an index never gets as far as one —
@@ -27510,19 +27743,24 @@ pub(crate) fn require_materialized_view(
     kv: &dyn Kv,
     name: &crabka_pgcatalog::RelationName,
 ) -> Result<crabka_pgcatalog::Table, ExecError> {
+    let not_a_matview =
+        || ExecError::Unsupported(format!("\"{}\" is not a materialized view", name.name));
     match crabka_pgcatalog::get_table(kv, name) {
         Ok(table) if table.materialized.is_some() => Ok(table),
-        Ok(_) => Err(ExecError::Unsupported(format!(
-            "\"{}\" is not a materialized view",
-            name.name
-        ))),
-        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
-            if relation_kind(kv, name).is_some() =>
-        {
-            Err(ExecError::WrongObjectType(format!(
-                "\"{}\" is not a table or materialized view",
-                name.name
-            )))
+        Ok(_) => Err(not_a_matview()),
+        // Which of the two refusals a name earns follows from its *kind*, not
+        // from which lookup answered: a synthesised catalog relation has no
+        // record under any stored key, and one whose kind is `table` still has
+        // to take the heap-bearing route the stored tables above take.
+        Err(error @ crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+            match relation_kind(kv, name) {
+                Some("table" | "foreign table") => Err(not_a_matview()),
+                Some(_) => Err(ExecError::WrongObjectType(format!(
+                    "\"{}\" is not a table or materialized view",
+                    name.name
+                ))),
+                None => Err(error.into()),
+            }
         }
         Err(error) => Err(error.into()),
     }
@@ -27603,7 +27841,14 @@ fn comment_ops(
         }
         "column" => {
             let column = column.expect("a column comment always splits off a column");
-            let table = crabka_pgcatalog::get_table(kv, &relation)?;
+            // A synthesised catalog relation has a column list without having a
+            // record under the table key, and `PostgreSQL` comments on its
+            // columns like any other's. Consulted only once `get_table` has
+            // missed, so an ordinary relation pays nothing for it.
+            let table = match crabka_pgcatalog::get_table(kv, &relation) {
+                Ok(table) => table,
+                Err(error) => virtual_relation_table(&relation).ok_or(error)?,
+            };
             if table.column_index(column).is_none() {
                 return Err(ExecError::UndefinedTableColumn {
                     column: column.to_string(),

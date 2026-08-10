@@ -4616,9 +4616,9 @@ fn table_privilege_ops(
 ) -> Result<Vec<WriteOp>, CatalogError> {
     // `GRANT … ON` names a relation, not specifically a table: a view is a
     // grantable object in its own right and the regression suite grants on one.
-    if !relation_exists(kv, table)? {
-        return Err(CatalogError::UndefinedTable(table.to_string()));
-    }
+    // Whether the relation is there at all is the caller's question, not this
+    // one's — the engine synthesises relations that hold no record under any
+    // key here, and `PostgreSQL` grants on those too.
     let mut ops = Vec::new();
     for grantee in grantees {
         // `PUBLIC` and the bootstrap superuser are roles with no `pg_authid`
@@ -6259,8 +6259,12 @@ mod tests {
         );
     }
 
+    /// Whether the relation is there is the caller's question: this builds the
+    /// grant for whatever name it is handed, because the engine synthesises
+    /// relations that hold no record under any key here and `PostgreSQL` grants
+    /// on those too. What it still refuses is a grantee no role holds.
     #[test]
-    fn granting_on_something_that_is_no_relation_is_undefined_table() {
+    fn granting_on_a_name_with_no_record_still_builds_the_grant() {
         use assert2::assert;
 
         let kv = MemKv::new();
@@ -6279,10 +6283,21 @@ mod tests {
             ),
         ] {
             assert!(
-                ops.expect_err("no such relation")
-                    == CatalogError::UndefinedTable(rel("missing").to_string())
+                ops.expect("the relation lookup is not this function's")
+                    .len()
+                    == 1
             );
         }
+        assert!(
+            grant_table_privileges_ops(
+                &kv,
+                &rel("missing"),
+                &["nobody".to_string()],
+                &["SELECT".to_string()],
+            )
+            .expect_err("an unheld name is not a grantee")
+                == CatalogError::UndefinedObject("nobody".into())
+        );
     }
 
     #[test]

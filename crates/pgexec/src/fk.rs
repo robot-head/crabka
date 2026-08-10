@@ -387,18 +387,31 @@ fn load_referenced_relation(
     catalog_kv: &dyn Kv,
     name: &RelationName,
 ) -> Result<(Table, Vec<Index>), ExecError> {
+    // A synthesised catalog relation whose kind is `table` is a system catalog,
+    // and `PostgreSQL` refuses the reference as a privilege rather than as a
+    // kind: adding a foreign key writes the referenced relation's trigger set.
+    if let Some(error) = crate::exec::system_catalog_wrong_kind(name) {
+        return Err(error);
+    }
     match crabka_pgcatalog::get_table(catalog_kv, name) {
+        // A materialized view is stored under the table key, so the fetched
+        // record has to be asked what it is: referencing one built a foreign
+        // key `PostgreSQL` refuses outright.
+        Ok(table) if crate::exec::stored_relation_kind(&table) != "table" => {
+            Err(ExecError::ReferencedRelationNotATable(name.name.clone()))
+        }
         Ok(table) => {
-            if table.foreign.is_some() {
-                return Err(ExecError::ReferencedRelationNotATable(name.name.clone()));
-            }
             let indexes = crabka_pgcatalog::list_table_indexes(catalog_kv, name)?;
             Ok((table, indexes))
         }
         Err(error) => {
-            if crabka_pgcatalog::get_view(catalog_kv, name).is_ok()
-                || crabka_pgcatalog::get_sequence(catalog_kv, name).is_ok()
-            {
+            // An index never reaches the referenced-relation test: PostgreSQL's
+            // `relation_open` locks its relkind out first, so it reports the
+            // open rather than the reference.
+            if let Some(refusal) = crate::exec::open_wrong_kind(catalog_kv, name) {
+                return Err(refusal);
+            }
+            if crate::exec::relation_kind(catalog_kv, name).is_some() {
                 return Err(ExecError::ReferencedRelationNotATable(name.name.clone()));
             }
             Err(error.into())

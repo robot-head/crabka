@@ -4857,12 +4857,16 @@ impl SqlSession {
                 return Err(error);
             }
             // A view is lockable in PostgreSQL, which locks it and recursively
-            // what it reads. Gres's relation locks are consulted by `LOCK TABLE`
-            // alone — ordinary DML serializes on row locks — so a view has no
-            // lock identity to take, and resolving it is the whole of the
-            // observable behaviour. Every other name still goes through
-            // `get_table`, so one that belongs to nothing keeps its 42P01.
-            if crabka_pgcatalog::get_view(&*self.catalog_kv, &name).is_ok() {
+            // what it reads, and so is a synthesised catalog relation. Gres's
+            // relation locks are consulted by `LOCK TABLE` alone — ordinary DML
+            // serializes on row locks — and neither kind holds rows this engine
+            // writes, so neither has a lock identity to take and resolving it is
+            // the whole of the observable behaviour. Every other name still goes
+            // through `get_table`, so one that belongs to nothing keeps its
+            // 42P01.
+            if crabka_pgcatalog::get_view(&*self.catalog_kv, &name).is_ok()
+                || crate::exec::is_virtual_relation(&name)
+            {
                 continue;
             }
             let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name)?;
@@ -9672,7 +9676,9 @@ impl SqlSession {
             // A relation this copy cannot scan row by row. PostgreSQL names the
             // kind and, for a view, points at the spelling that does work.
             Err(error) => {
-                if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &resolved).is_ok() {
+                if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &resolved).is_ok()
+                    || crate::exec::virtual_relation_kind(&resolved) == Some("view")
+                {
                     return Err(ExecError::Remote(
                         PgError::error(
                             "42809",
@@ -9694,7 +9700,14 @@ impl SqlSession {
                 {
                     return Err(error);
                 }
-                return Err(error.into());
+                // Only the column list is read from this record, and the
+                // rewritten `SELECT` reads a synthesised catalog relation the
+                // way every other query does, so `COPY pg_class TO` needs
+                // nothing beyond the columns.
+                match crate::exec::virtual_relation_table(&resolved) {
+                    Some(table) => table,
+                    None => return Err(error.into()),
+                }
             }
         };
         let projection = match columns {
@@ -12647,7 +12660,9 @@ impl SqlSession {
         // kind, and for a view points at what would make it work — a refusal
         // that has to arrive before `CopyInResponse` for the same reason the
         // privilege test does.
-        if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &resolved).is_ok() {
+        if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &resolved).is_ok()
+            || crate::exec::virtual_relation_kind(&resolved) == Some("view")
+        {
             return Err(ExecError::Remote(
                 PgError::error(
                     "42809",
