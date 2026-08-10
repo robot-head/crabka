@@ -1,16 +1,16 @@
 //! Diskless WAL object-store flusher.
 
-#![allow(dead_code)]
-
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 
-use crabka_log::{Log, Offset};
-use crabka_units::{ByteSize, mebibytes};
+use crabka_log::Offset;
+use crabka_metadata::{MetadataImage, NodeId};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, mebibytes};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
@@ -18,6 +18,7 @@ use super::{
     wal_index::{WalFlushRecord, WalIndexCache, WalIndexEntry},
     wal_object::WalObjectBuilder,
 };
+use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
 pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 pub(crate) const FLUSH_MAX_SIZE: ByteSize = mebibytes(8);
@@ -42,13 +43,96 @@ impl Default for FlushConfig {
 
 pub(crate) struct FlushPartition {
     pub(crate) topic_id: Uuid,
-    pub(crate) partition: i32,
-    pub(crate) log: Arc<Mutex<Log>>,
+    pub(crate) handle: Arc<Partition>,
     pub(crate) high_watermark: Offset,
+}
+
+/// Dependencies owned by the broker's diskless flush task.
+pub(crate) struct FlusherContext {
+    pub(crate) partitions: Arc<PartitionRegistry>,
+    pub(crate) image_rx: tokio::sync::watch::Receiver<Arc<MetadataImage>>,
+    pub(crate) object_store: Arc<dyn ObjectStore>,
+    pub(crate) index_log: DisklessIndexLog,
+    pub(crate) node_id: NodeId,
+    pub(crate) broker_id: i32,
+}
+
+/// Flush committed tails until broker shutdown. A failed tick does not move
+/// the durable index frontier, so the next tick safely retries the same tail.
+pub(crate) async fn run(context: FlusherContext, config: FlushConfig, shutdown: CancellationToken) {
+    let mut ticker = tokio::time::interval(config.interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut rotation = 0usize;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {}
+            () = shutdown.cancelled() => {
+                tracing::debug!("diskless WAL flusher shutting down");
+                return;
+            }
+        }
+        if let Err(error) = flush_tick(&context, &config, rotation).await {
+            tracing::warn!(%error, "diskless WAL flush failed; retrying");
+        }
+        rotation = rotation.wrapping_add(1);
+    }
+}
+
+async fn flush_tick(
+    context: &FlusherContext,
+    config: &FlushConfig,
+    rotation: usize,
+) -> Result<Option<WalFlushRecord>, crate::error::BrokerError> {
+    let image = context.image_rx.borrow().clone();
+    let mut partitions = flushable_partitions(&context.partitions, &image, context.node_id).await;
+    if !partitions.is_empty() {
+        let start = rotation % partitions.len();
+        partitions.rotate_left(start);
+    }
+    flush_once(
+        Arc::clone(&context.object_store),
+        context.broker_id,
+        &context.index_log,
+        context.index_log.cache(),
+        &partitions,
+        config,
+    )
+    .await
+}
+
+async fn flushable_partitions(
+    registry: &PartitionRegistry,
+    image: &MetadataImage,
+    node_id: NodeId,
+) -> Vec<FlushPartition> {
+    // Snapshot registry handles before awaiting any partition state.
+    let mut out = Vec::new();
+    for handle in registry.arcs() {
+        if !handle.diskless || handle.current_leader.load(Ordering::Relaxed) != node_id {
+            continue;
+        }
+        let Some(topic_id) = image.topic(&handle.topic).map(|topic| topic.topic_id) else {
+            continue;
+        };
+        let high_watermark = handle.high_watermark().await;
+        out.push(FlushPartition {
+            topic_id,
+            handle,
+            high_watermark,
+        });
+    }
+    out.sort_unstable_by(|left, right| {
+        left.handle
+            .topic
+            .cmp(&right.handle.topic)
+            .then_with(|| left.handle.index.cmp(&right.handle.index))
+    });
+    out
 }
 
 pub(crate) async fn flush_once(
     object_store: Arc<dyn ObjectStore>,
+    broker_id: i32,
     index_log: &DisklessIndexLog,
     cache: Arc<AsyncMutex<WalIndexCache>>,
     partitions: &[FlushPartition],
@@ -56,23 +140,37 @@ pub(crate) async fn flush_once(
 ) -> Result<Option<WalFlushRecord>, crate::error::BrokerError> {
     let mut builder = WalObjectBuilder::new();
     for partition in partitions {
+        let remaining = config
+            .max_size
+            .bytes_usize()
+            .saturating_sub(builder.body_len());
+        if remaining == 0 {
+            break;
+        }
         let start = cache
             .lock()
             .await
-            .flushed_frontier(partition.topic_id, partition.partition)
-            .unwrap_or(0);
-        let raw = partition
-            .log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .read_raw(Offset(start), partition.high_watermark, config.max_size)
-            .map_err(crate::error::BrokerError::from)?;
+            .flushed_frontier(partition.topic_id, partition.handle.index.get());
+        let raw = {
+            let log = partition
+                .handle
+                .log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let start = start.unwrap_or_else(|| log.log_start_offset().0);
+            log.read_raw(
+                Offset(start),
+                partition.high_watermark,
+                ByteSize::from_bytes(u64::try_from(remaining).unwrap_or(u64::MAX)),
+            )
+            .map_err(crate::error::BrokerError::from)?
+        };
         let Some(last_offset) = raw.last_offset else {
             continue;
         };
         builder.append_run(
             partition.topic_id,
-            partition.partition,
+            partition.handle.index.get(),
             raw.start_offset.0,
             last_offset.0,
             &raw.bytes,
@@ -82,7 +180,7 @@ pub(crate) async fn flush_once(
     if builder.is_empty() {
         return Ok(None);
     }
-    let object_key = format!("diskless-wal/{}.ckwl", Uuid::new_v4());
+    let object_key = format!("diskless-wal/{broker_id}/{}.ckwl", Uuid::new_v4());
     let object = builder.finish();
     object_store
         .put(
@@ -117,17 +215,19 @@ pub(crate) async fn flush_once(
             if let Some(frontier) = cache
                 .lock()
                 .await
-                .flushed_frontier(partition.topic_id, partition.partition)
+                .flushed_frontier(partition.topic_id, partition.handle.index.get())
             {
-                let hw_trim_floor = partition.high_watermark.0.saturating_sub(lag);
+                let hw_trim_floor = partition.high_watermark.0.saturating_sub(lag.max(0));
                 let trim_to = frontier.min(hw_trim_floor);
-                if trim_to > 0 {
-                    partition
-                        .log
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .trim_to_offset(Offset(trim_to))
-                        .map_err(crate::error::BrokerError::from)?;
+                let current_start = partition
+                    .handle
+                    .log
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .log_start_offset()
+                    .0;
+                if trim_to > current_start {
+                    partition.handle.trim_to_offset(Offset(trim_to)).await?;
                 }
             }
         }
@@ -161,8 +261,11 @@ async fn wait_for_committed_projection(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path as FsPath;
+
     use assert2::assert;
-    use crabka_log::LogConfig;
+    use crabka_log::{Log, LogConfig};
+    use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::records::{Attributes, Record, RecordBatch};
     use object_store::memory::InMemory;
     use tempfile::tempdir;
@@ -194,12 +297,35 @@ mod tests {
         }
     }
 
+    async fn test_partition(
+        root: &FsPath,
+        topic: &str,
+        partition: i32,
+        diskless: bool,
+        leader: NodeId,
+    ) -> Arc<Partition> {
+        let partition_dir = root.join(format!("{topic}-{partition}"));
+        std::fs::create_dir_all(&partition_dir).unwrap();
+        let mut log = Log::open(&partition_dir, LogConfig::default()).unwrap();
+        log.append(&mut batch(3)).unwrap();
+        let handle = crate::broker::spawn_partition(
+            topic.to_owned(),
+            crabka_ids::PartitionIndex(partition),
+            root.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+            diskless,
+        );
+        handle.current_leader.store(leader.0, Ordering::Relaxed);
+        handle.install_diskless_durable_hw(Offset(3)).await;
+        handle
+    }
+
     #[tokio::test]
     async fn flusher_writes_object_and_publishes_index() {
         let dir = tempdir().unwrap();
-        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        log.append(&mut batch(3)).unwrap();
-        let log = Arc::new(Mutex::new(log));
+        let handle = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let event_log = crabka_remote_storage_topic::InProcessMetadataEventLog::new(1);
         let index = DisklessIndexLog::start(event_log);
@@ -207,12 +333,12 @@ mod tests {
         let cache = index.cache();
         let record = flush_once(
             store.clone(),
+            7,
             &index,
             cache.clone(),
             &[FlushPartition {
                 topic_id,
-                partition: 0,
-                log: log.clone(),
+                handle: Arc::clone(&handle),
                 high_watermark: Offset(3),
             }],
             &FlushConfig::default(),
@@ -225,7 +351,219 @@ mod tests {
         assert!(record.entries[0].last_offset == 2);
         assert!(cache.lock().await.flushed_frontier(topic_id, 0) == Some(3));
         assert!(store.head(&Path::from(record.object_key)).await.is_ok());
-        assert!(log.lock().unwrap().log_start_offset() == Offset(2));
+        assert!(handle.log.lock().unwrap().log_start_offset() == Offset(2));
+    }
+
+    #[tokio::test]
+    async fn combined_object_stops_after_size_budget() {
+        let dir = tempdir().unwrap();
+        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
+        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1)).await;
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let index = DisklessIndexLog::start(
+            crabka_remote_storage_topic::InProcessMetadataEventLog::new(1),
+        );
+        let cache = index.cache();
+        let config = FlushConfig {
+            max_size: ByteSize::from_bytes(1),
+            trim_safety_lag: None,
+            ..FlushConfig::default()
+        };
+
+        let record = flush_once(
+            store,
+            7,
+            &index,
+            cache,
+            &[
+                FlushPartition {
+                    topic_id: Uuid::from_u128(11),
+                    handle: first,
+                    high_watermark: Offset(3),
+                },
+                FlushPartition {
+                    topic_id: Uuid::from_u128(11),
+                    handle: second,
+                    high_watermark: Offset(3),
+                },
+            ],
+            &config,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(record.entries.len() == 1);
+        assert!(record.entries[0].partition == 0);
+    }
+
+    #[tokio::test]
+    async fn tick_rotates_size_limited_flush_start() {
+        let dir = tempdir().unwrap();
+        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
+        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1)).await;
+        let partitions = Arc::new(PartitionRegistry::new());
+        partitions.insert("orders".into(), crabka_ids::PartitionIndex(0), first);
+        partitions.insert("orders".into(), crabka_ids::PartitionIndex(1), second);
+
+        let topic_id = Uuid::from_u128(11);
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id,
+            partitions: 2,
+            replication_factor: 1,
+        }));
+        let (_, image_rx) = tokio::sync::watch::channel(Arc::new(image));
+        let index = DisklessIndexLog::start(
+            crabka_remote_storage_topic::InProcessMetadataEventLog::new(1),
+        );
+        let cache = index.cache();
+        let context = FlusherContext {
+            partitions,
+            image_rx,
+            object_store: Arc::new(InMemory::new()),
+            index_log: index,
+            node_id: NodeId(1),
+            broker_id: 7,
+        };
+
+        flush_tick(
+            &context,
+            &FlushConfig {
+                max_size: ByteSize::from_bytes(1),
+                trim_safety_lag: None,
+                ..FlushConfig::default()
+            },
+            1,
+        )
+        .await
+        .unwrap();
+
+        let cache = cache.lock().await;
+        assert!(cache.flushed_frontier(topic_id, 0).is_none());
+        assert!(cache.flushed_frontier(topic_id, 1) == Some(3));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_rotates_size_limited_flushes_without_starvation() {
+        let dir = tempdir().unwrap();
+        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
+        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1)).await;
+        let partitions = Arc::new(PartitionRegistry::new());
+        partitions.insert("orders".into(), crabka_ids::PartitionIndex(0), first);
+        partitions.insert("orders".into(), crabka_ids::PartitionIndex(1), second);
+
+        let topic_id = Uuid::from_u128(11);
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id,
+            partitions: 2,
+            replication_factor: 1,
+        }));
+        let (_, image_rx) = tokio::sync::watch::channel(Arc::new(image));
+        let index = DisklessIndexLog::start(
+            crabka_remote_storage_topic::InProcessMetadataEventLog::new(1),
+        );
+        let cache = index.cache();
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(run(
+            FlusherContext {
+                partitions,
+                image_rx,
+                object_store: Arc::new(InMemory::new()),
+                index_log: index,
+                node_id: NodeId(1),
+                broker_id: 7,
+            },
+            FlushConfig {
+                interval: Duration::from_millis(1),
+                max_size: ByteSize::from_bytes(1),
+                trim_safety_lag: None,
+            },
+            shutdown.clone(),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let cache = cache.lock().await;
+                if cache.flushed_frontier(topic_id, 0) == Some(3)
+                    && cache.flushed_frontier(topic_id, 1) == Some(3)
+                {
+                    break;
+                }
+                drop(cache);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_flushes_only_led_diskless_partitions_and_stops() {
+        let dir = tempdir().unwrap();
+        let led = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
+        let follower = test_partition(dir.path(), "orders", 1, true, NodeId(2)).await;
+        let local = test_partition(dir.path(), "orders", 2, false, NodeId(1)).await;
+        let partitions = Arc::new(PartitionRegistry::new());
+        partitions.insert("orders".into(), crabka_ids::PartitionIndex(0), led);
+        partitions.insert("orders".into(), crabka_ids::PartitionIndex(1), follower);
+        partitions.insert("orders".into(), crabka_ids::PartitionIndex(2), local);
+
+        let topic_id = Uuid::from_u128(11);
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id,
+            partitions: 3,
+            replication_factor: 1,
+        }));
+        let (_, image_rx) = tokio::sync::watch::channel(Arc::new(image));
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let index = DisklessIndexLog::start(
+            crabka_remote_storage_topic::InProcessMetadataEventLog::new(1),
+        );
+        let cache = index.cache();
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(run(
+            FlusherContext {
+                partitions,
+                image_rx,
+                object_store: Arc::clone(&store),
+                index_log: index,
+                node_id: NodeId(1),
+                broker_id: 7,
+            },
+            FlushConfig {
+                interval: Duration::from_millis(1),
+                trim_safety_lag: None,
+                ..FlushConfig::default()
+            },
+            shutdown.clone(),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if cache.lock().await.flushed_frontier(topic_id, 0) == Some(3) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.cancel();
+        task.await.unwrap();
+
+        assert!(cache.lock().await.flushed_frontier(topic_id, 1).is_none());
+        assert!(cache.lock().await.flushed_frontier(topic_id, 2).is_none());
+        let object_key = cache.lock().await.lookup(topic_id, 0, 0).unwrap().0;
+        assert!(object_key.starts_with("diskless-wal/7/"));
+        assert!(store.head(&Path::from(object_key)).await.is_ok());
     }
 
     #[tokio::test]

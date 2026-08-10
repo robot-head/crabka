@@ -1,7 +1,5 @@
 //! Diskless WAL offset-to-object index records and in-memory projection.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap};
 
 use bytes::Bytes;
@@ -102,15 +100,6 @@ impl WalIndexCache {
             .values()
             .next()
             .map(|(_, entry)| entry.first_offset)
-    }
-
-    /// Remove all projected entries that point at `object_key`.
-    pub fn tombstone_object(&mut self, object_key: &str) {
-        for entries in self.by_topic_partition.values_mut() {
-            entries.retain(|_, (key, _)| key != object_key);
-        }
-        self.by_topic_partition
-            .retain(|_, entries| !entries.is_empty());
     }
 }
 

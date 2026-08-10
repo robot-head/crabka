@@ -19,10 +19,15 @@ pub(crate) struct DisklessReadHandle {
 }
 
 impl DisklessReadHandle {
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn new(index: Arc<AsyncMutex<WalIndexCache>>, store: Arc<dyn ObjectStore>) -> Self {
         Self { index, store }
+    }
+
+    /// Clone the raw object-store handle for the background WAL flusher.
+    #[must_use]
+    pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
+        Arc::clone(&self.store)
     }
 
     async fn read_run(&self, topic_id: Uuid, partition: i32, offset: i64) -> Option<Bytes> {

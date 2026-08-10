@@ -1338,8 +1338,16 @@ fn spawn_cluster_data_maintenance(
 }
 
 fn kafka_swap_kickoff(config: &BrokerConfig) -> Option<KafkaSwapKickoff> {
-    let crate::config::RlmmKind::TopicBacked(metadata_config) = &config.remote_log_metadata else {
-        return None;
+    config.remote_storage_backend.as_ref()?;
+    // The diskless WAL index is always topic-backed, even when tests opt the
+    // KIP-405 RLMM itself into its in-memory implementation.
+    let default_metadata_config;
+    let metadata_config = match &config.remote_log_metadata {
+        crate::config::RlmmKind::TopicBacked(metadata_config) => metadata_config,
+        crate::config::RlmmKind::InMemory => {
+            default_metadata_config = crate::config::KafkaRlmmConfig::default();
+            &default_metadata_config
+        }
     };
     let listeners = config.effective_listeners();
     let inter_broker = listeners
@@ -1716,7 +1724,7 @@ fn spawn_rlmm_bootstrap(
     }))
 }
 
-fn spawn_diskless_index_bootstrap(
+fn spawn_diskless_bootstrap(
     broker: &Arc<Broker>,
     kickoff: Option<&KafkaSwapKickoff>,
     shutdown: &CancellationToken,
@@ -1725,10 +1733,17 @@ fn spawn_diskless_index_bootstrap(
         return None;
     };
     let cache = Arc::clone(&handle.index);
+    let flusher = DisklessFlusherStartup {
+        partitions: Arc::clone(&broker.partitions),
+        image_rx: broker.controller.watch_image(),
+        object_store: handle.object_store(),
+        node_id: broker.config.node_id,
+        broker_id: broker.config.broker_id,
+    };
     let kickoff = kickoff.clone();
     let shutdown = shutdown.clone();
     Some(tokio::spawn(async move {
-        bootstrap_diskless_index_log(cache, kickoff, shutdown).await;
+        bootstrap_diskless_index_log(cache, kickoff, flusher, shutdown).await;
     }))
 }
 
@@ -1847,14 +1862,14 @@ async fn finish_broker_startup(
         runtime.kafka_swap_kickoff.as_ref(),
         &shutdown,
     );
-    let diskless_index_task =
-        spawn_diskless_index_bootstrap(&broker, runtime.kafka_swap_kickoff.as_ref(), &shutdown);
+    let diskless_task =
+        spawn_diskless_bootstrap(&broker, runtime.kafka_swap_kickoff.as_ref(), &shutdown);
     Ok(BrokerHandle {
         listen_addr,
         shutdown,
         listener_tasks,
         topic_rlmm_task,
-        diskless_index_task,
+        diskless_task,
         broker,
     })
 }
@@ -2156,9 +2171,9 @@ pub struct BrokerHandle {
     /// Topic-backed RLMM bootstrap and assignment task. Retained so shutdown
     /// can join it before the Tokio runtime drops.
     topic_rlmm_task: Option<JoinHandle<()>>,
-    /// Topic-backed diskless WAL index projection task. Retained so shutdown
-    /// can join it before the Tokio runtime drops.
-    diskless_index_task: Option<JoinHandle<()>>,
+    /// Topic-backed diskless WAL index projection and object flusher task.
+    /// Retained so shutdown can join it before the Tokio runtime drops.
+    diskless_task: Option<JoinHandle<()>>,
     /// Held so partition writer tasks live as long as the handle.
     broker: Arc<Broker>,
 }
@@ -3505,7 +3520,7 @@ impl BrokerHandle {
         if let Some(task) = self.topic_rlmm_task.take() {
             let _ = task.await;
         }
-        if let Some(task) = self.diskless_index_task.take() {
+        if let Some(task) = self.diskless_task.take() {
             let _ = task.await;
         }
         for t in self.listener_tasks.drain(..) {
@@ -4078,9 +4093,18 @@ async fn bootstrap_topic_rlmm(
     tokio::join!(image_watcher, reconciler);
 }
 
+struct DisklessFlusherStartup {
+    partitions: Arc<PartitionRegistry>,
+    image_rx: tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>>,
+    object_store: Arc<dyn object_store::ObjectStore>,
+    node_id: crabka_metadata::NodeId,
+    broker_id: i32,
+}
+
 async fn bootstrap_diskless_index_log(
     cache: Arc<tokio::sync::Mutex<crate::diskless::wal_index::WalIndexCache>>,
     config: KafkaSwapKickoff,
+    flusher: DisklessFlusherStartup,
     shutdown: CancellationToken,
 ) {
     let log_config = metadata_log_config(
@@ -4098,13 +4122,25 @@ async fn bootstrap_diskless_index_log(
         match started {
             Ok(log) => {
                 let log: Arc<dyn crabka_remote_storage_topic::MetadataEventLog> = log;
-                let _index =
+                let index_log =
                     crate::diskless::index_log::DisklessIndexLog::start_with_cache(log, cache);
                 tracing::info!(
                     topic = crate::diskless::index_log::DISKLESS_WAL_INDEX_TOPIC,
-                    "diskless WAL index projection started"
+                    "diskless WAL index projection and object flusher started"
                 );
-                shutdown.cancelled().await;
+                crate::diskless::flusher::run(
+                    crate::diskless::flusher::FlusherContext {
+                        partitions: flusher.partitions,
+                        image_rx: flusher.image_rx,
+                        object_store: flusher.object_store,
+                        index_log,
+                        node_id: flusher.node_id,
+                        broker_id: flusher.broker_id,
+                    },
+                    crate::diskless::flusher::FlushConfig::default(),
+                    shutdown,
+                )
+                .await;
                 return;
             }
             Err(error) => {
@@ -6667,6 +6703,24 @@ protocol = "Plaintext"
                 "current {current:?}"
             );
         }
+    }
+
+    #[test]
+    fn diskless_index_gets_topic_kickoff_with_in_memory_rlmm() {
+        let dir = tempdir().unwrap();
+        let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        check!(matches!(
+            config.remote_log_metadata,
+            crate::config::RlmmKind::InMemory
+        ));
+        check!(kafka_swap_kickoff(&config).is_none());
+
+        config.remote_storage_backend = Some(crate::config::RemoteStorageBackend::Local {
+            dir: dir.path().join("objects"),
+        });
+        let kickoff = kafka_swap_kickoff(&config).expect("diskless index kickoff");
+        check!(kickoff.cfg.num_partitions == crate::config::DEFAULT_RLMM_TOPIC_NUM_PARTITIONS);
+        check!(kickoff.cfg.replication == crate::config::DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR);
     }
 
     #[test]
