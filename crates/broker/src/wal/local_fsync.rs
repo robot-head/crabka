@@ -50,6 +50,27 @@ impl WalStore for LocalFsyncWal {
         res.map_err(BrokerError::from)?;
         Ok(leo)
     }
+
+    async fn trim_to_offset(&self, new_start: Offset) -> Result<Offset, BrokerError> {
+        let log = self.log.clone();
+        let result = match tokio::runtime::Handle::current().runtime_flavor() {
+            RuntimeFlavor::MultiThread => tokio::task::block_in_place(|| {
+                log.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .trim_to_offset(new_start)
+            }),
+            _ => tokio::task::spawn_blocking(move || {
+                log.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .trim_to_offset(new_start)
+            })
+            .await
+            .map_err(|error| {
+                crate::partition_writer::storage_failure_error("wal trim task panicked", error)
+            })?,
+        };
+        result.map_err(BrokerError::from)
+    }
 }
 
 #[cfg(test)]
@@ -88,6 +109,22 @@ mod tests {
         // Durable watermark only advances after sync_durable.
         let durable = w.sync_durable(leo).await.unwrap();
         assert!(durable == leo);
+    }
+
+    #[tokio::test]
+    async fn trim_advances_the_local_wal_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = wal(dir.path());
+        let (_results, leo) =
+            crate::partition_writer::run_produce_append_batch(w.log.clone(), vec![sample_owned(3)])
+                .await
+                .unwrap();
+        w.sync_durable(leo).await.unwrap();
+
+        let start = w.trim_to_offset(Offset(2)).await.unwrap();
+
+        assert!(start >= Offset(2));
+        assert!(w.log.lock().unwrap().log_start_offset() == start);
     }
 
     fn sample_owned(n: i32) -> ProduceData {

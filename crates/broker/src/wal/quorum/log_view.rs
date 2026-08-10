@@ -23,6 +23,11 @@ impl ShardLog {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    #[must_use]
+    pub(crate) fn shares_log(&self, other: &Arc<Mutex<Log>>) -> bool {
+        Arc::ptr_eq(&self.log, other)
+    }
 }
 
 impl LogView for ShardLog {

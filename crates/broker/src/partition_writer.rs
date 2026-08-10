@@ -470,20 +470,29 @@ async fn handle_reset(
 async fn handle_trim(
     log: &Arc<Mutex<Log>>,
     storage_status: (&Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
+    wal: Option<&crate::wal::SharedWal>,
     new_start: Offset,
     ack: tokio::sync::oneshot::Sender<Result<Offset, crate::error::BrokerError>>,
 ) {
-    let log_for_blocking = Arc::clone(log);
-    let result = run_log_mutation(
-        move || {
-            lock_log(&log_for_blocking)
-                .trim_to_offset(new_start)
-                .map_err(crate::error::BrokerError::from)
-        },
-        "trim_to_offset task panicked",
-        storage_status,
-    )
-    .await;
+    let result = if let Some(wal) = wal {
+        let result = wal.trim_to_offset(new_start).await;
+        if let Err(error) = &result {
+            flag_storage_failure(error, storage_status.0, storage_status.1);
+        }
+        result
+    } else {
+        let log_for_blocking = Arc::clone(log);
+        run_log_mutation(
+            move || {
+                lock_log(&log_for_blocking)
+                    .trim_to_offset(new_start)
+                    .map_err(crate::error::BrokerError::from)
+            },
+            "trim_to_offset task panicked",
+            storage_status,
+        )
+        .await
+    };
     let _ = ack.send(result);
 }
 
@@ -593,7 +602,14 @@ pub async fn run_with_sequencer(
                 .await;
             }
             WriterMessage::TrimToOffset { new_start, ack } => {
-                handle_trim(&log, (&log_dir, &log_dir_status), new_start, ack).await;
+                handle_trim(
+                    &log,
+                    (&log_dir, &log_dir_status),
+                    wal.as_ref(),
+                    new_start,
+                    ack,
+                )
+                .await;
             }
             WriterMessage::SetLogConfig { config, ack } => {
                 lock_log(&log).set_config(config);
@@ -808,6 +824,7 @@ mod tests {
     struct GatedWal {
         sync_started: Mutex<Option<oneshot::Sender<()>>>,
         release_sync: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+        trimmed_to: AtomicI64,
     }
 
     impl GatedWal {
@@ -815,6 +832,7 @@ mod tests {
             Self {
                 sync_started: Mutex::new(Some(sync_started)),
                 release_sync: tokio::sync::Mutex::new(Some(release_sync)),
+                trimmed_to: AtomicI64::new(-1),
             }
         }
     }
@@ -833,6 +851,14 @@ mod tests {
                 .expect("sync release receiver present");
             release.await.expect("sync release sent");
             Ok(leo)
+        }
+
+        async fn trim_to_offset(
+            &self,
+            new_start: Offset,
+        ) -> Result<Offset, crate::error::BrokerError> {
+            self.trimmed_to.store(new_start.0, Ordering::SeqCst);
+            Ok(new_start)
         }
     }
 
@@ -1695,6 +1721,52 @@ mod tests {
         let new_start = ack_rx.await.expect("ack").expect("trim ok");
         assert!(new_start >= 3);
         assert!(log.lock().expect("lock").log_start_offset() == new_start);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn diskless_writer_delegates_trim_to_the_wal() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        log.lock()
+            .expect("lock")
+            .append(&mut sample_batch(4))
+            .expect("append");
+
+        let (sync_started_tx, _sync_started_rx) = oneshot::channel();
+        let (_release_sync_tx, release_sync_rx) = oneshot::channel();
+        let gated_wal = Arc::new(GatedWal::new(sync_started_tx, release_sync_rx));
+        let wal: crate::wal::SharedWal = gated_wal.clone();
+        let (tx, rx) = mpsc::channel(1);
+        let writer = tokio::spawn(run_writer!(
+            "t".to_string(),
+            PartitionIndex(0),
+            log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            rx,
+            Arc::new(Notify::new()),
+            Arc::new(tokio::sync::Mutex::new(ReplicaState::new())),
+            Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
+            Some(wal),
+        ));
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::TrimToOffset {
+            new_start: Offset(3),
+            ack,
+        })
+        .await
+        .expect("send trim");
+
+        check!(ack_rx.await.expect("trim ack").expect("trim succeeds") == Offset(3));
+        check!(gated_wal.trimmed_to.load(Ordering::SeqCst) == 3);
+        check!(log.lock().expect("lock").log_start_offset() == Offset(0));
 
         drop(tx);
         writer.await.expect("writer join");

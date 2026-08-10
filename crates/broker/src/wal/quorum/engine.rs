@@ -119,6 +119,14 @@ impl WalShardEngine {
         self.replicas.iter().map(replica_end_offset).collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn replica_start_offsets(&self) -> Vec<Offset> {
+        self.replicas
+            .iter()
+            .map(|replica| replica.log.lock().log_start_offset())
+            .collect()
+    }
+
     pub(crate) async fn replicate_and_sync(
         &self,
         source: &Arc<Mutex<Log>>,
@@ -183,6 +191,28 @@ impl WalShardEngine {
             })?;
         let raw = replica.log.lock().read_raw(fetch_offset, hwm, max_size)?;
         Ok((hwm, raw.bytes))
+    }
+
+    pub(crate) async fn trim_to_offset(
+        &self,
+        source: &Arc<Mutex<Log>>,
+        new_start: Offset,
+    ) -> Result<Offset, BrokerError> {
+        let source_replica = self
+            .replicas
+            .first()
+            .ok_or_else(|| BrokerError::Replication("wal quorum has no source replica".into()))?;
+        if !source_replica.log.shares_log(source) {
+            return Err(BrokerError::Replication(
+                "wal quorum source is not its first replica".into(),
+            ));
+        }
+        // Trim replica copies before the partition source. If one copy fails,
+        // the source remains available and a later flusher tick can retry.
+        for replica in &self.replicas[1..] {
+            trim_log(replica.log.clone(), new_start).await?;
+        }
+        trim_log(ShardLog::new(source.clone()), new_start).await
     }
 }
 
@@ -334,6 +364,22 @@ async fn sync_replica(log: ShardLog, batches: &[BatchBytes]) -> Result<(), Broke
         tokio::task::spawn_blocking(move || sync_replica_blocking(&log, &batches))
             .await
             .map_err(|e| BrokerError::Replication(format!("wal replica task panicked: {e}")))?
+    }
+}
+
+async fn trim_log(log: ShardLog, new_start: Offset) -> Result<Offset, BrokerError> {
+    if tokio::runtime::Handle::current().runtime_flavor()
+        == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        tokio::task::block_in_place(|| log.lock().trim_to_offset(new_start).map_err(Into::into))
+    } else {
+        tokio::task::spawn_blocking(move || {
+            log.lock().trim_to_offset(new_start).map_err(Into::into)
+        })
+        .await
+        .map_err(|error| {
+            crate::partition_writer::storage_failure_error("wal trim task panicked", error)
+        })?
     }
 }
 

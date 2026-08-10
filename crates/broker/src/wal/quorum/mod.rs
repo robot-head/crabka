@@ -334,11 +334,18 @@ impl WalStore for QuorumWalStore {
         }
         Ok(durable)
     }
+
+    async fn trim_to_offset(&self, new_start: Offset) -> Result<Offset, BrokerError> {
+        self.engine.trim_to_offset(&self.source, new_start).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
 
     use assert2::assert;
     use crabka_kraft_core::NodeId;
@@ -548,6 +555,54 @@ mod tests {
         assert!(store.sync_durable(second).await.unwrap() == Offset(2));
         assert!(store.sync_durable(first).await.unwrap() == Offset(2));
         assert!(store.engine.durable_watermark() == Offset(2));
+    }
+
+    #[tokio::test]
+    async fn quorum_wal_store_trims_every_replica_before_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        let store = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source.clone(),
+            None,
+            3,
+        )
+        .unwrap();
+        let (_results, leo) = append_source(&store, 3).await;
+        store.sync_durable(leo).await.unwrap();
+
+        let start = store.trim_to_offset(Offset(2)).await.unwrap();
+
+        assert!(start >= Offset(2));
+        assert!(source.lock().unwrap().log_start_offset() == start);
+        assert!(store.engine.replica_start_offsets() == vec![start, start, start]);
+    }
+
+    #[tokio::test]
+    async fn quorum_wal_store_rejects_a_source_outside_the_voter_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        let replica = Arc::new(Mutex::new(
+            Log::open(dir.path().join("replica"), LogConfig::default()).unwrap(),
+        ));
+        let engine = Arc::new(WalShardEngine::for_logs(BTreeMap::from([(
+            NodeId(1),
+            replica,
+        )])));
+        let store = QuorumWalStore::new(source, engine);
+
+        let error = store.trim_to_offset(Offset(0)).await.unwrap_err();
+
+        assert!(
+            matches!(error, BrokerError::Replication(message) if message == "wal quorum source is not its first replica")
+        );
     }
 
     #[tokio::test]
