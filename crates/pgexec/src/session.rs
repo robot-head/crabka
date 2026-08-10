@@ -8582,6 +8582,33 @@ impl SqlSession {
                 crabka_pgparser::ast::OnCommitAction::PreserveRows => {}
                 crabka_pgparser::ast::OnCommitAction::Drop => drop.push(reference),
                 crabka_pgparser::ast::OnCommitAction::DeleteRows => {
+                    // A partitioned parent holds no rows, so there is nothing
+                    // here to empty and `PostgreSQL`'s `heap_truncate` skips it
+                    // for exactly that reason. Its partitions are queued in
+                    // their own right and empty themselves only if they
+                    // declared `ON COMMIT DELETE ROWS` too — so emptying the
+                    // parent's tree here would reach a partition that asked to
+                    // `PRESERVE ROWS`, and did.
+                    //
+                    // The statement below says `ONLY` to mean "this relation,
+                    // do not walk its tree", which is the sense the engine's own
+                    // desugarings use; `TRUNCATE ONLY` from a session means
+                    // something else and is refused. Skipping here keeps the two
+                    // apart without teaching `TRUNCATE` a third spelling.
+                    match crate::partition::is_partitioned(
+                        self.catalog_kv.as_ref(),
+                        &entry.relation,
+                    ) {
+                        Ok(true) => {
+                            still_owed.push(entry);
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            failure = failure.or(Some(error));
+                            continue;
+                        }
+                    }
                     // One statement per relation, so an entry that cannot be
                     // emptied costs only its own disposition rather than every
                     // other relation's.

@@ -492,6 +492,11 @@ pub enum ExecError {
         message: String,
         hint: Option<String>,
     },
+    /// `TRUNCATE ONLY` named a partitioned parent (42809). It owns no storage
+    /// to empty, so `PostgreSQL` treats the statement as a mistake rather than
+    /// as the no-op that `SELECT`/`UPDATE`/`DELETE … ONLY` over one become, and
+    /// hints at the two spellings that do something.
+    TruncateOnlyPartitioned,
     /// `PARTITION OF` named a relation that is not partitioned (42P17).
     NotPartitioned(String),
     /// A row write, or a back-validation scan, broke referential integrity.
@@ -1217,6 +1222,12 @@ impl ExecError {
             } => PgError::error("55000", message)
                 .with_detail(detail)
                 .with_hint(hint),
+            ExecError::TruncateOnlyPartitioned => {
+                PgError::error("42809", "cannot truncate only a partitioned table").with_hint(
+                    "Do not specify the ONLY keyword, or use TRUNCATE ONLY on the partitions \
+                     directly.",
+                )
+            }
             ExecError::MaterializedViewNotPopulated(relation) => PgError::error(
                 "55000",
                 format!("materialized view \"{relation}\" has not been populated"),

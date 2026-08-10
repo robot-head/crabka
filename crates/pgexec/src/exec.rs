@@ -3807,6 +3807,15 @@ fn truncate_names(
     let mut seen = HashSet::new();
     for target in targets {
         let named = resolve_relation(kv, resolution, &target.name, SchemaDisposition::Utility)?;
+        // The one member of the `ONLY` family that refuses rather than answers.
+        // `SELECT`/`UPDATE`/`DELETE … ONLY` over a partitioned parent all read
+        // or write its own — empty — row space and report nothing done, but
+        // `TRUNCATE ONLY` is 42809 on 18.4, on the grounds that a partitioned
+        // parent has no storage to truncate and the statement is therefore a
+        // mistake rather than a no-op.
+        if target.only && crate::partition::is_partitioned(kv, &named)? {
+            return Err(ExecError::TruncateOnlyPartitioned);
+        }
         let mut tree = vec![named.clone()];
         if !target.only {
             tree.extend(crate::inheritance::descendants(kv, &named)?);
@@ -3990,7 +3999,7 @@ async fn execute_write_parts(
     writes: &mut StatementWrites,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let Some(with) = statement_with_clause(stmt) else {
-        return execute_write_body(write_ctx, ctes, stmt, writes).await;
+        return execute_write_body(write_ctx, ctes, stmt, writes, Reach::of(stmt)).await;
     };
     let mut ops = Vec::new();
     let mut scope = ctes.child();
@@ -4010,8 +4019,14 @@ async fn execute_write_parts(
                     deferred.push(dml);
                     continue;
                 }
-                let (outcome, cte_ops) =
-                    Box::pin(execute_write_body(write_ctx, &scope, dml, writes)).await?;
+                let (outcome, cte_ops) = Box::pin(execute_write_body(
+                    write_ctx,
+                    &scope,
+                    dml,
+                    writes,
+                    Reach::of(dml),
+                ))
+                .await?;
                 ops.extend(cte_ops);
                 let Some(rel) = outcome.returning else {
                     // Only a *reference* to a data-modifying item without a
@@ -4027,11 +4042,24 @@ async fn execute_write_parts(
         };
         scope.insert(cte.name.clone(), rel);
     }
-    let (outcome, body_ops) =
-        Box::pin(execute_write_body(write_ctx, &scope, &body, writes)).await?;
+    let (outcome, body_ops) = Box::pin(execute_write_body(
+        write_ctx,
+        &scope,
+        &body,
+        writes,
+        Reach::of(&body),
+    ))
+    .await?;
     ops.extend(body_ops);
     for dml in deferred.into_iter().rev() {
-        let (_, cte_ops) = Box::pin(execute_write_body(write_ctx, &scope, dml, writes)).await?;
+        let (_, cte_ops) = Box::pin(execute_write_body(
+            write_ctx,
+            &scope,
+            dml,
+            writes,
+            Reach::of(dml),
+        ))
+        .await?;
         ops.extend(cte_ops);
     }
     Ok((outcome, ops))
@@ -4262,8 +4290,14 @@ async fn partitioned_dml(
             governing: Some(write_ctx.governing.unwrap_or(&parent_table)),
             ..*write_ctx
         };
-        let (outcome, leaf_ops) =
-            Box::pin(execute_write_body(&leaf_ctx, ctes, &per_leaf, writes)).await?;
+        let (outcome, leaf_ops) = Box::pin(execute_write_body(
+            &leaf_ctx,
+            ctes,
+            &per_leaf,
+            writes,
+            Reach::Storage,
+        ))
+        .await?;
         ops.extend(leaf_ops);
         // The per-leaf body already rendered its own count into the tag; the
         // parent's tag is their sum.
@@ -4298,7 +4332,12 @@ fn affected_from_tag(tag: &str) -> u64 {
 ///
 /// `only` is set because the caller has already enumerated the whole tree:
 /// without it a child with children of its own would expand again and write
-/// every grandchild once per path to it.
+/// every grandchild once per path to it. It says that and nothing more — the
+/// caller passes [`Reach::Storage`] alongside, and that, not this flag, is what
+/// decides whether a partitioned target still expands into its leaves. The two
+/// questions used to share this one boolean, which is how `ONLY` came to be
+/// ignored on a partitioned parent; see [`Reach`]. The flag survives because
+/// the sharded-write gate reads it for the inheritance question alone.
 ///
 /// The alias is the subtle one. Every expression in the statement resolves
 /// against [`table_qualifier`], which falls back to the *table's own name* when
@@ -4384,8 +4423,14 @@ async fn inherited_dml(
             governing: Some(write_ctx.governing.unwrap_or(&parent)),
             ..*write_ctx
         };
-        let (outcome, child_ops) =
-            Box::pin(execute_write_body(&child_ctx, ctes, &per_relation, writes)).await?;
+        let (outcome, child_ops) = Box::pin(execute_write_body(
+            &child_ctx,
+            ctes,
+            &per_relation,
+            writes,
+            Reach::Storage,
+        ))
+        .await?;
         ops.extend(child_ops);
         affected += affected_from_tag(&outcome.tag);
         if let Some(rows) = outcome.returning {
@@ -5136,7 +5181,14 @@ async fn execute_view_dml(
             view_checks: &rewritten.checks,
             ..*write_ctx
         };
-        return Box::pin(execute_write_body(&inner, ctes, &rewritten.stmt, writes)).await;
+        return Box::pin(execute_write_body(
+            &inner,
+            ctes,
+            &rewritten.stmt,
+            writes,
+            Reach::Storage,
+        ))
+        .await;
     }
 
     match stmt {
@@ -5327,11 +5379,21 @@ async fn execute_view_dml(
     }
 }
 
+/// Run one write statement.
+///
+/// `reach` says how far below its target the statement may go. A statement the
+/// session submitted carries its own answer in `ONLY`, and passes
+/// [`Reach::of`]. The engine's own desugarings — the per-relation pieces of a
+/// tree write, a view rewrite, the unfiltered `DELETE`s a `TRUNCATE` becomes —
+/// pass [`Reach::Storage`], because they have already walked the inheritance
+/// tree themselves but still need a partitioned target to expand. That
+/// distinction cannot be spelled in the AST's one boolean; see [`Reach`].
 async fn execute_write_body(
     write_ctx: &WriteContext<'_>,
     ctes: &crate::cte::CteContext,
     stmt: &Statement,
     writes: &mut StatementWrites,
+    reach: Reach,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let resolved = resolve_write_subqueries(write_ctx, ctes, stmt)?;
     let stmt = &resolved;
@@ -5369,8 +5431,14 @@ async fn execute_write_body(
         Statement::Insert { table, .. } if is_partitioned_ref(catalog_kv, resolution, table)? => {
             partitioned_insert(write_ctx, ctes, stmt, writes).await
         }
+        // `reach`, not the statement's own `ONLY`: a `TRUNCATE` desugars to an
+        // unfiltered `DELETE` that says `ONLY` to stop the inheritance walk it
+        // has already done, and reading that as the user's `ONLY` would leave a
+        // partitioned parent full. Under a real `ONLY` this arm is skipped and
+        // the plain path writes the parent's own — empty — row space, so
+        // `DELETE FROM ONLY parted` reports `DELETE 0` and touches no leaf.
         Statement::Update { table, .. } | Statement::Delete { table, .. }
-            if is_partitioned_ref(catalog_kv, resolution, table)? =>
+            if reach.spans_partitions() && is_partitioned_ref(catalog_kv, resolution, table)? =>
         {
             Box::pin(partitioned_dml(write_ctx, ctes, stmt, writes)).await
         }
@@ -5379,12 +5447,9 @@ async fn execute_write_body(
         // asks for exactly the un-expanded write, and a childless target has
         // nothing to expand into, so both fall through to the plain arms and
         // pay one children-index probe.
-        Statement::Update {
-            table, only: false, ..
-        }
-        | Statement::Delete {
-            table, only: false, ..
-        } if has_inheritance_children(catalog_kv, resolution, table)? => {
+        Statement::Update { table, .. } | Statement::Delete { table, .. }
+            if reach == Reach::Tree && has_inheritance_children(catalog_kv, resolution, table)? =>
+        {
             Box::pin(inherited_dml(write_ctx, ctes, stmt, writes)).await
         }
         Statement::Merge { table, .. } if is_partitioned_ref(catalog_kv, resolution, table)? => {
@@ -5931,8 +5996,14 @@ async fn execute_write_body(
                     returning: None,
                     with: None,
                 };
-                let (_, delete_ops) =
-                    Box::pin(execute_write_body(write_ctx, ctes, &delete, writes)).await?;
+                let (_, delete_ops) = Box::pin(execute_write_body(
+                    write_ctx,
+                    ctes,
+                    &delete,
+                    writes,
+                    Reach::Storage,
+                ))
+                .await?;
                 ops.extend(delete_ops);
             }
             Ok((WriteOutcome::command("TRUNCATE TABLE".into()), ops))
@@ -15323,6 +15394,62 @@ fn replace_subqueries_with_typed_nulls(
     }
 }
 
+/// How far below the relation it names a statement is asking to reach.
+///
+/// `PostgreSQL` spells this with one keyword — `ONLY` — and the engine used to
+/// carry it as the one boolean the parser produces. That is why `ONLY` was
+/// ignored on a partitioned parent: the keyword answers two independent
+/// questions at once, and the engine's own tree walks need the two answers to
+/// differ.
+///
+/// * An inheritance parent stores rows of its own, and its descendants store
+///   more. `ONLY` asks for the parent's.
+/// * A partitioned parent stores no rows at all. Its leaves store them, and
+///   `ONLY` therefore asks for nothing.
+///
+/// A walk that has already enumerated the inheritance descendants must not
+/// enumerate them again — it would read every relation once per path to it
+/// through a multiple-inheritance DAG — but it still has to reach a partitioned
+/// relation's leaves. Written as one boolean those two are the same value, and
+/// they are not the same request: `TRUNCATE parted` desugars to an unfiltered
+/// `DELETE` that says "do not walk inheritance", and reading that as the user's
+/// `ONLY` empties nothing at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reach {
+    /// Everything at or below the named relation: its own rows, its inheritance
+    /// descendants', and the leaves' of any partitioned relation among them.
+    /// What a statement that omitted `ONLY` asks for.
+    Tree,
+    /// The rows the named relation stores itself, and nothing below it. What
+    /// `ONLY` asks for. A partitioned parent stores none, so `ONLY` over one
+    /// reads and writes nothing — which is what `PostgreSQL` does.
+    OwnRows,
+    /// The named relation's own rows, plus its leaves' if it is partitioned, but
+    /// no inheritance walk: the caller has already done that walk. Only the
+    /// engine's own tree walks and desugarings ask for this; no SQL spells it.
+    Storage,
+}
+
+impl Reach {
+    /// What the statement itself asks for, before any engine rewrite.
+    fn of(stmt: &Statement) -> Self {
+        match stmt {
+            Statement::Update { only: true, .. } | Statement::Delete { only: true, .. } => {
+                Reach::OwnRows
+            }
+            _ => Reach::Tree,
+        }
+    }
+
+    /// Whether a partitioned relation reached this way expands into its leaves.
+    fn spans_partitions(self) -> bool {
+        match self {
+            Reach::Tree | Reach::Storage => true,
+            Reach::OwnRows => false,
+        }
+    }
+}
+
 /// Read a partitioned parent as the append of its leaf partitions.
 ///
 /// Each leaf is scanned through the ordinary base-table path and its rows are
@@ -15350,7 +15477,7 @@ fn partitioned_scan(
             read_ctx,
             &leaf_table,
             &leaf.name,
-            true,
+            Reach::Storage,
             None,
             None,
             &crate::privilege::ReadPermit::inherited(permit),
@@ -15383,7 +15510,7 @@ fn inherited_scan(
             read_ctx,
             &table,
             &relation_name.name,
-            true,
+            Reach::Storage,
             None,
             None,
             &crate::privilege::ReadPermit::inherited(permit),
@@ -15419,19 +15546,25 @@ fn scan_stored_relation(
     read_ctx: &crate::subquery::SubCtx<'_>,
     t: &Table,
     qualifier: &str,
-    only: bool,
+    reach: Reach,
     bounds: Option<&ScanBounds>,
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
     permit: &crate::privilege::ReadPermit,
 ) -> Result<crate::rls::RawScan, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
-    if !only && !crate::inheritance::children_of(catalog_kv, &t.name)?.is_empty() {
+    if reach == Reach::Tree && !crate::inheritance::children_of(catalog_kv, &t.name)?.is_empty() {
         return inherited_scan(read_ctx, t, qualifier, permit);
     }
     // A partitioned parent owns no rows: reading it is an append over its
     // leaves. Doing this before every other scan path is what keeps a
     // partitioned relation from silently answering empty.
-    if crate::partition::is_partitioned(catalog_kv, &t.name)? {
+    //
+    // Under `ONLY` there is nothing to append, and the fall-through below reads
+    // the parent's own — empty — row space, which is the answer `PostgreSQL`
+    // gives. This test used to run whatever the statement said, so `SELECT *
+    // FROM ONLY parted` returned the leaves' rows and `DELETE FROM ONLY parted`
+    // destroyed them.
+    if reach.spans_partitions() && crate::partition::is_partitioned(catalog_kv, &t.name)? {
         return partitioned_scan(read_ctx, t, qualifier, permit);
     }
     let scope = Scope::single(t, qualifier);
@@ -15772,7 +15905,8 @@ fn build_base_table(
     // executor start, and a check after the scan would let a leaky operator in
     // the `WHERE` observe rows the caller may not see.
     let permit = crate::privilege::ReadPermit::acquire(&read_ctx.privileges(), &t)?;
-    let raw = scan_stored_relation(read_ctx, &t, qualifier, *only, bounds, scan_plan, &permit)?;
+    let reach = if *only { Reach::OwnRows } else { Reach::Tree };
+    let raw = scan_stored_relation(read_ctx, &t, qualifier, reach, bounds, scan_plan, &permit)?;
     crate::rls::apply_row_security(read_ctx, raw)
 }
 
@@ -21424,8 +21558,13 @@ pub(crate) async fn execute_read_locking(
     if !only {
         relations.extend(crate::inheritance::descendants(catalog_kv, &t.name)?);
     }
+    // Under `ONLY` a partitioned parent contributes nothing, so there is no lock
+    // to spread over its leaves and nothing to refuse: the scan below reads its
+    // own empty row space and returns no rows, as `PostgreSQL` does. The refusal
+    // is for the reads that really would have to reach the leaves.
     for relation in &relations {
-        if crate::partition::is_partitioned(read_ctx.catalog_kv, relation)? {
+        if !(only && *relation == t.name) && crate::partition::is_partitioned(catalog_kv, relation)?
+        {
             return Err(ExecError::Unsupported(format!(
                 "{} on a partitioned table is not supported: the lock would have to be taken on \
                  every partition that contributes rows",

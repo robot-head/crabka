@@ -393,6 +393,65 @@ async fn outside_a_block_an_on_commit_disposition_fires_immediately() {
     assert!(client.scalar("SELECT count(*) FROM oc3").await == Some("0".to_string()));
 }
 
+/// `ON COMMIT DELETE ROWS` on a *partitioned* temp parent empties nothing by
+/// itself, and a partition keeps whatever its own disposition asked for.
+///
+/// 18.4 collects the `DELETE ROWS` relations at commit and hands them to
+/// `heap_truncate`, which skips anything without storage — so the partitioned
+/// parent is a no-op there and each partition is emptied only if it declared
+/// `DELETE ROWS` in its own right.
+///
+/// This engine reached the same commit-time truncation through a `TRUNCATE`
+/// that says `ONLY` to mean "this relation, not its tree". While `ONLY` was
+/// ignored on a partitioned parent that walked into every leaf, so a partition
+/// that asked to `PRESERVE ROWS` was emptied anyway — the parent's disposition
+/// silently overriding the child's.
+#[tokio::test]
+async fn on_commit_delete_rows_leaves_a_preserve_rows_partition_alone() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("BEGIN").await;
+    client
+        .run("CREATE TEMP TABLE ocp (a int) PARTITION BY LIST (a) ON COMMIT DELETE ROWS")
+        .await;
+    client
+        .run(
+            "CREATE TEMP TABLE ocp_keep PARTITION OF ocp FOR VALUES IN (1) ON COMMIT PRESERVE ROWS",
+        )
+        .await;
+    client
+        .run("CREATE TEMP TABLE ocp_wipe PARTITION OF ocp FOR VALUES IN (2) ON COMMIT DELETE ROWS")
+        .await;
+    client.run("INSERT INTO ocp VALUES (1), (2)").await;
+    client.run("COMMIT").await;
+
+    // The partition that asked to keep its rows still has them, and the one
+    // that asked to be emptied is empty. The parent reports their sum, which is
+    // also the witness that the commit truncated something rather than nothing.
+    assert!(client.scalar("SELECT count(*) FROM ocp_keep").await == Some("1".to_string()));
+    assert!(client.scalar("SELECT count(*) FROM ocp_wipe").await == Some("0".to_string()));
+    assert!(client.scalar("SELECT count(*) FROM ocp").await == Some("1".to_string()));
+}
+
+/// A partitioned temp parent whose partitions all say `DELETE ROWS` does end up
+/// empty — each partition empties itself, not the parent on their behalf.
+#[tokio::test]
+async fn on_commit_delete_rows_empties_partitions_that_asked_for_it() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("BEGIN").await;
+    client
+        .run("CREATE TEMP TABLE ocq (a int) PARTITION BY LIST (a) ON COMMIT DELETE ROWS")
+        .await;
+    client
+        .run("CREATE TEMP TABLE ocq_1 PARTITION OF ocq FOR VALUES IN (1) ON COMMIT DELETE ROWS")
+        .await;
+    client.run("INSERT INTO ocq VALUES (1)").await;
+    assert!(client.scalar("SELECT count(*) FROM ocq").await == Some("1".to_string()));
+    client.run("COMMIT").await;
+    assert!(client.scalar("SELECT count(*) FROM ocq").await == Some("0".to_string()));
+}
+
 /// `ON COMMIT` governs a relation that cannot outlive its session, so 18.4
 /// refuses it on a permanent table with
 /// `42P16 ON COMMIT can only be used on temporary tables`.
