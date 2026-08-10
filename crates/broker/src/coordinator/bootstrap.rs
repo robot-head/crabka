@@ -1731,6 +1731,7 @@ mod tests {
             0,
             Offset(0),
             MarkerType::Commit,
+            0,
         ))
         .unwrap();
         log.append(&mut transactional(1, 222)).unwrap();
@@ -1739,6 +1740,7 @@ mod tests {
             0,
             Offset(0),
             MarkerType::Abort,
+            0,
         ))
         .unwrap();
         log.append(&mut transactional(2, 333)).unwrap();

@@ -577,7 +577,12 @@ pub(crate) async fn dispatch_markers(
     entry: &TxnEntry,
     marker_type: MarkerType,
 ) -> Result<(), BrokerError> {
-    let MarkerDispatchContext { node_id, image, .. } = context;
+    let MarkerDispatchContext {
+        node_id,
+        coordinator_epoch,
+        image,
+        ..
+    } = context;
     // Group every involved (topic, partition) by its current leader.
     let mut by_leader: HashMap<NodeId, Vec<TopicPartition>> = HashMap::new();
 
@@ -606,6 +611,7 @@ pub(crate) async fn dispatch_markers(
                     entry.producer_id,
                     entry.producer_epoch,
                     marker_type,
+                    coordinator_epoch,
                 )
                 .await?;
             }

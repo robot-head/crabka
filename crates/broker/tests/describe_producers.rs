@@ -21,8 +21,11 @@ use crabka_protocol::{
         init_producer_id_request::InitProducerIdRequest,
         metadata_request::{MetadataRequest, MetadataRequestTopic},
         produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        write_txn_markers_request::{
+            WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
+        },
     },
-    records::{Record, RecordBatch},
+    records::{Attributes, Record, RecordBatch},
 };
 
 async fn topic_id_for(
@@ -93,6 +96,13 @@ fn batch(pid: i64, epoch: i16, base_seq: i32, values: &[&str]) -> RecordBatch {
         max_timestamp: i64::from(n),
         records,
         ..Default::default()
+    }
+}
+
+fn transactional_batch(pid: i64, epoch: i16, base_seq: i32, values: &[&str]) -> RecordBatch {
+    RecordBatch {
+        attributes: Attributes::default().with_transactional(true),
+        ..batch(pid, epoch, base_seq, values)
     }
 }
 
@@ -189,10 +199,131 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
     check!(producer.producer_epoch == i32::from(epoch));
     // base_seq=0, last_offset_delta=n-1=2 → last_sequence = 2.
     check!(producer.last_sequence == 2);
-    // Crabka doesn't yet wire per-partition txn bookkeeping; sentinels
-    // stay at -1.
+    // An idempotent (non-transactional) producer has no transaction fields.
     check!(producer.coordinator_epoch == -1);
     check!(producer.current_txn_start_offset == -1);
+
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn transactional_fields_follow_open_and_completed_transactions() {
+    let p = support::start().await;
+    create_topic(&p, "transactions", 1).await;
+    let topic_id = topic_id_for(&p, "transactions").await;
+    let (pid, epoch) = init_producer(&p).await;
+
+    let produce_response = p
+        .client
+        .send(ProduceRequest {
+            acks: -1,
+            timeout_ms: 5_000,
+            topic_data: vec![TopicProduceData {
+                name: "transactions".into(),
+                topic_id,
+                partition_data: vec![PartitionProduceData {
+                    index: 0,
+                    records: Some(transactional_batch(pid, epoch, 0, &["first"]).into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("transactional Produce");
+    assert!(produce_response.responses[0].partition_responses[0].error_code == 0);
+
+    let describe = p
+        .client
+        .send(DescribeProducersRequest {
+            topics: vec![TopicRequest {
+                name: "transactions".into(),
+                partition_indexes: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("DescribeProducers during first transaction");
+    let producer_row = &describe.topics[0].partitions[0].active_producers[0];
+    check!(producer_row.current_txn_start_offset == 0);
+    check!(producer_row.coordinator_epoch == -1);
+
+    let marker = p
+        .client
+        .send(WriteTxnMarkersRequest {
+            markers: vec![WritableTxnMarker {
+                producer_id: pid,
+                producer_epoch: epoch,
+                transaction_result: true,
+                coordinator_epoch: 17,
+                transaction_version: 1,
+                topics: vec![WritableTxnMarkerTopic {
+                    name: "transactions".into(),
+                    partition_indexes: vec![0],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("WriteTxnMarkers");
+    assert!(marker.markers[0].topics[0].partitions[0].error_code == 0);
+
+    let describe = p
+        .client
+        .send(DescribeProducersRequest {
+            topics: vec![TopicRequest {
+                name: "transactions".into(),
+                partition_indexes: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("DescribeProducers after marker");
+    let producer_row = &describe.topics[0].partitions[0].active_producers[0];
+    check!(producer_row.current_txn_start_offset == -1);
+    check!(producer_row.coordinator_epoch == 17);
+
+    let produce_response = p
+        .client
+        .send(ProduceRequest {
+            acks: -1,
+            timeout_ms: 5_000,
+            topic_data: vec![TopicProduceData {
+                name: "transactions".into(),
+                topic_id,
+                partition_data: vec![PartitionProduceData {
+                    index: 0,
+                    records: Some(transactional_batch(pid, epoch, 1, &["second"]).into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("second transactional Produce");
+    assert!(produce_response.responses[0].partition_responses[0].error_code == 0);
+
+    let describe = p
+        .client
+        .send(DescribeProducersRequest {
+            topics: vec![TopicRequest {
+                name: "transactions".into(),
+                partition_indexes: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("DescribeProducers during second transaction");
+    let producer_row = &describe.topics[0].partitions[0].active_producers[0];
+    check!(producer_row.current_txn_start_offset == 2);
+    check!(producer_row.coordinator_epoch == 17);
 
     p.broker.shutdown().await;
 }
@@ -321,6 +452,34 @@ async fn out_of_range_partition_returns_unknown_topic_or_partition() {
         .find(|p| p.partition_index == 5)
         .expect("p5");
     assert!(p5.error_code == 3, "{p5:?}");
+
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn metadata_known_partition_not_hosted_locally_returns_not_leader() {
+    let p = support::start().await;
+    create_topic(&p, "remote", 2).await;
+    assert!(p.broker.partition_exists_for_test("remote", 1));
+    p.broker.remove_local_partition_for_test("remote", 1);
+
+    let resp = p
+        .client
+        .send(DescribeProducersRequest {
+            topics: vec![TopicRequest {
+                name: "remote".into(),
+                partition_indexes: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("DescribeProducers");
+
+    let partition = &resp.topics[0].partitions[0];
+    assert!(partition.partition_index == 1);
+    check!(partition.error_code == 6, "expected NOT_LEADER_OR_FOLLOWER");
+    check!(partition.active_producers.is_empty());
 
     p.broker.shutdown().await;
 }

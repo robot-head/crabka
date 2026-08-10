@@ -75,6 +75,11 @@ pub struct Log {
     /// applies a commit or abort marker for that `producer_id`.
     pending: HashMap<ProducerId, Offset>,
 
+    /// Last transaction-coordinator epoch observed in a durable commit or
+    /// abort marker for each producer. The marker value carries this field,
+    /// so log recovery can rebuild it without a separate sidecar.
+    coordinator_epochs: HashMap<ProducerId, i32>,
+
     /// Active segment's `TxnIndex`. The log reopens it on segment roll.
     active_txn_index: TxnIndex,
 
@@ -377,6 +382,7 @@ impl Log {
             start_offset_override: None,
             lso,
             pending: HashMap::new(),
+            coordinator_epochs: HashMap::new(),
             active_txn_index,
             stamp_source: None,
             active_stamp_index: None,
@@ -393,6 +399,7 @@ impl Log {
     /// fetches or accepting a delayed transaction marker.
     fn rebuild_transaction_state(&mut self) -> Result<(), LogError> {
         self.pending.clear();
+        self.coordinator_epochs.clear();
         let mut next = self.log_start_offset();
         let end = self.log_end_offset();
         while next < end {
@@ -405,6 +412,14 @@ impl Log {
                 let producer_id = ProducerId(batch.producer_id);
                 if batch.attributes.is_control_batch() {
                     self.pending.remove(&producer_id);
+                    if let Some(epoch) = batch
+                        .records
+                        .first()
+                        .and_then(|record| record.value.as_deref())
+                        .and_then(parse_control_marker_coordinator_epoch)
+                    {
+                        self.coordinator_epochs.insert(producer_id, epoch);
+                    }
                 } else if batch.attributes.is_transactional() && !producer_id.is_none() {
                     self.pending
                         .entry(producer_id)
@@ -578,6 +593,22 @@ impl Log {
     #[must_use]
     pub fn pending_transaction_start(&self, producer_id: ProducerId) -> Option<Offset> {
         self.pending.get(&producer_id).copied()
+    }
+
+    /// Transaction fields reported by `DescribeProducers` for `producer_id`.
+    ///
+    /// The coordinator epoch is the last epoch embedded in a durable end
+    /// marker, or `-1` before the first marker. The start offset is present
+    /// only while a transaction is open on this partition.
+    #[must_use]
+    pub fn producer_transaction_state(&self, producer_id: ProducerId) -> (i32, Option<Offset>) {
+        (
+            self.coordinator_epochs
+                .get(&producer_id)
+                .copied()
+                .unwrap_or(-1),
+            self.pending_transaction_start(producer_id),
+        )
     }
 
     /// Close all segments. Drop runs automatically when `self` moves;
@@ -1080,6 +1111,14 @@ impl Log {
                 .first()
                 .and_then(|r| r.key.as_deref())
                 .and_then(parse_control_marker_type);
+            if let Some(epoch) = batch
+                .records
+                .first()
+                .and_then(|record| record.value.as_deref())
+                .and_then(parse_control_marker_coordinator_epoch)
+            {
+                self.coordinator_epochs.insert(pid, epoch);
+            }
             if let Some(start) = self.pending.remove(&pid) {
                 let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
                 if marker_type == Some(0)
@@ -1965,6 +2004,18 @@ fn parse_control_marker_type(key: &[u8]) -> Option<i16> {
     }
     let _version = i16::from_be_bytes([key[0], key[1]]);
     Some(i16::from_be_bytes([key[2], key[3]]))
+}
+
+/// Parse the transaction coordinator epoch from an end-marker value.
+/// Kafka encodes `(version: i16, coordinator_epoch: i32)` in big-endian.
+/// Older krabka markers had no value, so malformed or absent values are
+/// ignored for backward compatibility.
+fn parse_control_marker_coordinator_epoch(value: &[u8]) -> Option<i32> {
+    if value.len() < 6 {
+        return None;
+    }
+    let _version = i16::from_be_bytes([value[0], value[1]]);
+    Some(i32::from_be_bytes([value[2], value[3], value[4], value[5]]))
 }
 
 #[cfg(test)]
@@ -2875,6 +2926,14 @@ mod tests {
         Bytes::from(buf.to_vec())
     }
 
+    /// Build an end-marker value: (version=0: i16, coordinator epoch: i32) BE.
+    fn control_value(coordinator_epoch: i32) -> Bytes {
+        let mut buf = [0u8; 6];
+        buf[0..2].copy_from_slice(&0i16.to_be_bytes());
+        buf[2..6].copy_from_slice(&coordinator_epoch.to_be_bytes());
+        Bytes::from(buf.to_vec())
+    }
+
     /// A commit control batch (`marker_type=1`) for the given pid and epoch.
     /// `Log::append` rewrites the offsets.
     fn commit_marker(pid: i64, epoch: i16) -> RecordBatch {
@@ -2889,6 +2948,7 @@ mod tests {
             records: vec![Record {
                 offset_delta: 0,
                 key: Some(control_key(1 /* COMMIT */)),
+                value: Some(control_value(17)),
                 ..Default::default()
             }],
             ..RecordBatch::default()
@@ -2909,6 +2969,7 @@ mod tests {
             records: vec![Record {
                 offset_delta: 0,
                 key: Some(control_key(0 /* ABORT */)),
+                value: Some(control_value(17)),
                 ..Default::default()
             }],
             ..RecordBatch::default()
@@ -2954,12 +3015,26 @@ mod tests {
         assert2::assert!(reopened.lso() == Offset(0));
 
         reopened.append(&mut commit_marker(1000, 4)).unwrap();
+        assert2::assert!(reopened.producer_transaction_state(ProducerId(1000)) == (17, None));
         assert2::assert!(
             reopened
                 .pending_transaction_start(ProducerId(1000))
                 .is_none()
         );
         assert2::assert!(reopened.lso() == reopened.log_end_offset());
+
+        reopened
+            .append(&mut transactional_batch(1000, 4, &["next"]))
+            .unwrap();
+        assert2::assert!(
+            reopened.producer_transaction_state(ProducerId(1000)) == (17, Some(Offset(3)))
+        );
+        drop(reopened);
+
+        let recovered_again = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert2::assert!(
+            recovered_again.producer_transaction_state(ProducerId(1000)) == (17, Some(Offset(3)))
+        );
     }
 
     // ---- .stampindex append-path wiring tests ----

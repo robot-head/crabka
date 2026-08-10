@@ -316,6 +316,7 @@ impl TxnCoordinator {
                 entry.producer_id,
                 entry.producer_epoch,
                 marker_type,
+                -1,
             )
             .await?;
         }

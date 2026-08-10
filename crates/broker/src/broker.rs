@@ -2399,6 +2399,17 @@ impl BrokerHandle {
             .contains(topic, PartitionIndex(partition))
     }
 
+    /// Test-only: remove a partition from this broker's local registry while
+    /// leaving the controller metadata image unchanged. Admin-handler tests
+    /// use this to exercise requests sent to a broker that does not host a
+    /// metadata-known partition.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn remove_local_partition_for_test(&self, topic: &str, partition: i32) {
+        self.broker
+            .partitions
+            .remove(topic, PartitionIndex(partition));
+    }
+
     /// Test-only: read the share-state summary
     /// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)`
     /// for `(group, topic_id, partition)` straight from this broker's

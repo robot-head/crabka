@@ -16,12 +16,10 @@
 //! ## Field semantics
 //!
 //! `producer_id`, `producer_epoch`, `last_sequence`, and `last_timestamp`
-//! come straight from `crate::producer_state`. The transactional fields
-//! `coordinator_epoch` and `current_txn_start_offset` are not wired up. The
-//! broker does not track them for each `(topic, partition)` today, so they
-//! default to `-1`, the schema sentinel for "unknown / no current txn". When
-//! transactional in-flight tracking arrives, only the row builder needs to
-//! look them up.
+//! come from `crate::producer_state`. The partition log supplies the current
+//! transaction start offset and the last coordinator epoch recovered from a
+//! durable transaction marker. Their schema sentinel is `-1` when there is no
+//! open transaction or no marker has established a coordinator epoch yet.
 
 use bytes::Bytes;
 use crabka_metadata::AclOperation;
@@ -116,24 +114,45 @@ pub(crate) async fn handle(
                 continue;
             }
 
+            let partition_index = crabka_ids::PartitionIndex(idx);
+            let Some(partition) = broker
+                .partitions
+                .get(topic_req.name.as_str(), partition_index)
+            else {
+                parts_out.push(PartitionResponse {
+                    partition_index: idx,
+                    error_code: codes::NOT_LEADER_OR_FOLLOWER,
+                    error_message: None,
+                    active_producers: Vec::new(),
+                    ..Default::default()
+                });
+                continue;
+            };
+
             let snapshot = broker
                 .producer_state
-                .snapshot(topic_req.name.as_str(), crabka_ids::PartitionIndex(idx))
+                .snapshot(topic_req.name.as_str(), partition_index)
                 .await;
+            let log = partition.log.lock().map_err(|_| {
+                BrokerError::Replication(format!(
+                    "DescribeProducers: log lock poisoned for {}-{idx}",
+                    topic_req.name
+                ))
+            })?;
             let active_producers: Vec<ProducerState> = snapshot
                 .into_iter()
-                .map(|(producer_id, entry)| ProducerState {
-                    producer_id,
-                    producer_epoch: i32::from(entry.epoch),
-                    last_sequence: entry.last_sequence,
-                    last_timestamp: entry.last_timestamp,
-                    // Crabka doesn't track per-(topic, partition) txn
-                    // bookkeeping on the producer-state map; these stay
-                    // at -1 (the schema "unknown / no current txn"
-                    // sentinel) until that work lands.
-                    coordinator_epoch: -1,
-                    current_txn_start_offset: -1,
-                    ..Default::default()
+                .map(|(producer_id, entry)| {
+                    let (coordinator_epoch, transaction_start) =
+                        log.producer_transaction_state(crabka_log::ProducerId(producer_id));
+                    ProducerState {
+                        producer_id,
+                        producer_epoch: i32::from(entry.epoch),
+                        last_sequence: entry.last_sequence,
+                        last_timestamp: entry.last_timestamp,
+                        coordinator_epoch,
+                        current_txn_start_offset: transaction_start.map_or(-1, |offset| offset.0),
+                        ..Default::default()
+                    }
                 })
                 .collect();
 

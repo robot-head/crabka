@@ -408,13 +408,13 @@ async fn acquire_pass(
         } else {
             hwm
         };
-        // Archive aborted (committed-range) records. The LSO
-        // clamp above already guarantees no OPEN-transaction records are
-        // surfaced; aborted-but-stable records still get acquired because
-        // `AbortedTxn` carries only `producer_id + start_offset`, not the
-        // aborted region's end offset, so precise per-offset archival needs
-        // the control-batch markers.
         st.materialize(upper, cfg.max_inflight_records);
+        // Transaction markers occupy log offsets but are broker metadata, not
+        // user records. Archive them before acquisition so their encoded
+        // coordinator epoch can never appear in a ShareFetch response.
+        for (first, last) in control_batch_ranges(&part, st.start_offset, st.end_offset).await? {
+            st.archive_internal(first, last);
+        }
         let remaining_records = remaining_record_budget(max_records, total);
         let acquired = if remaining_records > 0 {
             st.acquire(
@@ -555,6 +555,45 @@ async fn read_acquired_bytes(
         Ok(Some(raw.bytes))
     } else {
         Ok(None)
+    }
+}
+
+/// Returns the control-batch offset ranges in `[start, end)`.
+///
+/// Share acquisition state is offset-based and therefore materializes log
+/// control markers along with data unless the handler explicitly archives
+/// them. The decoded log read keeps this classification out of the raw-byte
+/// response path.
+async fn control_batch_ranges(
+    part: &crate::partition::Partition,
+    start: Offset,
+    end: Offset,
+) -> Result<Vec<(Offset, Offset)>, BrokerError> {
+    if end <= start {
+        return Ok(Vec::new());
+    }
+    let log = part.log.clone();
+    let join = tokio::task::spawn_blocking(move || {
+        let log = log.lock().expect("log mutex poisoned");
+        let read = log.read(start, ByteSize::from_bytes(u64::MAX))?;
+        Ok::<_, crabka_log::LogError>(
+            read.batches
+                .into_iter()
+                .filter(|batch| batch.attributes.is_control_batch())
+                .filter_map(|batch| {
+                    let first = Offset(batch.base_offset).max(start);
+                    let last =
+                        Offset(batch.base_offset + i64::from(batch.last_offset_delta)).min(end - 1);
+                    (first <= last).then_some((first, last))
+                })
+                .collect(),
+        )
+    });
+    match join.await {
+        Ok(result) => result.map_err(BrokerError::from),
+        Err(join_err) => Err(BrokerError::Io(std::io::Error::other(format!(
+            "share-fetch control scan panicked: {join_err}"
+        )))),
     }
 }
 
