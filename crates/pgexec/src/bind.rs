@@ -30,6 +30,25 @@
 //! performance fix. `an_unresolvable_reference_is_silent_until_a_row_evaluates_it`
 //! in `tests/joins.rs` pins the behavior that must not move.
 //!
+//! # The exposure is wider than an empty table
+//!
+//! `AND` short-circuits: [`crate::eval`] returns `false` for the whole
+//! conjunction as soon as the left operand is `false`, before it evaluates the
+//! right. So a populated relation hides an unresolvable name just as an empty
+//! one does, whenever no row satisfies what stands to the left of it, and
+//! **whether the typo is reported depends on the data**:
+//!
+//! ```sql
+//! CREATE TABLE g (a int, b int); INSERT INTO g VALUES (1,1),(2,2),(3,3);
+//! SELECT a FROM g WHERE a = 1  AND nosuchcol = 1;  -- error, as PostgreSQL
+//! SELECT a FROM g WHERE a = 99 AND nosuchcol = 1;  -- 0 rows; PostgreSQL errors
+//! DELETE FROM g WHERE a = 99 AND nosuchcol = 1;    -- DELETE 0; PostgreSQL errors
+//! ```
+//!
+//! A `DELETE` whose predicate is misspelled answers success. That is the cost
+//! of the trade-off above, stated in full so whoever revisits it is not
+//! weighing it against "only empty tables".
+//!
 //! # Scope pairing
 //!
 //! A bound expression is meaningful ONLY against the scope it was bound to:
