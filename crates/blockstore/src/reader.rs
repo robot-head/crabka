@@ -1,12 +1,21 @@
 //! Reads Parquet blocks back from object storage into Arrow `RecordBatch`es.
 
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use crabka_units::prelude::*;
-use futures::TryStreamExt;
-use object_store::{ObjectStore, ObjectStoreExt, path::Path};
-use parquet::arrow::{ParquetRecordBatchStreamBuilder, async_reader::ParquetObjectReader};
+use futures::{FutureExt, TryFutureExt, TryStreamExt, future::BoxFuture};
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, path::Path};
+use parquet::{
+    arrow::{
+        ParquetRecordBatchStreamBuilder,
+        arrow_reader::ArrowReaderOptions,
+        async_reader::{AsyncFileReader, MetadataSuffixFetch},
+    },
+    errors::ParquetError,
+    file::metadata::{ParquetMetaData, ParquetMetaDataReader},
+};
 use tracing::instrument;
 
 use crate::error::{BlockStoreError, Result};
@@ -60,8 +69,8 @@ pub async fn read_block_with_max_bytes(
     max_bytes: ByteSize,
 ) -> Result<Vec<RecordBatch>> {
     let path = Path::from(object_key);
-    let size = head_within_cap(&store, &path, object_key, max_bytes).await?;
-    let reader = ParquetObjectReader::new(store, path).with_file_size(size);
+    head_within_cap(&store, &path, object_key, max_bytes).await?;
+    let reader = ObjectStoreReader::new(store, path);
     let stream = ParquetRecordBatchStreamBuilder::new(reader)
         .await?
         .build()?;
@@ -121,8 +130,8 @@ pub async fn read_row_group_metadata_with_max_bytes(
     max_bytes: ByteSize,
 ) -> Result<Vec<RowGroupMeta>> {
     let path = Path::from(object_key);
-    let size = head_within_cap(&store, &path, object_key, max_bytes).await?;
-    let reader = ParquetObjectReader::new(store, path).with_file_size(size);
+    head_within_cap(&store, &path, object_key, max_bytes).await?;
+    let reader = ObjectStoreReader::new(store, path);
     let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
     Ok(builder
         .metadata()
@@ -173,14 +182,84 @@ pub async fn read_block_row_groups_with_max_bytes(
     max_bytes: ByteSize,
 ) -> Result<Vec<RecordBatch>> {
     let path = Path::from(object_key);
-    let size = head_within_cap(&store, &path, object_key, max_bytes).await?;
-    let reader = ParquetObjectReader::new(store, path).with_file_size(size);
+    head_within_cap(&store, &path, object_key, max_bytes).await?;
+    let reader = ObjectStoreReader::new(store, path);
     let stream = ParquetRecordBatchStreamBuilder::new(reader)
         .await?
         .with_row_groups(row_groups.to_vec())
         .build()?;
     let batches = stream.try_collect::<Vec<_>>().await?;
     Ok(batches)
+}
+
+#[derive(Clone, Debug)]
+struct ObjectStoreReader {
+    store: Arc<dyn ObjectStore>,
+    path: Path,
+}
+
+impl ObjectStoreReader {
+    fn new(store: Arc<dyn ObjectStore>, path: Path) -> Self {
+        Self { store, path }
+    }
+}
+
+impl AsyncFileReader for ObjectStoreReader {
+    fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, parquet::errors::Result<Bytes>> {
+        self.store
+            .get_range(&self.path, range)
+            .map_err(to_parquet_error)
+            .boxed()
+    }
+
+    fn get_byte_ranges(
+        &mut self,
+        ranges: Vec<Range<u64>>,
+    ) -> BoxFuture<'_, parquet::errors::Result<Vec<Bytes>>> {
+        async move {
+            self.store
+                .get_ranges(&self.path, &ranges)
+                .await
+                .map_err(to_parquet_error)
+        }
+        .boxed()
+    }
+
+    fn get_metadata<'a>(
+        &'a mut self,
+        options: Option<&'a ArrowReaderOptions>,
+    ) -> BoxFuture<'a, parquet::errors::Result<Arc<ParquetMetaData>>> {
+        async move {
+            let metadata = ParquetMetaDataReader::new()
+                .with_arrow_reader_options(options)
+                .load_via_suffix_and_finish(self)
+                .await?;
+            Ok(Arc::new(metadata))
+        }
+        .boxed()
+    }
+}
+
+impl MetadataSuffixFetch for &mut ObjectStoreReader {
+    fn fetch_suffix(&mut self, suffix: usize) -> BoxFuture<'_, parquet::errors::Result<Bytes>> {
+        let options = GetOptions {
+            range: Some(GetRange::Suffix(suffix as u64)),
+            ..Default::default()
+        };
+        async move {
+            let result = self
+                .store
+                .get_opts(&self.path, options)
+                .await
+                .map_err(to_parquet_error)?;
+            result.bytes().await.map_err(to_parquet_error)
+        }
+        .boxed()
+    }
+}
+
+fn to_parquet_error(error: object_store::Error) -> ParquetError {
+    ParquetError::External(Box::new(error))
 }
 
 #[cfg(test)]
@@ -192,11 +271,10 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use object_store::{ObjectStore, memory::InMemory, path::Path};
-    use parquet::{
-        arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
-        file::properties::WriterProperties,
+    use object_store::{
+        ObjectStore, PutPayload, buffered::BufWriter, memory::InMemory, path::Path,
     };
+    use parquet::{arrow::AsyncArrowWriter, file::properties::WriterProperties};
 
     use super::*;
     use crate::writer::BlockWriter;
@@ -205,6 +283,21 @@ mod tests {
     fn max_block_bytes_is_one_gib() {
         assert2::assert!(DEFAULT_BLOCK_READ_MAX == gibibytes(1));
         assert2::assert!(DEFAULT_BLOCK_READ_MAX.bytes_u64() == 1024 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn metadata_suffix_fetch_reads_only_the_requested_tail() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("suffix");
+        store
+            .put(&path, PutPayload::from(b"metadata-tail".to_vec()))
+            .await
+            .unwrap();
+
+        let mut reader = ObjectStoreReader::new(store, path);
+        let suffix = (&mut reader).fetch_suffix(4).await.unwrap();
+
+        assert2::assert!(suffix == Bytes::from_static(b"tail"));
     }
 
     #[tokio::test]
@@ -292,7 +385,7 @@ mod tests {
         .unwrap();
 
         // One row per row group → exactly two row groups.
-        let object_writer = ParquetObjectWriter::new(store.clone(), Path::from("meta.parquet"));
+        let object_writer = BufWriter::new(store.clone(), Path::from("meta.parquet"));
         let props = WriterProperties::builder()
             .set_max_row_group_row_count(Some(1))
             .set_write_batch_size(1)
@@ -350,7 +443,7 @@ mod tests {
         )
         .unwrap();
 
-        let object_writer = ParquetObjectWriter::new(store.clone(), Path::from("rg.parquet"));
+        let object_writer = BufWriter::new(store.clone(), Path::from("rg.parquet"));
         let props = WriterProperties::builder()
             .set_max_row_group_row_count(Some(1))
             .set_write_batch_size(1)

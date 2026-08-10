@@ -2505,12 +2505,9 @@ mod tests {
     };
     use crabka_units::{nanos, secs};
     use http_body_util::BodyExt;
-    use object_store::{memory::InMemory, path::Path};
+    use object_store::{buffered::BufWriter, memory::InMemory, path::Path};
     use opentelemetry_proto::tonic::trace::v1::TracesData;
-    use parquet::{
-        arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
-        file::properties::WriterProperties,
-    };
+    use parquet::{arrow::AsyncArrowWriter, file::properties::WriterProperties};
     use prost::Message as _;
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -2779,7 +2776,7 @@ mod tests {
             .set_max_row_group_row_count(Some(1))
             .set_write_batch_size(1)
             .build();
-        let object_writer = ParquetObjectWriter::new(
+        let object_writer = BufWriter::new(
             object_store.clone(),
             Path::from("blocks/row-groups.parquet"),
         );
@@ -4288,7 +4285,7 @@ overrides:
         late.start_unix_nano = 5_000_000_000;
         let batch = encode_span_rows(&[early, late]).unwrap();
         let object_writer =
-            ParquetObjectWriter::new(object_store.clone(), Path::from("blocks/straddle.parquet"));
+            BufWriter::new(object_store.clone(), Path::from("blocks/straddle.parquet"));
         let mut writer =
             AsyncArrowWriter::try_new(object_writer, span_block_schema(), None).unwrap();
         writer.write(&batch).await.unwrap();

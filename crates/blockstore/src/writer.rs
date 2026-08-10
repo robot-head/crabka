@@ -7,8 +7,8 @@ use arrow::{
     datatypes::SchemaRef,
     record_batch::RecordBatch,
 };
-use object_store::{ObjectStore, path::Path};
-use parquet::arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter};
+use object_store::{ObjectStore, buffered::BufWriter, path::Path};
+use parquet::arrow::AsyncArrowWriter;
 use tracing::instrument;
 
 use crate::{
@@ -100,7 +100,7 @@ impl BlockWriter {
         let (min_ts, max_ts, row_count, fingerprints) = summarize(batches, &summary)?;
 
         let path = Path::from(object_key);
-        let object_writer = ParquetObjectWriter::new(self.store.clone(), path);
+        let object_writer = BufWriter::new(self.store.clone(), path);
         let mut writer = AsyncArrowWriter::try_new(object_writer, schema, None)?;
         for batch in batches {
             writer.write(batch).await?;
