@@ -6196,7 +6196,15 @@ impl SqlSession {
                 let error = error.into_pg();
                 crate::telemetry::record_error(&span, &error.code, &error.message);
                 self.mark_transaction_failed();
-                Err(error)
+                // A qualified interval literal — `interval '1 2' day to minute`
+                // — is decoded here and not at execution time, because the
+                // qualifier is a property of the literal. PostgreSQL still
+                // points its caret at that literal, and this is the only place
+                // the failure passes through, so the run-time attachment in
+                // `attach_known_runtime_diagnostics` never sees it. Only a
+                // type-input SQLSTATE gets this far; a syntax error carries its
+                // own position already.
+                Err(attach_type_input_literal_position(sql, error))
             }
         }
     }
@@ -10619,7 +10627,7 @@ fn parse_single_extended_statement(
     type_schemas: &[String],
 ) -> Result<Statement, PgError> {
     let statements = crabka_pgparser::parse_with_type_schemas(sql, type_schemas)
-        .map_err(|e| ExecError::from(e).into_pg())?;
+        .map_err(|e| attach_type_input_literal_position(sql, ExecError::from(e).into_pg()))?;
     match statements.as_slice() {
         [] => Err(PgError::error(
             sqlstate::SYNTAX_ERROR,
@@ -13515,18 +13523,181 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
     )
 }
 
-/// The rejected value and target type of a type-input error, for the three
-/// message shapes PostgreSQL's input functions produce.
-fn rejected_input_value(message: &str) -> Option<(&str, &str)> {
+/// The multi-word spellings PostgreSQL accepts for a type name. One word needs
+/// no table — any identifier can name a type — but `time with time zone` has to
+/// be read as one name rather than as the identifier `zone`.
+const MULTI_WORD_TYPE_NAMES: &[&str] = &[
+    "bit varying",
+    "character varying",
+    "double precision",
+    "national character",
+    "national character varying",
+    "time with time zone",
+    "time without time zone",
+    "timestamp with time zone",
+    "timestamp without time zone",
+];
+
+/// The types whose input function reports `date/time field value out of range`.
+/// `interval` is not one of them: SQL99 gives it its own message and SQLSTATE.
+const DATETIME_TYPE_KEYS: &[&str] = &[
+    "date",
+    "time",
+    "time with time zone",
+    "timestamp",
+    "timestamp with time zone",
+];
+
+/// The two types whose input function reports `timestamp out of range`.
+const TIMESTAMP_TYPE_KEYS: &[&str] = &["timestamp", "timestamp with time zone"];
+
+/// `json` and `jsonb` share one lexer, so they share its complaints: a `jsonb`
+/// literal is rejected with `invalid input syntax for type json` as well.
+const JSON_TYPE_KEYS: &[&str] = &["json", "jsonb"];
+
+/// What a type-input message proves about the type that rejected the literal.
+enum RejectedType {
+    /// The message names the type outright.
+    Named(String),
+    /// The message names a family, so any of these canonical keys will do.
+    OneOf(&'static [&'static str]),
+    /// `array_in` names no type, but only an array literal can reach it.
+    AnyArray,
+}
+
+impl RejectedType {
+    /// Whether a literal whose source states `stated` could be the one that the
+    /// input function rejected.
+    fn accepts(&self, stated: &str) -> bool {
+        match self {
+            RejectedType::Named(name) => stated == name,
+            RejectedType::OneOf(keys) => keys.contains(&stated),
+            RejectedType::AnyArray => stated.ends_with("[]"),
+        }
+    }
+}
+
+/// A type-input error decomposed into what it says about the literal that
+/// failed.
+struct RejectedInput<'a> {
+    /// The rejected text, when the message quotes it. `None` when the message
+    /// does not name a value, in which case the stated type is the only
+    /// evidence there is.
+    value: Option<&'a str>,
+    /// The type the failing input function belongs to.
+    expected: RejectedType,
+    /// Whether the caret may go on a literal the source does not hand *straight*
+    /// to that input function — one that states no type, taking it from the
+    /// target column of a `VALUES` row, or one written inside a call. A message
+    /// that quotes the value can afford the latitude, because the value picks
+    /// the literal out. One that quotes nothing cannot: every literal of the
+    /// reported type is otherwise a candidate, and
+    /// `JSON_VALUE(jsonb '"aaa"', '$' RETURNING json)` fails while converting
+    /// the *result*, with a perfectly good `jsonb` literal standing next to it
+    /// and no caret on it.
+    indirect_ok: bool,
+}
+
+/// The rejected value and target type of a type-input error, for every message
+/// shape PostgreSQL's input functions produce that a source literal can be
+/// blamed for.
+fn rejected_input(message: &str) -> Option<RejectedInput<'_>> {
+    /// The `…: "value"` tail these messages end with.
+    fn tail<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+        message
+            .strip_prefix(prefix)?
+            .strip_prefix(": \"")?
+            .strip_suffix('"')
+    }
+
+    /// A message that names both the value and one type.
+    fn named<'a>(value: &'a str, type_name: &str) -> RejectedInput<'a> {
+        RejectedInput {
+            value: Some(value),
+            expected: RejectedType::Named(canonical_type_key(type_name)),
+            indirect_ok: true,
+        }
+    }
+
+    /// A message that names a family of types and quotes the value.
+    fn family<'a>(value: &'a str, keys: &'static [&'static str]) -> RejectedInput<'a> {
+        RejectedInput {
+            value: Some(value),
+            expected: RejectedType::OneOf(keys),
+            indirect_ok: true,
+        }
+    }
+
     if let Some(rest) = message.strip_prefix("invalid input syntax for type ") {
-        let (type_name, quoted) = rest.split_once(": \"")?;
-        return Some((quoted.strip_suffix('"')?, type_name));
+        if let Some((type_name, quoted)) = rest.split_once(": \"") {
+            return Some(named(quoted.strip_suffix('"')?, type_name));
+        }
+        // `json_in` names its type but not the value, because the value is
+        // spelled out in the DETAIL and CONTEXT instead. With no value to search
+        // for, only a literal the source *writes* as JSON qualifies.
+        return (rest == "json").then_some(RejectedInput {
+            value: None,
+            expected: RejectedType::OneOf(JSON_TYPE_KEYS),
+            indirect_ok: false,
+        });
+    }
+    if let Some(value) = tail(message, "interval field value out of range") {
+        return Some(named(value, "interval"));
+    }
+    if let Some(value) = tail(message, "date/time field value out of range")
+        .or_else(|| tail(message, "time zone displacement out of range"))
+    {
+        return Some(family(value, DATETIME_TYPE_KEYS));
+    }
+    if let Some(value) = tail(message, "timestamp out of range") {
+        return Some(family(value, TIMESTAMP_TYPE_KEYS));
+    }
+    if let Some(value) = tail(message, "malformed array literal") {
+        return Some(RejectedInput {
+            value: Some(value),
+            expected: RejectedType::AnyArray,
+            indirect_ok: true,
+        });
+    }
+    if message == "array bound is out of integer range" {
+        return Some(RejectedInput {
+            value: None,
+            expected: RejectedType::AnyArray,
+            indirect_ok: false,
+        });
+    }
+    if let Some(value) = tail(message, "invalid cidr value") {
+        return Some(named(value, "cidr"));
+    }
+    // `invalid input value for enum rainbow: "mauve"` names the enum itself.
+    if let Some(rest) = message.strip_prefix("invalid input value for enum ") {
+        let (enum_name, quoted) = rest.split_once(": \"")?;
+        return Some(named(quoted.strip_suffix('"')?, enum_name));
+    }
+    // A `\u0000` escape is the one the JSON lexer re-codes to 22P05. It reaches
+    // only a JSON input, so the written type is the whole of the evidence.
+    if message == "unsupported Unicode escape sequence" {
+        return Some(RejectedInput {
+            value: None,
+            expected: RejectedType::OneOf(JSON_TYPE_KEYS),
+            indirect_ok: false,
+        });
+    }
+    // `line_in`'s two specification errors describe the line rather than the
+    // text, so they name neither the value nor the type. They can only come
+    // from a `line` input, so a single directly-coerced literal is the evidence.
+    if message.starts_with("invalid line specification:") {
+        return Some(RejectedInput {
+            value: None,
+            expected: RejectedType::Named("line".to_owned()),
+            indirect_ok: true,
+        });
     }
     let quoted = message
         .strip_prefix("value \"")
         .or_else(|| message.strip_prefix('"'))?;
     let (value, type_name) = quoted.rsplit_once("\" is out of range for type ")?;
-    Some((value, type_name))
+    Some(named(value, type_name))
 }
 
 /// PostgreSQL's canonical name for a type however it is spelled, so a written
@@ -13545,26 +13716,99 @@ fn canonical_type_key(name: &str) -> String {
         "bpchar" => "character".to_owned(),
         "timestamptz" => "timestamp with time zone".to_owned(),
         "timetz" => "time with time zone".to_owned(),
+        "time without time zone" => "time".to_owned(),
+        "timestamp without time zone" => "timestamp".to_owned(),
         _ => lowered,
     }
 }
 
-/// The type a source literal is *directly* coerced to, when the statement
-/// states one next to it: `int2 '1'`, `'1'::int2`, or `CAST('1' AS int2)`.
-/// A literal in a `VALUES` row states none, and takes its type from the target
-/// column instead.
-fn literal_target_type(
+/// The source words between two offsets, lowercased with runs of whitespace
+/// collapsed, so a type name spelled over several tokens compares as one string.
+fn collapse_words(text: &str) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    for word in text.split_whitespace() {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
+    collapsed.to_ascii_lowercase()
+}
+
+/// The canonical key of the type name written *after* `start`, as `::type` and
+/// `CAST(… AS type)` both spell it, including a trailing `[]` when the target is
+/// an array.
+fn stated_type_after(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    start: usize,
+) -> Option<String> {
+    use crabka_pgparser::token::Token;
+
+    let Some((Token::Ident(head), _)) = tokens.get(start) else {
+        return None;
+    };
+    let mut name = head.clone();
+    let mut end = start + 1;
+    // Longest wins: `time` and `time with time` are not type names, and only the
+    // four-word reading of `time with time zone` is.
+    for words in 2..=4 {
+        let Some(after) = tokens.get(start + words) else {
+            break;
+        };
+        let phrase = collapse_words(&sql[tokens[start].1..after.1]);
+        if MULTI_WORD_TYPE_NAMES.contains(&phrase.as_str()) {
+            name = phrase;
+            end = start + words;
+        }
+    }
+    let mut key = canonical_type_key(&name);
+    if matches!(tokens.get(end), Some((Token::LBracket, _))) {
+        key.push_str("[]");
+    }
+    Some(key)
+}
+
+/// The canonical key of the type name written *before* the literal at `index`,
+/// as the legacy `type 'literal'` spelling puts it.
+fn stated_type_before(
+    sql: &str,
     tokens: &[(crabka_pgparser::token::Token, usize)],
     index: usize,
-) -> Option<&str> {
+) -> Option<String> {
+    use crabka_pgparser::token::Token;
+
+    let literal = tokens[index].1;
+    for words in (2..=4).rev() {
+        let Some(first) = index.checked_sub(words) else {
+            continue;
+        };
+        let phrase = collapse_words(&sql[tokens[first].1..literal]);
+        if MULTI_WORD_TYPE_NAMES.contains(&phrase.as_str()) {
+            return Some(canonical_type_key(&phrase));
+        }
+    }
+    match index.checked_sub(1).map(|prev| &tokens[prev].0) {
+        Some(Token::Ident(name)) => Some(canonical_type_key(name)),
+        _ => None,
+    }
+}
+
+/// The type a source literal is *directly* coerced to, when the statement states
+/// one next to it: `int2 '1'`, `'1'::int2`, `CAST('1' AS int2)`, or the
+/// type-name call `cidr('…')`. A literal in a `VALUES` row states none, and
+/// takes its type from the target column instead.
+fn stated_literal_type(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    index: usize,
+) -> Option<String> {
     use crabka_pgparser::token::{Keyword, Token};
 
     // `'x'::type` binds tighter than an enclosing call, so
     // `to_timestamp('x'::date, …)` is still a coercion of the literal.
-    if let (Some((Token::TypeCast, _)), Some((Token::Ident(name), _))) =
-        (tokens.get(index + 1), tokens.get(index + 2))
-    {
-        return Some(name);
+    if matches!(tokens.get(index + 1), Some((Token::TypeCast, _))) {
+        return stated_type_after(sql, tokens, index + 2);
     }
     // `CAST('x' AS type)`. The `AS` must belong to a cast rather than a column
     // alias: `SELECT bool 'test' AS error` names the *output column* `error`,
@@ -13580,15 +13824,24 @@ fn literal_target_type(
             Some(Token::LParen),
             Some(Token::Keyword(Keyword::As))
         )
-    ) && let Some((Token::Ident(name), _)) = tokens.get(index + 2)
+    ) {
+        return stated_type_after(sql, tokens, index + 2);
+    }
+    // `cidr('…')` — a one-argument call on a *type* name is a coercion, and
+    // PostgreSQL positions it like one. Nothing here decides whether the name
+    // is a type: the caller accepts it only when the failing input function
+    // reported that same type, so an ordinary call such as `abs('zz')` is left
+    // undecorated.
+    if matches!(tokens.get(index + 1), Some((Token::RParen, _)))
+        && matches!(
+            index.checked_sub(1).map(|open| &tokens[open].0),
+            Some(Token::LParen)
+        )
+        && let Some((Token::Ident(name), _)) = index.checked_sub(2).map(|open| &tokens[open])
     {
-        return Some(name);
+        return Some(canonical_type_key(name));
     }
-    // The legacy `type 'literal'` spelling.
-    if let Some((Token::Ident(name), _)) = index.checked_sub(1).and_then(|prev| tokens.get(prev)) {
-        return Some(name);
-    }
-    None
+    stated_type_before(sql, tokens, index)
 }
 
 /// Whether the literal at `index` sits inside a function call's argument list.
@@ -13639,48 +13892,56 @@ fn encloses_function_call(tokens: &[(crabka_pgparser::token::Token, usize)], ind
 /// carries the rejected value; a repeated literal stays undecorated rather than
 /// guessing which occurrence failed.
 ///
+/// A message that quotes no value at all — `invalid input syntax for type json`
+/// — has only the written type to go on, so it blames a literal *only* when the
+/// source states that type next to it. A `VALUES` item, which states nothing,
+/// stays undecorated there even though a value-carrying message would claim it.
+///
 /// Known gap: when a *component* fails inside a composite literal — a `float8`
-/// coordinate overflowing inside a `line`, say — the message names the
-/// component's type while the source states the outer type, so the check
-/// declines and no caret is attached. PostgreSQL does attach one. No statement
-/// in the pinned corpus reaches that path with a position.
+/// coordinate overflowing inside a `line`, or an `integer` element inside an
+/// `int[]` — the message names the component's type while the source states the
+/// outer type, so the check declines and no caret is attached. PostgreSQL does
+/// attach one.
 fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
     use crabka_pgparser::token::Token;
 
-    // 22P02 invalid_text_representation, 22003 numeric_value_out_of_range, and
-    // 22007 invalid_datetime_format all name their type in the message, which is
-    // what proves the literal was coerced directly. 22008 and the array-literal
-    // messages carry no type name and are left undecorated.
-    if !matches!(error.code.as_str(), "22P02" | "22003" | "22007")
-        || error
-            .diagnostics
-            .as_ref()
-            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    // Every SQLSTATE an input function raises while parse analysis coerces a
+    // written constant: 22P02 invalid_text_representation, 22003
+    // numeric_value_out_of_range, 22007 invalid_datetime_format, 22008
+    // datetime_field_overflow, 22009 invalid_time_zone_displacement_value, 22015
+    // interval_field_overflow, 22P05 untranslatable_character, and 54000
+    // program_limit_exceeded, which is what an array dimension out of `int4`
+    // range raises. Testing the code first keeps the re-lex off the failure path
+    // of every statement that fails for another reason.
+    if !matches!(
+        error.code.as_str(),
+        "22P02" | "22003" | "22007" | "22008" | "22009" | "22015" | "22P05" | "54000"
+    ) || error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
     {
         return error;
     }
-    // `line_in`'s two specification errors describe the line rather than the
-    // text, so they name neither the value nor the type. They can only come
-    // from a `line` input, so the evidence is a single directly-coerced
-    // literal; the type check is unavailable and is skipped.
-    let line_specification = error.message.starts_with("invalid line specification:");
-    let (value, type_name) = match rejected_input_value(&error.message) {
-        Some(parsed) => parsed,
-        None if line_specification => ("", "line"),
-        None => return error,
+    let Some(rejected) = rejected_input(&error.message) else {
+        return error;
     };
     let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
         return error;
     };
-    let reported = canonical_type_key(type_name);
     let positions: Vec<usize> = tokens
         .iter()
         .enumerate()
         .filter_map(|(index, (token, offset))| match token {
-            Token::StringLit(candidate) if line_specification || candidate == value => {
-                let coerced = match literal_target_type(&tokens, index) {
-                    Some(stated) => canonical_type_key(stated) == reported,
-                    None => !encloses_function_call(&tokens, index),
+            Token::StringLit(candidate)
+                if rejected.value.is_none_or(|value| candidate == value) =>
+            {
+                let coerced = match stated_literal_type(sql, &tokens, index) {
+                    Some(stated) => {
+                        rejected.expected.accepts(&stated)
+                            && (rejected.indirect_ok || !encloses_function_call(&tokens, index))
+                    }
+                    None => rejected.indirect_ok && !encloses_function_call(&tokens, index),
                 };
                 coerced.then(|| sql[..*offset].chars().count() + 1)
             }
@@ -14352,7 +14613,7 @@ impl Session for SqlSession {
         let statements =
             crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
                 self.mark_transaction_failed();
-                ExecError::from(error).into_pg()
+                attach_type_input_literal_position(sql, ExecError::from(error).into_pg())
             })?;
         let parsed = single_copy_from_stdin(&statements)?;
         self.copy_probe = Some((sql.to_string(), statements));
@@ -14373,7 +14634,7 @@ impl Session for SqlSession {
                 let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
                 crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
                     self.mark_transaction_failed();
-                    ExecError::from(error).into_pg()
+                    attach_type_input_literal_position(sql, ExecError::from(error).into_pg())
                 })?
             }
         };
@@ -20860,6 +21121,30 @@ mod session_conformance_tests {
             ("SELECT CAST('zz' AS text)::int4", "22P02", None),
             // A repeated literal is ambiguous and is not guessed.
             ("SELECT '34.5'::int2, '34.5'::int2", "22P02", None),
+            // A field overflow names no type, but only an `interval` input
+            // raises 22015 and only a date/time input raises 22008.
+            ("SELECT interval '2147483648 years'", "22015", Some(17)),
+            ("SELECT '2147483648 years'::interval", "22015", Some(8)),
+            ("SELECT date '1997-02-29'", "22008", Some(13)),
+            (
+                "SELECT '0 second'::interval, '2001-02-29'::date",
+                "22008",
+                Some(30),
+            ),
+            // A type name spelled in four words is still one name.
+            ("SELECT time with time zone 'T04'", "22007", Some(28)),
+            (
+                "SELECT CAST('x' AS timestamp with time zone)",
+                "22007",
+                Some(13),
+            ),
+            ("SELECT double precision 'zz'", "22P02", Some(25)),
+            // `array_in` names no type either, so the target must be an array.
+            ("SELECT '{{1,2},{3}}'::text[]", "22P02", Some(8)),
+            ("SELECT '{{1,2},{3}}'::text::int[]", "22P02", None),
+            // A one-argument call on a *type* name is a coercion, and
+            // PostgreSQL positions it like one.
+            ("SELECT cidr('192.168.1.2/30')", "22P02", Some(13)),
         ] {
             let error = session.simple_query(sql).await.expect_err("input error");
             assert!(error.code == code, "{sql}: {error:?}");
@@ -20872,6 +21157,147 @@ mod session_conformance_tests {
                 "{sql}: {error:?}"
             );
         }
+    }
+
+    /// `json_in` reports its type but not the rejected value, so the written
+    /// type is the whole of the evidence: a literal the source spells as JSON is
+    /// blamed, and nothing else is.
+    #[tokio::test]
+    async fn json_input_errors_blame_only_a_written_json_literal() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("SELECT '01'::json", Some(8)),
+            ("SELECT '01'::jsonb", Some(8)),
+            ("SELECT jsonb '01'", Some(14)),
+            ("SELECT $$''$$::json", Some(8)),
+            // A second literal that states no type is not a candidate, so the
+            // one that states `json` is still unambiguous.
+            ("SELECT '01'::json, 'plain'", Some(8)),
+            // Coerced through `text`, so `json_in` runs at execution time and
+            // PostgreSQL reports no position.
+            ("SELECT '01'::text::json", None),
+            // The literal is sound and the failure is in converting the
+            // *result* of the call, so PostgreSQL blames neither.
+            (
+                "SELECT JSON_VALUE(jsonb '\"aaa\"', '$' RETURNING json ERROR ON ERROR)",
+                None,
+            ),
+            // Two JSON literals: the message says which type failed but not
+            // which literal, so neither is guessed.
+            ("SELECT '01'::json, '02'::jsonb", None),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("invalid json");
+            assert!(
+                error.message == "invalid input syntax for type json",
+                "{sql}: {error:?}"
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// An interval literal with a field qualifier is decoded while the statement
+    /// is *parsed*, because the qualifier is a property of the literal. That
+    /// failure never reaches the run-time attachment, so the parse path carries
+    /// the caret itself.
+    #[tokio::test]
+    async fn a_qualified_interval_literal_carries_its_caret() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("SELECT interval '1 2' day to minute", Some(17)),
+            ("SELECT interval '123 11' day", Some(17)),
+            // Two qualified literals: which one the parser stopped on is not
+            // knowable from the message, so neither is decorated.
+            ("SELECT interval '1 2' day, interval '1 2' hour", None),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("bad interval");
+            assert!(error.code == "22007", "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+
+        // The wire loop's first look at a simple-query string is the copy-in
+        // probe, and a parse failure there is the one the client is told about.
+        // `simple_query` never reaches it, so pin that path on its own.
+        let probed = session
+            .begin_copy_in("SELECT interval '1 2' day to minute")
+            .await
+            .expect_err("bad interval");
+        assert!(
+            probed
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(17),
+            "{probed:?}"
+        );
+    }
+
+    /// The attachment runs on the failure path of every statement and is applied
+    /// to errors it does not own, so it has to leave those exactly as they were
+    /// — and a statement that succeeds must not notice it at all.
+    #[tokio::test]
+    async fn literal_position_attachment_leaves_other_outcomes_alone() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "SELECT 1",
+            "SELECT interval '1 day'",
+            "SELECT interval '1 2' day to hour",
+            "SELECT '{1,2}'::int[]",
+            "SELECT '{\"a\":1}'::json",
+            "SELECT date '2001-02-28'",
+            "SELECT time with time zone '04:05:06+08'",
+        ] {
+            assert!(session.simple_query(sql).await.is_ok(), "{sql}");
+        }
+
+        let owned =
+            crabka_pgwire::error::PgError::error("22P02", "invalid input syntax for type json");
+        // An error that already carries a position keeps the one it has, even
+        // where this code would have chosen a different literal.
+        let already = super::attach_type_input_literal_position(
+            "SELECT '01'::json",
+            owned.clone().with_position(3),
+        );
+        assert!(
+            already
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(3)
+        );
+        // A SQLSTATE no input function raises is returned untouched, message,
+        // diagnostics and all.
+        let unrelated =
+            crabka_pgwire::error::PgError::error("42601", "invalid input syntax for type json");
+        assert!(
+            super::attach_type_input_literal_position("SELECT '01'::json", unrelated.clone())
+                == unrelated
+        );
+        // So is a message this code does not recognise, under a code it does.
+        let unshaped = crabka_pgwire::error::PgError::error(
+            "22P02",
+            "invalid input syntax for type json path",
+        );
+        assert!(
+            super::attach_type_input_literal_position("SELECT '01'::json", unshaped.clone())
+                == unshaped
+        );
     }
 
     #[tokio::test]
