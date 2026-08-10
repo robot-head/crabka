@@ -189,6 +189,17 @@ fn broker_config_records(
                 format!("unknown broker config {}", config.name),
             ));
         }
+        if node_id != crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID
+            && super::incremental_alter_configs::is_cluster_default_topic_config(&config.name)
+        {
+            return Err((
+                codes::INVALID_CONFIG,
+                format!(
+                    "broker config {} is valid only on the cluster-default resource",
+                    config.name
+                ),
+            ));
+        }
         let value = config.value.as_deref().ok_or_else(|| {
             (
                 codes::INVALID_CONFIG,
@@ -446,7 +457,10 @@ mod tests {
         let records = broker_config_records(
             &broker_resource(
                 "",
-                &[(crate::throttle::FOLLOWER_THROTTLED_RATE_KEY, "4096")],
+                &[
+                    (crate::throttle::FOLLOWER_THROTTLED_RATE_KEY, "4096"),
+                    (crate::config_keys::UNCLEAN_RECOVERY_STRATEGY, "Balanced"),
+                ],
             ),
             &image,
         )
@@ -454,11 +468,45 @@ mod tests {
 
         assert!(
             records
-                == vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-                    node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
-                    config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.into(),
-                    config_value: Some("4096".into()),
-                })]
+                == vec![
+                    MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                        node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+                        config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.into(),
+                        config_value: Some("4096".into()),
+                    }),
+                    MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                        node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+                        config_name: crate::config_keys::UNCLEAN_RECOVERY_STRATEGY.into(),
+                        config_value: Some("Balanced".into()),
+                    }),
+                ]
         );
+    }
+
+    #[test]
+    fn broker_full_replacement_rejects_per_broker_recovery_setting() {
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            crabka_metadata::BrokerRegistrationRecord {
+                node_id: crabka_metadata::NodeId(1),
+                broker_epoch: 0,
+                incarnation_id: uuid::Uuid::nil(),
+                host: "127.0.0.1".into(),
+                port: 9092,
+                rack: None,
+                endpoints: Vec::new(),
+            },
+        ));
+
+        let error = broker_config_records(
+            &broker_resource(
+                "1",
+                &[(crate::config_keys::UNCLEAN_RECOVERY_STRATEGY, "Balanced")],
+            ),
+            &image,
+        )
+        .expect_err("per-broker recovery setting must be rejected");
+
+        assert!(error.0 == codes::INVALID_CONFIG);
     }
 }
