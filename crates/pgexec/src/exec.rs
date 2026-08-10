@@ -269,7 +269,7 @@ impl<'a> WriteContext<'a> {
             blocking_query_memory: self.blocking_query_memory,
             security_role: self.fctx.effective_role(),
             policy_stack: self.policy_stack,
-            whole_row: None,
+            refs: None,
         }
     }
 
@@ -13262,7 +13262,7 @@ impl BindPass<'_, '_> {
         if shadow.qualifiers.iter().any(|q| q == qualifier) {
             return;
         }
-        let Some(value) = self.outer.whole_row_value(qualifier, self.row) else {
+        let Some(value) = self.outer.refs_value(qualifier, self.row) else {
             return;
         };
         self.substituted = true;
@@ -13919,12 +13919,13 @@ fn resolve_select_subqueries(
     let scope = if select.from.is_empty() {
         Scope::empty()
     } else {
-        match build_from_schema_with_ctes_and_context(
+        match build_from_schema_described(
             read_ctx.catalog_kv,
             read_ctx.fctx.resolution,
             &select.from,
             read_ctx.ctes,
             Some(read_ctx.eval_ctx),
+            read_ctx.refs,
         ) {
             Ok(described) => described.scope,
             // A FROM the schema pass cannot describe is not a new failure to
@@ -15478,10 +15479,11 @@ fn partitioned_scan(
     qualifier: &str,
     permit: &crate::privilege::ReadPermit,
 ) -> Result<crate::rls::RawScan, ExecError> {
-    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier);
+    let tableoid = crate::scope::wants_tableoid(read_ctx.refs);
+    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier, tableoid);
     for leaf in crate::partition::leaves_of(read_ctx.catalog_kv, &parent.name)? {
         let leaf_table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &leaf)?;
-        let ordinals = column_mapping(parent, &leaf_table)?;
+        let ordinals = tree_ordinals(parent, &leaf_table, tableoid)?;
         // Straight to the scan, not back through `build_table_expr`: re-entering
         // there would run each leaf through the row-security gate under the
         // LEAF's policies, and then run the whole append through it again under
@@ -15515,10 +15517,11 @@ fn inherited_scan(
         read_ctx.catalog_kv,
         &parent.name,
     )?);
-    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier);
+    let tableoid = crate::scope::wants_tableoid(read_ctx.refs);
+    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier, tableoid);
     for relation_name in relations {
         let table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &relation_name)?;
-        let ordinals = column_mapping(parent, &table)?;
+        let ordinals = tree_ordinals(parent, &table, tableoid)?;
         // See `partitioned_scan`: the child's rows are governed by the parent's
         // policies and read under the parent's permit, so they must not pass
         // through either gate on their own.
@@ -15583,7 +15586,17 @@ fn scan_stored_relation(
     if reach.spans_partitions() && crate::partition::is_partitioned(catalog_kv, &t.name)? {
         return partitioned_scan(read_ctx, t, qualifier, permit);
     }
-    let scope = Scope::single(t, qualifier);
+    let mut scope = Scope::single(t, qualifier);
+    // The oid this relation stamps on every row it yields, when the statement
+    // spells `tableoid` and nothing otherwise. Taken once, before the rows: it
+    // is a catalog fact about the relation, not about any row of it.
+    let stamp = crate::scope::wants_tableoid(read_ctx.refs)
+        .then(|| crate::catalog_rel::table_relation_oid(t.id))
+        .transpose()?
+        .map(Datum::Int4);
+    if stamp.is_some() {
+        scope.push_tableoid(qualifier);
+    }
     // SP40: a foreign table reads through the registered scanner, not the local
     // MVCC version store. `build_from` materializes BEFORE WHERE, so this scan
     // runs even for `WHERE false` — there is no skip path.
@@ -15609,7 +15622,11 @@ fn scan_stored_relation(
             scanner.scan(t, &server, mapping.as_ref(), scan_bounds, read_ctx.eval_ctx)?;
         resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
         expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
-        return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
+        return Ok(crate::rls::RawScan::of_relation(
+            t,
+            scope,
+            stamped(rows, stamp.as_ref()),
+        ));
     }
     let default_scan_plan = crate::plan_dist::DistributedScanPlan::default();
     // A pushed-down predicate, projection, aggregate or top-K reads the row as
@@ -15637,7 +15654,11 @@ fn scan_stored_relation(
         let mut rows: Vec<Vec<Datum>> = rows.into_iter().map(|scanned| scanned.row).collect();
         resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
         expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
-        return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
+        return Ok(crate::rls::RawScan::of_relation(
+            t,
+            scope,
+            stamped(rows, stamp.as_ref()),
+        ));
     }
     let scan_request = ScanRequest {
         local: read_ctx.kv,
@@ -15689,7 +15710,44 @@ fn scan_stored_relation(
     let mut rows: Vec<Vec<Datum>> = rows;
     resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
     expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
-    Ok(crate::rls::RawScan::of_relation(t, scope, rows))
+    Ok(crate::rls::RawScan::of_relation(
+        t,
+        scope,
+        stamped(rows, stamp.as_ref()),
+    ))
+}
+
+/// `rows`, each extended by `stamp` when the scan carries one.
+///
+/// The stamp goes on AFTER `resolve_scanned_regclass` and
+/// `expand_virtual_generated`, both of which read a row by the ordinals of the
+/// relation's declared columns and would mistake a longer row for a corrupt
+/// one.
+fn stamped(mut rows: Vec<Vec<Datum>>, stamp: Option<&Datum>) -> Vec<Vec<Datum>> {
+    if let Some(oid) = stamp {
+        for row in &mut rows {
+            row.push(oid.clone());
+        }
+    }
+    rows
+}
+
+/// [`column_mapping`] for a tree scan, extended by the hidden `tableoid` when
+/// the statement asks for one.
+///
+/// `source.columns.len()` is where the child's own scan appended its stamp,
+/// whether the child was a plain relation ([`Scope::single`]) or a nested tree
+/// ([`crate::rls::RawScan::tree_of`]) — both scopes are exactly the child's
+/// declared width before the system column goes on. Reading it through the same
+/// permutation as every user column is what makes an inheritance grandchild and
+/// a sub-partitioned leaf report THEMSELVES: each level stamps its own oid, and
+/// the level above only carries it up.
+fn tree_ordinals(parent: &Table, source: &Table, tableoid: bool) -> Result<Vec<usize>, ExecError> {
+    let mut ordinals = column_mapping(parent, source)?;
+    if tableoid {
+        ordinals.push(source.columns.len());
+    }
+    Ok(ordinals)
 }
 
 /// For each of `target`'s columns, the ordinal of the same-named column in
@@ -17207,6 +17265,15 @@ fn top_k_pushdown_for_relation(
     qualifier: &str,
     s: &SelectStmt,
 ) -> Result<Option<crate::TopKSpec>, ExecError> {
+    // A statement that reads `tableoid` keeps the full scan. The pushdown below
+    // resolves the select list and ORDER BY against a bare `Scope::single`,
+    // which has no system column, so it would report the 42703 the ordinary
+    // path is about to answer — and its `table.columns[column]` lookup indexes
+    // the DECLARED columns by a scope index, which a system column sits one
+    // past.
+    if crate::scope::wants_tableoid(read_ctx.refs) {
+        return Ok(None);
+    }
     let Some(unrestricted) =
         crate::rls::UnrestrictedTable::read(&read_ctx.privileges(), &read_ctx.rls(), table)?
     else {
@@ -17414,8 +17481,8 @@ pub(crate) fn select_to_relation_with_ctes(
     // resolution only folds subqueries into constants and internally qualified
     // markers, so the references it leaves are a subset of these, and collecting
     // first is what puts every read path under this statement's own set.
-    let whole_row = crate::scope::WholeRowRefs::of_select(s);
-    let read_ctx = &read_ctx.with_whole_row(&whole_row);
+    let refs = crate::scope::StatementRefs::of_select(s);
+    let read_ctx = &read_ctx.with_refs(&refs);
     let catalog_kv = read_ctx.catalog_kv;
     let ctes = read_ctx.ctes;
     let ctx = read_ctx.eval_ctx;
@@ -17452,14 +17519,21 @@ pub(crate) fn select_to_relation_with_ctes(
         } else {
             None
         };
-        if let Some(relation) = try_execute_partial_aggregate_pushdown(read_ctx, s)? {
-            return Ok(relation);
-        }
-        if let Some(relation) = try_execute_local_streaming_aggregate(read_ctx, s)? {
-            return Ok(relation);
-        }
-        if let Some(relation) = try_execute_local_join_count(read_ctx, s)? {
-            return Ok(relation);
+        // Each of the three folds the aggregate against a bare `Scope::single`,
+        // which carries no system column. A statement that reads `tableoid`
+        // takes the ordinary read path instead — the only one that builds the
+        // column — rather than reporting the 42703 that path is about to
+        // answer.
+        if !crate::scope::wants_tableoid(read_ctx.refs) {
+            if let Some(relation) = try_execute_partial_aggregate_pushdown(read_ctx, s)? {
+                return Ok(relation);
+            }
+            if let Some(relation) = try_execute_local_streaming_aggregate(read_ctx, s)? {
+                return Ok(relation);
+            }
+            if let Some(relation) = try_execute_local_join_count(read_ctx, s)? {
+                return Ok(relation);
+            }
         }
         let scan_plan = single_table_scan_plan(read_ctx, s)?;
         build_from(
@@ -17555,7 +17629,7 @@ pub(crate) fn build_from_schema_with_ctes(
     from: &[crabka_pgparser::ast::TableExpr],
     ctes: &crate::cte::CteContext,
 ) -> Result<Relation, ExecError> {
-    build_from_schema_with_ctes_and_context(catalog_kv, resolution, from, ctes, None)
+    build_from_schema_described(catalog_kv, resolution, from, ctes, None, None)
 }
 
 pub(crate) fn build_from_schema_with_ctes_and_context(
@@ -17565,18 +17639,62 @@ pub(crate) fn build_from_schema_with_ctes_and_context(
     ctes: &crate::cte::CteContext,
     ctx: Option<&crate::clock::EvalCtx>,
 ) -> Result<Relation, ExecError> {
+    build_from_schema_described(catalog_kv, resolution, from, ctes, ctx, None)
+}
+
+/// The describe walk for one SELECT, which is therefore able to describe the
+/// hidden `tableoid` that statement reads.
+///
+/// Describe and execute must agree about the column: a describe that omits it
+/// answers 42703 for a statement the read path would have answered, which is
+/// what `SELECT tableoid …` did under the extended protocol, inside `CREATE
+/// VIEW`, inside `CREATE TABLE AS` and in a set-op branch, while the identical
+/// text ran under the simple protocol.
+pub(crate) fn build_from_schema_of_select(
+    catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    select: &SelectStmt,
+    ctes: &crate::cte::CteContext,
+) -> Result<Relation, ExecError> {
+    let refs = crate::scope::StatementRefs::of_select(select);
+    build_from_schema_described(
+        catalog_kv,
+        resolution,
+        &select.from,
+        ctes,
+        None,
+        Some(&refs),
+    )
+}
+
+/// The describe walk, told which statement it is describing.
+///
+/// `refs` is the very thing the read path carries on its
+/// [`crate::subquery::SubCtx`], and means the same here: `None` is "no statement
+/// in hand", and then a stored relation is described without its `tableoid`
+/// exactly as it is scanned without one. The plpgsql record and FOR-loop scopes
+/// are the callers with nothing to pass.
+fn build_from_schema_described(
+    catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    from: &[crabka_pgparser::ast::TableExpr],
+    ctes: &crate::cte::CteContext,
+    ctx: Option<&crate::clock::EvalCtx>,
+    refs: Option<&crate::scope::StatementRefs>,
+) -> Result<Relation, ExecError> {
     let mut iter = from.iter();
     let first = iter
         .next()
         .ok_or_else(|| ExecError::Unsupported("build_from_schema on empty FROM".into()))?;
-    let mut acc = build_table_expr_schema_with_ctes(catalog_kv, resolution, first, ctes, ctx)?;
+    let mut acc =
+        build_table_expr_schema_with_ctes(catalog_kv, resolution, first, ctes, ctx, refs)?;
     for te in iter {
         // A lateral item references the accumulated columns, which no schema
         // description of it on its own can resolve. Substituting NULLs of the
         // right types leaves an item the ordinary describe understands and whose
         // output columns are unchanged.
         let te = &lateral_schema_item(catalog_kv, resolution, ctes, te, &acc.scope);
-        let next = build_table_expr_schema_with_ctes(catalog_kv, resolution, te, ctes, ctx)?;
+        let next = build_table_expr_schema_with_ctes(catalog_kv, resolution, te, ctes, ctx, refs)?;
         // Schema-only: no rows, so no ON predicate is ever evaluated — a default
         // (UTC/epoch) eval context is correct here.
         acc = join_relations(
@@ -17597,6 +17715,7 @@ fn build_table_expr_schema_with_ctes(
     te: &crabka_pgparser::ast::TableExpr,
     ctes: &crate::cte::CteContext,
     ctx: Option<&crate::clock::EvalCtx>,
+    refs: Option<&crate::scope::StatementRefs>,
 ) -> Result<Relation, ExecError> {
     use crabka_pgparser::ast::TableExpr;
     match te {
@@ -17619,6 +17738,7 @@ fn build_table_expr_schema_with_ctes(
                     },
                     ctes,
                     ctx,
+                    refs,
                 )?;
                 let qualifier = alias.clone().unwrap_or_else(|| name.to_string());
                 return crate::values::requalify_derived(base, &qualifier, &Some(names.clone()));
@@ -17687,8 +17807,16 @@ fn build_table_expr_schema_with_ctes(
                 open_wrong_kind(catalog_kv, name).unwrap_or_else(|| error.into())
             })?;
             let qualifier = alias.as_deref().unwrap_or(&t.name.name);
+            // The one arm that gets the system column. A view, a CTE, a derived
+            // table, a VALUES list and a virtual catalog relation all return
+            // above without one, which is what makes `SELECT tableoid FROM v`
+            // the 42703 `PostgreSQL` raises rather than a column of nulls.
+            let mut scope = Scope::single(&t, qualifier);
+            if crate::scope::wants_tableoid(refs) {
+                scope.push_tableoid(qualifier);
+            }
             Ok(Relation {
-                scope: Scope::single(&t, qualifier),
+                scope,
                 rows: Vec::new(),
             })
         }
@@ -17698,9 +17826,11 @@ fn build_table_expr_schema_with_ctes(
             kind,
             constraint,
         } => {
-            let l = build_table_expr_schema_with_ctes(catalog_kv, resolution, left, ctes, ctx)?;
+            let l =
+                build_table_expr_schema_with_ctes(catalog_kv, resolution, left, ctes, ctx, refs)?;
             let right = &lateral_schema_item(catalog_kv, resolution, ctes, right, &l.scope);
-            let r = build_table_expr_schema_with_ctes(catalog_kv, resolution, right, ctes, ctx)?;
+            let r =
+                build_table_expr_schema_with_ctes(catalog_kv, resolution, right, ctes, ctx, refs)?;
             // Schema-only: no rows, so no ON predicate is ever evaluated.
             join_relations(
                 l,
@@ -22485,11 +22615,21 @@ pub(crate) fn resolve_projection(
                 }
             }
             SelectItem::QualifiedWildcard(q) => {
+                // Every column carrying the qualifier EXCEPT a system column.
+                // Not `!is_join_input()`, which is what a bare `*` uses: `ja.*`
+                // over a USING/NATURAL join is meant to yield that side's own
+                // retained columns, and only `tableoid` has to drop out. Same
+                // rule, same reason, as [`Scope::whole_row`] — `SELECT a.*` and
+                // `SELECT a` are both "the columns of `a`", and `PostgreSQL`
+                // counts a system column in neither.
                 let cols: Vec<_> = scope
                     .columns
                     .iter()
                     .enumerate()
-                    .filter(|(_, c)| c.qualifier.as_deref() == Some(q))
+                    .filter(|(_, c)| {
+                        c.qualifier.as_deref() == Some(q)
+                            && c.exposure != crate::scope::Exposure::SystemColumn
+                    })
                     .collect();
                 if cols.is_empty() {
                     return Err(ExecError::MissingFromEntry(q.clone()));

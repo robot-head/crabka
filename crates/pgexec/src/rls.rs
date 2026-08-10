@@ -243,9 +243,19 @@ impl RawScan {
 
     /// An empty scan of an inheritance or partition parent, ready to absorb its
     /// children's rows. The parent's policies govern every row that lands here.
-    pub(crate) fn tree_of(parent: &Table, qualifier: &str) -> Self {
+    ///
+    /// `tableoid` adds the hidden system column to the tree's scope. The value
+    /// under it is the CHILD's — each child stamps its own before
+    /// [`RawScan::absorb`] permutes the row — so the parent contributes only the
+    /// column, and the qualifier it carries is the one the statement named the
+    /// parent by.
+    pub(crate) fn tree_of(parent: &Table, qualifier: &str, tableoid: bool) -> Self {
+        let mut scope = Scope::single(parent, qualifier);
+        if tableoid {
+            scope.push_tableoid(qualifier);
+        }
         Self {
-            scope: Scope::single(parent, qualifier),
+            scope,
             rows: Vec::new(),
             governing: parent.clone(),
         }

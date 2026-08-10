@@ -95,8 +95,7 @@ fn resolve_set_columns(
             let scope = if s.from.is_empty() {
                 Scope::empty()
             } else {
-                crate::exec::build_from_schema_with_ctes(catalog_kv, resolution, &s.from, ctes)?
-                    .scope
+                crate::exec::build_from_schema_of_select(catalog_kv, resolution, s, ctes)?.scope
             };
             // Run the SP34 scalar-subquery type pass (so a subquery column's OID is
             // known without executing), then resolve names + types + unknown-ness.

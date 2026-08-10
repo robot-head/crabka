@@ -7658,7 +7658,7 @@ impl SqlSession {
                 blocking_query_memory,
                 security_role: fctx.effective_role(),
                 policy_stack: &policy_stack,
-                whole_row: None,
+                refs: None,
             };
             with_query_cancel_runtime(Some(cancel.canceled), || {
                 with_guc_runtime(guc_values, guc_settings, prepared, || {
@@ -9280,7 +9280,7 @@ impl SqlSession {
                 blocking_query_memory,
                 security_role: fctx.effective_role(),
                 policy_stack: &policy_stack,
-                whole_row: None,
+                refs: None,
             };
             crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
                 runtime.block_on(async {
@@ -11210,10 +11210,10 @@ impl ParamBinder<'_> {
                 let scope = if select.from.is_empty() {
                     crate::scope::Scope::empty()
                 } else {
-                    crate::exec::build_from_schema_with_ctes(
+                    crate::exec::build_from_schema_of_select(
                         self.catalog_kv,
                         self.resolution,
-                        &select.from,
+                        select,
                         ctes,
                     )
                     .map_err(ExecError::into_pg)?
@@ -13202,6 +13202,15 @@ impl SqlSession {
             // A set-returning function in the select list turns one source row
             // into many, which this one-row-in-one-row-out cursor cannot do.
             || crate::srf::projection_contains_srf(&select.projection)
+            // `tableoid` is a hidden column the scan below does not build: this
+            // cursor resolves the select list against a bare `Scope::single`,
+            // and only `run_select` stamps the relation's oid onto each row.
+            // Streaming it answered 42703 for a column the same query without
+            // the fast path resolves — the identical class of divergence the
+            // matview, partitioned-parent and inheritance-parent declines above
+            // exist to prevent. Tested last: it walks the statement, and every
+            // cheaper shape test has already had its say.
+            || crate::scope::StatementRefs::of_select(&select).reads_tableoid()
         {
             return None;
         }

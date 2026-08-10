@@ -56,20 +56,44 @@ pub(crate) enum Exposure {
     /// side it can null-extend. Its qualifier is [`LIVE_QUALIFIER`] and its name
     /// is the qualifier it marks; see [`Scope::live_marker`].
     LiveMarker,
+    /// A stored relation's [`TABLEOID_COLUMN`]: the oid of the relation the row
+    /// itself came from, which over an inheritance or partition tree is the
+    /// LEAF's and not the parent's.
+    ///
+    /// It carries the relation's own qualifier, so `a.tableoid` and — when no
+    /// other relation in scope offers the name — a bare `tableoid` both reach
+    /// it. Everything that enumerates a relation's columns skips it, which is
+    /// how `PostgreSQL` hides a system column: `SELECT *`, `SELECT a.*`, a
+    /// whole-row `SELECT a`, `pg_attribute`-driven `\d`, and
+    /// `information_schema.columns` all show only the user columns.
+    SystemColumn,
 }
 
+/// The one system column the engine answers.
+///
+/// `PostgreSQL` has six (`tableoid`, `cmax`, `xmax`, `cmin`, `xmin`, `ctid`, at
+/// `attnum` -6 through -1). The other five describe a heap tuple's physical
+/// placement and its MVCC header, neither of which a KV row space has to
+/// reproduce; `tableoid` is the one whose answer is a catalog fact the engine
+/// already holds.
+pub(crate) const TABLEOID_COLUMN: &str = "tableoid";
+
 impl ColumnBinding {
-    /// Is this column hidden from a bare name and from `*`?
+    /// Is this column hidden from `*`?
     ///
-    /// Two kinds are: a `USING`/`NATURAL` join's raw input column, which a bare
-    /// name and `*` skip in favour of the merged column, and an outer join's
-    /// liveness marker, which is not a column of the relation at all. Both stay
-    /// in the row — the first so `ja.x` and `SELECT ja` still see the side's own
-    /// value, the second so a whole-row reference can tell a null-extended row
-    /// from a stored one.
+    /// Three kinds are: a `USING`/`NATURAL` join's raw input column, which a
+    /// bare name and `*` skip in favour of the merged column; an outer join's
+    /// liveness marker, which is not a column of the relation at all; and a
+    /// system column, which `PostgreSQL` keeps out of every expansion of a
+    /// relation's columns. All three stay in the row — the first so `ja.x` and
+    /// `SELECT ja` still see the side's own value, the second so a whole-row
+    /// reference can tell a null-extended row from a stored one, the third so
+    /// `a.tableoid` has something to read.
     ///
-    /// The name predates the marker; every caller wants "skip what `*` skips",
-    /// which is what this answers.
+    /// The name predates the other two; every caller wants "skip what `*`
+    /// skips", which is what this answers. A bare name skips the same set with
+    /// one exception, spelled out in [`Scope::resolve`]: a system column is
+    /// reachable bare, because `SELECT tableoid FROM t` is valid.
     pub(crate) fn is_join_input(&self) -> bool {
         !matches!(self.exposure, Exposure::Output)
     }
@@ -124,29 +148,35 @@ pub(crate) const CORRELATED_QUALIFIER: &str = "$corr";
 /// name skip the columns carrying it.
 pub(crate) const LIVE_QUALIFIER: &str = "$live";
 
-/// The relation names one statement could take a whole row of.
+/// What one statement's text asks the read paths below it to carry.
 ///
-/// A liveness marker ([`LIVE_QUALIFIER`]) is one hidden column on every row an
-/// outer join emits, so a join that adds one it never needs makes the whole
-/// result wider for nothing — enough, over a ten-thousand-row join, to push a
-/// query past the blocking-query memory budget it used to fit inside. This is
-/// what lets a join add only the markers the statement can read.
+/// Two hidden columns are conditional on this, for one reason: each is a column
+/// on every row of something, so adding one nothing reads makes the whole result
+/// wider for nothing — enough, over a ten-thousand-row join, to push a query
+/// past the blocking-query memory budget it used to fit inside.
 ///
-/// The set is every UNQUALIFIED name written anywhere in the statement, which is
-/// a superset of the whole-row references in it: [`Scope::whole_row_value`] is
-/// reached from exactly one place, an `Expr::Column` whose `table` is `None`
-/// that no column of the scope answers, so a marker can only ever be read
-/// through a bare name the statement spells. Names that turn out to be ordinary
-/// columns (the overwhelming majority) cost a marker only when a relation of the
-/// same query happens to share the name, and a marker nothing reads is merely
-/// the width this type exists to avoid — never a wrong answer.
+/// * `names` is every UNQUALIFIED name written anywhere in the statement, which
+///   decides the liveness markers ([`LIVE_QUALIFIER`]) an outer join carries. It
+///   is a superset of the whole-row references in the statement:
+///   [`Scope::whole_row_value`] is reached from exactly one place, an
+///   `Expr::Column` whose `table` is `None` that no column of the scope answers,
+///   so a marker can only ever be read through a bare name the statement spells.
+///   Names that turn out to be ordinary columns (the overwhelming majority) cost
+///   a marker only when a relation of the same query happens to share the name,
+///   and a marker nothing reads is merely the width this type exists to avoid —
+///   never a wrong answer.
+/// * `tableoid` is whether the statement spells that name at all, qualified or
+///   not, which decides whether a stored-relation scan stamps each row with the
+///   relation it came from. Unlike a marker, this one is read through
+///   `a.tableoid` as often as bare, so it cannot be narrowed to a qualifier.
 ///
 /// Deliberately not narrowed to "names that fail to resolve": which names those
-/// are depends on the scope, and the scope is what the join is in the middle of
-/// building.
+/// are depends on the scope, and the scope is what the read path is in the
+/// middle of building.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct WholeRowRefs {
+pub(crate) struct StatementRefs {
     names: std::collections::HashSet<String>,
+    tableoid: bool,
 }
 
 /// Must a join carry a liveness marker for `qualifier`?
@@ -155,11 +185,22 @@ pub(crate) struct WholeRowRefs {
 /// the behaviour every path had before markers became conditional. Only a caller
 /// holding the statement whose FROM clause it is building can narrow it, and a
 /// caller that cannot must not guess.
-pub(crate) fn wants_whole_row(refs: Option<&WholeRowRefs>, qualifier: &str) -> bool {
+pub(crate) fn wants_whole_row(refs: Option<&StatementRefs>, qualifier: &str) -> bool {
     refs.is_none_or(|refs| refs.names.contains(qualifier))
 }
 
-impl WholeRowRefs {
+/// Must a stored-relation scan stamp each row with its relation's oid?
+///
+/// `None` is "the statement is not known here", and stamps nothing: every path
+/// that reaches a scan without a statement in hand — the schema-description
+/// walk, a DML target read — has no `tableoid` reference to answer, because
+/// only a `SELECT` establishes the refs and only an expression bound against a
+/// scan's own scope can read the column.
+pub(crate) fn wants_tableoid(refs: Option<&StatementRefs>) -> bool {
+    refs.is_some_and(StatementRefs::reads_tableoid)
+}
+
+impl StatementRefs {
     /// Every unqualified name `select` spells, in it and in every query nested
     /// inside it.
     ///
@@ -172,6 +213,17 @@ impl WholeRowRefs {
         let mut refs = Self::default();
         refs.add_select(select);
         refs
+    }
+
+    /// Does the statement spell [`TABLEOID_COLUMN`], qualified or bare?
+    ///
+    /// A read path that cannot build the column has to decline the whole
+    /// statement rather than answer 42703 for it, so this is asked in two
+    /// places: here, through [`wants_tableoid`], by the scan that stamps the
+    /// column, and directly by the fast paths that resolve a select list
+    /// against a scope with no system column in it.
+    pub(crate) const fn reads_tableoid(&self) -> bool {
+        self.tableoid
     }
 
     fn add_select(&mut self, select: &SelectStmt) {
@@ -372,8 +424,13 @@ impl WholeRowRefs {
     }
 
     fn add_expr(&mut self, expr: &Expr) {
-        if let Expr::Column { table: None, name } = expr {
-            self.names.insert(name.clone());
+        if let Expr::Column { table, name } = expr {
+            if table.is_none() {
+                self.names.insert(name.clone());
+            }
+            // Qualified or not: `a.tableoid` is the spelling an inheritance
+            // query uses most, and it reaches the same hidden column.
+            self.tableoid |= name == TABLEOID_COLUMN;
         }
         for child in crate::exec::expr_children(expr) {
             self.add_expr(child);
@@ -416,6 +473,33 @@ impl Scope {
                 })
                 .collect(),
         }
+    }
+
+    /// Append the hidden [`TABLEOID_COLUMN`] for `qualifier`, at the end of the
+    /// row.
+    ///
+    /// At the end, and never among the relation's own columns, because every
+    /// index into a stored row is an index into `Table::columns`: a scan's
+    /// pushed-down projection, a partition's `column_mapping` permutation, and
+    /// the storage encoding all count from zero and stop at the declared width.
+    /// A system column past that width is invisible to all three, which is what
+    /// lets one appended `Datum` carry it.
+    ///
+    /// [`ColumnType::Int4`] and not [`ColumnType::Oid`], which is what
+    /// `pg_typeof` answers in `PostgreSQL`, because `Int4` is how this engine
+    /// spells every relation oid it produces: `pg_class.oid`, `pg_type.oid` and
+    /// the `regclass` datum all carry one. The two spellings that matter both
+    /// depend on it — `tableoid::regclass` resolves a NAME only for an `Int4`,
+    /// `Int8` or text operand (see [`crate::exec::regclass_cast`]), and
+    /// `t.tableoid = pg_class.oid` is a comparison of two `Int4`s rather than of
+    /// two types the engine has no operator for.
+    pub fn push_tableoid(&mut self, qualifier: &str) {
+        self.columns.push(ColumnBinding {
+            qualifier: Some(qualifier.to_string()),
+            name: TABLEOID_COLUMN.to_string(),
+            ty: ColumnType::Int4,
+            exposure: Exposure::SystemColumn,
+        });
     }
 
     /// The scope for an `INSERT … ON CONFLICT DO UPDATE` assignment or filter.
@@ -481,12 +565,16 @@ impl Scope {
         // join inputs included — that is the only way to `ja.x`. A bare one
         // skips them, so the merged `x` of a USING/NATURAL join is the single
         // match rather than one of three.
+        //
+        // A system column is the exception a bare reference still reaches:
+        // `SELECT tableoid FROM t` is valid, and over two relations that both
+        // offer the name it is 42702, exactly as an ambiguous user column is.
         let mut found: Option<usize> = None;
         for (i, c) in self.columns.iter().enumerate() {
             if c.name == name
                 && match qualifier {
                     Some(q) => c.qualifier.as_deref() == Some(q),
-                    None => !c.is_join_input(),
+                    None => !c.is_join_input() || c.exposure == Exposure::SystemColumn,
                 }
             {
                 if found.is_some() {
@@ -571,11 +659,16 @@ impl Scope {
         {
             return None;
         }
+        // A system column carries the relation's own qualifier but is not one of
+        // its columns: `SELECT t FROM t` over a two-column table is `(1,x)` in
+        // PostgreSQL, never `(1,x,16385)`.
         let indices: Vec<usize> = self
             .columns
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.qualifier.as_deref() == Some(qualifier))
+            .filter(|(_, c)| {
+                c.qualifier.as_deref() == Some(qualifier) && c.exposure != Exposure::SystemColumn
+            })
             .map(|(i, _)| i)
             .collect();
         (!indices.is_empty()).then_some(indices)
@@ -611,7 +704,7 @@ impl Scope {
     /// marker together, because this runs per row: it is the same single scan
     /// [`Scope::whole_row`] alone used to cost, and an invented row now leaves
     /// before any name or field is cloned.
-    pub fn whole_row_value(&self, qualifier: &str, values: &[Datum]) -> Option<Datum> {
+    pub fn refs_value(&self, qualifier: &str, values: &[Datum]) -> Option<Datum> {
         if qualifier == POSITION_QUALIFIER
             || qualifier == CORRELATED_QUALIFIER
             || qualifier == LIVE_QUALIFIER
@@ -621,10 +714,18 @@ impl Scope {
         let mut indices: Vec<usize> = Vec::new();
         let mut invented = false;
         for (i, c) in self.columns.iter().enumerate() {
-            if c.exposure == Exposure::LiveMarker {
-                invented |= c.name == qualifier && values[i].is_null();
-            } else if c.qualifier.as_deref() == Some(qualifier) {
-                indices.push(i);
+            match c.exposure {
+                Exposure::LiveMarker => invented |= c.name == qualifier && values[i].is_null(),
+                // The same exclusion [`Scope::whole_row`] makes, and it has to be
+                // made twice because this is the per-row path and that one is the
+                // per-statement one. `SELECT t, tableoid FROM t` is `(1,x)` and an
+                // oid beside it in `PostgreSQL`, never `(1,x,20001)`.
+                Exposure::SystemColumn => {}
+                Exposure::Output | Exposure::JoinInput { .. } => {
+                    if c.qualifier.as_deref() == Some(qualifier) {
+                        indices.push(i);
+                    }
+                }
             }
         }
         if indices.is_empty() {
@@ -766,6 +867,121 @@ mod tests {
         for (qualifier, name, expected) in cases {
             let got = s.resolve(qualifier, name);
             assert!(got == expected, "resolving {qualifier:?}.{name}");
+        }
+    }
+
+    /// The scope a stored-relation scan builds for a statement that reads
+    /// `tableoid`: the relation's own columns, then the system column.
+    fn scope_with_tableoid(name: &str, cols: &[(&str, ColumnType)]) -> Scope {
+        let mut scope = Scope::single(&tbl(name, cols), name);
+        scope.push_tableoid(name);
+        scope
+    }
+
+    #[test]
+    fn tableoid_goes_last_and_is_a_system_column() {
+        let expected = Scope {
+            columns: vec![
+                binding("t", "a", ColumnType::Int4),
+                ColumnBinding {
+                    qualifier: Some("t".to_string()),
+                    name: "tableoid".to_string(),
+                    ty: ColumnType::Int4,
+                    exposure: Exposure::SystemColumn,
+                },
+            ],
+        };
+        assert!(scope_with_tableoid("t", &[("a", ColumnType::Int4)]) == expected);
+    }
+
+    #[test]
+    fn tableoid_resolves_bare_and_qualified() {
+        let s = scope_with_tableoid("t", &[("a", ColumnType::Int4)]);
+        let cases: Vec<(Option<&str>, &str, Result<usize, ExecError>)> = vec![
+            // Both spellings reach it: `SELECT tableoid FROM t` and
+            // `SELECT t.tableoid FROM t` are each valid PostgreSQL.
+            (None, "tableoid", Ok(1)),
+            (Some("t"), "tableoid", Ok(1)),
+            // The user columns are untouched by its presence.
+            (None, "a", Ok(0)),
+            (Some("t"), "a", Ok(0)),
+        ];
+        for (qualifier, name, expected) in cases {
+            assert!(
+                s.resolve(qualifier, name) == expected,
+                "{qualifier:?}.{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn tableoid_is_hidden_from_star_and_from_a_whole_row_reference() {
+        let s = scope_with_tableoid("t", &[("a", ColumnType::Int4)]);
+        // `is_join_input` is what `SELECT *` filters on, and `whole_row` is what
+        // `SELECT t` and `SELECT t.*` expand: `PostgreSQL` shows a system column
+        // in none of the three.
+        assert!(s.columns[0].is_join_input() == false);
+        assert!(s.columns[1].is_join_input() == true);
+        assert!(s.whole_row("t") == Some(vec![0]));
+
+        let row = [Datum::Int4(7), Datum::Int4(20_001)];
+        let expected = Datum::Record(RecordValue::named(
+            None,
+            ["a".to_string()].into_iter().collect(),
+            vec![Datum::Int4(7)],
+        ));
+        assert!(s.refs_value("t", &row) == Some(expected));
+    }
+
+    #[test]
+    fn tableoid_of_two_relations_is_ambiguous_bare_and_reachable_qualified() {
+        let mut s = scope_with_tableoid("a", &[("x", ColumnType::Int4)]);
+        s.columns
+            .extend(scope_with_tableoid("b", &[("y", ColumnType::Int4)]).columns);
+        // The shape `inherit.sql` writes is the qualified one, and a comma-FROM
+        // over two relations makes the bare one 42702 — which is what
+        // `PostgreSQL` answers for `SELECT tableoid FROM t, p`.
+        assert!(s.resolve(None, "tableoid") == Err(ExecError::AmbiguousColumn("tableoid".into())));
+        assert!(s.resolve(Some("a"), "tableoid") == Ok(1));
+        assert!(s.resolve(Some("b"), "tableoid") == Ok(3));
+    }
+
+    #[test]
+    fn statement_refs_notice_every_spelling_of_tableoid() {
+        let cases = [
+            ("SELECT 1 FROM t", false),
+            ("SELECT a FROM t", false),
+            // Bare, qualified, and buried in a filter, a function argument, a
+            // cast and a nested query — each is a read the scan must answer.
+            ("SELECT tableoid FROM t", true),
+            ("SELECT t.tableoid FROM t", true),
+            ("SELECT tableoid::regclass FROM t", true),
+            ("SELECT 1 FROM t WHERE t.tableoid = 3", true),
+            ("SELECT count(tableoid) FROM t", true),
+            ("SELECT 1 FROM t WHERE a IN (SELECT tableoid FROM p)", true),
+            ("SELECT 1 FROM t ORDER BY tableoid", true),
+            // A column merely NAMED like it in another position is not a read of
+            // the system column, and the walk must not confuse the two.
+            ("SELECT tableoids FROM t", false),
+        ];
+        for (sql, expected) in cases {
+            let parsed = crabka_pgparser::parse(sql).expect("statement parses");
+            let [crabka_pgparser::ast::Statement::Query(query)] = parsed.as_slice() else {
+                panic!("{sql} is one query");
+            };
+            let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
+                panic!("{sql} is a plain select");
+            };
+            // `ORDER BY`, `LIMIT` and `OFFSET` are parsed onto the enclosing
+            // `QueryExpr`, and every executing path folds them into the
+            // `SelectStmt` before it reaches `of_select`. Folding them here too
+            // is what makes this measure the statement the engine measures.
+            let mut select = (**select).clone();
+            select.order_by.clone_from(&query.order_by);
+            select.limit.clone_from(&query.limit);
+            select.offset.clone_from(&query.offset);
+            let refs = StatementRefs::of_select(&select);
+            assert!(refs.reads_tableoid() == expected, "{sql}");
         }
     }
 }

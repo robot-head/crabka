@@ -61,7 +61,7 @@ pub(crate) struct SubCtx<'a> {
     /// path did before markers became conditional. Each statement overwrites it
     /// with its own as it starts, so a view body or a subquery is measured by
     /// its own text and never by the text of whatever reached it.
-    pub whole_row: Option<&'a crate::scope::WholeRowRefs>,
+    pub refs: Option<&'a crate::scope::StatementRefs>,
 }
 
 impl<'a> SubCtx<'a> {
@@ -83,26 +83,22 @@ impl<'a> SubCtx<'a> {
             blocking_query_memory: self.blocking_query_memory,
             security_role: self.security_role,
             policy_stack: self.policy_stack,
-            whole_row: self.whole_row,
+            refs: self.refs,
         }
     }
 
     /// The same read context, measuring outer-join liveness markers against
-    /// `whole_row` — the whole-row references of the statement about to build
-    /// its FROM clause.
+    /// `refs` — the references of the statement about to build its FROM clause.
     ///
     /// Every statement calls this as it starts, so the narrowing never outlives
     /// the text it was derived from: a view body, a derived table and a
     /// correlated subquery each replace it with their own.
-    pub(crate) fn with_whole_row<'b>(
-        &'b self,
-        whole_row: &'b crate::scope::WholeRowRefs,
-    ) -> SubCtx<'b>
+    pub(crate) fn with_refs<'b>(&'b self, refs: &'b crate::scope::StatementRefs) -> SubCtx<'b>
     where
         'a: 'b,
     {
         SubCtx {
-            whole_row: Some(whole_row),
+            refs: Some(refs),
             ..*self
         }
     }
@@ -158,7 +154,7 @@ impl<'a> SubCtx<'a> {
     pub(crate) fn join_policy(&self) -> crate::join::JoinPolicy<'_> {
         crate::join::JoinPolicy {
             memory: self.blocking_query_memory,
-            whole_row: self.whole_row,
+            refs: self.refs,
         }
     }
 

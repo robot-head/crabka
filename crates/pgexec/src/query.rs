@@ -102,13 +102,8 @@ fn describe_query_expr_inner(
                 crate::exec::reject_from_less_wildcard(&s.projection)?;
                 Scope::empty()
             } else {
-                crate::exec::build_from_schema_with_ctes(
-                    catalog_kv,
-                    resolution,
-                    &s.from,
-                    &query_ctes,
-                )?
-                .scope
+                crate::exec::build_from_schema_of_select(catalog_kv, resolution, s, &query_ctes)?
+                    .scope
             };
             let projection = crate::subquery::resolve_types_in_projection_with_ctes(
                 catalog_kv,

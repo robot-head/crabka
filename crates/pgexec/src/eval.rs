@@ -201,7 +201,7 @@ fn eval_depth_inner(
                 // A bare name that is no column may still name a relation in the
                 // FROM clause, and then it is that relation's whole row.
                 Err(error) => whole_row_reference(table.as_deref(), name, &error)
-                    .and_then(|q| scope.whole_row_value(q, values))
+                    .and_then(|q| scope.refs_value(q, values))
                     .ok_or(error),
             }
         }

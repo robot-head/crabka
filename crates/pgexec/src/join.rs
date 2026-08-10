@@ -19,7 +19,7 @@ use crabka_pgtypes::{ColumnType, Datum};
 use crate::{
     bind::BoundExpr,
     error::ExecError,
-    scope::{ColumnBinding, Exposure, LIVE_QUALIFIER, Scope, WholeRowRefs, wants_whole_row},
+    scope::{ColumnBinding, Exposure, LIVE_QUALIFIER, Scope, StatementRefs, wants_whole_row},
 };
 
 /// A materialized relation: an ordered `Scope` (the schema) plus its rows, each
@@ -42,7 +42,7 @@ pub(crate) struct JoinPolicy<'a> {
     /// The statement's whole-row references, which decide the hidden liveness
     /// markers an outer join carries. `None` marks every qualifier; see
     /// [`missing_live_markers`].
-    pub(crate) whole_row: Option<&'a WholeRowRefs>,
+    pub(crate) refs: Option<&'a StatementRefs>,
 }
 
 impl Default for JoinPolicy<'_> {
@@ -55,7 +55,7 @@ impl Default for JoinPolicy<'_> {
     fn default() -> Self {
         Self {
             memory: crate::scanner::BLOCKING_QUERY_MEMORY,
-            whole_row: None,
+            refs: None,
         }
     }
 }
@@ -298,8 +298,8 @@ impl JoinCondition {
     }
 }
 
-/// The qualifiers on a side an outer join can null-extend that `whole_row` can
-/// read and that carry no liveness marker yet, in row order.
+/// The qualifiers on a side an outer join can null-extend that a whole-row
+/// reference can read and that carry no liveness marker yet, in row order.
 ///
 /// A side that is itself an outer join already marks the qualifiers *it* can
 /// invent, and null-extending the side nulls those markers along with everything
@@ -310,15 +310,15 @@ impl JoinCondition {
 /// A marker is only ever read by [`Scope::whole_row_value`], through a bare name
 /// the statement spells, so a qualifier no name of the statement can reach needs
 /// none either — which is what keeps an outer join in a query with no whole-row
-/// reference exactly as wide as it was before markers existed. `whole_row` is
+/// reference exactly as wide as it was before markers existed. `refs` is
 /// `None` wherever the statement is not known, and then every qualifier is
 /// marked; see [`wants_whole_row`].
-fn missing_live_markers(side: &Scope, whole_row: Option<&WholeRowRefs>) -> Vec<String> {
+fn missing_live_markers(side: &Scope, refs: Option<&StatementRefs>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for column in &side.columns {
         if let Some(qualifier) = &column.qualifier
             && column.exposure != Exposure::LiveMarker
-            && wants_whole_row(whole_row, qualifier)
+            && wants_whole_row(refs, qualifier)
             && side.live_marker(qualifier).is_none()
             && !out.contains(qualifier)
         {
@@ -353,7 +353,7 @@ fn join_relations_impl(
 ) -> Result<Relation, ExecError> {
     let JoinPolicy {
         memory: blocking_query_memory,
-        whole_row,
+        refs,
     } = policy;
     let condition = JoinCondition::new(&left, right, constraint)?;
     let lw = left.scope.width();
@@ -363,11 +363,11 @@ fn join_relations_impl(
     // keeps unmatched LEFT rows, which means it is the RIGHT side it invents.
     let (left_markers, right_markers) = match kind {
         JoinKind::Inner | JoinKind::Cross => (Vec::new(), Vec::new()),
-        JoinKind::Left => (Vec::new(), missing_live_markers(&right.scope, whole_row)),
-        JoinKind::Right => (missing_live_markers(&left.scope, whole_row), Vec::new()),
+        JoinKind::Left => (Vec::new(), missing_live_markers(&right.scope, refs)),
+        JoinKind::Right => (missing_live_markers(&left.scope, refs), Vec::new()),
         JoinKind::Full => (
-            missing_live_markers(&left.scope, whole_row),
-            missing_live_markers(&right.scope, whole_row),
+            missing_live_markers(&left.scope, refs),
+            missing_live_markers(&right.scope, refs),
         ),
     };
     let (nl, nr) = (left_markers.len(), right_markers.len());
@@ -1956,7 +1956,7 @@ mod tests {
             &tctx(),
             JoinPolicy {
                 memory: budget,
-                whole_row: None,
+                refs: None,
             },
         )
         .expect_err("wide materialized join must exceed the same budget");
