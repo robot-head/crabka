@@ -1054,7 +1054,7 @@ fn event_dropped_object_rows(ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError
                 Datum::Int4(object.object_sub_id),
                 Datum::Bool(true),
                 Datum::Bool(false),
-                Datum::Bool(false),
+                Datum::Bool(object.is_temporary),
                 Datum::Text(object.object_type.clone()),
                 object
                     .schema_name

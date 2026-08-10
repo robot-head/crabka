@@ -653,7 +653,7 @@ fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
     let _ = write!(
         sql,
         " ON {}.{}",
-        quote_identifier(&trigger.table.schema),
+        quote_identifier(crabka_pgcatalog::displayed_schema(&trigger.table.schema)),
         quote_identifier(&trigger.table.name)
     );
     if let Some(referenced) = trigger.referenced_table_id
@@ -662,7 +662,7 @@ fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
         let _ = write!(
             sql,
             " FROM {}.{}",
-            quote_identifier(&table.name.schema),
+            quote_identifier(crabka_pgcatalog::displayed_schema(&table.name.schema)),
             quote_identifier(&table.name.name)
         );
     }
@@ -1693,7 +1693,7 @@ fn serial_sequence(
         .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
     match &found.default {
         Some(crabka_pgcatalog::ColumnDefault::NextVal(sequence)) => Ok(Datum::Text(
-            qualified_sequence_name(kv, &table.name, sequence)?,
+            qualified_sequence_name(kv, scope, &table.name, sequence)?,
         )),
         _ => Ok(Datum::Null),
     }
@@ -1710,19 +1710,33 @@ fn serial_sequence(
 /// schema it names. The sequence's own catalog record can. For a sequence the
 /// catalog no longer holds, this function falls back to its table's schema,
 /// which is where `PostgreSQL` puts the sequence a serial column owns.
+///
+/// A spelling is not an identity. Every session's temporary namespace spells
+/// `pg_temp`, so the spelling a temporary sequence carries is one that every
+/// other session's sequence of that name carries too, and a match on the text
+/// alone can pick a sequence this session cannot even reach. Only this
+/// session's temporary namespace can hold the sequence its own default names,
+/// so the other sessions' namespaces are dropped before the match is made.
+///
+/// The schema is spelled as [`crabka_pgcatalog::displayed_schema`] spells it —
+/// measured on `postgres:18.4`, where a temporary table's
+/// `pg_get_serial_sequence` answers `pg_temp.probe_t_s_seq`.
 fn qualified_sequence_name(
     kv: &dyn Kv,
+    scope: &ResolutionScope,
     table: &RelationName,
     spelled: &str,
 ) -> Result<String, ExecError> {
+    let temp = scope.temp_schema();
     let sequence = crabka_pgcatalog::list_sequences(kv)?
         .into_iter()
         .map(|(name, _)| name)
+        .filter(|name| !crabka_pgcatalog::is_temp_schema(&name.schema) || name.schema == temp)
         .find(|name| name.to_string() == spelled)
         .unwrap_or_else(|| table.sibling(spelled));
     Ok(format!(
         "{}.{}",
-        quote_identifier(&sequence.schema),
+        quote_identifier(crabka_pgcatalog::displayed_schema(&sequence.schema)),
         quote_identifier(&sequence.name)
     ))
 }
@@ -1973,7 +1987,7 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
     let relation = if qualify {
         format!(
             "{}.{}",
-            quote_identifier(&table.name.schema),
+            quote_identifier(crabka_pgcatalog::displayed_schema(&table.name.schema)),
             quote_identifier(&table.name.name)
         )
     } else {
@@ -2163,6 +2177,12 @@ pub(crate) fn foreign_key_definition(
 /// reaches right now. `public` is on the default path but is not on every path,
 /// and a schema that is on the path can still be shadowed by an earlier one
 /// holding the same relation name.
+///
+/// The qualifier a temporary namespace takes here is `pg_temp`, not the stored
+/// `pg_temp_<backend id>`. Measured on `postgres:18.4` with a temporary
+/// `shadow_t` shadowed by a `public.shadow_t` and `pg_temp` listed last on the
+/// search path, where `pg_get_constraintdef` answers
+/// `FOREIGN KEY (a) REFERENCES pg_temp.shadow_t(a)`.
 fn qualified_unless_visible(
     kv: &dyn Kv,
     scope: &ResolutionScope,
@@ -2173,7 +2193,7 @@ fn qualified_unless_visible(
     }
     Ok(format!(
         "{}.{}",
-        quote_identifier(&name.schema),
+        quote_identifier(crabka_pgcatalog::displayed_schema(&name.schema)),
         quote_identifier(&name.name)
     ))
 }
@@ -2262,21 +2282,28 @@ pub(crate) fn default_source_text(
     }
 }
 
-/// Quote an identifier the way PostgreSQL's `quote_ident` does.
+/// Quote an identifier the way `PostgreSQL`'s `quote_identifier` does — the one
+/// renderer, reached by the whole `pg_get_*def` family and by `pg_indexes`.
 ///
-/// The result is bare when the identifier is lowercase-safe, and
-/// double-quoted in every other case.
+/// This used to test the identifier's *character shape* alone, and its comment
+/// claimed that was what `quote_ident` did. It was not. `PostgreSQL` bares an
+/// identifier only when the character shape is safe **and** the word is not a
+/// keyword outside the `UNRESERVED` category, so a column named `values` prints
+/// `"values"` while one named `set` prints bare. Deparsing without the keyword
+/// test emits SQL that does not read back.
+///
+/// The predicate lives in [`crate::string_fn::quote_ident`], which the SQL
+/// function `quote_ident` already answers with, so this delegates rather than
+/// keeping a second copy that can drift from the first.
+///
+/// Delegating changes the keyword behaviour and nothing else. The two character
+/// rules are the same rule written twice: "non-empty, no leading digit, every
+/// character in `[a-z0-9_]`" and "leading character in `[a-z_]`, every character
+/// in `[a-z0-9_]`" admit exactly the same strings, since a string whose
+/// characters are all `[a-z0-9_]` and whose first is not a digit begins with
+/// `[a-z_]` by construction.
 pub(crate) fn quote_identifier(name: &str) -> String {
-    let safe = !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if safe {
-        name.to_string()
-    } else {
-        format!("\"{}\"", name.replace('"', "\"\""))
-    }
+    crate::string_fn::quote_ident(name)
 }
 
 #[cfg(test)]

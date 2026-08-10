@@ -125,6 +125,17 @@ pub(crate) struct EventTriggerObject {
     pub schema_name: Option<String>,
     pub object_name: Option<String>,
     pub identity: String,
+    /// Whether the object lived in a temporary namespace, which
+    /// `pg_event_trigger_dropped_objects` reports as `is_temporary`.
+    ///
+    /// This is carried rather than derived. `schema_name` holds the *display*
+    /// spelling, and [`crabka_pgcatalog::displayed_schema`] renders every
+    /// temporary namespace as the bare alias `pg_temp`, which
+    /// [`crabka_pgcatalog::is_temp_schema`] deliberately answers `false` for.
+    /// The stored `pg_temp_<backend id>` is the only spelling the predicate
+    /// recognises, and it is gone by the time a reader sees this struct — so
+    /// the producer records the fact while it still holds the stored name.
+    pub is_temporary: bool,
 }
 
 #[derive(Debug, Clone)]

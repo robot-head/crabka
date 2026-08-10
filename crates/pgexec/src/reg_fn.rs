@@ -462,6 +462,19 @@ pub(crate) fn builtin_proc_declared(name: &str, args: &[i32]) -> bool {
     })
 }
 
+/// `regprocout`'s text for a routine oid: bare when the name picks exactly one
+/// routine out, and `schema.name` when it does not.
+///
+/// The qualifier keeps the backend id a temporary namespace's name carries.
+/// `format_procedure` asks `get_namespace_name`, not the
+/// `get_namespace_name_or_temp` a deparsed reference asks, so `regproc` and
+/// `regprocedure` spell what a deparsed reference would spell `pg_temp` as
+/// `pg_temp_<n>` — measured on `postgres:18.4`, where a `pg_temp.probe_trig`
+/// casts to `pg_temp_46.probe_trig`, and where the same session's
+/// `pg_event_trigger_ddl_commands()` reports that routine as
+/// `schema = pg_temp` beside `identity = pg_temp_46.probe_trig()` in one row.
+/// [`crate::catalog_fn::relation_name_by_oid`] keeps the number for the same
+/// reason.
 fn proc_name(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
     // The user routines are few; the built-ins are indexed.
     let user = crate::routine::user_pg_proc_rows(kv)?;

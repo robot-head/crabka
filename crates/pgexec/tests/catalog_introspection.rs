@@ -1550,3 +1550,80 @@ async fn a_catalog_implemented_as_a_view_does_not_claim_to_be_a_table() {
         );
     }
 }
+
+/// A deparsed identifier is quoted exactly when `PostgreSQL` quotes it, which
+/// takes both halves of the test: a safe character shape *and* a word that is
+/// either no keyword at all or one in the `UNRESERVED` category.
+///
+/// The asymmetry is the point of the case. `set` is unreserved and stays bare;
+/// `values` and `exists` are not, so they are quoted. A renderer that tested
+/// character shape alone would leave all three bare, and one that quoted every
+/// keyword would quote `set` — so a case naming only one of them cannot tell
+/// the two failures apart, and this one names both.
+///
+/// Every expectation below was captured from `postgres:18.4`, which answers
+/// `set | "values" | "exists" | plain` for `quote_ident` on the four names and
+/// prints the same spellings inside each definition it deparses.
+#[tokio::test]
+async fn a_deparsed_keyword_identifier_is_quoted_only_where_postgres_quotes_it() {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        r#"CREATE TABLE kwt ("set" int4, "values" int4, "exists" int4, plain int4)"#,
+    )
+    .await;
+    run(
+        &engine,
+        r#"CREATE UNIQUE INDEX kwt_ix ON kwt ("values", "set")"#,
+    )
+    .await;
+    run(
+        &engine,
+        r#"ALTER TABLE kwt ADD CONSTRAINT kwt_ck CHECK ("values" > 0)"#,
+    )
+    .await;
+    run(
+        &engine,
+        r#"CREATE VIEW kwv AS SELECT "set", "values", plain FROM kwt"#,
+    )
+    .await;
+
+    // The SQL function and the deparser have to agree, because they answer the
+    // same question; the bug this pins was two renderers disagreeing.
+    assert!(
+        grid(
+            &engine,
+            "SELECT quote_ident('set'), quote_ident('values'), \
+                    quote_ident('exists'), quote_ident('plain')",
+        )
+        .await
+            == vec![some(&["set", r#""values""#, r#""exists""#, "plain"])]
+    );
+
+    assert!(
+        column(&engine, "SELECT pg_get_indexdef('kwt_ix'::regclass)").await
+            == some(&[r#"CREATE UNIQUE INDEX kwt_ix ON public.kwt USING btree ("values", set)"#])
+    );
+    // `pg_indexes.indexdef` is the same text by another road, and psql's `\di`
+    // reads it rather than the function.
+    assert!(
+        column(
+            &engine,
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'kwt_ix'",
+        )
+        .await
+            == some(&[r#"CREATE UNIQUE INDEX kwt_ix ON public.kwt USING btree ("values", set)"#])
+    );
+    assert!(
+        column(
+            &engine,
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'kwt_ck'",
+        )
+        .await
+            == some(&[r#"CHECK (("values" > 0))"#])
+    );
+    assert!(
+        column(&engine, "SELECT pg_get_viewdef('kwv'::regclass)").await
+            == some(&[" SELECT set,\n    \"values\",\n    plain\n   FROM kwt;"])
+    );
+}

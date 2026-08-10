@@ -910,3 +910,211 @@ async fn a_session_inheriting_a_backend_id_purges_the_leftovers() {
         observer.rows(&relations("c.relname = 'fresh'")).await == vec![row(&["fresh", &temp, "t"])]
     );
 }
+
+/// A *deparsed* reference to a temporary relation spells the namespace
+/// `pg_temp`, never `pg_temp_<backend id>`.
+///
+/// `PostgreSQL` routes every deparsed reference and every object identity
+/// through `get_namespace_name_or_temp`, which substitutes the alias for the
+/// reading session's own namespace. Measured on `postgres:18.4` against a
+/// temporary `probe_t`:
+///
+/// ```text
+/// pg_get_indexdef(…)          CREATE INDEX probe_i ON pg_temp.probe_t USING btree (b)
+/// pg_get_serial_sequence(…)   pg_temp.probe_t_s_seq
+/// pg_get_triggerdef(…)        CREATE TRIGGER probe_tg AFTER INSERT ON pg_temp.probe_t …
+/// ```
+///
+/// The backend id is the one part of a resolved name that no two runs have to
+/// agree on, so this case never writes one down. Where a spelling *does* keep
+/// the number, the case reads the number back from the session.
+#[tokio::test]
+async fn a_deparsed_reference_spells_the_temporary_namespace_pg_temp() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client
+        .run("CREATE TEMP TABLE dpr (id serial PRIMARY KEY, y int)")
+        .await;
+    client.run("CREATE INDEX dpr_y ON dpr (y)").await;
+    client
+        .run(
+            "CREATE FUNCTION dpr_noop() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN NEW; END $$",
+        )
+        .await;
+    client
+        .run(
+            "CREATE TRIGGER dpr_tg AFTER INSERT ON dpr FOR EACH ROW \
+             EXECUTE FUNCTION dpr_noop()",
+        )
+        .await;
+
+    assert!(
+        client
+            .rows(
+                "SELECT pg_get_indexdef('dpr_y'::regclass), \
+                        pg_get_serial_sequence('dpr', 'id'), \
+                        (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'dpr_tg')"
+            )
+            .await
+            == vec![row(&[
+                "CREATE INDEX dpr_y ON pg_temp.dpr USING btree (y)",
+                "pg_temp.dpr_id_seq",
+                "CREATE TRIGGER dpr_tg AFTER INSERT ON pg_temp.dpr FOR EACH ROW \
+                 EXECUTE FUNCTION dpr_noop()",
+            ])]
+    );
+}
+
+/// A constraint definition qualifies the table it references only when an
+/// unqualified reference would not reach it, and the qualifier it then uses is
+/// `pg_temp`.
+///
+/// Reaching that branch takes a shadow: `pg_temp` listed last on the search
+/// path and a `public` relation of the same name in front of it. Measured on
+/// `postgres:18.4`, which answers
+/// `FOREIGN KEY (a) REFERENCES pg_temp.shadow_t(a)`.
+#[tokio::test]
+async fn a_shadowed_temporary_reference_is_qualified_with_pg_temp() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client
+        .run("CREATE TABLE shadow_t (a int PRIMARY KEY)")
+        .await;
+    client
+        .run("CREATE TEMP TABLE shadow_t (a int PRIMARY KEY)")
+        .await;
+    client
+        .run("CREATE TEMP TABLE shadow_child (a int REFERENCES shadow_t (a))")
+        .await;
+    client.run("SET search_path = public, pg_temp").await;
+
+    assert!(
+        client
+            .rows(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+                 WHERE conname = 'shadow_child_a_fkey'"
+            )
+            .await
+            == one("FOREIGN KEY (a) REFERENCES pg_temp.shadow_t(a)")
+    );
+}
+
+/// An event trigger's `ddl_commands` row spells a temporary namespace
+/// `pg_temp` in both `schema_name` and `object_identity`, and so does the
+/// `sql_drop` row — which also reports `is_temporary`.
+///
+/// Measured on `postgres:18.4`, where `CREATE TEMP TABLE et_t(a int primary
+/// key, s serial)` under a `ddl_command_end` trigger reports
+/// `schema = pg_temp` beside `identity = pg_temp.et_t` on every row it emits,
+/// and `DROP TABLE et_t` reports the same under `sql_drop`:
+///
+/// ```text
+/// orig=t normal=f istemp=t type=table schema=pg_temp identity=pg_temp.it_t
+/// orig=t normal=f istemp=f type=table schema=public  identity=public.it_p
+/// ```
+///
+/// `is_temporary` is asserted in both directions on purpose. It cannot be
+/// recovered from `schema_name`, because that column carries the display
+/// spelling `pg_temp`, which is the alias rather than a namespace name — so a
+/// producer that forgot to record it could not be caught by reading the row.
+#[tokio::test]
+async fn an_event_trigger_names_a_temporary_namespace_pg_temp() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client
+        .run("CREATE TABLE et_audit (phase text, nsp text, identity text, istemp bool)")
+        .await;
+    client
+        .run(
+            "CREATE FUNCTION et_created() RETURNS event_trigger LANGUAGE plpgsql AS \
+             $$ BEGIN \
+                INSERT INTO et_audit \
+                SELECT 'create', schema_name, object_identity, false \
+                FROM pg_event_trigger_ddl_commands(); \
+                RETURN NULL; \
+              END $$",
+        )
+        .await;
+    client
+        .run(
+            "CREATE FUNCTION et_dropped() RETURNS event_trigger LANGUAGE plpgsql AS \
+             $$ BEGIN \
+                INSERT INTO et_audit \
+                SELECT 'drop', schema_name, object_identity, is_temporary \
+                FROM pg_event_trigger_dropped_objects(); \
+                RETURN NULL; \
+              END $$",
+        )
+        .await;
+    client
+        .run(
+            "CREATE EVENT TRIGGER et_created ON ddl_command_end \
+             WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION et_created()",
+        )
+        .await;
+    client
+        .run(
+            "CREATE EVENT TRIGGER et_dropped ON sql_drop \
+             WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION et_dropped()",
+        )
+        .await;
+
+    client
+        .run("CREATE TEMP TABLE et_t (a int PRIMARY KEY)")
+        .await;
+    client.run("CREATE TABLE et_p (a int PRIMARY KEY)").await;
+    client.run("DROP TABLE et_t").await;
+    client.run("DROP TABLE et_p").await;
+
+    let audited = client
+        .rows("SELECT DISTINCT phase, nsp FROM et_audit ORDER BY phase, nsp")
+        .await;
+    assert!(
+        audited
+            == vec![
+                row(&["create", "pg_temp"]),
+                row(&["create", "public"]),
+                row(&["drop", "pg_temp"]),
+                row(&["drop", "public"]),
+            ]
+    );
+    assert!(
+        client
+            .rows(
+                "SELECT DISTINCT identity, istemp FROM et_audit \
+                 WHERE phase = 'drop' AND identity LIKE '%et_%' ORDER BY identity"
+            )
+            .await
+            == vec![row(&["pg_temp.et_t", "t"]), row(&["public.et_p", "f"]),]
+    );
+}
+
+/// `regclass` and `regproc` keep the backend id. They answer the question "what
+/// text reads back as exactly this object", and `pg_temp` reads back as the
+/// *reader's* namespace, which is a different question.
+///
+/// Measured on `postgres:18.4`: a temporary `shadow_t` behind a `public`
+/// namesake casts to `pg_temp_51.shadow_t`, and a `pg_temp.probe_trig` casts to
+/// `pg_temp_46.probe_trig`. The number is not this case's to know, so it is
+/// read back from the session rather than written down.
+#[tokio::test]
+async fn regclass_keeps_the_backend_id_that_a_deparsed_reference_drops() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("CREATE TABLE keeper (a int)").await;
+    client.run("CREATE TEMP TABLE keeper (a int)").await;
+    client.run("SET search_path = public, pg_temp").await;
+    let temp = client.temp_namespace().await;
+
+    assert!(
+        client
+            .rows(
+                "SELECT c.oid::regclass::text FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.relname = 'keeper' AND n.nspname NOT IN ('public')"
+            )
+            .await
+            == one(&format!("{temp}.keeper"))
+    );
+}

@@ -1006,13 +1006,16 @@ pub(crate) fn event_trigger_context(
             object_id,
             object_sub_id: 0,
             object_type: object_type.to_string(),
-            schema_name: Some(name.schema.clone()),
+            schema_name: Some(crabka_pgcatalog::displayed_schema(&name.schema).to_string()),
             object_name: Some(object_name.to_string()),
             identity: format!(
                 "{}.{}",
-                crate::catalog_fn::quote_identifier(&name.schema),
+                crate::catalog_fn::quote_identifier(crabka_pgcatalog::displayed_schema(
+                    &name.schema
+                )),
                 crate::catalog_fn::quote_identifier(object_name)
             ),
+            is_temporary: crabka_pgcatalog::is_temp_schema(&name.schema),
         });
     }
     if let parsed::Statement::DropTable { names, cascade, .. } = stmt {
@@ -1085,13 +1088,14 @@ fn append_relation_object(
         object_id: i32::try_from(oid).unwrap_or(0),
         object_sub_id: 0,
         object_type: object_type.into(),
-        schema_name: Some(name.schema.clone()),
+        schema_name: Some(crabka_pgcatalog::displayed_schema(&name.schema).to_string()),
         object_name: Some(name.name.clone()),
         identity: format!(
             "{}.{}",
-            crate::catalog_fn::quote_identifier(&name.schema),
+            crate::catalog_fn::quote_identifier(crabka_pgcatalog::displayed_schema(&name.schema)),
             crate::catalog_fn::quote_identifier(&name.name)
         ),
+        is_temporary: crabka_pgcatalog::is_temp_schema(&name.schema),
     });
 }
 
@@ -1106,14 +1110,19 @@ fn append_trigger_objects(
             object_id: i32::try_from(trigger.oid).unwrap_or(0),
             object_sub_id: 0,
             object_type: "trigger".into(),
-            schema_name: Some(trigger.table.schema.clone()),
+            schema_name: Some(
+                crabka_pgcatalog::displayed_schema(&trigger.table.schema).to_string(),
+            ),
             object_name: Some(trigger.name.clone()),
             identity: format!(
                 "{} on {}.{}",
                 crate::catalog_fn::quote_identifier(&trigger.name),
-                crate::catalog_fn::quote_identifier(&trigger.table.schema),
+                crate::catalog_fn::quote_identifier(crabka_pgcatalog::displayed_schema(
+                    &trigger.table.schema
+                )),
                 crate::catalog_fn::quote_identifier(&trigger.table.name)
             ),
+            is_temporary: crabka_pgcatalog::is_temp_schema(&trigger.table.schema),
         });
     }
     Ok(())
@@ -1128,14 +1137,19 @@ fn append_foreign_key_object(
         object_id: crate::catalog_rel::foreign_key_oid(foreign_key.id)?,
         object_sub_id: 0,
         object_type: "table constraint".into(),
-        schema_name: Some(foreign_key.table.schema.clone()),
+        schema_name: Some(
+            crabka_pgcatalog::displayed_schema(&foreign_key.table.schema).to_string(),
+        ),
         object_name: Some(foreign_key.name.clone()),
         identity: format!(
             "{} on {}.{}",
             crate::catalog_fn::quote_identifier(&foreign_key.name),
-            crate::catalog_fn::quote_identifier(&foreign_key.table.schema),
+            crate::catalog_fn::quote_identifier(crabka_pgcatalog::displayed_schema(
+                &foreign_key.table.schema
+            )),
             crate::catalog_fn::quote_identifier(&foreign_key.table.name)
         ),
+        is_temporary: crabka_pgcatalog::is_temp_schema(&foreign_key.table.schema),
     });
     Ok(())
 }
