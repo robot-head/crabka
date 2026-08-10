@@ -69,6 +69,7 @@ pub(crate) fn request_context<'a>(
         principal,
         peer,
         client_id,
+        connection_id: "test-connection",
         sendfile_capable: false,
         connection_listener_name: "PLAINTEXT",
     }

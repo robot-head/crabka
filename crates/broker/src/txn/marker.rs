@@ -13,9 +13,6 @@ use bytes::Bytes;
 use crabka_log::{Offset, ProducerId};
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
 
-// `MarkerType` and `build_marker_batch` are intentionally `pub` for reuse
-// by the EndTxn handler. Suppress dead_code until then.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerType {
     Commit,
@@ -23,7 +20,6 @@ pub enum MarkerType {
 }
 
 impl MarkerType {
-    #[allow(dead_code)]
     fn type_code(self) -> i16 {
         match self {
             MarkerType::Commit => 1,
@@ -32,7 +28,6 @@ impl MarkerType {
     }
 }
 
-#[allow(dead_code)]
 pub fn build_marker_batch(
     producer_id: ProducerId,
     producer_epoch: i16,

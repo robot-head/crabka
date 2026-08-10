@@ -1,5 +1,3 @@
-#![allow(dead_code)] // consumed by TxnCoordinator.
-
 use std::collections::HashSet;
 
 use crabka_ids::PartitionIndex;

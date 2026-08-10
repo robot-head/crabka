@@ -2,8 +2,6 @@
 //!
 //! This mirrors the `__consumer_offsets` bootstrap.
 
-#![allow(dead_code)] // wired in by the FindCoordinator-TXN handler
-
 use std::sync::Arc;
 
 use crabka_metadata::{MetadataRecord, NodeId, PartitionRecord, TopicRecord};

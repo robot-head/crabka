@@ -5,10 +5,6 @@
 //! state change as a record in the matching `__transaction_state` partition.
 //! On `Broker::start` it recovers the state by replaying those partitions.
 
-// `is_coordinator_for`, `get`, and a couple of admin helpers are consumed by
-// the transaction wire handlers. Remove this attribute once those land.
-#![allow(dead_code)]
-
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;

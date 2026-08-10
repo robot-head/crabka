@@ -313,6 +313,7 @@ mod tests {
             principal: &principal,
             peer: &peer,
             client_id: "admin-client",
+            connection_id: "connection-a",
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };
@@ -400,6 +401,7 @@ mod tests {
             principal: &principal,
             peer: &peer,
             client_id: "client-a",
+            connection_id: "connection-a",
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };

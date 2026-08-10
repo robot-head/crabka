@@ -16,6 +16,9 @@ pub(crate) struct RequestContext<'a> {
     /// `peek_client_id(frame).unwrap_or("")` convention that the dispatch loop
     /// uses for the `request_percentage` quota.
     pub client_id: &'a str,
+    /// Unique identifier for the live network connection. Share sessions use
+    /// it to release acquisitions when the connection closes.
+    pub connection_id: &'a str,
     /// `true` when the connection can serve the fetch records region with
     /// kernel `sendfile(2)`. That means a plaintext `TcpStream` on a
     /// SENDFILE-alias platform: Linux, Apple, FreeBSD, or `DragonFly`. The fetch
@@ -51,6 +54,7 @@ impl<'a> RequestContext<'a> {
         principal: &'a Principal,
         peer: &'a SocketAddr,
         client_id: &'a str,
+        connection_id: &'a str,
         sendfile_capable: bool,
         connection_listener_name: &'a str,
     ) -> Self {
@@ -58,6 +62,7 @@ impl<'a> RequestContext<'a> {
             principal,
             peer,
             client_id,
+            connection_id,
             sendfile_capable,
             connection_listener_name,
         }
@@ -120,11 +125,19 @@ mod tests {
         let principal = principal();
         let peer = SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        let ctx = RequestContext::new(&principal, &peer, "client-a", true, "SASL_SSL");
+        let ctx = RequestContext::new(
+            &principal,
+            &peer,
+            "client-a",
+            "connection-a",
+            true,
+            "SASL_SSL",
+        );
 
         assert!(ctx.principal.name == "alice");
         assert!(ctx.peer == &peer);
         assert!(ctx.client_id == "client-a");
+        assert!(ctx.connection_id == "connection-a");
         assert!(ctx.sendfile_capable);
         assert!(ctx.connection_listener_name == "SASL_SSL");
         assert!(ctx.client_host() == "/127.0.0.1");
@@ -140,7 +153,14 @@ mod tests {
             4,
         ));
 
-        let ctx = RequestContext::new(&principal, &peer, "client-a", false, "PLAINTEXT");
+        let ctx = RequestContext::new(
+            &principal,
+            &peer,
+            "client-a",
+            "connection-a",
+            false,
+            "PLAINTEXT",
+        );
 
         assert!(ctx.client_host() == "/0:0:0:0:0:0:0:1%4");
     }
