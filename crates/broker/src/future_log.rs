@@ -46,7 +46,6 @@ use crate::{
 /// move's state through the registry. The writer task consumes them
 /// indirectly through the `SwapFutureLog` message, which Rust's dead-code
 /// pass cannot see through.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct FutureLogState {
     /// Parent `log.dir` that the move targets. It is one of the broker's
@@ -63,8 +62,8 @@ pub struct FutureLogState {
     /// Cancelled by the swap or by a follow-up `AlterReplicaLogDirs` that
     /// redirects an in-progress move.
     pub cancel: CancellationToken,
-    /// Kept alive so the replicator task is reaped when the entry is
-    /// removed from the registry.
+    /// Retained so cancellation and broker shutdown can abort and await the
+    /// replicator task.
     pub task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -79,11 +78,10 @@ pub enum MoveError {
     LogDirNotFound,
     /// The named partition is not hosted on this broker.
     ReplicaNotAvailable,
-    /// `crabka_log::Log::open` or `mkdir` failed while staging the
-    /// future log. The inner error is held for tracing / future use;
-    /// the handler maps every storage failure to `KAFKA_STORAGE_ERROR`
-    /// on the wire.
-    Storage(#[allow(dead_code)] BrokerError),
+    /// `crabka_log::Log::open` or `mkdir` failed while staging the future log.
+    /// The handler logs the inner error, then maps every storage failure to
+    /// `KAFKA_STORAGE_ERROR` on the wire.
+    Storage(BrokerError),
 }
 
 impl From<BrokerError> for MoveError {
@@ -203,6 +201,52 @@ async fn cancel_move(
         std::fs::remove_dir_all(&future_path)?;
     }
     Ok(())
+}
+
+fn take_move_tasks(
+    future_logs: &DashMap<(String, PartitionIndex), Arc<FutureLogState>>,
+) -> Vec<JoinHandle<()>> {
+    let states: Vec<_> = future_logs
+        .iter()
+        .map(|entry| Arc::clone(entry.value()))
+        .collect();
+    future_logs.clear();
+    for state in &states {
+        state.cancel.cancel();
+    }
+    states
+        .into_iter()
+        .filter_map(|state| {
+            state
+                .task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        })
+        .collect()
+}
+
+/// Cancel and await every in-progress log-directory move. Broker shutdown
+/// calls this after it has stopped accepting requests and before it stops the
+/// partition writers that the move tasks use.
+pub(crate) async fn shutdown_moves(
+    future_logs: &DashMap<(String, PartitionIndex), Arc<FutureLogState>>,
+) {
+    let tasks = take_move_tasks(future_logs);
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
+}
+
+/// Best-effort synchronous counterpart used when a
+/// [`crate::broker::BrokerHandle`] is dropped without an awaited shutdown.
+pub(crate) fn abort_moves(future_logs: &DashMap<(String, PartitionIndex), Arc<FutureLogState>>) {
+    for task in take_move_tasks(future_logs) {
+        task.abort();
+    }
 }
 
 /// Recover an interrupted move discovered on disk at broker startup
@@ -559,6 +603,67 @@ mod tests {
         assert!(policy.retry_backoff == millis(7));
         assert!(policy.read_chunk == kibibytes(4));
         assert!(policy.throttle.byte_rate() == crabka_units::bytes_per_sec(0));
+    }
+
+    #[tokio::test]
+    async fn shutdown_moves_cancels_and_awaits_every_task() {
+        struct DropCounter(Arc<AtomicU64>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let future_log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open future log"),
+        ));
+        let future_logs = DashMap::new();
+        let started = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut cancels = Vec::new();
+
+        for partition in [PartitionIndex(0), PartitionIndex(1)] {
+            let cancel = CancellationToken::new();
+            let task_started = Arc::clone(&started);
+            let task_dropped = Arc::clone(&dropped);
+            let task = tokio::spawn(async move {
+                let _drop_counter = DropCounter(task_dropped);
+                task_started.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            });
+            future_logs.insert(
+                ("t".to_string(), partition),
+                Arc::new(FutureLogState {
+                    target_log_dir: dir.path().to_path_buf(),
+                    future_path: dir.path().to_path_buf(),
+                    future_log: Arc::clone(&future_log),
+                    cancel: cancel.clone(),
+                    task: Mutex::new(Some(task)),
+                }),
+            );
+            cancels.push(cancel);
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("move tasks start");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            shutdown_moves(&future_logs),
+        )
+        .await
+        .expect("move task shutdown completes");
+
+        assert!(future_logs.is_empty());
+        assert!(cancels.iter().all(CancellationToken::is_cancelled));
+        assert!(dropped.load(Ordering::SeqCst) == 2);
     }
 
     #[tokio::test]

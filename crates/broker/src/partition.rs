@@ -7,10 +7,6 @@
 //! - a [`Notify`] that fires after every successful append. Long-poll Fetch
 //!   uses it to wake when new data arrives.
 
-// Fields (`log`, `writer_tx`, `append_notify`) are consumed by the Produce
-// + Fetch handlers landing in Tasks 15-16; keep this allow until then.
-#![allow(dead_code)]
-
 use std::{
     path::PathBuf,
     sync::{
@@ -21,7 +17,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use crabka_ids::PartitionIndex;
-use crabka_log::{AbortedTxn, Log, Offset, ReadOutput, VerbatimBatch};
+use crabka_log::{Log, Offset, ReadOutput, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
 use crabka_units::ByteSize;
 use tokio::{
@@ -216,9 +212,9 @@ pub struct Partition {
     /// True for Slice 1 diskless partitions whose client-visible HW may only
     /// advance through the WAL durable-sync path.
     pub(crate) diskless: bool,
-    /// Held so the writer task is reaped when every `Partition` handle is
-    /// dropped. Not accessed after construction.
-    pub writer_handle: Arc<JoinHandle<()>>,
+    /// Retained so broker shutdown can abort and await the writer task after
+    /// all request handlers have drained.
+    pub(crate) writer_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl Partition {
@@ -385,19 +381,6 @@ impl Partition {
         }
     }
 
-    /// Return aborted transactions from the active segment's `.txnindex`
-    /// whose offset range overlaps `[start, end)`.
-    ///
-    /// Locks the `Arc<Mutex<Log>>` briefly. Returns an empty `Vec` if
-    /// the mutex is poisoned.
-    #[must_use]
-    pub fn aborted_in_range(&self, start: Offset, end: Offset) -> Vec<AbortedTxn> {
-        match self.log.lock() {
-            Ok(g) => g.aborted_in_range(start, end),
-            Err(_) => Vec::new(),
-        }
-    }
-
     /// The additional internal stamp coordinate that covers `offset`. Returns
     /// `None` when this partition is unstamped, that is, when no
     /// [`crabka_log::StampSource`] is injected, or when no stamped range
@@ -406,12 +389,22 @@ impl Partition {
     /// Locks the `Arc<Mutex<Log>>` briefly. This is a server-side query only.
     /// No produce or fetch handler consults it, so the stamp cannot leak into
     /// any client-facing response. Returns `None` if the mutex is poisoned.
+    #[cfg(test)]
     #[must_use]
     pub fn stamp_for_offset(&self, offset: Offset) -> Option<u64> {
         match self.log.lock() {
             Ok(g) => g.stamp_for_offset(offset),
             Err(_) => None,
         }
+    }
+
+    /// Remove and return the writer task handle exactly once. Broker shutdown
+    /// uses this after request handlers drain, then aborts and awaits the task.
+    pub(crate) fn take_writer_handle(&self) -> Option<JoinHandle<()>> {
+        self.writer_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Read batches from the underlying [`Log`] that start at `offset`, and
@@ -704,7 +697,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         (p, dir)
     }
@@ -748,7 +741,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         (p, dir)
     }
@@ -841,7 +834,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let s = format!("{p:?}");
         // topic/partition_id appear; the mutex/log internals must NOT appear
@@ -882,7 +875,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         assert!(p.high_watermark().await == 42);
     }
@@ -907,7 +900,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         p.install_isr(
             &[
@@ -1135,7 +1128,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         p.await_hw_at_least(Offset(50), deadline)
@@ -1163,7 +1156,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
         let result = p.await_hw_at_least(Offset(100), deadline).await;
@@ -1193,7 +1186,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
 
         // Append a 3-record batch so log_end_offset() == 3.
@@ -1295,7 +1288,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

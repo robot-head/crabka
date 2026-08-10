@@ -16,7 +16,10 @@ use crabka_units::{
 };
 use dashmap::DashMap;
 use futures_util::future::BoxFuture;
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    task::{JoinHandle, JoinSet},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -2160,13 +2163,14 @@ impl Broker {
     }
 }
 
-/// Lifecycle handle returned by [`Broker::start`]. Drop or call
-/// [`shutdown`](BrokerHandle::shutdown) to stop the broker.
+/// Lifecycle handle returned by [`Broker::start`]. Call
+/// [`shutdown`](BrokerHandle::shutdown) for an orderly stop. Dropping the
+/// handle requests best-effort cancellation of all retained tasks.
 pub struct BrokerHandle {
     listen_addr: SocketAddr,
     shutdown: CancellationToken,
     /// One task per `ListenerSpec` bound during `Broker::start`. `shutdown()`
-    /// awaits every task to drain in-flight connections.
+    /// awaits every task after it stops all active connections.
     listener_tasks: Vec<JoinHandle<()>>,
     /// Topic-backed RLMM bootstrap and assignment task. Retained so shutdown
     /// can join it before the Tokio runtime drops.
@@ -2174,8 +2178,33 @@ pub struct BrokerHandle {
     /// Topic-backed diskless WAL index projection and object flusher task.
     /// Retained so shutdown can join it before the Tokio runtime drops.
     diskless_task: Option<JoinHandle<()>>,
-    /// Held so partition writer tasks live as long as the handle.
+    /// Shared broker state, including the registries that own background task
+    /// handles.
     broker: Arc<Broker>,
+}
+
+fn take_partition_writer_tasks(partitions: &PartitionRegistry) -> Vec<JoinHandle<()>> {
+    partitions
+        .arcs()
+        .into_iter()
+        .filter_map(|partition| partition.take_writer_handle())
+        .collect()
+}
+
+async fn shutdown_partition_writers(partitions: &PartitionRegistry) {
+    let tasks = take_partition_writer_tasks(partitions);
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
+}
+
+fn abort_partition_writers(partitions: &PartitionRegistry) {
+    for task in take_partition_writer_tasks(partitions) {
+        task.abort();
+    }
 }
 
 impl BrokerHandle {
@@ -3526,12 +3555,32 @@ impl BrokerHandle {
         for t in self.listener_tasks.drain(..) {
             let _ = t.await;
         }
+        crate::future_log::shutdown_moves(&self.broker.future_logs).await;
+        shutdown_partition_writers(&self.broker.partitions).await;
         // Shut down the raft engine so this broker's openraft instance stops
         // participating in elections after the broker is logically dead.
         // Without this, a killed broker's in-process raft engine keeps ticking
         // and re-elects itself, preventing the surviving nodes from detecting
         // the leader failure and electing a replacement.
         self.broker.controller.cancel().await;
+    }
+}
+
+impl Drop for BrokerHandle {
+    fn drop(&mut self) {
+        self.broker.supervisor_shutdown.cancel();
+        self.shutdown.cancel();
+        for task in self.listener_tasks.drain(..) {
+            task.abort();
+        }
+        if let Some(task) = self.topic_rlmm_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.diskless_task.take() {
+            task.abort();
+        }
+        crate::future_log::abort_moves(&self.broker.future_logs);
+        abort_partition_writers(&self.broker.partitions);
     }
 }
 
@@ -4388,7 +4437,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         current_leader,
         current_leader_epoch,
         diskless,
-        writer_handle: Arc::new(writer),
+        writer_handle: Arc::new(Mutex::new(Some(writer))),
     }))
 }
 
@@ -4585,17 +4634,29 @@ fn connection_creation_delay(rate: f64, maximum: Time) -> Time {
     Time::from_micros(i64::try_from(delay_micros).unwrap_or(i64::MAX)).min(maximum)
 }
 
+async fn shutdown_connection_tasks(connections: &mut JoinSet<()>) {
+    connections.shutdown().await;
+}
+
 async fn accept_loop(
     broker: Arc<Broker>,
     listener: TcpListener,
     spec: crate::config::ListenerSpec,
     shutdown: CancellationToken,
 ) {
+    let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {
                 tracing::info!(name = %spec.name, "listener shutting down");
                 break;
+            }
+            result = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = result
+                    && error.is_panic()
+                {
+                    tracing::warn!(?error, name = %spec.name, "connection task panicked");
+                }
             }
             accept = listener.accept() => {
                 match accept {
@@ -4652,7 +4713,7 @@ async fn accept_loop(
                         }
                         let b = broker.clone();
                         let s = spec.clone();
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             // Hold the connection guard for the lifetime of the
                             // connection; dropping it releases the global +
                             // per-IP slots.
@@ -4676,6 +4737,7 @@ async fn accept_loop(
             }
         }
     }
+    shutdown_connection_tasks(&mut connections).await;
 }
 
 /// Tune an accepted broker connection before serving it.
@@ -5026,7 +5088,10 @@ mod tests {
             Err(tokio::sync::mpsc::error::TrySendError::Full(_))
         ));
 
-        partition.writer_handle.abort();
+        partition
+            .take_writer_handle()
+            .expect("partition writer handle")
+            .abort();
     }
 
     #[test]
@@ -6657,21 +6722,104 @@ protocol = "Plaintext"
     }
 
     #[tokio::test]
+    async fn shutdown_connection_tasks_aborts_and_awaits_every_task() {
+        struct DropCounter(Arc<AtomicUsize>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let mut connections = JoinSet::new();
+        for _ in 0..2 {
+            let task_started = Arc::clone(&started);
+            let task_dropped = Arc::clone(&dropped);
+            connections.spawn(async move {
+                let _drop_counter = DropCounter(task_dropped);
+                task_started.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            });
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection tasks start");
+
+        shutdown_connection_tasks(&mut connections).await;
+
+        assert!(connections.is_empty());
+        assert!(dropped.load(Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
     async fn start_and_shutdown_clean() {
         let dir = tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
         let handle = Broker::start(config).await.unwrap();
         let broker = handle.broker_arc_for_test();
         let addr = handle.listen_addr();
+        let partition = local_partition_with_records(dir.path(), "shutdown", 0, &[]);
+        broker
+            .partitions
+            .insert("shutdown".to_string(), PartitionIndex(0), partition.clone());
         assert!(addr.port() != 0);
         let stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("listener accepts before shutdown");
         wait_for_connection_count(&broker, 1, "accept_loop did not register live connection").await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("broker shutdown completes");
+        assert!(broker.connections.total() == 0);
+        assert!(partition.take_writer_handle().is_none());
+        let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+        assert!(
+            partition
+                .writer_tx
+                .send(WriterMessage::Compact { ack })
+                .await
+                .is_err()
+        );
         drop(stream);
-        wait_for_connection_count(&broker, 0, "connection guard did not release client slot").await;
-        handle.shutdown().await;
         assert_listener_stops_accepting(addr).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_handle_stops_idle_connections_and_partition_writers() {
+        let dir = tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.unwrap();
+        let broker = handle.broker_arc_for_test();
+        let addr = handle.listen_addr();
+        let partition = local_partition_with_records(dir.path(), "drop-shutdown", 0, &[]);
+        broker.partitions.insert(
+            "drop-shutdown".to_string(),
+            PartitionIndex(0),
+            partition.clone(),
+        );
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("listener accepts before handle drop");
+        wait_for_connection_count(&broker, 1, "accept_loop did not register live connection").await;
+
+        drop(handle);
+
+        wait_for_connection_count(
+            &broker,
+            0,
+            "dropping BrokerHandle did not stop the idle connection",
+        )
+        .await;
+        assert!(partition.take_writer_handle().is_none());
+        assert_listener_stops_accepting(addr).await;
+        drop(stream);
+        broker.controller.cancel().await;
     }
 
     #[tokio::test]

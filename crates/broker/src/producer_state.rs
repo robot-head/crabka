@@ -22,7 +22,6 @@ pub struct ProducerEntry {
     pub last_offset: LogOffset,
     pub base_offset: LogOffset,
     /// Timestamp of the last accepted batch for this producer.
-    #[allow(dead_code)]
     pub last_timestamp: i64,
     /// Wall-clock millis of the last `commit` that touched this entry.
     /// [`ProducerState::expire_older_than`] uses it to evict idle

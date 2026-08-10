@@ -6,8 +6,6 @@
 //! tracking in `FollowerStats` (`last_fetch`, `last_caught_up`) lets
 //! the `isr_maintenance` task shrink and expand the ISR.
 
-#![allow(dead_code)] // wired in by the ISR-maintenance path
-
 use std::{
     collections::{HashMap, HashSet},
     time::Instant,

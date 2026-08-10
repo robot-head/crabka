@@ -6,8 +6,6 @@
 //! in `removing_replicas`, the task first hands leadership to a target replica
 //! that is in the ISR.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use async_trait::async_trait;

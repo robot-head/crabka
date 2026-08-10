@@ -490,7 +490,7 @@ async fn handle_trim(
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 ///
 /// The loop stops when the channel closes, that is, when all senders drop.
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn run(
     identity: (String, PartitionIndex),
     storage: (Arc<Mutex<Log>>, Arc<ArcSwap<PathBuf>>),
