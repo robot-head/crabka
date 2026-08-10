@@ -271,7 +271,9 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use object_store::{ObjectStore, buffered::BufWriter, memory::InMemory, path::Path};
+    use object_store::{
+        ObjectStore, PutPayload, buffered::BufWriter, memory::InMemory, path::Path,
+    };
     use parquet::{arrow::AsyncArrowWriter, file::properties::WriterProperties};
 
     use super::*;
@@ -281,6 +283,21 @@ mod tests {
     fn max_block_bytes_is_one_gib() {
         assert2::assert!(DEFAULT_BLOCK_READ_MAX == gibibytes(1));
         assert2::assert!(DEFAULT_BLOCK_READ_MAX.bytes_u64() == 1024 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn metadata_suffix_fetch_reads_only_the_requested_tail() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("suffix");
+        store
+            .put(&path, PutPayload::from(b"metadata-tail".to_vec()))
+            .await
+            .unwrap();
+
+        let mut reader = ObjectStoreReader::new(store, path);
+        let suffix = (&mut reader).fetch_suffix(4).await.unwrap();
+
+        assert2::assert!(suffix == Bytes::from_static(b"tail"));
     }
 
     #[tokio::test]
