@@ -940,7 +940,7 @@
       "changed_lines": 1427,
       "expected": "stats_ext.out",
       "hunks": 41,
-      "sha256": "3ced1c038ef7f7ebaf1ac65ac9863b8210195a1f14ef9af9e7839bd1d12d3cad"
+      "sha256": "0f748b76159f8ad249a4be8f622d3f8f990b59b335a9878e63623507ae53e63c"
     },
     "stats_import": {
       "changed_lines": 726,
@@ -985,10 +985,10 @@
       "sha256": "61b1d825acff07f280cc29292dcce95f898574dad69a515fc3e2faca8cf02a79"
     },
     "temp": {
-      "changed_lines": 174,
+      "changed_lines": 171,
       "expected": "temp.out",
-      "hunks": 15,
-      "sha256": "540e66c0c65ff0367829ad0f3fc8607956fbf4b31de0fc63a217fb42f59b8f35"
+      "hunks": 14,
+      "sha256": "bc92142b0ce5427102a102945a728c1ee976e13a1a59a89fb00db5a6985df088"
     },
     "text": {
       "changed_lines": 140,
@@ -1051,10 +1051,10 @@
       "sha256": "95a26f9df106dad75c6ecc6c33538a538c0148ec4af75ffa75180f04746d82e4"
     },
     "truncate": {
-      "changed_lines": 162,
+      "changed_lines": 158,
       "expected": "truncate.out",
       "hunks": 10,
-      "sha256": "85ac6a07e11f8aa68fed7c4e04c60403b13b4649d7cca14f6835e4f68066c970"
+      "sha256": "7c353919a66edfe0fa60b00848ec3ac737de7c6e5ea7afcfcf5c25b0d37f3555"
     },
     "tsdicts": {
       "changed_lines": 741,
