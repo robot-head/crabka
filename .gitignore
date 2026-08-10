@@ -55,3 +55,6 @@ mutants.out.old
 /parity.md
 /regress-parity.json
 /regress-parity.md
+
+# Python bytecode from local runs of scripts/tests
+__pycache__/
