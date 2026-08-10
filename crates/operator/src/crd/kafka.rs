@@ -603,12 +603,15 @@ define_broker_tuning! {
     plain share_group_enable: bool => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_session_timeout: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_heartbeat_interval: Time => ();
+    refined #[schemars(range(min = 1))] share_group_max_size: usize => refined_type::rule::GreaterUsize<0>;
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_record_lock_duration: Time => ();
     refined #[schemars(range(min = 1))] share_group_max_delivery_attempts: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 1))] share_group_max_inflight_records: i32 => refined_type::rule::GreaterI32<0>;
     string share_group_isolation_level: String => ();
+    plain streams_group_enable: bool => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_session_timeout: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_heartbeat_interval: Time => ();
+    refined #[schemars(range(min = 1))] streams_group_max_size: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] streams_internal_topic_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 0))] streams_group_num_standby_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
     refined #[schemars(range(min = 0))] streams_group_num_warmup_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
@@ -1770,6 +1773,28 @@ mod tests {
         }))
         .expect("deserialize invalid diskless WAL policy");
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn broker_tuning_group_member_limits_reach_broker_config() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "shareGroupMaxSize": 17,
+            "streamsGroupEnable": false,
+            "streamsGroupMaxSize": 19
+        }))
+        .expect("deserialize group limits");
+        tuning.validate().expect("validate group limits");
+        let rendered = tuning.render_runtime_toml();
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+
+        assert!(broker.share_group.max_size == 17);
+        assert!(!broker.streams_group.enable);
+        assert!(broker.streams_group.max_size == 19);
     }
 
     #[test]

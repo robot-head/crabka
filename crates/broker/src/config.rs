@@ -1466,7 +1466,7 @@ impl BrokerConfig {
             streams.max_session_timeout,
             streams.min_heartbeat_interval,
             streams.max_heartbeat_interval,
-            None,
+            Some(streams.max_size),
         )?;
 
         if let RlmmKind::TopicBacked(config) = &self.remote_log_metadata {
@@ -2729,6 +2729,10 @@ mod tests {
             &config,
             "share group heartbeat interval is outside its bounds",
         );
+
+        let mut config = BrokerConfig::default();
+        config.streams_group.max_size = 0;
+        assert_invalid_runtime(&config, "streams group maximum size must be positive");
     }
 
     #[test]

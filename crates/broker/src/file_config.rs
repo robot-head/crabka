@@ -530,18 +530,21 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub share_group_heartbeat_interval: Option<Time>,
+    pub share_group_max_size: Option<usize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub share_group_record_lock_duration: Option<Time>,
     pub share_group_max_delivery_attempts: Option<i16>,
     pub share_group_max_inflight_records: Option<i32>,
     pub share_group_isolation_level: Option<String>,
+    pub streams_group_enable: Option<bool>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub streams_group_session_timeout: Option<Time>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub streams_group_heartbeat_interval: Option<Time>,
+    pub streams_group_max_size: Option<usize>,
     pub streams_internal_topic_replication_factor: Option<i16>,
     pub streams_group_num_standby_replicas: Option<i32>,
     pub streams_group_num_warmup_replicas: Option<i32>,
@@ -2660,6 +2663,7 @@ impl RuntimeFileConfig {
             share_group_heartbeat_interval,
             cfg.share_group.heartbeat_interval
         );
+        set_runtime_usize!(runtime, share_group_max_size, cfg.share_group.max_size);
         set_runtime_duration!(
             runtime,
             share_group_record_lock_duration,
@@ -2696,6 +2700,7 @@ impl RuntimeFileConfig {
         cfg: &mut crate::config::BrokerConfig,
     ) -> Result<(), FileConfigError> {
         let runtime = self;
+        set_runtime_plain!(runtime, streams_group_enable, cfg.streams_group.enable);
         set_runtime_duration!(
             runtime,
             streams_group_session_timeout,
@@ -2706,6 +2711,7 @@ impl RuntimeFileConfig {
             streams_group_heartbeat_interval,
             cfg.streams_group.heartbeat_interval
         );
+        set_runtime_usize!(runtime, streams_group_max_size, cfg.streams_group.max_size);
         if let Some(value) = runtime.streams_internal_topic_replication_factor {
             cfg.streams_group.internal_topic_replication_factor =
                 positive_i16("streams_internal_topic_replication_factor", value)?;
@@ -4889,6 +4895,9 @@ controller_heartbeat_interval = "500ms"
 controller_fetch_miss_limit = 7
 metadata_raft_command_queue_capacity = 512
 metadata_raft_fetch_max = "4MiB"
+share_group_max_size = 17
+streams_group_enable = false
+streams_group_max_size = 19
 "#,
         )
         .expect("parse runtime config");
@@ -4918,6 +4927,9 @@ metadata_raft_fetch_max = "4MiB"
         assert!(cfg.controller_fetch_miss_limit.get() == 7);
         assert!(cfg.metadata_raft_command_queue_capacity.get() == 512);
         assert!(cfg.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
+        assert!(cfg.share_group.max_size == 17);
+        assert!(!cfg.streams_group.enable);
+        assert!(cfg.streams_group.max_size == 19);
     }
 
     /// Every time and byte-size runtime key must survive the round trip

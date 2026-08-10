@@ -71,8 +71,6 @@ pub struct StreamsGroupConfig {
     pub max_session_timeout: Duration,
     pub min_heartbeat_interval: Duration,
     pub max_heartbeat_interval: Duration,
-    /// Max number of streams groups. `0` means unlimited.
-    pub max_groups: usize,
     /// Max members per group.
     pub max_size: usize,
     /// `num.standby.replicas`: standby copies per stateful task.
@@ -104,7 +102,6 @@ impl Default for StreamsGroupConfig {
             max_session_timeout: Duration::from_mins(1),
             min_heartbeat_interval: Duration::from_secs(5),
             max_heartbeat_interval: Duration::from_secs(15),
-            max_groups: 0,
             max_size: 200,
             // Kafka GA defaults: no standby copies, up to 2 warmups,
             // acceptable lag 10k records.
@@ -247,7 +244,6 @@ mod tests {
                     max_session_timeout: Duration::from_mins(1),
                     min_heartbeat_interval: Duration::from_secs(5),
                     max_heartbeat_interval: Duration::from_secs(15),
-                    max_groups: 0,
                     max_size: 200,
                     num_standby_replicas: 0,
                     num_warmup_replicas: 2,

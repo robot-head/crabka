@@ -63,16 +63,8 @@ impl SharePartitionLeaderManager {
         controller: Arc<dyn MetadataSource>,
         persister: Arc<SharePersister>,
         config: Arc<ShareGroupConfig>,
-        unlimited_session_fallback: usize,
+        session_max: usize,
     ) -> Self {
-        // The share-session cache is capped at the same per-broker session
-        // ceiling as classic fetch sessions; `max_groups` of 0 means
-        // "unbounded" in `ShareGroupConfig`, so use the broker fallback.
-        let session_max = if config.max_groups == 0 {
-            unlimited_session_fallback
-        } else {
-            config.max_groups.saturating_mul(config.max_size.max(1))
-        };
         Self {
             node_id,
             partitions,

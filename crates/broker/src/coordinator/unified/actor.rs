@@ -1468,6 +1468,12 @@ pub(crate) fn step_heartbeat(
                 pending: PendingRecords::default(),
             };
         }
+        if state.members.len() >= config.max_size {
+            return HeartbeatStep {
+                response: error_resp(codes::GROUP_MAX_SIZE_REACHED, config),
+                pending: PendingRecords::default(),
+            };
+        }
         let m = build_member(&new_member_id, req, client, now);
         state.add_or_update_member(m);
         run_reconcile(state, config, metadata);
@@ -2818,6 +2824,32 @@ mod tests {
         check!(resp.member_id.as_deref() == Some("client-uuid-1"));
         check!(resp.member_epoch >= 1);
         check!(log.batches().await.len() == 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn member_limit_rejects_only_new_members() {
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let coord = Arc::new(GroupCoordinator::new(
+            NextGenConfig {
+                max_size: 1,
+                ..NextGenConfig::default()
+            },
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            empty_metadata(),
+            log,
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+        let handle = coord.get_or_create_consumer("g");
+
+        let joined = consumer_heartbeat(&handle, "m1", 0, Some("t")).await;
+        check!(joined.error_code == codes::NONE);
+
+        let rejected = consumer_heartbeat(&handle, "m2", 0, Some("t")).await;
+        check!(rejected.error_code == codes::GROUP_MAX_SIZE_REACHED);
+
+        let existing = consumer_heartbeat(&handle, "m1", joined.member_epoch, Some("t")).await;
+        check!(existing.error_code == codes::NONE);
+        check!(existing.member_epoch == joined.member_epoch);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

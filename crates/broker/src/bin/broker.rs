@@ -275,6 +275,8 @@ struct RuntimeArgs {
     share_group_session_timeout: Option<Time>,
     #[arg(long, env = "CRABKA_SHARE_GROUP_HEARTBEAT_INTERVAL", value_parser = crabka_units::parse::positive_time)]
     share_group_heartbeat_interval: Option<Time>,
+    #[arg(long, env = "CRABKA_SHARE_GROUP_MAX_SIZE", value_parser = parse_positive_count)]
+    share_group_max_size: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_SHARE_GROUP_RECORD_LOCK_DURATION", value_parser = crabka_units::parse::positive_time)]
     share_group_record_lock_duration: Option<Time>,
     #[arg(long, env = "CRABKA_SHARE_GROUP_MAX_DELIVERY_ATTEMPTS", value_parser = clap::value_parser!(i16).range(1..))]
@@ -284,10 +286,14 @@ struct RuntimeArgs {
     #[arg(long, env = "CRABKA_SHARE_GROUP_ISOLATION_LEVEL", value_parser = parse_share_isolation)]
     share_group_isolation_level:
         Option<crabka_broker::coordinator::unified::share::config::ShareIsolationLevel>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_ENABLE", action = clap::ArgAction::Set)]
+    streams_group_enable: Option<bool>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_SESSION_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
     streams_group_session_timeout: Option<Time>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_HEARTBEAT_INTERVAL", value_parser = crabka_units::parse::positive_time)]
     streams_group_heartbeat_interval: Option<Time>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_MAX_SIZE", value_parser = parse_positive_count)]
+    streams_group_max_size: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_STREAMS_INTERNAL_TOPIC_REPLICATION_FACTOR", value_parser = parse_positive_i16)]
     streams_internal_topic_replication_factor: Option<PositiveI16>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_NUM_STANDBY_REPLICAS", value_parser = clap::value_parser!(i32).range(0..))]
@@ -480,6 +486,8 @@ impl RuntimeArgs {
             self,
             runtime,
             share_group_max_inflight_records,
+            share_group_max_size,
+            streams_group_max_size,
             streams_internal_topic_replication_factor,
         );
         copy_plain_runtime!(
@@ -487,6 +495,7 @@ impl RuntimeArgs {
             runtime,
             share_group_enable,
             share_group_max_delivery_attempts,
+            streams_group_enable,
             streams_group_num_standby_replicas,
             streams_group_num_warmup_replicas,
             streams_group_acceptable_recovery_lag,
@@ -1572,6 +1581,25 @@ mod tests {
                 assert!(config.client_frame_max.size() == crabka_units::kibibytes(64));
             },
         );
+    }
+
+    #[test]
+    fn group_member_limits_and_streams_switch_apply_from_cli() {
+        let args = Args::try_parse_from([
+            "crabka-broker",
+            "--share-group-max-size=17",
+            "--streams-group-enable=false",
+            "--streams-group-max-size=19",
+        ])
+        .expect("parse group limits");
+        let mut config = BrokerConfig::default();
+
+        args.apply_runtime_to(&mut config, None)
+            .expect("apply group limits");
+
+        assert!(config.share_group.max_size == 17);
+        assert!(!config.streams_group.enable);
+        assert!(config.streams_group.max_size == 19);
     }
 
     #[test]

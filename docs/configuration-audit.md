@@ -84,6 +84,9 @@ defaults remain configurable even when the scanner reports the default constant.
   `SEND_ERROR_BACKOFF`, `UNKNOWN_TOPIC_RETRY_DELAY`, `EPOCH_FENCE_BACKOFF`,
   `UNEXPECTED_ERROR_BACKOFF`, `RECONNECT_INITIAL_DELAY`, and
   `RECONNECT_DELAY_CAP`; and the AddRaftVoter request timeout.
+- Diskless WAL projection: `FLUSH_INTERVAL`, `FLUSH_MAX_BYTES`,
+  `DEFAULT_TRIM_SAFETY_LAG`, and the projection timeout in
+  `diskless/flusher.rs`.
 - Coordinators: `ACTOR_MAILBOX_CAPACITY`, `SESSION_EXPIRY_TICK_INTERVAL`,
   `SHUTDOWN_ACK_TIMEOUT`, `DEFAULT_SESSION_TIMEOUT`,
   `DEFAULT_HEARTBEAT_INTERVAL`, `DEFAULT_MIN_SESSION_TIMEOUT`,
@@ -96,8 +99,7 @@ defaults remain configurable even when the scanner reports the default constant.
   `coordinator/unified/share/config.rs` and
   `coordinator/unified/streams/config.rs`; and the
   `share_session_cache_max_when_unlimited` fallback of 10,000 sessions in
-  `share_partition/manager.rs`. The Streams `enable`, `max_groups`, and
-  `max_size` fields and the 100 ms Share lock-sweeper floor are fixed
+  `share_partition/manager.rs`. The 100 ms Share lock-sweeper floor is fixed
   separately below.
 - Recovery and quota policy: `AGGRESSIVE_DEADLINE`, `BALANCED_DEADLINE`,
   `OPERATOR_RECOVERY_DEADLINE`, the maximum quota throttle delay, and
@@ -199,10 +201,6 @@ defaults remain configurable even when the scanner reports the default constant.
 - `ACKS_ALL`, accepted transaction-state arrays, share delivery-state flags,
   topology error states, and fixed collection dimensions derived from those
   protocol shapes: protocol invariants.
-- `FLUSH_INTERVAL`, `FLUSH_MAX_BYTES`, `DEFAULT_TRIM_SAFETY_LAG`, and the
-  diskless projection timeout in `diskless/flusher.rs`: staged code with no
-  production caller. Exposing them now would create no-op configuration;
-  reclassify them when production starts the flusher.
 - The heartbeat polling clamp of 500 ms through 1 s, the share lock-sweeper
   minimum of 100 ms, and fallback rebalance deadlines derived from configured
   group timeouts: algorithmic safety bounds or derived values, not independent
@@ -217,9 +215,6 @@ defaults remain configurable even when the scanner reports the default constant.
   `FALLBACK_REBALANCE_TIMEOUT_MS`, `FALLBACK_REBALANCE_TIMEOUT_MS_I32`, and
   `FALLBACK_HEARTBEAT_INTERVAL_MS`: classic coordinator conversion fallbacks
   derived from configured policy, not independent settings.
-- Streams `enable`, `max_groups`, and `max_size`: staged fields with no
-  production behavior. Exposing overrides now would create no-op
-  configuration; reclassify them when the Streams coordinator consumes them.
 - Model-checking constants, generated model inputs, and values in files matched
   by `*_model.rs`: verification inputs excluded directly by the scanner.
 

@@ -64,6 +64,9 @@ pub const INCONSISTENT_GROUP_PROTOCOL: i16 = 23;
 pub const UNKNOWN_MEMBER_ID: i16 = 25;
 pub const REBALANCE_IN_PROGRESS: i16 = 27;
 pub const MEMBER_ID_REQUIRED: i16 = 79;
+/// `GROUP_MAX_SIZE_REACHED` (81): a new member cannot join because the group
+/// already has its configured maximum number of members.
+pub const GROUP_MAX_SIZE_REACHED: i16 = 81;
 
 // Phase 6 additions — idempotent-producer codes.
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
