@@ -1,14 +1,16 @@
-//! `AlterConfigs` (`api_key=33`). Topic-level only.
+//! `AlterConfigs` (`api_key=33`) for topic and broker resources.
 //!
 //! The handler builds each resource's full override map from the request.
-//! That map is the *complete* set of non-default values for that topic. The
-//! handler validates the map against the whitelist in
-//! [`crate::config_keys`], then submits it through the controller as a
-//! single `V1TopicConfig` record. Replication-side propagation runs on
-//! every reconcile. See `ReplicatorSupervisor::reconcile`.
+//! That map is the *complete* set of non-default values for the resource.
+//! Topic configs use one authoritative `V1TopicConfig` record. Broker configs
+//! use Kafka-compatible per-key `V1BrokerConfig` records, including tombstones
+//! for overrides omitted from the replacement. An empty broker resource name
+//! targets Kafka's cluster-wide default broker config.
 
 use bytes::Bytes;
-use crabka_metadata::{AclOperation, MetadataRecord, ResourceType, TopicConfigRecord};
+use crabka_metadata::{
+    AclOperation, BrokerConfigRecord, MetadataRecord, ResourceType, TopicConfigRecord,
+};
 use crabka_protocol::{
     Decode, UnknownTaggedFields,
     owned::{
@@ -118,48 +120,38 @@ async fn process_resource(
         return out;
     }
 
-    // After ACL pass: only Topic resources proceed to actual config change.
-    // Broker resources are authorized above but we don't currently store broker
-    // configs, so fall through to the unsupported check.
-    if resource.resource_type != RESOURCE_TYPE_TOPIC {
-        out.error_code = codes::INVALID_RESOURCE_TYPE;
-        out.error_message = Some(format!(
-            "resource_type={} not supported",
-            resource.resource_type
-        ));
-        return out;
-    }
-
-    if image.topic(&resource.resource_name).is_none() {
-        out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
-        out.error_message = Some(format!("unknown topic `{}`", resource.resource_name));
-        return out;
-    }
-
-    // AlterConfigs is FULL replacement semantics per Kafka:
-    // the request's `configs` list IS the new target state for
-    // this resource. Validate every entry; on first invalid key
-    // surface INVALID_CONFIG and skip the submit.
-    let mut overrides = std::collections::BTreeMap::new();
-    let mut validation_err: Option<String> = None;
-    for cfg in &resource.configs {
-        let value = cfg.value.clone().unwrap_or_default();
-        if let Err(reason) = config_keys::validate_topic_config(&cfg.name, &value) {
-            validation_err = Some(reason);
-            break;
+    let records = match resource.resource_type {
+        RESOURCE_TYPE_TOPIC => {
+            if image.topic(&resource.resource_name).is_none() {
+                out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
+                out.error_message = Some(format!("unknown topic `{}`", resource.resource_name));
+                return out;
+            }
+            let mut overrides = std::collections::BTreeMap::new();
+            for cfg in &resource.configs {
+                let value = cfg.value.clone().unwrap_or_default();
+                if let Err(reason) = config_keys::validate_topic_config(&cfg.name, &value) {
+                    out.error_code = codes::INVALID_CONFIG;
+                    out.error_message = Some(reason);
+                    return out;
+                }
+                overrides.insert(cfg.name.clone(), value);
+            }
+            vec![MetadataRecord::V1TopicConfig(TopicConfigRecord {
+                topic: resource.resource_name.clone(),
+                overrides,
+            })]
         }
-        overrides.insert(cfg.name.clone(), value);
-    }
-    if let Some(reason) = validation_err {
-        out.error_code = codes::INVALID_CONFIG;
-        out.error_message = Some(reason);
-        return out;
-    }
-
-    let record = MetadataRecord::V1TopicConfig(TopicConfigRecord {
-        topic: resource.resource_name.clone(),
-        overrides,
-    });
+        RESOURCE_TYPE_BROKER => match broker_config_records(&resource, image) {
+            Ok(records) => records,
+            Err((code, message)) => {
+                out.error_code = code;
+                out.error_message = Some(message);
+                return out;
+            }
+        },
+        _ => unreachable!("resource type passed ACL dispatch"),
+    };
     if validate_only {
         // Validation pass already happened above (per-config loop). Nothing
         // to submit; the response already carries the per-resource result
@@ -167,7 +159,10 @@ async fn process_resource(
         // rejection). This matches Apache Kafka's --dry-run behavior.
         return out;
     }
-    match broker.controller.submit_change(vec![record]).await {
+    if records.is_empty() {
+        return out;
+    }
+    match broker.controller.submit_change(records).await {
         Ok(_) => {}
         Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
             out.error_code = codes::NOT_CONTROLLER;
@@ -178,6 +173,58 @@ async fn process_resource(
         }
     }
     out
+}
+
+fn broker_config_records(
+    resource: &AlterConfigsResource,
+    image: &crabka_metadata::MetadataImage,
+) -> Result<Vec<MetadataRecord>, (i16, String)> {
+    let node_id =
+        super::incremental_alter_configs::broker_config_node_id(&resource.resource_name, image)?;
+    let mut replacement = std::collections::BTreeMap::new();
+    for config in &resource.configs {
+        if !super::incremental_alter_configs::is_known_broker_config(&config.name) {
+            return Err((
+                codes::INVALID_CONFIG,
+                format!("unknown broker config {}", config.name),
+            ));
+        }
+        let value = config.value.as_deref().ok_or_else(|| {
+            (
+                codes::INVALID_CONFIG,
+                format!("broker config {} requires a value", config.name),
+            )
+        })?;
+        super::incremental_alter_configs::validate_broker_config_value(&config.name, value)
+            .map_err(|message| (codes::INVALID_CONFIG, message))?;
+        replacement.insert(config.name.clone(), value.to_owned());
+    }
+
+    let current = image.broker_config(node_id);
+    let capacity = replacement.len() + current.map_or(0, std::collections::BTreeMap::len);
+    let mut records = Vec::with_capacity(capacity);
+    records.extend(replacement.iter().map(|(name, value)| {
+        MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id,
+            config_name: name.clone(),
+            config_value: Some(value.clone()),
+        })
+    }));
+    if let Some(current) = current {
+        records.extend(
+            current
+                .keys()
+                .filter(|name| !replacement.contains_key(*name))
+                .map(|name| {
+                    MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                        node_id,
+                        config_name: name.clone(),
+                        config_value: None,
+                    })
+                }),
+        );
+    }
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -210,6 +257,22 @@ mod tests {
                 value: Some("60000".into()),
                 ..Default::default()
             }],
+            ..Default::default()
+        }
+    }
+
+    fn broker_resource(resource_name: &str, configs: &[(&str, &str)]) -> AlterConfigsResource {
+        AlterConfigsResource {
+            resource_type: RESOURCE_TYPE_BROKER,
+            resource_name: resource_name.into(),
+            configs: configs
+                .iter()
+                .map(|(name, value)| AlterableConfig {
+                    name: (*name).into(),
+                    value: Some((*value).into()),
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         }
     }
@@ -310,18 +373,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorized_broker_resource_is_reported_unsupported() {
+    async fn authorized_broker_resource_is_applied() {
         let resp = Box::pin(drive_one(
             Arc::new(crate::authorizer::AllowAllAuthorizer),
-            resource(RESOURCE_TYPE_BROKER, "1"),
+            broker_resource("1", &[(crate::throttle::LEADER_THROTTLED_RATE_KEY, "2048")]),
         ))
         .await;
 
         let expected = AlterConfigsResponse {
             throttle_time_ms: 0,
             responses: vec![AlterConfigsResourceResponse {
-                error_code: codes::INVALID_RESOURCE_TYPE,
-                error_message: Some("resource_type=4 not supported".to_string()),
+                error_code: codes::NONE,
+                error_message: None,
                 resource_type: RESOURCE_TYPE_BROKER,
                 resource_name: "1".to_string(),
                 unknown_tagged_fields: UnknownTaggedFields::default(),
@@ -329,5 +392,73 @@ mod tests {
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
+    }
+
+    #[test]
+    fn broker_full_replacement_sets_requested_and_deletes_omitted_configs() {
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            crabka_metadata::BrokerRegistrationRecord {
+                node_id: crabka_metadata::NodeId(1),
+                broker_epoch: 0,
+                incarnation_id: uuid::Uuid::nil(),
+                host: "127.0.0.1".into(),
+                port: 9092,
+                rack: None,
+                endpoints: Vec::new(),
+            },
+        ));
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: crabka_metadata::NodeId(1),
+            config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.into(),
+            config_value: Some("1024".into()),
+        }));
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: crabka_metadata::NodeId(1),
+            config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.into(),
+            config_value: Some("512".into()),
+        }));
+
+        let records = broker_config_records(
+            &broker_resource("1", &[(crate::throttle::LEADER_THROTTLED_RATE_KEY, "2048")]),
+            &image,
+        )
+        .expect("valid broker replacement");
+
+        let expected = vec![
+            MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id: crabka_metadata::NodeId(1),
+                config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.into(),
+                config_value: Some("2048".into()),
+            }),
+            MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id: crabka_metadata::NodeId(1),
+                config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.into(),
+                config_value: None,
+            }),
+        ];
+        assert!(records == expected);
+    }
+
+    #[test]
+    fn broker_full_replacement_accepts_cluster_default_resource() {
+        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        let records = broker_config_records(
+            &broker_resource(
+                "",
+                &[(crate::throttle::FOLLOWER_THROTTLED_RATE_KEY, "4096")],
+            ),
+            &image,
+        )
+        .expect("valid broker default replacement");
+
+        assert!(
+            records
+                == vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                    node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+                    config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.into(),
+                    config_value: Some("4096".into()),
+                })]
+        );
     }
 }

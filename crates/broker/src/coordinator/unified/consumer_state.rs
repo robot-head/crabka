@@ -53,10 +53,6 @@ pub struct MemberState {
     /// it against the metadata image and unions the match with
     /// `subscribed_topic_names`. `None` means "no regex", that is an
     /// exact-name subscription only.
-    ///
-    /// The broker does not persist this field on `__consumer_offsets` yet. The
-    /// client supplies it again on every heartbeat, so a coordinator failover
-    /// loses at most one heartbeat interval of state.
     pub subscribed_topic_regex: Option<String>,
     /// Compiled form of `subscribed_topic_regex`. The cache stops the
     /// reconciler from compiling the pattern for this member again on every

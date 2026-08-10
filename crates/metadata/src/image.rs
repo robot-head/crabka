@@ -13,10 +13,10 @@ use crate::{
     error::MetadataError,
     records::{
         BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
-        DelegationTokenRecord, FeatureLevelRecord, FeaturesEpochRecord, GroupConfigRecord,
-        KRaftVersionRecord, MetadataRecord, NodeId, PartitionOffsetAdvanceRecord, PartitionRecord,
-        ProducerIdsRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
-        VotersRecord,
+        DEFAULT_BROKER_CONFIG_NODE_ID, DelegationTokenRecord, FeatureLevelRecord,
+        FeaturesEpochRecord, GroupConfigRecord, KRaftVersionRecord, MetadataRecord, NodeId,
+        PartitionOffsetAdvanceRecord, PartitionRecord, ProducerIdsRecord, QuotaEntity,
+        ScramCredentialRecord, TopicConfigRecord, TopicRecord, VotersRecord,
     },
 };
 
@@ -268,6 +268,13 @@ impl MetadataImage {
         self.broker_configs.get(&node_id)
     }
 
+    /// Cluster-wide dynamic broker-config defaults, or `None` when no default
+    /// broker config has been applied.
+    #[must_use]
+    pub fn default_broker_config(&self) -> Option<&BTreeMap<String, String>> {
+        self.broker_config(DEFAULT_BROKER_CONFIG_NODE_ID)
+    }
+
     /// Returns the KIP-73 throttle rate for `node_id` and `kind`.
     /// Returns `None` if the config key is absent, unparseable, or negative.
     /// `-1` is Kafka's convention for "disabled" or "unlimited".
@@ -278,7 +285,10 @@ impl MetadataImage {
             ThrottleKind::Follower => "follower.replication.throttled.rate",
             ThrottleKind::AlterLogDirs => "replica.alter.log.dirs.io.max.bytes.per.second",
         };
-        let raw = self.broker_config(node_id)?.get(key)?;
+        let raw = self
+            .broker_config(node_id)
+            .and_then(|configs| configs.get(key))
+            .or_else(|| self.default_broker_config()?.get(key))?;
         let v: i64 = raw.parse().ok()?;
         (v >= 0).then(|| ByteRate::from_bytes_per_sec(v))
     }
@@ -2410,6 +2420,43 @@ mod tests {
         }));
         assert2::assert!(
             img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn broker_throttle_rate_uses_cluster_default() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: DEFAULT_BROKER_CONFIG_NODE_ID,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("2048".into()),
+        }));
+
+        assert2::assert!(
+            img.default_broker_config()
+                .and_then(|configs| configs.get("leader.replication.throttled.rate"))
+                .map(String::as_str)
+                == Some("2048")
+        );
+        assert2::assert!(
+            img.broker_throttle_rate(NodeId(7), ThrottleKind::Leader) == Some(bytes_per_sec(2048))
+        );
+    }
+
+    #[test]
+    fn per_broker_disabled_rate_overrides_cluster_default() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        for (node_id, value) in [(DEFAULT_BROKER_CONFIG_NODE_ID, "2048"), (NodeId(7), "-1")] {
+            img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id,
+                config_name: "leader.replication.throttled.rate".into(),
+                config_value: Some(value.into()),
+            }));
+        }
+
+        assert2::assert!(
+            img.broker_throttle_rate(NodeId(7), ThrottleKind::Leader)
                 .is_none()
         );
     }

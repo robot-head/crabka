@@ -71,7 +71,8 @@ pub(crate) async fn handle(
             .tx
             .send(ShareGroupActorMessage::Heartbeat {
                 request: req,
-                client_host: String::new(),
+                client_id: ctx.client_id.to_owned(),
+                client_host: ctx.client_host(),
                 reply: tx,
             })
             .await
@@ -205,6 +206,77 @@ mod tests {
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
         assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_persists_request_client_identity() {
+        let version = share_group_heartbeat_response::MAX_VERSION;
+        let (broker_handle, _dir) = crate::test_support::start_broker_with(|cfg| {
+            cfg.authorizer = std::sync::Arc::new(crate::authorizer::AllowAllAuthorizer);
+            cfg.share_group.enable = true;
+        })
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = ShareGroupHeartbeatRequest {
+            group_id: "identity-group".into(),
+            member_id: String::new(),
+            member_epoch: 0,
+            subscribed_topic_names: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        let bytes = handle(&broker, version, 1, &encode_request(&req), &ctx)
+            .await
+            .expect("ShareGroupHeartbeat handler");
+        assert!(decode_response(&bytes).error_code == 0);
+
+        let actor = broker
+            .group_coordinator
+            .get_or_create_share("identity-group");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(ShareGroupActorMessage::Describe { reply: tx })
+            .await
+            .expect("describe share group");
+        let view = rx.await.expect("share group view");
+
+        assert!(view.members.len() == 1);
+        assert!(view.members[0].client_id == "client-a");
+        assert!(view.members[0].client_host == "/127.0.0.1");
+
+        let peer: SocketAddr = "127.0.0.2:9093".parse().unwrap();
+        let ctx = crate::test_support::request_context(&principal, &peer, "client-b");
+        let req = ShareGroupHeartbeatRequest {
+            group_id: "identity-group".into(),
+            member_id: view.members[0].member_id.clone(),
+            member_epoch: view.members[0].member_epoch,
+            subscribed_topic_names: Some(Vec::new()),
+            ..Default::default()
+        };
+        let bytes = handle(&broker, version, 2, &encode_request(&req), &ctx)
+            .await
+            .expect("ShareGroupHeartbeat identity refresh");
+        assert!(decode_response(&bytes).error_code == 0);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(ShareGroupActorMessage::Describe { reply: tx })
+            .await
+            .expect("describe refreshed share group");
+        let view = rx.await.expect("refreshed share group view");
+        assert!(view.members[0].client_id == "client-b");
+        assert!(view.members[0].client_host == "/127.0.0.2");
+
         broker_handle.shutdown().await;
     }
 }

@@ -5,6 +5,7 @@
 //! UNKNOWN, version resolves to `Classic`, the safest behavior for a
 //! pre-bootstrap or legacy image. A 4.0-formatted cluster, or a standalone
 //! self-bootstrapped one, finalizes `TV_2`, so the common path is `Verified`.
+//! `TV_3` is an explicit opt-in for KIP-939 two-phase-commit participation.
 
 use crabka_metadata::MetadataImage;
 
@@ -17,23 +18,34 @@ pub(crate) enum TxnVersion {
     /// `TV_2`: an epoch bump on completion and server-side
     /// `AddPartitionsToTxn` verification. It also uses flexible records.
     Verified,
+    /// `TV_3`: KIP-939 two-phase-commit participation. It includes all `TV_2`
+    /// behavior and enables prepared-transaction recovery.
+    TwoPhase,
 }
 
 impl TxnVersion {
     /// Flexible `__transaction_state` record format applies at `TV >= 1`.
     pub(crate) fn flexible_records(self) -> bool {
-        matches!(self, TxnVersion::Flexible | TxnVersion::Verified)
+        matches!(
+            self,
+            TxnVersion::Flexible | TxnVersion::Verified | TxnVersion::TwoPhase
+        )
     }
     /// The epoch bump on completion and the verify-only `AddPartitionsToTxn`
-    /// both apply at `TV_2`.
+    /// both apply at `TV >= 2`.
     pub(crate) fn verified(self) -> bool {
-        matches!(self, TxnVersion::Verified)
+        matches!(self, TxnVersion::Verified | TxnVersion::TwoPhase)
+    }
+    /// KIP-939 request fields apply only at opt-in `TV_3`.
+    pub(crate) fn two_phase(self) -> bool {
+        matches!(self, TxnVersion::TwoPhase)
     }
 }
 
 pub(crate) fn resolve_txn_version(image: &MetadataImage) -> TxnVersion {
     match image.finalized_feature(crabka_metadata::transaction_version::TRANSACTION_VERSION_FEATURE)
     {
+        Some(3) => TxnVersion::TwoPhase,
         Some(2) => TxnVersion::Verified,
         Some(1) => TxnVersion::Flexible,
         _ => TxnVersion::Classic,
@@ -65,6 +77,7 @@ mod tests {
             (Some(0), TxnVersion::Classic),
             (Some(1), TxnVersion::Flexible),
             (Some(2), TxnVersion::Verified),
+            (Some(3), TxnVersion::TwoPhase),
         ] {
             assert!(
                 resolve_txn_version(&image_with_tv(level)) == want,
@@ -75,16 +88,18 @@ mod tests {
 
     #[test]
     fn behavior_predicates() {
-        for (v, want_flexible, want_verified) in [
-            (TxnVersion::Classic, false, false),
-            (TxnVersion::Flexible, true, false),
-            (TxnVersion::Verified, true, true),
+        for (v, want_flexible, want_verified, want_two_phase) in [
+            (TxnVersion::Classic, false, false, false),
+            (TxnVersion::Flexible, true, false, false),
+            (TxnVersion::Verified, true, true, false),
+            (TxnVersion::TwoPhase, true, true, true),
         ] {
             assert!(
                 v.flexible_records() == want_flexible,
                 "{v:?} flexible_records"
             );
             assert!(v.verified() == want_verified, "{v:?} verified");
+            assert!(v.two_phase() == want_two_phase, "{v:?} two_phase");
         }
     }
 }

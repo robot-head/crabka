@@ -126,7 +126,11 @@ pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> R
         let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
         let open_config = crate::diskless::recovery::open_config(log_config, diskless);
-        let log = Log::open(&dir, open_config).map_err(|e| format!("Log::open: {e}"))?;
+        let mut log = Log::open(&dir, open_config).map_err(|e| format!("Log::open: {e}"))?;
+        if let Some(stamp_source) = partitions.stamp_source() {
+            log.set_stamp_source(stamp_source)
+                .map_err(|e| format!("set stamp source: {e}"))?;
+        }
         let owning_dir = dir
             .parent()
             .expect("placed partition dir always has a parent log.dir")
@@ -783,7 +787,7 @@ mod tests {
     use std::{
         collections::BTreeSet,
         net::SocketAddr,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     };
 
     use assert2::{assert, check};
@@ -800,6 +804,56 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct TestStampSource(AtomicU64);
+
+    impl crabka_log::StampSource for TestStampSource {
+        fn next_stamp(&self) -> u64 {
+            self.0.fetch_add(1, Ordering::Relaxed)
+        }
+    }
+
+    fn materialize_test_partition(
+        partitions: &Arc<PartitionRegistry>,
+        log_dir: &std::path::Path,
+        topic: &str,
+    ) {
+        materialize_partition(MaterializePartitionConfig {
+            partitions,
+            topic,
+            topic_id: None,
+            partition: 0,
+            log_dirs: &[log_dir.to_path_buf()],
+            log_config: &LogConfig::default(),
+            log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: hours(24),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
+            diskless: false,
+            hot_tail: None,
+            wal_shards: None,
+            sequencer: None,
+        })
+        .expect("materialize partition");
+    }
+
+    fn append_one(partition: &crate::partition::Partition) -> crabka_log::Offset {
+        use crabka_protocol::records::{Record, RecordBatch};
+
+        let mut batch = RecordBatch {
+            records: vec![Record::default()],
+            ..RecordBatch::default()
+        };
+        partition
+            .log
+            .lock()
+            .expect("partition log")
+            .append(&mut batch)
+            .expect("append")
+    }
 
     /// Yield-poll until `cond` holds, with a bounded hang-guard. A real
     /// stall then fails the test deterministically instead of spinning
@@ -1165,6 +1219,64 @@ mod tests {
         .await;
         let st = part.replica_state.lock().await;
         assert!(st.isr.len() == 3);
+    }
+
+    #[tokio::test]
+    async fn materialized_partition_stamps_only_when_source_is_configured() {
+        let disabled_dir = tempfile::tempdir().expect("disabled tempdir");
+        let disabled = Arc::new(PartitionRegistry::new());
+        materialize_test_partition(&disabled, disabled_dir.path(), "disabled");
+        let disabled_part = disabled
+            .get("disabled", PartitionIndex(0))
+            .expect("disabled partition");
+        let disabled_offset = append_one(&disabled_part);
+        assert!(disabled_offset == crabka_log::Offset(0));
+        assert!(
+            disabled_part.stamp_for_offset(disabled_offset).is_none(),
+            "Kafka-only partitions must not create internal stamps"
+        );
+
+        let enabled_dir = tempfile::tempdir().expect("enabled tempdir");
+        let source: Arc<dyn crabka_log::StampSource> =
+            Arc::new(TestStampSource(AtomicU64::new(100)));
+        let enabled = Arc::new(PartitionRegistry::with_stamp_source(Some(source)));
+        materialize_test_partition(&enabled, enabled_dir.path(), "enabled");
+        let enabled_part = enabled
+            .get("enabled", PartitionIndex(0))
+            .expect("enabled partition");
+        let enabled_offset = append_one(&enabled_part);
+        assert!(enabled_offset == crabka_log::Offset(0));
+        assert!(enabled_part.stamp_for_offset(enabled_offset) == Some(100));
+    }
+
+    #[tokio::test]
+    async fn recovered_partition_installs_source_before_new_appends() {
+        use crabka_protocol::records::{Record, RecordBatch};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let partition_dir = crate::log_dir::partition_dir(dir.path(), "recovered", 0);
+        std::fs::create_dir_all(&partition_dir).expect("partition dir");
+        let mut existing = Log::open(&partition_dir, LogConfig::default()).expect("open existing");
+        existing
+            .append(&mut RecordBatch {
+                records: vec![Record::default()],
+                ..RecordBatch::default()
+            })
+            .expect("append existing");
+        drop(existing);
+
+        let source: Arc<dyn crabka_log::StampSource> =
+            Arc::new(TestStampSource(AtomicU64::new(500)));
+        let partitions = Arc::new(PartitionRegistry::with_stamp_source(Some(source)));
+        materialize_test_partition(&partitions, dir.path(), "recovered");
+        let partition = partitions
+            .get("recovered", PartitionIndex(0))
+            .expect("recovered partition");
+
+        let new_offset = append_one(&partition);
+        assert!(new_offset == crabka_log::Offset(1));
+        assert!(partition.stamp_for_offset(crabka_log::Offset(0)).is_none());
+        assert!(partition.stamp_for_offset(new_offset) == Some(500));
     }
 
     #[tokio::test]

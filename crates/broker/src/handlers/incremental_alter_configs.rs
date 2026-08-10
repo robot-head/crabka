@@ -43,7 +43,7 @@ const OP_DELETE: i8 = 1;
 
 /// Returns `true` if `name` is a broker-scoped config key accepted by this
 /// broker.
-fn is_known_broker_config(name: &str) -> bool {
+pub(super) fn is_known_broker_config(name: &str) -> bool {
     matches!(
         name,
         crate::throttle::LEADER_THROTTLED_RATE_KEY
@@ -55,7 +55,7 @@ fn is_known_broker_config(name: &str) -> bool {
 /// Validate the value for a broker-scoped config key.
 /// Returns `Err` if the key is unknown or if the value does not parse as an
 /// `i64`.
-fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
+pub(super) fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
     match name {
         crate::throttle::LEADER_THROTTLED_RATE_KEY
         | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
@@ -65,6 +65,25 @@ fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
             .map_err(|e| format!("invalid rate: {e}")),
         _ => Err(format!("unknown broker config {name}")),
     }
+}
+
+pub(super) fn broker_config_node_id(
+    resource_name: &str,
+    image: &MetadataImage,
+) -> Result<NodeId, (i16, String)> {
+    if resource_name.is_empty() {
+        return Ok(crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID);
+    }
+    let node_id = resource_name.parse::<u64>().map(NodeId).map_err(|_| {
+        (
+            codes::INVALID_REQUEST,
+            format!("invalid broker id {resource_name:?}"),
+        )
+    })?;
+    if image.broker(node_id).is_none() {
+        return Err((codes::INVALID_REQUEST, format!("unknown broker {node_id}")));
+    }
+    Ok(node_id)
 }
 
 #[tracing::instrument(
@@ -343,24 +362,14 @@ fn handle_broker_scoped(
     out: &mut AlterConfigsResourceResponse,
     to_submit: &mut Vec<MetadataRecord>,
 ) {
-    // Empty resource_name = cluster-wide default; not currently supported.
-    if resource.resource_name.is_empty() {
-        out.error_code = codes::INVALID_REQUEST;
-        out.error_message = Some("cluster-wide broker config not supported".into());
-        return;
-    }
-    let node_id: NodeId = if let Ok(n) = resource.resource_name.parse::<u64>() {
-        NodeId(n)
-    } else {
-        out.error_code = codes::INVALID_REQUEST;
-        out.error_message = Some(format!("invalid broker id {:?}", resource.resource_name));
-        return;
+    let node_id = match broker_config_node_id(&resource.resource_name, image) {
+        Ok(node_id) => node_id,
+        Err((code, message)) => {
+            out.error_code = code;
+            out.error_message = Some(message);
+            return;
+        }
     };
-    if image.broker(node_id).is_none() {
-        out.error_code = codes::INVALID_REQUEST;
-        out.error_message = Some(format!("unknown broker {node_id}"));
-        return;
-    }
     for cfg in &resource.configs {
         if !is_known_broker_config(&cfg.name) {
             out.error_code = codes::INVALID_CONFIG;
@@ -550,14 +559,27 @@ mod tests {
     }
 
     #[test]
-    fn broker_scoped_empty_name_returns_invalid_request() {
+    fn broker_scoped_empty_name_targets_cluster_default() {
         let img = make_image_with_broker(crabka_audit::NodeId(1));
-        let resource = make_resource("", vec![]);
+        let resource = make_resource(
+            "",
+            vec![make_set_cfg(
+                crate::throttle::LEADER_THROTTLED_RATE_KEY,
+                "2048",
+            )],
+        );
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::INVALID_REQUEST);
-        assert!(to_submit.is_empty());
+        assert!(out.error_code == codes::NONE);
+        assert!(
+            to_submit
+                == vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                    node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+                    config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.to_string(),
+                    config_value: Some("2048".to_string()),
+                })]
+        );
     }
 
     #[test]

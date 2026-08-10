@@ -21,6 +21,7 @@ use crabka_client_producer::Producer;
 use crabka_protocol::owned::{
     describe_transactions_request::DescribeTransactionsRequest,
     init_producer_id_request::InitProducerIdRequest,
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
 };
 use tempfile::TempDir;
 
@@ -34,6 +35,22 @@ async fn boot(two_pc_enabled: bool) -> (BrokerHandle, String, TempDir) {
     cfg.features.transaction_two_phase_commit_enable = two_pc_enabled;
     let broker = Broker::start(cfg).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
+    if two_pc_enabled {
+        let admin = client(&bootstrap).await;
+        let response = admin
+            .send(UpdateFeaturesRequest {
+                feature_updates: vec![FeatureUpdateKey {
+                    feature: "transaction.version".into(),
+                    max_version_level: 3,
+                    upgrade_type: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("enable transaction.version 3");
+        assert!(response.error_code == NONE, "{response:?}");
+    }
     (broker, bootstrap, dir)
 }
 

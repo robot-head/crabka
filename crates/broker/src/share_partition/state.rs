@@ -150,6 +150,44 @@ impl AcquisitionState {
         self.coalesce();
     }
 
+    /// Archives an internal log offset range so it can never be delivered to
+    /// a share consumer.
+    ///
+    /// Transaction control batches occupy offsets in the partition log but
+    /// are broker metadata, not user records. The `ShareFetch` handler calls
+    /// this after materialization for every control-batch range in the live
+    /// window.
+    pub fn archive_internal(&mut self, first: Offset, last: Offset) {
+        if first > last {
+            return;
+        }
+        self.split_at_offset(first);
+        self.split_at_offset(last + 1);
+        let mut changed = false;
+        for batch in &mut self.batches {
+            if batch.last_offset < first || batch.first_offset > last {
+                continue;
+            }
+            if matches!(
+                batch.state,
+                RecordState::Acknowledged | RecordState::Archived
+            ) {
+                continue;
+            }
+            self.delivery_complete_count = self
+                .delivery_complete_count
+                .saturating_add(clamp_i32(batch.len()));
+            batch.state = RecordState::Archived;
+            batch.acquired_by = None;
+            batch.lock_deadline = None;
+            changed = true;
+        }
+        if changed {
+            self.dirty = true;
+            self.advance_spso();
+        }
+    }
+
     /// Acquires up to `max_records` Available records for `member`. It walks
     /// the window from `start_offset`.
     ///
@@ -734,6 +772,31 @@ mod tests {
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         let err = s.acknowledge("m2", Offset(0), Offset(2), AckType::Accept, t0());
         assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
+    }
+
+    #[test]
+    fn internal_offsets_are_archived_before_acquire() {
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(5), 100);
+        s.archive_internal(Offset(2), Offset(2));
+
+        let acquired = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
+        assert!(
+            acquired
+                == vec![
+                    AcquiredRange {
+                        first: Offset(0),
+                        last: Offset(1),
+                        delivery_count: 1,
+                    },
+                    AcquiredRange {
+                        first: Offset(3),
+                        last: Offset(4),
+                        delivery_count: 1,
+                    },
+                ]
+        );
+        check!(s.delivery_complete_count() == 1);
     }
 
     #[test]

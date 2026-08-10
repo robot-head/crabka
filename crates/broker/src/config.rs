@@ -3,7 +3,7 @@
 //! Build the configuration directly for library use, or from CLI flags. The
 //! binary entry point is `bin/broker.rs`.
 
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use crabka_compression::RecordDecompressionPolicy;
 use crabka_log::LogConfig;
@@ -337,6 +337,13 @@ pub struct BrokerConfig {
 
     /// Per-log configuration applied to every partition this broker hosts.
     pub log_config: LogConfig,
+
+    /// Optional internal timestamp source shared by every hosted partition.
+    ///
+    /// `None` is the Kafka-only default: no `.stampindex` sidecar is opened and
+    /// record bytes, offsets, LSO, and high-watermark behavior stay unchanged.
+    /// A combined SQL/Kafka runtime injects its tenant timestamp source here.
+    pub stamp_source: Option<Arc<dyn crabka_log::StampSource>>,
 
     /// Raft node id. Conventionally equal to `broker_id as NodeId`.
     pub node_id: NodeId,
@@ -1099,6 +1106,7 @@ impl BrokerConfig {
             log_dir,
             extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
+            stamp_source: None,
             node_id: NodeId(1),
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],
@@ -2017,6 +2025,7 @@ impl Default for BrokerConfig {
             log_dir: PathBuf::from("./crabka-data"),
             extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
+            stamp_source: None,
             node_id: NodeId(1),
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],

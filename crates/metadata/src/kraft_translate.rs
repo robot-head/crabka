@@ -79,9 +79,10 @@ use crate::{
     acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType},
     records::{
         BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
-        DelegationTokenRecord, DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord,
-        GroupConfigRecord, LeaderEpoch, MetadataRecord, NodeId, PartitionRecord, ProducerIdsRecord,
-        QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
+        DEFAULT_BROKER_CONFIG_NODE_ID, DelegationTokenRecord, DeleteScramCredentialRecord,
+        DeleteTopicRecord, FeatureLevelRecord, GroupConfigRecord, LeaderEpoch, MetadataRecord,
+        NodeId, PartitionRecord, ProducerIdsRecord, QuotaEntity, ScramCredentialRecord,
+        TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
     },
 };
 
@@ -655,8 +656,12 @@ fn to_kraft_iter(
         }
         MetadataRecord::V1BrokerConfig(c) => {
             vec![KraftMetadataRecord::Config(ConfigRecord {
-                resource_type: 0, // BROKER
-                resource_name: c.node_id.to_string(),
+                resource_type: 4, // ConfigResource.Type.BROKER
+                resource_name: if c.node_id == DEFAULT_BROKER_CONFIG_NODE_ID {
+                    String::new()
+                } else {
+                    c.node_id.to_string()
+                },
                 name: c.config_name.clone(),
                 value: c.config_value.clone(),
                 ..Default::default()
@@ -1152,18 +1157,23 @@ fn config_from_kraft(
     image: &MetadataImage,
 ) -> Result<MetadataRecord, TranslateError> {
     match c.resource_type {
-        0 => {
+        4 => {
             // BROKER — `V1BrokerConfig` is already per-key (Some=set, None=delete),
             // so a single `ConfigRecord` maps 1:1 (the image merges per-key).
-            let node_id = c
-                .resource_name
-                .parse::<u64>()
-                .map_err(|e| TranslateError::Invalid {
-                    field: "broker config resource_name",
-                    detail: e.to_string(),
-                })?;
+            let node_id = if c.resource_name.is_empty() {
+                DEFAULT_BROKER_CONFIG_NODE_ID
+            } else {
+                NodeId(
+                    c.resource_name
+                        .parse::<u64>()
+                        .map_err(|e| TranslateError::Invalid {
+                            field: "broker config resource_name",
+                            detail: e.to_string(),
+                        })?,
+                )
+            };
             Ok(MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-                node_id: NodeId(node_id),
+                node_id,
                 config_name: c.name.clone(),
                 config_value: c.value.clone(),
             }))
@@ -1648,6 +1658,28 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         });
+        let encoded = to_kraft_records(&rec, &img()).expect("encode broker config");
+        assert2::assert!(matches!(
+            encoded.as_slice(),
+            [KraftMetadataRecord::Config(config)]
+                if config.resource_type == 4 && config.resource_name == "7"
+        ));
+        round_trip(&rec, &img());
+    }
+
+    #[test]
+    fn default_broker_config_round_trips_with_empty_resource_name() {
+        let rec = MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: DEFAULT_BROKER_CONFIG_NODE_ID,
+            config_name: "follower.replication.throttled.rate".into(),
+            config_value: Some("4096".into()),
+        });
+        let encoded = to_kraft_records(&rec, &img()).expect("encode default broker config");
+        assert2::assert!(matches!(
+            encoded.as_slice(),
+            [KraftMetadataRecord::Config(config)]
+                if config.resource_type == 4 && config.resource_name.is_empty()
+        ));
         round_trip(&rec, &img());
     }
 

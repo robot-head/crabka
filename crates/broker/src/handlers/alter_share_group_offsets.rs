@@ -414,6 +414,7 @@ mod tests {
                     subscribed_topic_names: Some(Vec::new()),
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: "127.0.0.1".into(),
                 reply: tx,
             })

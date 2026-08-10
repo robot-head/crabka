@@ -97,6 +97,7 @@ pub(crate) fn handle(
                                 pid,
                                 epoch,
                                 marker_type,
+                                marker_entry.coordinator_epoch,
                             )
                             .await
                             {
@@ -161,6 +162,7 @@ pub(crate) async fn append_marker_and_materialize(
     producer_id: crabka_log::ProducerId,
     producer_epoch: i16,
     marker_type: MarkerType,
+    coordinator_epoch: i32,
 ) -> Result<(), BrokerError> {
     let committed_offsets = if marker_type == MarkerType::Commit && topic == OFFSETS_TOPIC {
         let coordinator = group_coordinator.ok_or_else(|| {
@@ -181,6 +183,7 @@ pub(crate) async fn append_marker_and_materialize(
         producer_epoch,
         partition.log_end_offset(),
         marker_type,
+        coordinator_epoch,
     );
     partition.produce_batch(marker).await?;
 
@@ -505,6 +508,7 @@ mod tests {
             producer_id,
             5,
             MarkerType::Abort,
+            0,
         )
         .await
         .expect("abort marker");

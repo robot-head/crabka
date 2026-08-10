@@ -47,6 +47,7 @@ pub(super) enum JoinAction {
 pub(super) fn handle_join(
     state: &mut ClassicState,
     req: &JoinGroupRequest,
+    client_id: &str,
     client_host: &str,
     initial_rebalance_delay: Duration,
 ) -> JoinAction {
@@ -133,7 +134,7 @@ pub(super) fn handle_join(
     let outcome = state.add_member(
         Member::new(
             req.member_id.clone(),
-            String::new(), // client_id is header-level only
+            client_id.to_string(),
             client_host.to_string(),
             session_timeout,
             rebalance_timeout,
@@ -482,7 +483,7 @@ mod tests {
         req: &JoinGroupRequest,
         client_host: &str,
     ) -> JoinAction {
-        super::handle_join(state, req, client_host, Duration::from_secs(3))
+        super::handle_join(state, req, "client-a", client_host, Duration::from_secs(3))
     }
 
     fn join_req(member_id: &str, instance: Option<&str>) -> JoinGroupRequest {
@@ -559,6 +560,8 @@ mod tests {
         let mut g = ClassicState::new("g");
         let action = handle_join(&mut g, &join_req("m1", None), "h");
         assert!(matches!(action, JoinAction::Park));
+        check!(g.members["m1"].client_id == "client-a");
+        check!(g.members["m1"].host == "h");
         check!(g.rebalance_deadline.is_some());
         check!(g.state == GroupState::PreparingRebalance);
     }
@@ -570,6 +573,7 @@ mod tests {
         let action = super::handle_join(
             &mut g,
             &join_req("m1", None),
+            "client-a",
             "h",
             Duration::from_millis(17),
         );

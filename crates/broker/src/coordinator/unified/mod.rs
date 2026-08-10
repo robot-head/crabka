@@ -56,6 +56,12 @@ pub(crate) fn first_join_member_id(request_member_id: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ClientIdentity<'a> {
+    pub id: &'a str,
+    pub host: &'a str,
+}
+
 pub(crate) fn validate_member_epoch(
     current_epoch: Option<i32>,
     requested_epoch: i32,

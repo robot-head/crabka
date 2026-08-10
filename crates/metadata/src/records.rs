@@ -156,6 +156,10 @@ pub struct TopicConfigRecord {
 }
 
 /// Per-broker configuration key/value pair. `Some(value)` = set; `None` = delete.
+///
+/// Kafka names the cluster-wide broker-default resource with an empty string.
+/// [`DEFAULT_BROKER_CONFIG_NODE_ID`] represents that resource internally; the
+/// `KRaft` translator maps it back to the empty resource name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerConfigRecord {
     pub node_id: NodeId,
@@ -163,6 +167,11 @@ pub struct BrokerConfigRecord {
     /// `Some(value)` = set; `None` = delete.
     pub config_value: Option<String>,
 }
+
+/// Internal identity for Kafka's cluster-wide default broker-config resource.
+/// Broker IDs are non-negative signed 32-bit integers on the Kafka wire, so
+/// this value cannot collide with a real broker.
+pub const DEFAULT_BROKER_CONFIG_NODE_ID: NodeId = NodeId(u64::MAX);
 
 /// KIP-714 client-metrics subscription config. Authoritative target
 /// state: each `V1ClientMetricsConfig` fully replaces the previous
