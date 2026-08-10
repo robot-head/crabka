@@ -24,6 +24,7 @@ use super::WalStore;
 use crate::error::BrokerError;
 
 const QUORUM_STATE_FILE: &str = "quorum-state.json";
+const QUORUM_STATE_BACKUP_FILE: &str = "quorum-state.json.bak";
 
 /// A [`WalStore`] backed by a quorum of durable WAL replica logs.
 #[derive(Debug, Clone)]
@@ -115,6 +116,20 @@ impl QuorumWalStore {
 struct PersistedQuorumState {
     cluster_id: uuid::Uuid,
     voters: Vec<u64>,
+    #[serde(default)]
+    kraft_version: u16,
+    #[serde(default)]
+    leader_epoch: u32,
+    #[serde(default)]
+    leader_id: Option<u64>,
+    #[serde(default)]
+    voted_key: Option<PersistedReplicaKey>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct PersistedReplicaKey {
+    id: u64,
+    directory_id: uuid::Uuid,
 }
 
 #[derive(Debug)]
@@ -130,22 +145,55 @@ fn load_or_prepare_quorum_state(
 ) -> Result<OpenedQuorumState, BrokerError> {
     fs::create_dir_all(root)?;
     let path = root.join(QUORUM_STATE_FILE);
-    if path.exists() {
-        let bytes = fs::read(&path)?;
+    let backup = root.join(QUORUM_STATE_BACKUP_FILE);
+    let existing = if path.exists() {
+        Some(&path)
+    } else if backup.exists() {
+        Some(&backup)
+    } else {
+        None
+    };
+    if let Some(existing) = existing {
+        let bytes = fs::read(existing)?;
         let persisted: PersistedQuorumState = serde_json::from_slice(&bytes).map_err(|err| {
-            BrokerError::Replication(format!("decode WAL quorum state {}: {err}", path.display()))
+            BrokerError::Replication(format!(
+                "decode WAL quorum state {}: {err}",
+                existing.display()
+            ))
         })?;
         let persisted_ids = persisted.voters.into_iter().map(NodeId).collect::<Vec<_>>();
         if persisted_ids != voter_ids {
             return Err(BrokerError::Replication(format!(
                 "WAL quorum voter set changed for {}: persisted {:?}, configured {:?}",
-                path.display(),
+                existing.display(),
                 persisted_ids,
                 voter_ids
             )));
         }
+        let leader_id = persisted.leader_id.map(NodeId);
+        let voted_key = persisted
+            .voted_key
+            .map(|key| crabka_kraft_core::ReplicaKey {
+                id: NodeId(key.id),
+                directory_id: key.directory_id,
+            });
+        if leader_id.is_some_and(|id| !voters.contains(id))
+            || voted_key.is_some_and(|key| !voters.contains(key.id))
+        {
+            return Err(BrokerError::Replication(format!(
+                "WAL quorum state {} names a leader or vote outside its voter set",
+                existing.display()
+            )));
+        }
         return Ok(OpenedQuorumState {
-            state: crabka_kraft_core::QuorumState::bootstrap(persisted.cluster_id, voters),
+            state: crabka_kraft_core::QuorumState {
+                cluster_id: persisted.cluster_id,
+                kraft_version: persisted.kraft_version,
+                leader_epoch: persisted.leader_epoch,
+                leader_id,
+                voted_key,
+                voters,
+            },
             is_new: false,
         });
     }
@@ -166,6 +214,13 @@ fn persist_quorum_state(
     let persisted = PersistedQuorumState {
         cluster_id: state.cluster_id,
         voters: voter_ids.iter().map(|id| id.0).collect(),
+        kraft_version: state.kraft_version,
+        leader_epoch: state.leader_epoch,
+        leader_id: state.leader_id.map(|id| id.0),
+        voted_key: state.voted_key.map(|key| PersistedReplicaKey {
+            id: key.id.0,
+            directory_id: key.directory_id,
+        }),
     };
     let bytes = serde_json::to_vec_pretty(&persisted).map_err(|err| {
         BrokerError::Replication(format!("encode WAL quorum state {}: {err}", path.display()))
@@ -175,7 +230,27 @@ fn persist_quorum_state(
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&temporary, &path)?;
+
+    let backup = root.join(QUORUM_STATE_BACKUP_FILE);
+    if backup.exists() {
+        if path.exists() {
+            fs::remove_file(&backup)?;
+        } else {
+            fs::rename(&backup, &path)?;
+        }
+    }
+    if path.exists() {
+        fs::rename(&path, &backup)?;
+    }
+    if let Err(error) = fs::rename(&temporary, &path) {
+        if backup.exists() && !path.exists() {
+            let _ = fs::rename(&backup, &path);
+        }
+        return Err(error.into());
+    }
+    if backup.exists() {
+        fs::remove_file(&backup)?;
+    }
 
     // A durable file is not enough on filesystems where the rename itself is
     // only stable after the parent directory is synced. Rust does not expose
@@ -589,15 +664,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let voter_ids = vec![NodeId(0), NodeId(1), NodeId(2)];
         let voters = engine::voter_set(voter_ids.iter().copied());
-        let first = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        let mut first = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
         assert!(first.is_new);
+        first.state.kraft_version = 1;
+        first.state.leader_epoch = 7;
+        first.state.leader_id = Some(NodeId(2));
+        first.state.voted_key = Some(crabka_kraft_core::ReplicaKey {
+            id: NodeId(1),
+            directory_id: Uuid::from_u128(99),
+        });
         persist_quorum_state(root.path(), &first.state, &voter_ids).unwrap();
 
         let voters = engine::voter_set(voter_ids.iter().copied());
         let reopened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
 
         assert!(!reopened.is_new);
-        assert!(reopened.state.cluster_id == first.state.cluster_id);
+        assert!(reopened.state == first.state);
         assert!(root.path().join(QUORUM_STATE_FILE).exists());
         assert!(
             !root
@@ -606,6 +688,7 @@ mod tests {
                 .with_extension("json.tmp")
                 .exists()
         );
+        assert!(!root.path().join(QUORUM_STATE_BACKUP_FILE).exists());
     }
 
     #[test]
@@ -626,6 +709,78 @@ mod tests {
         let voters = engine::voter_set(voter_ids.iter().copied());
         let reopened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
         assert!(reopened.state.cluster_id == opened.state.cluster_id);
+    }
+
+    #[test]
+    fn quorum_state_persist_replaces_an_existing_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let voter_ids = vec![NodeId(0), NodeId(1), NodeId(2)];
+        let voters = engine::voter_set(voter_ids.iter().copied());
+        let mut opened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        persist_quorum_state(root.path(), &opened.state, &voter_ids).unwrap();
+        opened.state.leader_epoch = 4;
+        opened.state.leader_id = Some(NodeId(1));
+
+        persist_quorum_state(root.path(), &opened.state, &voter_ids).unwrap();
+
+        let voters = engine::voter_set(voter_ids.iter().copied());
+        let reopened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        assert!(reopened.state == opened.state);
+        assert!(!root.path().join(QUORUM_STATE_BACKUP_FILE).exists());
+    }
+
+    #[test]
+    fn quorum_state_loads_backup_left_between_replace_renames() {
+        let root = tempfile::tempdir().unwrap();
+        let voter_ids = vec![NodeId(0), NodeId(1), NodeId(2)];
+        let voters = engine::voter_set(voter_ids.iter().copied());
+        let opened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        persist_quorum_state(root.path(), &opened.state, &voter_ids).unwrap();
+        fs::rename(
+            root.path().join(QUORUM_STATE_FILE),
+            root.path().join(QUORUM_STATE_BACKUP_FILE),
+        )
+        .unwrap();
+
+        let voters = engine::voter_set(voter_ids.iter().copied());
+        let recovered = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+
+        assert!(!recovered.is_new);
+        assert!(recovered.state == opened.state);
+    }
+
+    #[test]
+    fn legacy_quorum_state_descriptor_loads_with_consensus_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let cluster_id = Uuid::from_u128(17);
+        fs::write(
+            root.path().join(QUORUM_STATE_FILE),
+            format!(r#"{{"cluster_id":"{cluster_id}","voters":[0,1,2]}}"#),
+        )
+        .unwrap();
+        let voter_ids = vec![NodeId(0), NodeId(1), NodeId(2)];
+        let voters = engine::voter_set(voter_ids.iter().copied());
+
+        let opened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+
+        assert!(opened.state.cluster_id == cluster_id);
+        assert!(opened.state.kraft_version == 0);
+        assert!(opened.state.leader_epoch == 0);
+        assert!(opened.state.leader_id.is_none());
+        assert!(opened.state.voted_key.is_none());
+    }
+
+    #[test]
+    fn quorum_state_rejects_leader_outside_voter_set() {
+        let root = tempfile::tempdir().unwrap();
+        let voter_ids = vec![NodeId(0), NodeId(1), NodeId(2)];
+        let voters = engine::voter_set(voter_ids.iter().copied());
+        let mut opened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        opened.state.leader_id = Some(NodeId(9));
+        persist_quorum_state(root.path(), &opened.state, &voter_ids).unwrap();
+
+        let voters = engine::voter_set(voter_ids.iter().copied());
+        assert!(load_or_prepare_quorum_state(root.path(), &voter_ids, voters).is_err());
     }
 
     #[test]
