@@ -54,10 +54,10 @@ pub const INVALID_PARTITIONS: i16 = 37;
 pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const NOT_CONTROLLER: i16 = 41;
 pub const INVALID_REQUEST: i16 = 42;
-/// Kafka error 87. The broker returns it when a Produce payload is
-/// structurally malformed. For example, a legacy v0/v1 `MessageSet` that fails
-/// CRC, has nested compression, or that the broker cannot parse into v2
-/// records.
+/// Kafka error 87. The broker returns it when a record-bearing payload is
+/// structurally malformed. Examples include an invalid Produce `MessageSet`
+/// and a `PushTelemetry` payload that cannot be decompressed or decoded as
+/// OTLP metrics.
 pub const INVALID_RECORD: i16 = 87;
 
 // Phase 5 additions — group coordinator codes.
