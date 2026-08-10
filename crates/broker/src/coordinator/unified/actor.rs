@@ -753,7 +753,7 @@ async fn handle_classic_delete_message(
         classic_group_metadata_tombstone: true,
         ..PendingRecords::default()
     }
-    .into_batch(&group_id, chrono_now_ms());
+    .to_batch(&group_id, chrono_now_ms());
     match offsets_log.append(&group_id, batch).await {
         Ok(()) => {
             let _ = reply.send(Ok(()));
@@ -1148,17 +1148,7 @@ async fn handle_session_tick(
     // reconciler own the single `bump_epoch` (via `reconcile_if_dirty`); an
     // explicit pre-bump here would double-advance `group_epoch` per eviction.
     run_reconcile(state, config, metadata);
-    let mut pending = PendingRecords {
-        group_metadata: Some(GroupMetadataValue {
-            epoch: state.group_epoch,
-        }),
-        ..Default::default()
-    };
-    if state.target.epoch > 0 {
-        pending.target_metadata = Some(TargetAssignmentMetadataValue {
-            assignment_epoch: state.target.epoch,
-        });
-    }
+    let mut pending = snapshot_pending_after_change(state, &[], true);
     for mid in &evicted {
         pending.member_metadata.push((mid.clone(), None));
         pending.target_per_member.push((mid.clone(), None));
@@ -1218,28 +1208,13 @@ async fn maybe_downgrade(
 
     let image = metadata.snapshot();
 
-    // The departed native member's membership change shrank the group, but the
-    // server `target` was last computed while it was still present, so it does
-    // NOT yet cover its partitions. Re-reconcile over the SURVIVING members
-    // first — exactly the way the heartbeat path does (`run_reconcile`) — so
-    // the remaining classic members absorb the orphaned partitions before we
-    // freeze the target into the classic group's seed assignments. Without this
-    // the group would land `Stable` with a partition gap and never rebalance,
-    // violating the migration spec's "no partition gap" guarantee.
-    {
-        let state = group
-            .as_consumer_mut()
-            .expect("consumer-kind verified above");
-        state.dirty = true;
-        run_reconcile(state, config, metadata);
-    }
-
-    // Re-borrow immutably to read the freshly-reconciled target.
+    // The leave or expiration path already reconciled the surviving members,
+    // so the target covers the departed native member's partitions.
     let state = group.as_consumer().expect("consumer-kind verified above");
     let classic = migration::convert_consumer_to_classic(state, &image);
     let pending = migration::downgrade_pending_records(state, &classic);
     let group_id = group.group_id.clone();
-    let batch = pending.into_batch(&group_id, chrono_now_ms());
+    let batch = pending.to_batch(&group_id, chrono_now_ms());
     offsets_log.append(&group_id, batch).await?;
     coordinator.mark_classic_after_downgrade(&group_id);
     *group.kind_mut() = GroupKind::Classic(classic);
@@ -1391,7 +1366,8 @@ async fn classic_join_hosted(
     if state.dirty {
         run_reconcile(state, config, metadata);
         state.advance_member_epoch(&req.member_id);
-        let pending = snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id));
+        let pending =
+            snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id), true);
         if let Err(e) = flush_pending(state, pending, offsets_log, coordinator, now_ms).await {
             tracing::warn!(
                 group_id = %state.group_id, error = %e,
@@ -1434,7 +1410,7 @@ pub(crate) fn step_heartbeat(
 ) -> HeartbeatStep {
     // ─── Leave path ──────────────────────────────────────────────
     if req.member_epoch == -1 {
-        return leave_step(state, config, req);
+        return leave_step(state, config, metadata, req);
     }
 
     // ─── Validate assignor selection ─────────────────────────────
@@ -1482,7 +1458,8 @@ pub(crate) fn step_heartbeat(
         // partitions, withholds those still held by others) before responding.
         let owned = reported_owned(req);
         state.reconcile_member(&new_member_id, &owned);
-        let pending = snapshot_pending_after_change(state, std::slice::from_ref(&new_member_id));
+        let pending =
+            snapshot_pending_after_change(state, std::slice::from_ref(&new_member_id), true);
         let response = build_assignment_resp(state, &new_member_id, config);
         return HeartbeatStep { response, pending };
     }
@@ -1502,9 +1479,14 @@ pub(crate) fn step_heartbeat(
     };
 
     // ─── Steady-state: update last_seen / subscription / owned ───
+    let previous_target_epoch = state.target.epoch;
     let any_change = update_member_state(state, config, metadata, req, client, now, cur_epoch);
     let pending = if any_change {
-        snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id))
+        snapshot_pending_after_change(
+            state,
+            std::slice::from_ref(&req.member_id),
+            state.target.epoch != previous_target_epoch,
+        )
     } else {
         PendingRecords::default()
     };
@@ -1513,15 +1495,22 @@ pub(crate) fn step_heartbeat(
 }
 
 /// Pure form of the leave path (`member_epoch == -1`). It removes the member,
-/// raises the group epoch, and builds the tombstone and group-epoch records.
+/// reconciles the survivors, and builds their replacement records plus the
+/// departed member's tombstones.
 /// The async caller flushes the returned `pending`.
 fn leave_step(
     state: &mut super::consumer_state::GroupState,
     config: &NextGenConfig,
+    metadata: &dyn MetadataProvider,
     req: &ConsumerGroupHeartbeatRequest,
 ) -> HeartbeatStep {
-    let mut pending = PendingRecords::default();
-    if state.members.contains_key(&req.member_id) {
+    let mut pending = if state.remove_member(&req.member_id).is_some() {
+        run_reconcile(state, config, metadata);
+        snapshot_pending_after_change(state, &[], true)
+    } else {
+        PendingRecords::default()
+    };
+    if !pending.is_empty() {
         pending.member_metadata.push((req.member_id.clone(), None));
         pending
             .target_per_member
@@ -1530,11 +1519,6 @@ fn leave_step(
             .current_per_member
             .push((req.member_id.clone(), None));
     }
-    state.remove_member(&req.member_id);
-    state.bump_epoch();
-    pending.group_metadata = Some(GroupMetadataValue {
-        epoch: state.group_epoch,
-    });
     HeartbeatStep {
         response: base_resp(0, req.member_epoch, config),
         pending,
@@ -1835,7 +1819,7 @@ impl PendingRecords {
             && self.classic_group_metadata.is_none()
     }
 
-    pub fn into_batch(self, group_id: &str, now_ms: i64) -> RecordBatch {
+    pub fn to_batch(&self, group_id: &str, now_ms: i64) -> RecordBatch {
         let mut batch = OffsetRecordBatchBuilder::default();
 
         if let Some(v) = self.group_metadata {
@@ -1846,13 +1830,13 @@ impl PendingRecords {
                 Some(v.encode()),
             );
         }
-        for (member_id, v) in self.member_metadata {
+        for (member_id, v) in &self.member_metadata {
             batch.push(
                 encode_key(&NextGenKey::MemberMetadata {
                     group_id: group_id.into(),
-                    member_id,
+                    member_id: member_id.clone(),
                 }),
-                v.map(|x| x.encode()),
+                v.as_ref().map(MemberMetadataValue::encode),
             );
         }
         if let Some(v) = self.target_metadata {
@@ -1863,22 +1847,22 @@ impl PendingRecords {
                 Some(v.encode()),
             );
         }
-        for (member_id, v) in self.target_per_member {
+        for (member_id, v) in &self.target_per_member {
             batch.push(
                 encode_key(&NextGenKey::TargetAssignmentMember {
                     group_id: group_id.into(),
-                    member_id,
+                    member_id: member_id.clone(),
                 }),
-                v.map(|x| x.encode()),
+                v.as_ref().map(TargetAssignmentMemberValue::encode),
             );
         }
-        for (member_id, v) in self.current_per_member {
+        for (member_id, v) in &self.current_per_member {
             batch.push(
                 encode_key(&NextGenKey::CurrentMemberAssignment {
                     group_id: group_id.into(),
-                    member_id,
+                    member_id: member_id.clone(),
                 }),
-                v.map(|x| x.encode()),
+                v.as_ref().map(CurrentMemberAssignmentValue::encode),
             );
         }
         if self.classic_group_metadata_tombstone {
@@ -1907,7 +1891,7 @@ impl PendingRecords {
                 None,
             );
         }
-        if let Some(v) = self.classic_group_metadata {
+        if let Some(v) = &self.classic_group_metadata {
             batch.push(
                 crate::coordinator::unified::persistence::encode_key(
                     &crate::coordinator::unified::persistence::Key::GroupMetadata {
@@ -1920,13 +1904,51 @@ impl PendingRecords {
 
         batch.finish(now_ms)
     }
+
+    /// Apply exactly this durable next-gen record delta to the respawn cache.
+    fn apply_to_cache(self, coordinator: &super::GroupCoordinator, group_id: &str) {
+        if self.next_gen_group_metadata_tombstone {
+            coordinator.remove_cached_seed(group_id);
+            return;
+        }
+        coordinator.update_cached_seed(group_id, |seed| {
+            if let Some(value) = self.group_metadata {
+                seed.group_epoch = value.epoch;
+            }
+            for (member_id, value) in self.member_metadata {
+                if let Some(value) = value {
+                    seed.members.insert(member_id, value);
+                } else {
+                    seed.members.remove(&member_id);
+                }
+            }
+            if let Some(value) = self.target_metadata {
+                seed.target_epoch = value.assignment_epoch;
+            }
+            if self.next_gen_target_metadata_tombstone {
+                seed.target_epoch = 0;
+            }
+            for (member_id, value) in self.target_per_member {
+                if let Some(value) = value {
+                    seed.target_per_member.insert(member_id, value);
+                } else {
+                    seed.target_per_member.remove(&member_id);
+                }
+            }
+            for (member_id, value) in self.current_per_member {
+                if let Some(value) = value {
+                    seed.current_per_member.insert(member_id, value);
+                } else {
+                    seed.current_per_member.remove(&member_id);
+                }
+            }
+        });
+    }
 }
 
-/// Snapshot a `GroupState` into a `GroupSeed` suitable for restoring a
 /// Maps a member's in-memory classic facade, if there is one, into the
 /// persisted k5 `ClassicMemberMetadata` sub-block. It is the single source of
-/// truth for both the cache snapshot (`snapshot_seed`) and the log-write path
-/// (`snapshot_pending_after_change`), so the two cannot drift.
+/// truth for the log-write path and its incremental cache update.
 fn classic_member_metadata(
     m: &super::consumer_state::MemberState,
 ) -> Option<super::persistence_next_gen::ClassicMemberMetadata> {
@@ -1940,80 +1962,6 @@ fn classic_member_metadata(
         })
 }
 
-/// freshly-respawned actor. It mirrors what bootstrap replay would produce.
-// PERF: this deep-clones EVERY member's subscriptions/assignments into a
-// fresh `GroupSeed` on every persisted heartbeat, even when only one member
-// changed. An incremental cache update — applying just the affected-member
-// delta computed by `snapshot_pending_after_change` — would avoid the
-// full-group re-clone, but `GroupCoordinator::update_cache` (mod.rs) only
-// exposes a whole-seed replace and `GroupSeed` is consumed wholesale by
-// replay/scrub. Adding a delta-apply API would ripple into mod.rs, which is
-// out of scope here; left as the remaining full-clone for a follow-up.
-pub(crate) fn snapshot_seed(state: &super::consumer_state::GroupState) -> super::GroupSeed {
-    use crate::coordinator::unified::persistence_next_gen as p;
-    let mut members = std::collections::HashMap::new();
-    let mut target_per_member = std::collections::HashMap::new();
-    let mut current_per_member = std::collections::HashMap::new();
-    for (mid, m) in &state.members {
-        let mm = p::MemberMetadataValue {
-            instance_id: m.instance_id.clone(),
-            rack_id: m.rack_id.clone(),
-            client_id: m.client_id.clone(),
-            client_host: m.client_host.clone(),
-            subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
-            subscribed_topic_regex: m.subscribed_topic_regex.clone(),
-            server_assignor: m.server_assignor.clone(),
-            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
-                .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
-            classic: classic_member_metadata(m),
-        };
-        members.insert(mid.clone(), mm);
-
-        let cur = p::CurrentMemberAssignmentValue {
-            member_epoch: m.member_epoch,
-            previous_member_epoch: m.previous_member_epoch,
-            state: m.assignment_state,
-            assigned_partitions: m
-                .assigned_partitions
-                .iter()
-                .map(|(tid, parts)| p::AssignedTopicPartitions {
-                    topic_id: *tid,
-                    partitions: parts.clone(),
-                })
-                .collect(),
-            partitions_pending_revocation: m
-                .partitions_pending_revocation
-                .iter()
-                .map(|(tid, parts)| p::AssignedTopicPartitions {
-                    topic_id: *tid,
-                    partitions: parts.clone(),
-                })
-                .collect(),
-        };
-        current_per_member.insert(mid.clone(), cur);
-
-        if let Some(target) = state.target.per_member.get(mid) {
-            let tv = p::TargetAssignmentMemberValue {
-                topic_partitions: target
-                    .iter()
-                    .map(|(tid, parts)| p::AssignedTopicPartitions {
-                        topic_id: *tid,
-                        partitions: parts.clone(),
-                    })
-                    .collect(),
-            };
-            target_per_member.insert(mid.clone(), tv);
-        }
-    }
-    super::GroupSeed {
-        group_epoch: state.group_epoch,
-        target_epoch: state.target.epoch,
-        members,
-        target_per_member,
-        current_per_member,
-    }
-}
-
 fn chrono_now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -2021,80 +1969,105 @@ fn chrono_now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// Builds a `PendingRecords` set that carries the state changes for the listed
-/// `affected_members`. It always includes the current group epoch, and the
-/// target epoch when that epoch is non-zero.
+fn member_metadata_value(member: &super::consumer_state::MemberState) -> MemberMetadataValue {
+    MemberMetadataValue {
+        instance_id: member.instance_id.clone(),
+        rack_id: member.rack_id.clone(),
+        client_id: member.client_id.clone(),
+        client_host: member.client_host.clone(),
+        subscribed_topic_names: member.subscribed_topic_names.iter().cloned().collect(),
+        subscribed_topic_regex: member.subscribed_topic_regex.clone(),
+        server_assignor: member.server_assignor.clone(),
+        rebalance_timeout_ms: i32::try_from(member.rebalance_timeout.as_millis())
+            .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
+        classic: classic_member_metadata(member),
+    }
+}
+
+fn current_assignment_value(
+    member: &super::consumer_state::MemberState,
+) -> CurrentMemberAssignmentValue {
+    use crate::coordinator::unified::persistence_next_gen::AssignedTopicPartitions;
+    CurrentMemberAssignmentValue {
+        member_epoch: member.member_epoch,
+        previous_member_epoch: member.previous_member_epoch,
+        state: member.assignment_state,
+        assigned_partitions: member
+            .assigned_partitions
+            .iter()
+            .map(|(topic_id, partitions)| AssignedTopicPartitions {
+                topic_id: *topic_id,
+                partitions: partitions.clone(),
+            })
+            .collect(),
+        partitions_pending_revocation: member
+            .partitions_pending_revocation
+            .iter()
+            .map(|(topic_id, partitions)| AssignedTopicPartitions {
+                topic_id: *topic_id,
+                partitions: partitions.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn target_assignment_value(target: &HashMap<Uuid, Vec<i32>>) -> TargetAssignmentMemberValue {
+    use crate::coordinator::unified::persistence_next_gen::AssignedTopicPartitions;
+    TargetAssignmentMemberValue {
+        topic_partitions: target
+            .iter()
+            .map(|(topic_id, partitions)| AssignedTopicPartitions {
+                topic_id: *topic_id,
+                partitions: partitions.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Builds the durable records for one group-state transition.
+///
+/// Member metadata is limited to `affected_members`. When reconciliation made
+/// a new target, every target and current assignment is included because the
+/// reconciler updates the whole group at once.
 fn snapshot_pending_after_change(
     state: &super::consumer_state::GroupState,
     affected_members: &[String],
+    target_changed: bool,
 ) -> PendingRecords {
-    use crate::coordinator::unified::persistence_next_gen as p;
     let mut pending = PendingRecords {
-        group_metadata: Some(p::GroupMetadataValue {
+        group_metadata: Some(GroupMetadataValue {
             epoch: state.group_epoch,
         }),
         ..Default::default()
     };
-    if state.target.epoch > 0 {
-        pending.target_metadata = Some(p::TargetAssignmentMetadataValue {
-            assignment_epoch: state.target.epoch,
-        });
-    }
     for mid in affected_members {
         if let Some(m) = state.members.get(mid) {
-            pending.member_metadata.push((
-                mid.clone(),
-                Some(p::MemberMetadataValue {
-                    instance_id: m.instance_id.clone(),
-                    rack_id: m.rack_id.clone(),
-                    client_id: m.client_id.clone(),
-                    client_host: m.client_host.clone(),
-                    subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
-                    subscribed_topic_regex: m.subscribed_topic_regex.clone(),
-                    server_assignor: m.server_assignor.clone(),
-                    rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
-                        .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
-                    classic: classic_member_metadata(m),
-                }),
-            ));
-            pending.current_per_member.push((
-                mid.clone(),
-                Some(p::CurrentMemberAssignmentValue {
-                    member_epoch: m.member_epoch,
-                    previous_member_epoch: m.previous_member_epoch,
-                    state: m.assignment_state,
-                    assigned_partitions: m
-                        .assigned_partitions
-                        .iter()
-                        .map(|(tid, parts)| p::AssignedTopicPartitions {
-                            topic_id: *tid,
-                            partitions: parts.clone(),
-                        })
-                        .collect(),
-                    partitions_pending_revocation: m
-                        .partitions_pending_revocation
-                        .iter()
-                        .map(|(tid, parts)| p::AssignedTopicPartitions {
-                            topic_id: *tid,
-                            partitions: parts.clone(),
-                        })
-                        .collect(),
-                }),
-            ));
-            if let Some(target) = state.target.per_member.get(mid) {
-                pending.target_per_member.push((
-                    mid.clone(),
-                    Some(p::TargetAssignmentMemberValue {
-                        topic_partitions: target
-                            .iter()
-                            .map(|(tid, parts)| p::AssignedTopicPartitions {
-                                topic_id: *tid,
-                                partitions: parts.clone(),
-                            })
-                            .collect(),
-                    }),
-                ));
+            pending
+                .member_metadata
+                .push((mid.clone(), Some(member_metadata_value(m))));
+            pending
+                .current_per_member
+                .push((mid.clone(), Some(current_assignment_value(m))));
+        }
+    }
+    if target_changed {
+        pending.target_metadata = Some(TargetAssignmentMetadataValue {
+            assignment_epoch: state.target.epoch,
+        });
+        for (mid, member) in &state.members {
+            if !affected_members.iter().any(|affected| affected == mid) {
+                pending
+                    .current_per_member
+                    .push((mid.clone(), Some(current_assignment_value(member))));
             }
+            pending.target_per_member.push((
+                mid.clone(),
+                state
+                    .target
+                    .per_member
+                    .get(mid)
+                    .map(target_assignment_value),
+            ));
         }
     }
     pending
@@ -2107,7 +2080,7 @@ fn snapshot_pending_after_change(
 /// atomically in one batch.
 pub(crate) fn full_pending_records(state: &super::consumer_state::GroupState) -> PendingRecords {
     let all_member_ids: Vec<String> = state.members.keys().cloned().collect();
-    snapshot_pending_after_change(state, &all_member_ids)
+    snapshot_pending_after_change(state, &all_member_ids, true)
 }
 
 /// Builds a wire-faithful classic k2 `GroupMetadataValue` from a downgraded
@@ -2164,7 +2137,7 @@ async fn flush_classic_metadata(
     offsets_log
         .append(
             &state.group_id,
-            pending.into_batch(&state.group_id, chrono_now_ms()),
+            pending.to_batch(&state.group_id, chrono_now_ms()),
         )
         .await
 }
@@ -2179,11 +2152,9 @@ async fn flush_pending(
     if pending.is_empty() {
         return Ok(());
     }
-    // Consume `pending` by value: `into_batch` moves the per-member
-    // record vectors straight into the batch instead of deep-cloning them.
-    let batch = pending.into_batch(&state.group_id, now_ms);
+    let batch = pending.to_batch(&state.group_id, now_ms);
     offsets_log.append(&state.group_id, batch).await?;
-    coordinator.update_cache(&state.group_id, snapshot_seed(state));
+    pending.apply_to_cache(coordinator, &state.group_id);
     Ok(())
 }
 
@@ -3003,6 +2974,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn leave_reconciles_and_persists_survivor_assignments() {
+        let config = NextGenConfig::default();
+        let topic_id = Uuid([8; 16]);
+        let metadata = StaticMetadata {
+            input: ReconcileInput {
+                topic_id_by_name: [("t".into(), topic_id)].into(),
+                partitions_per_topic: [(topic_id, 2)].into(),
+                ..Default::default()
+            },
+        };
+        let mut state = GroupState::new("g");
+        for member_id in ["m1", "m2"] {
+            state.add_or_update_member(build_member(
+                member_id,
+                &ConsumerGroupHeartbeatRequest {
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                crate::coordinator::unified::ClientIdentity {
+                    id: "client",
+                    host: "host",
+                },
+                Instant::now(),
+            ));
+        }
+        run_reconcile(&mut state, &config, &metadata);
+        let epoch_before = state.group_epoch;
+
+        let step = step_heartbeat(
+            &mut state,
+            &config,
+            &metadata,
+            &ConsumerGroupHeartbeatRequest {
+                group_id: "g".into(),
+                member_id: "m2".into(),
+                member_epoch: -1,
+                ..Default::default()
+            },
+            crate::coordinator::unified::ClientIdentity {
+                id: "client",
+                host: "host",
+            },
+            Instant::now(),
+        );
+
+        check!(state.group_epoch == epoch_before + 1);
+        check!(state.target.per_member["m1"][&topic_id] == vec![0, 1]);
+        check!(
+            step.pending
+                .target_per_member
+                .iter()
+                .any(|(member_id, value)| member_id == "m1" && value.is_some())
+        );
+        check!(
+            step.pending
+                .current_per_member
+                .iter()
+                .any(|(member_id, value)| member_id == "m1" && value.is_some())
+        );
+        assert!(
+            step.pending
+                .member_metadata
+                .iter()
+                .any(|(member_id, value)| member_id == "m2" && value.is_none())
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actor_exits_on_append_error() {
         let (coord, log) = make_coordinator();
@@ -3044,7 +3084,7 @@ mod tests {
     #[test]
     fn pending_records_empty_yields_empty_batch() {
         let p = PendingRecords::default();
-        let batch = p.into_batch("g", 0);
+        let batch = p.to_batch("g", 0);
         assert!(batch.records.is_empty());
     }
 
@@ -3071,7 +3111,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let batch = p.into_batch("g", 0);
+        let batch = p.to_batch("g", 0);
         assert!(batch.records.len() == 3);
         let deltas: Vec<i32> = batch.records.iter().map(|r| r.offset_delta).collect();
         assert!(deltas == vec![0, 1, 2]);
@@ -3084,9 +3124,196 @@ mod tests {
             member_metadata: vec![("m1".into(), None)],
             ..Default::default()
         };
-        let batch = p.into_batch("g", 0);
+        let batch = p.to_batch("g", 0);
         assert!(batch.records.len() == 1);
         assert!(batch.records[0].value.is_none());
+    }
+
+    #[test]
+    fn reconciled_snapshot_persists_every_members_assignments() {
+        let mut state = GroupState::new("g");
+        for member_id in ["m1", "m2"] {
+            state.add_or_update_member(build_member(
+                member_id,
+                &ConsumerGroupHeartbeatRequest {
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                crate::coordinator::unified::ClientIdentity {
+                    id: "client",
+                    host: "host",
+                },
+                Instant::now(),
+            ));
+        }
+        let topic_id = Uuid([9; 16]);
+        state.group_epoch = 2;
+        state.target.epoch = 2;
+        state
+            .target
+            .per_member
+            .insert("m1".into(), HashMap::from([(topic_id, vec![0])]));
+        state
+            .target
+            .per_member
+            .insert("m2".into(), HashMap::from([(topic_id, vec![1])]));
+
+        let pending = snapshot_pending_after_change(&state, &["m2".into()], true);
+        let member_ids: Vec<&str> = pending
+            .member_metadata
+            .iter()
+            .map(|(member_id, _)| member_id.as_str())
+            .collect();
+        let mut target_ids: Vec<&str> = pending
+            .target_per_member
+            .iter()
+            .map(|(member_id, _)| member_id.as_str())
+            .collect();
+        let mut current_ids: Vec<&str> = pending
+            .current_per_member
+            .iter()
+            .map(|(member_id, _)| member_id.as_str())
+            .collect();
+        target_ids.sort_unstable();
+        current_ids.sort_unstable();
+
+        check!(member_ids == vec!["m2"]);
+        check!(target_ids == vec!["m1", "m2"]);
+        check!(current_ids == vec!["m1", "m2"]);
+        assert!(pending.target_metadata.is_some());
+    }
+
+    #[test]
+    fn full_pending_records_contains_every_member_record() {
+        let mut state = GroupState::new("g");
+        for member_id in ["m1", "m2"] {
+            state.add_or_update_member(build_member(
+                member_id,
+                &ConsumerGroupHeartbeatRequest::default(),
+                crate::coordinator::unified::ClientIdentity {
+                    id: "client",
+                    host: "host",
+                },
+                Instant::now(),
+            ));
+            state
+                .target
+                .per_member
+                .insert(member_id.into(), HashMap::new());
+        }
+        state.group_epoch = 4;
+        state.target.epoch = 4;
+
+        let pending = full_pending_records(&state);
+
+        check!(pending.group_metadata == Some(GroupMetadataValue { epoch: 4 }));
+        check!(
+            pending.target_metadata
+                == Some(TargetAssignmentMetadataValue {
+                    assignment_epoch: 4,
+                })
+        );
+        check!(pending.member_metadata.len() == 2);
+        check!(pending.target_per_member.len() == 2);
+        assert!(pending.current_per_member.len() == 2);
+    }
+
+    #[test]
+    fn member_only_snapshot_does_not_rewrite_group_target() {
+        let mut state = GroupState::new("g");
+        state.add_or_update_member(build_member(
+            "m1",
+            &ConsumerGroupHeartbeatRequest::default(),
+            crate::coordinator::unified::ClientIdentity {
+                id: "client",
+                host: "host",
+            },
+            Instant::now(),
+        ));
+
+        let pending = snapshot_pending_after_change(&state, &["m1".into()], false);
+
+        check!(pending.member_metadata.len() == 1);
+        check!(pending.current_per_member.len() == 1);
+        check!(pending.target_metadata.is_none());
+        assert!(pending.target_per_member.is_empty());
+    }
+
+    #[test]
+    fn subscription_change_persists_every_reconciled_assignment() {
+        let config = NextGenConfig::default();
+        let first_topic = Uuid([10; 16]);
+        let second_topic = Uuid([11; 16]);
+        let metadata = StaticMetadata {
+            input: ReconcileInput {
+                topic_id_by_name: [
+                    ("first".into(), first_topic),
+                    ("second".into(), second_topic),
+                ]
+                .into(),
+                partitions_per_topic: [(first_topic, 2), (second_topic, 2)].into(),
+                ..Default::default()
+            },
+        };
+        let mut state = GroupState::new("g");
+        for member_id in ["m1", "m2"] {
+            state.add_or_update_member(build_member(
+                member_id,
+                &ConsumerGroupHeartbeatRequest {
+                    subscribed_topic_names: Some(vec!["first".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                crate::coordinator::unified::ClientIdentity {
+                    id: "client",
+                    host: "host",
+                },
+                Instant::now(),
+            ));
+        }
+        run_reconcile(&mut state, &config, &metadata);
+        state.advance_member_epoch("m1");
+        state.advance_member_epoch("m2");
+        let member_epoch = state.group_epoch;
+
+        let step = step_heartbeat(
+            &mut state,
+            &config,
+            &metadata,
+            &ConsumerGroupHeartbeatRequest {
+                group_id: "g".into(),
+                member_id: "m2".into(),
+                member_epoch,
+                subscribed_topic_names: Some(vec!["second".into()]),
+                rebalance_timeout_ms: 60_000,
+                ..Default::default()
+            },
+            crate::coordinator::unified::ClientIdentity {
+                id: "client",
+                host: "host",
+            },
+            Instant::now(),
+        );
+
+        let mut target_ids: Vec<&str> = step
+            .pending
+            .target_per_member
+            .iter()
+            .map(|(member_id, _)| member_id.as_str())
+            .collect();
+        let mut current_ids: Vec<&str> = step
+            .pending
+            .current_per_member
+            .iter()
+            .map(|(member_id, _)| member_id.as_str())
+            .collect();
+        target_ids.sort_unstable();
+        current_ids.sort_unstable();
+
+        check!(step.pending.target_metadata.is_some());
+        check!(target_ids == vec!["m1", "m2"]);
+        assert!(current_ids == vec!["m1", "m2"]);
     }
 
     /// Regression for the epoch double-bump: a single session-timeout eviction
@@ -3151,7 +3378,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_seed_pins_full_group_state_including_classic_facade() {
+    fn pending_delta_populates_cache_including_classic_facade() {
         use crate::coordinator::unified::persistence_next_gen as p;
 
         let topic = {
@@ -3192,7 +3419,10 @@ mod tests {
             .insert("m1".to_string(), HashMap::from([(topic, vec![0, 1, 2])]));
         state.add_or_update_member(m);
 
-        let seed = snapshot_seed(&state);
+        let pending = snapshot_pending_after_change(&state, &["m1".to_string()], true);
+        let (coordinator, _) = make_coordinator();
+        pending.apply_to_cache(&coordinator, "g");
+        let seed = coordinator.cached_seed("g").expect("cached seed");
 
         let expected = super::super::GroupSeed {
             group_epoch: 7,
@@ -3242,6 +3472,19 @@ mod tests {
             )]),
         };
         assert!(seed == expected);
+    }
+
+    #[test]
+    fn pending_group_tombstone_removes_cached_seed() {
+        let (coordinator, _) = make_coordinator();
+        coordinator.update_cached_seed("g", |seed| seed.group_epoch = 7);
+        PendingRecords {
+            next_gen_group_metadata_tombstone: true,
+            ..Default::default()
+        }
+        .apply_to_cache(&coordinator, "g");
+
+        assert!(coordinator.cached_seed("g").is_none());
     }
 
     // ---------------------------------------------------------------------

@@ -320,11 +320,20 @@ impl GroupCoordinator {
         self.metadata_source.get().map(|h| h.0.clone())
     }
 
-    /// Replace the cached seed for `group_id` with `seed`.
+    /// Mutate the cached seed for `group_id` after a successful durable write.
     ///
-    /// The actor calls this after every successful `OffsetsLog::append`.
-    pub fn update_cache(&self, group_id: &str, seed: GroupSeed) {
-        self.seeds_cache.insert(group_id.into(), seed);
+    /// Applying only the records in the write avoids cloning the whole group
+    /// after a one-member heartbeat while keeping cache and replay semantics
+    /// identical.
+    pub(crate) fn update_cached_seed(&self, group_id: &str, update: impl FnOnce(&mut GroupSeed)) {
+        let mut seed = self.seeds_cache.entry(group_id.into()).or_default();
+        update(seed.value_mut());
+    }
+
+    /// Remove a cached next-gen seed after its group-metadata tombstone is
+    /// durable.
+    pub(crate) fn remove_cached_seed(&self, group_id: &str) {
+        self.seeds_cache.remove(group_id);
     }
 
     /// Fetch the most recently cached seed for `group_id`, if any.
@@ -1841,14 +1850,10 @@ mod tests {
         check!(coord.cached_share_seed("sg") == None);
         check!(coord.cached_streams_seed("st") == None);
 
-        coord.update_cache(
-            "g",
-            GroupSeed {
-                group_epoch: 7,
-                target_epoch: 8,
-                ..GroupSeed::default()
-            },
-        );
+        coord.update_cached_seed("g", |seed| {
+            seed.group_epoch = 7;
+            seed.target_epoch = 8;
+        });
         let cached = coord.cached_seed("g").unwrap();
         assert!(cached.group_epoch == 7);
         assert!(cached.target_epoch == 8);

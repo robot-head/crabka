@@ -51,7 +51,7 @@ pub(crate) fn classic_group_metadata_tombstone_batch(group_id: &str, now_ms: i64
         classic_group_metadata_tombstone: true,
         ..Default::default()
     }
-    .into_batch(group_id, now_ms)
+    .to_batch(group_id, now_ms)
 }
 
 /// Build the batch that tombstones every streams record for `group_id`, for the
