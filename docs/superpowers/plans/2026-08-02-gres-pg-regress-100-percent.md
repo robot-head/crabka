@@ -807,3 +807,44 @@ Literal 231 / 231 is incompatible with retaining PostgreSQL-visible exclusions e
 - [ ] Record the PostgreSQL tag, archive hash, commands, artifacts, and three clean run IDs in a dated evidence document.
 
 **Final gate:** PostgreSQL self-check, standalone Gres, and substrate-backed Gres are all 231 / 231 in serial and parallel modes; all existing hand-written, extended-protocol, sharded, and PgDog gates remain green.
+
+---
+
+## Triage: what the three largest files are actually made of (2026-08-10)
+
+Measured from the certified run at baseline 120,353, by classifying every changed
+line inside a hunk rather than by reading the diffs. Recorded so the next wave does
+not re-derive it — and, for `join`, so nobody spends a slice on it.
+
+**`join`, 8,006 changed lines — do not chase this file.**
+
+| lines | share | what |
+|---:|---:|---|
+| 3,585 | 44% | EXPLAIN plan nodes |
+| 2,010 | 25% | genuinely different row content |
+| 1,186 | 14% | rulers and row counts, consequent on the rows above |
+| 450 | 6% | the same rows in a different order |
+| 182 | 2% | error text |
+
+Only ~50 statements in the whole file raise an error, so this is not a cascade
+that one fix unblocks. The EXPLAIN half is the separately-recorded dead end: the
+read path never consults a secondary index, so `Index Scan`, `Bitmap Heap Scan`
+and `Hash` have no executor counterpart, and matching upstream would mean
+reproducing PostgreSQL's cost model. The 2,010 lines of wrong content are real
+but are many small unrelated gaps, not one. The 450 ordering lines are the
+cheapest piece and connect to a known defect — `inheritance::children_of` reads
+children in KV key order, and `pgkv::key::push_key_part` writes a four-byte
+big-endian length before each name, so siblings sort by name **length** first
+where PostgreSQL's `find_inheritance_children` sorts by OID.
+
+**`partition_join` 4,199 and `partition_prune` 4,083 — cascades, unlike `join`.**
+`partition_join` shows 55 `relation "…" does not exist`; `partition_prune` shows
+72 of those plus 37 `column "…" does not exist`. Both also hit
+`expression partition keys are not supported: PARTITION BY …`. These behave like
+`inherit` did before the drop-set fix: a producer defect early in the file
+poisons everything after it. Find the first failing statement in each rather
+than counting the lines.
+
+**`inherit` 2,766 is gated on `tableoid`**, which 47 of its statements name; the
+42703 cascades into a further 88 lines. That slice also recovers the +57 this
+wave deliberately accepted when binding began reporting unresolvable columns.
