@@ -90,6 +90,9 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     # Temporary DataFusion pin for profile query support.
     "https://github.com/apache/datafusion",
+    # Temporary compatibility pin until testcontainers-modules publishes a
+    # release that depends on testcontainers 0.28.
+    "https://github.com/testcontainers/testcontainers-rs-modules-community",
 ]
 
 [[licenses.clarify]]
