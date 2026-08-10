@@ -84,7 +84,6 @@ fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
 /// [`Segment::open_active`] opens an active segment with tail recovery.
 #[derive(Debug)]
 pub struct Segment {
-    #[allow(dead_code)] // used by later phases (Log retention, recovery).
     dir: PathBuf,
     base_offset: Offset,
     /// The `.log` data file, wrapped in `Arc`.

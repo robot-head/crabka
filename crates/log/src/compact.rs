@@ -55,7 +55,7 @@ pub(crate) struct BatchMeta {
 /// retains the tombstone or the marker until the wall clock reaches this
 /// value.
 #[must_use]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) const fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
     crabka_verified::compute_horizon(now_ms, delete_retention_ms)
 }
@@ -98,7 +98,7 @@ pub(crate) fn should_index_key(key: Option<&[u8]>, is_control_batch: bool) -> bo
 /// function. The production rewrite path delegates the same arithmetic to
 /// `RecordBatch::with_delete_horizon`, so the function is `dead_code` outside
 /// tests.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn rewrite_batch_horizon(
     base_timestamp: i64,
     deltas: &[i64],
@@ -119,7 +119,7 @@ pub(crate) fn rewrite_batch_horizon(
 /// [`CleanedTransactionMetadata::txn_state`], which folds this check in. This
 /// standalone form exists for `core_tests` and the planned stateright and
 /// proptest model.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn txn_data_fully_gone(
     producer_id: ProducerId,
     survivors: &HashSet<ProducerId>,
@@ -693,7 +693,7 @@ pub struct RewriteOutput {
     /// `base_offset` of the new segment. It equals the lowest input segment.
     pub new_base_offset: Offset,
     /// Highest absolute offset of any surviving record.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub new_last_offset: Offset,
     /// Path to the rewritten survivor `.txnindex`. The rewrite writes this
     /// file only when it carries forward one or more aborted-txn entries. It
@@ -943,6 +943,7 @@ pub fn rewrite_segments(
         index_swap,
         timeindex_swap,
         new_base_offset: new_base,
+        #[cfg(test)]
         new_last_offset: last_kept_offset,
         txnindex_swap,
     })

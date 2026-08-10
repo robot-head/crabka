@@ -33,8 +33,7 @@ pub(crate) use context::{RequestContext, TelemetryContext};
 
 pub(crate) mod registry;
 pub(crate) use registry::DispatchRegistry;
-#[allow(unused_imports)] // Staged for later dispatch-registry handler families.
-pub(crate) use registry::{DispatchEntry, DispatchKind, PlainHandler, RequestQuotaPolicy};
+pub(crate) use registry::{DispatchEntry, DispatchKind, RequestQuotaPolicy};
 
 pub(crate) fn encode_response<R: Encode>(
     resp: &R,

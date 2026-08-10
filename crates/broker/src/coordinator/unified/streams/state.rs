@@ -407,23 +407,6 @@ fn normalize_task_map(mut map: BTreeMap<String, Vec<i32>>) -> BTreeMap<String, V
     map
 }
 
-/// Merges `src` into `dst` as a union of the partitions of each subtopology,
-/// then normalizes the result.
-///
-/// Callers that build a task map from several sources, such as the assignor,
-/// use it. It lives here as a shared task-map primitive.
-#[allow(dead_code)] // exercised by unit tests and shared task-map callers.
-fn merge_task_maps(dst: &mut BTreeMap<String, Vec<i32>>, src: &BTreeMap<String, Vec<i32>>) {
-    for (sub, parts) in src {
-        dst.entry(sub.clone()).or_default().extend_from_slice(parts);
-    }
-    for parts in dst.values_mut() {
-        parts.sort_unstable();
-        parts.dedup();
-    }
-    dst.retain(|_, parts| !parts.is_empty());
-}
-
 /// Splits a member's currently-owned active tasks against its new active
 /// target. The function *keeps* tasks that are in both, and *revokes* tasks
 /// the member owns that the target no longer holds. It normalizes both halves:
@@ -656,12 +639,5 @@ mod tests {
     fn normalize_sorts_dedups_and_drops_empty() {
         let m = normalize_task_map(task_map(&[("sub0", &[2, 0, 1, 1]), ("sub1", &[])]));
         assert!(m == task_map(&[("sub0", &[0, 1, 2])]));
-    }
-
-    #[test]
-    fn merge_task_maps_unions_and_normalizes() {
-        let mut dst = task_map(&[("sub0", &[0, 2])]);
-        merge_task_maps(&mut dst, &task_map(&[("sub0", &[1, 2]), ("sub1", &[3])]));
-        assert!(dst == task_map(&[("sub0", &[0, 1, 2]), ("sub1", &[3])]));
     }
 }
