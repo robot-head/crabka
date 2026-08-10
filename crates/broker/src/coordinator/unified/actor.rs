@@ -50,7 +50,7 @@ use super::{
 };
 use crate::{
     codes,
-    coordinator::{GroupSnapshot, MemberSnapshot},
+    coordinator::{DeleteGroupError, GroupSnapshot, MemberSnapshot},
 };
 
 /// A Kafka wire `error_code` value, as carried in response `error_code`
@@ -130,7 +130,12 @@ pub enum GroupActorMessage {
     ClassicLeave {
         req: LeaveGroupRequest,
         version: i16,
-        reply: oneshot::Sender<Vec<MemberResponse>>,
+        reply: oneshot::Sender<LeaveResult>,
+    },
+    /// Atomically verify that a classic group is empty and append its k2
+    /// tombstone. A successful delete stops the actor.
+    ClassicDelete {
+        reply: oneshot::Sender<Result<(), DeleteGroupError>>,
     },
     /// Read-only classic snapshot for the admin/offset-delete handlers.
     ClassicInspect {
@@ -198,6 +203,14 @@ pub struct SyncResult {
     pub assignment: Bytes,
     pub protocol_type: Option<String>,
     pub protocol_name: Option<String>,
+}
+
+/// Structured `LeaveGroup` result. Versions 0–2 use the top-level error;
+/// versions 3+ use the per-member results.
+#[derive(Debug, Default)]
+pub struct LeaveResult {
+    pub error_code: ErrorCode,
+    pub members: Vec<MemberResponse>,
 }
 
 /// Read-only projection of a classic `Group` for the admin and offset-delete
@@ -483,6 +496,7 @@ async fn handle_classic_join_message(
     reply: oneshot::Sender<JoinResult>,
 ) -> bool {
     if let Some(state) = group.as_classic_mut() {
+        let previous = state.clone();
         match classic_ops::handle_join(
             state,
             &request,
@@ -491,6 +505,21 @@ async fn handle_classic_join_message(
             services.config.classic_initial_rebalance_delay,
         ) {
             classic_ops::JoinAction::Immediate(result) => {
+                if result.error_code == codes::NONE
+                    && let Err(error) = flush_classic_metadata(state, services.offsets_log).await
+                {
+                    *state = previous;
+                    tracing::warn!(group_id = %state.group_id, %error,
+                        "classic static rejoin log write failed");
+                    let _ = reply.send(JoinResult {
+                        error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                        member_id: request.member_id,
+                        protocol_type: state.protocol_type.clone(),
+                        protocol_name: state.protocol_name.clone(),
+                        ..JoinResult::default()
+                    });
+                    return true;
+                }
                 let _ = reply.send(result);
             }
             classic_ops::JoinAction::Park => {
@@ -529,10 +558,10 @@ async fn handle_classic_join_message(
     true
 }
 
-fn handle_classic_sync_message(
+async fn handle_classic_sync_message(
     group: &mut CoordinatorGroup,
     parked: &mut ParkedWaiters,
-    metadata: &dyn MetadataProvider,
+    services: ActorServices<'_>,
     request: SyncGroupRequest,
     reply: oneshot::Sender<SyncResult>,
 ) {
@@ -542,11 +571,18 @@ fn handle_classic_sync_message(
                 error_code: codes::UNKNOWN_MEMBER_ID,
                 ..SyncResult::default()
             },
-            |state| migration::serve_classic_sync(state, &request.member_id, &metadata.snapshot()),
+            |state| {
+                migration::serve_classic_sync(
+                    state,
+                    &request.member_id,
+                    &services.metadata.snapshot(),
+                )
+            },
         );
         let _ = reply.send(result);
         return;
     };
+    let previous = state.clone();
     match classic_ops::handle_sync(state, &request) {
         classic_ops::SyncAction::Immediate(result) => {
             let _ = reply.send(result);
@@ -555,6 +591,22 @@ fn handle_classic_sync_message(
             parked.followers.insert(request.member_id, reply);
         }
         classic_ops::SyncAction::LeaderInstalled(result) => {
+            if let Err(error) = flush_classic_metadata(state, services.offsets_log).await {
+                *state = previous;
+                tracing::warn!(group_id = %state.group_id, %error,
+                    "classic SyncGroup log write failed");
+                let failure = || SyncResult {
+                    error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                    protocol_type: state.protocol_type.clone(),
+                    protocol_name: state.protocol_name.clone(),
+                    ..SyncResult::default()
+                };
+                let _ = reply.send(failure());
+                for (_, follower) in parked.followers.drain() {
+                    let _ = follower.send(failure());
+                }
+                return;
+            }
             let _ = reply.send(result);
             drain_parked_followers(state, &mut parked.followers);
         }
@@ -594,11 +646,21 @@ async fn handle_actor_tick(
             return false;
         }
     } else if let Some(state) = group.as_classic_mut() {
+        let previous = state.clone();
         let dropped = state.expire_dead_members(
             Instant::now(),
             services.config.classic_initial_rebalance_delay,
         );
         if !dropped.is_empty() {
+            if state.members.is_empty() {
+                state.generation_id += 1;
+                if let Err(error) = flush_classic_metadata(state, services.offsets_log).await {
+                    *state = previous;
+                    tracing::warn!(group = %group_id, %error,
+                        "classic expiration log write failed; retrying on the next tick");
+                    return true;
+                }
+            }
             tracing::info!(group = %group_id, ?dropped, "expired members; waking joiners");
             drain_removed_classic_waiters(&dropped, &mut parked.joiners, &mut parked.followers);
             maybe_complete_classic(state, &mut parked.joiners, &mut parked.followers);
@@ -642,24 +704,67 @@ fn handle_classic_heartbeat_message(
     }
 }
 
-fn handle_classic_leave_message(
+async fn handle_classic_leave_message(
     group: &mut CoordinatorGroup,
     parked: &mut ParkedWaiters,
+    offsets_log: &dyn OffsetsLog,
     request: &LeaveGroupRequest,
     version: i16,
-) -> Vec<MemberResponse> {
+) -> Result<Vec<MemberResponse>, ErrorCode> {
     let Some(state) = group.as_classic_mut() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
+    let previous = state.clone();
     let before_members: Vec<String> = state.members.keys().cloned().collect();
     let responses = classic_ops::handle_leave(state, request, version);
     let removed: Vec<String> = before_members
         .into_iter()
         .filter(|member_id| !state.members.contains_key(member_id))
         .collect();
+    if !removed.is_empty() && state.members.is_empty() {
+        state.generation_id += 1;
+        if let Err(error) = flush_classic_metadata(state, offsets_log).await {
+            *state = previous;
+            tracing::warn!(group_id = %state.group_id, %error,
+                "classic LeaveGroup log write failed");
+            return Err(codes::COORDINATOR_LOAD_IN_PROGRESS);
+        }
+    }
     drain_removed_classic_waiters(&removed, &mut parked.joiners, &mut parked.followers);
     maybe_complete_classic(state, &mut parked.joiners, &mut parked.followers);
-    responses
+    Ok(responses)
+}
+
+async fn handle_classic_delete_message(
+    group: &CoordinatorGroup,
+    offsets_log: &dyn OffsetsLog,
+    reply: oneshot::Sender<Result<(), DeleteGroupError>>,
+) -> bool {
+    let Some(state) = group.as_classic() else {
+        let _ = reply.send(Err(DeleteGroupError::NotFound));
+        return true;
+    };
+    if !state.members.is_empty() {
+        let _ = reply.send(Err(DeleteGroupError::NonEmpty));
+        return true;
+    }
+    let group_id = state.group_id.clone();
+    let batch = PendingRecords {
+        classic_group_metadata_tombstone: true,
+        ..PendingRecords::default()
+    }
+    .into_batch(&group_id, chrono_now_ms());
+    match offsets_log.append(&group_id, batch).await {
+        Ok(()) => {
+            let _ = reply.send(Ok(()));
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%group_id, %error, "classic DeleteGroups tombstone write failed");
+            let _ = reply.send(Err(DeleteGroupError::Internal));
+            true
+        }
+    }
 }
 
 fn inspect_any(group: &CoordinatorGroup, metadata: &dyn MetadataProvider) -> Option<GroupSnapshot> {
@@ -736,7 +841,7 @@ async fn handle_actor_message(
             .await
         }
         GroupActorMessage::ClassicSync { req, reply } => {
-            handle_classic_sync_message(group, parked, services.metadata, req, reply);
+            handle_classic_sync_message(group, parked, services, req, reply).await;
             true
         }
         GroupActorMessage::ClassicHeartbeat { req, reply } => {
@@ -749,9 +854,30 @@ async fn handle_actor_message(
             version,
             reply,
         } => {
-            let responses = handle_classic_leave_message(group, parked, &req, version);
-            let _ = reply.send(responses);
+            let result =
+                handle_classic_leave_message(group, parked, services.offsets_log, &req, version)
+                    .await;
+            let result = match result {
+                Ok(members) if version < 3 => LeaveResult {
+                    error_code: members
+                        .first()
+                        .map_or(codes::NONE, |member| member.error_code),
+                    members,
+                },
+                Ok(members) => LeaveResult {
+                    error_code: codes::NONE,
+                    members,
+                },
+                Err(error_code) => LeaveResult {
+                    error_code,
+                    members: Vec::new(),
+                },
+            };
+            let _ = reply.send(result);
             true
+        }
+        GroupActorMessage::ClassicDelete { reply } => {
+            handle_classic_delete_message(group, services.offsets_log, reply).await
         }
         GroupActorMessage::ClassicInspect { reply } => {
             if let Some(state) = group.as_classic() {
@@ -2020,6 +2146,23 @@ pub(crate) fn classic_group_metadata_record(
     }
 }
 
+/// Append the complete classic k2 snapshot for one durable group transition.
+async fn flush_classic_metadata(
+    state: &super::classic_state::ClassicGroup,
+    offsets_log: &dyn OffsetsLog,
+) -> Result<(), crate::error::BrokerError> {
+    let pending = PendingRecords {
+        classic_group_metadata: Some(classic_group_metadata_record(state)),
+        ..PendingRecords::default()
+    };
+    offsets_log
+        .append(
+            &state.group_id,
+            pending.into_batch(&state.group_id, chrono_now_ms()),
+        )
+        .await
+}
+
 async fn flush_pending(
     state: &super::consumer_state::GroupState,
     pending: PendingRecords,
@@ -2200,6 +2343,370 @@ mod tests {
         check!(followers.is_empty());
         check!(join_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
         check!(sync_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
+    }
+
+    fn completing_classic_group(member_ids: &[&str]) -> CoordinatorGroup {
+        use super::super::classic_state::{ClassicGroup as ClassicState, Member};
+
+        let mut state = ClassicState::new("g");
+        state.protocol_type = Some("consumer".into());
+        for member_id in member_ids {
+            state.add_member(Member::new(
+                *member_id,
+                "client",
+                "host",
+                Duration::from_secs(30),
+                Duration::from_mins(1),
+                vec![("range".into(), Bytes::from_static(b"subscription"))],
+            ));
+        }
+        state.resolve_selected_protocol_metadata("range");
+        state.complete_rebalance("range");
+        CoordinatorGroup {
+            group_id: "g".into(),
+            kind: GroupKind::Classic(state),
+            committed_offsets: HashMap::new(),
+        }
+    }
+
+    async fn last_classic_metadata(
+        log: &InMemoryOffsetsLog,
+    ) -> crate::coordinator::unified::persistence::GroupMetadataValue {
+        use crate::coordinator::unified::persistence::{GroupMetadataValue, Key, parse_key};
+
+        for batch in log.batches().await.iter().rev() {
+            for record in batch.records.iter().rev() {
+                if record.key.as_ref().is_some_and(|key| {
+                    matches!(
+                        parse_key(key),
+                        Ok(Key::GroupMetadata { group_id: ref id }) if id == "g"
+                    )
+                }) {
+                    return GroupMetadataValue::decode_value(
+                        record.value.as_deref().expect("classic metadata value"),
+                    )
+                    .expect("valid classic metadata");
+                }
+            }
+        }
+        panic!("classic metadata record not found")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_leader_sync_persists_complete_stable_snapshot() {
+        use crabka_protocol::owned::sync_group_request::SyncGroupRequestAssignment;
+
+        let (coord, log) = make_coordinator();
+        let group = completing_classic_group(&["m1", "m2"]);
+        let generation = group.as_classic().unwrap().generation_id;
+        coord.seed_classic("g", Box::new(group));
+        let handle = coord.find("g").unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicSync {
+                req: SyncGroupRequest {
+                    group_id: "g".into(),
+                    generation_id: generation,
+                    member_id: "m1".into(),
+                    assignments: vec![SyncGroupRequestAssignment {
+                        member_id: "m1".into(),
+                        assignment: Bytes::from_static(b"assignment"),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                reply: tx,
+            })
+            .await
+            .unwrap();
+
+        check!(rx.await.unwrap().error_code == codes::NONE);
+        let persisted = last_classic_metadata(&log).await;
+        check!(persisted.generation == generation);
+        check!(persisted.protocol_name.as_deref() == Some("range"));
+        check!(persisted.members.len() == 2);
+        check!(
+            persisted
+                .members
+                .iter()
+                .find(|member| member.member_id == "m1")
+                .unwrap()
+                .assignment
+                == Bytes::from_static(b"assignment")
+        );
+        check!(
+            persisted
+                .members
+                .iter()
+                .find(|member| member.member_id == "m2")
+                .unwrap()
+                .assignment
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_sync_append_failure_rolls_back_and_can_retry() {
+        use crabka_protocol::owned::sync_group_request::SyncGroupRequestAssignment;
+
+        let (coord, log) = make_coordinator();
+        let group = completing_classic_group(&["m1"]);
+        let generation = group.as_classic().unwrap().generation_id;
+        coord.seed_classic("g", Box::new(group));
+        let handle = coord.find("g").unwrap();
+        log.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let request = SyncGroupRequest {
+            group_id: "g".into(),
+            generation_id: generation,
+            member_id: "m1".into(),
+            assignments: vec![SyncGroupRequestAssignment {
+                member_id: "m1".into(),
+                assignment: Bytes::from_static(b"assignment"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicSync {
+                req: request.clone(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        check!(rx.await.unwrap().error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        let view = classic_inspect(&handle).await;
+        check!(view.state == ClassicGroupState::CompletingRebalance);
+        check!(view.members[0].assignment.is_none());
+        check!(log.batches().await.is_empty());
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicSync {
+                req: request,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        check!(rx.await.unwrap().error_code == codes::NONE);
+        check!(log.batches().await.len() == 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_stable_static_rejoin_persists_refreshed_member() {
+        use crabka_protocol::owned::join_group_request::JoinGroupRequestProtocol;
+
+        let (coord, log) = make_coordinator();
+        let mut group = completing_classic_group(&["m1"]);
+        let state = group.as_classic_mut().unwrap();
+        let member = state.members.get_mut("m1").unwrap();
+        member.group_instance_id = Some("instance-1".into());
+        member.assignment = Some(Bytes::from_static(b"assignment"));
+        state
+            .static_members
+            .insert("instance-1".into(), "m1".into());
+        state.state = ClassicGroupState::Stable;
+        let generation = state.generation_id;
+        coord.seed_classic("g", Box::new(group));
+        let handle = coord.find("g").unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicJoin {
+                req: JoinGroupRequest {
+                    group_id: "g".into(),
+                    session_timeout_ms: 30_000,
+                    rebalance_timeout_ms: 60_000,
+                    member_id: "m1".into(),
+                    group_instance_id: Some("instance-1".into()),
+                    protocol_type: "consumer".into(),
+                    protocols: vec![JoinGroupRequestProtocol {
+                        name: "range".into(),
+                        metadata: Bytes::from_static(b"new-subscription"),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                client_id: "new-client".into(),
+                client_host: "new-host".into(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+
+        let response = rx.await.unwrap();
+        check!(response.error_code == codes::NONE);
+        check!(response.generation_id == generation);
+        let persisted = last_classic_metadata(&log).await;
+        check!(persisted.generation == generation);
+        check!(persisted.members.len() == 1);
+        check!(persisted.members[0].client_id == "new-client");
+        check!(persisted.members[0].client_host == "new-host");
+        check!(persisted.members[0].subscription == Bytes::from_static(b"new-subscription"));
+        check!(persisted.members[0].assignment == Bytes::from_static(b"assignment"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_static_rejoin_append_failure_rolls_back_and_reports_error() {
+        use crabka_protocol::owned::join_group_request::JoinGroupRequestProtocol;
+
+        let (coord, log) = make_coordinator();
+        let mut group = completing_classic_group(&["m1"]);
+        let state = group.as_classic_mut().unwrap();
+        let member = state.members.get_mut("m1").unwrap();
+        member.group_instance_id = Some("instance-1".into());
+        member.assignment = Some(Bytes::from_static(b"assignment"));
+        state
+            .static_members
+            .insert("instance-1".into(), "m1".into());
+        state.state = ClassicGroupState::Stable;
+        coord.seed_classic("g", Box::new(group));
+        let handle = coord.find("g").unwrap();
+        log.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicJoin {
+                req: JoinGroupRequest {
+                    group_id: "g".into(),
+                    session_timeout_ms: 30_000,
+                    rebalance_timeout_ms: 60_000,
+                    member_id: "m1".into(),
+                    group_instance_id: Some("instance-1".into()),
+                    protocol_type: "consumer".into(),
+                    protocols: vec![JoinGroupRequestProtocol {
+                        name: "range".into(),
+                        metadata: Bytes::from_static(b"new-subscription"),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                client_id: "new-client".into(),
+                client_host: "new-host".into(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+
+        let response = rx.await.unwrap();
+        check!(response.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        check!(response.member_id == "m1");
+        check!(response.protocol_type.as_deref() == Some("consumer"));
+        check!(response.protocol_name.as_deref() == Some("range"));
+        let view = classic_inspect(&handle).await;
+        check!(view.state == ClassicGroupState::Stable);
+        check!(view.members.len() == 1);
+        check!(view.members[0].client_id == "client");
+        check!(view.members[0].host == "host");
+        check!(view.members[0].protocol_metadata == Bytes::from_static(b"subscription"));
+        check!(view.members[0].assignment.as_deref() == Some(&b"assignment"[..]));
+        check!(log.batches().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_last_member_leave_persists_empty_generation() {
+        use crabka_protocol::owned::leave_group_request::MemberIdentity;
+
+        let (coord, log) = make_coordinator();
+        let mut group = completing_classic_group(&["m1"]);
+        group.as_classic_mut().unwrap().state = ClassicGroupState::Stable;
+        let prior_generation = group.as_classic().unwrap().generation_id;
+        coord.seed_classic("g", Box::new(group));
+        let handle = coord.find("g").unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicLeave {
+                req: LeaveGroupRequest {
+                    group_id: "g".into(),
+                    members: vec![MemberIdentity {
+                        member_id: "m1".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                version: 3,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+
+        let result = rx.await.unwrap();
+        check!(result.error_code == codes::NONE);
+        check!(result.members[0].error_code == codes::NONE);
+        let view = classic_inspect(&handle).await;
+        check!(view.state == ClassicGroupState::Empty);
+        check!(view.generation_id == prior_generation + 1);
+        let persisted = last_classic_metadata(&log).await;
+        check!(persisted.generation == prior_generation + 1);
+        check!(persisted.members.is_empty());
+        check!(persisted.leader.is_none());
+        check!(persisted.protocol_name.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_legacy_leave_append_failure_rolls_back_and_reports_error() {
+        let (coord, log) = make_coordinator();
+        let mut group = completing_classic_group(&["m1"]);
+        group.as_classic_mut().unwrap().state = ClassicGroupState::Stable;
+        coord.seed_classic("g", Box::new(group));
+        let handle = coord.find("g").unwrap();
+        log.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicLeave {
+                req: LeaveGroupRequest {
+                    group_id: "g".into(),
+                    member_id: "m1".into(),
+                    ..Default::default()
+                },
+                version: 2,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+
+        let result = rx.await.unwrap();
+        check!(result.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        check!(result.members.is_empty());
+        let view = classic_inspect(&handle).await;
+        check!(view.state == ClassicGroupState::Stable);
+        check!(view.members.len() == 1);
+        check!(view.members[0].member_id == "m1");
+        check!(log.batches().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn classic_last_member_expiration_persists_empty_generation() {
+        let (coord, log) = make_coordinator();
+        let mut group = completing_classic_group(&["m1"]);
+        let state = group.as_classic_mut().unwrap();
+        state.state = ClassicGroupState::Stable;
+        state.members.get_mut("m1").unwrap().session_timeout = Duration::ZERO;
+        let prior_generation = state.generation_id;
+        let mut parked = ParkedWaiters::default();
+        let services = ActorServices {
+            config: &coord.config,
+            metadata: coord.metadata.as_ref(),
+            offsets_log: log.as_ref(),
+            coordinator: &coord,
+        };
+
+        check!(handle_actor_tick(&mut group, &mut parked, services).await);
+        let state = group.as_classic().unwrap();
+        check!(state.state == ClassicGroupState::Empty);
+        check!(state.generation_id == prior_generation + 1);
+        let persisted = last_classic_metadata(&log).await;
+        check!(persisted.generation == prior_generation + 1);
+        check!(persisted.members.is_empty());
     }
 
     /// A coordinator whose metadata image holds one topic `t` with `partitions`
@@ -2801,8 +3308,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn classic_admin_surface_and_immediate_join() {
         use crabka_protocol::owned::join_group_request::JoinGroupRequest;
-        let (coord, _log) = make_coordinator();
+        let (coord, log) = make_coordinator();
         let handle = coord.get_or_create_classic("g");
+        coord.mark_classic("g");
 
         // Empty member_id → immediate MEMBER_ID_REQUIRED (no member added).
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2840,6 +3348,24 @@ mod tests {
         check!(coord.describe_group("g").await.is_some());
         check!(coord.delete_group("g").await == Ok(()));
         check!(coord.describe_group("g").await.is_none());
+        check!(log.has_classic_group_metadata_tombstone("g").await);
+        check!(coord.group_type("g").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_delete_append_failure_keeps_group_registered() {
+        let (coord, log) = make_coordinator();
+        let _ = coord.get_or_create_classic("g");
+        coord.mark_classic("g");
+        log.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        check!(
+            coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::Internal)
+        );
+        check!(coord.describe_group("g").await.is_some());
+        check!(coord.group_type("g") == Some(super::super::GroupType::Classic));
+        check!(!log.has_classic_group_metadata_tombstone("g").await);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3733,7 +4259,7 @@ mod tests {
             })
             .await
             .unwrap();
-        rx.await.unwrap()
+        rx.await.unwrap().members
     }
 
     /// Validates an offset commit against the group's LIVE kind, through the
@@ -4061,7 +4587,7 @@ mod tests {
     /// the native consumer leaves.
     ///
     /// The handle's spawn-time `kind` is a stale `Consumer`, but `delete_group`
-    /// dispatches on `ClassicInspect`'s live-kind reply. The downgraded group
+    /// dispatches on `ClassicDelete`'s live-kind reply. The downgraded group
     /// answers as classic, so a non-empty group reports `NonEmpty` and NOT
     /// `NotFound`. That proves delete sees it as classic. Before the refactor,
     /// the stale `handle.kind == Consumer` gate short-circuited to
