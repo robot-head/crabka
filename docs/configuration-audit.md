@@ -6643,14 +6643,12 @@ placement fails closed. Each voter stores and fsyncs one local follower log.
 The leader acknowledges a write only after a majority reports the offset as
 durable.
 
-The adjacent one-second in-process WAL election timeout remains fixed: the
-stored state machine is not currently driven, so exposing the value would
-create a no-op setting. The diskless flusher values remain fixed for the same
-reason recorded earlier: that staged flusher still has no production caller.
-All 1,854 broker library, 18 broker binary and 773 operator library tests,
-operator-to-broker TOML, generated-CRD parity, workspace all-target Clippy,
-nightly formatting and diff hygiene pass. The repository-wide hardcoded
-operational-value audit remains active.
+Partition metadata selects the diskless WAL leader. The WAL engine does not
+run a second election. Its restart descriptor stores only voter IDs. The broker
+uses those IDs to reject an incompatible local replica layout. It accepts and
+ignores legacy election fields. The broker starts the diskless flusher when
+remote storage is enabled and stops it during shutdown. The repository-wide
+hardcoded operational-value audit remains active.
 
 ## Repository-Wide Runtime Configuration Audit Complete
 

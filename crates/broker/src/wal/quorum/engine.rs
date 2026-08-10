@@ -8,20 +8,15 @@ use std::{
     },
 };
 
-use tokio::sync::Notify;
-
 use bytes::Bytes;
 use crabka_ids::{LeaderEpoch, Offset, ProducerId};
-use crabka_kraft_core::{LogView as _, NodeId, QuorumState, QuorumStateMachine};
+use crabka_kraft_core::{LogView as _, NodeId};
 use crabka_log::{Log, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
-use crabka_units::{ByteSize, convert::ByteSizeExt as _, millis};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
+use tokio::sync::Notify;
 
 use crate::{error::BrokerError, wal::quorum::log_view::ShardLog};
-
-/// Election timeout of the in-process WAL quorum's state machine. The replicas
-/// are local, so the window only has to cover a stalled replica task.
-const ELECTION_TIMEOUT: crabka_units::Time = millis(1_000);
 
 /// A single durable member of a WAL quorum.
 #[derive(Debug)]
@@ -50,7 +45,6 @@ impl WalReplica {
 /// Drives the durable quorum frontier of a WAL shard.
 #[derive(Debug)]
 pub(crate) struct WalShardEngine {
-    core: Mutex<QuorumStateMachine>,
     replicas: Vec<WalReplica>,
     expected_voters: usize,
     durable_watermark: AtomicI64,
@@ -85,36 +79,19 @@ pub(crate) enum OpenMode {
 }
 
 impl WalShardEngine {
-    pub(crate) fn new(
-        me: NodeId,
-        state: QuorumState,
-        replicas: Vec<WalReplica>,
-        mode: OpenMode,
-    ) -> Result<Self, BrokerError> {
+    pub(crate) fn new(replicas: Vec<WalReplica>, mode: OpenMode) -> Result<Self, BrokerError> {
         if replicas.is_empty() {
             return Err(BrokerError::Replication(
                 "wal quorum must contain at least one replica".into(),
             ));
         }
-        if state.voters.len() != replicas.len()
-            || replicas
-                .iter()
-                .any(|replica| !state.voters.contains(replica.id))
-        {
-            return Err(BrokerError::Replication(
-                "wal quorum replicas do not match the persisted voter set".into(),
-            ));
-        }
-
-        let core = QuorumStateMachine::new(me, state, ELECTION_TIMEOUT);
+        let expected_voters = replicas.len();
         let durable_watermark = match mode {
             OpenMode::BootstrapFrom(source) => bootstrap_durable_prefix(&replicas, source)?,
-            OpenMode::Recover => recover_durable_prefix(&replicas, core.quorum_state().majority())?,
+            OpenMode::Recover => recover_durable_prefix(&replicas, expected_voters / 2 + 1)?,
             OpenMode::Distributed => replicas[0].log.lock().log_start_offset(),
         };
-        let expected_voters = replicas.len();
         Ok(Self {
-            core: Mutex::new(core),
             replicas,
             expected_voters,
             durable_watermark: AtomicI64::new(durable_watermark.0),
@@ -146,13 +123,8 @@ impl WalShardEngine {
             log.sync()?;
             log.log_end_offset()
         };
-        let me = NodeId(0);
-        let voters = voter_set([me]);
-        let state = QuorumState::bootstrap(uuid::Uuid::new_v4(), voters);
         let mut engine = Self::new(
-            me,
-            state,
-            vec![WalReplica::new(me, source)],
+            vec![WalReplica::new(NodeId(0), source)],
             OpenMode::Distributed,
         )?;
         engine.expected_voters = expected_voters;
@@ -238,13 +210,11 @@ impl WalShardEngine {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn for_logs(logs: std::collections::BTreeMap<NodeId, Arc<Mutex<Log>>>) -> Self {
-        let voters = voter_set(logs.keys().copied());
-        let state = QuorumState::bootstrap(uuid::Uuid::nil(), voters);
         let replicas = logs
             .into_iter()
             .map(|(id, log)| WalReplica::new(id, log))
             .collect();
-        Self::new(NodeId(1), state, replicas, OpenMode::Recover).expect("test WAL quorum recovers")
+        Self::new(replicas, OpenMode::Recover).expect("test WAL quorum recovers")
     }
 
     #[must_use]
@@ -360,12 +330,7 @@ impl WalShardEngine {
                 synced += 1;
             }
         }
-        let required = self
-            .core
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .quorum_state()
-            .majority();
+        let required = self.expected_voters / 2 + 1;
         if synced < required {
             return Err(BrokerError::Replication(format!(
                 "wal quorum has {synced} synced replicas, needs {required}"
@@ -710,13 +675,4 @@ fn sync_replica_blocking(log: &ShardLog, batches: &[BatchBytes]) -> Result<(), B
     }
     log.sync()?;
     Ok(())
-}
-
-pub(super) fn voter_set(ids: impl IntoIterator<Item = NodeId>) -> crabka_voters::VoterSet {
-    crabka_voters::VoterSet::from_voters(ids.into_iter().map(|id| crabka_voters::Voter {
-        id,
-        directory_id: uuid::Uuid::nil(),
-        endpoints: Vec::new(),
-        kraft_version: crabka_voters::KRaftVersionRange::default(),
-    }))
 }
