@@ -15,17 +15,16 @@
 //!     `correlation_id` and a 1-byte tagged-fields section.
 //!   - The `ApiVersions (18)` response header is *always* v0 by Kafka spec.
 
-// Exercised via the runtime path and integration tests. Unit coverage in this
-// file is deliberately narrow — see the `tests` module docstring.
-#![allow(dead_code)]
-
 use std::{collections::HashMap, sync::Arc};
 
 use crabka_protocol::{
     Decode, Encode,
     owned::{
-        sasl_authenticate_request::SaslAuthenticateRequest,
-        sasl_handshake_request::SaslHandshakeRequest,
+        api_versions_request::{self, ApiVersionsRequest},
+        api_versions_response::{ApiVersion, ApiVersionsResponse},
+        request_header::RequestHeader,
+        sasl_authenticate_request::{self, SaslAuthenticateRequest},
+        sasl_handshake_request::{self, SaslHandshakeRequest},
     },
 };
 use crabka_raft::{
@@ -59,30 +58,10 @@ const API_KEY_SASL_HANDSHAKE: i16 = 17;
 const API_KEY_SASL_AUTHENTICATE: i16 = 36;
 const API_KEY_API_VERSIONS: i16 = 18;
 
-/// Fixed-size prefix of a request header before the client-id bytes:
-/// `api_key i16 + api_version i16 + correlation_id i32 + client_id_len i16`.
-const REQUEST_HEADER_PREFIX_LEN: usize = 10;
-
 /// `SaslAuthenticate (36)` switches to flexible (v2) request *and* response
 /// headers at this `api_version`. This is the KIP-482 flexible-versions
 /// cutover.
 const SASL_AUTHENTICATE_FLEXIBLE_VERSION: i16 = 2;
-
-/// Pre-auth APIs advertised in the hand-rolled `ApiVersionsResponse v0`,
-/// in wire order: `SaslHandshake`, `SaslAuthenticate`, `ApiVersions`.
-const ADVERTISED_PRE_AUTH_APIS: [i16; 3] = [
-    API_KEY_SASL_HANDSHAKE,
-    API_KEY_SASL_AUTHENTICATE,
-    API_KEY_API_VERSIONS,
-];
-
-/// Version range that the minimal `ApiVersionsResponse v0` advertises for
-/// every pre-auth API. It covers `SaslHandshake` v0-1, `SaslAuthenticate`
-/// v0-2, and `ApiVersions` v0, the versions the inbound state machine
-/// accepts.
-const ADVERTISED_MIN_VERSION: i16 = 0;
-/// See [`ADVERTISED_MIN_VERSION`].
-const ADVERTISED_MAX_VERSION: i16 = 2;
 
 /// Per-broker handshake adapter. `Broker::start` constructs it and passes it
 /// into `ControllerConfig::handshake`.
@@ -93,6 +72,8 @@ pub struct BrokerRaftHandshake {
     pub gssapi: Option<crabka_security::gssapi::GssapiConfig>,
     pub protocol: ListenerProtocol,
     pub controller: ControllerHandleArc,
+    /// Maximum Kafka handshake frame body accepted before authentication.
+    pub max_frame_bytes: usize,
     /// Authorizer that gates controller RPCs after authentication (H-1).
     ///
     /// Authentication proves *who* the peer is. This authorizer enforces that
@@ -250,7 +231,8 @@ async fn run_inbound_sasl(
 ) -> Result<crabka_security::Principal, RaftHandshakeError> {
     let mut auth = pre_auth_state();
     loop {
-        let (api_key, api_version, corr_id, body) = read_kafka_request(stream).await?;
+        let (api_key, api_version, corr_id, body) =
+            read_kafka_request(stream, cfg.max_frame_bytes).await?;
         if !is_pre_auth_allowed(api_key) && !auth.is_authenticated() {
             return Err(RaftHandshakeError::Sasl(format!(
                 "pre-auth request api_key={api_key} rejected"
@@ -262,8 +244,11 @@ async fn run_inbound_sasl(
             // `InterBrokerClient` outbound path skips ApiVersions, so this
             // path exists for JVM-client tolerance only.
             API_KEY_API_VERSIONS => {
-                let resp_bytes = build_api_versions_response(corr_id);
-                stream.write_all(&resp_bytes).await?;
+                let mut cur = body.as_slice();
+                ApiVersionsRequest::decode(&mut cur, api_version)
+                    .map_err(|e| RaftHandshakeError::Protocol(e.to_string()))?;
+                let resp = pre_auth_api_versions_response();
+                write_response(stream, api_key, api_version, corr_id, &resp).await?;
             }
             API_KEY_SASL_HANDSHAKE => {
                 let mut cur = body.as_slice();
@@ -372,51 +357,38 @@ async fn run_inbound_sasl(
 /// `network::client::round_trip`:
 /// - v1, non-flexible: `api_key i16 | api_version i16 | corr_id i32 |
 ///   client_id i16-length-prefixed bytes`.
-/// - v2, flexible, which `SaslAuthenticate v2+` uses: the v1 layout plus a
-///   trailing `0x00` tagged-fields byte.
+/// - v2, flexible, which `SaslAuthenticate v2+` and `ApiVersions v3+` use:
+///   the v1 layout plus a tagged-fields section.
 async fn read_kafka_request(
     stream: &mut dyn DuplexStream,
+    max_frame_bytes: usize,
 ) -> Result<(i16, i16, i32, Vec<u8>), RaftHandshakeError> {
     let mut size_buf = [0u8; 4];
     stream.read_exact(&mut size_buf).await?;
     let size = u32::from_be_bytes(size_buf) as usize;
+    crate::network::codec::validate_frame_length(size, max_frame_bytes)
+        .map_err(|e| RaftHandshakeError::Protocol(e.to_string()))?;
     let mut frame = vec![0u8; size];
     stream.read_exact(&mut frame).await?;
-    if frame.len() < REQUEST_HEADER_PREFIX_LEN {
+    if frame.len() < 4 {
         return Err(RaftHandshakeError::Protocol("short request header".into()));
     }
     let api_key = i16::from_be_bytes([frame[0], frame[1]]);
     let api_version = i16::from_be_bytes([frame[2], frame[3]]);
-    let corr_id = i32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
-    let client_id_len = i16::from_be_bytes([frame[8], frame[9]]);
-    let mut cursor: usize = REQUEST_HEADER_PREFIX_LEN;
-    if client_id_len >= 0 {
-        let cid_len = usize::try_from(client_id_len)
-            .map_err(|_| RaftHandshakeError::Protocol("client_id_len overflow".into()))?;
-        let cid_end = cursor
-            .checked_add(cid_len)
-            .ok_or_else(|| RaftHandshakeError::Protocol("client_id_len overflow".into()))?;
-        if cid_end > frame.len() {
-            return Err(RaftHandshakeError::Protocol(
-                "client_id extends past frame".into(),
-            ));
-        }
-        cursor = cid_end;
-    }
-    // Flexible request header (v2) for SaslAuthenticate v2+: a single
-    // tagged-fields byte (always 0 for empty) follows client_id. Other
-    // pre-auth APIs (SaslHandshake v0/v1, ApiVersions v0) use the
-    // non-flexible v1 header — no extra byte.
-    if is_request_header_flexible(api_key, api_version) {
-        if cursor >= frame.len() {
-            return Err(RaftHandshakeError::Protocol(
-                "missing tagged-fields byte in flexible request header".into(),
-            ));
-        }
-        cursor += 1;
-    }
-    let body = frame[cursor..].to_vec();
-    Ok((api_key, api_version, corr_id, body))
+    let header_version = if is_request_header_flexible(api_key, api_version) {
+        2
+    } else {
+        1
+    };
+    let mut body = frame.as_slice();
+    let header = RequestHeader::decode(&mut body, header_version)
+        .map_err(|e| RaftHandshakeError::Protocol(e.to_string()))?;
+    Ok((
+        header.request_api_key,
+        header.request_api_version,
+        header.correlation_id,
+        body.to_vec(),
+    ))
 }
 
 /// Encodes `resp`, prepends the `ResponseHeader` (v0 or v1 by the rules
@@ -449,13 +421,12 @@ async fn write_response<R: Encode>(
 
 /// Request-header flexibility rules.
 ///
-/// Mirrors the encoder side in `network::client::round_trip`, where the caller
-/// passes `flexible = true` only for `SaslAuthenticate v2+`. Every other
-/// pre-auth API uses the non-flexible v1 header.
+/// Mirrors the generated protocol schema. `SaslAuthenticate` becomes flexible
+/// at v2 and `ApiVersions` at v3. `SaslHandshake` v0-v1 stays non-flexible.
 fn is_request_header_flexible(api_key: i16, api_version: i16) -> bool {
     match api_key {
         API_KEY_SASL_AUTHENTICATE => api_version >= SASL_AUTHENTICATE_FLEXIBLE_VERSION,
-        // SaslHandshake v0/v1 — non-flexible. ApiVersions v0 — non-flexible.
+        API_KEY_API_VERSIONS => api_version >= api_versions_request::FLEXIBLE_MIN,
         _ => false,
     }
 }
@@ -476,37 +447,36 @@ fn is_response_header_flexible(api_key: i16, api_version: i16) -> bool {
     }
 }
 
-/// Minimal hand-rolled `ApiVersionsResponse v0`. It advertises only the
-/// pre-auth APIs 17, 36, and 18. Crabka's own `InterBrokerClient` skips
-/// `ApiVersions`, so this response exists only to serve JVM-style peers that
-/// always send it first.
-fn build_api_versions_response(corr_id: i32) -> Vec<u8> {
-    // v0 body: error_code(i16) + api_versions array(i32 len, repeats of
-    // {api_key i16, min i16, max i16}) + throttle_time_ms(i32).
-    let api_count =
-        i32::try_from(ADVERTISED_PRE_AUTH_APIS.len()).expect("advertised API count fits i32");
-    let mut body = Vec::with_capacity(2 + 4 + ADVERTISED_PRE_AUTH_APIS.len() * 6 + 4);
-    body.extend_from_slice(&0i16.to_be_bytes()); // error_code
-    body.extend_from_slice(&api_count.to_be_bytes()); // array length
-    for k in ADVERTISED_PRE_AUTH_APIS {
-        body.extend_from_slice(&k.to_be_bytes());
-        body.extend_from_slice(&ADVERTISED_MIN_VERSION.to_be_bytes()); // min_version
-        body.extend_from_slice(&ADVERTISED_MAX_VERSION.to_be_bytes()); // max_version
+/// Builds the minimal `ApiVersionsResponse` used before SASL authentication.
+///
+/// Only the three APIs allowed during authentication are advertised. Each
+/// entry uses its generated schema range; the ranges are not interchangeable.
+/// The generated encoder also handles the v0-v4 body differences, including
+/// compact arrays and tagged fields from v3.
+fn pre_auth_api_versions_response() -> ApiVersionsResponse {
+    ApiVersionsResponse {
+        api_keys: vec![
+            ApiVersion {
+                api_key: API_KEY_SASL_HANDSHAKE,
+                min_version: sasl_handshake_request::MIN_VERSION,
+                max_version: sasl_handshake_request::MAX_VERSION,
+                ..Default::default()
+            },
+            ApiVersion {
+                api_key: API_KEY_SASL_AUTHENTICATE,
+                min_version: sasl_authenticate_request::MIN_VERSION,
+                max_version: sasl_authenticate_request::MAX_VERSION,
+                ..Default::default()
+            },
+            ApiVersion {
+                api_key: API_KEY_API_VERSIONS,
+                min_version: api_versions_request::MIN_VERSION,
+                max_version: api_versions_request::MAX_VERSION,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
     }
-    body.extend_from_slice(&0i32.to_be_bytes()); // throttle_time_ms
-
-    // ApiVersions response header is always v0 — no tagged-fields byte.
-    // The response body is fixed size (3 entries × 6 bytes + 10 bytes of
-    // scalars = 28 bytes), so `total` is well under u32::MAX. We assert
-    // this explicitly so the cast can't silently truncate if someone
-    // later expands the advertised API list.
-    let total = 4 + body.len();
-    let total_u32 = u32::try_from(total).expect("ApiVersions response fits in u32");
-    let mut out = Vec::with_capacity(4 + total);
-    out.extend_from_slice(&total_u32.to_be_bytes());
-    out.extend_from_slice(&corr_id.to_be_bytes());
-    out.extend_from_slice(&body);
-    out
 }
 
 #[cfg(test)]
@@ -521,7 +491,7 @@ mod tests {
     //! flips `requires_*`.
 
     use assert2::assert;
-    use bytes::BufMut;
+    use bytes::{BufMut, Bytes};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         time::{Duration, timeout},
@@ -583,7 +553,7 @@ mod tests {
     ) -> Result<(i16, i16, i32, Vec<u8>), RaftHandshakeError> {
         let (mut client, mut server) = tokio::io::duplex(4096);
         client.write_all(&frame).await.expect("write request frame");
-        read_kafka_request(&mut server).await
+        read_kafka_request(&mut server, 4096).await
     }
 
     async fn read_response_frame(stream: &mut tokio::io::DuplexStream) -> Vec<u8> {
@@ -612,6 +582,7 @@ mod tests {
             gssapi: None,
             protocol: ListenerProtocol::SaslPlaintext,
             controller: Arc::new(OnceCell::new()),
+            max_frame_bytes: 4096,
             authorizer: Arc::new(crate::authorizer::AllowAllAuthorizer),
         }
     }
@@ -624,6 +595,18 @@ mod tests {
         }
         .encode(&mut body, 1)
         .expect("encode sasl handshake");
+        body.to_vec()
+    }
+
+    fn api_versions_body(version: i16) -> Vec<u8> {
+        let mut body = bytes::BytesMut::new();
+        ApiVersionsRequest {
+            client_software_name: "raft-peer".to_string(),
+            client_software_version: "1.0".to_string(),
+            ..Default::default()
+        }
+        .encode(&mut body, version)
+        .expect("encode api versions");
         body.to_vec()
     }
 
@@ -655,6 +638,7 @@ mod tests {
             gssapi: None,
             protocol: ListenerProtocol::Plaintext,
             controller: Arc::new(OnceCell::new()),
+            max_frame_bytes: 4096,
             authorizer: Arc::new(crate::authorizer::AllowAllAuthorizer),
         };
         // `upgrade(TcpStream)` requires a real TCP socket, so we
@@ -685,6 +669,7 @@ mod tests {
             gssapi: None,
             protocol: ListenerProtocol::SaslPlaintext,
             controller: controller_cell,
+            max_frame_bytes: 4096,
             authorizer: Arc::new(DenyAll),
         };
         let principal = crabka_security::Principal {
@@ -714,6 +699,8 @@ mod tests {
             (API_KEY_SASL_HANDSHAKE, 1, false),
             (API_KEY_SASL_AUTHENTICATE, 1, false),
             (API_KEY_SASL_AUTHENTICATE, 2, true),
+            (API_KEY_API_VERSIONS, 2, false),
+            (API_KEY_API_VERSIONS, 3, true),
         ];
         for (api_key, version, want) in request_cases {
             assert!(
@@ -752,6 +739,34 @@ mod tests {
         let flex = request_frame(36, 2, 43, Some(b"c"), true, b"auth-body");
         let decoded = read_request_from_frame(flex).await.expect("flex request");
         assert!(decoded == (36, 2, 43, b"auth-body".to_vec()));
+
+        let mut inner = bytes::BytesMut::new();
+        RequestHeader {
+            request_api_key: API_KEY_API_VERSIONS,
+            request_api_version: 3,
+            correlation_id: 44,
+            client_id: Some("c".to_string()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![
+                crabka_protocol::UnknownTaggedField {
+                    tag: 300,
+                    bytes: Bytes::from_static(b"tag-payload"),
+                },
+            ]),
+        }
+        .encode(&mut inner, 2)
+        .expect("encode flexible request header with tag");
+        inner.extend_from_slice(b"api-body");
+        let mut tagged = Vec::new();
+        tagged.extend_from_slice(
+            &u32::try_from(inner.len())
+                .expect("frame fits u32")
+                .to_be_bytes(),
+        );
+        tagged.extend_from_slice(&inner);
+        let decoded = read_request_from_frame(tagged)
+            .await
+            .expect("tagged flexible request");
+        assert!(decoded == (API_KEY_API_VERSIONS, 3, 44, b"api-body".to_vec()));
     }
 
     #[tokio::test]
@@ -769,20 +784,13 @@ mod tests {
         truncated_client.extend_from_slice(b"xy");
 
         let missing_tag = request_frame(36, 2, 44, Some(b"c"), false, b"");
+        let oversized = 4097u32.to_be_bytes().to_vec();
 
-        let cases = [
-            (short, "short request header"),
-            (truncated_client, "client_id extends past frame"),
-            (missing_tag, "missing tagged-fields byte"),
-        ];
-        for (frame, want_msg) in cases {
+        for frame in [short, truncated_client, missing_tag, oversized] {
             let got = read_request_from_frame(frame).await;
             assert!(
-                matches!(
-                    &got,
-                    Err(RaftHandshakeError::Protocol(msg)) if msg.contains(want_msg)
-                ),
-                "want protocol error containing {want_msg:?}, got {got:?}"
+                matches!(got, Err(RaftHandshakeError::Protocol(_))),
+                "want protocol error, got {got:?}"
             );
         }
     }
@@ -796,9 +804,8 @@ mod tests {
 
     #[tokio::test]
     async fn read_kafka_request_accepts_exact_header_prefix_frame() {
-        // A null client id and empty body make the frame exactly
-        // REQUEST_HEADER_PREFIX_LEN bytes — the minimum legal frame and the
-        // only length where the short-header guard's strict `<` matters.
+        // A null client id and empty body make the frame exactly 10 bytes,
+        // the minimum legal v1 request header.
         let frame = request_frame(17, 1, 46, None, false, b"");
         let decoded = read_request_from_frame(frame).await.expect("exact prefix");
         assert!(decoded == (17, 1, 46, Vec::new()));
@@ -842,30 +849,39 @@ mod tests {
         assert!(&frame[4..] == &[0xcc]);
     }
 
-    #[test]
-    fn api_versions_response_has_expected_frame_shape() {
-        let bytes = build_api_versions_response(99);
-        // Byte-exact v0 frame: size(32) | corr_id(99) | error_code(0) |
-        // array len(3) | {api_key, min 0, max 2} × [17, 36, 18] |
-        // throttle_time_ms(0).
-        let expected: Vec<u8> = [
-            &32u32.to_be_bytes()[..],
-            &99i32.to_be_bytes(),
-            &0i16.to_be_bytes(),
-            &3i32.to_be_bytes(),
-            &17i16.to_be_bytes(),
-            &0i16.to_be_bytes(),
-            &2i16.to_be_bytes(),
-            &36i16.to_be_bytes(),
-            &0i16.to_be_bytes(),
-            &2i16.to_be_bytes(),
-            &18i16.to_be_bytes(),
-            &0i16.to_be_bytes(),
-            &2i16.to_be_bytes(),
-            &0i32.to_be_bytes(),
-        ]
-        .concat();
-        assert!(bytes == expected);
+    #[tokio::test]
+    async fn api_versions_response_uses_schema_ranges_and_versioned_encoding() {
+        let expected_ranges = [(17, 0, 1), (36, 0, 2), (18, 0, 4)];
+
+        for version in [0, 3] {
+            let (mut client, mut server) = tokio::io::duplex(256);
+            let writer = tokio::spawn(async move {
+                let response = pre_auth_api_versions_response();
+                write_response(&mut server, API_KEY_API_VERSIONS, version, 99, &response)
+                    .await
+                    .expect("write api versions response");
+            });
+            let frame = read_response_frame(&mut client).await;
+            writer.await.expect("writer");
+
+            assert!(&frame[..4] == &99i32.to_be_bytes());
+            let mut body = &frame[4..];
+            let response = ApiVersionsResponse::decode(&mut body, version)
+                .expect("decode api versions response");
+            assert!(body.is_empty());
+            let ranges: Vec<_> = response
+                .api_keys
+                .iter()
+                .map(|api| (api.api_key, api.min_version, api.max_version))
+                .collect();
+            assert!(ranges == expected_ranges);
+
+            if version == 0 {
+                // v0 has no throttle_time_ms field. The old hand-rolled
+                // response appended one and produced a malformed frame.
+                assert!(frame.len() == 28);
+            }
+        }
     }
 
     #[tokio::test]
@@ -879,16 +895,21 @@ mod tests {
         client
             .write_all(&request_frame(
                 API_KEY_API_VERSIONS,
-                0,
+                3,
                 1,
                 Some(b"c"),
-                false,
-                b"",
+                true,
+                &api_versions_body(3),
             ))
             .await
             .expect("write api versions");
         let api_versions = read_response_frame(&mut client).await;
         assert!(&api_versions[0..4] == &1i32.to_be_bytes());
+        let mut api_versions_body = &api_versions[4..];
+        let response = ApiVersionsResponse::decode(&mut api_versions_body, 3)
+            .expect("decode api versions v3 response");
+        assert!(api_versions_body.is_empty());
+        assert!(response.api_keys.len() == 3);
 
         client
             .write_all(&request_frame(

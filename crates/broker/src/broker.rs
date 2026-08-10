@@ -202,6 +202,7 @@ pub struct Broker {
     /// `KafkaTopicAuditSink`. Disabled (`AuditLog::disabled()`) when
     /// `BrokerConfig::audit_enabled` is `false`.
     pub(crate) audit_log: std::sync::Arc<crabka_audit::AuditLog>,
+    pub(crate) audit_writer_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     handlers: DispatchRegistry,
 }
 
@@ -253,6 +254,7 @@ fn prepare_raft_transport(
                 gssapi: config.gssapi.clone(),
                 protocol: config.controller_listener_protocol,
                 controller: Arc::clone(&controller_cell),
+                max_frame_bytes: config.socket_request_max.bytes_usize(),
                 authorizer: Arc::clone(&config.authorizer),
             };
             Some(Arc::new(handshake) as Arc<dyn crabka_raft::RaftListenerHandshake>)
@@ -774,9 +776,13 @@ fn start_audit_pipeline(
     partitions: &Arc<PartitionRegistry>,
     metrics: &crate::metrics::BrokerMetrics,
     supervisor_shutdown: &CancellationToken,
-) -> (Option<PartitionIndex>, Arc<crabka_audit::AuditLog>) {
+) -> (
+    Option<PartitionIndex>,
+    Arc<crabka_audit::AuditLog>,
+    Option<JoinHandle<()>>,
+) {
     if !config.audit_enabled {
-        return (None, crabka_audit::AuditLog::disabled());
+        return (None, crabka_audit::AuditLog::disabled(), None);
     }
     let image = controller.current_image();
     let led_partition = (0_i32..)
@@ -788,7 +794,7 @@ fn start_audit_pipeline(
         .find(|(_, record)| record.leader == config.node_id)
         .map(|(index, _)| PartitionIndex(index));
     let (log, receiver) = crabka_audit::AuditLog::new(config.audit_event_queue_capacity);
-    if let Some(partition_index) = led_partition {
+    let writer_handle = if let Some(partition_index) = led_partition {
         let sink = Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
             Arc::clone(partitions),
             config.audit_topic.clone(),
@@ -829,7 +835,7 @@ fn start_audit_pipeline(
                 sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             },
         );
-        tokio::spawn(writer.run());
+        let writer_handle = tokio::spawn(writer.run());
         spawn_audit_metrics(
             stats,
             log.clone(),
@@ -837,14 +843,16 @@ fn start_audit_pipeline(
             config.audit_stats_poll_interval,
             supervisor_shutdown.child_token(),
         );
+        Some(writer_handle)
     } else {
         tracing::warn!("no audit partition led by this broker; audit records will drop");
-    }
+        None
+    };
     config.authorizer = Arc::new(crate::audit_authorizer::AuditingAuthorizer::new(
         Arc::clone(&config.authorizer),
         log.clone(),
     ));
-    (led_partition, log)
+    (led_partition, log, writer_handle)
 }
 
 fn spawn_broker_gauge_updater(
@@ -1838,6 +1846,7 @@ async fn finish_broker_startup(
         #[cfg(any(test, feature = "test-helpers"))]
         offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         audit_log: runtime.audit_log,
+        audit_writer_handle: tokio::sync::Mutex::new(runtime.audit_writer_handle),
         handlers: crate::handlers::registry::build_registry(),
     });
     let (shutdown, listener_tasks) = spawn_listener_tasks(&broker, bound);
@@ -1943,6 +1952,7 @@ struct BrokerRuntimeStartup {
     diskless_read: Option<Arc<crate::diskless::read::DisklessReadHandle>>,
     client_metrics: Arc<crate::client_metrics::ClientMetrics>,
     audit_log: Arc<crabka_audit::AuditLog>,
+    audit_writer_handle: Option<JoinHandle<()>>,
     audit_led_partition: Option<PartitionIndex>,
     kafka_swap_kickoff: Option<KafkaSwapKickoff>,
     kafka_swap_target: Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
@@ -1976,7 +1986,7 @@ async fn start_broker_runtime(
             listener.protocol
         });
     let metrics = crate::metrics::BrokerMetrics::new();
-    let (audit_led_partition, audit_log) = start_audit_pipeline(
+    let (audit_led_partition, audit_log, audit_writer_handle) = start_audit_pipeline(
         config,
         &**controller,
         storage.0,
@@ -2067,6 +2077,7 @@ async fn start_broker_runtime(
         diskless_read: remote.diskless_read,
         client_metrics,
         audit_log,
+        audit_writer_handle,
         audit_led_partition,
         kafka_swap_kickoff,
         kafka_swap_target: remote.swap_target,
@@ -3501,18 +3512,6 @@ impl BrokerHandle {
     /// Cancel the listener and drain in-flight connections. The returned
     /// future completes when the listener task exits.
     pub async fn shutdown(mut self) {
-        // Emit the BrokerStopping lifecycle event before tearing down
-        // partitions. This record may be dropped if the audit partition is
-        // already gone — acceptable for Slice 1; durable shutdown auditing
-        // is Slice 3.
-        self.broker
-            .audit_log
-            .emit(crabka_audit::AuditEvent::Lifecycle {
-                kind: crabka_audit::LifecycleKind::BrokerStopping,
-                node_id: i64::from(self.broker.config.broker_id),
-                time_ms: crate::time_util::now_ms(),
-            });
-
         // Cancel the replicator supervisor BEFORE the controller drops:
         // in-flight replication tasks must observe a clean cancellation
         // rather than a torn-down metadata-watch channel.
@@ -3538,6 +3537,17 @@ impl BrokerHandle {
         for t in self.listener_tasks.drain(..) {
             let _ = t.await;
         }
+        self.broker
+            .audit_log
+            .emit(crabka_audit::AuditEvent::Lifecycle {
+                kind: crabka_audit::LifecycleKind::BrokerStopping,
+                node_id: i64::from(self.broker.config.broker_id),
+                time_ms: crate::time_util::now_ms(),
+            });
+        self.broker.audit_log.close();
+        if let Some(task) = self.broker.audit_writer_handle.lock().await.take() {
+            let _ = task.await;
+        }
         crate::future_log::shutdown_moves(&self.broker.future_logs).await;
         shutdown_partition_writers(&self.broker.partitions).await;
         // Shut down the raft engine so this broker's openraft instance stops
@@ -3553,6 +3563,12 @@ impl Drop for BrokerHandle {
     fn drop(&mut self) {
         self.broker.supervisor_shutdown.cancel();
         self.shutdown.cancel();
+        self.broker.audit_log.close();
+        if let Ok(mut handle) = self.broker.audit_writer_handle.try_lock()
+            && let Some(task) = handle.take()
+        {
+            task.abort();
+        }
         for task in self.listener_tasks.drain(..) {
             task.abort();
         }
