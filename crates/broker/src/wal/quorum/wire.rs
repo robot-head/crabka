@@ -7,9 +7,9 @@ use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 const KRAFT_METADATA_TOPIC_ID: crabka_protocol::primitives::uuid::Uuid =
     crabka_protocol::primitives::uuid::Uuid([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-const KIP_595_FETCH_VERSION: i16 = 17;
-const NONE: i16 = 0;
+pub(crate) const KIP_595_FETCH_VERSION: i16 = 17;
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+const WAL_FETCH_RACK_ID: &str = "__crabka_diskless_wal";
 
 /// Group discriminator for KIP-595 traffic carried by the broker listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,11 +55,18 @@ pub(crate) fn classify_fetch(body: &[u8]) -> Option<QuorumGroup> {
 pub(crate) fn decode_fetch(body: &[u8]) -> Option<WalFetchRequest> {
     let mut cur = body;
     let request = FetchRequest::decode(&mut cur, KIP_595_FETCH_VERSION).ok()?;
+    decode_fetch_request(&request)
+}
+
+pub(crate) fn decode_fetch_request(request: &FetchRequest) -> Option<WalFetchRequest> {
     let topic = request.topics.first()?;
     let partition = topic.partitions.first()?;
     let group = if topic.topic_id == KRAFT_METADATA_TOPIC_ID {
         QuorumGroup::Metadata
     } else {
+        if request.rack_id != WAL_FETCH_RACK_ID {
+            return None;
+        }
         QuorumGroup::diskless_wal(
             uuid::Uuid::from_bytes(topic.topic_id.0),
             PartitionIndex(partition.partition),
@@ -73,20 +80,12 @@ pub(crate) fn decode_fetch(body: &[u8]) -> Option<WalFetchRequest> {
     })
 }
 
-pub(crate) fn encode_fetch_response(group: QuorumGroup, hwm: i64, records: Bytes) -> Bytes {
-    encode_fetch_response_with_error(group, hwm, records, NONE)
-}
-
-pub(crate) fn encode_unknown_shard_fetch_response(group: QuorumGroup) -> Bytes {
-    encode_fetch_response_with_error(group, 0, Bytes::new(), UNKNOWN_TOPIC_OR_PARTITION)
-}
-
-fn encode_fetch_response_with_error(
+pub(crate) fn fetch_response(
     group: QuorumGroup,
     hwm: i64,
     records: Bytes,
     error_code: i16,
-) -> Bytes {
+) -> crabka_protocol::owned::fetch_response::FetchResponse {
     use crabka_protocol::{owned::fetch_response as fetch_resp, records::RecordsPayload};
 
     let (topic, topic_id, partition) = match group {
@@ -100,7 +99,7 @@ fn encode_fetch_response_with_error(
             partition.0,
         ),
     };
-    let response = fetch_resp::FetchResponse {
+    fetch_resp::FetchResponse {
         responses: vec![fetch_resp::FetchableTopicResponse {
             topic,
             topic_id,
@@ -116,7 +115,18 @@ fn encode_fetch_response_with_error(
             ..Default::default()
         }],
         ..Default::default()
-    };
+    }
+}
+
+pub(crate) fn unknown_shard_fetch_response(
+    group: QuorumGroup,
+) -> crabka_protocol::owned::fetch_response::FetchResponse {
+    fetch_response(group, 0, Bytes::new(), UNKNOWN_TOPIC_OR_PARTITION)
+}
+
+pub(crate) fn encode_fetch_response_struct(
+    response: &crabka_protocol::owned::fetch_response::FetchResponse,
+) -> Bytes {
     let mut out = bytes::BytesMut::new();
     let _ = response.encode(&mut out, KIP_595_FETCH_VERSION);
     out.freeze()
@@ -143,6 +153,9 @@ pub(crate) fn encode_fetch_for_group(
         ),
     };
     let request = FetchRequest {
+        rack_id: matches!(group, QuorumGroup::DisklessWal { .. })
+            .then_some(WAL_FETCH_RACK_ID.to_string())
+            .unwrap_or_default(),
         replica_state: fetch_req::ReplicaState {
             replica_id: i32::try_from(from.0).unwrap_or(i32::MAX),
             replica_epoch: -1,
@@ -197,5 +210,22 @@ mod tests {
                 partition: PartitionIndex(3),
             })
         );
+    }
+
+    #[test]
+    fn classify_fetch_does_not_capture_normal_follower_fetch() {
+        let topic_id = uuid::Uuid::from_u128(42);
+        let mut cur = encode_fetch_for_group(
+            QuorumGroup::diskless_wal(topic_id, PartitionIndex(3)),
+            NodeId(2),
+            7,
+            11,
+        );
+        let mut request = FetchRequest::decode(&mut cur, KIP_595_FETCH_VERSION).unwrap();
+        request.rack_id.clear();
+        let mut body = bytes::BytesMut::new();
+        request.encode(&mut body, KIP_595_FETCH_VERSION).unwrap();
+
+        assert_eq!(classify_fetch(&body), None);
     }
 }

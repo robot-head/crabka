@@ -7,7 +7,10 @@ use dashmap::DashMap;
 
 use super::{
     engine::WalShardEngine,
-    wire::{QuorumGroup, decode_fetch, encode_fetch_response, encode_unknown_shard_fetch_response},
+    wire::{
+        QuorumGroup, WalFetchRequest, decode_fetch, decode_fetch_request,
+        encode_fetch_response_struct, fetch_response, unknown_shard_fetch_response,
+    },
 };
 
 /// Per-partition WAL shard identity for Slice 6a.
@@ -42,6 +45,40 @@ impl WalShardRegistry {
     pub(crate) fn remove(&self, shard_id: ShardId) -> Option<Arc<WalShardEngine>> {
         self.engines.remove(&shard_id).map(|(_, engine)| engine)
     }
+
+    pub(crate) fn route_fetch_request(
+        &self,
+        request: &crabka_protocol::owned::fetch_request::FetchRequest,
+    ) -> Option<Result<crabka_protocol::owned::fetch_response::FetchResponse, crate::BrokerError>>
+    {
+        self.route_decoded_fetch(decode_fetch_request(request)?)
+    }
+
+    fn route_decoded_fetch(
+        &self,
+        request: WalFetchRequest,
+    ) -> Option<Result<crabka_protocol::owned::fetch_response::FetchResponse, crate::BrokerError>>
+    {
+        let QuorumGroup::DisklessWal {
+            topic_id,
+            partition,
+        } = request.group
+        else {
+            return None;
+        };
+        let shard = ShardId {
+            topic_id,
+            partition,
+        };
+        let Some(engine) = self.get(shard) else {
+            return Some(Ok(unknown_shard_fetch_response(request.group)));
+        };
+        Some(
+            engine
+                .serve_fetch(crabka_ids::Offset(request.fetch_offset), request.max_size)
+                .map(|(hwm, records)| fetch_response(request.group, hwm.0, records, 0)),
+        )
+    }
 }
 
 /// Routes shard-addressed KIP-595 Fetch requests to the registered diskless
@@ -67,24 +104,12 @@ impl crabka_raft::RaftShardRouter for WalShardRouter {
             let Some(request) = decode_fetch(&body) else {
                 return Ok(None);
             };
-            let QuorumGroup::DisklessWal {
-                topic_id,
-                partition,
-            } = request.group
-            else {
+            let Some(response) = self.registry.route_decoded_fetch(request) else {
                 return Ok(None);
             };
-            let shard = ShardId {
-                topic_id,
-                partition,
-            };
-            let Some(engine) = self.registry.get(shard) else {
-                return Ok(Some(encode_unknown_shard_fetch_response(request.group)));
-            };
-            let (hwm, records) = engine
-                .serve_fetch(crabka_ids::Offset(request.fetch_offset), request.max_size)
-                .map_err(|err| crabka_raft::RaftError::ChangeRejected(err.to_string()))?;
-            Ok(Some(encode_fetch_response(request.group, hwm.0, records)))
+            let response =
+                response.map_err(|err| crabka_raft::RaftError::ChangeRejected(err.to_string()))?;
+            Ok(Some(encode_fetch_response_struct(&response)))
         })
     }
 }
