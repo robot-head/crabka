@@ -6,7 +6,10 @@
 //! each record batch through the `crabka_metadata` Kafka-record bridge, and
 //! applies the records exactly as the controller state machine would.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
 
 use crabka_metadata::{MetadataImage, from_kraft_value};
 use crabka_protocol::records::RecordBatch;
@@ -55,6 +58,9 @@ pub struct ObserverConfig {
 pub struct MetadataObserver {
     image: watch::Sender<Arc<MetadataImage>>,
     leader: watch::Sender<Option<NodeId>>,
+    /// Highest metadata-log offset applied to `image`, or `-1` before the
+    /// first record. This is the value sent in `BrokerHeartbeat`.
+    metadata_offset: AtomicI64,
     shutdown: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
@@ -70,6 +76,7 @@ impl MetadataObserver {
         let observer = Arc::new(Self {
             image: image_tx,
             leader: leader_tx,
+            metadata_offset: AtomicI64::new(-1),
             shutdown: shutdown.clone(),
             task: tokio::sync::Mutex::new(None),
         });
@@ -93,6 +100,11 @@ impl MetadataObserver {
     #[must_use]
     pub fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
         self.leader.subscribe()
+    }
+
+    #[must_use]
+    pub fn current_metadata_offset(&self) -> i64 {
+        self.metadata_offset.load(Ordering::Acquire)
     }
 
     /// Stops the fetch loop and drains the task.
@@ -257,6 +269,10 @@ async fn run_loop(
             r = fetch_once(&config, &addr, target, fetch_offset, &observer.image) => r,
         };
         if let Some(new_offset) = result {
+            observer.metadata_offset.store(
+                i64::try_from(new_offset).unwrap_or(i64::MAX) - 1,
+                Ordering::Release,
+            );
             let _ = observer.leader.send_replace(Some(target));
             if new_offset == fetch_offset {
                 tokio::select! {
@@ -496,6 +512,8 @@ mod tests {
             sleeper: Arc::new(SystemSleeper::new()),
         });
 
+        assert!(observer.current_metadata_offset() == -1);
+
         observer.cancel().await;
 
         assert!(observer.task.lock().await.is_none());
@@ -625,6 +643,10 @@ mod tests {
         }
 
         assert!(observer.current_image().topic("observed").is_some());
+        let controller_offset = i64::try_from(ctrl.quorum_state().last_applied_index)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(1);
+        assert!(observer.current_metadata_offset() == controller_offset);
         assert!(
             client_ids
                 .lock()

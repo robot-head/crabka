@@ -3,8 +3,6 @@
 //! current controller in the metadata image, and it retries after transient
 //! errors.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use crabka_client_core::ConnectionOptions;
@@ -87,6 +85,24 @@ fn heartbeat_connection_options(broker_id: i32, interval: Time) -> ConnectionOpt
     }
 }
 
+fn heartbeat_request(
+    broker_id: i32,
+    broker_epoch: i64,
+    current_metadata_offset: i64,
+    want_shut_down: bool,
+    offline_log_dirs: Vec<crabka_protocol::primitives::uuid::Uuid>,
+) -> BrokerHeartbeatRequest {
+    BrokerHeartbeatRequest {
+        broker_id,
+        broker_epoch,
+        current_metadata_offset,
+        want_fence: false,
+        want_shut_down,
+        offline_log_dirs,
+        ..Default::default()
+    }
+}
+
 /// Triggers the KIP-112 self-shutdown. It latches `should_shutdown` and
 /// cancels the supervisor. Every early-exit path calls it, so the check is not
 /// accidentally skipped when the controller is temporarily unreachable.
@@ -121,6 +137,15 @@ pub(crate) async fn run(mut cfg: Config) {
             continue;
         };
         let image = cfg.controller.current_image();
+        let Some(broker_epoch) = image.broker_epoch(crabka_raft::NodeId(
+            u64::try_from(cfg.broker_id).unwrap_or(u64::MAX),
+        )) else {
+            debug!(
+                broker_id = cfg.broker_id,
+                "heartbeat: broker registration not in metadata image yet"
+            );
+            continue;
+        };
         let Some(broker_rec) = image.broker(leader_id) else {
             debug!("heartbeat: controller leader not in metadata image yet");
             continue;
@@ -167,19 +192,24 @@ pub(crate) async fn run(mut cfg: Config) {
         let offline_log_dirs = offline_dir_uuids(&cfg.log_dir_status, &cfg.log_dir_ids);
         let resp = tokio::time::timeout(
             rpc_timeout.to_std(),
-            client.send(BrokerHeartbeatRequest {
-                broker_id: cfg.broker_id,
-                broker_epoch: 0,
-                current_metadata_offset: 0,
-                want_fence: false,
+            client.send(heartbeat_request(
+                cfg.broker_id,
+                broker_epoch,
+                cfg.controller.current_metadata_offset(),
                 want_shut_down,
                 offline_log_dirs,
-                ..Default::default()
-            }),
+            )),
         )
         .await;
         match resp {
             Ok(Ok(r)) => {
+                if r.error_code != crate::codes::NONE {
+                    warn!(
+                        error_code = r.error_code,
+                        "heartbeat rejected by controller"
+                    );
+                    continue;
+                }
                 if r.should_shut_down {
                     // Latch true; never flip back. The
                     // `BrokerHandle::controlled_shutdown` waiter is
@@ -274,5 +304,18 @@ mod tests {
         check!(opts.client_id == "crabka-broker-9-heartbeat");
         check!(opts.connect_timeout == secs(1));
         check!(opts.request_timeout == secs(1));
+    }
+
+    #[test]
+    fn heartbeat_request_reports_registration_and_applied_metadata() {
+        let offline = crabka_protocol::primitives::uuid::Uuid([7; 16]);
+        let req = heartbeat_request(3, 41, 47, true, vec![offline]);
+
+        assert!(req.broker_id == 3);
+        assert!(req.broker_epoch == 41);
+        assert!(req.current_metadata_offset == 47);
+        assert!(!req.want_fence);
+        assert!(req.want_shut_down);
+        assert!(req.offline_log_dirs == vec![offline]);
     }
 }

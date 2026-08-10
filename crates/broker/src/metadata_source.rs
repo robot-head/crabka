@@ -23,6 +23,13 @@ pub trait MetadataSource: Send + Sync {
     fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>>;
     fn watch_leader(&self) -> watch::Receiver<Option<NodeId>>;
     fn quorum_state(&self) -> QuorumState;
+    /// Highest metadata-log offset applied to the current image, or `-1`
+    /// before the first record.
+    fn current_metadata_offset(&self) -> i64 {
+        i64::try_from(self.quorum_state().last_applied_index)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(1)
+    }
     /// Directory identity voted for in the current controller epoch.
     fn voted_directory_id(&self) -> Option<uuid::Uuid> {
         None
@@ -145,6 +152,9 @@ impl MetadataSource for ObserverSource {
     }
     fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
         self.observer.watch_leader()
+    }
+    fn current_metadata_offset(&self) -> i64 {
+        self.observer.current_metadata_offset()
     }
     fn quorum_state(&self) -> QuorumState {
         // A broker-only node is not a voter and has no openraft state of its
@@ -558,6 +568,10 @@ mod tests {
             .submit_change(vec![topic_record("snapshot-topic")])
             .await
             .expect("submit metadata");
+        let expected_offset = i64::try_from(source.quorum_state().last_applied_index)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(1);
+        assert_eq!(source.current_metadata_offset(), expected_offset);
         source.trigger_snapshot().await.expect("snapshot");
         assert!(matches!(
             source.read_snapshot_range(0, 1),
@@ -593,6 +607,7 @@ mod tests {
         let source = ObserverSource::new(observer.clone(), writer.clone());
 
         assert_eq!(source.current_image().cluster_id(), cluster_id);
+        assert_eq!(source.current_metadata_offset(), -1);
         source
             .submit_change(vec![topic_record("forwarded-topic")])
             .await
