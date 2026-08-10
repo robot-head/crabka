@@ -13750,7 +13750,7 @@ dependencies = [
 [[package]]
 name = "testcontainers-modules"
 version = "0.15.0"
-source = "git+https://github.com/testcontainers/testcontainers-rs-modules-community?rev=032bcf88c6564824e81ada9a416d4da9ed3f4dc4#032bcf88c6564824e81ada9a416d4da9ed3f4dc4"
+source = "git+https://github.com/testcontainers/testcontainers-rs-modules-community?rev=390054380a9c30a5f91051933444ae827b50398b#390054380a9c30a5f91051933444ae827b50398b"
 dependencies = [
  "testcontainers",
 ]
