@@ -497,6 +497,14 @@ impl ReplicatorSupervisor {
         // idempotently repaired on the next watch delivery.
         self.prune_deleted_topic_partitions(image);
 
+        // A reassignment can remove this broker from a live partition's
+        // replica set without deleting the topic. Stop and remove that local
+        // runtime before materializing the new desired set. Partitions that
+        // are absent from metadata are left alone here: startup recovery can
+        // discover an on-disk partition before its topic record arrives, and
+        // `prune_deleted_topic_partitions` handles known topic tombstones.
+        self.prune_unassigned_partitions(&local_set, image);
+
         // 0. Materialize the on-disk partition for every assignment where
         //    self is in `replicas`, regardless of leader/follower role.
         //    Additionally: sync the partition's cached leader + epoch
@@ -619,39 +627,61 @@ impl ReplicatorSupervisor {
             let Some(&topic_id) = obsolete_topics.get(&partition.topic) else {
                 continue;
             };
-            let topic = partition.topic.clone();
-            let index = partition.index;
-            let Some(removed) = self.partitions.remove(&topic, index) else {
+            self.prune_partition(&partition, topic_id);
+        }
+    }
+
+    fn prune_unassigned_partitions(
+        &self,
+        local_set: &HashSet<TopicPartition>,
+        image: &MetadataImage,
+    ) {
+        for partition in self.partitions.arcs() {
+            let key = (partition.topic.clone(), partition.index.get());
+            let Some(topic_id) = image.topic(&key.0).map(|topic| topic.topic_id) else {
                 continue;
             };
-            self.reported_dirs.remove(&(topic.clone(), index.get()));
-            let owning_dir = removed.log_dir.load_full();
-            if let Err(error) = crate::wal::quorum::remove_shard(
-                self.wal_shards.as_ref(),
-                &owning_dir,
-                &topic,
-                topic_id,
-                index,
-            ) {
-                warn!(
-                    topic = %topic,
-                    partition = index.get(),
-                    error = %error,
-                    "failed to prune deleted topic WAL shard"
-                );
+            if image.partition(&key.0, key.1).is_none() || local_set.contains(&key) {
+                continue;
             }
-            let partition_dir = crate::log_dir::partition_dir(&owning_dir, &topic, index.get());
-            if let Err(error) = std::fs::remove_dir_all(&partition_dir)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                warn!(
-                    topic = %topic,
-                    partition = index.get(),
-                    path = %partition_dir.display(),
-                    error = %error,
-                    "failed to prune deleted topic partition directory"
-                );
-            }
+            self.prune_partition(&partition, topic_id);
+        }
+    }
+
+    fn prune_partition(&self, partition: &crate::partition::Partition, topic_id: uuid::Uuid) {
+        let topic = &partition.topic;
+        let index = partition.index;
+        let Some(removed) = self.partitions.remove(topic, index) else {
+            return;
+        };
+        if let Some(writer) = removed.take_writer_handle() {
+            writer.abort();
+        }
+        self.reported_dirs.remove(&(topic.clone(), index.get()));
+        let owning_dir = removed.log_dir.load_full();
+        if let Err(error) = crate::wal::quorum::remove_shard(
+            self.wal_shards.as_ref(),
+            &owning_dir,
+            topic,
+            topic_id,
+            index,
+        ) {
+            warn!(
+                topic = %topic,
+                partition = index.get(),
+                error = %error,
+                "failed to prune WAL shard"
+            );
+        }
+        let partition_dir = crate::log_dir::partition_dir(&owning_dir, topic, index.get());
+        if let Err(error) = remove_partition_dir(&partition_dir) {
+            warn!(
+                topic = %topic,
+                partition = index.get(),
+                path = %partition_dir.display(),
+                error = %error,
+                "failed to prune partition directory"
+            );
         }
     }
 
@@ -793,6 +823,13 @@ impl ReplicatorSupervisor {
 
     pub(crate) fn spawn(self) -> JoinHandle<()> {
         tokio::spawn(self.run())
+    }
+}
+
+fn remove_partition_dir(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 
@@ -1603,6 +1640,78 @@ mod tests {
             },
         ];
         assert!(actual == expected);
+    }
+
+    #[tokio::test]
+    async fn reconcile_prunes_partition_after_local_replica_is_reassigned() {
+        let topic = topic_record("moved", 1);
+        let assigned = image_with(&[
+            topic.clone(),
+            partition_record("moved", 0, NodeId(2), vec![NodeId(2)], 0),
+        ]);
+        let reassigned = image_with(&[
+            topic,
+            partition_record("moved", 0, NodeId(1), vec![NodeId(1)], 1),
+        ]);
+        let (supervisor, partitions, _reporter, dir) = supervisor_fixture(assigned.clone());
+        supervisor.reconcile(&assigned).await;
+
+        let original = partitions
+            .get("moved", PartitionIndex(0))
+            .expect("assigned partition");
+        let topic_id = assigned.topic("moved").expect("topic").topic_id;
+        let shard = crate::wal::quorum::registry::ShardId {
+            topic_id,
+            partition: PartitionIndex(0),
+        };
+        supervisor.wal_shards.insert(
+            shard,
+            Arc::new(crate::wal::quorum::engine::WalShardEngine::for_logs(
+                std::collections::BTreeMap::from([(NodeId(2), original.log.clone())]),
+            )),
+        );
+        let wal_dir =
+            crate::wal::quorum::shard_dir(dir.path(), "moved", Some(topic_id), PartitionIndex(0));
+        std::fs::create_dir_all(&wal_dir).expect("WAL shard directory");
+
+        supervisor.reconcile(&reassigned).await;
+
+        assert!(!partitions.contains("moved", PartitionIndex(0)));
+        assert!(!dir.path().join("moved-0").exists());
+        assert!(supervisor.wal_shards.get(shard).is_none());
+        assert!(!wal_dir.exists());
+        assert!(original.take_writer_handle().is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_partition_until_its_metadata_record_arrives() {
+        let image = image_with(&[topic_record("pending", 1)]);
+        let (supervisor, partitions, _reporter, dir) = supervisor_fixture(image.clone());
+        supervisor
+            .materialize_local_partition(&image, "pending", 0)
+            .expect("startup partition");
+        let original = partitions
+            .get("pending", PartitionIndex(0))
+            .expect("startup partition");
+
+        supervisor.reconcile(&image).await;
+
+        let current = partitions
+            .get("pending", PartitionIndex(0))
+            .expect("pending metadata must not delete local storage");
+        assert!(Arc::ptr_eq(&original, &current));
+        assert!(dir.path().join("pending-0").exists());
+    }
+
+    #[test]
+    fn remove_partition_dir_is_idempotent_but_reports_other_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing");
+        remove_partition_dir(&missing).expect("missing directory is already removed");
+
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"not a directory").expect("test file");
+        assert!(remove_partition_dir(&file).is_err());
     }
 
     #[tokio::test]
