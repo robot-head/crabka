@@ -127,13 +127,16 @@ impl ReplicaState {
         self.hw
     }
 
-    /// Recompute the high watermark after the WAL has made records durable up
-    /// to `durable_leo`. Identical HW arithmetic to
-    /// [`Self::recompute_hw_for_leader_append`], but it has its own name
-    /// because the diskless path advances the HW only AFTER an `fsync`. The
-    /// `acks=all` gate then observes durability, not just an append.
+    /// Advance the high watermark after the WAL has made records durable up to
+    /// `durable_leo`.
+    ///
+    /// The WAL quorum replaces the partition ISR as the durability authority
+    /// for diskless records. Applying [`Self::compute_hw`] here would combine
+    /// two independent quorums and could pin the client-visible watermark to a
+    /// Kafka follower's stale LEO after the WAL quorum had already committed
+    /// the records. The watermark remains monotonic within this runtime.
     pub(crate) fn recompute_hw_for_wal_durable(&mut self, durable_leo: Offset) -> Offset {
-        self.hw = self.compute_hw(durable_leo);
+        self.hw = self.hw.max(durable_leo);
         self.hw
     }
 
@@ -349,6 +352,31 @@ mod tests {
         s.install_isr(&[NodeId(1)], &[NodeId(1)], NodeId(1), now());
         let hw = s.recompute_hw_for_wal_durable(o(5));
         assert!(hw == o(5));
+    }
+
+    #[test]
+    fn wal_durable_hw_is_independent_of_partition_isr_progress() {
+        let mut s = fresh();
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            now(),
+        );
+
+        let hw = s.recompute_hw_for_wal_durable(o(5));
+
+        assert!(hw == o(5));
+        assert!(s.per_follower.get(&NodeId(2)).map(|f| f.leo) == Some(o(0)));
+        assert!(s.per_follower.get(&NodeId(3)).map(|f| f.leo) == Some(o(0)));
+    }
+
+    #[test]
+    fn wal_durable_hw_does_not_regress() {
+        let mut s = fresh();
+        assert!(s.recompute_hw_for_wal_durable(o(8)) == o(8));
+
+        assert!(s.recompute_hw_for_wal_durable(o(5)) == o(8));
     }
 
     #[test]
