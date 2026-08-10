@@ -254,7 +254,7 @@ impl JoinCondition {
             ));
         }
         let on_predicate = match constraint {
-            JoinConstraint::On(predicate) => Some(BoundExpr::new(predicate, &combined_scope)),
+            JoinConstraint::On(predicate) => Some(BoundExpr::new(predicate, &combined_scope)?),
             _ => None,
         };
         Ok(Self {

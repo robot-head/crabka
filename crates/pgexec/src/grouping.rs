@@ -400,7 +400,7 @@ fn augmented_rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut out = Vec::with_capacity(rows.len().saturating_mul(plan.sets.len()));
     let mut bytes = 0usize;
-    let group_by = crate::bind::bind_all(&plan.group_by, scope);
+    let group_by = crate::bind::bind_all(&plan.group_by, scope)?;
     for row in rows {
         // The grouping expressions are evaluated once per input row; a set only
         // decides which of those values survives into its key.

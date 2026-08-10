@@ -5264,6 +5264,7 @@ async fn execute_view_dml(
             let target_rows =
                 build_from(&read, std::slice::from_ref(&target_expr), None, None, None)?.rows;
             let source = DmlSource::build(write_ctx, ctes, &view, qualifier, from)?;
+            let bound_filter = source.bind_filter(filter.as_ref())?;
             let targets = resolve_assignments(write_ctx, ctes, &view, assignments)?;
             let spec = ReturningSpec::new(
                 &view,
@@ -5279,7 +5280,7 @@ async fn execute_view_dml(
             let mut returned = Vec::new();
             let mut count = 0_u64;
             for old in target_rows {
-                let Some(joined) = source.first_match(filter.as_ref(), &old, ctx)? else {
+                let Some(joined) = source.first_match(bound_filter.as_ref(), &old, ctx)? else {
                     continue;
                 };
                 let proposed = apply_assignments(&view, &targets, &source.scope, &joined, ctx)?;
@@ -5335,6 +5336,7 @@ async fn execute_view_dml(
             let target_rows =
                 build_from(&read, std::slice::from_ref(&target_expr), None, None, None)?.rows;
             let source = DmlSource::build(write_ctx, ctes, &view, qualifier, using)?;
+            let bound_filter = source.bind_filter(filter.as_ref())?;
             let spec = ReturningSpec::new(
                 &view,
                 qualifier,
@@ -5345,7 +5347,7 @@ async fn execute_view_dml(
             let mut returned = Vec::new();
             let mut count = 0_u64;
             for old in target_rows {
-                let Some(joined) = source.first_match(filter.as_ref(), &old, ctx)? else {
+                let Some(joined) = source.first_match(bound_filter.as_ref(), &old, ctx)? else {
                     continue;
                 };
                 let Some(result) = crate::trigger::fire_instead_row(
@@ -5641,6 +5643,7 @@ async fn execute_write_body(
             let fk_ctx = crate::fk::StatementFkContext::resolve(catalog_kv, &t)?;
             let qualifier = table_qualifier(&t, alias);
             let source = DmlSource::build(write_ctx, ctes, &t, qualifier, from)?;
+            let bound_filter = source.bind_filter(filter.as_ref())?;
             let targets = resolve_assignments(write_ctx, ctes, &t, assignments)?;
             let spec = ReturningSpec::new(
                 &t,
@@ -5670,7 +5673,7 @@ async fn execute_write_body(
                 //    that don't match the WHERE clause (avoids over-locking and
                 //    restores row-level write concurrency for different rows).
                 if source
-                    .first_match(filter.as_ref(), &scanned_row, ctx)?
+                    .first_match(bound_filter.as_ref(), &scanned_row, ctx)?
                     .is_none()
                 {
                     continue;
@@ -5698,7 +5701,7 @@ async fn execute_write_body(
                 //    A joined UPDATE updates each target row once, using the first
                 //    source row it matches (PostgreSQL leaves the choice
                 //    unspecified when several match).
-                let Some(joined) = source.first_match(filter.as_ref(), &cur_row, ctx)? else {
+                let Some(joined) = source.first_match(bound_filter.as_ref(), &cur_row, ctx)? else {
                     continue; // no longer matches the WHERE clause
                 };
                 // 5. PostgreSQL modifies a given row at most once per command, so
@@ -5788,6 +5791,7 @@ async fn execute_write_body(
             let is_truncate = writes.truncate_set.contains(&t.id);
             let qualifier = table_qualifier(&t, alias);
             let source = DmlSource::build(write_ctx, ctes, &t, qualifier, using)?;
+            let bound_filter = source.bind_filter(filter.as_ref())?;
             let spec = ReturningSpec::new(
                 &t,
                 qualifier,
@@ -5822,7 +5826,7 @@ async fn execute_write_body(
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause.
                 if source
-                    .first_match(filter.as_ref(), &scanned_row, ctx)?
+                    .first_match(bound_filter.as_ref(), &scanned_row, ctx)?
                     .is_none()
                 {
                     continue;
@@ -5845,7 +5849,7 @@ async fn execute_write_body(
                     continue; // already deleted by a concurrent committed txn
                 };
                 // 4. Re-check filter on the (possibly re-found) current row.
-                let Some(joined) = source.first_match(filter.as_ref(), &cur_row, ctx)? else {
+                let Some(joined) = source.first_match(bound_filter.as_ref(), &cur_row, ctx)? else {
                     continue; // no longer matches the WHERE clause
                 };
                 // 5. A row another part of this statement already updated or
@@ -6071,15 +6075,27 @@ impl DmlSource {
         if self.joined { None } else { filter }
     }
 
+    /// Bind the statement's `WHERE` against the combined scope, once, before
+    /// the candidate loop. The index probe keeps the source spelling — it reads
+    /// column NAMES to match an index — so only [`Self::first_match`] takes the
+    /// bound form.
+    fn bind_filter(
+        &self,
+        filter: Option<&Expr>,
+    ) -> Result<Option<crate::bind::BoundExpr>, ExecError> {
+        crate::bind::bind_optional(filter, &self.scope)
+    }
+
     /// The first source row that satisfies `filter` for this target row, as the
     /// combined row expressions resolve against. `None` means the target row is
     /// not affected by the statement.
     fn first_match(
         &self,
-        filter: Option<&Expr>,
+        filter: Option<&crate::bind::BoundExpr>,
         target_row: &[Datum],
         ctx: &crate::clock::EvalCtx,
     ) -> Result<Option<Vec<Datum>>, ExecError> {
+        let filter = filter.map(crate::bind::BoundExpr::expr);
         for source_row in &self.rows {
             let mut combined = target_row.to_vec();
             combined.extend_from_slice(source_row);
@@ -6803,7 +6819,7 @@ async fn execute_merge(
 
     // Every (source, target) pair evaluates the same ON condition, so its
     // column references are resolved once against the joined scope.
-    let on_bound = crate::bind::BoundExpr::new(on, &scope);
+    let on_bound = crate::bind::BoundExpr::new(on, &scope)?;
     for source_row in &source_rel.rows {
         let mut any_match = false;
         for (rowid, _xmin, target_row) in &target_rows {
@@ -10488,7 +10504,7 @@ fn execute_timestamp_update(
         )
         .collect::<Result<Vec<_>, ExecError>>()?;
     let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, None, RowInterval::ALL)?;
-    let filter = crate::bind::bind_optional(filter, &scope);
+    let filter = crate::bind::bind_optional(filter, &scope)?;
     let filter = filter.as_ref().map(crate::bind::BoundExpr::expr);
     let mut writes = Vec::new();
     for ScannedRow { rowid, row, .. } in rows {
@@ -10574,7 +10590,7 @@ fn execute_timestamp_delete(
 ) -> Result<TimestampWritePlan, ExecError> {
     let scope = Scope::single(table, &table.name.name);
     let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, None, RowInterval::ALL)?;
-    let filter = crate::bind::bind_optional(filter, &scope);
+    let filter = crate::bind::bind_optional(filter, &scope)?;
     let filter = filter.as_ref().map(crate::bind::BoundExpr::expr);
     let mut writes = Vec::new();
     for ScannedRow { rowid, row, .. } in rows {
@@ -12074,7 +12090,7 @@ fn filter_relation(
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
     let rows = std::mem::take(&mut relation.rows);
-    let predicate = crate::bind::BoundExpr::new(predicate, &relation.scope);
+    let predicate = crate::bind::BoundExpr::new(predicate, &relation.scope)?;
     for row in rows {
         if row_matches(Some(predicate.expr()), &relation.scope, &row, ctx)? {
             relation.rows.push(row);
@@ -17462,7 +17478,7 @@ pub(crate) fn select_to_relation_with_ctes(
     // The uncorrelated filter is the same expression for every row, so its
     // column references are resolved once here instead of once per row.
     let bound_filter = if binder.is_none() {
-        crate::bind::bind_optional(s.filter.as_ref(), &relation.scope)
+        crate::bind::bind_optional(s.filter.as_ref(), &relation.scope)?
     } else {
         None
     };
@@ -21601,7 +21617,7 @@ pub(crate) async fn execute_read_locking(
 
     // The uncorrelated filter is the same expression for every scanned row.
     let bound_filter = if binder.is_none() {
-        crate::bind::bind_optional(s.filter.as_ref(), &scope)
+        crate::bind::bind_optional(s.filter.as_ref(), &scope)?
     } else {
         None
     };
@@ -21610,7 +21626,7 @@ pub(crate) async fn execute_read_locking(
     // they do for `inherited_scan`, and they are asked before the lock rather
     // than after the scan — see [`crate::rls::LockingReadGate`].
     let gate = crate::rls::LockingReadGate::compile(read_ctx, &t)?;
-    let bound_gate = crate::bind::bind_optional(gate.qual(), &scope);
+    let bound_gate = crate::bind::bind_optional(gate.qual(), &scope)?;
     let bound_gate = bound_gate.as_ref().map(crate::bind::BoundExpr::expr);
 
     // Scan visible rows, then lock and EvalPlanQual-recheck each one.
@@ -21886,7 +21902,7 @@ fn key_source_rows(
             SelectOrderKey::Output(i) => crate::bind::BoundExpr::new(&out_exprs[*i], scope),
             SelectOrderKey::SourceExpr(expr) => crate::bind::BoundExpr::new(expr, scope),
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let mut keyed: KeyedRows = Vec::with_capacity(rows.len());
     let mut keyed_bytes = 0usize;
     for row in rows {
@@ -22051,7 +22067,7 @@ fn keep_first_per_distinct_on_group(
     scope: &Scope,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<KeyedRows, ExecError> {
-    let on = crate::bind::bind_all(on, scope);
+    let on = crate::bind::bind_all(on, scope)?;
     let mut out: KeyedRows = Vec::new();
     let mut previous: Option<Vec<Datum>> = None;
     for (keys, row) in keyed {
@@ -22103,7 +22119,7 @@ pub(crate) fn project_rows(
     rows: &[Vec<Datum>],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let out_exprs = crate::bind::bind_all(out_exprs, scope);
+    let out_exprs = crate::bind::bind_all(out_exprs, scope)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut cells = Vec::with_capacity(out_exprs.len());

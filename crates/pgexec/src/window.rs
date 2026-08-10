@@ -1226,7 +1226,7 @@ fn eval_key_rows<'a>(
     // their column references are resolved once here.
     let exprs: Vec<crate::bind::BoundExpr> = exprs
         .map(|expr| crate::bind::BoundExpr::new(expr, scope))
-        .collect();
+        .collect::<Result<_, _>>()?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut key = Vec::with_capacity(exprs.len());

@@ -13365,6 +13365,13 @@ impl SqlSession {
                 },
             )?;
             let ctx = self.eval_ctx();
+            // The WHERE is the same expression for every page, so it is bound
+            // once here — as the materializing path binds it — rather than
+            // re-resolved by name for every row. Binding it before the first
+            // page is also what reports a reference that does not resolve when
+            // the scan returns no row at all.
+            let bound_filter = crate::bind::bind_optional(select.filter.as_ref(), &scope)?;
+            let bound_filter = bound_filter.as_ref().map(crate::bind::BoundExpr::expr);
             // LIMIT/OFFSET are arbitrary expressions; the streaming cursor
             // needs them as counts, so they are evaluated once up front just
             // as the materializing path does.
@@ -13390,12 +13397,7 @@ impl SqlSession {
                 let page = cursor.next_page(page_rows).await?;
                 let mut source_rows = Vec::with_capacity(page.rows.len());
                 for scanned in page.rows {
-                    if !crate::exec::row_matches(
-                        select.filter.as_ref(),
-                        &scope,
-                        &scanned.row,
-                        &ctx,
-                    )? {
+                    if !crate::exec::row_matches(bound_filter, &scope, &scanned.row, &ctx)? {
                         continue;
                     }
                     if offset > 0 {

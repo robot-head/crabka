@@ -2850,7 +2850,7 @@ pub(crate) fn aggregate_rows(
     let mut group_bytes = 0usize;
     // The grouping keys are the same expressions for every row, so resolve
     // their column references once rather than once per row.
-    let bound_group_by = crate::bind::bind_all(&group_by, scope);
+    let bound_group_by = crate::bind::bind_all(&group_by, scope)?;
     for row in &rows {
         let mut key = Vec::with_capacity(bound_group_by.len());
         for g in &bound_group_by {
