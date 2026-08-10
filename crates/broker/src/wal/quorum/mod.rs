@@ -66,11 +66,7 @@ impl QuorumWalStore {
             .config_snapshot();
         let mut replicas = Vec::with_capacity(replica_count);
         replicas.push(engine::WalReplica::new(NodeId(0), source.clone()));
-        let root = log_dir.join("__diskless_wal_quorum").join(format!(
-            "{}-{}",
-            sanitize_topic(topic),
-            partition.0
-        ));
+        let root = shard_dir(log_dir, topic, topic_id, partition);
         for id in 1..replica_count {
             let id = NodeId(u64::try_from(id).map_err(|_| {
                 BrokerError::Replication("diskless WAL replica count exceeds u64".into())
@@ -209,6 +205,39 @@ fn sanitize_topic(topic: &str) -> String {
         .collect()
 }
 
+#[must_use]
+pub(crate) fn shard_dir(
+    log_dir: &std::path::Path,
+    topic: &str,
+    topic_id: Option<Uuid>,
+    partition: PartitionIndex,
+) -> std::path::PathBuf {
+    let identity = topic_id.map_or_else(
+        || sanitize_topic(topic),
+        |topic_id| format!("{}-{topic_id}", sanitize_topic(topic)),
+    );
+    log_dir
+        .join("__diskless_wal_quorum")
+        .join(format!("{identity}-{}", partition.0))
+}
+
+pub(crate) fn remove_shard(
+    registry: &registry::WalShardRegistry,
+    log_dir: &std::path::Path,
+    topic: &str,
+    topic_id: Uuid,
+    partition: PartitionIndex,
+) -> std::io::Result<()> {
+    registry.remove(registry::ShardId {
+        topic_id,
+        partition,
+    });
+    match fs::remove_dir_all(shard_dir(log_dir, topic, Some(topic_id), partition)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
 #[async_trait]
 impl WalStore for QuorumWalStore {
     async fn sync_durable(&self, leo: Offset) -> Result<Offset, BrokerError> {
@@ -253,6 +282,35 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn shard_directory_distinguishes_same_name_topic_recreations() {
+        let root = std::path::Path::new("data");
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+
+        let first = shard_dir(root, "orders", Some(first_id), PartitionIndex(3));
+        let second = shard_dir(root, "orders", Some(second_id), PartitionIndex(3));
+
+        assert!(first != second);
+        assert!(first.ends_with(format!("orders-{first_id}-3")));
+        assert!(second.ends_with(format!("orders-{second_id}-3")));
+    }
+
+    #[test]
+    fn remove_shard_is_idempotent_but_reports_other_io_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = registry::WalShardRegistry::new();
+        let topic_id = Uuid::from_u128(3);
+        let partition = PartitionIndex(4);
+
+        remove_shard(&registry, root.path(), "orders", topic_id, partition).unwrap();
+
+        let path = shard_dir(root.path(), "orders", Some(topic_id), partition);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"not a directory").unwrap();
+        assert!(remove_shard(&registry, root.path(), "orders", topic_id, partition).is_err());
     }
 
     #[test]

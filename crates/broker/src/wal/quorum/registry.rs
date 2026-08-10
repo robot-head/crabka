@@ -38,6 +38,10 @@ impl WalShardRegistry {
             .get(&shard_id)
             .map(|entry| entry.value().clone())
     }
+
+    pub(crate) fn remove(&self, shard_id: ShardId) -> Option<Arc<WalShardEngine>> {
+        self.engines.remove(&shard_id).map(|(_, engine)| engine)
+    }
 }
 
 /// Routes shard-addressed KIP-595 Fetch requests to the registered diskless

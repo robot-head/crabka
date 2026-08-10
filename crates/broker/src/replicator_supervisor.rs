@@ -610,15 +610,15 @@ impl ReplicatorSupervisor {
             let obsolete = known_topic_ids
                 .iter()
                 .filter(|(name, id)| current_topic_ids.get(*name) != Some(*id))
-                .map(|(name, _)| name.clone())
-                .collect::<HashSet<_>>();
+                .map(|(name, id)| (name.clone(), *id))
+                .collect::<HashMap<_, _>>();
             *known_topic_ids = current_topic_ids;
             obsolete
         };
         for partition in self.partitions.arcs() {
-            if !obsolete_topics.contains(&partition.topic) {
+            let Some(&topic_id) = obsolete_topics.get(&partition.topic) else {
                 continue;
-            }
+            };
             let topic = partition.topic.clone();
             let index = partition.index;
             let Some(removed) = self.partitions.remove(&topic, index) else {
@@ -626,6 +626,20 @@ impl ReplicatorSupervisor {
             };
             self.reported_dirs.remove(&(topic.clone(), index.get()));
             let owning_dir = removed.log_dir.load_full();
+            if let Err(error) = crate::wal::quorum::remove_shard(
+                self.wal_shards.as_ref(),
+                &owning_dir,
+                &topic,
+                topic_id,
+                index,
+            ) {
+                warn!(
+                    topic = %topic,
+                    partition = index.get(),
+                    error = %error,
+                    "failed to prune deleted topic WAL shard"
+                );
+            }
             let partition_dir = crate::log_dir::partition_dir(&owning_dir, &topic, index.get());
             if let Err(error) = std::fs::remove_dir_all(&partition_dir)
                 && error.kind() != std::io::ErrorKind::NotFound
@@ -1527,8 +1541,29 @@ mod tests {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let deleted_topic_id = active.topic("deleted").expect("deleted topic").topic_id;
+        let deleted_shard = crate::wal::quorum::registry::ShardId {
+            topic_id: deleted_topic_id,
+            partition: PartitionIndex(0),
+        };
+        supervisor.wal_shards.insert(
+            deleted_shard,
+            Arc::new(crate::wal::quorum::engine::WalShardEngine::for_logs(
+                std::collections::BTreeMap::from([(NodeId(2), original["deleted"].log.clone())]),
+            )),
+        );
+        let deleted_wal_dir = crate::wal::quorum::shard_dir(
+            dir.path(),
+            "deleted",
+            Some(deleted_topic_id),
+            PartitionIndex(0),
+        );
+        std::fs::create_dir_all(&deleted_wal_dir).expect("deleted WAL shard directory");
 
         supervisor.reconcile(&after_delete).await;
+
+        assert!(supervisor.wal_shards.get(deleted_shard).is_none());
+        assert!(!deleted_wal_dir.exists());
 
         let actual = ["deleted", "live", "recreated", "startup-only"]
             .into_iter()
