@@ -18458,6 +18458,29 @@ fn virtual_catalog_rows(
 /// A partition is always its parent's only inheritance step, so `inhseqno` is
 /// 1 and `inhdetachpending` false. The concurrent-detach flag has no state to
 /// report here, because detach is a single catalog batch.
+///
+/// # A parent name that resolves to nothing
+///
+/// `PostgreSQL` stores the parent as an oid, so a row whose parent is gone is
+/// still a row: it prints the number it holds and every join to `pg_class`
+/// simply misses. Measured on 18.4, with `inhparent` hand-set to an oid no
+/// relation carries, `SELECT * FROM pg_inherits` prints that number,
+/// `inhparent::regclass` renders it as digits rather than erroring, a
+/// `LEFT JOIN pg_class` yields NULL, and `\d` on the child, on the ex-parent
+/// and on an unrelated relation is unaffected.
+///
+/// crabka stores the parent as a *name*, and a name that resolves to nothing
+/// has no oid to print. It gets [`UNRESOLVED_PARENT_OID`], which is the one
+/// value guaranteed to resolve to nothing, so every join behaves as it does
+/// against `PostgreSQL`'s dangling oid.
+///
+/// The row is kept rather than dropped, and that is the whole point of the
+/// treatment. This projection used to raise `UndefinedTable` for the *whole*
+/// statement, so one stale key took `SELECT * FROM pg_inherits` — and so psql's
+/// `\d` on every relation in the database — down with it. Dropping the row
+/// instead would trade that for the opposite failure: the catalog would look
+/// healthy and the missing link would be invisible. One odd row is what a
+/// catalog table owes.
 fn pg_inherits_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let tables = crabka_pgcatalog::list_tables(catalog_kv)?;
     let table_ids = tables
@@ -18471,14 +18494,14 @@ fn pg_inherits_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             parents.push(parent);
         }
         for (index, parent) in parents.into_iter().enumerate() {
-            let parent_id = table_ids.get(&parent).copied().ok_or_else(|| {
-                ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(
-                    parent.to_string(),
-                ))
-            })?;
+            let parent_oid = table_ids
+                .get(&parent)
+                .map_or(Ok(UNRESOLVED_PARENT_OID), |id| {
+                    crate::catalog_rel::table_relation_oid(*id)
+                })?;
             rows.push(vec![
                 int(crate::catalog_rel::table_relation_oid(table.id)?),
-                int(crate::catalog_rel::table_relation_oid(parent_id)?),
+                int(parent_oid),
                 int(i32::try_from(index + 1).unwrap_or(i32::MAX)),
                 Datum::Bool(false),
             ]);
@@ -18486,6 +18509,14 @@ fn pg_inherits_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     }
     Ok(rows)
 }
+
+/// The `inhparent` of a `pg_inherits` row whose stored parent name resolves to
+/// no relation.
+///
+/// `InvalidOid` — `PostgreSQL`'s own "no such object" oid, and outside every
+/// oid band [`crate::catalog_rel`] hands out, so it can never collide with a
+/// live relation and make the row read as a link to the wrong table.
+const UNRESOLVED_PARENT_OID: i32 = 0;
 
 /// `pg_partitioned_table`: one row per partitioned parent.
 fn pg_partitioned_table_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -34694,6 +34725,69 @@ mod tests {
             )
             .await
                 == vec![text_row(&["ic", "ip", "1"]), text_row(&["ic2", "ip", "1"])]
+        );
+    }
+
+    /// A stored parent name that resolves to no relation costs *that row* its
+    /// parent oid, and costs nothing else.
+    ///
+    /// It used to cost the whole projection. The parent lookup raised
+    /// `UndefinedTable` for the statement, so one stale key took
+    /// `SELECT * FROM pg_inherits` — and psql's `\d` on every relation in the
+    /// database — down with it, including relations with no inheritance at all.
+    ///
+    /// The store is built directly rather than through statements because the
+    /// guard has to hold for a key no statement is supposed to leave: one
+    /// written by a crash, a partial batch, or a producer bug not yet found.
+    /// Fixing a producer removes today's route to the state; it does not make
+    /// the projection total.
+    #[test]
+    fn an_unresolvable_parent_costs_one_row_its_oid_not_the_projection() {
+        use assert2::assert;
+        use crabka_pgkv::Kv as _;
+        use crabka_pgtypes::{ColumnType, Datum};
+
+        let kv = crabka_pgkv::MemKv::new();
+        let column = || vec![crabka_pgcatalog::Column::new("i", ColumnType::Int4)];
+        let healthy = RelationName::public("amp_parent");
+        let child = RelationName::public("amp_child");
+        let gone = RelationName::public("amp_departed");
+        let healthy_id =
+            crabka_pgcatalog::create_table(&kv, &healthy, column()).expect("create the parent");
+        let child_id =
+            crabka_pgcatalog::create_table(&kv, &child, column()).expect("create the child");
+        // `amp_departed` is never created: the child's list names a relation
+        // the catalog does not hold, which is the state under test.
+        kv.write_batch(&crate::inheritance::attach_ops(
+            &child,
+            &[healthy.clone(), gone],
+        ))
+        .expect("link the child to both names");
+
+        let oid = |id| crate::catalog_rel::table_relation_oid(id).expect("oid");
+        assert!(
+            super::pg_inherits_rows(&kv).expect("pg_inherits stays readable")
+                == vec![
+                    vec![
+                        Datum::Int4(oid(child_id)),
+                        Datum::Int4(oid(healthy_id)),
+                        Datum::Int4(1),
+                        Datum::Bool(false),
+                    ],
+                    vec![
+                        Datum::Int4(oid(child_id)),
+                        Datum::Int4(super::UNRESOLVED_PARENT_OID),
+                        Datum::Int4(2),
+                        Datum::Bool(false),
+                    ],
+                ]
+        );
+        // The substitute has to resolve to nothing, or the row would read as a
+        // link to whichever relation did carry that oid.
+        assert!(
+            crate::catalog_rel::relation_for_oid(&kv, super::UNRESOLVED_PARENT_OID)
+                .expect("reverse lookup")
+                .is_none()
         );
     }
 
