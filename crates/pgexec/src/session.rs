@@ -6328,10 +6328,11 @@ impl SqlSession {
                 crate::telemetry::record_parse_statements(&span, statements.len());
                 Ok(statements)
             }
-            Err(error) => {
-                let error = error.into_pg();
+            Err(parsed) => {
+                let error = parsed.clone().into_pg();
                 crate::telemetry::record_error(&span, &error.code, &error.message);
                 self.mark_transaction_failed();
+                let error = attach_parsed_bit_string_position(sql, &parsed, error);
                 // A qualified interval literal — `interval '1 2' day to minute`
                 // — is decoded here and not at execution time, because the
                 // qualifier is a property of the literal. PostgreSQL still
@@ -13652,9 +13653,14 @@ fn resolve_ordering_family_oid(
 }
 
 fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    // `attach_hidden_target_alias_diagnostic` guards on the whole diagnostics
+    // struct rather than on the position, so it has to run before anything that
+    // can create one.
     let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
+    let error = attach_reg_cast_literal_position(sql, error);
     attach_undefined_function_position(
         sql,
+        stmt,
         attach_range_literal_position(sql, attach_type_input_literal_position(sql, error)),
     )
 }
@@ -14165,13 +14171,32 @@ fn attach_hidden_target_alias_diagnostic(
         .with_position(*position)
 }
 
-fn attach_undefined_function_position(sql: &str, error: PgError) -> PgError {
+/// Point at the call that named a function `PostgreSQL` could not resolve.
+///
+/// A *query* resolves the name during parse analysis and reports the call's
+/// position; a utility statement whose whole subject is a routine looks the
+/// name up afterwards, from a parse tree that no longer carries the source, and
+/// reports no position at all. Measured on 18.4: `DROP FUNCTION nosuch()`,
+/// `ALTER FUNCTION nosuch() RENAME TO …`, `COMMENT ON FUNCTION nosuch()`,
+/// `DROP AGGREGATE nosuch(int)` and `ALTER TABLE t ALTER COLUMN a SET DEFAULT
+/// nosuch()` are all bare, while `SELECT nosuch(1)`, `CREATE TABLE t (a int
+/// DEFAULT nosuch())` and even `CREATE INDEX ON t ((nosuch(a)))` carry a caret.
+fn attach_undefined_function_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
     use crabka_pgparser::token::Token;
 
     if sql
         .trim_start()
         .to_ascii_lowercase()
         .starts_with("alter operator family")
+        || matches!(
+            stmt,
+            Statement::DropRoutine { .. }
+                | Statement::AlterRoutine { .. }
+                | Statement::DropAggregate { .. }
+                | Statement::AlterAggregate { .. }
+                | Statement::AlterTable { .. }
+                | Statement::Comment { .. }
+        )
     {
         return error;
     }
@@ -14208,8 +14233,114 @@ fn attach_undefined_function_position(sql: &str, error: PgError) -> PgError {
     }
 }
 
+/// Point at the bit-string literal whose digits `bit_in` rejected.
+///
+/// A `B'…'`/`X'…'` literal is decoded while the statement is *parsed*, because
+/// `PostgreSQL` runs `bit_in` in its own grammar too, so this failure never
+/// reaches [`attach_known_runtime_diagnostics`] — the same reason a qualified
+/// interval literal is handled on the parse path. The parser already noted
+/// where the literal was written, which is exactly where `PostgreSQL` points;
+/// only the conversion to a wire error dropped it.
+fn attach_parsed_bit_string_position(sql: &str, parsed: &ExecError, error: PgError) -> PgError {
+    let ExecError::Parse(parsed) = parsed else {
+        return error;
+    };
+    if error.code != "22P02"
+        || !(error.message.ends_with("\" is not a valid binary digit")
+            || error
+                .message
+                .ends_with("\" is not a valid hexadecimal digit"))
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Some(prefix) = sql.get(..parsed.position) else {
+        return error;
+    };
+    error.with_position(prefix.chars().count() + 1)
+}
+
+/// Point at the string constant a `reg*` cast could not resolve.
+///
+/// `regclass('pg_classes')` is a cast written in function-call form, so the name
+/// it fails to resolve is a *constant*, not an identifier, and `PostgreSQL`
+/// points at the constant. Every `reg*` input function reports what the name
+/// should have been rather than the usual `invalid input syntax`, which is why
+/// these reach here rather than [`attach_type_input_literal_position`]:
+/// `regrole('nosuch')` is `role "nosuch" does not exist`, `regnamespace` is a
+/// `schema`, `regproc` a `function`, `regoper` an `operator`, `regtype` a `type`
+/// and `regclass` a `relation`.
+///
+/// Only the function-call spelling qualifies. PostgreSQL points at the constant
+/// for `'x'::regclass` and `CAST('x' AS regclass)` just the same, but those two
+/// are how a *query about a relation* names it — `pg_get_indexdef('i'::regclass)`
+/// — so whenever Crabka fails such a query for its own reasons the message ends
+/// in `does not exist` and names the very relation the cast spells. Measured on
+/// the 18.4 corpus, admitting them blames the constant in 104 places where
+/// PostgreSQL raises nothing at all, against 14 places gained; the call spelling
+/// alone gains the same 14 and costs none.
+fn attach_reg_cast_literal_position(sql: &str, error: PgError) -> PgError {
+    use crabka_pgparser::token::Token;
+
+    /// The `reg*` types whose input function resolves a name in the catalog.
+    const REG_TYPES: &[&str] = &[
+        "regclass",
+        "regcollation",
+        "regconfig",
+        "regdictionary",
+        "regnamespace",
+        "regoper",
+        "regoperator",
+        "regproc",
+        "regprocedure",
+        "regrole",
+        "regtype",
+    ];
+
+    // 42P01 undefined_table, 42704 undefined_object, 42883 undefined_function
+    // and 3F000 invalid_schema_name are the four a `reg*` lookup can raise.
+    if !matches!(error.code.as_str(), "42P01" | "42704" | "42883" | "3F000")
+        || !error.message.ends_with(" does not exist")
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let is_reg =
+        |token: &Token| matches!(token, Token::Ident(name) if REG_TYPES.contains(&name.as_str()));
+    let positions: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (token, offset))| {
+            if !matches!(token, Token::StringLit(_)) {
+                return None;
+            }
+            index
+                .checked_sub(2)
+                .is_some_and(|name| is_reg(&tokens[name].0) && tokens[name + 1].0 == Token::LParen)
+                .then_some(sql[..*offset].chars().count() + 1)
+        })
+        .collect();
+    match positions.as_slice() {
+        [position] => error.with_position(*position),
+        _ => error,
+    }
+}
+
 /// Add PostgreSQL's caret only when the source proves which range cast failed.
 /// General runtime errors and ambiguous repeated literals remain undecorated.
+///
+/// A multirange is the same shape of failure written against the same shape of
+/// cast — `'{(a,])}'::textmultirange` — and its type name ends in `range` too,
+/// so it needs only its own message prefix.
 fn attach_range_literal_position(sql: &str, error: PgError) -> PgError {
     use crabka_pgparser::token::Token;
 
@@ -14218,6 +14349,7 @@ fn attach_range_literal_position(sql: &str, error: PgError) -> PgError {
         .as_ref()
         .is_some_and(|diagnostics| diagnostics.position.is_some())
         || !(error.message.starts_with("malformed range literal:")
+            || error.message.starts_with("malformed multirange literal:")
             || error.message.starts_with("range lower bound must be"))
     {
         return error;
@@ -14374,6 +14506,13 @@ impl Session for SqlSession {
                 // The streaming fast path bypasses `run_one`, so run its
                 // epilogue here — a projected `pg_notify()` must still deliver
                 // at the end of an autocommit statement.
+                //
+                // It bypasses the diagnostics the ordinary path attaches too.
+                // Measured on the 18.4 corpus, closing that gap costs 48 places
+                // and gains none: the failures this cursor reports for a
+                // single-relation select are overwhelmingly ones PostgreSQL
+                // does not report at all, and a caret on an error PostgreSQL
+                // never raises is two more lines of divergence, not fewer.
                 self.finish_statement(stmt, result.map(|()| QueryResult::Empty))
                     .await
                     .map_err(ExecError::into_pg)?;
@@ -14749,7 +14888,9 @@ impl Session for SqlSession {
         let statements =
             crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
                 self.mark_transaction_failed();
-                attach_type_input_literal_position(sql, ExecError::from(error).into_pg())
+                let error = ExecError::from(error);
+                let reported = attach_type_input_literal_position(sql, error.clone().into_pg());
+                attach_parsed_bit_string_position(sql, &error, reported)
             })?;
         let parsed = single_copy_from_stdin(&statements)?;
         self.copy_probe = Some((sql.to_string(), statements));
@@ -14770,7 +14911,9 @@ impl Session for SqlSession {
                 let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
                 crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
                     self.mark_transaction_failed();
-                    attach_type_input_literal_position(sql, ExecError::from(error).into_pg())
+                    let error = ExecError::from(error);
+                    let reported = attach_type_input_literal_position(sql, error.clone().into_pg());
+                    attach_parsed_bit_string_position(sql, &error, reported)
                 })?
             }
         };
@@ -21452,6 +21595,19 @@ mod session_conformance_tests {
                 == Some(8)
         );
 
+        // A multirange fails the same way against the same shape of cast.
+        let multirange = session
+            .simple_query("SELECT '{(a,])}'::int4multirange")
+            .await
+            .expect_err("invalid multirange");
+        assert!(
+            multirange
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8)
+        );
+
         let undecorated = super::attach_range_literal_position(
             "SELECT ''::int4range, ''::int4range",
             crabka_pgwire::error::PgError::error("22P02", "malformed range literal: \"\""),
@@ -21499,6 +21655,7 @@ mod session_conformance_tests {
 
         let ambiguous = super::attach_undefined_function_position(
             "SELECT missing(1), missing(2)",
+            &only_statement("SELECT missing(1), missing(2)"),
             crabka_pgwire::error::PgError::error(
                 "42883",
                 "function missing(integer) does not exist",
@@ -21512,8 +21669,10 @@ mod session_conformance_tests {
                 .is_none(),
             "an ambiguous call is not guessed"
         );
+        let family = "ALTER OPERATOR FAMILY f USING btree ADD FUNCTION 5 missing(internal)";
         let utility_signature = super::attach_undefined_function_position(
-            "ALTER OPERATOR FAMILY f USING btree ADD FUNCTION 5 missing(internal)",
+            family,
+            &only_statement(family),
             crabka_pgwire::error::PgError::error(
                 "42883",
                 "function missing(internal) does not exist",
@@ -21526,6 +21685,213 @@ mod session_conformance_tests {
                 .and_then(|diagnostics| diagnostics.position)
                 .is_none()
         );
+    }
+
+    /// The one statement `sql` parses to, for the diagnostics helpers that ask
+    /// what kind of statement raised the error.
+    fn only_statement(sql: &str) -> crabka_pgparser::ast::Statement {
+        let mut statements = crabka_pgparser::parse(sql).expect("parses");
+        assert!(statements.len() == 1, "{sql} is one statement");
+        statements.remove(0)
+    }
+
+    /// A statement whose whole subject is a routine looks its name up after
+    /// parse analysis, from a tree that no longer carries the source, so
+    /// PostgreSQL reports it with no position — measured on 18.4 for `DROP`,
+    /// `ALTER` and `COMMENT ON FUNCTION`, for `DROP AGGREGATE`, and for an
+    /// `ALTER TABLE … SET DEFAULT`. A query naming the same missing function
+    /// still carries its caret.
+    #[tokio::test]
+    async fn a_utility_statement_naming_a_missing_routine_stays_bare() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE bare (a int)")
+            .await
+            .expect("create");
+        for sql in [
+            "DROP FUNCTION definitely_missing()",
+            "DROP PROCEDURE definitely_missing()",
+            "ALTER FUNCTION definitely_missing() RENAME TO other",
+            "COMMENT ON FUNCTION definitely_missing() IS 'x'",
+            "DROP AGGREGATE definitely_missing(int)",
+            "ALTER TABLE bare ALTER COLUMN a SET DEFAULT definitely_missing()",
+        ] {
+            let error = session
+                .simple_query(sql)
+                .await
+                .expect_err("missing routine");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    .is_none(),
+                "{sql}: {error:?}"
+            );
+        }
+        let query = session
+            .simple_query("SELECT definitely_missing(1)")
+            .await
+            .expect_err("missing routine");
+        assert!(
+            query
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8)
+        );
+    }
+
+    /// A `reg*` cast resolves a *constant*, so PostgreSQL blames the constant
+    /// rather than any identifier the statement writes.
+    #[tokio::test]
+    async fn a_reg_cast_blames_the_name_it_was_handed() {
+        for (sql, position) in [
+            ("SELECT regclass('pg_classes')", Some(17)),
+            ("SELECT regrole('regress_no_such_role')", Some(16)),
+            // Two casts in one statement: which one failed is not knowable
+            // from the message.
+            ("SELECT regclass('a'), regclass('b')", None),
+            // The cast spellings are PostgreSQL's too, but they are also how a
+            // query about a relation names it, so they are left alone.
+            ("SELECT 'pg_classes'::regclass", None),
+            ("SELECT CAST('pg_classes' AS regclass)", None),
+        ] {
+            let error = super::attach_reg_cast_literal_position(
+                sql,
+                crabka_pgwire::error::PgError::error(
+                    "42P01",
+                    "relation \"pg_classes\" does not exist",
+                ),
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+        // A message under one of those SQLSTATEs that does not report a name is
+        // not a `reg*` failure at all.
+        let unrelated = crabka_pgwire::error::PgError::error("42P01", "relation is not a table");
+        assert!(
+            super::attach_reg_cast_literal_position("SELECT regclass('x')", unrelated.clone())
+                == unrelated
+        );
+    }
+
+    /// `bit_in` quotes the character it choked on, not the literal, so the
+    /// `b`/`x` marker is the only evidence of which literal failed.
+    #[tokio::test]
+    async fn a_bit_string_literal_carries_its_caret() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("SELECT b' 0'", Some(8)),
+            ("SELECT x'0 '", Some(8)),
+            ("SELECT 1, x'0 '", Some(11)),
+            // A binary complaint does not blame a hexadecimal literal.
+            ("SELECT b' 0', x'00'", Some(8)),
+            // Two bad literals need no guess, unlike the run-time attachments:
+            // the parser stopped on the first, which is the one PostgreSQL's
+            // own grammar stops on too.
+            ("SELECT b' 0', b' 1'", Some(8)),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("bad digit");
+            assert!(error.code == "22P02", "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+
+        // The wire loop's first look at a simple-query string is the copy-in
+        // probe, and the parse failure it reports is the one the client sees.
+        // `simple_query` never reaches it, so pin that path on its own.
+        let probed = session
+            .begin_copy_in("SELECT x'0 '")
+            .await
+            .expect_err("bad digit");
+        assert!(
+            probed
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8),
+            "{probed:?}"
+        );
+    }
+
+    /// The shared attachment runs on the failure path of every statement, so a
+    /// statement that succeeds, an error that already carries a position and an
+    /// error under a SQLSTATE none of the helpers own must all come through
+    /// unchanged.
+    #[tokio::test]
+    async fn the_diagnostics_pass_leaves_other_outcomes_alone() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE untouched (a int)",
+            "INSERT INTO untouched VALUES (1)",
+            "SELECT regclass FROM (SELECT 1 AS regclass) s",
+            "SELECT b'01', x'0f'",
+        ] {
+            assert!(session.simple_query(sql).await.is_ok(), "{sql}");
+        }
+        // A missing relation named by a utility statement is bare, and it is a
+        // `table` rather than a `relation` — both as PostgreSQL 18.4 has them.
+        let dropped = session
+            .simple_query("DROP TABLE definitely_missing")
+            .await
+            .expect_err("missing table");
+        assert!(dropped.message == "table \"definitely_missing\" does not exist");
+        assert!(
+            dropped
+                .diagnostics
+                .as_ref()
+                .and_then(|d| d.position)
+                .is_none()
+        );
+        let altered = session
+            .simple_query("ALTER TABLE definitely_missing ADD COLUMN b int")
+            .await
+            .expect_err("missing relation");
+        assert!(altered.message == "relation \"definitely_missing\" does not exist");
+        assert!(
+            altered
+                .diagnostics
+                .as_ref()
+                .and_then(|d| d.position)
+                .is_none()
+        );
+
+        // A position already chosen by an earlier helper is kept, and an error
+        // that is not a parse failure is left alone even when its message is
+        // one this helper owns.
+        let parsed = crate::error::ExecError::Parse(
+            crabka_pgparser::parse("SELECT b' 0'").expect_err("bad digit"),
+        );
+        let owned =
+            crabka_pgwire::error::PgError::error("22P02", "\" \" is not a valid binary digit");
+        let already = super::attach_parsed_bit_string_position(
+            "SELECT b' 0'",
+            &parsed,
+            owned.clone().with_position(3),
+        );
+        assert!(already.diagnostics.as_ref().and_then(|d| d.position) == Some(3));
+        let unparsed = super::attach_parsed_bit_string_position(
+            "SELECT b' 0'",
+            &crate::error::ExecError::Unsupported("not a parse failure".into()),
+            owned.clone(),
+        );
+        assert!(unparsed == owned);
     }
 
     /// An absolute location for `CREATE TABLESPACE`, spelled the way the host
