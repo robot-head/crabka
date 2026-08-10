@@ -245,7 +245,7 @@ pub struct BrokerConfig {
     pub client_metrics_stale_push_intervals: u32,
     /// Capacity of each coordinator actor mailbox.
     pub coordinator_actor_mailbox_capacity: usize,
-    /// Number of local durable replicas in each diskless WAL quorum.
+    /// Number of broker voters in each diskless WAL quorum.
     pub diskless_wal_local_replica_count: usize,
     /// Capacity of the unclean-recovery work queue.
     pub unclean_recovery_queue_capacity: usize,
@@ -1792,6 +1792,11 @@ impl BrokerConfig {
                 )));
             }
         }
+        if self.diskless_wal_local_replica_count.is_multiple_of(2) {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "diskless_wal_local_replica_count must be odd".into(),
+            ));
+        }
         for (name, value) in [
             ("audit_tail_read_max", self.audit_tail_read_max),
             ("share_recovery_read_max", self.share_recovery_read_max),
@@ -2549,6 +2554,9 @@ mod tests {
             }),
             ("diskless_wal_local_replica_count must be positive", |c| {
                 c.diskless_wal_local_replica_count = 0;
+            }),
+            ("diskless_wal_local_replica_count must be odd", |c| {
+                c.diskless_wal_local_replica_count = 2;
             }),
             ("unclean_recovery_queue_capacity must be positive", |c| {
                 c.unclean_recovery_queue_capacity = 0;

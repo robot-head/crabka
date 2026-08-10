@@ -1,6 +1,7 @@
 //! Quorum-backed diskless WAL implementation.
 
 pub(crate) mod engine;
+pub(crate) mod follower;
 pub(crate) mod log_view;
 pub(crate) mod placement;
 pub(crate) mod registry;
@@ -100,6 +101,29 @@ impl QuorumWalStore {
                 partition,
                 cache,
             });
+        Ok(Self {
+            source,
+            engine,
+            hot_tail,
+        })
+    }
+
+    pub(crate) fn for_distributed_partition(
+        topic_id: Uuid,
+        partition: PartitionIndex,
+        source: Arc<Mutex<Log>>,
+        hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
+        voter_count: usize,
+    ) -> Result<Self, BrokerError> {
+        let engine = Arc::new(WalShardEngine::new_distributed(
+            source.clone(),
+            voter_count,
+        )?);
+        let hot_tail = hot_tail.map(|cache| HotTailTarget {
+            topic_id,
+            partition,
+            cache,
+        });
         Ok(Self {
             source,
             engine,
@@ -383,7 +407,7 @@ mod tests {
     #[test]
     fn remove_shard_is_idempotent_but_reports_other_io_errors() {
         let root = tempfile::tempdir().unwrap();
-        let registry = registry::WalShardRegistry::new();
+        let registry = registry::WalShardRegistry::new(NodeId(0));
         let topic_id = Uuid::from_u128(3);
         let partition = PartitionIndex(4);
 
@@ -588,6 +612,136 @@ mod tests {
         assert!(fetch.log_start_offset == Offset(0));
         assert!(!fetch.offset_out_of_range);
         assert!(!fetch.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wal_fetch_accepts_the_log_end_and_a_zero_byte_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        let store = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source,
+            None,
+            3,
+        )
+        .unwrap();
+        let (_results, log_end) = append_source(&store, 1).await;
+
+        let at_end = store
+            .engine
+            .serve_fetch(log_end, ByteSize::from_bytes(u64::MAX))
+            .unwrap();
+        assert!(!at_end.offset_out_of_range);
+        assert!(at_end.records.is_empty());
+
+        let zero_bytes = store.engine.serve_fetch(Offset(0), ByteSize::ZERO).unwrap();
+        assert!(!zero_bytes.offset_out_of_range);
+        assert!(zero_bytes.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn distributed_wal_waits_for_a_remote_fsync_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        let store = Arc::new(
+            QuorumWalStore::for_distributed_partition(
+                Uuid::from_u128(99),
+                PartitionIndex(0),
+                source,
+                None,
+                3,
+            )
+            .unwrap(),
+        );
+        store
+            .engine
+            .configure_distributed(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        let (_results, leo) = append_source(&store, 1).await;
+        let syncing = Arc::clone(&store);
+        let mut sync = tokio::spawn(async move { syncing.sync_durable(leo).await });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut sync)
+                .await
+                .is_err()
+        );
+        assert!(!store.engine.record_follower_ack(NodeId(9), leo));
+        assert!(!store.engine.record_follower_ack(NodeId(1), leo));
+        assert!(
+            !store
+                .engine
+                .record_follower_ack(NodeId(2), Offset(leo.0 + 1))
+        );
+        assert!(store.engine.record_follower_ack(NodeId(2), leo));
+
+        assert!(sync.await.unwrap().unwrap() == leo);
+        assert!(store.engine.durable_watermark() == leo);
+        assert!(store.engine.replica_end_offsets() == vec![leo]);
+        assert!(store.trim_to_offset(leo).await.unwrap() == leo);
+        assert!(store.engine.replica_start_offsets() == vec![leo]);
+
+        let (_results, next) = append_source(&store, 1).await;
+        let syncing = Arc::clone(&store);
+        let mut sync = tokio::spawn(async move { syncing.sync_durable(next).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut sync)
+                .await
+                .is_err()
+        );
+        store.engine.configure_distributed(NodeId(1), &[]);
+        let error = sync.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("placement disappeared"));
+    }
+
+    #[tokio::test]
+    async fn distributed_wal_reopens_without_truncating_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let source = Arc::new(Mutex::new(
+            Log::open(&source_dir, LogConfig::default()).unwrap(),
+        ));
+        let mut batch = batch(2);
+        source.lock().unwrap().append(&mut batch).unwrap();
+        source.lock().unwrap().sync().unwrap();
+        let store = QuorumWalStore::for_distributed_partition(
+            Uuid::from_u128(100),
+            PartitionIndex(0),
+            source.clone(),
+            None,
+            3,
+        )
+        .unwrap();
+        assert!(store.engine.durable_watermark() == Offset(0));
+        assert!(store.engine.replica_end_offsets() == vec![Offset(2)]);
+        drop(store);
+        drop(source);
+
+        let source = Arc::new(Mutex::new(
+            Log::open(&source_dir, LogConfig::default()).unwrap(),
+        ));
+        let reopened = QuorumWalStore::for_distributed_partition(
+            Uuid::from_u128(100),
+            PartitionIndex(0),
+            source,
+            None,
+            3,
+        )
+        .unwrap();
+
+        assert!(reopened.engine.durable_watermark() == Offset(0));
+        assert!(reopened.engine.replica_end_offsets() == vec![Offset(2)]);
+        reopened
+            .engine
+            .configure_distributed(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        assert!(reopened.engine.record_follower_ack(NodeId(2), Offset(2)));
+        assert!(reopened.engine.durable_watermark() == Offset(2));
     }
 
     #[tokio::test]

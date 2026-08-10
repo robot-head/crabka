@@ -24,19 +24,30 @@ pub(crate) struct ShardId {
 }
 
 /// Registry from shard identity to its in-process WAL engine.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct WalShardRegistry {
+    local_node_id: crabka_raft::NodeId,
     engines: DashMap<ShardId, Arc<WalShardEngine>>,
     placements: RwLock<HashMap<ShardId, Vec<crabka_raft::NodeId>>>,
 }
 
 impl WalShardRegistry {
     #[must_use]
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(local_node_id: crabka_raft::NodeId) -> Self {
+        Self {
+            local_node_id,
+            engines: DashMap::new(),
+            placements: RwLock::new(HashMap::new()),
+        }
     }
 
     pub(crate) fn insert(&self, shard_id: ShardId, engine: Arc<WalShardEngine>) {
+        let placements = self
+            .placements
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let voters = placements.get(&shard_id).map_or(&[][..], Vec::as_slice);
+        engine.configure_distributed(self.local_node_id, voters);
         self.engines.insert(shard_id, engine);
     }
 
@@ -44,12 +55,19 @@ impl WalShardRegistry {
     /// Replacing the map also removes deleted topics and superseded topic IDs.
     pub(crate) fn replace_placements(
         &self,
-        placements: HashMap<ShardId, Vec<crabka_raft::NodeId>>,
+        placements: &HashMap<ShardId, Vec<crabka_raft::NodeId>>,
     ) {
-        *self
+        let mut current = self
             .placements
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = placements;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current.clone_from(placements);
+        for entry in &self.engines {
+            let voters = current.get(entry.key()).map_or(&[][..], Vec::as_slice);
+            entry
+                .value()
+                .configure_distributed(self.local_node_id, voters);
+        }
     }
 
     #[cfg(test)]
@@ -69,10 +87,11 @@ impl WalShardRegistry {
     }
 
     pub(crate) fn remove(&self, shard_id: ShardId) -> Option<Arc<WalShardEngine>> {
-        self.placements
+        let mut placements = self
+            .placements
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&shard_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        placements.remove(&shard_id);
         self.engines.remove(&shard_id).map(|(_, engine)| engine)
     }
 
@@ -100,18 +119,22 @@ impl WalShardRegistry {
             topic_id,
             partition,
         };
-        let authorized = self
+        let placement = self
             .placements
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&shard)
-            .is_some_and(|voters| voters.contains(&request.from));
+            .cloned();
+        let authorized = placement.as_ref().is_some_and(|voters| {
+            voters.first() == Some(&self.local_node_id) && voters.contains(&request.from)
+        });
         if !authorized {
             return Some(Ok(unknown_shard_fetch_response(request.group)));
         }
         let Some(engine) = self.get(shard) else {
             return Some(Ok(unknown_shard_fetch_response(request.group)));
         };
+        engine.record_follower_ack(request.from, crabka_ids::Offset(request.fetch_offset));
         Some(
             engine
                 .serve_fetch(crabka_ids::Offset(request.fetch_offset), request.max_size)
@@ -214,7 +237,7 @@ mod tests {
         )])));
         engine.replicate_and_sync(&source, Offset(1)).await.unwrap();
 
-        let registry = Arc::new(WalShardRegistry::new());
+        let registry = Arc::new(WalShardRegistry::new(crabka_raft::NodeId(9)));
         let topic_id = uuid::Uuid::from_u128(17);
         let partition = PartitionIndex(2);
         registry.insert(
@@ -224,7 +247,7 @@ mod tests {
             },
             engine,
         );
-        registry.replace_placements(HashMap::from([(
+        registry.replace_placements(&HashMap::from([(
             ShardId {
                 topic_id,
                 partition,
@@ -287,13 +310,13 @@ mod tests {
             source,
         )])));
 
-        let registry = Arc::new(WalShardRegistry::new());
+        let registry = Arc::new(WalShardRegistry::new(crabka_raft::NodeId(9)));
         let shard = ShardId {
             topic_id: uuid::Uuid::from_u128(18),
             partition: PartitionIndex(3),
         };
         registry.insert(shard, engine);
-        registry.replace_placements(HashMap::from([(shard, vec![crabka_raft::NodeId(9)])]));
+        registry.replace_placements(&HashMap::from([(shard, vec![crabka_raft::NodeId(9)])]));
         let body = encode_fetch_for_group(
             QuorumGroup::diskless_wal(shard.topic_id, shard.partition),
             crabka_raft::NodeId(9),
@@ -335,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn wal_shard_router_rejects_a_broker_outside_the_placement() {
-        let registry = Arc::new(WalShardRegistry::new());
+        let registry = Arc::new(WalShardRegistry::new(crabka_raft::NodeId(2)));
         let topic_id = uuid::Uuid::from_u128(17);
         let partition = PartitionIndex(2);
         let shard = ShardId {
@@ -353,7 +376,7 @@ mod tests {
                 log,
             )]))),
         );
-        registry.replace_placements(HashMap::from([(shard, vec![crabka_raft::NodeId(2)])]));
+        registry.replace_placements(&HashMap::from([(shard, vec![crabka_raft::NodeId(2)])]));
         let router = WalShardRouter::new(registry);
         let body = encode_fetch_for_group(
             QuorumGroup::diskless_wal(topic_id, partition),
@@ -375,7 +398,7 @@ mod tests {
 
     #[test]
     fn replacing_placements_removes_stale_shards() {
-        let registry = WalShardRegistry::new();
+        let registry = WalShardRegistry::new(crabka_raft::NodeId(1));
         let stale = ShardId {
             topic_id: uuid::Uuid::from_u128(1),
             partition: PartitionIndex(0),
@@ -384,9 +407,9 @@ mod tests {
             topic_id: uuid::Uuid::from_u128(2),
             partition: PartitionIndex(0),
         };
-        registry.replace_placements(HashMap::from([(stale, vec![crabka_raft::NodeId(1)])]));
+        registry.replace_placements(&HashMap::from([(stale, vec![crabka_raft::NodeId(1)])]));
 
-        registry.replace_placements(HashMap::from([(current, vec![crabka_raft::NodeId(2)])]));
+        registry.replace_placements(&HashMap::from([(current, vec![crabka_raft::NodeId(2)])]));
 
         assert!(registry.placement(stale).is_none());
         assert_eq!(

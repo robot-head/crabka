@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use crabka_ids::PartitionIndex;
+use crabka_ids::{Offset, PartitionIndex};
 use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt},
@@ -218,10 +218,10 @@ struct DisklessRuntime {
 }
 
 impl DisklessRuntime {
-    fn new() -> Self {
+    fn new(node_id: crabka_raft::NodeId) -> Self {
         Self {
             hot_tail: Arc::new(crate::diskless::hot_tail::HotTailCache::default()),
-            wal_shards: Arc::new(crate::wal::quorum::registry::WalShardRegistry::new()),
+            wal_shards: Arc::new(crate::wal::quorum::registry::WalShardRegistry::new(node_id)),
         }
     }
 }
@@ -3794,7 +3794,7 @@ impl Broker {
             ktls_enabled,
             inter_broker_client,
         } = prepare_startup_transport(&config).await?;
-        let diskless_runtime = DisklessRuntime::new();
+        let diskless_runtime = DisklessRuntime::new(config.node_id);
 
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
@@ -4280,6 +4280,12 @@ pub(crate) fn diskless_topic_config(
         .is_some_and(|value| value == "true")
 }
 
+type PartitionWal = (
+    Option<crate::wal::SharedWal>,
+    Option<crabka_log::Offset>,
+    Option<Arc<crate::wal::quorum::engine::WalShardEngine>>,
+);
+
 fn partition_wal(
     identity: (&str, Option<uuid::Uuid>, PartitionIndex),
     log_dir: &std::path::Path,
@@ -4288,20 +4294,30 @@ fn partition_wal(
     hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
     replica_count: usize,
-) -> Result<(Option<crate::wal::SharedWal>, Option<crabka_log::Offset>), BrokerError> {
+) -> Result<PartitionWal, BrokerError> {
     let (topic, topic_id, partition_id) = identity;
     if !diskless {
-        return Ok((None, None));
+        return Ok((None, None, None));
     }
-    let wal = crate::wal::quorum::QuorumWalStore::for_partition(
-        topic,
-        topic_id,
-        partition_id,
-        log_dir,
-        log,
-        hot_tail,
-        replica_count,
-    )?;
+    let wal = if let (Some(topic_id), Some(_)) = (topic_id, wal_shards.as_ref()) {
+        crate::wal::quorum::QuorumWalStore::for_distributed_partition(
+            topic_id,
+            partition_id,
+            log,
+            hot_tail,
+            replica_count,
+        )?
+    } else {
+        crate::wal::quorum::QuorumWalStore::for_partition(
+            topic,
+            topic_id,
+            partition_id,
+            log_dir,
+            log,
+            hot_tail,
+            replica_count,
+        )?
+    };
     let durable_watermark = wal.engine().durable_watermark();
     if let (Some(topic_id), Some(registry)) = (topic_id, wal_shards) {
         registry.insert(
@@ -4312,9 +4328,11 @@ fn partition_wal(
             wal.engine(),
         );
     }
+    let engine = wal.engine();
     Ok((
         Some(Arc::new(wal) as crate::wal::SharedWal),
         Some(durable_watermark),
+        Some(engine),
     ))
 }
 
@@ -4396,7 +4414,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         sequencer,
     } = config;
     let log = Arc::new(Mutex::new(log));
-    let (wal, recovered_durable_watermark) = partition_wal(
+    let (wal, recovered_durable_watermark, wal_engine) = partition_wal(
         (&topic, topic_id, partition_id),
         &log_dir,
         Arc::clone(&log),
@@ -4416,7 +4434,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
     let current_leader = Arc::new(AtomicU64::new(0));
     let current_leader_epoch = Arc::new(AtomicI32::new(0));
     let log_dir = Arc::new(arc_swap::ArcSwap::from_pointee(log_dir));
-    let writer = tokio::spawn(crate::partition_writer::run_with_sequencer(
+    let writer_future = crate::partition_writer::run_with_sequencer(
         (topic.clone(), partition_id),
         (log.clone(), log_dir.clone()),
         rx,
@@ -4428,7 +4446,31 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         (log_dir_status, producer_state, wal),
         (producer_id_expiration, max_produce_group),
         sequencer,
-    ));
+    );
+    let writer = if let Some(engine) = wal_engine {
+        let replica_state = replica_state.clone();
+        let hw_advance_notify = hw_advance_notify.clone();
+        tokio::spawn(async move {
+            let watermark_updates = async move {
+                let mut observed = Offset(-1);
+                loop {
+                    let durable = engine.wait_for_durable_advance(observed).await;
+                    observed = durable;
+                    let mut state = replica_state.lock().await;
+                    let previous = state.hw;
+                    if state.recompute_hw_for_wal_durable(durable) > previous {
+                        hw_advance_notify.notify_waiters();
+                    }
+                }
+            };
+            tokio::select! {
+                () = writer_future => {}
+                () = watermark_updates => {}
+            }
+        })
+    } else {
+        tokio::spawn(writer_future)
+    };
     Ok(Arc::new(Partition {
         topic,
         index: partition_id,
@@ -5190,6 +5232,86 @@ mod tests {
         .expect("spawn recovered partition");
 
         assert!(partition.high_watermark().await == crabka_log::Offset(2));
+        partition
+            .take_writer_handle()
+            .expect("partition writer handle")
+            .abort();
+    }
+
+    #[tokio::test]
+    async fn distributed_wal_ack_restores_the_partition_watermark() {
+        let dir = tempdir().expect("tempdir");
+        let topic_id = uuid::Uuid::new_v4();
+        let shard = crate::wal::quorum::registry::ShardId {
+            topic_id,
+            partition: PartitionIndex(0),
+        };
+        let registry = Arc::new(crate::wal::quorum::registry::WalShardRegistry::new(
+            crabka_raft::NodeId(1),
+        ));
+        registry.replace_placements(&std::collections::HashMap::from([(
+            shard,
+            vec![
+                crabka_raft::NodeId(1),
+                crabka_raft::NodeId(2),
+                crabka_raft::NodeId(3),
+            ],
+        )]));
+        let partition_dir = crate::log_dir::partition_dir(dir.path(), "recovered", 0);
+        std::fs::create_dir_all(&partition_dir).expect("partition directory");
+        let mut log =
+            crabka_log::Log::open(&partition_dir, crabka_log::LogConfig::default()).unwrap();
+        let mut batch = crabka_protocol::records::RecordBatch {
+            last_offset_delta: 1,
+            records: vec![
+                crabka_protocol::records::Record::default(),
+                crabka_protocol::records::Record {
+                    offset_delta: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        log.append(&mut batch).expect("append recovered records");
+        let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
+            topic: "recovered".into(),
+            topic_id: Some(topic_id),
+            partition_id: PartitionIndex(0),
+            log_dir: dir.path().to_path_buf(),
+            log,
+            log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: millis(1),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
+            diskless: true,
+            hot_tail: None,
+            wal_shards: Some(registry.clone()),
+            sequencer: None,
+        })
+        .expect("spawn recovered partition");
+        assert!(partition.high_watermark().await == Offset(0));
+
+        let acknowledgement = crate::wal::quorum::wire::fetch_request(
+            crate::wal::quorum::wire::QuorumGroup::diskless_wal(topic_id, PartitionIndex(0)),
+            crabka_raft::NodeId(2),
+            0,
+            2,
+            crabka_units::mebibytes(1),
+        );
+        registry
+            .route_fetch_request(&acknowledgement)
+            .expect("WAL route")
+            .expect("WAL response");
+
+        partition
+            .await_hw_at_least(
+                Offset(2),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .await
+            .expect("restored WAL watermark");
         partition
             .take_writer_handle()
             .expect("partition writer handle")

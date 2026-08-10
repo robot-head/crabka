@@ -138,13 +138,13 @@ pub(crate) fn encode_fetch_response_struct(
     out.freeze()
 }
 
-#[cfg(test)]
-pub(crate) fn encode_fetch_for_group(
+pub(crate) fn fetch_request(
     group: QuorumGroup,
     from: crabka_raft::NodeId,
     fetch_epoch: i32,
     fetch_offset: i64,
-) -> Bytes {
+    max_size: ByteSize,
+) -> FetchRequest {
     use crabka_protocol::owned::fetch_request as fetch_req;
 
     let (topic, topic_id, partition) = match group {
@@ -158,7 +158,7 @@ pub(crate) fn encode_fetch_for_group(
             partition.0,
         ),
     };
-    let request = FetchRequest {
+    FetchRequest {
         rack_id: matches!(group, QuorumGroup::DisklessWal { .. })
             .then_some(WAL_FETCH_RACK_ID.to_string())
             .unwrap_or_default(),
@@ -167,6 +167,7 @@ pub(crate) fn encode_fetch_for_group(
             replica_epoch: -1,
             ..Default::default()
         },
+        max_bytes: max_size.bytes_i32(),
         topics: vec![fetch_req::FetchTopic {
             topic,
             topic_id,
@@ -175,12 +176,29 @@ pub(crate) fn encode_fetch_for_group(
                 current_leader_epoch: fetch_epoch,
                 fetch_offset,
                 last_fetched_epoch: fetch_epoch,
+                partition_max_bytes: max_size.bytes_i32(),
                 ..Default::default()
             }],
             ..Default::default()
         }],
         ..Default::default()
-    };
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn encode_fetch_for_group(
+    group: QuorumGroup,
+    from: crabka_raft::NodeId,
+    fetch_epoch: i32,
+    fetch_offset: i64,
+) -> Bytes {
+    let request = fetch_request(
+        group,
+        from,
+        fetch_epoch,
+        fetch_offset,
+        ByteSize::from_bytes(u64::MAX),
+    );
     let mut out = bytes::BytesMut::new();
     let _ = request.encode(&mut out, KIP_595_FETCH_VERSION);
     out.freeze()

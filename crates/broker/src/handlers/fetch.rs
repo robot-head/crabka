@@ -161,7 +161,7 @@ pub(crate) async fn handle(
         read_committed,
     } = preparation;
 
-    if version == crate::wal::quorum::wire::KIP_595_FETCH_VERSION
+    if version >= crate::wal::quorum::wire::KIP_595_FETCH_VERSION
         && denied_topics.is_empty()
         && let Some(response) = broker.wal_shards.route_fetch_request(&req)
     {
@@ -1700,10 +1700,13 @@ mod tests {
     use std::{collections::BTreeMap, net::SocketAddr, sync::Mutex};
 
     use assert2::assert;
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
     use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig, Offset};
-    use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
+    use crabka_protocol::{
+        Encode as _,
+        records::{Record, RecordBatch, RecordsPayload},
+    };
     use crabka_security::{AuthMethod, Principal};
     use crabka_units::{Time, convert::TimeExt, millis};
 
@@ -1713,7 +1716,7 @@ mod tests {
         wal::quorum::{
             engine::WalShardEngine,
             registry::ShardId,
-            wire::{KIP_595_FETCH_VERSION, QuorumGroup, encode_fetch_for_group},
+            wire::{KIP_595_FETCH_VERSION, QuorumGroup, fetch_request},
         },
     };
 
@@ -1747,6 +1750,7 @@ mod tests {
             .expect("append");
         source.lock().expect("log").sync().expect("sync");
         let topic_id = uuid::Uuid::from_u128(0xD15C);
+        let local_node_id = broker.config.node_id;
         broker.wal_shards.insert(
             ShardId {
                 topic_id,
@@ -1759,19 +1763,13 @@ mod tests {
         );
         broker
             .wal_shards
-            .replace_placements(std::collections::HashMap::from([(
+            .replace_placements(&std::collections::HashMap::from([(
                 ShardId {
                     topic_id,
                     partition: PartitionIndex(0),
                 },
-                vec![crabka_raft::NodeId(2)],
+                vec![local_node_id],
             )]));
-        let request = encode_fetch_for_group(
-            QuorumGroup::diskless_wal(topic_id, PartitionIndex(0)),
-            crabka_raft::NodeId(2),
-            0,
-            0,
-        );
         let principal = Principal {
             name: "broker-2".into(),
             auth_method: AuthMethod::Anonymous,
@@ -1780,18 +1778,31 @@ mod tests {
         let peer = SocketAddr::from(([127, 0, 0, 1], 9092));
         let context = RequestContext::new(&principal, &peer, "wal-fetch", "test", false, "");
 
-        let (response, version) =
-            super::handle(&broker, KIP_595_FETCH_VERSION, 1, &request, &context)
-                .await
-                .expect("route WAL fetch");
+        for version in [KIP_595_FETCH_VERSION, 18] {
+            let request = fetch_request(
+                QuorumGroup::diskless_wal(topic_id, PartitionIndex(0)),
+                local_node_id,
+                0,
+                0,
+                crabka_units::mebibytes(1),
+            );
+            let mut encoded = BytesMut::new();
+            request
+                .encode(&mut encoded, version)
+                .expect("encode WAL fetch");
+            let (response, response_version) =
+                super::handle(&broker, version, 1, &encoded, &context)
+                    .await
+                    .expect("route WAL fetch");
 
-        assert!(version == KIP_595_FETCH_VERSION);
-        let partition = &response.responses[0].partitions[0];
-        assert!(partition.high_watermark == 1);
-        assert!(matches!(
-            partition.records,
-            Some(RecordsPayload::Raw(ref records)) if !records.is_empty()
-        ));
+            assert!(response_version == version);
+            let partition = &response.responses[0].partitions[0];
+            assert!(partition.high_watermark == 1);
+            assert!(matches!(
+                partition.records,
+                Some(RecordsPayload::Raw(ref records)) if !records.is_empty()
+            ));
+        }
         broker_handle.shutdown().await;
     }
 
