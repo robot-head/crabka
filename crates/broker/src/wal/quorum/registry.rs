@@ -24,18 +24,15 @@ pub(crate) struct WalShardRegistry {
 }
 
 impl WalShardRegistry {
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn insert(&self, shard_id: ShardId, engine: Arc<WalShardEngine>) {
         self.engines.insert(shard_id, engine);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn get(&self, shard_id: ShardId) -> Option<Arc<WalShardEngine>> {
         self.engines
             .get(&shard_id)
@@ -85,14 +82,6 @@ impl crabka_raft::RaftShardRouter for WalShardRouter {
                 .map_err(|err| crabka_raft::RaftError::ChangeRejected(err.to_string()))?;
             Ok(Some(encode_fetch_response(request.group, hwm.0, records)))
         })
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn identity_shard(topic_id: uuid::Uuid, partition: PartitionIndex) -> ShardId {
-    ShardId {
-        topic_id,
-        partition,
     }
 }
 

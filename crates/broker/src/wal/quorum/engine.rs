@@ -7,33 +7,31 @@ use std::sync::{
 
 use bytes::Bytes;
 use crabka_ids::{LeaderEpoch, Offset, ProducerId};
-use crabka_kraft_core::{NodeId, QuorumState, QuorumStateMachine};
+use crabka_kraft_core::{LogView as _, NodeId, QuorumState, QuorumStateMachine};
 use crabka_log::{Log, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
 use crabka_units::{ByteSize, convert::ByteSizeExt as _, millis};
 
-use crate::error::BrokerError;
+use crate::{error::BrokerError, wal::quorum::log_view::ShardLog};
 
 /// Election timeout of the in-process WAL quorum's state machine. The replicas
 /// are local, so the window only has to cover a stalled replica task.
 const ELECTION_TIMEOUT: crabka_units::Time = millis(1_000);
 
 /// A single durable member of a WAL quorum.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct WalReplica {
     pub(super) id: NodeId,
-    log: Arc<Mutex<Log>>,
+    log: ShardLog,
     alive: AtomicBool,
 }
 
 impl WalReplica {
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn new(id: NodeId, log: Arc<Mutex<Log>>) -> Self {
         Self {
             id,
-            log,
+            log: ShardLog::new(log),
             alive: AtomicBool::new(true),
         }
     }
@@ -130,7 +128,8 @@ impl WalShardEngine {
         if target <= committed {
             return Ok(committed);
         }
-        let source_end = replica_log_end(source);
+        let source = ShardLog::new(source.clone());
+        let source_end = Offset(source.end_offset());
         if target > source_end {
             return Err(BrokerError::Replication(format!(
                 "wal source ends at {}, before requested durable offset {}",
@@ -144,7 +143,7 @@ impl WalShardEngine {
                 continue;
             }
             let replica_end = replica_end_offset(replica);
-            let Ok(batches) = read_batches_exact(source, replica_end.min(target), target) else {
+            let Ok(batches) = read_batches_exact(&source, replica_end.min(target), target) else {
                 continue;
             };
             if sync_replica(replica.log.clone(), &batches).await.is_ok() {
@@ -182,11 +181,7 @@ impl WalShardEngine {
             .ok_or_else(|| {
                 BrokerError::Replication("wal quorum has no live fetch replica".into())
             })?;
-        let raw = replica
-            .log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .read_raw(fetch_offset, hwm, max_size)?;
+        let raw = replica.log.lock().read_raw(fetch_offset, hwm, max_size)?;
         Ok((hwm, raw.bytes))
     }
 }
@@ -242,10 +237,7 @@ fn normalize_durable_prefix(
     durable: Offset,
 ) -> Result<(), BrokerError> {
     for replica in replicas {
-        let mut log = replica
-            .log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut log = replica.log.lock();
         log.truncate_to(durable)?;
     }
     for (replica, end) in replicas.iter().zip(ends) {
@@ -256,13 +248,7 @@ fn normalize_durable_prefix(
 }
 
 fn replica_end_offset(replica: &WalReplica) -> Offset {
-    replica_log_end(&replica.log)
-}
-
-fn replica_log_end(log: &Arc<Mutex<Log>>) -> Offset {
-    log.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .log_end_offset()
+    Offset(replica.log.end_offset())
 }
 
 #[derive(Debug, Clone)]
@@ -273,13 +259,12 @@ struct BatchBytes {
 }
 
 fn read_batches(
-    source: &Arc<Mutex<Log>>,
+    source: &ShardLog,
     start: Offset,
     target: Offset,
 ) -> Result<Vec<BatchBytes>, BrokerError> {
     let raw = source
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         // Replication must carry every batch in `start..target`, so the read
         // is uncapped.
         .read_raw(start, target, ByteSize::from_bytes(u64::MAX))?;
@@ -287,7 +272,7 @@ fn read_batches(
 }
 
 fn read_batches_exact(
-    source: &Arc<Mutex<Log>>,
+    source: &ShardLog,
     start: Offset,
     target: Offset,
 ) -> Result<Vec<BatchBytes>, BrokerError> {
@@ -339,7 +324,7 @@ fn split_batches(bytes: &Bytes) -> Result<Vec<BatchBytes>, BrokerError> {
     Ok(out)
 }
 
-async fn sync_replica(log: Arc<Mutex<Log>>, batches: &[BatchBytes]) -> Result<(), BrokerError> {
+async fn sync_replica(log: ShardLog, batches: &[BatchBytes]) -> Result<(), BrokerError> {
     if tokio::runtime::Handle::current().runtime_flavor()
         == tokio::runtime::RuntimeFlavor::MultiThread
     {
@@ -352,10 +337,8 @@ async fn sync_replica(log: Arc<Mutex<Log>>, batches: &[BatchBytes]) -> Result<()
     }
 }
 
-fn sync_replica_blocking(log: &Mutex<Log>, batches: &[BatchBytes]) -> Result<(), BrokerError> {
-    let mut log = log
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn sync_replica_blocking(log: &ShardLog, batches: &[BatchBytes]) -> Result<(), BrokerError> {
+    let mut log = log.lock();
     for batch in batches {
         let end = log.log_end_offset();
         if end <= batch.base_offset {

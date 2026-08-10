@@ -47,7 +47,7 @@ impl QuorumGroup {
 /// The fixed `__cluster_metadata` topic id identifies Kafka's metadata quorum.
 /// Diskless WAL shards reuse the same KIP-595 Fetch envelope, but they use the
 /// data topic id and the partition as the shard address.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn classify_fetch(body: &[u8]) -> Option<QuorumGroup> {
     decode_fetch(body).map(|request| request.group)
 }
@@ -122,7 +122,7 @@ fn encode_fetch_response_with_error(
     out.freeze()
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn encode_fetch_for_group(
     group: QuorumGroup,
     from: crabka_raft::NodeId,

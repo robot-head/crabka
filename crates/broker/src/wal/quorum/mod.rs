@@ -26,7 +26,6 @@ use crate::error::BrokerError;
 const QUORUM_STATE_FILE: &str = "quorum-state.json";
 
 /// A [`WalStore`] backed by a quorum of durable WAL replica logs.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct QuorumWalStore {
     source: Arc<Mutex<Log>>,
@@ -42,7 +41,7 @@ struct HotTailTarget {
 }
 
 impl QuorumWalStore {
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn new(source: Arc<Mutex<Log>>, engine: Arc<WalShardEngine>) -> Self {
         Self {
