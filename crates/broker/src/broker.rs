@@ -1736,6 +1736,7 @@ fn spawn_diskless_bootstrap(
         object_store: handle.object_store(),
         node_id: broker.config.node_id,
         broker_id: broker.config.broker_id,
+        flush_config: crate::diskless::flusher::FlushConfig::from_broker(&broker.config),
     };
     let kickoff = kickoff.clone();
     let shutdown = shutdown.clone();
@@ -4146,6 +4147,7 @@ struct DisklessFlusherStartup {
     object_store: Arc<dyn object_store::ObjectStore>,
     node_id: crabka_metadata::NodeId,
     broker_id: i32,
+    flush_config: crate::diskless::flusher::FlushConfig,
 }
 
 async fn bootstrap_diskless_index_log(
@@ -4184,7 +4186,7 @@ async fn bootstrap_diskless_index_log(
                         node_id: flusher.node_id,
                         broker_id: flusher.broker_id,
                     },
-                    crate::diskless::flusher::FlushConfig::default(),
+                    flusher.flush_config,
                     shutdown,
                 )
                 .await;

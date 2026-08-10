@@ -84,9 +84,12 @@ defaults remain configurable even when the scanner reports the default constant.
   `SEND_ERROR_BACKOFF`, `UNKNOWN_TOPIC_RETRY_DELAY`, `EPOCH_FENCE_BACKOFF`,
   `UNEXPECTED_ERROR_BACKOFF`, `RECONNECT_INITIAL_DELAY`, and
   `RECONNECT_DELAY_CAP`; and the AddRaftVoter request timeout.
-- Diskless WAL projection: `FLUSH_INTERVAL`, `FLUSH_MAX_BYTES`,
-  `DEFAULT_TRIM_SAFETY_LAG`, and the projection timeout in
-  `diskless/flusher.rs`.
+- Diskless WAL projection: `DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL`,
+  `DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE`, `DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG`,
+  and `DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT`. Production maps these
+  defaults through the `diskless_wal_flush_interval`,
+  `diskless_wal_flush_max_size`, `diskless_wal_trim_safety_lag`, and
+  `diskless_wal_index_projection_timeout` runtime settings.
 - Coordinators: `ACTOR_MAILBOX_CAPACITY`, `SESSION_EXPIRY_TICK_INTERVAL`,
   `SHUTDOWN_ACK_TIMEOUT`, `DEFAULT_SESSION_TIMEOUT`,
   `DEFAULT_HEARTBEAT_INTERVAL`, `DEFAULT_MIN_SESSION_TIMEOUT`,

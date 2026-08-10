@@ -383,6 +383,16 @@ pub struct RuntimeFileConfig {
     pub client_metrics_otlp_queue_capacity: Option<usize>,
     pub coordinator_actor_mailbox_capacity: Option<usize>,
     pub diskless_wal_local_replica_count: Option<usize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub diskless_wal_flush_interval: Option<Time>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub diskless_wal_flush_max_size: Option<ByteSize>,
+    pub diskless_wal_trim_safety_lag: Option<i64>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub diskless_wal_index_projection_timeout: Option<Time>,
     pub unclean_recovery_queue_capacity: Option<usize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
@@ -2345,6 +2355,30 @@ impl RuntimeFileConfig {
             runtime,
             diskless_wal_local_replica_count,
             cfg.diskless_wal_local_replica_count
+        );
+        set_runtime_time_millis!(
+            runtime,
+            diskless_wal_flush_interval,
+            cfg.diskless_wal_flush_interval
+        );
+        set_runtime_size_bytes!(
+            runtime,
+            diskless_wal_flush_max_size,
+            cfg.diskless_wal_flush_max_size,
+            whole_bytes_usize
+        );
+        if let Some(value) = runtime.diskless_wal_trim_safety_lag {
+            if value < 0 {
+                return Err(FileConfigError::InvalidConfig(
+                    "diskless_wal_trim_safety_lag must be nonnegative".into(),
+                ));
+            }
+            cfg.diskless_wal_trim_safety_lag = value;
+        }
+        set_runtime_time_millis!(
+            runtime,
+            diskless_wal_index_projection_timeout,
+            cfg.diskless_wal_index_projection_timeout
         );
         set_runtime_usize!(
             runtime,
@@ -4891,6 +4925,10 @@ opa_http_timeout = "2500ms"
 replication_fetch_max = "2MiB"
 replication_fetch_max_wait = "750ms"
 replication_fetch_min = "2B"
+diskless_wal_flush_interval = "125ms"
+diskless_wal_flush_max_size = "4MiB"
+diskless_wal_trim_safety_lag = 0
+diskless_wal_index_projection_timeout = "3s"
 controller_heartbeat_interval = "500ms"
 controller_fetch_miss_limit = 7
 metadata_raft_command_queue_capacity = 512
@@ -4927,9 +4965,24 @@ streams_group_max_size = 19
         assert!(cfg.controller_fetch_miss_limit.get() == 7);
         assert!(cfg.metadata_raft_command_queue_capacity.get() == 512);
         assert!(cfg.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
+        assert!(cfg.diskless_wal_flush_interval == millis(125));
+        assert!(cfg.diskless_wal_flush_max_size == mebibytes(4));
+        assert!(cfg.diskless_wal_trim_safety_lag == 0);
+        assert!(cfg.diskless_wal_index_projection_timeout == secs(3));
         assert!(cfg.share_group.max_size == 17);
         assert!(!cfg.streams_group.enable);
         assert!(cfg.streams_group.max_size == 19);
+    }
+
+    #[test]
+    fn runtime_file_config_rejects_negative_diskless_wal_trim_lag() {
+        let file: FileConfig = toml::from_str("[runtime]\ndiskless_wal_trim_safety_lag = -1\n")
+            .expect("parse runtime config");
+        let error = file
+            .apply_to(&mut crate::config::BrokerConfig::default())
+            .expect_err("reject negative trim lag");
+
+        assert!(error.to_string().contains("diskless_wal_trim_safety_lag"));
     }
 
     /// Every time and byte-size runtime key must survive the round trip

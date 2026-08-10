@@ -543,6 +543,10 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] client_metrics_otlp_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] coordinator_actor_mailbox_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] diskless_wal_local_replica_count: usize => refined_type::rule::GreaterUsize<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] diskless_wal_flush_interval: Time => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] diskless_wal_flush_max_size: ByteSize => ();
+    refined #[schemars(range(min = 0))] diskless_wal_trim_safety_lag: i64 => refined_type::rule::GreaterEqualI64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] diskless_wal_index_projection_timeout: Time => ();
     refined #[schemars(range(min = 1))] unclean_recovery_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] share_recovery_read_max: ByteSize => ();
     refined #[schemars(range(min = 1))] share_session_cache_max_when_unlimited: usize => refined_type::rule::GreaterUsize<0>;
@@ -1757,7 +1761,11 @@ mod tests {
     #[test]
     fn broker_tuning_diskless_wal_replica_count_reaches_broker_config() {
         let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
-            "disklessWalLocalReplicaCount": 5
+            "disklessWalLocalReplicaCount": 5,
+            "disklessWalFlushInterval": "125ms",
+            "disklessWalFlushMaxSize": "4MiB",
+            "disklessWalTrimSafetyLag": 0,
+            "disklessWalIndexProjectionTimeout": "3s"
         }))
         .expect("deserialize diskless WAL policy");
         tuning.validate().expect("validate diskless WAL policy");
@@ -1767,11 +1775,21 @@ mod tests {
         file.apply_to(&mut broker)
             .expect("apply operator TOML to broker");
         assert!(broker.diskless_wal_local_replica_count == 5);
+        assert!(broker.diskless_wal_flush_interval == crabka_units::millis(125));
+        assert!(broker.diskless_wal_flush_max_size == crabka_units::mebibytes(4));
+        assert!(broker.diskless_wal_trim_safety_lag == 0);
+        assert!(broker.diskless_wal_index_projection_timeout == crabka_units::secs(3));
 
         let invalid: BrokerTuning = serde_json::from_value(serde_json::json!({
             "disklessWalLocalReplicaCount": 0
         }))
         .expect("deserialize invalid diskless WAL policy");
+        assert!(invalid.validate().is_err());
+
+        let invalid: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "disklessWalTrimSafetyLag": -1
+        }))
+        .expect("deserialize invalid diskless WAL trim policy");
         assert!(invalid.validate().is_err());
     }
 

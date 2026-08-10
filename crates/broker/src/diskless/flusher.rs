@@ -7,7 +7,10 @@ use std::{
 
 use crabka_log::Offset;
 use crabka_metadata::{MetadataImage, NodeId};
-use crabka_units::{ByteSize, convert::ByteSizeExt as _, mebibytes};
+use crabka_units::{
+    ByteSize,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -18,25 +21,41 @@ use super::{
     wal_index::{WalFlushRecord, WalIndexCache, WalIndexEntry},
     wal_object::WalObjectBuilder,
 };
-use crate::{partition::Partition, partition_registry::PartitionRegistry};
-
-pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
-pub(crate) const FLUSH_MAX_SIZE: ByteSize = mebibytes(8);
-pub(crate) const DEFAULT_TRIM_SAFETY_LAG: i64 = 1;
+use crate::{
+    config::{
+        DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL, DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE,
+        DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT, DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG,
+    },
+    partition::Partition,
+    partition_registry::PartitionRegistry,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct FlushConfig {
     pub(crate) interval: Duration,
     pub(crate) max_size: ByteSize,
     pub(crate) trim_safety_lag: Option<i64>,
+    pub(crate) index_projection_timeout: Duration,
 }
 
 impl Default for FlushConfig {
     fn default() -> Self {
         Self {
-            interval: FLUSH_INTERVAL,
-            max_size: FLUSH_MAX_SIZE,
-            trim_safety_lag: Some(DEFAULT_TRIM_SAFETY_LAG),
+            interval: DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL.to_std(),
+            max_size: DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE,
+            trim_safety_lag: Some(DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG),
+            index_projection_timeout: DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT.to_std(),
+        }
+    }
+}
+
+impl FlushConfig {
+    pub(crate) fn from_broker(config: &crate::config::BrokerConfig) -> Self {
+        Self {
+            interval: config.diskless_wal_flush_interval.to_std(),
+            max_size: config.diskless_wal_flush_max_size,
+            trim_safety_lag: Some(config.diskless_wal_trim_safety_lag),
+            index_projection_timeout: config.diskless_wal_index_projection_timeout.to_std(),
         }
     }
 }
@@ -208,7 +227,7 @@ pub(crate) async fn flush_once(
         entries,
     };
     index_log.publish_flush(&record).await?;
-    wait_for_committed_projection(cache.clone(), &record).await?;
+    wait_for_committed_projection(cache.clone(), &record, config.index_projection_timeout).await?;
 
     if let Some(lag) = config.trim_safety_lag {
         for partition in partitions {
@@ -239,8 +258,9 @@ pub(crate) async fn flush_once(
 async fn wait_for_committed_projection(
     cache: Arc<AsyncMutex<WalIndexCache>>,
     record: &WalFlushRecord,
+    timeout: Duration,
 ) -> Result<(), crate::error::BrokerError> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(timeout, async {
         loop {
             {
                 let cache = cache.lock().await;
@@ -480,6 +500,7 @@ mod tests {
                 interval: Duration::from_millis(1),
                 max_size: ByteSize::from_bytes(1),
                 trim_safety_lag: None,
+                ..FlushConfig::default()
             },
             shutdown.clone(),
         ));
@@ -567,6 +588,29 @@ mod tests {
 
     #[tokio::test]
     async fn default_config_enables_safe_trim_lag() {
-        assert!(FlushConfig::default().trim_safety_lag == Some(DEFAULT_TRIM_SAFETY_LAG));
+        let config = FlushConfig::default();
+        assert!(config.trim_safety_lag == Some(DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG));
+        assert!(
+            config.index_projection_timeout
+                == DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT.to_std()
+        );
+    }
+
+    #[test]
+    fn broker_config_controls_every_flusher_policy() {
+        let broker = crate::config::BrokerConfig {
+            diskless_wal_flush_interval: crabka_units::millis(125),
+            diskless_wal_flush_max_size: crabka_units::mebibytes(4),
+            diskless_wal_trim_safety_lag: 0,
+            diskless_wal_index_projection_timeout: crabka_units::secs(3),
+            ..crate::config::BrokerConfig::default()
+        };
+
+        let config = FlushConfig::from_broker(&broker);
+
+        assert!(config.interval == Duration::from_millis(125));
+        assert!(config.max_size == crabka_units::mebibytes(4));
+        assert!(config.trim_safety_lag == Some(0));
+        assert!(config.index_projection_timeout == Duration::from_secs(3));
     }
 }
