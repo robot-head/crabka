@@ -7,8 +7,6 @@
 //! return the encoded bytes. The bytes are ready to send after
 //! `network::dispatch` prepends the response header.
 
-#![allow(dead_code)] // handler modules are registered as each API is enabled.
-
 /// Raw wire `api_key` (i16) that selects the RPC.
 ///
 /// This is the numeric form of a [`crabka_protocol::api_key::ApiKey`] variant.

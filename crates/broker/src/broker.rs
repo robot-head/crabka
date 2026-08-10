@@ -65,10 +65,6 @@ const TEST_AWAITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// The running broker. Library callers get a [`BrokerHandle`] from
 /// [`Broker::start`]; this struct is the shared internal state.
-// `config`, `metadata`, `partitions` are consumed by the per-API handlers
-// landing in Tasks 12-16; allow dead_code on the struct until the handlers
-// pick them up.
-#[allow(dead_code)]
 pub struct Broker {
     pub(crate) config: BrokerConfig,
     /// Metadata authority for this broker. For combined/controller nodes
@@ -121,6 +117,7 @@ pub struct Broker {
     /// this is `true` keeps the per-connection path infallible-by-construction.
     /// When `false` (non-Linux, no `tls` module, or no TLS configured), TLS
     /// listeners serve the exact userspace rustls path (byte-identical wire).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) ktls_enabled: bool,
     /// Shared outbound dialer used by the replicator, raft transport,
     /// and controller-heartbeat loops. When `inter_broker_credentials`
@@ -128,13 +125,6 @@ pub struct Broker {
     /// to a plain `TcpStream::connect`. The new wiring is transparent
     /// for the legacy PLAINTEXT-only path.
     pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
-    /// Resolved protocol of the inter-broker listener (matched from
-    /// `BrokerConfig::effective_listeners()` against
-    /// `inter_broker_listener_name`). Threaded into outbound inter-broker
-    /// dials. The replicator and heartbeat hold their own copies. The
-    /// `EndTxn` marker fan-out reads this one, so TLS / SASL run when the
-    /// listener demands them.
-    pub(crate) inter_broker_listener_protocol: crabka_security::ListenerProtocol,
     /// KIP-966 offset-aware unclean recovery. Cloneable handle that
     /// enqueues recovery jobs onto the Unclean Recovery Manager task.
     /// Used by the `ElectLeaders UNCLEAN` handler (which awaits the
@@ -194,10 +184,6 @@ pub struct Broker {
     /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before they
     /// touch the dir.
     pub(crate) log_dir_status: crate::log_dir_status::LogDirRegistry,
-    /// KIP-858: stable UUID per configured log.dir, minted + persisted at
-    /// startup. Shared with the heartbeat client (`offline_log_dirs` UUID list)
-    /// and the assignment reporter (`AssignReplicasToDirs` handler).
-    pub(crate) log_dir_ids: crate::log_dir_id::LogDirIds,
     /// KIP-714 client-metrics receiver: subscription manager + Prometheus
     /// collector + OTLP forwarder. Shared so the push handler
     /// and the scrape path both touch the same instance.
@@ -1785,7 +1771,6 @@ type BrokerCoordinatorSet = (
 
 struct BrokerStorageStartup {
     log_dir_status: crate::log_dir_status::LogDirRegistry,
-    log_dir_ids: crate::log_dir_id::LogDirIds,
     diskless: DisklessRuntime,
 }
 
@@ -1835,7 +1820,6 @@ async fn finish_broker_startup(
         tls_dynamic: transport.0,
         ktls_enabled: transport.1,
         inter_broker_client: transport.2,
-        inter_broker_listener_protocol: runtime.inter_listener_protocol,
         unclean_recovery: runtime.unclean_recovery,
         metrics: runtime.metrics,
         metrics_bound_addr: runtime.metrics_bound_addr,
@@ -1850,7 +1834,6 @@ async fn finish_broker_startup(
         hot_tail: storage.diskless.hot_tail,
         wal_shards: storage.diskless.wal_shards,
         log_dir_status: storage.log_dir_status,
-        log_dir_ids: storage.log_dir_ids,
         client_metrics: runtime.client_metrics,
         #[cfg(any(test, feature = "test-helpers"))]
         offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -3939,7 +3922,6 @@ impl Broker {
             runtime,
             BrokerStorageStartup {
                 log_dir_status,
-                log_dir_ids,
                 diskless: diskless_runtime,
             },
         )

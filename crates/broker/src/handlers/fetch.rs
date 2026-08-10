@@ -1621,6 +1621,7 @@ fn consume_consumer_quota(
     Time::from_secs_f64(delay_secs).min(maximum)
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn should_use_sendfile(total_bytes: usize, has_regions: bool, minimum_bytes: usize) -> bool {
     total_bytes >= minimum_bytes && has_regions
 }

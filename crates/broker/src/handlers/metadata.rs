@@ -361,26 +361,11 @@ pub(crate) fn pick_endpoint_host_port(
     }
 }
 
-fn parse_host_port(addr: &str) -> (String, i32) {
-    let (host, port) = crate::handlers::parse_advertised_host_port(addr);
-    (host, i32::from(port))
-}
-
 #[cfg(test)]
 mod tests {
     use assert2::assert;
 
     use super::*;
-
-    #[test]
-    fn parse_host_port_ok() {
-        assert!(parse_host_port("foo:1234") == ("foo".into(), 1234));
-    }
-
-    #[test]
-    fn parse_host_port_falls_back() {
-        assert!(parse_host_port("not-an-addr") == ("localhost".into(), 9092));
-    }
 
     fn endpoint(name: &str, host: &str, port: u16) -> crabka_metadata::BrokerEndpoint {
         crabka_metadata::BrokerEndpoint {

@@ -316,6 +316,7 @@ fn duplicate_alteration_error() -> AlterationError {
 /// Validates one deletion and accepts it if it is valid. It returns the
 /// per-user result row for the response, and on accept it pushes the metadata
 /// record to `records`.
+#[cfg(test)]
 fn process_deletion(
     broker: &Broker,
     d: ScramCredentialDeletion,
@@ -333,6 +334,7 @@ fn process_deletion(
 /// Validates one upsertion and accepts it if it is valid. It returns the
 /// per-user result row for the response, and on accept it pushes the metadata
 /// record to `records`.
+#[cfg(test)]
 fn process_upsertion(
     u: ScramCredentialUpsertion,
     authorized: bool,

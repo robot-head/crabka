@@ -1,10 +1,11 @@
 //! Kafka uses a 4-byte big-endian length prefix followed by the frame body.
 //! Both directions of every connection share this framing.
 
-#![allow(dead_code)] // accept loop materializes elsewhere.
-
+#[cfg(test)]
 use tokio::net::TcpStream;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
+#[cfg(test)]
+use tokio_util::codec::Framed;
+use tokio_util::codec::LengthDelimitedCodec;
 
 pub(crate) fn validate_frame_length(
     frame_body_len: usize,
@@ -32,6 +33,7 @@ pub fn codec(max_frame_bytes: usize) -> LengthDelimitedCodec {
 
 /// Wraps a [`TcpStream`] with the Kafka length-delimited codec.
 #[must_use]
+#[cfg(test)]
 pub fn frame(stream: TcpStream, max_frame_bytes: usize) -> Framed<TcpStream, LengthDelimitedCodec> {
     Framed::new(stream, codec(max_frame_bytes))
 }

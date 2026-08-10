@@ -11,8 +11,6 @@
 //! `false` keeps Kafka's safe-by-default behavior. The partition stays
 //! unavailable until a former ISR member returns.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};

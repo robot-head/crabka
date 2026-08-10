@@ -90,12 +90,6 @@ pub(crate) async fn handle(
     }
 }
 
-/// The response the handler returns when share groups are disabled on this
-/// broker.
-fn disabled_response() -> ShareGroupHeartbeatResponse {
-    error(codes::UNSUPPORTED_VERSION)
-}
-
 fn error(code: i16) -> ShareGroupHeartbeatResponse {
     ShareGroupHeartbeatResponse {
         error_code: code,
@@ -112,12 +106,6 @@ mod tests {
     use crabka_security::{AuthMethod, Principal};
 
     use super::*;
-
-    #[test]
-    fn disabled_feature_yields_unsupported_version() {
-        let resp = disabled_response();
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-    }
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {

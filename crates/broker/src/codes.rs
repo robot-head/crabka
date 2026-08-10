@@ -4,8 +4,6 @@
 //! react to specific codes, so a substitution changes client behavior. The
 //! values here mirror the canonical Apache Kafka table.
 
-#![allow(dead_code)] // codes are consumed by handlers as APIs are enabled.
-
 pub const NONE: i16 = 0;
 pub const UNKNOWN_SERVER_ERROR: i16 = -1;
 pub const OFFSET_OUT_OF_RANGE: i16 = 1;

@@ -23,10 +23,6 @@
 //!
 //! The broker rejects unknown keys with `INVALID_CONFIG`.
 
-// Items are `pub(crate)` for downstream handlers (Tasks 7-10); until those
-// modules land they appear unused to the compiler.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use crabka_log::LogConfig;
