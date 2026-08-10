@@ -13122,10 +13122,10 @@ impl SqlSession {
         let [
             TableExpr::Table {
                 name,
+                only,
                 alias,
                 columns: None,
                 sample: None,
-                ..
             },
         ] = select.from.as_slice()
         else {
@@ -13188,7 +13188,21 @@ impl SqlSession {
             Err(error) => return Some(Err(error)),
         };
         let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
-            Ok(table) if table.foreign.is_none() => table,
+            // A materialized view whose contents have never been computed is an
+            // error to read, not an empty relation. `exec::require_populated`
+            // refuses it at the one place every stored-relation read passes,
+            // and this cursor is not that place — it streamed the empty row
+            // space and answered zero rows and no error at all. Declining
+            // hands the read to the path that does refuse it.
+            Ok(table)
+                if table.foreign.is_none()
+                    && table
+                        .materialized
+                        .as_ref()
+                        .is_none_or(|matview| matview.populated) =>
+            {
+                table
+            }
             Ok(_) => return None,
             Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return None,
             Err(error) => return Some(Err(error.into())),
@@ -13202,12 +13216,47 @@ impl SqlSession {
             Ok(true) => return None,
             Err(error) => return Some(Err(error)),
         }
+        // An inheritance parent is the same wrong answer with rows in it: it
+        // holds its own rows, *and* its children's are part of the read, so
+        // this cursor answered `SELECT * FROM parent` with the parent's rows
+        // alone while the same query with an `ORDER BY` returned the tree.
+        // `ONLY` asks for exactly the one relation this cursor scans, so it
+        // still streams.
+        match crate::exec::reads_inheritance_children(self.catalog_kv.as_ref(), *only, &name) {
+            Ok(false) => {}
+            Ok(true) => return None,
+            Err(error) => return Some(Err(error)),
+        }
         if crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection)
             .text_search
             .is_some()
         {
             return None;
         }
+        // The two gates every other stored-relation read passes and this one
+        // did not: the read permit and row security. `UnrestrictedTable::read`
+        // is the pushdowns' form of both — it admits the relation only when the
+        // session holds `SELECT` on it *and* no policy applies, and declines
+        // otherwise instead of raising. Declining is the whole answer here:
+        // `run_select` raises the 42501 itself, in `PostgreSQL`'s order and
+        // naming the relation the query named, and filters the policied rows
+        // through `rls::apply_row_security` with the subquery resolution and
+        // recursion guard a row-at-a-time cursor has no way to run. The cost is
+        // a slower correct answer on exactly the reads that were wrong before.
+        //
+        // The scan below takes its relation from this token rather than from
+        // `table`, so it cannot be reached without the proof — the same
+        // construction that makes the other six pushdowns safe.
+        let role = self.current_role_for_row_security();
+        let unrestricted = match crate::rls::UnrestrictedTable::read(
+            &crate::privilege::PrivilegeCtx::new(self.catalog_kv.as_ref(), &role),
+            &crate::rls::RlsCtx::new(self.catalog_kv.as_ref(), &role, self.guc.row_security()),
+            &table,
+        ) {
+            Ok(Some(unrestricted)) => unrestricted,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error)),
+        };
 
         // The streaming cursor bypasses `run_one`, so it opens its own
         // `db.statement` span. `pg.select` is created while that span is
@@ -13257,12 +13306,16 @@ impl SqlSession {
                 Arc::clone(&self.range_scanner),
                 read_ts,
             );
+            // The gated relation, not the one `get_table` returned: the token
+            // is the only way to name it here, so this scan cannot run without
+            // the permit and the row-security decision that made it.
+            let table = unrestricted.get();
             let qualifier = alias.as_deref().unwrap_or(&table.name.name);
-            let scope = crate::scope::Scope::single(&table, qualifier);
+            let scope = crate::scope::Scope::single(table, qualifier);
             let (fields, expressions, _) =
                 crate::exec::resolve_projection(&select.projection, &scope)?;
             let mut plan =
-                crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection);
+                crate::plan_dist::plan_scan(table, select.filter.as_ref(), &select.projection);
             plan.projection = crate::ProjectionPushdown::All;
             plan.partial_aggregate = None;
             plan.top_k = None;
@@ -13276,7 +13329,7 @@ impl SqlSession {
                     own_xid: own,
                     read_ts: None,
                     own_start_ts: None,
-                    table: &table,
+                    table,
                     interval: crate::scanner::RowInterval::ALL,
                     predicate: plan.predicate,
                     projection: plan.projection,

@@ -16836,7 +16836,11 @@ fn single_local_base_table(
 /// parent whose children hold rows would report its own rows only, while a
 /// plain `SELECT` over the same FROM returns the whole tree. `ONLY` asks for
 /// just the parent's rows, which is what the pushdown already computes.
-fn reads_inheritance_children(
+///
+/// The wire path's streaming cursor asks it for the same reason: it scans one
+/// relation's row space too, so a parent named without `ONLY` is a shape it
+/// cannot serve.
+pub(crate) fn reads_inheritance_children(
     catalog_kv: &dyn Kv,
     only: bool,
     name: &crabka_pgcatalog::RelationName,
@@ -16844,7 +16848,10 @@ fn reads_inheritance_children(
     if only {
         return Ok(false);
     }
-    Ok(!crate::inheritance::children_of(catalog_kv, name)?.is_empty())
+    // The cheap form on purpose: the answer is a boolean, and every read of an
+    // ordinary childless relation asks it. `children_of` would decode a name
+    // list to throw it away.
+    crate::inheritance::has_children(catalog_kv, name)
 }
 
 /// Match a FROM that is exactly one sharded base table.
