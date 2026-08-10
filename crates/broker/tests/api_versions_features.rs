@@ -12,6 +12,7 @@
 //! `transaction.version = 2`. It also reports a real `finalized_features_epoch`
 //! of `>= 0`. `UpdateFeatures` (`api_key` 57) then moves those levels.
 //! `tests/feature_finalization.rs` exercises that path.
+//! `transaction.version = 3` is advertised but remains opt-in for KIP-939.
 //!
 //! Two shapes break every JVM admin client whose enum does not list the level:
 //! a `supported_features` entry whose `max_version` is above the connecting
@@ -74,7 +75,7 @@ async fn v3_response_advertises_supported_and_bootstrapped_finalized_features() 
         .find(|f| f.name == "transaction.version")
         .expect("transaction.version advertised in supported_features");
     assert!(tv.min_version == 1, "{resp:?}");
-    assert!(tv.max_version == 2, "{resp:?}");
+    assert!(tv.max_version == 3, "{resp:?}");
 
     // A self-bootstrapped broker finalizes the release defaults.
     let finalized_metadata_version = resp

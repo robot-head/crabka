@@ -41,7 +41,7 @@ The resource manager enrolled with the gres coordinator is the broker transactio
 
 ### Recovery completes KIP-939 rather than inventing a parallel path
 
-A prepared cross-domain transaction must survive anything. Broker restart: the transaction state replays from `__transaction_state`, and the 2PC sentinel keeps it unreapable. Coordinator restart: the decision (or its absence) is durable in the coordinator's own log, and completion is idempotent — markers re-driven at the current epoch are the existing retry story. Producer/application restart: the missing piece is `keepPreparedTxn` on `InitProducerId`, explicitly unimplemented today; this design makes finishing it a prerequisite, because it is precisely the "reattach to a prepared transaction and complete it" primitive KIP-939 defines. Orphan resolution is one rule: the broker never times out a 2PC transaction, and anyone discovering one asks the gres coordinator, which always has (or will re-derive) the answer — a single authority, per the decision record, rather than a two-coordinator agreement protocol.
+A prepared cross-domain transaction must survive anything. Broker restart: the transaction state replays from `__transaction_state`, and the 2PC sentinel keeps it unreapable. Coordinator restart: the decision (or its absence) is durable in the coordinator's own log, and completion is idempotent — markers re-driven at the current epoch are the existing retry story. Producer/application restart: opt-in `transaction.version=3` implements `keepPreparedTxn` on `InitProducerId`, the "reattach to a prepared transaction and complete it" primitive KIP-939 defines. Orphan resolution is one rule: the broker never times out a 2PC transaction, and anyone discovering one asks the gres coordinator, which always has (or will re-derive) the answer — a single authority, per the decision record, rather than a two-coordinator agreement protocol.
 
 ### Stamping is enabled per tenant with a SQL domain
 
@@ -58,7 +58,7 @@ Tenants running pure Kafka pay nothing: no stampindex, no clock client, no solo-
 
 - **Byte-exact surfaces (unchanged):** record batch format, offsets, LSO/high-watermark, `aborted_transactions` in fetch responses, transaction-state log schema, all client-facing request/response schemas. The differential suites against the released `cp-kafka` image are the enforcement mechanism and must pass unchanged.
 - **KIP-98/KIP-890 (EOS, epochs):** untouched; producer-epoch fencing is reused as the zombie fence for cross-domain participants.
-- **KIP-939 (2PC participation):** this design *completes* the existing groundwork — `enable2Pc` and the never-reap predicate exist; `keepPreparedTxn` recovery becomes required. Where KIP-939 leaves the external coordinator abstract, the gres coordinator is that coordinator; the broker-visible behavior stays within what the KIP specifies for a 2PC-enabled transactional producer.
+- **KIP-939 (2PC participation):** the broker-side groundwork is complete behind opt-in `transaction.version=3`: `enable2Pc`, the never-reap predicate, persisted recovery identities, and `keepPreparedTxn` recovery. Where KIP-939 leaves the external coordinator abstract, the gres coordinator is that coordinator; the broker-visible behavior stays within what the KIP specifies for a 2PC-enabled transactional producer.
 - **KIP-447 (fenced offset commits):** unaffected; buffered transactional offsets commit under the same markers.
 
 ## Testing

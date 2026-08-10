@@ -38,9 +38,10 @@ Confirmed against Apache Kafka's `TransactionCoordinator` / `TransactionMetadata
   cannot probe the flag).
 - **ACL.** A new `TWO_PHASE_COMMIT` operation (wire discriminant **15**) on the
   `TransactionalId` resource, required in addition to `Write`.
-- **`keepPreparedTxn`.** The prepared-txn *recovery* flow (returning
-  `OngoingTxnProducerId`/`OngoingTxnProducerEpoch`) is **still unstable in Kafka
-  trunk**, whose coordinator returns `UNSUPPORTED_VERSION`. We match that.
+- **`keepPreparedTxn`.** The prepared-txn recovery flow is available behind
+  opt-in `transaction.version=3`. It returns the original ongoing identity and
+  stages a separately fenced recovery identity that persists in the flexible
+  transaction-state record.
 
 Crabka had **no transaction-timeout reaper at all** before this change — the
 `txn_timeout_ms` was persisted but never enforced. So implementing "2PC is never
@@ -69,7 +70,7 @@ auto-aborted" required first implementing the auto-abort it must be exempt from
   `EndTxn(abort)`, bumping the producer epoch on completion (TV_2) to fence the
   timed-out producer. Re-validates identity+state before the Complete write so a
   concurrent `EndTxn`/`InitProducerId` is never clobbered. Marker fan-out is
-  local-only (remote logged+skipped, like the `InitProducerId` abort path).
+  sent to both local and remote partition leaders.
 - `txn/expiration.rs`: a `tokio` ticker (`DEFAULT_REAP_INTERVAL = 10s`, matching
   `transaction.abort.timed.out.transaction.cleanup.interval.ms`) spawned from
   `Broker::start`. Every broker runs it; it acts only on tids it coordinates.
@@ -78,9 +79,13 @@ auto-aborted" required first implementing the auto-abort it must be exempt from
 
 ### `InitProducerId` handler
 
-In the transactional branch, before the coordinator check: gate `enable2Pc` on
-the cluster config + `TWO_PHASE_COMMIT` ACL; return `UNSUPPORTED_VERSION` for
-`keepPreparedTxn`; and resolve the persisted timeout via `resolve_txn_timeout`.
+In the transactional branch, before the coordinator check: gate `enable2Pc` and
+`keepPreparedTxn` on `transaction.version=3`, the cluster config, and the
+`TWO_PHASE_COMMIT` ACL. Recovery returns the original ongoing identity, advances
+the staged identity on every call, persists it, and lets the latest recovery
+client complete through `EndTxn`. `keepPreparedTxn` is valid without
+`enable2Pc`; only `enable2Pc` replaces the stored timeout with the no-timeout
+sentinel.
 
 ### ACL plumbing
 
@@ -108,8 +113,7 @@ Properties:
 Bounds: `max_epoch ∈ {3, 6}`, fenced by `within_boundary` + state/depth caps +
 2-minute timeout, like the sibling txn models.
 
-## Deliberately out of scope (matches Kafka-as-released)
+## Deliberately out of scope
 
-- `keepPreparedTxn` recovery (`OngoingTxnProducerId/Epoch`) — unstable upstream.
-- Reaper abort-marker fan-out to *remote*-led partitions (single-broker txns are
-  fully covered; this mirrors the existing `InitProducerId` abort limitation).
+- Native client `prepareTransaction` / `completeTransaction` APIs.
+- Admin `forceTerminateTransaction` and its command-line surface.

@@ -82,7 +82,7 @@ fn group_partitions(partitions: &HashSet<TopicPartition>) -> Vec<(&str, Vec<i32>
 /// Encode the Kafka `TransactionLogValue`.
 ///
 /// When `flexible` is true, the function selects v1, the flexible form, for
-/// `TV_1` and `TV_2`. When it is false, the function selects v0, the
+/// `TV_1`, `TV_2`, and `TV_3`. When it is false, the function selects v0, the
 /// non-flexible form, for `TV_0`. The output is deterministic: the function
 /// groups and sorts the partitions before it encodes them.
 pub(crate) fn encode_value(entry: &TxnEntry, flexible: bool) -> Vec<u8> {

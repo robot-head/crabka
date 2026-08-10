@@ -157,7 +157,7 @@ pub(crate) async fn handle(
             if req.keep_prepared_txn && (req.producer_id != -1 || req.producer_epoch != -1) {
                 return encode_err(version, codes::INVALID_REQUEST);
             }
-            if req.keep_prepared_txn && !txnv.verified() {
+            if (req.enable2_pc || req.keep_prepared_txn) && !txnv.two_phase() {
                 return encode_err(version, codes::UNSUPPORTED_VERSION);
             }
             coord.refresh_leader_partitions(&image).await;
@@ -267,14 +267,6 @@ async fn handle_transactional(
                 let recovery = {
                     let mut entry = existing.lock().await;
                     if entry.state == TxnState::Ongoing {
-                        if entry.txn_timeout_ms != i32::MAX && !enable_2pc {
-                            return Ok(InitProducerIdResponse {
-                                error_code: codes::INVALID_TXN_STATE,
-                                producer_id: -1,
-                                producer_epoch: -1,
-                                ..Default::default()
-                            });
-                        }
                         let ongoing_pid = entry.producer_id;
                         let ongoing_epoch = entry.producer_epoch;
                         if enable_2pc {
@@ -407,14 +399,24 @@ async fn stage_recovery_identity(
     entry: &mut TxnEntry,
     producer_ids: &crate::producer_id_manager::ProducerIdManager,
 ) -> Result<(crabka_log::ProducerId, i16), BrokerError> {
+    let already_staged = entry.has_staged_producer_identity();
     let (client_pid, client_epoch) = crate::txn::handlers::end_txn::client_producer_identity(entry);
-    let (next_pid, next_epoch) = crate::txn::handlers::end_txn::next_producer_identity(
-        crate::txn::version::TxnVersion::Verified,
-        client_pid,
-        client_epoch,
-        producer_ids,
-    )
-    .await?;
+    let (next_pid, next_epoch) = if already_staged {
+        crate::txn::handlers::end_txn::next_recovery_producer_identity(
+            client_pid,
+            client_epoch,
+            producer_ids,
+        )
+        .await?
+    } else {
+        crate::txn::handlers::end_txn::next_producer_identity(
+            crate::txn::version::TxnVersion::TwoPhase,
+            client_pid,
+            client_epoch,
+            producer_ids,
+        )
+        .await?
+    };
     entry.next_producer_id = next_pid;
     entry.next_producer_epoch = next_epoch;
     Ok((next_pid, next_epoch))
@@ -436,6 +438,7 @@ mod tests {
     use assert2::assert;
     use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig, ProducerId};
+    use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
     use crabka_units::secs;
 
     use super::*;
@@ -443,6 +446,42 @@ mod tests {
         test_support::{peer, principal, start_broker_with},
         txn::state::{TopicPartition, TxnEntry},
     };
+
+    async fn wait_for_leader(broker: &Broker) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if broker
+                .controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|node| node == broker.config.node_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn enable_transaction_version_3(broker: &Broker) {
+        wait_for_leader(broker).await;
+        broker
+            .controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::transaction_version::TRANSACTION_VERSION_FEATURE.into(),
+                level: 3,
+            })])
+            .await
+            .expect("enable transaction.version 3");
+        assert!(
+            broker.controller.current_image().finalized_feature(
+                crabka_metadata::transaction_version::TRANSACTION_VERSION_FEATURE
+            ) == Some(3)
+        );
+    }
 
     /// `dispatch_abort_markers` appends an abort control-marker batch to each
     /// locally-led partition in the entry's partition set. Each append advances
@@ -517,7 +556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_identity_advances_on_every_call_and_rotates_before_marker_epoch() {
+    async fn recovery_identity_advances_through_max_then_rotates() {
         let ids = crate::producer_id_manager::ProducerIdManager::new();
         let mut entry = TxnEntry::new_empty("tid-recover".into(), ProducerId(7), 3, i32::MAX, 0);
         entry.state = TxnState::Ongoing;
@@ -529,11 +568,22 @@ mod tests {
 
         entry.next_producer_id = ProducerId(7);
         entry.next_producer_epoch = i16::MAX - 1;
+        assert!(
+            stage_recovery_identity(&mut entry, &ids).await.unwrap() == (ProducerId(7), i16::MAX)
+        );
         let (rotated_pid, rotated_epoch) = stage_recovery_identity(&mut entry, &ids).await.unwrap();
         assert!(rotated_pid != 7);
         assert!(rotated_epoch == 0);
         assert!(entry.producer_id == 7);
         assert!(entry.producer_epoch == 3);
+
+        entry.next_producer_id = ProducerId(-1);
+        entry.next_producer_epoch = -1;
+        entry.producer_epoch = i16::MAX - 1;
+        let (initial_rotated_pid, initial_rotated_epoch) =
+            stage_recovery_identity(&mut entry, &ids).await.unwrap();
+        assert!(initial_rotated_pid != 7);
+        assert!(initial_rotated_epoch == 0);
     }
 
     #[tokio::test]
@@ -551,6 +601,9 @@ mod tests {
         let peer = peer();
         let context = crate::test_support::request_context(&principal, &peer, "txn-client");
         let tids = ["txn-below-min", "txn-above-max", "txn-2pc"];
+
+        let version = crabka_protocol::owned::init_producer_id_response::MAX_VERSION;
+        enable_transaction_version_3(&broker).await;
 
         let find_version = crabka_protocol::owned::find_coordinator_response::MAX_VERSION;
         let find_request =
@@ -577,7 +630,6 @@ mod tests {
                 .all(|coordinator| coordinator.error_code == codes::NONE)
         );
 
-        let version = crabka_protocol::owned::init_producer_id_response::MAX_VERSION;
         for (tid, requested_ms, enable_2pc, expected_ms) in [
             (tids[0], 500, false, 2_000),
             (tids[1], 10_000, false, 8_000),
@@ -620,7 +672,7 @@ mod tests {
         };
         broker
             .txn_coordinator
-            .put(snapshot, crate::txn::version::TxnVersion::Verified)
+            .put(snapshot, crate::txn::version::TxnVersion::TwoPhase)
             .await
             .expect("persist ongoing 2PC transaction");
 
@@ -726,6 +778,141 @@ mod tests {
         assert!(completed.state == TxnState::CompleteCommit);
         assert!(completed.next_producer_id.is_none());
         assert!(completed.next_producer_epoch == -1);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn kip939_fields_require_transaction_version_3() {
+        let (broker_handle, _dir) = start_broker_with(|config| {
+            config.audit_enabled = false;
+            config.features.transaction_two_phase_commit_enable = true;
+        })
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal("admin");
+        let peer = peer();
+        let context = crate::test_support::request_context(&principal, &peer, "txn-client");
+        let version = crabka_protocol::owned::init_producer_id_response::MAX_VERSION;
+
+        for (enable_2pc, keep_prepared_txn) in [(true, false), (false, true)] {
+            let request = InitProducerIdRequest {
+                transactional_id: Some("txn-tv2".to_string()),
+                transaction_timeout_ms: 500,
+                enable2_pc: enable_2pc,
+                keep_prepared_txn,
+                ..Default::default()
+            };
+            let response = handle(
+                &broker,
+                version,
+                1,
+                &crate::test_support::encode_request(&request, version),
+                &context,
+            )
+            .await
+            .expect("reject KIP-939 request before TV3");
+            let response: InitProducerIdResponse =
+                crate::test_support::decode_response(&response, version);
+            assert!(
+                response.error_code == codes::UNSUPPORTED_VERSION,
+                "{response:?}"
+            );
+        }
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn keep_prepared_txn_without_enable_2pc_preserves_finite_timeout() {
+        let (broker_handle, _dir) = start_broker_with(|config| {
+            config.audit_enabled = false;
+            config.transaction_state_num_partitions = 7;
+            config.transaction_min_timeout = secs(2);
+            config.transaction_max_timeout = secs(8);
+            config.features.transaction_two_phase_commit_enable = true;
+        })
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        enable_transaction_version_3(&broker).await;
+        let principal = principal("admin");
+        let peer = peer();
+        let context = crate::test_support::request_context(&principal, &peer, "txn-client");
+        let tid = "txn-recover-finite";
+
+        let find_version = crabka_protocol::owned::find_coordinator_response::MAX_VERSION;
+        let find_request =
+            crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest {
+                key_type: 1,
+                coordinator_keys: vec![tid.to_string()],
+                ..Default::default()
+            };
+        let response = crate::handlers::find_coordinator::handle(
+            &broker,
+            find_version,
+            1,
+            &crate::test_support::encode_request(&find_request, find_version),
+            &context,
+        )
+        .await
+        .expect("find transaction coordinator");
+        let response: crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse =
+            crate::test_support::decode_response(&response, find_version);
+        assert!(response.coordinators[0].error_code == codes::NONE);
+
+        let version = crabka_protocol::owned::init_producer_id_response::MAX_VERSION;
+        let request = InitProducerIdRequest {
+            transactional_id: Some(tid.to_string()),
+            transaction_timeout_ms: 500,
+            ..Default::default()
+        };
+        let response = handle(
+            &broker,
+            version,
+            2,
+            &crate::test_support::encode_request(&request, version),
+            &context,
+        )
+        .await
+        .expect("initialize finite-timeout transaction");
+        let response: InitProducerIdResponse =
+            crate::test_support::decode_response(&response, version);
+        assert!(response.error_code == codes::NONE);
+
+        let finite = broker
+            .txn_coordinator
+            .get(tid)
+            .expect("finite-timeout transaction entry");
+        let (finite_pid, finite_epoch, snapshot) = {
+            let mut entry = finite.lock().await;
+            entry.state = TxnState::Ongoing;
+            (entry.producer_id, entry.producer_epoch, entry.clone())
+        };
+        broker
+            .txn_coordinator
+            .put(snapshot, crate::txn::version::TxnVersion::TwoPhase)
+            .await
+            .expect("persist finite ongoing transaction");
+
+        let recovery_request = InitProducerIdRequest {
+            transactional_id: Some(tid.to_string()),
+            transaction_timeout_ms: 500,
+            keep_prepared_txn: true,
+            ..Default::default()
+        };
+        let response = handle(
+            &broker,
+            version,
+            3,
+            &crate::test_support::encode_request(&recovery_request, version),
+            &context,
+        )
+        .await
+        .expect("recover finite-timeout transaction without enable2Pc");
+        let response: InitProducerIdResponse =
+            crate::test_support::decode_response(&response, version);
+        assert!(response.error_code == codes::NONE);
+        assert!(response.ongoing_txn_producer_id == finite_pid.get());
+        assert!(response.ongoing_txn_producer_epoch == finite_epoch);
+        assert!(finite.lock().await.txn_timeout_ms == 2_000);
         broker_handle.shutdown().await;
     }
 }

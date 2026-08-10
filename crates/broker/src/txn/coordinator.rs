@@ -460,7 +460,7 @@ impl TxnCoordinator {
     ///
     /// Each abort runs the same two-step transition + marker fan-out as an
     /// `EndTxn(committed=false)` and bumps the producer epoch on completion (at
-    /// `TV_2`) so the timed-out producer is fenced. A marker failure leaves the
+    /// `TV >= 2`) so the timed-out producer is fenced. A marker failure leaves the
     /// entry in `PrepareAbort`; the next sweep retries the fan-out. A concurrent
     /// caller that changed the entry out from under us aborts this reap of that
     /// tid (re-validated before the Complete write). Returns the tids it

@@ -342,9 +342,9 @@ async fn dispatch_transaction_markers(
 /// a transaction completes.
 ///
 /// - Below `TV_2`: unchanged — the epoch only moves on `InitProducerId` reuse.
-/// - `TV_2`, normal: same `producer_id`, `epoch + 1` — bumping on completion
+/// - `TV >= 2`, normal: same `producer_id`, `epoch + 1` — bumping on completion
 ///   fences a zombie holding the old epoch without a fresh `InitProducerId`.
-/// - `TV_2`, marker-epoch boundary (`epoch >= i16::MAX - 1`): `i16::MAX` is
+/// - `TV >= 2`, marker-epoch boundary (`epoch >= i16::MAX - 1`): `i16::MAX` is
 ///   reserved for the transaction marker, so a *new* `producer_id` is allocated
 ///   at epoch 0 before the client can receive the reserved epoch. The caller
 ///   records the old id as `prev_producer_id`; `EndTxn` v5 returns the new pair.
@@ -378,6 +378,38 @@ fn next_producer_identity_with_fresh(
     }
 }
 
+/// KIP-939 recovery identities have already moved past the original producer
+/// identity that must retain `i16::MAX` for its transaction marker. A staged
+/// recovery identity can therefore advance through `i16::MAX`; only a later
+/// recovery or completion rotates it to a fresh producer ID.
+pub(crate) async fn next_recovery_producer_identity(
+    pid: ProducerId,
+    epoch: i16,
+    ids: &crate::producer_id_manager::ProducerIdManager,
+) -> Result<(ProducerId, i16), BrokerError> {
+    let fresh = if epoch == i16::MAX {
+        Some(ids.allocate().await?.0)
+    } else {
+        None
+    };
+    Ok(
+        next_recovery_producer_identity_with_fresh(pid, epoch, fresh)
+            .expect("fresh producer ID supplied at the recovery rotation boundary"),
+    )
+}
+
+fn next_recovery_producer_identity_with_fresh(
+    pid: ProducerId,
+    epoch: i16,
+    fresh: Option<ProducerId>,
+) -> Option<(ProducerId, i16)> {
+    if epoch < i16::MAX {
+        Some((pid, epoch + 1))
+    } else {
+        fresh.map(|producer_id| (producer_id, 0))
+    }
+}
+
 pub(crate) fn client_producer_identity(entry: &TxnEntry) -> (ProducerId, i16) {
     if entry.has_staged_producer_identity() {
         (entry.next_producer_id, entry.next_producer_epoch)
@@ -395,8 +427,14 @@ pub(crate) async fn prepare_completion_identities(
     txnv: TxnVersion,
     ids: &crate::producer_id_manager::ProducerIdManager,
 ) -> Result<(), BrokerError> {
+    let had_recovery_identity = entry.has_staged_producer_identity();
     let (_, client_epoch) = client_producer_identity(entry);
-    let fresh = if txnv.verified() && client_epoch >= i16::MAX - 1 {
+    let at_rotation_boundary = if had_recovery_identity {
+        client_epoch == i16::MAX
+    } else {
+        client_epoch >= i16::MAX - 1
+    };
+    let fresh = if txnv.verified() && at_rotation_boundary {
         Some(ids.allocate().await?.0)
     } else {
         None
@@ -417,8 +455,11 @@ pub(crate) fn prepare_completion_identities_with_fresh(
 
     let had_recovery_identity = entry.has_staged_producer_identity();
     let (client_pid, client_epoch) = client_producer_identity(entry);
-    let (completion_pid, completion_epoch) =
-        next_producer_identity_with_fresh(txnv, client_pid, client_epoch, fresh)?;
+    let (completion_pid, completion_epoch) = if had_recovery_identity {
+        next_recovery_producer_identity_with_fresh(client_pid, client_epoch, fresh)?
+    } else {
+        next_producer_identity_with_fresh(txnv, client_pid, client_epoch, fresh)?
+    };
 
     // The transaction marker fences the identity that wrote the transaction.
     // i16::MAX is reserved for this final marker epoch.
@@ -751,7 +792,7 @@ fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
 }
 
 /// Encode a successful `EndTxn` response. `producer_id` and `producer_epoch`
-/// are the post-completion identity. The epoch bumps at `TV_2`, or rolls to a
+/// are the post-completion identity. The epoch bumps at `TV >= 2`, or rolls to a
 /// new `producer_id` on epoch exhaustion; see [`next_producer_identity`]. They
 /// are only on the wire at v5 (KIP-890). At lower versions the producer never
 /// observes them, and the persisted bump instead fences a stale-epoch producer
@@ -842,8 +883,9 @@ mod tests {
             // Below TV_2 (Classic, Flexible): pid + epoch unchanged.
             (TxnVersion::Classic, (ProducerId(7), 3)),
             (TxnVersion::Flexible, (ProducerId(7), 3)),
-            // TV_2 (Verified) non-overflow: same pid, epoch + 1.
+            // TV_2+ non-overflow: same pid, epoch + 1.
             (TxnVersion::Verified, (ProducerId(7), 4)),
+            (TxnVersion::TwoPhase, (ProducerId(7), 4)),
         ];
         for (version, want) in cases {
             assert!(
@@ -884,19 +926,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_completion_rotates_before_the_reserved_marker_epoch() {
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        let mut entry = entry(7, i16::MAX - 1, TxnState::PrepareCommit);
+
+        prepare_completion_identities(&mut entry, TxnVersion::Verified, &ids)
+            .await
+            .unwrap();
+
+        assert!(entry.producer_epoch == i16::MAX);
+        let (completion_pid, completion_epoch) = completion_producer_identity(&entry);
+        assert!(completion_pid != 7);
+        assert!(completion_epoch == 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_completion_does_not_allocate_at_the_tv2_boundary() {
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        let mut entry = entry(7, i16::MAX - 1, TxnState::PrepareCommit);
+
+        prepare_completion_identities(&mut entry, TxnVersion::Classic, &ids)
+            .await
+            .unwrap();
+
+        assert!(completion_producer_identity(&entry) == (ProducerId(7), i16::MAX - 1));
+        assert!(
+            ids.allocate().await.unwrap() == (ProducerId(0), 0),
+            "legacy completion must not consume a fresh producer ID"
+        );
+    }
+
+    #[tokio::test]
     async fn prepared_recovery_uses_marker_identity_and_fences_the_recovery_client() {
         let ids = crate::producer_id_manager::ProducerIdManager::new();
         let mut entry = entry(7, 3, TxnState::PrepareCommit);
         entry.next_producer_id = ProducerId(7);
         entry.next_producer_epoch = 4;
 
-        prepare_completion_identities(&mut entry, TxnVersion::Verified, &ids)
+        prepare_completion_identities(&mut entry, TxnVersion::TwoPhase, &ids)
             .await
             .unwrap();
 
         assert!(entry.producer_id == 7);
         assert!(entry.producer_epoch == 4, "marker identity must advance");
         assert!(completion_producer_identity(&entry) == (ProducerId(7), 5));
+    }
+
+    #[tokio::test]
+    async fn prepared_recovery_can_use_max_epoch_before_rotating() {
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        let mut entry = entry(7, i16::MAX - 1, TxnState::PrepareCommit);
+        entry.next_producer_id = ProducerId(11);
+        entry.next_producer_epoch = i16::MAX - 1;
+
+        prepare_completion_identities(&mut entry, TxnVersion::TwoPhase, &ids)
+            .await
+            .unwrap();
+
+        assert!(entry.producer_epoch == i16::MAX);
+        assert!(completion_producer_identity(&entry) == (ProducerId(11), i16::MAX));
+
+        entry.next_producer_epoch = i16::MAX;
+        prepare_completion_identities(&mut entry, TxnVersion::TwoPhase, &ids)
+            .await
+            .unwrap();
+        let (rotated_pid, rotated_epoch) = completion_producer_identity(&entry);
+        assert!(rotated_pid != 11);
+        assert!(rotated_epoch == 0);
     }
 
     // ── Phase-3 re-validation: validate_complete_reacquire ──────────────────
