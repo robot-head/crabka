@@ -84,11 +84,16 @@ def replacement_pairs(source_root: Path | None, build_root: Path | None) -> list
         if root is None:
             continue
         raw = str(root).rstrip("/")
+        # `resolve()` follows symlinks; `abspath` does not. A server told a path
+        # through a symlinked working directory -- which is how the CI runner's
+        # workspace is laid out -- echoes the unresolved form back in its error
+        # text, so substituting only the resolved one leaves it in place and the
+        # canonical hash differs between machines while the line count does not.
+        absolute = os.path.abspath(str(root)).rstrip("/")
         resolved = str(root.resolve()).rstrip("/")
-        if raw:
-            pairs.add((raw, token))
-        if resolved:
-            pairs.add((resolved, token))
+        for candidate in (raw, absolute, resolved):
+            if candidate:
+                pairs.add((candidate, token))
     return sorted(pairs, key=lambda pair: len(pair[0]), reverse=True)
 
 
