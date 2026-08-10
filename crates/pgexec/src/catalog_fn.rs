@@ -2080,7 +2080,7 @@ fn foreign_key_constraint_def(
 ) -> Result<Option<String>, ExecError> {
     let oids = crate::catalog_rel::foreign_key_constraint_oids(kv)?;
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
-        let key = format!("{}.{}", foreign_key.table, foreign_key.name);
+        let key = (foreign_key.table.clone(), foreign_key.name.clone());
         if oids.get(&key) == Some(&wanted) {
             return Ok(Some(foreign_key_definition(kv, scope, &foreign_key)?));
         }
@@ -3026,7 +3026,10 @@ mod tests {
         kv.write_batch(&crabka_pgcatalog::put_foreign_key_ops(&foreign_key))
             .expect("seed the catalog");
         let oids = crate::catalog_rel::foreign_key_constraint_oids(&kv).expect("foreign key oids");
-        let oid = oids["cc.cc_a_fkey"];
+        let oid = oids[&(
+            crabka_pgcatalog::RelationName::public("cc"),
+            "cc_a_fkey".to_string(),
+        )];
         assert!(
             constraint_def(&kv, &scope, &Datum::Int4(oid)).expect("constraint definition")
                 == Datum::Text("FOREIGN KEY (a) REFERENCES pp(id)".into())

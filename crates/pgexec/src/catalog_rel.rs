@@ -489,17 +489,28 @@ pub(crate) fn not_null_constraint_oids(
     Ok(banded_oids(NOT_NULL_OID_BASE, &keys))
 }
 
-/// Every `FOREIGN KEY` constraint's oid, indexed by the `<child table>.<name>`
-/// text `pg_get_constraintdef` reverses an oid through.
+/// Every `FOREIGN KEY` constraint's oid, indexed by its child table and name.
 ///
 /// The oid itself comes from [`foreign_key_oid`]. This map is a lookup index
 /// over that oid, not the definition of it.
-pub(crate) fn foreign_key_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
+///
+/// The key is the **pair**, not `format!("{table}.{name}")`. A rendered key
+/// cannot be an identity: `RelationName`'s own `Display` is not injective —
+/// `a.b` plus `c` and `a` plus `b.c` render alike, which its doc comment warns
+/// about — and any future change to how a schema renders silently merges two
+/// constraints into one entry. That is not hypothetical: rendering a temporary
+/// relation's schema as `pg_temp` rather than `pg_temp_<backend id>`, which is
+/// what `PostgreSQL` shows, would make two sessions' identically-named
+/// constraints collide here, and `pg_get_constraintdef` would then hand one
+/// session the other's definition text.
+pub(crate) fn foreign_key_constraint_oids(
+    kv: &dyn Kv,
+) -> Result<BTreeMap<(RelationName, String), i32>, ExecError> {
     crabka_pgcatalog::list_foreign_keys(kv)?
         .into_iter()
         .map(|foreign_key| {
             Ok((
-                format!("{}.{}", foreign_key.table, foreign_key.name),
+                (foreign_key.table.clone(), foreign_key.name.clone()),
                 foreign_key_oid(foreign_key.id)?,
             ))
         })
@@ -3715,7 +3726,7 @@ mod tests {
         assert!(row.len() == columns("pg_constraint").len());
         assert!(
             row == vec![
-                int(oids["cc.cc_a_fkey"]),
+                int(oids[&(RelationName::public("cc"), "cc_a_fkey".to_string())]),
                 text("cc_a_fkey"),
                 int(crate::exec::PUBLIC_NAMESPACE_OID),
                 text("f"),
@@ -3964,11 +3975,15 @@ mod tests {
 
         assert!(oids.len() == 4);
         // Constraint names are unique per relation, not per catalog, so the key
-        // carries the child relation.
-        assert!(oids.contains_key("cc.cc_a_fkey"));
+        // carries the child relation — as a pair, not as rendered text, so that
+        // two relations rendering alike cannot merge into one entry.
+        assert!(oids.contains_key(&(RelationName::public("cc"), "cc_a_fkey".to_string())));
         let band = FOREIGN_KEY_OID_BASE..FOREIGN_KEY_OID_BASE + OID_BAND_WIDTH;
-        for (key, oid) in &oids {
-            assert!(band.contains(oid), "{key} oid {oid} is out of band");
+        for ((table, name), oid) in &oids {
+            assert!(
+                band.contains(oid),
+                "{table}.{name} oid {oid} is out of band"
+            );
         }
         let distinct = oids.values().collect::<std::collections::BTreeSet<_>>();
         assert!(distinct.len() == oids.len());
