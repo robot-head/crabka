@@ -15,7 +15,7 @@ use tracing::Instrument as _;
 use crate::{
     engine::{
         BoundParam, CloseTarget, CopyInResponse, CopyOutStream, Engine, ExecuteOutcome,
-        Notification, QueryResult, ResultPage, ResultSink, Session, TxStatus,
+        Notification, QueryResult, ReportedParameter, ResultPage, ResultSink, Session, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
     messages::{
@@ -44,8 +44,10 @@ pub enum AuthMode {
 pub struct SessionConfig {
     pub auth: AuthMode,
     pub max_message_len: usize,
-    /// `ParameterStatus` values announced at session start. Clients parse
-    /// `server_version` and depend on `client_encoding=UTF8`.
+    /// The server-wide floor of the startup `ParameterStatus` burst; see
+    /// [`default_server_params`]. Clients parse `server_version` and depend on
+    /// `client_encoding=UTF8`. A session announces these unless its own
+    /// startup packet or its engine has something truer to say.
     pub server_params: Vec<(String, String)>,
     /// How much of a client-supplied W3C trace context statements on this
     /// connection may inherit. See [`IngressTracePolicy`].
@@ -64,20 +66,124 @@ impl SessionConfig {
     }
 }
 
+/// The static floor of the startup `ParameterStatus` burst.
+///
+/// `PostgreSQL` marks fifteen GUCs `GUC_REPORT` in `guc_tables.c` and announces
+/// every one of them at startup; a live 18.4 backend sends exactly those
+/// fifteen. Twelve are here. The three that are not are the three no gres
+/// session can answer honestly:
+///
+/// * `is_superuser` and `session_authorization` are authorization state the
+///   engine owns, and the engine does not yet learn who connected — the wire
+///   layer never passes `user` down, so a gres session's user is always
+///   `public`. Announcing the startup packet's `user` would contradict
+///   `SELECT session_user` on the very same connection.
+/// * `scram_iterations` sets the iteration count used when *generating* a SCRAM
+///   secret. Gres never generates one; its verifiers arrive already built. The
+///   parameter is not a GUC gres has, so `SHOW scram_iterations` fails, and a
+///   `ParameterStatus` for it would be a claim about a capability that is not
+///   there.
+///
+/// Every parameter that is here is one gres can also answer through `SHOW`,
+/// which is the test each of them had to pass.
+///
+/// The values are the server's, not the session's: a client that set one of
+/// them in its startup packet is answered from
+/// [`Session::reported_parameters`] instead, and for
+/// [`VERBATIM_REPORTED_PARAMS`] from the startup packet itself.
 #[must_use]
 pub fn default_server_params() -> Vec<(String, String)> {
     [
-        ("server_version", "18.0"),
+        // `PQserverVersion` parses this, so it has to name the same release as
+        // `version()` and `server_version_num`, which are both 18.4.
+        ("server_version", "18.4"),
         ("server_encoding", "UTF8"),
         ("client_encoding", "UTF8"),
+        ("application_name", ""),
         ("DateStyle", "ISO, MDY"),
+        ("IntervalStyle", "postgres"),
+        ("TimeZone", "UTC"),
+        ("search_path", "\"$user\", public"),
+        ("default_transaction_read_only", "off"),
+        ("in_hot_standby", "off"),
         ("integer_datetimes", "on"),
         ("standard_conforming_strings", "on"),
-        ("TimeZone", "UTC"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect()
+}
+
+/// Reported parameters an engine stores exactly as the startup packet spelled
+/// them, so the wire layer can announce the client's own value without having
+/// to ask what the engine made of it.
+///
+/// The rest normalise, and only the engine knows the canonical form: measured
+/// against `PostgreSQL` 18.4, a startup `DateStyle=Postgres` is announced as
+/// `Postgres, MDY`, `TimeZone=utc` as `UTC`, and `IntervalStyle=SQL_STANDARD`
+/// as `sql_standard`. Those come from [`Session::reported_parameters`].
+const VERBATIM_REPORTED_PARAMS: [&str; 2] = ["application_name", "search_path"];
+
+/// A connection's `ParameterStatus` bookkeeping: the engine's change stream,
+/// and the value last announced for each reported parameter.
+///
+/// The last-announced map is what makes a change *report* rather than an echo.
+/// `PostgreSQL` keeps a `reported_value` per GUC and stays silent when the
+/// current value already matches it, so rolling a `SET LOCAL` back to the value
+/// the client was already told produces no message at all. Holding the same
+/// map here means an engine can push unconditionally on every assignment and
+/// still put exactly `PostgreSQL`'s messages on the wire.
+#[derive(Debug, Default)]
+struct ParameterReporter {
+    changes: Option<mpsc::Receiver<ReportedParameter>>,
+    /// Keyed by the lowercased name, because GUC names are case-insensitive and
+    /// an engine may not spell `DateStyle` the way the startup burst did. The
+    /// stored name is the spelling this connection has already used, which is
+    /// the one it keeps using.
+    announced: std::collections::HashMap<String, (String, String)>,
+}
+
+impl ParameterReporter {
+    /// Announce a parameter and remember it as this connection's current value.
+    fn announce(&mut self, out: &mut BytesMut, name: &str, value: &str) {
+        let key = name.to_ascii_lowercase();
+        let name = match self.announced.get(&key) {
+            Some((announced_name, announced_value)) => {
+                if announced_value == value {
+                    return;
+                }
+                announced_name.clone()
+            }
+            None => name.to_string(),
+        };
+        backend::parameter_status(out, &name, value);
+        self.announced.insert(key, (name, value.to_string()));
+    }
+
+    /// Drain the engine's queue and write the `ParameterStatus` messages the
+    /// round owes, collapsing repeats of one parameter to its final value.
+    ///
+    /// Order is the order each parameter first moved. A live 18.4 backend emits
+    /// the reverse, because `ReportChangedGUCOptions` walks a list it builds by
+    /// prepending; no client can tell, since the messages name themselves.
+    fn flush(&mut self, out: &mut BytesMut) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        let mut round: Vec<ReportedParameter> = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            match round
+                .iter_mut()
+                .find(|seen| seen.name.eq_ignore_ascii_case(&change.name))
+            {
+                Some(seen) => seen.value = change.value,
+                None => round.push(change),
+            }
+        }
+        for change in round {
+            self.announce(out, &change.name, &change.value);
+        }
+    }
 }
 
 // ── Extended-query state ────────────────────────────────────────────────────
@@ -657,17 +763,71 @@ fn write_notices(out: &mut BytesMut, notices: Option<&mut mpsc::Receiver<PgError
     }
 }
 
+/// Write the startup `ParameterStatus` burst for one connection.
+///
+/// The burst is the server's static set, with two things laid over it. The
+/// engine's own [`Session::reported_parameters`] win outright, because the
+/// engine is what applied the startup packet and what normalised it. For the
+/// [`VERBATIM_REPORTED_PARAMS`] an engine that reports nothing still gets the
+/// client's own value echoed, which is safe precisely because those two are
+/// stored unchanged. A reported parameter the static set does not carry is
+/// announced after it, so an engine can grow the set without the wire layer
+/// changing.
+fn announce_startup_parameters<Sess: Session>(
+    out: &mut BytesMut,
+    parameters: &mut ParameterReporter,
+    config: &SessionConfig,
+    startup_params: &[(String, String)],
+    session: &Sess,
+) {
+    let from_engine = session.reported_parameters();
+    let lookup = |named: &str, pairs: &[(String, String)]| {
+        pairs
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(named))
+            .map(|(_, value)| value.clone())
+    };
+    for (name, value) in &config.server_params {
+        let announced = from_engine
+            .iter()
+            .find(|reported| reported.name.eq_ignore_ascii_case(name))
+            .map(|reported| reported.value.clone())
+            .or_else(|| {
+                VERBATIM_REPORTED_PARAMS
+                    .iter()
+                    .any(|verbatim| verbatim.eq_ignore_ascii_case(name))
+                    .then(|| lookup(name, startup_params))
+                    .flatten()
+            })
+            .unwrap_or_else(|| value.clone());
+        parameters.announce(out, name, &announced);
+    }
+    for reported in &from_engine {
+        parameters.announce(out, &reported.name, &reported.value);
+    }
+}
+
 /// Write the `ReadyForQuery` that closes an exchange, preceded by any pending
-/// `NoticeResponse` and `NotificationResponse` messages.
+/// `NoticeResponse`, `NotificationResponse` and `ParameterStatus` messages.
 ///
 /// Postgres delivers notifications only between transactions. A session that
 /// is idle *in* a transaction block accumulates them until the block ends, so
 /// this function drains the queue only when the reported status is `Idle`.
+///
+/// Changed `GUC_REPORT` parameters go out last, immediately ahead of
+/// `ReadyForQuery`, which is where a backend puts them:
+/// `ReportChangedGUCOptions` is the last thing `PostgresMain` does before it
+/// calls `ReadyForQuery`. That placement is what batches a multi-statement
+/// `Query` or a pipeline into one report per round instead of one per
+/// statement — measured on 18.4, `SELECT 1; SET application_name='a2';
+/// SELECT 2` puts its single `ParameterStatus` after the *last* statement's
+/// `CommandComplete`.
 fn write_ready<Sess: Session>(
     out: &mut BytesMut,
     session: &Sess,
     notices: Option<&mut mpsc::Receiver<PgError>>,
     notifications: Option<&mut mpsc::Receiver<Notification>>,
+    parameters: &mut ParameterReporter,
 ) {
     write_notices(out, notices);
     let status = session.tx_status();
@@ -683,6 +843,7 @@ fn write_ready<Sess: Session>(
             );
         }
     }
+    parameters.flush(out);
     backend::ready_for_query(out, status);
 }
 
@@ -779,15 +940,18 @@ where
     if !authenticate(&mut stream, &startup_params, &config, &mut out, &mut inbuf).await? {
         return Ok(());
     }
-    for (name, value) in &config.server_params {
-        backend::parameter_status(&mut out, name, value);
-    }
-    backend::backend_key_data(&mut out, cancel.pid, cancel.secret);
-
     // One session per connection; it owns the (currently trivial) transaction
     // state and is threaded by `&mut` through the message loop. The pid it is
-    // built with is the one just announced in `BackendKeyData`, so a
+    // built with is the one announced in `BackendKeyData` below, so a
     // self-notify reaches the client stamped with its own pid.
+    //
+    // Nothing is announced until the engine has taken the startup packet and
+    // finished starting up, because until then there is nothing truthful to
+    // announce: the engine applies these parameters as the session's defaults
+    // and normalises them on the way in. It is also what a backend does with a
+    // startup packet it rejects — a bad GUC there is fatal *before* the
+    // `ParameterStatus` burst, so the client gets `ErrorResponse` and nothing
+    // else.
     let mut session = engine.connect_with_pid(cancel.pid);
     for (name, value) in &startup_params {
         if !matches!(name.as_str(), "user" | "database")
@@ -809,8 +973,26 @@ where
     // once here avoids a second borrow of `session` during protocol handling.
     let mut notifications = session.take_notifications();
     let mut notices = session.take_notices();
+    let mut parameters = ParameterReporter {
+        changes: session.take_parameter_changes(),
+        ..ParameterReporter::default()
+    };
+    announce_startup_parameters(
+        &mut out,
+        &mut parameters,
+        &config,
+        &startup_params,
+        &session,
+    );
+    backend::backend_key_data(&mut out, cancel.pid, cancel.secret);
 
-    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+    write_ready(
+        &mut out,
+        &session,
+        notices.as_mut(),
+        notifications.as_mut(),
+        &mut parameters,
+    );
     stream.write_all(&out).await?;
     out.clear();
 
@@ -909,6 +1091,7 @@ where
                                 &session,
                                 notices.as_mut(),
                                 notifications.as_mut(),
+                                &mut parameters,
                             );
                         }
                         stream.write_all(&out).await?;
@@ -932,6 +1115,7 @@ where
                                 &session,
                                 notices.as_mut(),
                                 notifications.as_mut(),
+                                &mut parameters,
                             );
                         }
                         stream.write_all(&out).await?;
@@ -988,6 +1172,7 @@ where
                                 &session,
                                 notices.as_mut(),
                                 notifications.as_mut(),
+                                &mut parameters,
                             );
                             stream.write_all(&out).await?;
                             out.clear();
@@ -1003,6 +1188,7 @@ where
                                 &session,
                                 notices.as_mut(),
                                 notifications.as_mut(),
+                                &mut parameters,
                             );
                             stream.write_all(&out).await?;
                             out.clear();
@@ -1050,7 +1236,13 @@ where
                             }
                         }
                     }
-                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+                    write_ready(
+                        &mut out,
+                        &session,
+                        notices.as_mut(),
+                        notifications.as_mut(),
+                        &mut parameters,
+                    );
                     stream.write_all(&out).await?;
                     out.clear();
                 }
@@ -1064,7 +1256,13 @@ where
                     // A statement that outlives a `Sync` is genuinely being
                     // reused; the trace it was prepared under is stale.
                     ext.trace = TraceCarrier::default();
-                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+                    write_ready(
+                        &mut out,
+                        &session,
+                        notices.as_mut(),
+                        notifications.as_mut(),
+                        &mut parameters,
+                    );
                     stream.write_all(&out).await?;
                     out.clear();
                 }
@@ -1089,7 +1287,13 @@ where
                     };
                     write_notices(&mut out, notices.as_mut());
                     backend::error_response(&mut out, &e);
-                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+                    write_ready(
+                        &mut out,
+                        &session,
+                        notices.as_mut(),
+                        notifications.as_mut(),
+                        &mut parameters,
+                    );
                     stream.write_all(&out).await?;
                     out.clear();
                 }

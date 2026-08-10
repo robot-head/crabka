@@ -236,6 +236,26 @@ pub struct CopyOutStream {
     pub tag: String,
 }
 
+/// One `GUC_REPORT` parameter and the value the connection must be told it has.
+///
+/// `PostgreSQL` marks fifteen GUCs `GUC_REPORT` in `guc_tables.c` and reports
+/// each of them twice over: once in the startup burst, and again — as a fresh
+/// `ParameterStatus` — every later time the session value changes. The second
+/// half is the half clients actually build on. A transaction pooler learns the
+/// state of a backend it is about to hand to another client from exactly these
+/// messages, and libpq answers `PQparameterStatus` from them.
+///
+/// The wire layer owns the *reporting* rules, so an engine may push the same
+/// parameter repeatedly and need not remember what it last said: see
+/// [`Session::take_parameter_changes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedParameter {
+    /// The GUC's canonical spelling, which is the one `guc_tables.c` declares:
+    /// `DateStyle` and `TimeZone`, not `datestyle` and `timezone`.
+    pub name: String,
+    pub value: String,
+}
+
 /// One `NOTIFY` delivered asynchronously to a listening connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notification {
@@ -318,6 +338,51 @@ pub trait Session: Send {
     /// `ReadyForQuery`. An error return rejects the connection.
     fn startup(&mut self) -> impl Future<Output = Result<(), PgError>> + Send {
         async { Ok(()) }
+    }
+
+    /// The `GUC_REPORT` values this session starts with, read once after
+    /// [`Session::startup`] and announced in the startup `ParameterStatus`
+    /// burst.
+    ///
+    /// These override the static
+    /// [`SessionConfig::server_params`](crate::session::SessionConfig::server_params)
+    /// by name, case-insensitively, and a name the static set does not carry
+    /// is announced as well. The engine is the only thing that can answer
+    /// truthfully, because it is the only thing that knows what it made of the
+    /// startup packet: `PostgreSQL` answers a startup `DateStyle=Postgres`
+    /// with `Postgres, MDY`, a `TimeZone=utc` with `UTC`, and an
+    /// `IntervalStyle=SQL_STANDARD` with `sql_standard`.
+    ///
+    /// The default is empty, which leaves a session announcing only the static
+    /// set.
+    fn reported_parameters(&self) -> Vec<ReportedParameter> {
+        Vec::new()
+    }
+
+    /// Hand the wire layer this session's `GUC_REPORT` change stream.
+    ///
+    /// The wire layer calls this exactly once, immediately after it creates the
+    /// session, and from then on drains the queue at every `ReadyForQuery` —
+    /// which is where `PostgreSQL` puts the resulting `ParameterStatus`
+    /// messages, batched after the last statement of the round rather than
+    /// interleaved with each one.
+    ///
+    /// An engine pushes a parameter's **new effective value** whenever that
+    /// value moves, and does not have to filter: the wire layer collapses
+    /// repeats within a round and drops any value equal to the one it last
+    /// announced, which is what `PostgreSQL`'s per-GUC `reported_value` check
+    /// does. Rolling a `SET LOCAL` back to the value the client already knows
+    /// therefore stays silent on both.
+    ///
+    /// Every path that moves a reported value owes a push, not just `SET`:
+    /// `RESET`, `RESET ALL`, `DISCARD ALL`, `set_config()`, and the transaction
+    /// end that reverts a `SET LOCAL` all emit `ParameterStatus` on
+    /// `PostgreSQL`.
+    ///
+    /// Engines that never push keep the default `None`, and their sessions
+    /// announce the startup burst and nothing after it.
+    fn take_parameter_changes(&mut self) -> Option<mpsc::Receiver<ReportedParameter>> {
+        None
     }
 
     /// Release whatever the session owns that outlives the connection but not
