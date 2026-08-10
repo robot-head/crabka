@@ -18,7 +18,7 @@ use crabka_log::{Log, LogConfig};
 use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use uuid::Uuid;
 
-use self::engine::WalShardEngine;
+use self::engine::{OpenMode, WalShardEngine};
 use super::WalStore;
 use crate::error::BrokerError;
 
@@ -81,8 +81,21 @@ impl QuorumWalStore {
         }
         let voter_ids: Vec<_> = replicas.iter().map(engine::WalReplica::id).collect();
         let voters = engine::voter_set(voter_ids.iter().copied());
-        let state = load_or_bootstrap_quorum_state(&root, voter_ids, voters)?;
-        let engine = Arc::new(WalShardEngine::new(NodeId(0), state, replicas));
+        let opened = load_or_prepare_quorum_state(&root, &voter_ids, voters)?;
+        let mode = if opened.is_new {
+            OpenMode::BootstrapFrom(NodeId(0))
+        } else {
+            OpenMode::Recover
+        };
+        let engine = Arc::new(WalShardEngine::new(
+            NodeId(0),
+            opened.state.clone(),
+            replicas,
+            mode,
+        )?);
+        if opened.is_new {
+            persist_quorum_state(&root, &opened.state, &voter_ids)?;
+        }
         let hot_tail = topic_id
             .zip(hot_tail)
             .map(|(topic_id, cache)| HotTailTarget {
@@ -108,11 +121,17 @@ struct PersistedQuorumState {
     voters: Vec<u64>,
 }
 
-fn load_or_bootstrap_quorum_state(
+#[derive(Debug)]
+struct OpenedQuorumState {
+    state: crabka_kraft_core::QuorumState,
+    is_new: bool,
+}
+
+fn load_or_prepare_quorum_state(
     root: &std::path::Path,
-    voter_ids: Vec<NodeId>,
+    voter_ids: &[NodeId],
     voters: crabka_voters::VoterSet,
-) -> Result<crabka_kraft_core::QuorumState, BrokerError> {
+) -> Result<OpenedQuorumState, BrokerError> {
     fs::create_dir_all(root)?;
     let path = root.join(QUORUM_STATE_FILE);
     if path.exists() {
@@ -129,22 +148,36 @@ fn load_or_bootstrap_quorum_state(
                 voter_ids
             )));
         }
-        return Ok(crabka_kraft_core::QuorumState::bootstrap(
-            persisted.cluster_id,
-            voters,
-        ));
+        return Ok(OpenedQuorumState {
+            state: crabka_kraft_core::QuorumState::bootstrap(persisted.cluster_id, voters),
+            is_new: false,
+        });
     }
 
     let state = crabka_kraft_core::QuorumState::bootstrap(uuid::Uuid::new_v4(), voters);
+    Ok(OpenedQuorumState {
+        state,
+        is_new: true,
+    })
+}
+
+fn persist_quorum_state(
+    root: &std::path::Path,
+    state: &crabka_kraft_core::QuorumState,
+    voter_ids: &[NodeId],
+) -> Result<(), BrokerError> {
+    let path = root.join(QUORUM_STATE_FILE);
     let persisted = PersistedQuorumState {
         cluster_id: state.cluster_id,
-        voters: voter_ids.into_iter().map(|id| id.0).collect(),
+        voters: voter_ids.iter().map(|id| id.0).collect(),
     };
     let bytes = serde_json::to_vec_pretty(&persisted).map_err(|err| {
         BrokerError::Replication(format!("encode WAL quorum state {}: {err}", path.display()))
     })?;
-    fs::write(path, bytes)?;
-    Ok(state)
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)?;
+    Ok(())
 }
 
 fn replica_config(config: &LogConfig) -> LogConfig {
@@ -235,6 +268,35 @@ mod tests {
         assert!(!root.join("replica-2").exists());
     }
 
+    #[test]
+    fn partition_quorum_bootstraps_existing_source_into_every_replica() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        source.lock().unwrap().append(&mut batch(3)).unwrap();
+        source.lock().unwrap().sync().unwrap();
+
+        let store = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source,
+            None,
+            3,
+        )
+        .unwrap();
+
+        assert!(store.engine.durable_watermark() == Offset(3));
+        assert!(store.engine.replica_end_offsets() == vec![Offset(3), Offset(3), Offset(3)]);
+        assert!(
+            dir.path()
+                .join("__diskless_wal_quorum/topic-0/quorum-state.json")
+                .is_file()
+        );
+    }
+
     #[tokio::test]
     async fn quorum_wal_store_commits_on_f_plus_1_and_survives_one_loss() {
         let source_dir = tempfile::tempdir().unwrap();
@@ -273,6 +335,11 @@ mod tests {
         let (_results, leo) = append_source(&store, 1).await;
         assert!(store.sync_durable(leo).await.is_err());
         assert!(engine.durable_watermark() == Offset(5));
+
+        engine.set_replica_alive(NodeId(3), true);
+        let (_results, leo) = append_source(&store, 1).await;
+        assert!(store.sync_durable(leo).await.unwrap() == Offset(7));
+        assert!(engine.replica_end_offsets()[2] == Offset(7));
     }
 
     #[tokio::test]
@@ -315,6 +382,126 @@ mod tests {
         assert!(cache.get(topic_id, partition, 1, usize::MAX).is_some());
     }
 
+    #[tokio::test]
+    async fn quorum_wal_store_can_commit_a_source_prefix_without_regressing() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        let store = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source,
+            None,
+            3,
+        )
+        .unwrap();
+
+        let (_results, first) = append_source(&store, 1).await;
+        let (_results, second) = append_source(&store, 1).await;
+        assert!(store.sync_durable(first).await.unwrap() == Offset(1));
+        assert!(store.sync_durable(second).await.unwrap() == Offset(2));
+        assert!(store.sync_durable(first).await.unwrap() == Offset(2));
+        assert!(store.engine.durable_watermark() == Offset(2));
+    }
+
+    #[tokio::test]
+    async fn partition_quorum_recovers_watermark_and_repairs_one_lost_replica() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let source = Arc::new(Mutex::new(
+            Log::open(&source_dir, LogConfig::default()).unwrap(),
+        ));
+        let store = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source.clone(),
+            None,
+            3,
+        )
+        .unwrap();
+
+        let (_results, leo) = append_source(&store, 1).await;
+        assert!(store.sync_durable(leo).await.unwrap() == Offset(1));
+        drop(store);
+        drop(source);
+
+        let lost_replica = dir.path().join("__diskless_wal_quorum/topic-0/replica-2");
+        std::fs::remove_dir_all(&lost_replica).unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(&source_dir, LogConfig::default()).unwrap(),
+        ));
+        let reopened = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source,
+            None,
+            3,
+        )
+        .unwrap();
+
+        assert!(reopened.engine.durable_watermark() == Offset(1));
+        assert!(reopened.engine.replica_end_offsets() == vec![Offset(1), Offset(1), Offset(1)]);
+        let (hwm, records) = reopened
+            .engine
+            .serve_fetch(Offset(0), ByteSize::from_bytes(u64::MAX))
+            .unwrap();
+        assert!(hwm == Offset(1));
+        assert!(!records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn partition_quorum_discards_uncommitted_suffix_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let source = Arc::new(Mutex::new(
+            Log::open(&source_dir, LogConfig::default()).unwrap(),
+        ));
+        let store = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source.clone(),
+            None,
+            3,
+        )
+        .unwrap();
+        let (_results, leo) = append_source(&store, 2).await;
+        assert!(store.sync_durable(leo).await.unwrap() == Offset(2));
+
+        store.engine.set_replica_alive(NodeId(1), false);
+        store.engine.set_replica_alive(NodeId(2), false);
+        let (_results, leo) = append_source(&store, 1).await;
+        assert!(store.sync_durable(leo).await.is_err());
+        assert!(store.engine.replica_end_offsets() == vec![Offset(3), Offset(2), Offset(2)]);
+        drop(store);
+        drop(source);
+
+        let source = Arc::new(Mutex::new(
+            Log::open(&source_dir, LogConfig::default()).unwrap(),
+        ));
+        let reopened = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source,
+            None,
+            3,
+        )
+        .unwrap();
+
+        assert!(reopened.engine.durable_watermark() == Offset(2));
+        assert!(reopened.engine.replica_end_offsets() == vec![Offset(2), Offset(2), Offset(2)]);
+    }
+
     fn batch(records: i32) -> RecordBatch {
         let mut batch = RecordBatch {
             last_offset_delta: records - 1,
@@ -334,12 +521,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let voter_ids = vec![NodeId(0), NodeId(1), NodeId(2)];
         let voters = engine::voter_set(voter_ids.iter().copied());
-        let first = load_or_bootstrap_quorum_state(root.path(), voter_ids.clone(), voters).unwrap();
+        let first = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        assert!(first.is_new);
+        persist_quorum_state(root.path(), &first.state, &voter_ids).unwrap();
 
         let voters = engine::voter_set(voter_ids.iter().copied());
-        let reopened = load_or_bootstrap_quorum_state(root.path(), voter_ids, voters).unwrap();
+        let reopened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
 
-        assert!(reopened.cluster_id == first.cluster_id);
+        assert!(!reopened.is_new);
+        assert!(reopened.state.cluster_id == first.state.cluster_id);
         assert!(root.path().join(QUORUM_STATE_FILE).exists());
     }
 
@@ -348,10 +538,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let voter_ids = vec![NodeId(0), NodeId(1), NodeId(2)];
         let voters = engine::voter_set(voter_ids.iter().copied());
-        load_or_bootstrap_quorum_state(root.path(), voter_ids, voters).unwrap();
+        let first = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        persist_quorum_state(root.path(), &first.state, &voter_ids).unwrap();
 
         let changed = vec![NodeId(0), NodeId(1), NodeId(3)];
         let voters = engine::voter_set(changed.iter().copied());
-        assert!(load_or_bootstrap_quorum_state(root.path(), changed, voters).is_err());
+        assert!(load_or_prepare_quorum_state(root.path(), &changed, voters).is_err());
     }
 }

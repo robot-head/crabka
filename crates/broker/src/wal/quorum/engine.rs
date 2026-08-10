@@ -47,21 +47,49 @@ impl WalReplica {
 /// Drives the durable quorum frontier of a WAL shard.
 #[derive(Debug)]
 pub(crate) struct WalShardEngine {
-    #[allow(dead_code)]
     core: Mutex<QuorumStateMachine>,
     replicas: Vec<WalReplica>,
     durable_watermark: AtomicI64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OpenMode {
+    BootstrapFrom(NodeId),
+    Recover,
+}
+
 impl WalShardEngine {
-    #[allow(dead_code)]
-    #[must_use]
-    pub(crate) fn new(me: NodeId, state: QuorumState, replicas: Vec<WalReplica>) -> Self {
-        Self {
-            core: Mutex::new(QuorumStateMachine::new(me, state, ELECTION_TIMEOUT)),
-            replicas,
-            durable_watermark: AtomicI64::new(0),
+    pub(crate) fn new(
+        me: NodeId,
+        state: QuorumState,
+        replicas: Vec<WalReplica>,
+        mode: OpenMode,
+    ) -> Result<Self, BrokerError> {
+        if replicas.is_empty() {
+            return Err(BrokerError::Replication(
+                "wal quorum must contain at least one replica".into(),
+            ));
         }
+        if state.voters.len() != replicas.len()
+            || replicas
+                .iter()
+                .any(|replica| !state.voters.contains(replica.id))
+        {
+            return Err(BrokerError::Replication(
+                "wal quorum replicas do not match the persisted voter set".into(),
+            ));
+        }
+
+        let core = QuorumStateMachine::new(me, state, ELECTION_TIMEOUT);
+        let durable_watermark = match mode {
+            OpenMode::BootstrapFrom(source) => bootstrap_durable_prefix(&replicas, source)?,
+            OpenMode::Recover => recover_durable_prefix(&replicas, core.quorum_state().majority())?,
+        };
+        Ok(Self {
+            core: Mutex::new(core),
+            replicas,
+            durable_watermark: AtomicI64::new(durable_watermark.0),
+        })
     }
 
     #[cfg(test)]
@@ -73,7 +101,7 @@ impl WalShardEngine {
             .into_iter()
             .map(|(id, log)| WalReplica::new(id, log))
             .collect();
-        Self::new(NodeId(1), state, replicas)
+        Self::new(NodeId(1), state, replicas, OpenMode::Recover).expect("test WAL quorum recovers")
     }
 
     #[must_use]
@@ -88,26 +116,47 @@ impl WalShardEngine {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn replica_end_offsets(&self) -> Vec<Offset> {
+        self.replicas.iter().map(replica_end_offset).collect()
+    }
+
     pub(crate) async fn replicate_and_sync(
         &self,
         source: &Arc<Mutex<Log>>,
         target: Offset,
     ) -> Result<Offset, BrokerError> {
-        let start = self.durable_watermark();
-        if target <= start {
-            return Ok(start);
+        let committed = self.durable_watermark();
+        if target <= committed {
+            return Ok(committed);
         }
-        let batches = read_batches(source, start, target)?;
+        let source_end = replica_log_end(source);
+        if target > source_end {
+            return Err(BrokerError::Replication(format!(
+                "wal source ends at {}, before requested durable offset {}",
+                source_end.0, target.0
+            )));
+        }
+
         let mut synced = 0usize;
         for replica in &self.replicas {
             if !replica.alive.load(Ordering::Acquire) {
                 continue;
             }
+            let replica_end = replica_end_offset(replica);
+            let Ok(batches) = read_batches_exact(source, replica_end.min(target), target) else {
+                continue;
+            };
             if sync_replica(replica.log.clone(), &batches).await.is_ok() {
                 synced += 1;
             }
         }
-        let required = self.replicas.len() / 2 + 1;
+        let required = self
+            .core
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .quorum_state()
+            .majority();
         if synced < required {
             return Err(BrokerError::Replication(format!(
                 "wal quorum has {synced} synced replicas, needs {required}"
@@ -142,6 +191,80 @@ impl WalShardEngine {
     }
 }
 
+fn recover_durable_prefix(replicas: &[WalReplica], majority: usize) -> Result<Offset, BrokerError> {
+    let ends = replicas.iter().map(replica_end_offset).collect::<Vec<_>>();
+    let (donor_index, donor_end) = ends
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, offset)| offset.0)
+        .map(|(index, offset)| (index, *offset))
+        .ok_or_else(|| BrokerError::Replication("wal quorum has no recovery donor".into()))?;
+    let follower_ends = ends
+        .iter()
+        .enumerate()
+        .filter_map(|(index, offset)| (index != donor_index).then_some(offset.0))
+        .collect::<Vec<_>>();
+    let durable = Offset(crabka_verified::recompute_high_watermark(
+        donor_end.0,
+        &follower_ends,
+        majority,
+        -1,
+        0,
+    ));
+
+    normalize_durable_prefix(replicas, &ends, donor_index, durable)?;
+    Ok(durable)
+}
+
+fn bootstrap_durable_prefix(
+    replicas: &[WalReplica],
+    source: NodeId,
+) -> Result<Offset, BrokerError> {
+    let ends = replicas.iter().map(replica_end_offset).collect::<Vec<_>>();
+    let source_index = replicas
+        .iter()
+        .position(|replica| replica.id == source)
+        .ok_or_else(|| {
+            BrokerError::Replication(format!(
+                "wal quorum bootstrap source {} is not a voter",
+                source.0
+            ))
+        })?;
+    let durable = ends[source_index];
+    normalize_durable_prefix(replicas, &ends, source_index, durable)?;
+    Ok(durable)
+}
+
+fn normalize_durable_prefix(
+    replicas: &[WalReplica],
+    ends: &[Offset],
+    donor_index: usize,
+    durable: Offset,
+) -> Result<(), BrokerError> {
+    for replica in replicas {
+        let mut log = replica
+            .log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.truncate_to(durable)?;
+    }
+    for (replica, end) in replicas.iter().zip(ends) {
+        let batches = read_batches_exact(&replicas[donor_index].log, (*end).min(durable), durable)?;
+        sync_replica_blocking(&replica.log, &batches)?;
+    }
+    Ok(())
+}
+
+fn replica_end_offset(replica: &WalReplica) -> Offset {
+    replica_log_end(&replica.log)
+}
+
+fn replica_log_end(log: &Arc<Mutex<Log>>) -> Offset {
+    log.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .log_end_offset()
+}
+
 #[derive(Debug, Clone)]
 struct BatchBytes {
     base_offset: Offset,
@@ -161,6 +284,29 @@ fn read_batches(
         // is uncapped.
         .read_raw(start, target, ByteSize::from_bytes(u64::MAX))?;
     split_batches(&raw.bytes)
+}
+
+fn read_batches_exact(
+    source: &Arc<Mutex<Log>>,
+    start: Offset,
+    target: Offset,
+) -> Result<Vec<BatchBytes>, BrokerError> {
+    if start == target {
+        return Ok(Vec::new());
+    }
+    let batches = read_batches(source, start, target)?;
+    let first = batches.first().map(|batch| batch.base_offset);
+    let end = batches
+        .last()
+        .and_then(|batch| batch.last_offset.0.checked_add(1))
+        .map(Offset);
+    if (first, end) != (Some(start), Some(target)) {
+        return Err(BrokerError::Replication(format!(
+            "wal source does not contain the complete range {}..{}",
+            start.0, target.0
+        )));
+    }
+    Ok(batches)
 }
 
 fn split_batches(bytes: &Bytes) -> Result<Vec<BatchBytes>, BrokerError> {

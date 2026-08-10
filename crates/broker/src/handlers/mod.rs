@@ -32,8 +32,7 @@ pub(crate) mod context;
 pub(crate) use context::{RequestContext, TelemetryContext};
 
 pub(crate) mod registry;
-pub(crate) use registry::DispatchRegistry;
-pub(crate) use registry::{DispatchEntry, DispatchKind, RequestQuotaPolicy};
+pub(crate) use registry::{DispatchEntry, DispatchKind, DispatchRegistry, RequestQuotaPolicy};
 
 pub(crate) fn encode_response<R: Encode>(
     resp: &R,
