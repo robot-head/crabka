@@ -109,11 +109,12 @@ pub(crate) enum RowSecurity {
 
 /// A table proven not subject to row security for this read.
 ///
-/// The optimizer pushdowns take this instead of `&Table`. Its only constructors
-/// return `None` unless the decision was [`RowSecurity::Open`], so a pushdown
-/// that forgets about row security does not compile rather than silently
-/// reading past a policy. Falling through to `None` is fail-closed: the caller
-/// drops to the ordinary gated scan, which is slower and never wrong.
+/// The optimizer pushdowns and the wire path's streaming cursor take this
+/// instead of `&Table`. Its only constructors return `None` unless the decision
+/// was [`RowSecurity::Open`], so a read that forgets about row security does
+/// not compile rather than silently reading past a policy. Falling through to
+/// `None` is fail-closed: the caller drops to the ordinary gated scan, which is
+/// slower and never wrong.
 #[derive(Clone, Copy)]
 pub(crate) struct UnrestrictedTable<'a>(&'a Table);
 
@@ -154,8 +155,11 @@ impl<'a> UnrestrictedTable<'a> {
     /// The permit is taken by reference and never read: it is there so this
     /// constructor cannot be reached without one, which is what makes
     /// "unrestricted" mean *both* freedoms rather than only the row-security
-    /// one. Six optimizer pushdowns take an `UnrestrictedTable`; a seventh
-    /// written the same way is safe by construction.
+    /// one. Eight reads now take the proof, and they are no longer all
+    /// optimizer pushdowns: six are, the seventh is the wire path's streaming
+    /// cursor, and the eighth is the correlated scalar lookup, which holds it
+    /// by value as an [`UnrestrictedRelation`] because its plan outlives the
+    /// planner's borrow. A ninth written the same way is safe by construction.
     pub(crate) const fn from_decision(
         _permit: &crate::privilege::ReadPermit,
         decision: &RowSecurity,
@@ -170,6 +174,46 @@ impl<'a> UnrestrictedTable<'a> {
     /// The relation, now that it is known not to need filtering.
     pub(crate) const fn get(self) -> &'a Table {
         self.0
+    }
+}
+
+/// The same proof as [`UnrestrictedTable`], held by value.
+///
+/// `UnrestrictedTable` borrows, which suits a pushdown that decides and then
+/// scans inside one call. A pushdown that decides while *planning* and scans
+/// later has nothing left to borrow from: the correlated scalar lookup builds
+/// its plan once and answers every outer row from it, long after the planner's
+/// `&Table` is gone. Owning the relation behind this type is what keeps the
+/// rule anyway — the plan has no field a scan could read the relation out of
+/// without the proof.
+pub(crate) struct UnrestrictedRelation(Table);
+
+impl UnrestrictedRelation {
+    /// Take `table` by value and keep it only if the session may read it and
+    /// no policy applies to it.
+    ///
+    /// Declines with `None` exactly as [`UnrestrictedTable::read`] does, and
+    /// for the same reason: the caller's fallback is the ordinary gated read,
+    /// which raises the denial itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage/corruption errors from the catalog KV seam, or a
+    /// refusal to compile an unsafe policy qual.
+    pub(crate) fn read(
+        privileges: &crate::privilege::PrivilegeCtx<'_>,
+        ctx: &RlsCtx<'_>,
+        table: Table,
+    ) -> Result<Option<Self>, ExecError> {
+        // `is_some` rather than a `map`: the borrow the decision holds on
+        // `table` has to end before `table` can move into the proof.
+        let admitted = UnrestrictedTable::read(privileges, ctx, &table)?.is_some();
+        Ok(admitted.then_some(Self(table)))
+    }
+
+    /// The relation, now that it is known to be readable and unfiltered.
+    pub(crate) const fn get(&self) -> &Table {
+        &self.0
     }
 }
 

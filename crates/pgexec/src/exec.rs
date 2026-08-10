@@ -12510,7 +12510,17 @@ struct LazyInitPlan {
 
 struct CorrelatedScalarLookup {
     query: crabka_pgparser::ast::QueryExpr,
-    table: Table,
+    /// The inner relation, behind the proof that the session may read it and
+    /// that no policy filters it.
+    ///
+    /// This scan answers every outer row out of one hash of the whole inner
+    /// relation, so it has to be the whole relation the session is entitled
+    /// to — there is no per-row read left for a gate to sit in front of.
+    /// Keeping the relation only inside the proof is what stops a later edit
+    /// scanning it without one; [`plan_correlated_scalar_lookup`] is the only
+    /// place the proof is obtained, and it declines the pushdown when it
+    /// cannot be.
+    table: crate::rls::UnrestrictedRelation,
     key_column: usize,
     result_column: usize,
     result_type: ColumnType,
@@ -12522,9 +12532,11 @@ fn build_correlated_scalar_lookup(
     read_ctx: &crate::subquery::SubCtx<'_>,
     plan: &CorrelatedScalarLookup,
 ) -> Result<CorrelatedScalarLookupState, ExecError> {
+    // The gated relation, which is the only one this function can name.
+    let table = plan.table.get();
     // The lookup projects columns straight out of storage, where a virtual
     // generated column is a NULL placeholder; the ordinary scan materializes it.
-    if has_virtual_generated(&plan.table) {
+    if has_virtual_generated(table) {
         return Ok(CorrelatedScalarLookupState::Fallback);
     }
     let projected_columns = if plan.key_column == plan.result_column {
@@ -12536,7 +12548,7 @@ fn build_correlated_scalar_lookup(
         .iter()
         .enumerate()
         .filter_map(|(projected, source)| {
-            holds_reg(plan.table.columns[*source].ty).map(|kind| (projected, kind))
+            holds_reg(table.columns[*source].ty).map(|kind| (projected, kind))
         })
         .collect::<Vec<_>>();
     let result_column = usize::from(plan.key_column != plan.result_column);
@@ -12550,7 +12562,7 @@ fn build_correlated_scalar_lookup(
             own_xid: read_ctx.own,
             read_ts: None,
             own_start_ts: None,
-            table: &plan.table,
+            table,
             interval: RowInterval::ALL,
             predicate: PredicatePushdown::FullScan,
             projection: crate::ProjectionPushdown::Columns(projected_columns),
@@ -13442,7 +13454,16 @@ fn plan_correlated_scalar_lookup(
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    if table.sharded
+    // A materialized view whose contents have never been computed is an error
+    // to read, not an empty relation, and this hash never opens the path that
+    // says so: it read the empty row space and answered `NULL` for every outer
+    // key, while the same subquery without the `LIMIT 1` raised 55000.
+    // Declining hands both shapes to the path that refuses it.
+    if table
+        .materialized
+        .as_ref()
+        .is_some_and(|matview| !matview.populated)
+        || table.sharded
         || table.sharding.is_some()
         || table.foreign.is_some()
         || crate::partition::is_partitioned(read_ctx.catalog_kv, &table.name)?
@@ -13512,6 +13533,29 @@ fn plan_correlated_scalar_lookup(
         return Ok(None);
     }
     let result_type = table.columns[result_column].ty;
+    // The two gates every other stored-relation read passes and this one did
+    // not: the read permit and row security. The lookup hashes the whole inner
+    // relation and answers every outer row from that hash, so an ungranted
+    // relation was readable by anyone who could name a key — with
+    // `generate_series` as the outer relation, by anyone at all — and a policy
+    // that hid a row hid it from every path but this one.
+    //
+    // Declining is the whole answer. The correlated fallback re-runs the
+    // subquery through `subquery::resolve_expr`, which raises the 42501 itself
+    // and filters through `rls::apply_row_security` with the once-per-scan qual
+    // resolution and the recursion guard this hash has nowhere to run. Nor
+    // could a filtering fast path be the same fast path: the hash is built from
+    // a two-column projection, while a policy qual may read any column of the
+    // row, so filtering here means scanning the relation whole.
+    //
+    // The proof is taken by value because the plan outlives this function and
+    // is read once per outer row; it is the only field the scan can reach the
+    // relation through.
+    let Some(table) =
+        crate::rls::UnrestrictedRelation::read(&read_ctx.privileges(), &read_ctx.rls(), table)?
+    else {
+        return Ok(None);
+    };
     Ok(Some((
         CorrelatedScalarLookup {
             query: query.clone(),
