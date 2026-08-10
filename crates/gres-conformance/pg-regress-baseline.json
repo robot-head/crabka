@@ -568,7 +568,7 @@
       "changed_lines": 457,
       "expected": "largeobject.out",
       "hunks": 4,
-      "sha256": "8046ddd32623e38d5513467cc82a71e9d6aacec63fa786a63c20007312e6ea62"
+      "sha256": "679b140f87e381a75528fc83f12b1a882d2a226f3936975068ffea2a0389fe80"
     },
     "limit": {
       "changed_lines": 199,

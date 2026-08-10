@@ -40,6 +40,27 @@ def diff_section(
     return "\n".join(lines) + "\n"
 
 
+def context_line_diff(root: Path, test: str, argument: str) -> str:
+    """A diff whose changed line is a psql `LINE n:` echo cut off mid-argument.
+
+    psql truncates that echo to a fixed display width, so when the argument is
+    an absolute path the surviving text is a bare prefix of it.
+    """
+    return (
+        "\n".join(
+            (
+                f"diff -U3 {root}/source/expected/{test}.out {root}/build/results/{test}.out",
+                f"--- {root}/source/expected/{test}.out\t2026-08-01 01:02:03 +0000",
+                f"+++ {root}/build/results/{test}.out\t2026-08-02 04:05:06 +0000",
+                "@@ -1 +1 @@",
+                "-ERROR:  cannot execute lo_import() in a read-only transaction",
+                f"+LINE 1: SELECT lo_import('{argument}...",
+            )
+        )
+        + "\n"
+    )
+
+
 class Dataset:
     def __init__(
         self,
@@ -173,6 +194,50 @@ class BaselineTest(unittest.TestCase):
             )
             self.assertEqual(first_document["failures"]["float4"]["hunks"], 1)
             self.assertEqual(first_document["failures"]["float4"]["changed_lines"], 2)
+
+    def test_generate_is_stable_when_a_context_line_cuts_the_root_in_half(self) -> None:
+        # The cut lands inside the build root for both, at a different depth,
+        # because the roots are different lengths -- which is the situation on
+        # any two machines that keep their artifacts in different places.
+        width = 20
+        documents = []
+        with tempfile.TemporaryDirectory() as temporary:
+            for name in ("a", "b" * 30):
+                root = Path(temporary) / name
+                root.mkdir()
+                dataset = Dataset(root, ["largeobject"], {"largeobject": (1, "same")})
+                path = f"{dataset.build_root}/results/lotest.txt"
+                dataset.diff.write_text(
+                    context_line_diff(root, "largeobject", path[:width]),
+                    encoding="utf-8",
+                )
+                result = run("generate", *dataset.arguments())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                documents.append(json.loads(result.stdout))
+
+        self.assertEqual(documents[0], documents[1])
+        self.assertEqual(documents[0]["failures"]["largeobject"]["changed_lines"], 2)
+
+    def test_a_truncated_context_line_that_is_not_a_root_stays_distinct(self) -> None:
+        # An XPath expression opens with a slash too. Eliding one would hash
+        # two different queries the same and hide a real divergence.
+        documents = []
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, xpath in (("a", "/menu/beer"), ("b" * 30, "/menu/wine")):
+                root = Path(temporary) / name
+                root.mkdir()
+                dataset = Dataset(root, ["xml"], {"xml": (1, "same")})
+                dataset.diff.write_text(
+                    context_line_diff(root, "xml", xpath), encoding="utf-8"
+                )
+                result = run("generate", *dataset.arguments())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                documents.append(json.loads(result.stdout))
+
+        self.assertNotEqual(
+            documents[0]["failures"]["xml"]["sha256"],
+            documents[1]["failures"]["xml"]["sha256"],
+        )
 
     def test_check_accepts_all_pass_command_log_without_diff(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

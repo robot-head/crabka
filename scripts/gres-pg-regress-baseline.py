@@ -20,6 +20,11 @@ TAP_RESULT = re.compile(
     r"^(not )?ok\s+(\d+)\s+(?:[+-]\s+)?([A-Za-z0-9_][A-Za-z0-9_.-]*)(?:\s+.*)?$"
 )
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# Shortest run-directory prefix a truncated line may be canonicalised on.
+# Anything shorter risks colliding with ordinary quoted text: an XPath
+# expression in `xml` also opens with a slash.
+MIN_TRUNCATED_ROOT = 12
+TRUNCATED_ROOT = "<TRUNCATED_ROOT>"
 
 
 class BaselineError(ValueError):
@@ -84,17 +89,41 @@ def replacement_pairs(source_root: Path | None, build_root: Path | None) -> list
         if root is None:
             continue
         raw = str(root).rstrip("/")
-        # `resolve()` follows symlinks; `abspath` does not. A server told a path
-        # through a symlinked working directory -- which is how the CI runner's
-        # workspace is laid out -- echoes the unresolved form back in its error
-        # text, so substituting only the resolved one leaves it in place and the
-        # canonical hash differs between machines while the line count does not.
-        absolute = os.path.abspath(str(root)).rstrip("/")
         resolved = str(root.resolve()).rstrip("/")
-        for candidate in (raw, absolute, resolved):
+        for candidate in (raw, resolved):
             if candidate:
                 pairs.add((candidate, token))
     return sorted(pairs, key=lambda pair: len(pair[0]), reverse=True)
+
+
+def elide_truncated_root(line: str, replacements: list[tuple[str, str]]) -> str:
+    """Canonicalise a run path that psql cut in half.
+
+    psql echoes the offending statement under `LINE n:` and truncates it to a
+    fixed display width, which can land mid-path. What survives is a bare
+    prefix of the run directory, so no whole-path substitution matches it, and
+    how much survives depends on where that directory lives. Two machines that
+    agree on every byte of behaviour would otherwise hash differently -- the
+    same line count, a different digest.
+
+    Only one path per line can be truncated, since truncation ends the line.
+    Every root collapses to one token: where the cut lands in a directory the
+    source and build roots share, the surviving text cannot say which of them
+    the line named, and a tie broken on the root text would answer differently
+    on each machine -- the very thing this is here to stop.
+    """
+    if not line.endswith("..."):
+        return line
+    longest = 0
+    for root, _ in replacements:
+        for end in range(len(root), max(longest, MIN_TRUNCATED_ROOT - 1), -1):
+            if root[:end] in line:
+                longest = end
+                prefix = root[:end]
+                break
+    if longest == 0:
+        return line
+    return line.replace(prefix, TRUNCATED_ROOT)
 
 
 def split_diff_sections(path: Path, failed: set[str]) -> dict[str, list[str]]:
@@ -158,6 +187,7 @@ def canonical_failure(
         else:
             for root, token in replacements:
                 line = line.replace(root, token)
+            line = elide_truncated_root(line, replacements)
         if line.startswith("@@ "):
             hunks += 1
             in_hunk = True
