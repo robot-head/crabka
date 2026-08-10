@@ -477,7 +477,7 @@ impl Model for CgcModel {
                     &config(),
                     &self.metadata(),
                     &req,
-                    "",
+                    super::super::ClientIdentity { id: "", host: "" },
                     Instant::now(),
                 );
                 assert_epoch_monotonic(last, &g);
@@ -494,7 +494,7 @@ impl Model for CgcModel {
                     &config(),
                     &self.metadata(),
                     &req,
-                    "",
+                    super::super::ClientIdentity { id: "", host: "" },
                     Instant::now(),
                 );
                 assert_epoch_monotonic(last, &g);
@@ -512,7 +512,7 @@ impl Model for CgcModel {
                     &config(),
                     &self.metadata(),
                     &req,
-                    "",
+                    super::super::ClientIdentity { id: "", host: "" },
                     Instant::now(),
                 );
                 assert_epoch_monotonic(last, &g);

@@ -91,6 +91,7 @@ pub enum GroupActorMessage {
     // ── next-gen consumer protocol (non-parking) ──
     Heartbeat {
         request: ConsumerGroupHeartbeatRequest,
+        client_id: String,
         client_host: String,
         reply: oneshot::Sender<ConsumerGroupHeartbeatResponse>,
     },
@@ -114,6 +115,7 @@ pub enum GroupActorMessage {
     // ── classic protocol (parking) ──
     ClassicJoin {
         req: JoinGroupRequest,
+        client_id: String,
         client_host: String,
         reply: oneshot::Sender<JoinResult>,
     },
@@ -388,7 +390,7 @@ async fn handle_actor_heartbeat(
     group: &mut CoordinatorGroup,
     services: ActorServices<'_>,
     request: ConsumerGroupHeartbeatRequest,
-    client_host: &str,
+    client: super::ClientIdentity<'_>,
     reply: oneshot::Sender<ConsumerGroupHeartbeatResponse>,
 ) -> bool {
     if group.is_classic() {
@@ -438,7 +440,7 @@ async fn handle_actor_heartbeat(
         services.offsets_log,
         services.coordinator,
         &request,
-        client_host,
+        client,
     )
     .await
     {
@@ -476,6 +478,7 @@ async fn handle_classic_join_message(
     parked: &mut ParkedWaiters,
     services: ActorServices<'_>,
     request: JoinGroupRequest,
+    client_id: &str,
     client_host: &str,
     reply: oneshot::Sender<JoinResult>,
 ) -> bool {
@@ -483,6 +486,7 @@ async fn handle_classic_join_message(
         match classic_ops::handle_join(
             state,
             &request,
+            client_id,
             client_host,
             services.config.classic_initial_rebalance_delay,
         ) {
@@ -508,6 +512,7 @@ async fn handle_classic_join_message(
             services.coordinator,
             HostedJoin {
                 request: &request,
+                client_id,
                 client_host,
                 reply,
                 now_ms: chrono_now_ms(),
@@ -676,9 +681,22 @@ async fn handle_actor_message(
     match message {
         GroupActorMessage::Heartbeat {
             request,
+            client_id,
             client_host,
             reply,
-        } => handle_actor_heartbeat(group, services, request, &client_host, reply).await,
+        } => {
+            handle_actor_heartbeat(
+                group,
+                services,
+                request,
+                super::ClientIdentity {
+                    id: &client_id,
+                    host: &client_host,
+                },
+                reply,
+            )
+            .await
+        }
         GroupActorMessage::ValidateCommit {
             member_id,
             group_instance_id,
@@ -702,9 +720,21 @@ async fn handle_actor_message(
         }
         GroupActorMessage::ClassicJoin {
             req,
+            client_id,
             client_host,
             reply,
-        } => handle_classic_join_message(group, parked, services, req, &client_host, reply).await,
+        } => {
+            handle_classic_join_message(
+                group,
+                parked,
+                services,
+                req,
+                &client_id,
+                &client_host,
+                reply,
+            )
+            .await
+        }
         GroupActorMessage::ClassicSync { req, reply } => {
             handle_classic_sync_message(group, parked, services.metadata, req, reply);
             true
@@ -1169,6 +1199,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
 /// with the same failure code the heartbeat path uses.
 struct HostedJoin<'a> {
     request: &'a JoinGroupRequest,
+    client_id: &'a str,
     client_host: &'a str,
     reply: oneshot::Sender<JoinResult>,
     now_ms: i64,
@@ -1184,6 +1215,7 @@ async fn classic_join_hosted(
 ) -> Result<(), crate::error::BrokerError> {
     let HostedJoin {
         request: req,
+        client_id,
         client_host,
         reply,
         now_ms,
@@ -1223,7 +1255,7 @@ async fn classic_join_hosted(
             member_id: req.member_id.clone(),
             subscription_topics: topics,
             protocols,
-            client_id: String::new(), // header-level only (matches classic_ops::handle_join)
+            client_id: client_id.to_string(),
             client_host: client_host.to_string(),
             session_timeout,
             rebalance_timeout,
@@ -1271,7 +1303,7 @@ pub(crate) fn step_heartbeat(
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
     req: &ConsumerGroupHeartbeatRequest,
-    client_host: &str,
+    client: super::ClientIdentity<'_>,
     now: Instant,
 ) -> HeartbeatStep {
     // ─── Leave path ──────────────────────────────────────────────
@@ -1310,7 +1342,7 @@ pub(crate) fn step_heartbeat(
                 pending: PendingRecords::default(),
             };
         }
-        let m = build_member(&new_member_id, req, client_host, now);
+        let m = build_member(&new_member_id, req, client, now);
         state.add_or_update_member(m);
         run_reconcile(state, config, metadata);
         state.advance_member_epoch(&new_member_id);
@@ -1338,7 +1370,7 @@ pub(crate) fn step_heartbeat(
     };
 
     // ─── Steady-state: update last_seen / subscription / owned ───
-    let any_change = update_member_state(state, config, metadata, req, now, cur_epoch);
+    let any_change = update_member_state(state, config, metadata, req, client, now, cur_epoch);
     let pending = if any_change {
         snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id))
     } else {
@@ -1384,11 +1416,11 @@ async fn handle_heartbeat(
     offsets_log: &dyn OffsetsLog,
     coordinator: &super::GroupCoordinator,
     req: &ConsumerGroupHeartbeatRequest,
-    client_host: &str,
+    client: super::ClientIdentity<'_>,
 ) -> Result<ConsumerGroupHeartbeatResponse, crate::error::BrokerError> {
     let now = Instant::now();
     let now_ms = chrono_now_ms();
-    let step = step_heartbeat(state, config, metadata, req, client_host, now);
+    let step = step_heartbeat(state, config, metadata, req, client, now);
     flush_pending(state, step.pending, offsets_log, coordinator, now_ms).await?;
     Ok(step.response)
 }
@@ -1415,19 +1447,28 @@ fn update_member_state(
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
     req: &ConsumerGroupHeartbeatRequest,
+    client: super::ClientIdentity<'_>,
     now: Instant,
     cur_epoch: i32,
 ) -> bool {
-    let mut subscription_changed = false;
+    let mut member_metadata_changed = false;
     let mut became_dirty = false;
     if let Some(m) = state.members.get_mut(&req.member_id) {
         m.last_seen = now;
+        if m.client_id != client.id {
+            m.client_id = client.id.to_string();
+            member_metadata_changed = true;
+        }
+        if m.client_host != client.host {
+            m.client_host = client.host.to_string();
+            member_metadata_changed = true;
+        }
         if let Some(ref names) = req.subscribed_topic_names {
             let set: std::collections::HashSet<String> = names.iter().cloned().collect();
             if set != m.subscribed_topic_names {
                 m.subscribed_topic_names = set;
                 became_dirty = true;
-                subscription_changed = true;
+                member_metadata_changed = true;
             }
         }
         // KIP-848 v1+: `subscribed_topic_regex` may change independently
@@ -1466,7 +1507,7 @@ fn update_member_state(
             .unwrap_or_default()
     };
     let assignment_changed = state.reconcile_member(&req.member_id, &owned);
-    subscription_changed || was_dirty || epoch_advanced || assignment_changed
+    member_metadata_changed || was_dirty || epoch_advanced || assignment_changed
 }
 
 fn run_reconcile(state: &mut GroupState, config: &NextGenConfig, metadata: &dyn MetadataProvider) {
@@ -1504,7 +1545,7 @@ fn pick_assignor(
 fn build_member(
     member_id: &str,
     req: &ConsumerGroupHeartbeatRequest,
-    host: &str,
+    client: super::ClientIdentity<'_>,
     now: Instant,
 ) -> MemberState {
     let subs: std::collections::HashSet<String> = req
@@ -1517,8 +1558,8 @@ fn build_member(
         member_id: member_id.into(),
         instance_id: req.instance_id.clone(),
         rack_id: req.rack_id.clone(),
-        client_id: String::new(),
-        client_host: host.into(),
+        client_id: client.id.into(),
+        client_host: client.host.into(),
         subscribed_topic_names: subs,
         subscribed_topic_regex: req.subscribed_topic_regex.clone(),
         compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
@@ -2223,6 +2264,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2255,6 +2297,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2287,6 +2330,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2308,6 +2352,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2332,6 +2377,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2353,6 +2399,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2382,6 +2429,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2400,6 +2448,7 @@ mod tests {
                     member_epoch: -1,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2433,6 +2482,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2529,7 +2579,10 @@ mod tests {
                 rebalance_timeout_ms: 60_000,
                 ..Default::default()
             },
-            "h",
+            crate::coordinator::unified::ClientIdentity {
+                id: "client-a",
+                host: "h",
+            },
             Instant::now(),
         );
         // Force the member to look session-expired. 50ms is always within
@@ -2578,7 +2631,10 @@ mod tests {
                 rebalance_timeout_ms: 60_000,
                 ..Default::default()
             },
-            "h",
+            crate::coordinator::unified::ClientIdentity {
+                id: "client-a",
+                host: "h",
+            },
             Instant::now(),
         );
         m.member_epoch = 7;
@@ -2607,7 +2663,7 @@ mod tests {
                 p::MemberMetadataValue {
                     instance_id: None,
                     rack_id: None,
-                    client_id: String::new(),
+                    client_id: "client-a".to_string(),
                     client_host: "h".to_string(),
                     subscribed_topic_names: vec!["t".to_string()],
                     subscribed_topic_regex: None,
@@ -2680,7 +2736,10 @@ mod tests {
         let mut m = build_member(
             "m1",
             &ConsumerGroupHeartbeatRequest::default(),
-            "h",
+            crate::coordinator::unified::ClientIdentity {
+                id: "client-a",
+                host: "h",
+            },
             Instant::now(),
         );
         m.server_assignor = Some("ghost".into());
@@ -2723,6 +2782,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -2755,6 +2815,7 @@ mod tests {
                     protocol_type: "consumer".into(),
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -3058,6 +3119,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -3161,6 +3223,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -3183,6 +3246,7 @@ mod tests {
                     member_epoch: -1,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -3212,6 +3276,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: "127.0.0.1".into(),
                 reply: tx,
             })
@@ -3428,6 +3493,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -3449,6 +3515,7 @@ mod tests {
                     member_epoch: -1,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -3624,6 +3691,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
             })
@@ -4113,7 +4181,17 @@ mod tests {
             rebalance_timeout_ms: 60_000,
             ..Default::default()
         };
-        let step = step_heartbeat(&mut group, &config, &metadata, &req, "", Instant::now());
+        let step = step_heartbeat(
+            &mut group,
+            &config,
+            &metadata,
+            &req,
+            crate::coordinator::unified::ClientIdentity {
+                id: "client-a",
+                host: "",
+            },
+            Instant::now(),
+        );
         // First join succeeds, advances to group epoch 1, targets all
         // partitions of "t", and must persist records.
         check!(step.response.error_code == 0);

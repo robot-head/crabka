@@ -410,7 +410,7 @@ impl Model for ReconModel {
                     &config(),
                     &self.metadata(),
                     &req,
-                    "",
+                    super::super::ClientIdentity { id: "", host: "" },
                     Instant::now(),
                 );
                 assert_epoch_monotonic(last, &g);
@@ -427,7 +427,7 @@ impl Model for ReconModel {
                     &config(),
                     &self.metadata(),
                     &req,
-                    "",
+                    super::super::ClientIdentity { id: "", host: "" },
                     Instant::now(),
                 );
                 assert_epoch_monotonic(last, &g);
@@ -445,7 +445,7 @@ impl Model for ReconModel {
                     &config(),
                     &self.metadata(),
                     &req,
-                    "",
+                    super::super::ClientIdentity { id: "", host: "" },
                     Instant::now(),
                 );
                 assert_epoch_monotonic(last, &g);

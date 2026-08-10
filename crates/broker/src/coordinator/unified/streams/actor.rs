@@ -236,7 +236,7 @@ async fn actor_loop(
                             metadata_source.as_ref(),
                             &coordinator,
                             &request,
-                            ClientContext {
+                            super::super::ClientIdentity {
                                 id: &client_id,
                                 host: &client_host,
                             },
@@ -395,12 +395,6 @@ async fn handle_session_tick(
     flush_pending(actor, pending, offsets_log, coordinator, now_ms).await
 }
 
-#[derive(Clone, Copy)]
-struct ClientContext<'a> {
-    id: &'a str,
-    host: &'a str,
-}
-
 async fn handle_heartbeat(
     actor: &mut ActorState,
     config: &StreamsGroupConfig,
@@ -408,9 +402,9 @@ async fn handle_heartbeat(
     metadata_source: Option<&Arc<dyn MetadataSource>>,
     coordinator: &super::super::GroupCoordinator,
     req: &StreamsGroupHeartbeatRequest,
-    client: ClientContext<'_>,
+    client: super::super::ClientIdentity<'_>,
 ) -> Result<StreamsGroupHeartbeatResponse, crate::error::BrokerError> {
-    let ClientContext {
+    let super::super::ClientIdentity {
         id: client_id,
         host: client_host,
     } = client;
@@ -464,7 +458,7 @@ async fn handle_heartbeat(
     };
 
     // ─── Steady state ────────────────────────────────────────────
-    let mut changed = update_member_steady_state(actor, req, now);
+    let mut changed = update_member_steady_state(actor, req, client_id, client_host, now);
     // Topology handling: newer epoch is accepted, older is flagged STALE.
     if let Some(topo) = &req.topology {
         let cur_topo_epoch = actor.state.topology_epoch;
@@ -505,6 +499,8 @@ async fn handle_heartbeat(
 fn update_member_steady_state(
     actor: &mut ActorState,
     req: &StreamsGroupHeartbeatRequest,
+    client_id: &str,
+    client_host: &str,
     now: Instant,
 ) -> bool {
     let Some(m) = actor.state.members.get_mut(&req.member_id) else {
@@ -512,6 +508,15 @@ fn update_member_steady_state(
     };
     m.last_seen = now;
     let mut changed = false;
+
+    if m.client_id != client_id {
+        m.client_id = client_id.to_string();
+        changed = true;
+    }
+    if m.client_host != client_host {
+        m.client_host = client_host.to_string();
+        changed = true;
+    }
 
     if let Some(active) = &req.active_tasks {
         let map = task_ids_to_map(active);

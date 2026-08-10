@@ -99,14 +99,12 @@ pub(crate) async fn handle(
         ng.mark_streams(&req.group_id);
         let handle = ng.get_or_create_streams(&req.group_id);
         let (tx, rx) = oneshot::channel();
-        // The actor message shape carries client_id/client_host, but this
-        // handler does not use them for routing, so pass empty values.
         if handle
             .tx
             .send(StreamsGroupActorMessage::Heartbeat {
                 request: Box::new(req),
-                client_id: String::new(),
-                client_host: String::new(),
+                client_id: ctx.client_id.to_owned(),
+                client_host: ctx.client_host(),
                 reply: tx,
             })
             .await
@@ -248,6 +246,68 @@ mod tests {
         let resp = decode_response(&resp);
 
         assert!(resp.error_code == codes::UNSUPPORTED_VERSION, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_persists_request_client_identity() {
+        let version = streams_group_heartbeat_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        finalize_streams_version(&broker).await;
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+
+        let bytes = handle(
+            &broker,
+            version,
+            1,
+            &encode_request(&request("identity-group")),
+            &ctx,
+        )
+        .await
+        .expect("StreamsGroupHeartbeat handler");
+        assert!(decode_response(&bytes).error_code == 0);
+
+        let actor = broker
+            .group_coordinator
+            .get_or_create_streams("identity-group");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(StreamsGroupActorMessage::Describe { reply: tx })
+            .await
+            .expect("describe streams group");
+        let view = rx.await.expect("streams group view");
+
+        assert!(view.members.len() == 1);
+        assert!(view.members[0].client_id == "streams-client");
+        assert!(view.members[0].client_host == "/127.0.0.1");
+
+        let peer: SocketAddr = "127.0.0.2:9093".parse().unwrap();
+        let ctx = crate::test_support::request_context(&principal, &peer, "streams-client-b");
+        let req = StreamsGroupHeartbeatRequest {
+            group_id: "identity-group".into(),
+            member_id: view.members[0].member_id.clone(),
+            member_epoch: view.members[0].member_epoch,
+            ..Default::default()
+        };
+        let bytes = handle(&broker, version, 2, &encode_request(&req), &ctx)
+            .await
+            .expect("StreamsGroupHeartbeat identity refresh");
+        assert!(decode_response(&bytes).error_code == 0);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(StreamsGroupActorMessage::Describe { reply: tx })
+            .await
+            .expect("describe refreshed streams group");
+        let view = rx.await.expect("refreshed streams group view");
+        assert!(view.members[0].client_id == "streams-client-b");
+        assert!(view.members[0].client_host == "/127.0.0.2");
+
         broker_handle.shutdown().await;
     }
 

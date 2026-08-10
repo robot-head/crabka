@@ -62,6 +62,26 @@ impl<'a> RequestContext<'a> {
             connection_listener_name,
         }
     }
+
+    /// Kafka's group coordinator stores `InetAddress::toString()`, which is
+    /// the peer IP prefixed with `/` and does not include the connection port.
+    pub(crate) fn client_host(&self) -> String {
+        match self.peer {
+            SocketAddr::V4(peer) => format!("/{}", peer.ip()),
+            SocketAddr::V6(peer) => {
+                let address = peer
+                    .ip()
+                    .segments()
+                    .map(|segment| format!("{segment:x}"))
+                    .join(":");
+                let scope = match peer.scope_id() {
+                    0 => String::new(),
+                    scope_id => format!("%{scope_id}"),
+                };
+                format!("/{address}{scope}")
+            }
+        }
+    }
 }
 
 impl<'a> TelemetryContext<'a> {
@@ -107,6 +127,22 @@ mod tests {
         assert!(ctx.client_id == "client-a");
         assert!(ctx.sendfile_capable);
         assert!(ctx.connection_listener_name == "SASL_SSL");
+        assert!(ctx.client_host() == "/127.0.0.1");
+    }
+
+    #[test]
+    fn request_context_client_host_uses_java_ipv6_format() {
+        let principal = principal();
+        let peer = SocketAddr::V6(std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::LOCALHOST,
+            9092,
+            0,
+            4,
+        ));
+
+        let ctx = RequestContext::new(&principal, &peer, "client-a", false, "PLAINTEXT");
+
+        assert!(ctx.client_host() == "/0:0:0:0:0:0:0:1%4");
     }
 
     #[test]
