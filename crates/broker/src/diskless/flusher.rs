@@ -297,7 +297,7 @@ mod tests {
         }
     }
 
-    async fn test_partition(
+    fn test_partition(
         root: &FsPath,
         topic: &str,
         partition: i32,
@@ -318,14 +318,13 @@ mod tests {
             diskless,
         );
         handle.current_leader.store(leader.0, Ordering::Relaxed);
-        handle.install_diskless_durable_hw(Offset(3)).await;
         handle
     }
 
     #[tokio::test]
     async fn flusher_writes_object_and_publishes_index() {
         let dir = tempdir().unwrap();
-        let handle = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
+        let handle = test_partition(dir.path(), "orders", 0, true, NodeId(1));
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let event_log = crabka_remote_storage_topic::InProcessMetadataEventLog::new(1);
         let index = DisklessIndexLog::start(event_log);
@@ -357,8 +356,8 @@ mod tests {
     #[tokio::test]
     async fn combined_object_stops_after_size_budget() {
         let dir = tempdir().unwrap();
-        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
-        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1)).await;
+        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1));
+        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1));
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let index = DisklessIndexLog::start(
             crabka_remote_storage_topic::InProcessMetadataEventLog::new(1),
@@ -400,8 +399,8 @@ mod tests {
     #[tokio::test]
     async fn tick_rotates_size_limited_flush_start() {
         let dir = tempdir().unwrap();
-        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
-        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1)).await;
+        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1));
+        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1));
         let partitions = Arc::new(PartitionRegistry::new());
         partitions.insert("orders".into(), crabka_ids::PartitionIndex(0), first);
         partitions.insert("orders".into(), crabka_ids::PartitionIndex(1), second);
@@ -448,8 +447,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_rotates_size_limited_flushes_without_starvation() {
         let dir = tempdir().unwrap();
-        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
-        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1)).await;
+        let first = test_partition(dir.path(), "orders", 0, true, NodeId(1));
+        let second = test_partition(dir.path(), "orders", 1, true, NodeId(1));
         let partitions = Arc::new(PartitionRegistry::new());
         partitions.insert("orders".into(), crabka_ids::PartitionIndex(0), first);
         partitions.insert("orders".into(), crabka_ids::PartitionIndex(1), second);
@@ -506,9 +505,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_flushes_only_led_diskless_partitions_and_stops() {
         let dir = tempdir().unwrap();
-        let led = test_partition(dir.path(), "orders", 0, true, NodeId(1)).await;
-        let follower = test_partition(dir.path(), "orders", 1, true, NodeId(2)).await;
-        let local = test_partition(dir.path(), "orders", 2, false, NodeId(1)).await;
+        let led = test_partition(dir.path(), "orders", 0, true, NodeId(1));
+        let follower = test_partition(dir.path(), "orders", 1, true, NodeId(2));
+        let local = test_partition(dir.path(), "orders", 2, false, NodeId(1));
         let partitions = Arc::new(PartitionRegistry::new());
         partitions.insert("orders".into(), crabka_ids::PartitionIndex(0), led);
         partitions.insert("orders".into(), crabka_ids::PartitionIndex(1), follower);

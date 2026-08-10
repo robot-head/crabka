@@ -720,12 +720,6 @@ impl ReplicatorSupervisor {
                 // up toward ISR re-admission.
                 part.install_isr(&part_record.isr, &part_record.replicas, part_record.leader)
                     .await;
-                if part.diskless
-                    && let Some(next_offset) = image.partition_next_offset(&key.0, key.1)
-                {
-                    part.install_diskless_durable_hw(crabka_ids::Offset(next_offset))
-                        .await;
-                }
             }
         }
     }
@@ -1517,6 +1511,37 @@ mod tests {
         );
         let state = part.replica_state.lock().await;
         assert!(state.isr == [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn reconcile_does_not_treat_reserved_diskless_offset_as_durable() {
+        use std::collections::BTreeMap;
+
+        use crabka_metadata::{PartitionOffsetAdvanceRecord, TopicConfigRecord};
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("crabka.diskless".into(), "true".into());
+        let img = image_with(&[
+            topic_record("diskless", 1),
+            partition_record("diskless", 0, NodeId(2), vec![NodeId(2)], 0),
+            MetadataRecord::V1TopicConfig(TopicConfigRecord {
+                topic: "diskless".into(),
+                overrides,
+            }),
+            MetadataRecord::V1PartitionOffsetAdvance(PartitionOffsetAdvanceRecord {
+                topic: "diskless".into(),
+                partition: 0,
+                count: 7,
+            }),
+        ]);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
+
+        supervisor.reconcile(&img).await;
+
+        let partition = partitions
+            .get("diskless", PartitionIndex(0))
+            .expect("diskless leader materialized");
+        assert!(partition.high_watermark().await == crabka_log::Offset(0));
     }
 
     #[tokio::test]

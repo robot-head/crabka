@@ -485,20 +485,6 @@ impl Partition {
         }
     }
 
-    pub(crate) async fn install_diskless_durable_hw(&self, durable_leo: Offset) -> Offset {
-        let advanced = {
-            let mut st = self.replica_state.lock().await;
-            let previous = st.hw;
-            st.recompute_hw_for_wal_durable(durable_leo);
-            st.hw = st.hw.max(previous);
-            st.hw > previous
-        };
-        if advanced {
-            self.hw_advance_notify.notify_waiters();
-        }
-        self.high_watermark().await
-    }
-
     /// Install (or reinstall) the ISR membership and seed non-leader
     /// follower entries to 0. The replicator supervisor calls this
     /// when this broker materializes a partition where it is the leader.
@@ -985,27 +971,6 @@ mod tests {
             futures_util::poll!(&mut waiter).is_pending(),
             "diskless ISR install must not release HW before WAL sync"
         );
-    }
-
-    #[tokio::test]
-    async fn install_diskless_durable_hw_advances_and_notifies_monotonically() {
-        let hw_advance_notify = Arc::new(Notify::new());
-        let (mut p, _td) = test_partition(hw_advance_notify.clone());
-        p.diskless = true;
-
-        let waiter = hw_advance_notify.notified();
-        tokio::pin!(waiter);
-        assert!(futures_util::poll!(&mut waiter).is_pending());
-
-        assert!(p.install_diskless_durable_hw(Offset(4)).await == Offset(4));
-        assert!(p.high_watermark().await == Offset(4));
-        assert!(futures_util::poll!(&mut waiter).is_ready());
-
-        let waiter = hw_advance_notify.notified();
-        tokio::pin!(waiter);
-        assert!(futures_util::poll!(&mut waiter).is_pending());
-        assert!(p.install_diskless_durable_hw(Offset(2)).await == Offset(4));
-        assert!(futures_util::poll!(&mut waiter).is_pending());
     }
 
     #[tokio::test]
