@@ -182,12 +182,22 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
     })
 }
 
-/// The `has_<objectkind>_privilege` family, which shares one implementation.
+/// The `has_<objectkind>_privilege` family, which shares one entry point.
 ///
-/// **Every one of them returns `true` unconditionally** — no per-object
-/// privilege enforcement exists yet. Row-level security reads this list to
-/// refuse a policy qual that names any of them, since such a qual would admit
-/// every row to every role instead of the subset it appears to describe.
+/// Three of them answer for real: `has_table_privilege`,
+/// `has_any_column_privilege` and `has_column_privilege` resolve the relation
+/// and consult its ACL, because those are the shapes
+/// [`RelationPrivilegeCall::of`] recognises. **The other eleven still return
+/// `true` unconditionally** — no privilege is stored for a database, schema,
+/// sequence, function, language, server, foreign-data wrapper, tablespace,
+/// type or parameter, so there is nothing to consult.
+///
+/// Row-level security refuses a policy qual naming *any* of the fourteen. For
+/// the eleven that is the original reason: the qual would admit every row to
+/// every role instead of the subset it appears to describe. For the three it
+/// is no longer that — they answer correctly — but the refusal is kept because
+/// a qual whose meaning turns on an ACL is a second security surface behind
+/// the policy, and admitting it needs its own argument rather than this one.
 pub(crate) const PRIVILEGE_FUNCTIONS: [&str; 14] = [
     "has_table_privilege",
     "has_column_privilege",
