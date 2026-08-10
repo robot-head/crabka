@@ -176,6 +176,29 @@ fn combine_infinite(a: i32, b: i32) -> Option<i32> {
     }
 }
 
+/// The interval `end - start` when either endpoint is non-finite, given the two
+/// endpoints' [`timestamp_infinite_sign`]-style signs. `None` means both
+/// endpoints are finite and the caller must do the arithmetic itself.
+///
+/// One rule serves every timestamp-difference operator, because PostgreSQL gives
+/// them all the same answer: two infinities of the SAME sign would have to
+/// cancel, which is `interval out of range`; otherwise the infinite endpoint
+/// decides, and `end`'s sign wins over a negated `start`'s. `age` needs it too —
+/// it is a difference with month borrowing, and the borrowing has nothing to
+/// borrow from once an endpoint is infinite.
+#[must_use]
+pub fn infinite_interval_difference(
+    end_sign: i32,
+    start_sign: i32,
+) -> Option<Result<Interval, TypeError>> {
+    let sign = combine_infinite(end_sign, -start_sign)?;
+    Some(if sign == 0 {
+        Err(interval_out_of_range())
+    } else {
+        Ok(Interval::infinity_of_sign(sign))
+    })
+}
+
 /// Add two intervals field-wise with overflow checking.
 pub fn add_interval(a: Interval, b: Interval) -> Result<Interval, TypeError> {
     if let Some(sign) = combine_infinite(a.infinite_sign(), b.infinite_sign()) {
@@ -379,11 +402,10 @@ pub fn timestamp_plus_interval(ts: DateTime, iv: Interval) -> Result<DateTime, T
 pub fn timestamp_diff(a: DateTime, b: DateTime) -> Result<Interval, TypeError> {
     // Two infinities of the same sign cancel to nothing definable; one infinite
     // operand gives the infinite interval of the difference's sign.
-    if let Some(sign) = combine_infinite(timestamp_infinite_sign(a), -timestamp_infinite_sign(b)) {
-        if sign == 0 {
-            return Err(interval_out_of_range());
-        }
-        return Ok(Interval::infinity_of_sign(sign));
+    if let Some(result) =
+        infinite_interval_difference(timestamp_infinite_sign(a), timestamp_infinite_sign(b))
+    {
+        return result;
     }
     let total_micros = a
         .since((jiff::Unit::Microsecond, b))
@@ -481,13 +503,10 @@ pub fn timestamptz_plus_interval(
 /// micros (split into whole days + remainder, matching PG's interval storage). The
 /// subtraction is on absolute instants, so no time zone is needed.
 pub fn timestamptz_diff(a: Timestamp, b: Timestamp) -> Result<Interval, TypeError> {
-    if let Some(sign) =
-        combine_infinite(timestamptz_infinite_sign(a), -timestamptz_infinite_sign(b))
+    if let Some(result) =
+        infinite_interval_difference(timestamptz_infinite_sign(a), timestamptz_infinite_sign(b))
     {
-        if sign == 0 {
-            return Err(interval_out_of_range());
-        }
-        return Ok(Interval::infinity_of_sign(sign));
+        return result;
     }
     let total_micros = a.as_microsecond() - b.as_microsecond();
     let days = (total_micros / USECS_PER_DAY_I64) as i32;
@@ -6388,6 +6407,102 @@ mod io_tests {
         // An already-infinite operand propagates rather than erroring.
         assert!(neg_interval(Interval::INFINITY).expect("negate") == Interval::NEG_INFINITY);
         assert!(add_interval(Interval::INFINITY, iv(0, 1, 0)).expect("add") == Interval::INFINITY);
+    }
+
+    /// The one rule every timestamp-difference operator shares, against
+    /// `PostgreSQL` 18.4. Two infinities of the SAME sign have to cancel and are
+    /// 22008; otherwise the infinite endpoint decides, with `end`'s sign winning
+    /// over a negated `start`'s. Two finite endpoints are the caller's problem.
+    #[test]
+    fn a_difference_with_a_non_finite_endpoint_follows_one_rule() {
+        use assert2::assert;
+
+        // (end sign, start sign) → the text of the answer, or the error.
+        let cases = [
+            ((1, 1), Err("interval out of range")),
+            ((-1, -1), Err("interval out of range")),
+            ((1, -1), Ok("infinity")),
+            ((-1, 1), Ok("-infinity")),
+            ((1, 0), Ok("infinity")),
+            ((0, 1), Ok("-infinity")),
+            ((-1, 0), Ok("-infinity")),
+            ((0, -1), Ok("infinity")),
+        ];
+        for ((end, start), expected) in cases {
+            let outcome = infinite_interval_difference(end, start)
+                .unwrap_or_else(|| panic!("({end}, {start}) is non-finite"));
+            match (outcome, expected) {
+                (Ok(interval), Ok(text)) => assert!(interval_to_text(interval) == text),
+                (Err(error), Err(text)) => {
+                    assert!(error.sqlstate() == "22008");
+                    assert!(error.to_string() == text);
+                }
+                (got, want) => panic!("({end}, {start}): {got:?} is not {want:?}"),
+            }
+        }
+        // Two finite endpoints are nobody's infinity.
+        assert!(infinite_interval_difference(0, 0).is_none());
+        // The three difference operators agree with the rule they now share.
+        assert!(
+            timestamp_diff(TIMESTAMP_INFINITY, TIMESTAMP_NEG_INFINITY).expect("difference")
+                == Interval::INFINITY
+        );
+        assert!(timestamp_diff(TIMESTAMP_INFINITY, TIMESTAMP_INFINITY).is_err());
+        assert!(
+            timestamptz_diff(timestamptz_neg_infinity(), timestamptz_infinity())
+                .expect("difference")
+                == Interval::NEG_INFINITY
+        );
+        assert!(timestamptz_diff(timestamptz_infinity(), timestamptz_infinity()).is_err());
+    }
+
+    /// The reserved values stay the extreme representable value of each type,
+    /// which is the whole reason no comparison path needs a case for them: an
+    /// infinity sorts outside every finite value, and so groups, aggregates and
+    /// keys an index the way `PostgreSQL` does, for free.
+    #[test]
+    fn the_reserved_values_still_sort_outside_every_finite_one() {
+        use assert2::assert;
+
+        let dates = [
+            Date::constant(-4713, 11, 24),
+            Date::constant(1, 1, 1),
+            Date::constant(2000, 1, 1),
+            Date::constant(9999, 12, 30),
+        ];
+        for d in dates {
+            assert!(DATE_NEG_INFINITY < d && d < DATE_INFINITY);
+            assert!(!date_is_infinite(d));
+            let ts = date_to_midnight(d);
+            assert!(TIMESTAMP_NEG_INFINITY < ts && ts < TIMESTAMP_INFINITY);
+            assert!(!timestamp_is_infinite(ts));
+        }
+        for instant in [
+            Timestamp::UNIX_EPOCH,
+            Timestamp::from_second(1).expect("ts"),
+        ] {
+            assert!(timestamptz_neg_infinity() < instant && instant < timestamptz_infinity());
+            assert!(!timestamptz_is_infinite(instant));
+        }
+        // An `age` answer of `infinity` is the same reserved interval every
+        // other operator produces, so it aggregates and orders with them.
+        let extremes = [iv(0, 0, i64::MAX), iv(i32::MAX, 0, 0), iv(0, i32::MAX, 0)];
+        for finite in extremes {
+            assert!(!finite.is_infinite());
+            assert!(Interval::NEG_INFINITY < finite && finite < Interval::INFINITY);
+        }
+        assert!(
+            infinite_interval_difference(1, 0)
+                .expect("non-finite")
+                .expect("interval")
+                == Interval::INFINITY
+        );
+        assert!(
+            infinite_interval_difference(-1, 0)
+                .expect("non-finite")
+                .expect("interval")
+                == Interval::NEG_INFINITY
+        );
     }
 
     /// An interval field can be spelled with arbitrarily many digits. Before

@@ -297,18 +297,38 @@ pub(crate) fn eval_datetime(
                 return Ok(Datum::Null);
             }
             // Two-arg: `age(end, start)` = end − start. One-arg: `age(ts)` =
-            // current_date(at midnight, session zone) − ts (PG semantics).
-            let (end, start) = match args.get(1) {
+            // current_date(at midnight, session zone) − ts (PG semantics), and
+            // the transaction date is always finite, so only `a` can be
+            // infinite there.
+            let b = match args.get(1) {
                 Some(e) => {
                     let b = eval_child(e)?;
                     if b.is_null() {
                         return Ok(Datum::Null);
                     }
-                    (
-                        as_datetime(&a, &ctx.time_zone)?,
-                        as_datetime(&b, &ctx.time_zone)?,
-                    )
+                    Some(b)
                 }
+                None => None,
+            };
+            // Settle the non-finite cases on the Datums, BEFORE `as_datetime`.
+            // A `timestamptz` infinity is the extreme *instant*, and rendering
+            // it as a wall-clock in a session zone off UTC moves it off the
+            // reserved value — the sentinel would be gone by the time the field
+            // arithmetic saw it.
+            let (end_sign, start_sign) = match &b {
+                Some(b) => (temporal_infinite_sign(&a), temporal_infinite_sign(b)),
+                None => (0, temporal_infinite_sign(&a)),
+            };
+            if let Some(result) =
+                crabka_pgtypes::datetime::infinite_interval_difference(end_sign, start_sign)
+            {
+                return Ok(Datum::Interval(result?));
+            }
+            let (end, start) = match &b {
+                Some(b) => (
+                    as_datetime(&a, &ctx.time_zone)?,
+                    as_datetime(b, &ctx.time_zone)?,
+                ),
                 None => {
                     let today = ctx.time_zone.to_datetime(ctx.now).date();
                     (
@@ -472,6 +492,23 @@ fn zone_arg(d: &Datum) -> Result<TimeZone, ExecError> {
     }
     crabka_pgtypes::datetime::resolve_time_zone(name)
         .ok_or_else(|| ExecError::UnknownTimeZone(name.to_string()))
+}
+
+/// `1` for a `+infinity` temporal Datum, `-1` for `-infinity`, `0` for a finite
+/// one. A Datum of a type that has no infinities — or none at all — is `0`, and
+/// the caller's own coercion then reports the type error.
+///
+/// This has to be read off the Datum in its own type. [`as_datetime`] renders a
+/// `timestamptz` as a wall-clock, which for the reserved extreme instant lands
+/// on an ordinary civil datetime in any session zone off UTC, so a check made
+/// after the coercion would miss half the infinities.
+fn temporal_infinite_sign(d: &Datum) -> i32 {
+    match d {
+        Datum::Date(v) => crabka_pgtypes::datetime::date_infinite_sign(*v),
+        Datum::Timestamp(v) => crabka_pgtypes::datetime::timestamp_infinite_sign(*v),
+        Datum::Timestamptz(v) => crabka_pgtypes::datetime::timestamptz_infinite_sign(*v),
+        _ => 0,
+    }
 }
 
 /// Coerce a temporal Datum to a civil `DateTime` for `age` arithmetic. A
@@ -1153,6 +1190,22 @@ fn days_in_month(year: i16, month: i8) -> Option<i8> {
 ///   * `timestamptz` → `timestamp`: render the instant in `zone` (wall-clock).
 fn timezone_convert(tz: &TimeZone, value: &Datum) -> Result<Datum, ExecError> {
     match value {
+        // A non-finite reading is the same non-finite reading in every zone: it
+        // is not a wall-clock a zone can move. Rendering it would land on an
+        // ordinary value in any zone off UTC, and re-deriving an instant from
+        // one can leave the calendar altogether, so only the type changes.
+        Datum::Timestamp(dt) if crabka_pgtypes::datetime::timestamp_is_infinite(*dt) => {
+            let sign = crabka_pgtypes::datetime::timestamp_infinite_sign(*dt);
+            Ok(Datum::Timestamptz(
+                crabka_pgtypes::datetime::timestamptz_infinity_of_sign(sign),
+            ))
+        }
+        Datum::Timestamptz(ts) if crabka_pgtypes::datetime::timestamptz_is_infinite(*ts) => {
+            let sign = crabka_pgtypes::datetime::timestamptz_infinite_sign(*ts);
+            Ok(Datum::Timestamp(
+                crabka_pgtypes::datetime::timestamp_infinity_of_sign(sign),
+            ))
+        }
         // A wall-clock on a DST boundary has two readings or none; PostgreSQL's
         // `DetermineTimeZoneOffset` picks the later instant either way, which is
         // what `zoned_instant` applies. jiff's own `Compatible` strategy takes
@@ -1189,11 +1242,14 @@ mod tests {
     };
 
     fn ctx_at(rfc3339: &str) -> EvalCtx {
+        ctx_at_zone(rfc3339, jiff::tz::TimeZone::UTC)
+    }
+    fn ctx_at_zone(rfc3339: &str, time_zone: jiff::tz::TimeZone) -> EvalCtx {
         let now: jiff::Timestamp = rfc3339.parse().expect("ts");
         EvalCtx {
             now,
             stmt_now: now,
-            time_zone: jiff::tz::TimeZone::UTC,
+            time_zone,
             date_order: crabka_pgtypes::datetime::DateOrder::default(),
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
@@ -1742,6 +1798,149 @@ mod tests {
                 micros: 0
             })
         );
+    }
+
+    /// `PostgreSQL` 18.4, measured. `age` CARRIES a non-finite endpoint; it does
+    /// not compute with it. Before this, the reserved sentinels went into the
+    /// field arithmetic as ordinary years 9999 and −9999, so `age(timestamp
+    /// 'infinity')` answered a finite interval measured from the transaction
+    /// date — a wrong answer that also changed every day.
+    ///
+    /// The finite rows share the table on purpose: they run the same path and
+    /// must not move.
+    #[test]
+    fn age_carries_a_non_finite_endpoint_rather_than_computing_with_it() {
+        use assert2::assert;
+
+        // A session zone OFF UTC is the interesting one for `timestamptz`: the
+        // reserved instant renders as an ordinary wall-clock there, so a check
+        // made after the coercion to civil time would see a finite value.
+        for zone in [
+            jiff::tz::TimeZone::UTC,
+            jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(-8)),
+            jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(11)),
+        ] {
+            let ctx = ctx_at_zone("2024-03-15T10:00:00Z", zone.clone());
+            for (expr, expected) in [
+                // One argument: `current_date − x`, so the sign flips.
+                ("age(timestamp 'infinity')", "-infinity"),
+                ("age(timestamp '-infinity')", "infinity"),
+                ("age(timestamptz 'infinity')", "-infinity"),
+                ("age(timestamptz '-infinity')", "infinity"),
+                ("age(date 'infinity')", "-infinity"),
+                ("age(date '-infinity')", "infinity"),
+                // Two arguments: `end − start`, so `end`'s sign wins, and a
+                // negated `-infinity` start is a `+infinity` contribution.
+                (
+                    "age(timestamp 'infinity', timestamp '-infinity')",
+                    "infinity",
+                ),
+                (
+                    "age(timestamp '-infinity', timestamp 'infinity')",
+                    "-infinity",
+                ),
+                (
+                    "age(timestamp 'infinity', timestamp '2000-01-01')",
+                    "infinity",
+                ),
+                (
+                    "age(timestamp '2000-01-01', timestamp 'infinity')",
+                    "-infinity",
+                ),
+                (
+                    "age(timestamp '2000-01-01', timestamp '-infinity')",
+                    "infinity",
+                ),
+                (
+                    "age(timestamptz 'infinity', timestamptz '2000-01-01')",
+                    "infinity",
+                ),
+                ("age(date 'infinity', timestamp '2000-01-01')", "infinity"),
+                // A NULL argument still wins over a non-finite one.
+                ("age(timestamp 'infinity', NULL::timestamp)", "NULL"),
+                ("age(NULL::timestamp, timestamp 'infinity')", "NULL"),
+                // Finite endpoints, through the same path, unmoved.
+                (
+                    "age(TIMESTAMP '2024-03-01 00:00:00', TIMESTAMP '2024-01-01 00:00:00')",
+                    "2 mons",
+                ),
+                (
+                    "age(TIMESTAMP '2024-03-01 00:00:00', TIMESTAMP '2024-01-15 00:00:00')",
+                    "1 mon 15 days",
+                ),
+                ("age(TIMESTAMP '2024-01-15 00:00:00')", "2 mons"),
+            ] {
+                let got = match ev(expr, &ctx) {
+                    Datum::Null => "NULL".to_string(),
+                    Datum::Interval(iv) => crabka_pgtypes::datetime::interval_to_text(iv),
+                    other => panic!("{expr} gave {other:?}"),
+                };
+                assert!(got == expected, "{expr} in {zone:?}");
+            }
+        }
+    }
+
+    /// Two infinities of the SAME sign would have to cancel, which `PostgreSQL`
+    /// refuses with 22008 rather than answering zero. Gres answered `@ 0`.
+    #[test]
+    fn age_of_two_like_signed_infinities_is_22008() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-03-15T10:00:00Z");
+        for expr in [
+            "age(timestamp 'infinity', timestamp 'infinity')",
+            "age(timestamp '-infinity', timestamp '-infinity')",
+            "age(timestamptz 'infinity', timestamptz 'infinity')",
+            "age(timestamptz '-infinity', timestamptz '-infinity')",
+            "age(date 'infinity', date 'infinity')",
+        ] {
+            let error = crate::eval::eval(
+                &crabka_pgparser::parser::parse_expr_for_test(expr).expect("parse"),
+                &Scope::empty(),
+                &[],
+                &ctx,
+            )
+            .expect_err(expr)
+            .into_pg();
+            assert!(error.code == "22008", "{expr}");
+            assert!(error.message == "interval out of range", "{expr}");
+        }
+    }
+
+    /// A non-finite reading is the same reading in every zone, so `AT TIME ZONE`
+    /// only switches its type. Rendering the reserved instant as a wall-clock
+    /// used to lose the sentinel in any zone off UTC.
+    #[test]
+    fn a_non_finite_reading_survives_at_time_zone() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-03-15T10:00:00Z");
+        let civil_high = Datum::Timestamp(crabka_pgtypes::datetime::TIMESTAMP_INFINITY);
+        let civil_low = Datum::Timestamp(crabka_pgtypes::datetime::TIMESTAMP_NEG_INFINITY);
+        let zoned_high = Datum::Timestamptz(crabka_pgtypes::datetime::timestamptz_infinity());
+        let zoned_low = Datum::Timestamptz(crabka_pgtypes::datetime::timestamptz_neg_infinity());
+        for zone in ["UTC", "-08:00", "+11:00"] {
+            for (expr, expected) in [
+                (
+                    format!("timestamp 'infinity' AT TIME ZONE '{zone}'"),
+                    zoned_high.clone(),
+                ),
+                (
+                    format!("timestamp '-infinity' AT TIME ZONE '{zone}'"),
+                    zoned_low.clone(),
+                ),
+                (
+                    format!("timestamptz 'infinity' AT TIME ZONE '{zone}'"),
+                    civil_high.clone(),
+                ),
+                (
+                    format!("timestamptz '-infinity' AT TIME ZONE '{zone}'"),
+                    civil_low.clone(),
+                ),
+            ] {
+                assert!(ev(&expr, &ctx) == expected, "{expr}");
+            }
+        }
     }
 
     #[test]
