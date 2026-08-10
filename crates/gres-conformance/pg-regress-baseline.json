@@ -25,10 +25,10 @@
       "sha256": "d73c7fba4f5e2c942163292a494b766ffcbca3c50c48df0d64375591cdb48696"
     },
     "alter_table": {
-      "changed_lines": 1937,
+      "changed_lines": 1938,
       "expected": "alter_table.out",
       "hunks": 163,
-      "sha256": "da7e78cd03fb851be4ab6b5901e870289cc0bf30c446979401b24249eb064b1b"
+      "sha256": "f03f6ddbc87a941618581f7c30e74478725bfce152889060cea61634c47e2b9a"
     },
     "amutils": {
       "changed_lines": 180,
@@ -361,10 +361,10 @@
       "sha256": "3d19d713ce428db87c5b7935e40e2b095b361e0ee9a41da201f09bdc2099623e"
     },
     "foreign_key": {
-      "changed_lines": 1405,
+      "changed_lines": 1406,
       "expected": "foreign_key.out",
       "hunks": 81,
-      "sha256": "2e1adaf42225e4f2334cb239bb7cb27011d16b1fe4ee8eac62172cf38cfa06e5"
+      "sha256": "688e12b61942656c1bbe24b40e0b213100ebdf248308a026b94b88a8c01109d8"
     },
     "functional_deps": {
       "changed_lines": 72,
@@ -481,10 +481,10 @@
       "sha256": "31856c77a2e6eb61c5af0dc76db9da346048241ae10e4e0f88ffdb49f7f2557e"
     },
     "inherit": {
-      "changed_lines": 2721,
+      "changed_lines": 2766,
       "expected": "inherit.out",
-      "hunks": 87,
-      "sha256": "bff31e7dfe102bf89dd7497b14a79eff36cc0f3ca2f48f0b41d0bc10e0bc03ca"
+      "hunks": 86,
+      "sha256": "fe9e4ceef02cd2f2d4d58734f12b6f3be24575b375e67a7bc9a8d7b0e6bd733d"
     },
     "init_privs": {
       "changed_lines": 8,
@@ -595,10 +595,10 @@
       "sha256": "d745377773537d29a1306ba226256a55164c1c557b249a3f5c85514858651bd1"
     },
     "merge": {
-      "changed_lines": 978,
+      "changed_lines": 979,
       "expected": "merge.out",
       "hunks": 88,
-      "sha256": "c90d8a459e84bff91fb09915abc3439ba47dca17e96738bf3cb6d61250481863"
+      "sha256": "05c9cbcbac6a12b422da0cfe34ef098dd1547fa084c42f034c95aa2b896c9166"
     },
     "misc": {
       "changed_lines": 234,
@@ -769,10 +769,10 @@
       "sha256": "05ee01973dc237e8aa2671b5bacf4d872e63cf3aa19e0ea6251fc2589e63819a"
     },
     "psql": {
-      "changed_lines": 1279,
+      "changed_lines": 1285,
       "expected": "psql.out",
       "hunks": 74,
-      "sha256": "a281383dfe222d9b5004a59aa083743930bb1bd1e56c0b195fd9e03460697c8b"
+      "sha256": "3abbbe50f4380bbd8abc2bfc051bc9bff6d3abb920e5cfa9c736bd862fee38ae"
     },
     "psql_pipeline": {
       "changed_lines": 171,
@@ -847,10 +847,10 @@
       "sha256": "ea238f86e469ebcd6ae1d83b956e2f81be44238ecd89f032b4f58a3d3281494c"
     },
     "rules": {
-      "changed_lines": 2455,
+      "changed_lines": 2453,
       "expected": "rules.out",
       "hunks": 78,
-      "sha256": "7da92488485a73f0d2cdce6261cf0670391fa57929283906139ee466b9787389"
+      "sha256": "08a9af415b0d5320d97d4e5401097986cc497b5238597025443fc70ced6610c5"
     },
     "select": {
       "changed_lines": 309,
@@ -937,10 +937,10 @@
       "sha256": "48eb10cf93f4cafa0e49f074fbf28afc5b2b2417f33f9f5a841642fc89beefca"
     },
     "stats_ext": {
-      "changed_lines": 1427,
+      "changed_lines": 1426,
       "expected": "stats_ext.out",
       "hunks": 41,
-      "sha256": "0f748b76159f8ad249a4be8f622d3f8f990b59b335a9878e63623507ae53e63c"
+      "sha256": "d9a19cb16532d3b3ce20ddbf0cb1c9671ab625ec0bc90ee85f9f69149f525101"
     },
     "stats_import": {
       "changed_lines": 726,
@@ -1009,10 +1009,10 @@
       "sha256": "04e1cf61897bfae6281a6fe465f6f11ebafeba362d5597184ff0f97d01221d99"
     },
     "tidscan": {
-      "changed_lines": 249,
+      "changed_lines": 245,
       "expected": "tidscan.out",
       "hunks": 1,
-      "sha256": "db7a8b9eea88558c4dcdbf0f48a750d1e0c4f3ee905b1ca5079b20865ea8d582"
+      "sha256": "237f1de9f8e9471d36a7c63ea54f2178e87ea8a1caa57658654fea4b25aef79e"
     },
     "time": {
       "changed_lines": 31,
@@ -1093,10 +1093,10 @@
       "sha256": "b7a8de502384716ae6f8e9889325ff3b356251c28f9645e4dfd9a7296d5daf46"
     },
     "type_sanity": {
-      "changed_lines": 319,
+      "changed_lines": 329,
       "expected": "type_sanity.out",
       "hunks": 25,
-      "sha256": "b4687e608517bf97fe750e4457e7e9af6de597b6a9d04c958cec948d55a81cf7"
+      "sha256": "d1ccb6c24fcc5792d7110507df33b17eb4b7938e2795fc22ad158c438acd098c"
     },
     "typed_table": {
       "changed_lines": 108,
