@@ -100,6 +100,7 @@ mod read_gate;
 mod reg_fn;
 mod regexp_fn;
 mod relname;
+mod relstats;
 pub mod rls;
 mod routine;
 mod rowexpr;

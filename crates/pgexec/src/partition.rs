@@ -551,6 +551,12 @@ pub(crate) fn put_scheme_ops(parent: &RelationName, scheme: &Scheme) -> Vec<Writ
 }
 
 /// Write ops that attach `child` to `parent` with `bound`.
+///
+/// The third op is the `pg_class.relhassubclass` latch. `PostgreSQL` sets it
+/// here — on `PARTITION OF` and on `ATTACH PARTITION` alike — and
+/// [`detach_ops`] deliberately does not clear it: the flag stays true until an
+/// `ANALYZE` looks and finds no children, and the regression corpus reads the
+/// parent in exactly that window.
 pub(crate) fn attach_ops(
     parent: &RelationName,
     child: &RelationName,
@@ -565,6 +571,7 @@ pub(crate) fn attach_ops(
             key: children_key(parent, child),
             value: Vec::new(),
         },
+        crate::relstats::set_has_subclass_op(parent),
     ]
 }
 

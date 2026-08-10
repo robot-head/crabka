@@ -5067,10 +5067,11 @@ impl SqlSession {
     /// `ANALYZE` and `VACUUM`'s shared front half: everything `PostgreSQL`
     /// checks before it touches the first relation.
     ///
-    /// For this engine that front half *is* the command. There are no planner
-    /// statistics to collect and reclamation is autonomous, so neither has any
-    /// work left to do — but the checks still have to run, because they are
-    /// what decide whether `PostgreSQL` reports success at all, and a
+    /// Reclamation is autonomous here, so `VACUUM` has nothing left to do once
+    /// the checks pass. `ANALYZE` does: it maintains the two `pg_class` columns
+    /// that record what it saw — see
+    /// [`collect_relation_statistics`](Self::collect_relation_statistics). The
+    /// checks still decide whether `PostgreSQL` reports success at all, and a
     /// statement that cannot name its target must not answer `ANALYZE`.
     ///
     /// The order below is `PostgreSQL`'s, and every step of it is observable:
@@ -5084,6 +5085,9 @@ impl SqlSession {
     /// 3. Then, relation by relation in written order: a kind that cannot be
     ///    analyzed is skipped with a `WARNING` rather than refused, and only
     ///    then are its columns checked.
+    /// 4. Only after every check has passed for every named relation are any
+    ///    statistics collected, so `ANALYZE good, nosuch` leaves `good`
+    ///    untouched.
     async fn run_maintenance(
         &mut self,
         command: MaintenanceCommand,
@@ -5114,6 +5118,7 @@ impl SqlSession {
             }
             resolved.push((name, target));
         }
+        let mut collect = Vec::new();
         for (name, target) in resolved {
             // Only a stored table carries columns to collect statistics for.
             // Anything else that shares the relation namespace — a view, a
@@ -5135,6 +5140,12 @@ impl SqlSession {
                 }
                 table
             };
+            // A relation that got this far is one `ANALYZE` would collect
+            // statistics for. A synthesised catalog relation has no stored rows
+            // to count, so it is accepted and then has nothing done to it.
+            if table.is_some() {
+                collect.push(name.clone());
+            }
             let (Some(columns), Some(table)) = (target.columns.as_ref(), table) else {
                 continue;
             };
@@ -5155,9 +5166,134 @@ impl SqlSession {
                 seen.push(column);
             }
         }
+        if stmt.analyze {
+            if stmt.targets.is_empty() {
+                collect = self.database_wide_analyze_targets()?;
+            }
+            Box::pin(self.collect_relation_statistics(collect)).await?;
+        }
         Ok(QueryResult::Command {
             tag: command.tag().into(),
         })
+    }
+
+    /// Every relation a target-less `ANALYZE` visits.
+    ///
+    /// Scoped to `ANALYZE` on purpose. `PostgreSQL`'s target-less `VACUUM`
+    /// visits the same set and refreshes `reltuples` for each, but the only
+    /// bare `VACUUM;` in the regression corpus is `sanity_check`'s first
+    /// statement, and nothing in the corpus reads a count that only a bare
+    /// `VACUUM` could have written. Enumerating there would buy no fidelity the
+    /// corpus can see and would put an exact file on the line, so the no-target
+    /// path stays a no-op for `VACUUM`.
+    ///
+    /// `PostgreSQL` skips relations the caller may not maintain, with a
+    /// `WARNING` per relation — which is why `maintain_every` sets
+    /// `client_min_messages = error` around its bare `ANALYZE`. The skip is
+    /// silent here: nothing in the corpus reads those warnings, and a warning
+    /// per relation in another user's schema is a lot of output to get exactly
+    /// right for no observable gain.
+    fn database_wide_analyze_targets(
+        &self,
+    ) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
+        let kv = self.catalog_kv.as_ref();
+        // The role a relation created now would be owned by, which is the role
+        // ownership has to be compared against: a session that authenticated as
+        // nobody carries `PUBLIC` and acts as the bootstrap superuser.
+        let role = if self.current_role == crabka_pgcatalog::PUBLIC_ROLE {
+            crabka_pgcatalog::BOOTSTRAP_ROLE
+        } else {
+            self.current_role.as_str()
+        };
+        let superuser = crate::rls::role_is_superuser(kv, role)?;
+        let own_temp_schema = crabka_pgcatalog::temp_schema_name(self.backend_pid);
+        let mut targets = Vec::new();
+        for table in crabka_pgcatalog::list_tables(kv)? {
+            // A foreign table has nothing local to sample, and another
+            // session's temporary namespace is not this session's to read.
+            if table.foreign.is_some()
+                || (crabka_pgcatalog::is_temp_schema(&table.name.schema)
+                    && table.name.schema != own_temp_schema)
+                || (!superuser && table.owner != role)
+            {
+                continue;
+            }
+            targets.push(table.name);
+        }
+        Ok(targets)
+    }
+
+    /// Bring `pg_class.reltuples` and `pg_class.relhassubclass` up to date for
+    /// every relation this `ANALYZE` accepted.
+    ///
+    /// Both were measured against `PostgreSQL` 18.4:
+    ///
+    /// * `reltuples` becomes the relation's own live-row count — except for a
+    ///   partitioned relation, which has no rows of its own and takes the count
+    ///   of its whole tree. An inheritance *parent* is not a special case: it
+    ///   reports its own rows and ignores its children's.
+    /// * `relhassubclass` is only ever *cleared* here, and only when the
+    ///   relation has no children left. Nothing else clears it: not `DROP
+    ///   TABLE` of the last child, not `DETACH PARTITION`, not `VACUUM`.
+    ///
+    /// The count runs through the ordinary read path, one statement per
+    /// relation, which is also what gives a target-less `ANALYZE` the
+    /// transaction-per-relation shape `PostgreSQL` calls "use_own_xacts". A
+    /// relation the read path refuses keeps whatever estimate it had rather
+    /// than turning a maintenance command into an error — `PostgreSQL` reads
+    /// the heap directly and has no equivalent failure to report.
+    async fn collect_relation_statistics(
+        &mut self,
+        relations: Vec<crabka_pgcatalog::RelationName>,
+    ) -> Result<(), ExecError> {
+        let mut ops = Vec::new();
+        for name in relations {
+            if let Some(reltuples) = self.count_relation_rows(&name).await {
+                ops.push(crate::relstats::set_reltuples_op(&name, reltuples));
+            }
+            let kv = self.catalog_kv.as_ref();
+            if crate::relstats::of(kv, &name)?.has_subclass
+                && !crate::inheritance::has_children(kv, &name)?
+                && crate::partition::partitions_of(kv, &name)?.is_empty()
+            {
+                ops.push(crate::relstats::clear_has_subclass_op(&name));
+            }
+        }
+        self.commit_catalog_ops(ops).await
+    }
+
+    /// The live-row count `ANALYZE` records for one relation, or `None` when
+    /// the read path could not produce one.
+    async fn count_relation_rows(&mut self, name: &crabka_pgcatalog::RelationName) -> Option<f32> {
+        // A partitioned relation stores nothing itself, so its count is its
+        // tree's; every other relation counts only what it holds, which is what
+        // `ONLY` asks for even when the relation has inheritance children.
+        let only = match crate::partition::is_partitioned(self.catalog_kv.as_ref(), name) {
+            Ok(partitioned) => !partitioned,
+            Err(_) => return None,
+        };
+        let sql = format!(
+            "SELECT count(*) FROM {}{}.{}",
+            if only { "ONLY " } else { "" },
+            crate::catalog_fn::quote_identifier(&name.schema),
+            crate::catalog_fn::quote_identifier(&name.name),
+        );
+        let parsed = crabka_pgparser::parse(&sql).ok()?;
+        let [statement] = parsed.as_slice() else {
+            return None;
+        };
+        let result = Box::pin(self.run_select(statement)).await;
+        let QueryResult::Rows { rows, .. } = result.ok()? else {
+            return None;
+        };
+        let [row] = rows.as_slice() else { return None };
+        let [Some(cell)] = row.as_slice() else {
+            return None;
+        };
+        let count: i64 = std::str::from_utf8(&cell.text).ok()?.parse().ok()?;
+        // `reltuples` is a float4 in PostgreSQL too, so a count past the
+        // 24-bit mantissa loses the same precision there.
+        Some(count as f32)
     }
 
     /// `REINDEX`, which rebuilds nothing here and still has to resolve
@@ -22158,5 +22294,250 @@ mod session_conformance_tests {
         // earlier target would have emitted.
         assert!(state(&mut session, "ANALYZE v1, nope").await == "42P01");
         assert!(notices.try_recv().is_err());
+    }
+
+    /// Assert both `pg_class` columns `ANALYZE` maintains for one relation.
+    ///
+    /// `reltuples` is read as a number rather than compared as the text a
+    /// float4 renders to: that rendering is a platform's business and a test
+    /// that pins it fails somewhere else. Every count these tests use is a
+    /// small exact integer, so "rounds to the same integer" is the widest
+    /// tolerance that can still tell any two of them apart.
+    async fn assert_class_stats(
+        session: &mut SqlSession,
+        relname: &str,
+        reltuples: f64,
+        has_subclass: &str,
+        label: &str,
+    ) {
+        let sql =
+            format!("SELECT reltuples, relhassubclass FROM pg_class WHERE relname = '{relname}'");
+        let rows = run(session, &sql).await.expect(&sql);
+        let [row] = rows.as_slice() else {
+            panic!("expected exactly one pg_class row for {relname}");
+        };
+        let [measured, latched] = row.as_slice() else {
+            panic!("expected exactly two columns from {sql}");
+        };
+        let measured: f64 = measured.parse().expect("reltuples renders as a number");
+        assert!(
+            (measured - reltuples).abs() < 0.5 && latched == has_subclass,
+            "{label}: {relname} reads ({measured}, {latched}), expected ({reltuples}, {has_subclass})"
+        );
+    }
+
+    /// `reltuples` is the relation's *own* live-row count. An inheritance
+    /// parent does not take its children's, which is what separates it from a
+    /// partitioned parent — and `relhassubclass` is already set by the time the
+    /// child exists, before any `ANALYZE` has run.
+    #[tokio::test]
+    async fn analyze_counts_an_inheritance_parents_own_rows_only() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE ipar (i int)",
+            "CREATE TABLE ichi () INHERITS (ipar)",
+            "INSERT INTO ipar VALUES (1), (2), (3)",
+            "INSERT INTO ichi VALUES (9), (9)",
+        ] {
+            run(&mut s, sql).await.expect(sql);
+        }
+
+        // Created, populated, never analyzed: the count is PostgreSQL's
+        // "unknown", and the child has already latched the flag.
+        assert_class_stats(&mut s, "ipar", -1.0, "t", "before ANALYZE").await;
+
+        run(&mut s, "ANALYZE ipar").await.expect("analyze");
+        assert_class_stats(&mut s, "ipar", 3.0, "t", "after ANALYZE").await;
+    }
+
+    /// The window `expected/vacuum.out` reads in: a parent that has just lost
+    /// its last child still reports the pre-drop count and a set
+    /// `relhassubclass`, and only the next `ANALYZE` corrects either. Both
+    /// blocks of that file are here, because the two inheritance flavours
+    /// answer the count differently — a partitioned parent stores nothing and
+    /// counts its tree.
+    #[tokio::test]
+    async fn a_parent_that_lost_its_last_child_stays_stale_until_analyze() {
+        let cases = [
+            ("non-partitioning inheritance", false, 0.0_f64),
+            ("partitioning", true, 2.0_f64),
+        ];
+        for (label, partitioned, analyzed) in cases {
+            let engine = SqlEngine::new();
+            let mut s = engine.connect();
+            let (parent, child, insert_into) = if partitioned {
+                (
+                    "CREATE TABLE par (i int) PARTITION BY LIST (i)",
+                    "CREATE TABLE chi PARTITION OF par FOR VALUES IN (1)",
+                    "par",
+                )
+            } else {
+                (
+                    "CREATE TABLE par (i int)",
+                    "CREATE TABLE chi () INHERITS (par)",
+                    "chi",
+                )
+            };
+            for sql in [
+                parent,
+                child,
+                &format!("INSERT INTO {insert_into} VALUES (1), (1)"),
+                "ANALYZE par",
+            ] {
+                run(&mut s, sql).await.expect(label);
+            }
+            assert_class_stats(&mut s, "par", analyzed, "t", label).await;
+
+            run(&mut s, "DROP TABLE chi").await.expect(label);
+            assert_class_stats(
+                &mut s,
+                "par",
+                analyzed,
+                "t",
+                &format!("{label}: the drop corrects neither column"),
+            )
+            .await;
+
+            run(&mut s, "ANALYZE par").await.expect(label);
+            assert_class_stats(&mut s, "par", 0.0, "f", label).await;
+        }
+    }
+
+    /// `DETACH PARTITION` is the other way a parent loses its last child, and
+    /// it leaves the latch set exactly as `DROP TABLE` does. Re-attaching sets
+    /// it again.
+    #[tokio::test]
+    async fn detaching_the_last_partition_leaves_the_latch_for_analyze() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE dpar (i int) PARTITION BY LIST (i)",
+            "CREATE TABLE dchi PARTITION OF dpar FOR VALUES IN (1)",
+            "ALTER TABLE dpar DETACH PARTITION dchi",
+        ] {
+            run(&mut s, sql).await.expect(sql);
+        }
+        assert_class_stats(&mut s, "dpar", -1.0, "t", "after DETACH").await;
+
+        run(&mut s, "ANALYZE dpar").await.expect("analyze");
+        assert_class_stats(&mut s, "dpar", 0.0, "f", "after ANALYZE").await;
+
+        run(
+            &mut s,
+            "ALTER TABLE dpar ATTACH PARTITION dchi FOR VALUES IN (1)",
+        )
+        .await
+        .expect("attach");
+        assert_class_stats(&mut s, "dpar", 0.0, "t", "after ATTACH").await;
+    }
+
+    /// `VACUUM` shares every line of `run_maintenance` with `ANALYZE` and must
+    /// still move neither column — including the target-less spelling, which is
+    /// the first statement of the `sanity_check` regression test. The same
+    /// statement written with `ANALYZE` does move them.
+    #[tokio::test]
+    async fn vacuum_alone_never_moves_the_analyze_maintained_columns() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE vpar (i int)",
+            "CREATE TABLE vchi () INHERITS (vpar)",
+            "INSERT INTO vpar VALUES (1), (2)",
+            "DROP TABLE vchi",
+        ] {
+            run(&mut s, sql).await.expect(sql);
+        }
+
+        for sql in [
+            "VACUUM vpar",
+            "VACUUM FULL vpar",
+            "VACUUM (FREEZE) vpar",
+            "VACUUM",
+        ] {
+            assert!(state(&mut s, sql).await == "00000", "case: {sql}");
+            assert_class_stats(&mut s, "vpar", -1.0, "t", sql).await;
+        }
+
+        run(&mut s, "VACUUM ANALYZE vpar")
+            .await
+            .expect("vacuum analyze");
+        assert_class_stats(&mut s, "vpar", 2.0, "f", "VACUUM ANALYZE vpar").await;
+    }
+
+    /// A target-less `ANALYZE` visits every relation the session owns, which is
+    /// what `maintain_every`'s bare `ANALYZE;` relies on.
+    #[tokio::test]
+    async fn a_target_less_analyze_visits_every_relation_the_session_owns() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE dw1 (i int)",
+            "CREATE TABLE dw2 (i int)",
+            "INSERT INTO dw1 VALUES (1)",
+            "INSERT INTO dw2 VALUES (1), (2)",
+        ] {
+            run(&mut s, sql).await.expect(sql);
+        }
+
+        run(&mut s, "ANALYZE").await.expect("analyze");
+        assert_class_stats(&mut s, "dw1", 1.0, "f", "bare ANALYZE").await;
+        assert_class_stats(&mut s, "dw2", 2.0, "f", "bare ANALYZE").await;
+    }
+
+    /// Nothing is collected until every check has passed for every named
+    /// relation, and statistics never outlive the relation they describe — a
+    /// new relation reusing a dropped one's name starts from "unknown".
+    #[tokio::test]
+    async fn a_refused_analyze_collects_nothing_and_a_reused_name_starts_over() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run(&mut s, "CREATE TABLE keep (i int)").await.expect("ddl");
+        run(&mut s, "INSERT INTO keep VALUES (1), (2), (3)")
+            .await
+            .expect("seed");
+
+        for (sql, code) in [
+            ("ANALYZE keep, nope", "42P01"),
+            ("ANALYZE nope, keep", "42P01"),
+            ("ANALYZE keep (nosuchcol)", "42703"),
+            ("ANALYZE keep (i, i)", "42701"),
+        ] {
+            assert!(state(&mut s, sql).await == code, "case: {sql}");
+            assert_class_stats(&mut s, "keep", -1.0, "f", sql).await;
+        }
+
+        run(&mut s, "ANALYZE keep").await.expect("analyze");
+        assert_class_stats(&mut s, "keep", 3.0, "f", "ANALYZE keep").await;
+
+        run(&mut s, "DROP TABLE keep").await.expect("drop");
+        run(&mut s, "CREATE TABLE keep (i int)").await.expect("ddl");
+        assert_class_stats(&mut s, "keep", -1.0, "f", "a reused name").await;
+    }
+
+    /// Every other relation kind shares the `pg_class` row builder, and none of
+    /// them has statistics of its own: `ANALYZE` skips them and they keep
+    /// reporting the defaults. A catalog relation is neither skipped nor
+    /// refused, and still has nothing stored to report.
+    #[tokio::test]
+    async fn relations_that_carry_no_statistics_report_the_defaults() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE base (i int)",
+            "CREATE VIEW basev AS SELECT i FROM base",
+            "CREATE SEQUENCE baseq",
+            "CREATE INDEX basei ON base (i)",
+            "ANALYZE basev",
+            "ANALYZE baseq",
+            "ANALYZE basei",
+            "ANALYZE pg_class",
+            "ANALYZE",
+        ] {
+            assert!(state(&mut s, sql).await == "00000", "case: {sql}");
+        }
+        for relname in ["basev", "baseq", "basei", "pg_class"] {
+            assert_class_stats(&mut s, relname, -1.0, "f", relname).await;
+        }
     }
 }

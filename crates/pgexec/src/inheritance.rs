@@ -37,15 +37,24 @@ fn encode_parents(parents: &[RelationName]) -> Vec<u8> {
     value
 }
 
+/// Write ops that record `child`'s parents and each parent's back-link.
+///
+/// Every parent also gets its `pg_class.relhassubclass` latched, which is what
+/// `PostgreSQL` does when a child appears. Nothing here ever clears it —
+/// dropping the last child leaves the flag set until an `ANALYZE` looks, and
+/// `expected/vacuum.out` reads a parent inside that window.
 pub(crate) fn attach_ops(child: &RelationName, parents: &[RelationName]) -> Vec<WriteOp> {
     let mut ops = vec![WriteOp::Put {
         key: relation_key(PARENTS_PREFIX, child),
         value: encode_parents(parents),
     }];
-    ops.extend(parents.iter().map(|parent| WriteOp::Put {
-        key: child_index_key(parent, child),
-        value: Vec::new(),
-    }));
+    for parent in parents {
+        ops.push(WriteOp::Put {
+            key: child_index_key(parent, child),
+            value: Vec::new(),
+        });
+        ops.push(crate::relstats::set_has_subclass_op(parent));
+    }
     ops
 }
 

@@ -8109,9 +8109,14 @@ fn drop_table_and_dependents_ops(
         ops.extend(crabka_pgcatalog::drop_table_ops(kv, &descendant)?);
         ops.extend(crate::partition::drop_metadata_ops(kv, &descendant)?);
         ops.extend(crate::inheritance::drop_metadata_ops(kv, &descendant)?);
+        // Only the departing relation's own statistics go. A parent losing its
+        // last child keeps its `relhassubclass` latch, which is the stale
+        // window `ANALYZE` is what closes.
+        ops.extend(crate::relstats::drop_metadata_ops(&descendant));
     }
     ops.extend(crate::partition::drop_metadata_ops(kv, name)?);
     ops.extend(crate::inheritance::drop_metadata_ops(kv, name)?);
+    ops.extend(crate::relstats::drop_metadata_ops(name));
     ops.extend(crabka_pgcatalog::trigger::drop_triggers_for_table_ops(
         kv, table.id,
     )?);
@@ -18186,6 +18191,9 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .map(|index| index.table_id)
         .collect::<std::collections::BTreeSet<_>>();
     let role_oids = crate::catalog_rel::role_oids(catalog_kv)?;
+    // Two scans, not two reads per relation: `reltuples` and `relhassubclass`
+    // are stored per relation and only stored relations ever have them.
+    let relstats = crate::relstats::all(catalog_kv)?;
     // An index is owned by whoever owns the table it indexes, so the table
     // pass records what the index pass needs rather than reading the catalog
     // again per index.
@@ -18233,6 +18241,9 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relowner = role_oid_of(&role_oids, &table.owner);
         row.relrowsecurity = table.row_security;
         row.relforcerowsecurity = table.force_row_security;
+        let stats = relstats.get(&table.name).copied().unwrap_or_default();
+        row.reltuples = stats.reltuples;
+        row.relhassubclass = stats.has_subclass;
         table_owner_oids.insert(table.name.clone(), row.relowner);
         rows.push(row.build()?);
     }
@@ -18406,6 +18417,14 @@ struct PgClassRow<'a> {
     relhasindex: bool,
     relhasrules: bool,
     relhastriggers: bool,
+    /// `pg_class.relhassubclass`. A latch set when a child appears and cleared
+    /// only by an `ANALYZE` that finds none left — see [`crate::relstats`].
+    /// Only a stored relation carries one; a partitioned *index* also does in
+    /// `PostgreSQL`, and that is not modelled here.
+    relhassubclass: bool,
+    /// `pg_class.reltuples`. [`crate::relstats::UNKNOWN_TUPLES`] until an
+    /// `ANALYZE` measures the relation.
+    reltuples: f32,
     relam: i32,
     relfilenode: i32,
     relispartition: bool,
@@ -18449,6 +18468,8 @@ impl<'a> PgClassRow<'a> {
             relhasindex: false,
             relhasrules: false,
             relhastriggers: false,
+            relhassubclass: false,
+            reltuples: crate::relstats::UNKNOWN_TUPLES,
             // A materialized view's contents live in the heap exactly as a
             // table's do, so PostgreSQL gives it the heap access method too.
             relam: if matches!(relkind, "r" | "m") { 2 } else { 0 },
@@ -18481,7 +18502,7 @@ impl<'a> PgClassRow<'a> {
             int(i32::try_from(self.reltablespace)
                 .map_err(|_| ExecError::Unsupported("tablespace oid exceeds int4".into()))?),
             int(0),
-            Datum::Float4(-1.0),
+            Datum::Float4(self.reltuples),
             int(0),
             int(0),
             int(0),
@@ -18495,7 +18516,7 @@ impl<'a> PgClassRow<'a> {
             Datum::Int2(checks),
             Datum::Bool(self.relhasrules),
             Datum::Bool(self.relhastriggers),
-            Datum::Bool(false),
+            Datum::Bool(self.relhassubclass),
             Datum::Bool(self.relrowsecurity),
             Datum::Bool(self.relforcerowsecurity),
             Datum::Bool(self.relispopulated),
