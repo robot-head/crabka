@@ -739,10 +739,10 @@
       "sha256": "ecd74599825a9e44a5b5afb89a022fc6ec6ae0675f2bb575c606261d8d2b5ec1"
     },
     "portals": {
-      "changed_lines": 1242,
+      "changed_lines": 1238,
       "expected": "portals.out",
       "hunks": 15,
-      "sha256": "5c5ecbc81e4b680cf1620de6df546bc63fcda7a27cf9f49c0c0697360e1b5e1d"
+      "sha256": "0e776901aee9795dd4ba20e9152e63c7767fd05f2b88f3c959809ced64c079a0"
     },
     "predicate": {
       "changed_lines": 238,
@@ -763,10 +763,10 @@
       "sha256": "6860deb687b19b78a5f6c5c2b694543343f7007f11d175b5893eab300d5a8ac1"
     },
     "privileges": {
-      "changed_lines": 1827,
+      "changed_lines": 1817,
       "expected": "privileges.out",
       "hunks": 93,
-      "sha256": "f6bfc53ac76d38a2bd33ff422b62d87279e9f38d71aafb74de887e3e32504d1c"
+      "sha256": "b2c9638a795ae404dbcdd6a02a169469736054ba93beff1ad6b913933b8dfa86"
     },
     "psql": {
       "changed_lines": 1279,
@@ -1117,10 +1117,10 @@
       "sha256": "8b36d30899f331a425755a990cc98d8a7de6d7cccb06e1e266ed755ba8f03cab"
     },
     "updatable_views": {
-      "changed_lines": 1692,
+      "changed_lines": 1690,
       "expected": "updatable_views.out",
       "hunks": 116,
-      "sha256": "f79c1f16b3e2e8e7989d9b46c0fa27c4381b676925f55ef8467da6af704c1398"
+      "sha256": "ce4ece8dd706df9d3a50d9535ca89ff0960844b731e62ac5ca44a528f1a37fa1"
     },
     "update": {
       "changed_lines": 548,
