@@ -4,7 +4,6 @@ use crabka_metadata::{BrokerRegistrationRecord, NodeId};
 
 /// Selects the WAL voters. It spreads them across racks when the metadata
 /// carries rack information.
-#[allow(dead_code)]
 pub(crate) fn select_voters(
     brokers: impl IntoIterator<Item = BrokerRegistrationRecord>,
     local_node: NodeId,
@@ -100,6 +99,13 @@ mod tests {
         );
 
         assert_eq!(selected, vec![NodeId(1), NodeId(2), NodeId(3)]);
+    }
+
+    #[test]
+    fn placement_does_not_invent_an_unregistered_local_voter() {
+        let selected = select_voters([broker(2, Some("a")), broker(3, Some("b"))], NodeId(1), 2);
+
+        assert_eq!(selected, vec![NodeId(2), NodeId(3)]);
     }
 
     fn broker(id: u64, rack: Option<&str>) -> BrokerRegistrationRecord {

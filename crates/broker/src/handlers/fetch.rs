@@ -1757,6 +1757,15 @@ mod tests {
                 source,
             )]))),
         );
+        broker
+            .wal_shards
+            .replace_placements(std::collections::HashMap::from([(
+                ShardId {
+                    topic_id,
+                    partition: PartitionIndex(0),
+                },
+                vec![crabka_raft::NodeId(2)],
+            )]));
         let request = encode_fetch_for_group(
             QuorumGroup::diskless_wal(topic_id, PartitionIndex(0)),
             crabka_raft::NodeId(2),

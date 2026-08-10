@@ -1,6 +1,9 @@
 //! WAL shard registry.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 use crabka_ids::PartitionIndex;
 use dashmap::DashMap;
@@ -24,6 +27,7 @@ pub(crate) struct ShardId {
 #[derive(Debug, Default)]
 pub(crate) struct WalShardRegistry {
     engines: DashMap<ShardId, Arc<WalShardEngine>>,
+    placements: RwLock<HashMap<ShardId, Vec<crabka_raft::NodeId>>>,
 }
 
 impl WalShardRegistry {
@@ -36,6 +40,28 @@ impl WalShardRegistry {
         self.engines.insert(shard_id, engine);
     }
 
+    /// Atomically install the voter placement derived from one metadata image.
+    /// Replacing the map also removes deleted topics and superseded topic IDs.
+    pub(crate) fn replace_placements(
+        &self,
+        placements: HashMap<ShardId, Vec<crabka_raft::NodeId>>,
+    ) {
+        *self
+            .placements
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = placements;
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn placement(&self, shard_id: ShardId) -> Option<Vec<crabka_raft::NodeId>> {
+        self.placements
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&shard_id)
+            .cloned()
+    }
+
     pub(crate) fn get(&self, shard_id: ShardId) -> Option<Arc<WalShardEngine>> {
         self.engines
             .get(&shard_id)
@@ -43,6 +69,10 @@ impl WalShardRegistry {
     }
 
     pub(crate) fn remove(&self, shard_id: ShardId) -> Option<Arc<WalShardEngine>> {
+        self.placements
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&shard_id);
         self.engines.remove(&shard_id).map(|(_, engine)| engine)
     }
 
@@ -70,6 +100,15 @@ impl WalShardRegistry {
             topic_id,
             partition,
         };
+        let authorized = self
+            .placements
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&shard)
+            .is_some_and(|voters| voters.contains(&request.from));
+        if !authorized {
+            return Some(Ok(unknown_shard_fetch_response(request.group)));
+        }
         let Some(engine) = self.get(shard) else {
             return Some(Ok(unknown_shard_fetch_response(request.group)));
         };
@@ -171,6 +210,13 @@ mod tests {
             },
             engine,
         );
+        registry.replace_placements(HashMap::from([(
+            ShardId {
+                topic_id,
+                partition,
+            },
+            vec![crabka_raft::NodeId(9)],
+        )]));
         let router = WalShardRouter::new(registry);
         let body = encode_fetch_for_group(
             QuorumGroup::diskless_wal(topic_id, partition),
@@ -192,6 +238,68 @@ mod tests {
                 .records
                 .as_ref()
                 .is_some_and(|records| records.payload_len() > 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn wal_shard_router_rejects_a_broker_outside_the_placement() {
+        let registry = Arc::new(WalShardRegistry::new());
+        let topic_id = uuid::Uuid::from_u128(17);
+        let partition = PartitionIndex(2);
+        let shard = ShardId {
+            topic_id,
+            partition,
+        };
+        let dir = tempdir().unwrap();
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).unwrap(),
+        ));
+        registry.insert(
+            shard,
+            Arc::new(WalShardEngine::for_logs(BTreeMap::from([(
+                crabka_raft::NodeId(1),
+                log,
+            )]))),
+        );
+        registry.replace_placements(HashMap::from([(shard, vec![crabka_raft::NodeId(2)])]));
+        let router = WalShardRouter::new(registry);
+        let body = encode_fetch_for_group(
+            QuorumGroup::diskless_wal(topic_id, partition),
+            crabka_raft::NodeId(9),
+            0,
+            0,
+        );
+
+        let response = router
+            .route(crabka_raft::kraft::transport::api_key::FETCH, body)
+            .await
+            .unwrap()
+            .expect("diskless WAL fetch response");
+        let decoded = FetchResponse::decode(&mut response.as_ref(), 17).unwrap();
+        let partition = &decoded.responses[0].partitions[0];
+        assert_eq!(partition.error_code, 3);
+        assert!(partition.records.is_none());
+    }
+
+    #[test]
+    fn replacing_placements_removes_stale_shards() {
+        let registry = WalShardRegistry::new();
+        let stale = ShardId {
+            topic_id: uuid::Uuid::from_u128(1),
+            partition: PartitionIndex(0),
+        };
+        let current = ShardId {
+            topic_id: uuid::Uuid::from_u128(2),
+            partition: PartitionIndex(0),
+        };
+        registry.replace_placements(HashMap::from([(stale, vec![crabka_raft::NodeId(1)])]));
+
+        registry.replace_placements(HashMap::from([(current, vec![crabka_raft::NodeId(2)])]));
+
+        assert!(registry.placement(stale).is_none());
+        assert_eq!(
+            registry.placement(current),
+            Some(vec![crabka_raft::NodeId(2)])
         );
     }
 }

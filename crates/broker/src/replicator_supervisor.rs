@@ -66,6 +66,37 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
         .collect()
 }
 
+/// WAL voter placement for every diskless partition in one metadata image.
+/// The partition leader is first, then rack-distinct registered brokers are
+/// preferred by the placement policy.
+pub(crate) fn desired_wal_placements(
+    image: &MetadataImage,
+    voter_count: usize,
+) -> HashMap<crate::wal::quorum::registry::ShardId, Vec<NodeId>> {
+    let brokers = image.brokers().cloned().collect::<Vec<_>>();
+    image
+        .all_partitions()
+        .filter(|partition| {
+            crate::broker::diskless_topic_config(image.topic_config(&partition.topic))
+        })
+        .filter(|partition| image.broker(partition.leader).is_some())
+        .filter_map(|partition| {
+            let topic_id = image.topic(&partition.topic)?.topic_id;
+            Some((
+                crate::wal::quorum::registry::ShardId {
+                    topic_id,
+                    partition: PartitionIndex(partition.partition),
+                },
+                crate::wal::quorum::placement::select_voters(
+                    brokers.iter().cloned(),
+                    partition.leader,
+                    voter_count,
+                ),
+            ))
+        })
+        .collect()
+}
+
 /// Open (or recover) the on-disk `Partition` for `(topic, partition)` and
 /// insert it into `partitions` with
 /// `PartitionRegistry::materialize_if_vacant`.
@@ -487,6 +518,20 @@ impl ReplicatorSupervisor {
     }
 
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
+        let wal_placements = desired_wal_placements(image, self.diskless_wal_local_replica_count);
+        for (shard, voters) in &wal_placements {
+            if voters.len() < self.diskless_wal_local_replica_count {
+                warn!(
+                    topic_id = %shard.topic_id,
+                    partition = shard.partition.0,
+                    available = voters.len(),
+                    required = self.diskless_wal_local_replica_count,
+                    "diskless WAL placement lacks enough registered brokers"
+                );
+            }
+        }
+        self.wal_shards.replace_placements(wal_placements);
+
         let local_set = desired_local_set(self.node_id, image);
 
         // A DeleteTopics handler tears down its local partition immediately
@@ -1217,6 +1262,60 @@ mod tests {
                     ("a".to_string(), 1),
                     ("c".to_string(), -1),
                 ])
+        );
+    }
+
+    #[test]
+    fn desired_wal_placements_cover_only_diskless_topics_and_prefer_distinct_racks() {
+        use std::collections::BTreeMap;
+
+        use crabka_metadata::TopicConfigRecord;
+
+        let topic_id = Uuid::from_u128(17);
+        let mut overrides = BTreeMap::new();
+        overrides.insert("crabka.diskless".into(), "true".into());
+        let mut broker1 = broker_record(NodeId(1));
+        broker1.rack = Some("a".into());
+        let mut broker2 = broker_record(NodeId(2));
+        broker2.rack = Some("b".into());
+        let mut broker3 = broker_record(NodeId(3));
+        broker3.rack = Some("c".into());
+        let mut broker4 = broker_record(NodeId(4));
+        broker4.rack = Some("a".into());
+        let image = image_with(&[
+            MetadataRecord::V1BrokerRegistration(broker4),
+            MetadataRecord::V1BrokerRegistration(broker2),
+            MetadataRecord::V1BrokerRegistration(broker1),
+            MetadataRecord::V1BrokerRegistration(broker3),
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "diskless".into(),
+                topic_id,
+                partitions: 1,
+                replication_factor: 3,
+            }),
+            partition_record(
+                "diskless",
+                0,
+                NodeId(2),
+                vec![NodeId(1), NodeId(2), NodeId(3)],
+                0,
+            ),
+            MetadataRecord::V1TopicConfig(TopicConfigRecord {
+                topic: "diskless".into(),
+                overrides,
+            }),
+            topic_record("classic", 1),
+            partition_record("classic", 0, NodeId(1), vec![NodeId(1)], 0),
+        ]);
+
+        let placements = desired_wal_placements(&image, 3);
+
+        assert!(placements.len() == 1);
+        assert!(
+            placements.get(&crate::wal::quorum::registry::ShardId {
+                topic_id,
+                partition: PartitionIndex(0),
+            }) == Some(&vec![NodeId(2), NodeId(1), NodeId(3)])
         );
     }
 
