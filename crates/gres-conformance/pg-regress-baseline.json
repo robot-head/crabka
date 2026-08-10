@@ -511,10 +511,10 @@
       "sha256": "b78e3930608148bc85bf2abef8e493078f122b5175a1629394b1c56abf121ff1"
     },
     "interval": {
-      "changed_lines": 350,
+      "changed_lines": 334,
       "expected": "interval.out",
-      "hunks": 26,
-      "sha256": "e08fe2f78d2eb0ae296271ad7f548ffe9db77d66151d2d918a9a3a6a1ad36daf"
+      "hunks": 25,
+      "sha256": "a10bdddcfbee63755faeece2bcfd4abc404790ec811eb25304acbebbcad28969"
     },
     "join": {
       "changed_lines": 8010,
@@ -1021,16 +1021,16 @@
       "sha256": "98610bebd2df2822517dd1d719e609a17c9dd7cffaca021465044d009549bf7c"
     },
     "timestamp": {
-      "changed_lines": 927,
+      "changed_lines": 891,
       "expected": "timestamp.out",
-      "hunks": 26,
-      "sha256": "a30045deb74ae14b07fb6477c0b3f9c2396dc216e1de1cdd3f6c4c9b762e16d2"
+      "hunks": 25,
+      "sha256": "2b50465b89dba02d4f295622ee43b7ba6158c712ef913a913b4566038ee7f5a5"
     },
     "timestamptz": {
-      "changed_lines": 1308,
+      "changed_lines": 1272,
       "expected": "timestamptz.out",
-      "hunks": 43,
-      "sha256": "384dc4780809b153dc1d4eb4c06aac85af36337406ecc6e959f0dfc6316acbfe"
+      "hunks": 42,
+      "sha256": "a111f59f8094b45581d9c7ba6fec42943f9805b85828197b7b944b7f0b846245"
     },
     "timetz": {
       "changed_lines": 82,
