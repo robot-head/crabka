@@ -582,12 +582,6 @@
       "hunks": 14,
       "sha256": "49cd4a9980ed5d77fff1a73595cbb48c6dafd02fe812f085ac8a0c991c96f778"
     },
-    "maintain_every": {
-      "changed_lines": 4,
-      "expected": "maintain_every.out",
-      "hunks": 2,
-      "sha256": "29514841ee8c55cdfbaf4750933f7b9cca179a9834f55bcf581bd44f23f8ba85"
-    },
     "matview": {
       "changed_lines": 249,
       "expected": "matview.out",
@@ -1030,13 +1024,13 @@
       "changed_lines": 927,
       "expected": "timestamp.out",
       "hunks": 26,
-      "sha256": "b57435e9bb208f58dbcc2406802f1d19502050cc76e6ceab72e25d37083c64f1"
+      "sha256": "a30045deb74ae14b07fb6477c0b3f9c2396dc216e1de1cdd3f6c4c9b762e16d2"
     },
     "timestamptz": {
       "changed_lines": 1308,
       "expected": "timestamptz.out",
       "hunks": 43,
-      "sha256": "50c5be8ddbe3b14c5557a2223df14767c15735505d0115f41a8bcc5f1cacc08a"
+      "sha256": "384dc4780809b153dc1d4eb4c06aac85af36337406ecc6e959f0dfc6316acbfe"
     },
     "timetz": {
       "changed_lines": 82,
@@ -1141,10 +1135,10 @@
       "sha256": "63869a27b63eb7ed7820c29d31cbd9e3d644d9d5e07029a3a705b9f7a0a3fdfe"
     },
     "vacuum": {
-      "changed_lines": 198,
+      "changed_lines": 190,
       "expected": "vacuum.out",
-      "hunks": 21,
-      "sha256": "7780975c9226578a34a3417a3afce16b8f4a533ee627acd1af75a8eb906abb76"
+      "hunks": 17,
+      "sha256": "cd4f1e370d32745443aca08d1bb47578f896b3aac69e0771ff76f26e74bd3145"
     },
     "window": {
       "changed_lines": 2436,
@@ -1189,7 +1183,7 @@
       "sha256": "c0f90338e27ec100f860eb0891f6f32fdb6155e1f7d302e4890c2b5adfca1068"
     }
   },
-  "passed": 33,
+  "passed": 34,
   "postgres_tag": "REL_18_4",
   "schedule": [
     "test_setup",
