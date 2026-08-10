@@ -135,21 +135,33 @@ pub(crate) fn has_children(kv: &dyn Kv, parent: &RelationName) -> Result<bool, E
     Ok(seen > 0)
 }
 
-/// Every relation below `parent`, each named once.
+/// Every relation below `parent`, each named once, in the order `PostgreSQL`
+/// appends them to a read of the tree.
 ///
 /// The visited set is load-bearing rather than defensive: multiple inheritance
 /// makes the graph a DAG, so `d INHERITS (b, c)` under `b, c INHERITS a` is
 /// reachable from `a` by two paths. Yielding `d` twice makes
 /// [`inherited_scan`](crate::exec) read its rows twice, and `SELECT * FROM a`
 /// silently returns duplicates.
+///
+/// # Why the queue is a queue
+///
+/// `PostgreSQL`'s `find_all_inheritors` walks the tree breadth-first, and the
+/// order is observable: an unordered `SELECT * FROM parent` returns each
+/// relation's rows in exactly the order the walk names them. Measured on 18.4
+/// over `a` with children `b, c` and grandchildren `d, e` below `b`, the rows
+/// arrive `a, b, c, d, e` — a whole level before the next one, not `b`'s
+/// subtree before `c`. A stack yields `a, c, b, e, d` instead, which is two
+/// wrong answers rather than one: the wrong level order and the siblings
+/// reversed.
 pub(crate) fn descendants(
     kv: &dyn Kv,
     parent: &RelationName,
 ) -> Result<Vec<RelationName>, ExecError> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut pending = children_of(kv, parent)?;
-    while let Some(child) = pending.pop() {
+    let mut pending = std::collections::VecDeque::from(children_of(kv, parent)?);
+    while let Some(child) = pending.pop_front() {
         if !seen.insert(child.clone()) {
             continue;
         }
@@ -275,7 +287,8 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv, WriteOp};
 
     use super::{
-        CHILDREN_PREFIX, PARENTS_PREFIX, attach_ops, children_of, drop_metadata_ops, parents_of,
+        CHILDREN_PREFIX, PARENTS_PREFIX, attach_ops, children_of, descendants, drop_metadata_ops,
+        parents_of,
     };
 
     fn relation(name: &str) -> RelationName {
@@ -408,6 +421,28 @@ mod tests {
         assert!(parents_of(&kv, &relation("mid")).expect("read") == Vec::new());
         assert!(parents_of(&kv, &relation("leaf")).expect("read") == vec![relation("mid")]);
         assert!(children_of(&kv, &relation("mid")).expect("read") == vec![relation("leaf")]);
+    }
+
+    #[test]
+    fn the_walk_names_a_whole_level_before_the_next_one() {
+        // The order is observable: an unordered `SELECT * FROM a` returns each
+        // relation's rows in the order this walk names them, and PostgreSQL
+        // 18.4 answers `a, b, c, d, e` for this tree. A stack answers
+        // `c, b, e, d`.
+        let kv = linked(&[("b", &["a"]), ("c", &["a"]), ("d", &["b"]), ("e", &["b"])]);
+        assert!(
+            descendants(&kv, &relation("a")).expect("walk")
+                == vec![relation("b"), relation("c"), relation("d"), relation("e")]
+        );
+    }
+
+    #[test]
+    fn the_walk_names_a_relation_reachable_by_two_paths_once() {
+        let kv = linked(&[("b", &["a"]), ("c", &["a"]), ("d", &["b", "c"])]);
+        assert!(
+            descendants(&kv, &relation("a")).expect("walk")
+                == vec![relation("b"), relation("c"), relation("d")]
+        );
     }
 
     #[test]

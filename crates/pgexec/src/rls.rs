@@ -217,12 +217,12 @@ impl RawScan {
     /// `PostgreSQL`'s rule: a child's own policies do not apply to a read of the
     /// parent.
     pub(crate) fn absorb(&mut self, child: Self, ordinals: &[usize]) {
-        self.rows.extend(child.rows.into_iter().map(|row| {
-            ordinals
-                .iter()
-                .map(|ordinal| row.get(*ordinal).cloned().unwrap_or(Datum::Null))
-                .collect::<Vec<_>>()
-        }));
+        self.rows.extend(
+            child
+                .rows
+                .into_iter()
+                .map(|row| crate::exec::permuted_row(&row, ordinals)),
+        );
     }
 }
 
@@ -268,6 +268,70 @@ pub(crate) fn apply_row_security(
             }
             Ok(Relation { scope, rows: kept })
         }
+    }
+}
+
+/// The predicate a locking read judges a row by *before* it locks it.
+///
+/// [`apply_row_security`] is the gate for a scan that can hand the gate a
+/// finished row set. A locking read cannot: it takes the row lock the moment it
+/// accepts a row, and a lock is observable — `NOWAIT` reports it, `SKIP LOCKED`
+/// steps around it, and an ordinary waiter blocks on it. Filtering afterwards
+/// would return the right rows and still have told the caller which hidden ones
+/// exist, so the locking read compiles the same policies into a predicate and
+/// asks it first.
+///
+/// `PostgreSQL` judges the row against the `UPDATE` policies as well as the
+/// `SELECT` ones, at every lock strength. Measured on 18.4, a relation with a
+/// `FOR SELECT` policy admitting one row and a `FOR UPDATE` policy admitting a
+/// different one returns nothing to any of `FOR UPDATE`, `FOR NO KEY UPDATE`,
+/// `FOR SHARE` or `FOR KEY SHARE`; so does a relation with a `FOR SELECT`
+/// policy and no `UPDATE` policy at all, whose empty permissive fold denies
+/// every row.
+pub(crate) struct LockingReadGate(Option<Expr>);
+
+impl LockingReadGate {
+    /// Compile `governing`'s policies for a locking read of its rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns 42501 when `row_security = off` and a policy would have applied,
+    /// 42P17 when a policy qual reads the relation its own policy protects, and
+    /// storage/parse errors from compiling the quals.
+    pub(crate) fn compile(
+        read_ctx: &crate::subquery::SubCtx<'_>,
+        governing: &Table,
+    ) -> Result<Self, ExecError> {
+        let mut quals = Vec::new();
+        for command in [PolicyCommand::Select, PolicyCommand::Update] {
+            match decide(&read_ctx.rls(), governing, command)? {
+                RowSecurity::Open => {}
+                RowSecurity::Refuse { relation } => {
+                    return Err(ExecError::RowSecurityRefused(relation));
+                }
+                RowSecurity::Restricted { relation, qual } => {
+                    // See `apply_row_security`: a qual that reads its own
+                    // relation is reported rather than recursed into, and the
+                    // subqueries inside it are resolved once per scan, under
+                    // the guard that catches exactly that.
+                    if read_ctx.policy_stack.holds(governing.id) {
+                        return Err(ExecError::PolicyRecursion(relation));
+                    }
+                    let _entered = read_ctx.policy_stack.enter(governing.id);
+                    quals.push(crate::subquery::resolve_expr(read_ctx, &qual)?);
+                }
+            }
+        }
+        Ok(Self(
+            quals
+                .into_iter()
+                .reduce(|left, right| binary(BinaryOp::And, left, right)),
+        ))
+    }
+
+    /// The predicate, or `None` when no policy applies to this read.
+    pub(crate) fn qual(&self) -> Option<&Expr> {
+        self.0.as_ref()
     }
 }
 

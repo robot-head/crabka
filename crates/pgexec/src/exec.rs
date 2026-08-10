@@ -15515,6 +15515,26 @@ pub(crate) fn column_mapping(target: &Table, source: &Table) -> Result<Vec<usize
         .collect()
 }
 
+/// `row` read through `ordinals`: `ordinals[i]` is the index in `row` of the
+/// result's `i`th column, as [`column_mapping`] computes it. An index the
+/// source row does not have reads as NULL.
+pub(crate) fn permuted_row(row: &[Datum], ordinals: &[usize]) -> Vec<Datum> {
+    ordinals
+        .iter()
+        .map(|ordinal| row.get(*ordinal).cloned().unwrap_or(Datum::Null))
+        .collect()
+}
+
+/// `row` permuted by `ordinals`, or handed straight back when there are none —
+/// which is how a relation reshapes rows it read from itself, whose mapping is
+/// the identity and whose permutation would be a copy.
+fn reshape_row(row: Vec<Datum>, ordinals: Option<&[usize]>) -> Vec<Datum> {
+    match ordinals {
+        Some(ordinals) => permuted_row(&row, ordinals),
+        None => row,
+    }
+}
+
 /// The leaf partition a row of `parent`'s shape belongs to, together with the
 /// row permuted into that leaf's own column order.
 ///
@@ -15532,11 +15552,7 @@ fn route_row_to_leaf(
         return Ok(None);
     };
     let child = crabka_pgcatalog::get_table(kv, &chosen.name)?;
-    let ordinals = column_mapping(&child, parent)?;
-    let child_row = ordinals
-        .iter()
-        .map(|ordinal| row.get(*ordinal).cloned().unwrap_or(Datum::Null))
-        .collect::<Vec<_>>();
+    let child_row = permuted_row(row, &column_mapping(&child, parent)?);
     route_row_to_leaf(kv, &child, &child_row)
 }
 
@@ -21307,14 +21323,14 @@ pub(crate) async fn execute_read_locking(
             return Err(ExecError::MissingFromEntry(named.clone()));
         }
     }
-    let (t, qualifier) = match s.from.as_slice() {
+    let (t, qualifier, only) = match s.from.as_slice() {
         [
             crabka_pgparser::ast::TableExpr::Table {
                 name,
+                only,
                 alias,
                 columns: None,
                 sample: None,
-                ..
             },
         ] if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_none() => {
             let table = crabka_pgcatalog::get_table(
@@ -21328,7 +21344,7 @@ pub(crate) async fn execute_read_locking(
                     .iter()
                     .any(|named| named.eq_ignore_ascii_case(&qualifier))
             {
-                (table, qualifier)
+                (table, qualifier, *only)
             } else {
                 // The clause names other relations only, so this one is read
                 // without locking.
@@ -21348,13 +21364,32 @@ pub(crate) async fn execute_read_locking(
             )));
         }
     };
-    if crate::partition::is_partitioned(read_ctx.catalog_kv, &t.name)? {
-        return Err(ExecError::Unsupported(format!(
-            "{} on a partitioned table is not supported: the lock would have to be taken on \
-             every partition that contributes rows",
-            locking.strength.as_sql()
-        )));
+    // The relations this read covers: the named one, plus every inheritance
+    // descendant unless the statement said `ONLY`. `SELECT * FROM parent FOR
+    // UPDATE` locks and returns a child's rows in `PostgreSQL`, and this path
+    // used to scan the named relation alone — a silent wrong answer of exactly
+    // the kind [`inherited_scan`] exists to prevent on the ordinary read side.
+    let mut relations = vec![t.name.clone()];
+    if !only {
+        relations.extend(crate::inheritance::descendants(catalog_kv, &t.name)?);
     }
+    for relation in &relations {
+        if crate::partition::is_partitioned(read_ctx.catalog_kv, relation)? {
+            return Err(ExecError::Unsupported(format!(
+                "{} on a partitioned table is not supported: the lock would have to be taken on \
+                 every partition that contributes rows",
+                locking.strength.as_sql()
+            )));
+        }
+    }
+    // Every other stored-relation read takes a permit before it reads a byte
+    // (see `build_base_table`); this one took none, so a role holding no
+    // `SELECT` at all could read a relation by asking to lock it — and a role
+    // holding `SELECT` alone could reserve its rows against everyone else. The
+    // whole tree is read under the named relation's permit, which is
+    // `PostgreSQL`'s rule for a tree read — see
+    // [`crate::privilege::ReadPermit::inherited`].
+    let _permit = crate::privilege::ReadPermit::acquire_for_row_lock(&read_ctx.privileges(), &t)?;
     // Resolve only after proving this is a lockable base-table shape. Fallbacks
     // execute through the ordinary read path, which owns their single subquery
     // resolution; doing it before the shape decision would run volatile
@@ -21381,99 +21416,142 @@ pub(crate) async fn execute_read_locking(
         None
     };
     let bound_filter = bound_filter.as_ref().map(crate::bind::BoundExpr::expr);
+    // The named relation's policies govern every row of the tree, exactly as
+    // they do for `inherited_scan`, and they are asked before the lock rather
+    // than after the scan — see [`crate::rls::LockingReadGate`].
+    let gate = crate::rls::LockingReadGate::compile(read_ctx, &t)?;
+    let bound_gate = crate::bind::bind_optional(gate.qual(), &scope);
+    let bound_gate = bound_gate.as_ref().map(crate::bind::BoundExpr::expr);
 
     // Scan visible rows, then lock and EvalPlanQual-recheck each one.
     let mut kept: Vec<Vec<Datum>> = Vec::new();
-    for ScannedRow {
-        rowid,
-        xmin: scanned_xmin,
-        row: mut scanned_row,
-    } in read_ctx.range_scanner.scan(ScanRequest {
-        local: kv,
-        global,
-        global_snapshot: gsnap,
-        snapshot,
-        own_xid: Some(xid),
-        read_ts: None,
-        own_start_ts: None,
-        table: &t,
-        interval: RowInterval::ALL,
-        predicate: PredicatePushdown::FullScan,
-        projection: crate::ProjectionPushdown::All,
-        partial_aggregate: None,
-        top_k: None,
-    })? {
-        expand_virtual_generated_row(&t, &mut scanned_row, ctx)?;
-        // 1. Filter on the snapshot-visible row FIRST — only lock rows that
-        //    match the WHERE clause (a FOR UPDATE/SHARE with no WHERE still
-        //    locks all rows because row_matches(None, ..) returns true).
-        let matches = if let Some(binder) = &mut binder {
-            row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &scanned_row, binder)?
+    for relation in &relations {
+        // The named relation is already open; only a descendant costs a second
+        // catalog read, and only a descendant needs permuting, since the
+        // parent's mapping to itself is the identity.
+        let scanned = if *relation == t.name {
+            None
         } else {
-            row_matches(bound_filter, &scope, &scanned_row, ctx)?
+            let child = crabka_pgcatalog::get_table(catalog_kv, relation)?;
+            let ordinals = column_mapping(&t, &child)?;
+            Some((child, ordinals))
         };
-        if !matches {
-            continue;
-        }
-
-        // 2. Lock only matching candidates (40P01 on deadlock or expired cap).
-        //    NOWAIT and SKIP LOCKED both take the non-blocking path and differ
-        //    only in what a conflict means: an error, or a row that is skipped.
-        match locking.wait {
-            crabka_pgparser::ast::LockWaitPolicy::Wait => {
-                lockmgr
-                    .acquire_as(t.id, rowid, mode, lock_owner, lock_wait_cap)
-                    .await
-                    .map_err(lock_acquire_error)?;
-            }
-            policy => {
-                if let crate::lockmgr::Acquire::Conflict(_) =
-                    lockmgr.try_acquire_as(t.id, rowid, mode, lock_owner)
-                {
-                    if policy == crabka_pgparser::ast::LockWaitPolicy::SkipLocked {
-                        continue;
-                    }
-                    return Err(ExecError::FunctionError {
-                        sqlstate: "55P03",
-                        message: format!("could not obtain lock on row in relation \"{}\"", t.name),
-                    });
-                }
-            }
-        }
-
-        // 3. EvalPlanQual: re-read the row under the lock (40001 under RR if
-        //    changed since our snapshot; RC re-finds the latest live version).
-        let Some((_cur_key_xid, cur_xmin, cur_row)) = eval_plan_qual(
-            &MutationContext {
-                kv,
-                global,
-                procarray,
-                snapshot,
-                xid,
-                repeatable_read,
-                eval_ctx: ctx,
-            },
-            &t,
+        let (from, ordinals) = match &scanned {
+            Some((child, ordinals)) => (child, Some(ordinals.as_slice())),
+            None => (&t, None),
+        };
+        for ScannedRow {
             rowid,
-        )?
-        else {
-            continue; // deleted by a concurrent committed txn — skip
-        };
-
-        // 4. Re-apply the WHERE filter only when EvalPlanQual found a newer
-        //    tuple version. Re-running a volatile predicate against the same
-        //    version would evaluate it twice even without a concurrent update.
-        if cur_xmin != scanned_xmin {
+            xmin: scanned_xmin,
+            row: mut scanned_row,
+        } in read_ctx.range_scanner.scan(ScanRequest {
+            local: kv,
+            global,
+            global_snapshot: gsnap,
+            snapshot,
+            own_xid: Some(xid),
+            read_ts: None,
+            own_start_ts: None,
+            table: from,
+            interval: RowInterval::ALL,
+            predicate: PredicatePushdown::FullScan,
+            projection: crate::ProjectionPushdown::All,
+            partial_aggregate: None,
+            top_k: None,
+        })? {
+            // A generated column is expanded in the relation the row came out
+            // of, before the row is reshaped into the one the query named.
+            expand_virtual_generated_row(from, &mut scanned_row, ctx)?;
+            let scanned_row = reshape_row(scanned_row, ordinals);
+            // 0. Row security first: a row a policy hides must not be locked,
+            //    because a lock is observable through NOWAIT, SKIP LOCKED and
+            //    an ordinary waiter.
+            if !row_matches(bound_gate, &scope, &scanned_row, ctx)? {
+                continue;
+            }
+            // 1. Filter on the snapshot-visible row before locking — only lock
+            //    rows that match the WHERE clause (a FOR UPDATE/SHARE with no
+            //    WHERE still locks all rows because row_matches(None, ..)
+            //    returns true).
             let matches = if let Some(binder) = &mut binder {
-                row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &cur_row, binder)?
+                row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &scanned_row, binder)?
             } else {
-                row_matches(bound_filter, &scope, &cur_row, ctx)?
+                row_matches(bound_filter, &scope, &scanned_row, ctx)?
             };
             if !matches {
-                continue; // no longer matches
+                continue;
             }
+
+            // 2. Lock only matching candidates (40P01 on deadlock or expired
+            //    cap). NOWAIT and SKIP LOCKED both take the non-blocking path
+            //    and differ only in what a conflict means: an error, or a row
+            //    that is skipped. The lock names the relation the row lives in,
+            //    never the parent it is reported under.
+            match locking.wait {
+                crabka_pgparser::ast::LockWaitPolicy::Wait => {
+                    lockmgr
+                        .acquire_as(from.id, rowid, mode, lock_owner, lock_wait_cap)
+                        .await
+                        .map_err(lock_acquire_error)?;
+                }
+                policy => {
+                    if let crate::lockmgr::Acquire::Conflict(_) =
+                        lockmgr.try_acquire_as(from.id, rowid, mode, lock_owner)
+                    {
+                        if policy == crabka_pgparser::ast::LockWaitPolicy::SkipLocked {
+                            continue;
+                        }
+                        return Err(ExecError::FunctionError {
+                            sqlstate: "55P03",
+                            message: format!(
+                                "could not obtain lock on row in relation \"{}\"",
+                                from.name
+                            ),
+                        });
+                    }
+                }
+            }
+
+            // 3. EvalPlanQual: re-read the row under the lock (40001 under RR
+            //    if changed since our snapshot; RC re-finds the latest live
+            //    version).
+            let Some((_cur_key_xid, cur_xmin, cur_row)) = eval_plan_qual(
+                &MutationContext {
+                    kv,
+                    global,
+                    procarray,
+                    snapshot,
+                    xid,
+                    repeatable_read,
+                    eval_ctx: ctx,
+                },
+                from,
+                rowid,
+            )?
+            else {
+                continue; // deleted by a concurrent committed txn — skip
+            };
+            let cur_row = reshape_row(cur_row, ordinals);
+
+            // 4. Re-apply the filters only when EvalPlanQual found a newer
+            //    tuple version. Re-running a volatile predicate against the
+            //    same version would evaluate it twice even without a concurrent
+            //    update.
+            if cur_xmin != scanned_xmin {
+                if !row_matches(bound_gate, &scope, &cur_row, ctx)? {
+                    continue;
+                }
+                let matches = if let Some(binder) = &mut binder {
+                    row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &cur_row, binder)?
+                } else {
+                    row_matches(bound_filter, &scope, &cur_row, ctx)?
+                };
+                if !matches {
+                    continue; // no longer matches
+                }
+            }
+            kept.push(cur_row);
         }
-        kept.push(cur_row);
     }
 
     resolve_scanned_regclass(read_ctx.catalog_kv, &t, &mut kept)?;

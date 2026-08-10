@@ -557,6 +557,37 @@ impl ReadPermit {
             .map(|held| held.then_some(Self { _private: () }))
     }
 
+    /// The permit a locking read takes: this one, and `UPDATE` besides.
+    ///
+    /// A `FOR UPDATE`/`FOR SHARE` reads rows and reserves the right to change
+    /// them, and `PostgreSQL` charges for both. Measured on 18.4, a role holding
+    /// `SELECT` alone is refused at every lock strength — `FOR UPDATE`, `FOR NO
+    /// KEY UPDATE`, `FOR SHARE` and `FOR KEY SHARE` — and neither `DELETE` nor
+    /// `TRUNCATE` stands in for the `UPDATE`.
+    ///
+    /// It returns the read permit rather than a second token because the scan
+    /// underneath is an ordinary read of the relation; the extra privilege is a
+    /// condition on reaching it, not a different power over the rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns 42501 when the session may not read `table` or may not update
+    /// it, or storage/corruption errors from the catalog KV seam.
+    pub(crate) fn acquire_for_row_lock(
+        ctx: &PrivilegeCtx<'_>,
+        table: &Table,
+    ) -> Result<Self, ExecError> {
+        let permit = Self::acquire(ctx, table)?;
+        require(
+            ctx,
+            &table.name,
+            &table.owner,
+            RelationKind::Table,
+            Privilege::Update,
+        )?;
+        Ok(permit)
+    }
+
     /// The permit a child of an inheritance or partition tree is read under:
     /// its parent's.
     ///
