@@ -558,6 +558,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wal_fetch_serves_the_uncommitted_tail_with_separate_frontiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        let store = QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source,
+            None,
+            3,
+        )
+        .unwrap();
+
+        let (_results, first) = append_source(&store, 1).await;
+        let (_results, second) = append_source(&store, 1).await;
+        store.sync_durable(first).await.unwrap();
+
+        let fetch = store
+            .engine
+            .serve_fetch(first, ByteSize::from_bytes(u64::MAX))
+            .unwrap();
+
+        assert!(fetch.high_watermark == first);
+        assert!(fetch.log_end_offset == second);
+        assert!(fetch.log_start_offset == Offset(0));
+        assert!(!fetch.offset_out_of_range);
+        assert!(!fetch.records.is_empty());
+    }
+
+    #[tokio::test]
     async fn quorum_wal_store_trims_every_replica_before_the_source() {
         let dir = tempfile::tempdir().unwrap();
         let source = Arc::new(Mutex::new(
@@ -646,12 +679,12 @@ mod tests {
 
         assert!(reopened.engine.durable_watermark() == Offset(1));
         assert!(reopened.engine.replica_end_offsets() == vec![Offset(1), Offset(1), Offset(1)]);
-        let (hwm, records) = reopened
+        let fetch = reopened
             .engine
             .serve_fetch(Offset(0), ByteSize::from_bytes(u64::MAX))
             .unwrap();
-        assert!(hwm == Offset(1));
-        assert!(!records.is_empty());
+        assert!(fetch.high_watermark == Offset(1));
+        assert!(!fetch.records.is_empty());
     }
 
     #[tokio::test]

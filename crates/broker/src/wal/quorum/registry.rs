@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use super::{
     engine::WalShardEngine,
     wire::{
-        QuorumGroup, WalFetchRequest, decode_fetch, decode_fetch_request,
+        OFFSET_OUT_OF_RANGE, QuorumGroup, WalFetchRequest, decode_fetch, decode_fetch_request,
         encode_fetch_response_struct, fetch_response, unknown_shard_fetch_response,
     },
 };
@@ -115,7 +115,21 @@ impl WalShardRegistry {
         Some(
             engine
                 .serve_fetch(crabka_ids::Offset(request.fetch_offset), request.max_size)
-                .map(|(hwm, records)| fetch_response(request.group, hwm.0, records, 0)),
+                .map(|fetch| {
+                    let error_code = if fetch.offset_out_of_range {
+                        OFFSET_OUT_OF_RANGE
+                    } else {
+                        0
+                    };
+                    fetch_response(
+                        request.group,
+                        fetch.high_watermark.0,
+                        fetch.log_end_offset.0,
+                        fetch.log_start_offset.0,
+                        fetch.records,
+                        error_code,
+                    )
+                }),
         )
     }
 }
@@ -233,12 +247,90 @@ mod tests {
         let decoded = FetchResponse::decode(&mut response.as_ref(), 17).unwrap();
         let partition = &decoded.responses[0].partitions[0];
         assert_eq!(partition.high_watermark, 1);
+        assert_eq!(partition.last_stable_offset, 1);
+        assert_eq!(partition.log_start_offset, 0);
         assert!(
             partition
                 .records
                 .as_ref()
                 .is_some_and(|records| records.payload_len() > 0)
         );
+    }
+
+    #[tokio::test]
+    async fn wal_shard_router_reports_offset_out_of_range_with_log_bounds() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).unwrap(),
+        ));
+        {
+            let mut log = source.lock().unwrap();
+            for offset in 0..6 {
+                let mut batch = RecordBatch {
+                    records: vec![Record {
+                        attributes: 0,
+                        offset_delta: 0,
+                        timestamp_delta: 0,
+                        key: None,
+                        value: Some(Bytes::from_static(b"a")),
+                        headers: vec![],
+                    }],
+                    ..Default::default()
+                };
+                log.append_at(&mut batch, Offset(offset)).unwrap();
+            }
+            log.sync().unwrap();
+            log.trim_to_offset(Offset(5)).unwrap();
+        }
+        let engine = Arc::new(WalShardEngine::for_logs(BTreeMap::from([(
+            crabka_raft::NodeId(1),
+            source,
+        )])));
+
+        let registry = Arc::new(WalShardRegistry::new());
+        let shard = ShardId {
+            topic_id: uuid::Uuid::from_u128(18),
+            partition: PartitionIndex(3),
+        };
+        registry.insert(shard, engine);
+        registry.replace_placements(HashMap::from([(shard, vec![crabka_raft::NodeId(9)])]));
+        let body = encode_fetch_for_group(
+            QuorumGroup::diskless_wal(shard.topic_id, shard.partition),
+            crabka_raft::NodeId(9),
+            0,
+            4,
+        );
+
+        let router = WalShardRouter::new(registry);
+        let response = router
+            .route(crabka_raft::kraft::transport::api_key::FETCH, body)
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded = FetchResponse::decode(&mut response.as_ref(), 17).unwrap();
+        let partition = &decoded.responses[0].partitions[0];
+        assert_eq!(partition.error_code, OFFSET_OUT_OF_RANGE);
+        assert_eq!(partition.log_start_offset, 5);
+        assert_eq!(partition.last_stable_offset, 6);
+        assert!(partition.records.is_none());
+
+        let body = encode_fetch_for_group(
+            QuorumGroup::diskless_wal(shard.topic_id, shard.partition),
+            crabka_raft::NodeId(9),
+            0,
+            7,
+        );
+        let response = router
+            .route(crabka_raft::kraft::transport::api_key::FETCH, body)
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded = FetchResponse::decode(&mut response.as_ref(), 17).unwrap();
+        let partition = &decoded.responses[0].partitions[0];
+        assert_eq!(partition.error_code, OFFSET_OUT_OF_RANGE);
+        assert_eq!(partition.log_start_offset, 5);
+        assert_eq!(partition.last_stable_offset, 6);
+        assert!(partition.records.is_none());
     }
 
     #[tokio::test]

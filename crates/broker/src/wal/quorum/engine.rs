@@ -50,6 +50,16 @@ pub(crate) struct WalShardEngine {
     durable_watermark: AtomicI64,
 }
 
+/// One response from the leader-side WAL fetch path.
+#[derive(Debug)]
+pub(crate) struct WalFetchData {
+    pub(crate) high_watermark: Offset,
+    pub(crate) log_end_offset: Offset,
+    pub(crate) log_start_offset: Offset,
+    pub(crate) records: Bytes,
+    pub(crate) offset_out_of_range: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum OpenMode {
     BootstrapFrom(NodeId),
@@ -177,11 +187,7 @@ impl WalShardEngine {
         &self,
         fetch_offset: Offset,
         max_size: ByteSize,
-    ) -> Result<(Offset, Bytes), BrokerError> {
-        let hwm = self.durable_watermark();
-        if fetch_offset < Offset(0) || fetch_offset >= hwm || max_size == ByteSize::ZERO {
-            return Ok((hwm, Bytes::new()));
-        }
+    ) -> Result<WalFetchData, BrokerError> {
         let replica = self
             .replicas
             .iter()
@@ -189,8 +195,29 @@ impl WalShardEngine {
             .ok_or_else(|| {
                 BrokerError::Replication("wal quorum has no live fetch replica".into())
             })?;
-        let raw = replica.log.lock().read_raw(fetch_offset, hwm, max_size)?;
-        Ok((hwm, raw.bytes))
+        let log = replica.log.lock();
+        let log_start_offset = log.log_start_offset();
+        let log_end_offset = log.log_end_offset();
+        let offset_out_of_range = fetch_offset < log_start_offset || fetch_offset > log_end_offset;
+        let records = if offset_out_of_range
+            || fetch_offset == log_end_offset
+            || max_size == ByteSize::ZERO
+        {
+            Bytes::new()
+        } else {
+            // A WAL follower must receive the leader's uncommitted tail and
+            // fsync it before that follower can acknowledge the range. Limiting
+            // this read to the current high watermark creates a deadlock: no
+            // follower can fetch the bytes needed to advance the watermark.
+            log.read_raw(fetch_offset, log_end_offset, max_size)?.bytes
+        };
+        Ok(WalFetchData {
+            high_watermark: self.durable_watermark(),
+            log_end_offset,
+            log_start_offset,
+            records,
+            offset_out_of_range,
+        })
     }
 
     pub(crate) async fn trim_to_offset(

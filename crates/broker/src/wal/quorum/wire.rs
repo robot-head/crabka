@@ -9,6 +9,7 @@ const KRAFT_METADATA_TOPIC_ID: crabka_protocol::primitives::uuid::Uuid =
     crabka_protocol::primitives::uuid::Uuid([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 pub(crate) const KIP_595_FETCH_VERSION: i16 = 17;
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+pub(crate) const OFFSET_OUT_OF_RANGE: i16 = 1;
 const WAL_FETCH_RACK_ID: &str = "__crabka_diskless_wal";
 
 /// Group discriminator for KIP-595 traffic carried by the broker listener.
@@ -83,6 +84,8 @@ pub(crate) fn decode_fetch_request(request: &FetchRequest) -> Option<WalFetchReq
 pub(crate) fn fetch_response(
     group: QuorumGroup,
     hwm: i64,
+    log_end_offset: i64,
+    log_start_offset: i64,
     records: Bytes,
     error_code: i16,
 ) -> crabka_protocol::owned::fetch_response::FetchResponse {
@@ -107,8 +110,11 @@ pub(crate) fn fetch_response(
                 partition_index: partition,
                 error_code,
                 high_watermark: hwm,
-                last_stable_offset: hwm,
-                log_start_offset: 0,
+                // This is a private, rack-discriminated Fetch protocol. WAL
+                // followers need the leader LEO as well as its committed HWM,
+                // so the otherwise-unused LSO field carries that frontier.
+                last_stable_offset: log_end_offset,
+                log_start_offset,
                 records: (!records.is_empty()).then_some(RecordsPayload::Raw(records)),
                 ..Default::default()
             }],
@@ -121,7 +127,7 @@ pub(crate) fn fetch_response(
 pub(crate) fn unknown_shard_fetch_response(
     group: QuorumGroup,
 ) -> crabka_protocol::owned::fetch_response::FetchResponse {
-    fetch_response(group, 0, Bytes::new(), UNKNOWN_TOPIC_OR_PARTITION)
+    fetch_response(group, 0, 0, 0, Bytes::new(), UNKNOWN_TOPIC_OR_PARTITION)
 }
 
 pub(crate) fn encode_fetch_response_struct(
