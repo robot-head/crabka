@@ -73,11 +73,11 @@ pub use kraft_translate::{
 };
 pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientMetricsConfigRecord,
-    ClientQuotaRecord, DelegationTokenRecord, DeleteDelegationTokenRecord,
-    DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, FeaturesEpochRecord,
-    GroupConfigRecord, KRaftVersionRecord, LeaderEpoch, MetadataRecord, NodeId,
-    PartitionDirAssignmentRecord, PartitionOffsetAdvanceRecord, PartitionRecord, ProducerIdsRecord,
-    QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
-    VotersRecord,
+    ClientQuotaRecord, DEFAULT_BROKER_CONFIG_NODE_ID, DelegationTokenRecord,
+    DeleteDelegationTokenRecord, DeleteScramCredentialRecord, DeleteTopicRecord,
+    FeatureLevelRecord, FeaturesEpochRecord, GroupConfigRecord, KRaftVersionRecord, LeaderEpoch,
+    MetadataRecord, NodeId, PartitionDirAssignmentRecord, PartitionOffsetAdvanceRecord,
+    PartitionRecord, ProducerIdsRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
+    TopicRecord, UnregisterBrokerRecord, VotersRecord,
 };
 pub use voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
