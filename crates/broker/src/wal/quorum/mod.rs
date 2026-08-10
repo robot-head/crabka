@@ -8,6 +8,7 @@ pub(crate) mod wire;
 
 use std::{
     fs,
+    io::Write as _,
     sync::{Arc, Mutex},
 };
 
@@ -175,8 +176,18 @@ fn persist_quorum_state(
         BrokerError::Replication(format!("encode WAL quorum state {}: {err}", path.display()))
     })?;
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)?;
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, &path)?;
+
+    // A durable file is not enough on filesystems where the rename itself is
+    // only stable after the parent directory is synced. Rust does not expose
+    // directory handles that can be flushed on Windows; the file sync above is
+    // the strongest portable guarantee there, matching `crabka-log`.
+    #[cfg(unix)]
+    fs::File::open(root)?.sync_all()?;
     Ok(())
 }
 
@@ -531,6 +542,33 @@ mod tests {
         assert!(!reopened.is_new);
         assert!(reopened.state.cluster_id == first.state.cluster_id);
         assert!(root.path().join(QUORUM_STATE_FILE).exists());
+        assert!(
+            !root
+                .path()
+                .join(QUORUM_STATE_FILE)
+                .with_extension("json.tmp")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn quorum_state_persist_replaces_a_stale_temporary_file() {
+        let root = tempfile::tempdir().unwrap();
+        let voter_ids = vec![NodeId(0), NodeId(1), NodeId(2)];
+        let voters = engine::voter_set(voter_ids.iter().copied());
+        let opened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        let temporary = root
+            .path()
+            .join(QUORUM_STATE_FILE)
+            .with_extension("json.tmp");
+        fs::write(&temporary, b"incomplete").unwrap();
+
+        persist_quorum_state(root.path(), &opened.state, &voter_ids).unwrap();
+
+        assert!(!temporary.exists());
+        let voters = engine::voter_set(voter_ids.iter().copied());
+        let reopened = load_or_prepare_quorum_state(root.path(), &voter_ids, voters).unwrap();
+        assert!(reopened.state.cluster_id == opened.state.cluster_id);
     }
 
     #[test]
