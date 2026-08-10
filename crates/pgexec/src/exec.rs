@@ -814,6 +814,17 @@ pub(crate) fn execute_ddl(
             }
             let dropping: std::collections::HashSet<_> =
                 targets.iter().map(|(name, _)| name.clone()).collect();
+            // What the statement takes away, which is more than what it names:
+            // a partition goes with its parent. The inheritance links are
+            // settled against this whole set once the loop below has run, so
+            // that a child of two departing parents is rewritten from the set
+            // rather than once per parent.
+            let mut removed = dropping.clone();
+            for (name, is_sequence) in &targets {
+                if !is_sequence {
+                    removed.extend(crate::partition::descendants(kv, name)?);
+                }
+            }
             for (name, is_sequence) in &targets {
                 if *is_sequence {
                     tag = "DROP SEQUENCE";
@@ -856,6 +867,7 @@ pub(crate) fn execute_ddl(
                     }
                 }
             }
+            ops.extend(crate::inheritance::drop_metadata_ops(kv, &removed)?);
             Ok((command(tag), ops))
         }
         Statement::CreateSchema {
@@ -1238,6 +1250,12 @@ pub(crate) fn execute_ddl(
                     Err(error) => return Err(error.into()),
                 }
             }
+            // No syntax makes a materialized view inherit, be inherited from, or
+            // be partitioned, so the targets are the whole removal set and this
+            // sweep finds nothing. It stays because dropping a stored relation
+            // without it is the mistake this batch exists to prevent, and one
+            // statement quietly exempt from it is how that mistake returns.
+            ops.extend(crate::inheritance::drop_metadata_ops(kv, &dropping)?);
             Ok((command("DROP MATERIALIZED VIEW"), ops))
         }
         Statement::CreateIndex {
@@ -8046,6 +8064,7 @@ pub(crate) fn drop_schema_contents_ops(
             }
         }
     }
+    ops.extend(crate::inheritance::drop_metadata_ops(kv, &dropping)?);
     ops.extend(crate::usertype::drop_schema_types_ops(kv, schema)?);
     Ok(ops)
 }
@@ -8065,6 +8084,13 @@ pub(crate) fn drop_schema_contents_ops(
 /// its child table survives, while a dependent view is dropped outright. A
 /// partition is neither. It has no independent existence, so it goes with its
 /// parent whether or not `CASCADE` was written.
+///
+/// Inheritance links are *not* settled here. A child's parent list has to be
+/// rewritten against the whole statement's removal set rather than against one
+/// name out of it, so [`crate::inheritance::drop_metadata_ops`] is called once,
+/// by the caller, over every relation the statement takes away: its targets and
+/// the partitions hanging off them. That function says what a per-relation
+/// rewrite corrupted.
 ///
 /// # Errors
 ///
@@ -8108,14 +8134,12 @@ fn drop_table_and_dependents_ops(
         }
         ops.extend(crabka_pgcatalog::drop_table_ops(kv, &descendant)?);
         ops.extend(crate::partition::drop_metadata_ops(kv, &descendant)?);
-        ops.extend(crate::inheritance::drop_metadata_ops(kv, &descendant)?);
         // Only the departing relation's own statistics go. A parent losing its
         // last child keeps its `relhassubclass` latch, which is the stale
         // window `ANALYZE` is what closes.
         ops.extend(crate::relstats::drop_metadata_ops(&descendant));
     }
     ops.extend(crate::partition::drop_metadata_ops(kv, name)?);
-    ops.extend(crate::inheritance::drop_metadata_ops(kv, name)?);
     ops.extend(crate::relstats::drop_metadata_ops(name));
     ops.extend(crabka_pgcatalog::trigger::drop_triggers_for_table_ops(
         kv, table.id,
