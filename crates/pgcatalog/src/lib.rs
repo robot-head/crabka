@@ -96,12 +96,27 @@ impl RelationName {
 impl std::fmt::Display for RelationName {
     /// Spelled the way `PostgreSQL` spells a relation in a diagnostic. A
     /// relation in `public` is bare, because the default search path makes that
-    /// the unqualified name. Every other relation is `schema.name`.
+    /// the unqualified name. Every other relation is `schema.name`, with the
+    /// schema spelled as [`displayed_schema`] spells it — so a temporary
+    /// relation is `pg_temp.t` and never `pg_temp_<backend id>.t`.
+    ///
+    /// The backend id is the one part of a resolved name that no run of the
+    /// same statements has to agree on: it counts the sessions the process has
+    /// opened, so anything that opens one more session earlier renumbers every
+    /// temporary namespace after it. A diagnostic carrying it therefore changes
+    /// text without changing meaning, and `postgres:18.4` never puts a session's
+    /// *own* backend id in front of a relation name either.
+    ///
+    /// # This rendering is not an identity
+    ///
+    /// Two relations in two sessions' temporary namespaces spell the same. Never
+    /// key a map, a set or a lookup on this string; use the [`RelationName`]
+    /// itself, which keeps the schema apart.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_public() {
             f.write_str(&self.name)
         } else {
-            write!(f, "{}.{}", self.schema, self.name)
+            write!(f, "{}.{}", displayed_schema(&self.schema), self.name)
         }
     }
 }
@@ -1026,6 +1041,11 @@ const TEMP_SCHEMA_PREFIX: &str = "pg_temp_";
 ///
 /// Verified against `postgres:18.4`, where a session's `current_schemas(true)`
 /// reports `pg_temp_<n>` first.
+///
+/// This is the namespace's *name*, which is what the catalog stores it under and
+/// what `pg_namespace`, `pg_tables`, `information_schema` and `current_schemas`
+/// all report. It is not what a diagnostic or a deparsed reference spells: see
+/// [`displayed_schema`].
 #[must_use]
 pub fn temp_schema_name(backend_id: i32) -> String {
     format!("{TEMP_SCHEMA_PREFIX}{backend_id}")
@@ -1043,6 +1063,50 @@ pub fn temp_schema_name(backend_id: i32) -> String {
 pub fn is_temp_schema(name: &str) -> bool {
     name.strip_prefix(TEMP_SCHEMA_PREFIX)
         .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The name a *display* context spells `schema` with: [`PG_TEMP_ALIAS`] for a
+/// temporary namespace, and the schema's own name for everything else.
+///
+/// This is `PostgreSQL`'s `get_namespace_name_or_temp`, which is what every
+/// deparsed reference and every object identity goes through. The plain
+/// `get_namespace_name` is what the catalog's own columns report, and those keep
+/// the number. Measured on `postgres:18.4` with a temporary table `probe_t`:
+///
+/// ```text
+/// EXPLAIN (VERBOSE) SELECT * FROM probe_t   Seq Scan on pg_temp.probe_t
+/// pg_get_indexdef(…)                        … ON pg_temp.probe_t USING btree (a)
+/// pg_identify_object(…).identity            pg_temp.probe_t
+/// pg_identify_object_as_address(…)          {pg_temp,probe_t}
+/// pg_event_trigger_ddl_commands().schema    pg_temp
+///
+/// current_schemas(true)                     {pg_temp_19,pg_catalog,public}
+/// pg_namespace.nspname                      pg_temp_19
+/// pg_tables.schemaname                      pg_temp_19
+/// pg_identify_object(…).schema              pg_temp_19
+/// \d probe_t                                Table "pg_temp_19.probe_t"
+/// ```
+///
+/// # One session's namespace is not another's
+///
+/// `PostgreSQL` compares the namespace against `myTempNamespace`, so it prints
+/// the alias only for the *reading* session's own namespace and keeps the number
+/// for every other one — `Seq Scan on pg_temp_20.other_sess_t`, measured with
+/// two connections. This function has no session to compare against, so it
+/// spells every temporary namespace `pg_temp`. Its callers are diagnostics,
+/// where the divergence needs a statement that writes another live session's
+/// `pg_temp_<n>` as a qualifier, and it is one of under-specification: `pg_temp`
+/// reads back as the reader's *own* namespace, so no name this produces can
+/// reach a namespace that was not already reachable. Spelling the alias exactly
+/// as `PostgreSQL` does means giving every rendering site the session's
+/// [`temp_schema_name`] to compare against.
+#[must_use]
+pub fn displayed_schema(schema: &str) -> &str {
+    if is_temp_schema(schema) {
+        PG_TEMP_ALIAS
+    } else {
+        schema
+    }
 }
 
 /// The `pg_class.relpersistence` a relation in `schema` reports.
@@ -5567,6 +5631,92 @@ mod tests {
             name: name.to_string(),
             owner: owner.to_string(),
         }
+    }
+
+    /// Every schema a relation can sit in, and the way a diagnostic spells it.
+    ///
+    /// `public` is bare because the default search path reaches it unqualified.
+    /// A temporary namespace is `pg_temp`, which is the alias
+    /// `get_namespace_name_or_temp` prints and the only spelling
+    /// `postgres:18.4` ever puts in front of a temporary relation. Everything
+    /// else is its own name, including the schemas whose names only *look*
+    /// temporary — the suffix has to be digits and there has to be at least one.
+    #[test]
+    fn a_relation_is_spelled_the_way_a_diagnostic_spells_it() {
+        use assert2::assert;
+
+        let cases = [
+            ("public", "t"),
+            ("s1", "s1.t"),
+            ("pg_catalog", "pg_catalog.t"),
+            ("information_schema", "information_schema.t"),
+            // The alias itself, which a written `pg_temp` qualifier keeps.
+            ("pg_temp", "pg_temp.t"),
+            ("pg_temp_1", "pg_temp.t"),
+            ("pg_temp_33000", "pg_temp.t"),
+            // Named by a user, not by the engine: no digits, or not only
+            // digits, or nothing after the underscore.
+            ("pg_temp_", "pg_temp_.t"),
+            ("pg_tempx", "pg_tempx.t"),
+            ("pg_temp_1a", "pg_temp_1a.t"),
+            ("pg_temp_ 1", "pg_temp_ 1.t"),
+        ];
+        for (schema, spelled) in cases {
+            assert!(
+                RelationName::new(schema, "t").to_string() == spelled,
+                "{schema}"
+            );
+        }
+    }
+
+    /// The property the spelling exists for: two sessions running the same
+    /// statements produce the same diagnostic.
+    ///
+    /// The backend id is whatever the wire layer handed out, so a rendering that
+    /// carried it would differ between two runs of one script. No id is pinned
+    /// here; the test asserts only that no two of them can be told apart.
+    #[test]
+    fn a_temporary_relation_is_spelled_the_same_whatever_the_backend_id() {
+        use assert2::assert;
+
+        let backend_ids = [1, 7, 33_000, i32::MAX];
+        let spellings: Vec<String> = backend_ids
+            .into_iter()
+            .map(|backend_id| RelationName::new(temp_schema_name(backend_id), "t").to_string())
+            .collect();
+        assert!(spellings == vec!["pg_temp.t".to_string(); backend_ids.len()]);
+    }
+
+    /// The spelling is the only thing that changes. A temporary namespace is
+    /// still recognised as one, still reports `relpersistence = 't'`, and still
+    /// keys the catalog under the name that has the backend id in it.
+    #[test]
+    fn spelling_a_namespace_pg_temp_does_not_rename_it() {
+        use assert2::assert;
+
+        let stored = temp_schema_name(33_000);
+        assert!(is_temp_schema(&stored));
+        assert!(relpersistence_of(&stored) == 't');
+        assert!(displayed_schema(&stored) == PG_TEMP_ALIAS);
+        // The alias is not itself a temporary namespace, so nothing that keys
+        // off the stored name can be satisfied by the spelling.
+        assert!(!is_temp_schema(PG_TEMP_ALIAS));
+        assert!(relpersistence_of(PG_TEMP_ALIAS) == 'p');
+        // Two relations that a diagnostic spells alike are still two relations:
+        // the catalog keys them apart, so a lookup cannot follow the spelling.
+        let kv = MemKv::default();
+        let name = RelationName::new(&stored, "t");
+        let aliased = RelationName::new(PG_TEMP_ALIAS, "t");
+        assert!(name.schema == stored);
+        assert!(name != aliased);
+        assert!(name.to_string() == aliased.to_string());
+        let (_, ops) = create_table_ops(&kv, &name, cols()).expect("create");
+        kv.write_batch(&ops).expect("write");
+        assert!(get_table(&kv, &name).is_ok());
+        assert!(matches!(
+            get_table(&kv, &aliased),
+            Err(CatalogError::UndefinedTable(_))
+        ));
     }
 
     #[test]
