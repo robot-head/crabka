@@ -6,10 +6,9 @@
 //! the broker. The log owns both the append seam that folds stamps in and the
 //! `.stampindex` that they land in. The seam therefore stays here, so tests
 //! can check the log's own stamp behavior with a deterministic in-crate
-//! source, and the log needs no dependency edge onto a real clock. Broker-side
-//! future work will connect a real HLC or solo-mode oracle grant client to
-//! this trait. A log with no injected source stamps nothing and behaves
-//! exactly as before.
+//! source, and the log needs no dependency edge onto a real clock. The broker
+//! injects the tenant source when internal stamping is enabled. A log with no
+//! injected source stamps nothing and behaves exactly as before.
 
 use std::fmt::Debug;
 

@@ -664,11 +664,13 @@ fn swap_future_log(
     // replicator catch up.
     let mut log_guard = lock_log(log);
     let config = log_guard.config_snapshot();
+    let current_stamp_source = log_guard.stamp_source();
     let current_leo = log_guard.log_end_offset();
     let mut future_guard = lock_log(future_log);
     if future_guard.log_end_offset() < current_leo {
         return Ok(SwapOutcome::NotCaughtUp);
     }
+    let future_stamp_source = future_guard.stamp_source();
 
     let source_partition_path = log_guard.dir().to_path_buf();
 
@@ -693,7 +695,12 @@ fn swap_future_log(
         // source dir so the partition keeps serving against the
         // pre-swap location.
         match Log::open(&source_partition_path, config) {
-            Ok(reopened) => *log_guard = reopened,
+            Ok(mut reopened) => {
+                if let Some(stamp_source) = current_stamp_source {
+                    reopened.set_stamp_source(stamp_source)?;
+                }
+                *log_guard = reopened;
+            }
             Err(reopen_err) => {
                 tracing::error!(
                     error = %reopen_err,
@@ -716,7 +723,11 @@ fn swap_future_log(
     }
     let _ = std::fs::remove_dir_all(&tomb_dir);
 
-    *log_guard = Log::open(target_partition_path, config)?;
+    let mut reopened = Log::open(target_partition_path, config)?;
+    if let Some(stamp_source) = future_stamp_source {
+        reopened.set_stamp_source(stamp_source)?;
+    }
+    *log_guard = reopened;
     log_dir.store(Arc::new(target_log_dir));
     Ok(SwapOutcome::Swapped)
 }
@@ -734,6 +745,15 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct FixedStamp(u64);
+
+    impl crabka_log::StampSource for FixedStamp {
+        fn next_stamp(&self) -> u64 {
+            self.0
+        }
+    }
 
     macro_rules! run_writer {
         ($topic:expr, $partition:expr, $log:expr, $log_dir:expr, $rx:expr,
@@ -1747,8 +1767,16 @@ mod tests {
         let future_path = target_dir.join("t-0.future");
         let target_partition_path = target_dir.join("t-0");
 
-        let log = Arc::new(Mutex::new(open_log_with_records(&source_partition, 2)));
-        let future_log = Arc::new(Mutex::new(open_log_with_records(&future_path, 2)));
+        let mut source_log = open_log_with_records(&source_partition, 2);
+        source_log
+            .set_stamp_source(Arc::new(FixedStamp(7)))
+            .expect("source stamp index");
+        let log = Arc::new(Mutex::new(source_log));
+        let mut staged_log = open_log_with_records(&future_path, 2);
+        staged_log
+            .set_stamp_source(Arc::new(FixedStamp(7)))
+            .expect("future stamp index");
+        let future_log = Arc::new(Mutex::new(staged_log));
         let log_dir = Arc::new(ArcSwap::from_pointee(source_dir.clone()));
 
         let result = swap_future_log(
@@ -1763,13 +1791,18 @@ mod tests {
 
         // Pull both log observations under one lock acquisition — two
         // `lock()` temporaries in a single assert statement would deadlock.
-        let (leo, log_dir_now) = {
+        let (leo, log_dir_now, has_stamp_source) = {
             let guard = log.lock().unwrap();
-            (guard.log_end_offset(), guard.dir().to_path_buf())
+            (
+                guard.log_end_offset(),
+                guard.dir().to_path_buf(),
+                guard.stamp_source().is_some(),
+            )
         };
         check!(result == SwapOutcome::Swapped);
         check!(leo == 2);
         check!(log_dir_now == target_partition_path.clone());
+        check!(has_stamp_source);
         check!(log_dir.load().as_ref().clone() == target_dir);
         check!(!source_partition.exists());
         check!(target_partition_path.exists());

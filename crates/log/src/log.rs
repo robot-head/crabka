@@ -81,8 +81,8 @@ pub struct Log {
     /// Injected source of the additional internal stamp coordinate. `None`
     /// is the default and means this partition stamps nothing. Behavior and
     /// all wire-exact bytes stay exactly as they are without a stamp.
-    /// [`Log::set_stamp_source`] sets this field. Broker-side future work
-    /// will connect a real HLC or solo-mode oracle.
+    /// [`Log::set_stamp_source`] sets this field. The broker shares one tenant
+    /// source across all hosted partitions when internal stamping is enabled.
     stamp_source: Option<std::sync::Arc<dyn StampSource>>,
 
     /// Active segment's `.stampindex` sidecar. It is present exactly when a
@@ -661,6 +661,15 @@ impl Log {
         self.active_stamp_index = Some(StampIndex::open(path)?);
         self.stamp_source = Some(source);
         Ok(())
+    }
+
+    /// Clone the currently installed internal stamp source.
+    ///
+    /// Log-directory moves use this to preserve stamping when they close and
+    /// reopen a partition around the final filesystem swap.
+    #[must_use]
+    pub fn stamp_source(&self) -> Option<std::sync::Arc<dyn StampSource>> {
+        self.stamp_source.as_ref().map(std::sync::Arc::clone)
     }
 
     /// The internal stamp that covers `offset`, or `None` when there is no
@@ -2968,6 +2977,7 @@ mod tests {
             crate::stamp_source::MonotonicStampSource::new(1_000, 10),
         ))
         .unwrap();
+        check!(log.stamp_source().is_some());
 
         log.append(&mut sample_batch(2)).unwrap(); // offsets 0..=1, stamp 1000
         log.append(&mut sample_batch(1)).unwrap(); // offset  2,     stamp 1010

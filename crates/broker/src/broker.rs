@@ -528,7 +528,9 @@ async fn recover_storage_and_groups(
     let log_dirs = config.all_log_dirs();
     let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&log_dirs);
     let log_dir_ids = crate::log_dir_id::LogDirIds::resolve(&log_dirs);
-    let partitions = Arc::new(PartitionRegistry::new());
+    let partitions = Arc::new(PartitionRegistry::with_stamp_source(
+        config.stamp_source.as_ref().map(Arc::clone),
+    ));
     let producer_state = Arc::new(crate::producer_state::ProducerState::new());
     if config.is_broker() {
         let startup_image = controller.current_image();
@@ -538,6 +540,9 @@ async fn recover_storage_and_groups(
             let diskless = diskless_topic_config(startup_image.topic_config(&topic));
             let open_config = crate::diskless::recovery::open_config(&config.log_config, diskless);
             let mut log = crabka_log::Log::open(&directory, open_config)?;
+            if let Some(stamp_source) = partitions.stamp_source() {
+                log.set_stamp_source(stamp_source)?;
+            }
             if diskless {
                 crate::diskless::recovery::recover_open_log(
                     &topic,

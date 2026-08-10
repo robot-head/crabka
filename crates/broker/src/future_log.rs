@@ -165,7 +165,7 @@ pub(crate) async fn start_move(
     // (5) Open the future log at <target>/<topic>-<partition>-future.
     let future_path = log_dir::future_partition_dir(&target_log_dir, topic, partition.get());
     std::fs::create_dir_all(&future_path)?;
-    let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
+    let future_log = open_future_log(partitions, &future_path, log_config)?;
 
     spawn_move(MoveTask {
         partitions: partitions.clone(),
@@ -223,7 +223,7 @@ pub(crate) fn resume_move(
         .get(topic, partition)
         .ok_or(MoveError::ReplicaNotAvailable)?;
     let future_path = log_dir::future_partition_dir(target_log_dir, topic, partition.get());
-    let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
+    let future_log = open_future_log(partitions, &future_path, log_config)?;
     spawn_move(MoveTask {
         partitions: partitions.clone(),
         future_logs: future_logs.clone(),
@@ -236,6 +236,18 @@ pub(crate) fn resume_move(
         policy,
     });
     Ok(())
+}
+
+fn open_future_log(
+    partitions: &PartitionRegistry,
+    path: &Path,
+    log_config: &LogConfig,
+) -> Result<Arc<Mutex<Log>>, MoveError> {
+    let mut log = Log::open(path, log_config.clone())?;
+    if let Some(stamp_source) = partitions.stamp_source() {
+        log.set_stamp_source(stamp_source)?;
+    }
+    Ok(Arc::new(Mutex::new(log)))
 }
 
 /// Shared by [`start_move`] and [`resume_move`]. It builds the
@@ -508,13 +520,25 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
+    };
 
     use assert2::assert;
     use crabka_units::{kibibytes, mebibytes, millis};
     use tempfile::tempdir;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct TestStampSource(AtomicU64);
+
+    impl crabka_log::StampSource for TestStampSource {
+        fn next_stamp(&self) -> u64 {
+            self.0.fetch_add(1, Ordering::Relaxed)
+        }
+    }
 
     fn test_policy() -> MovePolicy {
         MovePolicy {
@@ -807,9 +831,18 @@ mod tests {
     async fn resume_move_catches_up_and_swaps_future_log() {
         let primary = tempdir().unwrap();
         let target = tempdir().unwrap();
-        let partitions = Arc::new(PartitionRegistry::new());
+        let stamp_source: Arc<dyn crabka_log::StampSource> =
+            Arc::new(TestStampSource(AtomicU64::new(100)));
+        let partitions = Arc::new(PartitionRegistry::with_stamp_source(Some(Arc::clone(
+            &stamp_source,
+        ))));
         let future_logs = Arc::new(DashMap::new());
         let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
+        part.log
+            .lock()
+            .expect("source log")
+            .set_stamp_source(stamp_source)
+            .expect("source stamp index");
         append_records(&part, 3);
         partitions.insert("t".to_string(), PartitionIndex(0), part.clone());
 
@@ -844,6 +877,9 @@ mod tests {
         assert!(
             canonicalize_or_self(&part.log_dir.load_full()) == canonicalize_or_self(target.path())
         );
+        assert!(part.stamp_for_offset(Offset(0)) == Some(101));
+        append_records(&part, 1);
+        assert!(part.stamp_for_offset(Offset(3)) == Some(102));
     }
 
     #[tokio::test]
