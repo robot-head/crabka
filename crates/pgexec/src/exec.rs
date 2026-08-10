@@ -27551,15 +27551,197 @@ pub(crate) fn cluster_wrong_kind(
     kv: &dyn Kv,
     name: &crabka_pgcatalog::RelationName,
 ) -> Option<ExecError> {
+    not_heap_bearing(kv, name)
+        .or_else(|| is_virtual_relation(name).then(|| no_clustered_index(name)))
+}
+
+/// `"x" is not a table or materialized view`, for a relation that is neither.
+///
+/// The two statements that ask this — `CLUSTER` and `REINDEX TABLE` — want the
+/// two kinds that carry a heap of their own, which is what an index hangs off
+/// and what a reordering rewrites. Phrased as the kinds it accepts rather than
+/// the kinds it refuses, because a foreign table shares the table catalog key
+/// here: listing the refusals let one through, and `CLUSTER` on a foreign table
+/// then reached the clustered-index lookup and reported that instead.
+fn not_heap_bearing(kv: &dyn Kv, name: &crabka_pgcatalog::RelationName) -> Option<ExecError> {
     wrong_kind(kv, name, |kind| {
-        (kind == "view" || kind == "sequence" || kind == "index").then(|| {
+        (kind != "table" && kind != "materialized view").then(|| {
             ExecError::WrongObjectType(format!(
                 "\"{}\" is not a table or materialized view",
                 name.name
             ))
         })
     })
-    .or_else(|| is_virtual_relation(name).then(|| no_clustered_index(name)))
+}
+
+/// `REINDEX TABLE` against a relation of the wrong kind.
+///
+/// The same two kinds `CLUSTER` accepts and the same wording, because both
+/// statements want a relation with a heap under it. A partitioned table is
+/// accepted too and is a `table` here, so it needs no arm; a partitioned
+/// *index* is an `index` and is refused, which is the pair `create_index.sql`
+/// writes back to back.
+///
+/// Where the two part company is what comes next: `CLUSTER` goes on to want a
+/// clustered index, and `REINDEX` wants nothing more.
+pub(crate) fn reindex_table_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    not_heap_bearing(kv, name)
+}
+
+/// `REINDEX INDEX` against a relation of the wrong kind.
+///
+/// `PostgreSQL` words this one after the kind that was *asked for* rather than
+/// after the kinds it would accept, and emits no `HINT` — unlike the `DROP`
+/// family, which names the command that would have worked.
+pub(crate) fn reindex_index_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    wrong_kind(kv, name, |kind| {
+        (kind != "index")
+            .then(|| ExecError::WrongObjectType(format!("\"{}\" is not an index", name.name)))
+    })
+}
+
+/// `REINDEX … CONCURRENTLY` against a system catalog.
+///
+/// This is the one refusal `REINDEX` owes a catalog. Unlike every other
+/// statement that names one, `REINDEX` *rebuilds* rather than redefines, so
+/// `allowSystemTableMods` never runs and `REINDEX TABLE pg_class` succeeds —
+/// [`system_catalog_wrong_kind`]'s 42501 would be wrong here. What the catalog
+/// cannot do is have its index swapped out while the catalog itself is what
+/// records the swap.
+///
+/// Asked after the kind test, because a synthesised *view* takes the wrong-kind
+/// refusal instead: `REINDEX TABLE CONCURRENTLY pg_settings` is 42809, not
+/// this.
+pub(crate) fn reindex_concurrently_system_catalog(
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    is_system_catalog(name).then(reindex_concurrent_system_refusal)
+}
+
+/// `PostgreSQL`'s wording for a concurrent rebuild of a catalog index, which
+/// `REINDEX SYSTEM CONCURRENTLY` reports for the whole database rather than for
+/// a relation, so it names nothing.
+pub(crate) fn reindex_concurrent_system_refusal() -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "0A000",
+        "cannot reindex system catalogs concurrently",
+    ))
+}
+
+/// The options a `REINDEX` carries, read off the list as written.
+pub(crate) struct ReindexOptions {
+    /// Whether the rebuild was asked to be concurrent, by either spelling.
+    pub(crate) concurrently: bool,
+    /// The tablespace to move the rebuilt indexes into, which only has to
+    /// exist here: nothing is rebuilt, so nothing moves.
+    pub(crate) tablespace: Option<String>,
+}
+
+/// Read a `REINDEX` option list, refusing what `PostgreSQL`'s `ExecReindex`
+/// refuses.
+///
+/// This runs before every other check, including the transaction-block guard:
+/// `BEGIN; REINDEX (nosuchopt) TABLE CONCURRENTLY t` is the unrecognized
+/// option, not the block.
+///
+/// # Errors
+///
+/// `42601` for an unknown option name, for a boolean option given a value that
+/// is not one, and for `TABLESPACE` given no value at all.
+pub(crate) fn reindex_options(
+    stmt: &crabka_pgparser::ast::ReindexStmt,
+) -> Result<ReindexOptions, ExecError> {
+    let mut options = ReindexOptions {
+        concurrently: stmt.concurrently,
+        tablespace: None,
+    };
+    for (name, value) in &stmt.options {
+        match name.as_str() {
+            "verbose" => {
+                utility_option_boolean(name, value.as_deref())?;
+            }
+            "concurrently" => {
+                options.concurrently = utility_option_boolean(name, value.as_deref())?;
+            }
+            "tablespace" => {
+                let Some(value) = value else {
+                    return Err(ExecError::Syntax(format!("{name} requires a parameter")));
+                };
+                options.tablespace = Some(value.clone());
+            }
+            _ => {
+                return Err(ExecError::Syntax(format!(
+                    "unrecognized REINDEX option \"{name}\""
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+/// A utility option written as a boolean, which `PostgreSQL` reads with
+/// `defGetBoolean`: the bare name means true, and a value otherwise goes
+/// through `parse_bool`, which takes any unambiguous prefix of the words it
+/// knows as well as `1` and `0`.
+///
+/// # Errors
+///
+/// `42601 <option> requires a Boolean value`.
+fn utility_option_boolean(name: &str, value: Option<&str>) -> Result<bool, ExecError> {
+    let Some(value) = value else {
+        return Ok(true);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "t" | "tr" | "tru" | "true" | "y" | "ye" | "yes" | "1" => Ok(true),
+        "of" | "off" | "f" | "fa" | "fal" | "fals" | "false" | "n" | "no" | "0" => Ok(false),
+        _ => Err(ExecError::Syntax(format!(
+            "{name} requires a Boolean value"
+        ))),
+    }
+}
+
+/// The tablespace a statement named, checked for existence alone.
+///
+/// Unlike [`resolve_relation_tablespace_oid`] this accepts `pg_global`, because
+/// `REINDEX`'s refusal for it is per *index* — a table with no indexes takes
+/// none — and there are no index files here to place anywhere.
+///
+/// # Errors
+///
+/// `42704` when no tablespace of that name exists.
+pub(crate) fn require_tablespace(kv: &dyn Kv, name: &str) -> Result<(), ExecError> {
+    match crabka_pgcatalog::tablespace_oid(kv, name) {
+        Ok(_) => Ok(()),
+        Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+            Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42704",
+                format!("tablespace \"{name}\" does not exist"),
+            )))
+        }
+        Err(other) => Err(other.into()),
+    }
+}
+
+/// `REINDEX DATABASE`/`REINDEX SYSTEM` naming a database that is not the open
+/// one.
+///
+/// `PostgreSQL` compares the written name against `get_database_name` and
+/// refuses anything else, including a database that does exist. The engine has
+/// exactly one, so the comparison is against [`CURRENT_DATABASE`] — the same
+/// name `current_database()` and `pg_database` already answer with.
+pub(crate) fn reindex_other_database(name: Option<&str>) -> Option<ExecError> {
+    name.filter(|name| *name != CURRENT_DATABASE).map(|_| {
+        ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "0A000",
+            "can only reindex the currently open database",
+        ))
+    })
 }
 
 /// `LOCK TABLE` against a relation of the wrong kind.

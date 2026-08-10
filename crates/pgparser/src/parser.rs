@@ -5636,7 +5636,7 @@ impl Parser {
     /// The `( <name> [<value>] [, …] )` option list `ANALYZE` and `VACUUM`
     /// share, reporting whether `ANALYZE` was among the options switched on.
     ///
-    /// It cannot reuse [`Self::eat_utility_option_list`] for one reason:
+    /// It cannot reuse [`Self::utility_option_list`] for one reason:
     /// `FULL` lexes as a keyword here (it is the one in `FULL JOIN`), so
     /// `VACUUM (FULL) t` needs an option name that is not required to be an
     /// identifier.
@@ -5717,9 +5717,15 @@ impl Parser {
     /// name is parsed once and reinterpreted as the index when `ON` follows.
     fn cluster_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.bump(); // cluster
-        self.eat_utility_option_list()?;
+        self.utility_option_list()?;
         self.eat_ident_eq("verbose");
-        if !matches!(self.peek(), Token::Ident(_)) {
+        // `public` is lexed as a keyword here, so a bare-name test that asks
+        // only for `Token::Ident` reads `CLUSTER public.t` as the target-less
+        // spelling and then chokes on the leftover name.
+        if !matches!(
+            self.peek(),
+            Token::Ident(_) | Token::Keyword(Keyword::Public)
+        ) {
             return Ok(crate::ast::Statement::Cluster(None));
         }
         let first = self.relation_ref()?;
@@ -5744,16 +5750,36 @@ impl Parser {
 
     /// P5: `REINDEX [ ( <option>, … ) ] { INDEX | TABLE | SCHEMA | DATABASE |
     /// SYSTEM } [CONCURRENTLY] [ <name> ]`.
+    ///
+    /// `INDEX` and `TABLE` read their name as a relation reference, so it can
+    /// be schema-qualified — `REINDEX INDEX pg_toast.pg_toast_1262_index` is a
+    /// spelling `PostgreSQL`'s own suite writes. The other three read a bare
+    /// name, and only `DATABASE` and `SYSTEM` may omit it.
     fn reindex_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{ReindexStmt, ReindexTarget};
+        /// Which of the five spellings was written, held apart from the target
+        /// because `CONCURRENTLY` is read between the keyword and the name.
+        enum Spelling {
+            Index,
+            Table,
+            Schema,
+            Database,
+            System,
+        }
         self.bump(); // reindex
-        self.eat_utility_option_list()?;
+        let options = self.utility_option_list()?;
         let pos = self.peek_pos();
-        let recognized = self.eat_keyword(Keyword::Index)
-            || self.eat_keyword(Keyword::Table)
-            || self.eat_keyword(Keyword::Schema)
-            || self.eat_ident_eq("database")
-            || self.eat_ident_eq("system");
-        if !recognized {
+        let spelling = if self.eat_keyword(Keyword::Index) {
+            Spelling::Index
+        } else if self.eat_keyword(Keyword::Table) {
+            Spelling::Table
+        } else if self.eat_keyword(Keyword::Schema) {
+            Spelling::Schema
+        } else if self.eat_ident_eq("database") {
+            Spelling::Database
+        } else if self.eat_ident_eq("system") {
+            Spelling::System
+        } else {
             return Err(ParseError::new(
                 format!(
                     "expected INDEX, TABLE, SCHEMA, DATABASE or SYSTEM in REINDEX, found {:?}",
@@ -5761,16 +5787,21 @@ impl Parser {
                 ),
                 pos,
             ));
-        }
-        self.eat_ident_eq("concurrently");
-        if matches!(
-            self.peek(),
-            Token::Ident(_) | Token::Keyword(Keyword::Public | Keyword::User)
-        ) {
-            self.expect_object_name()?;
-        }
+        };
+        let concurrently = self.eat_ident_eq("concurrently");
+        let target = match spelling {
+            Spelling::Index => ReindexTarget::Index(self.relation_ref()?),
+            Spelling::Table => ReindexTarget::Table(self.relation_ref()?),
+            Spelling::Schema => ReindexTarget::Schema(self.expect_object_name()?),
+            Spelling::Database => ReindexTarget::Database(self.optional_object_name()?),
+            Spelling::System => ReindexTarget::System(self.optional_object_name()?),
+        };
         Ok(crate::ast::Statement::Utility(
-            crate::ast::UtilityStatement::Reindex,
+            crate::ast::UtilityStatement::Reindex(ReindexStmt {
+                target,
+                concurrently,
+                options,
+            }),
         ))
     }
 
@@ -5878,25 +5909,48 @@ impl Parser {
         ))
     }
 
-    /// The `( <name> [<value>] [, …] )` option list shared by the utility
-    /// commands whose options carry no semantics here.
-    fn eat_utility_option_list(&mut self) -> Result<bool, ParseError> {
+    /// The parenthesised `( <name> [<value>] [, …] )` list `CLUSTER` and
+    /// `REINDEX` take ahead of their target. `ANALYZE` and `VACUUM` have
+    /// [`Self::maintenance_option_list`] of their own, for the reason its
+    /// documentation gives.
+    ///
+    /// The names and values come back verbatim. Which of them a given statement
+    /// accepts is not a grammar question — `PostgreSQL` reads the list with one
+    /// production and then refuses an unknown name from the statement's own
+    /// executor, with a message that names the statement.
+    fn utility_option_list(&mut self) -> Result<crate::ast::UtilityOptionList, ParseError> {
+        let mut options = crate::ast::UtilityOptionList::new();
         if *self.peek() != Token::LParen {
-            return Ok(false);
+            return Ok(options);
         }
         self.bump();
         loop {
-            self.expect_ident()?;
-            if !matches!(self.peek(), Token::Comma | Token::RParen) {
-                self.storage_parameter_value()?;
-            }
+            let name = self.expect_ident()?;
+            let value = if matches!(self.peek(), Token::Comma | Token::RParen) {
+                None
+            } else {
+                Some(self.storage_parameter_value()?)
+            };
+            options.push((name, value));
             if self.eat_comma() {
                 continue;
             }
             break;
         }
         self.expect(&Token::RParen)?;
-        Ok(true)
+        Ok(options)
+    }
+
+    /// An object name in a position where `PostgreSQL` also accepts nothing at
+    /// all, as `REINDEX DATABASE` does.
+    fn optional_object_name(&mut self) -> Result<Option<String>, ParseError> {
+        if matches!(
+            self.peek(),
+            Token::Ident(_) | Token::Keyword(Keyword::Public | Keyword::User)
+        ) {
+            return self.expect_object_name().map(Some);
+        }
+        Ok(None)
     }
 
     fn text_search_kind_at(

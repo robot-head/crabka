@@ -262,7 +262,7 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::DropPolicy { .. } => "DROP POLICY",
         Statement::Utility(utility) => match utility {
             UtilityStatement::Analyze(_) => "ANALYZE",
-            UtilityStatement::Reindex => "REINDEX",
+            UtilityStatement::Reindex(_) => "REINDEX",
             UtilityStatement::CreateOperatorFamily { .. } => "CREATE OPERATOR FAMILY",
             UtilityStatement::CreateOperatorClass { .. } => "CREATE OPERATOR CLASS",
             UtilityStatement::AlterOperatorObject { .. } => "ALTER OPERATOR",

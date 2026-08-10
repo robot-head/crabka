@@ -5159,6 +5159,111 @@ impl SqlSession {
         })
     }
 
+    /// `REINDEX`, which rebuilds nothing here and still has to resolve
+    /// everything it names.
+    ///
+    /// Index maintenance is autonomous, so the rebuild itself is an accepted
+    /// hint. What is not a hint is *which* names `PostgreSQL` accepts: a
+    /// relation that is not there, or is there and is the wrong kind, is a
+    /// refusal, and reporting success for it is how a suite silently stops
+    /// testing what it meant to.
+    ///
+    /// The order the checks run in is `PostgreSQL`'s and was measured, not
+    /// derived. The option list is read first, so an unknown option beats even
+    /// the transaction-block guard. `CONCURRENTLY`'s guard comes next and beats
+    /// the tablespace lookup, while `SCHEMA`'s and `DATABASE`'s come *after*
+    /// it — the two guards live on opposite sides of that lookup in
+    /// `ExecReindex`, which is why `BEGIN; REINDEX (TABLESPACE nosuch) SCHEMA s`
+    /// reports the tablespace and `BEGIN; REINDEX (TABLESPACE nosuch) TABLE
+    /// CONCURRENTLY t` reports the block.
+    fn run_reindex(
+        &mut self,
+        stmt: &crabka_pgparser::ast::ReindexStmt,
+    ) -> Result<QueryResult, ExecError> {
+        use crabka_pgparser::ast::ReindexTarget;
+        let options = crate::exec::reindex_options(stmt)?;
+        if options.concurrently {
+            self.prevent_in_transaction_block("REINDEX CONCURRENTLY")?;
+        }
+        if let Some(tablespace) = &options.tablespace {
+            crate::exec::require_tablespace(&*self.catalog_kv, tablespace)?;
+        }
+        match &stmt.target {
+            ReindexTarget::Index(reference) | ReindexTarget::Table(reference) => {
+                let name = crate::relname::resolve_relation(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    reference,
+                    crate::relname::SchemaDisposition::Utility,
+                )?;
+                // One lookup answers both questions the two refusals need, and
+                // it is the only catalog read a `REINDEX` that succeeds pays
+                // for.
+                if crate::exec::relation_kind(&*self.catalog_kv, &name).is_none() {
+                    return Err(
+                        crabka_pgcatalog::CatalogError::UndefinedTable(name.to_string()).into(),
+                    );
+                }
+                let wrong_kind = if matches!(stmt.target, ReindexTarget::Index(_)) {
+                    crate::exec::reindex_index_wrong_kind(&*self.catalog_kv, &name)
+                } else {
+                    crate::exec::reindex_table_wrong_kind(&*self.catalog_kv, &name)
+                };
+                if let Some(error) = wrong_kind {
+                    return Err(error);
+                }
+                if options.concurrently
+                    && let Some(error) = crate::exec::reindex_concurrently_system_catalog(&name)
+                {
+                    return Err(error);
+                }
+            }
+            ReindexTarget::Schema(schema) => {
+                self.prevent_in_transaction_block("REINDEX SCHEMA")?;
+                if !crabka_pgcatalog::schema_exists(&*self.catalog_kv, schema)? {
+                    return Err(
+                        crabka_pgcatalog::CatalogError::UndefinedSchema(schema.clone()).into(),
+                    );
+                }
+            }
+            ReindexTarget::Database(database) => {
+                self.prevent_in_transaction_block("REINDEX DATABASE")?;
+                if let Some(error) = crate::exec::reindex_other_database(database.as_deref()) {
+                    return Err(error);
+                }
+            }
+            ReindexTarget::System(database) => {
+                self.prevent_in_transaction_block("REINDEX SYSTEM")?;
+                // Every relation this spelling would reach is a catalog, so the
+                // refusal does not wait to be told which one.
+                if options.concurrently {
+                    return Err(crate::exec::reindex_concurrent_system_refusal());
+                }
+                if let Some(error) = crate::exec::reindex_other_database(database.as_deref()) {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(QueryResult::Command {
+            tag: "REINDEX".into(),
+        })
+    }
+
+    /// `PostgreSQL`'s `PreventInTransactionBlock`, which a statement that
+    /// cannot be rolled back calls before it does anything at all.
+    ///
+    /// # Errors
+    ///
+    /// `25001`, naming the statement as `PostgreSQL` names it.
+    fn prevent_in_transaction_block(&self, statement: &str) -> Result<(), ExecError> {
+        if matches!(self.state, TxnState::Idle) {
+            return Ok(());
+        }
+        Err(ExecError::ActiveSqlTransaction(format!(
+            "{statement} cannot run inside a transaction block"
+        )))
+    }
+
     /// The P5/D6/D8 utility bucket: documented mappings and documented refusals.
     async fn utility(&mut self, utility: &UtilityStatement) -> Result<QueryResult, ExecError> {
         match utility {
@@ -5166,11 +5271,9 @@ impl SqlSession {
                 self.run_maintenance(MaintenanceCommand::Analyze, stmt)
                     .await
             }
-            // Reclamation and index maintenance are autonomous here, and there
-            // are no planner statistics to collect, so these are accepted hints.
-            UtilityStatement::Reindex => Ok(QueryResult::Command {
-                tag: "REINDEX".into(),
-            }),
+            UtilityStatement::Reindex(stmt) => self.run_reindex(stmt),
+            // Reclamation is autonomous here, so there is no write-ahead log to
+            // flush and nothing for this to do but say it did it.
             UtilityStatement::Checkpoint => Ok(QueryResult::Command {
                 tag: "CHECKPOINT".into(),
             }),

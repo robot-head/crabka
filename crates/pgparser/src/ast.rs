@@ -308,6 +308,49 @@ pub struct MaintenanceStmt {
     pub analyze: bool,
 }
 
+/// A parenthesised `name [value]` utility option list, exactly as written.
+///
+/// The value is `None` when the option was written bare, because that is a
+/// distinction the reader needs: `REINDEX (VERBOSE)` means `VERBOSE true`,
+/// while `REINDEX (TABLESPACE)` is `tablespace requires a parameter`.
+pub type UtilityOptionList = Vec<(String, Option<String>)>;
+
+/// What a `REINDEX` names.
+///
+/// The five spellings do not share one name shape, so the target cannot be a
+/// kind beside a string. `INDEX` and `TABLE` name a relation, which may carry a
+/// schema qualifier and resolves against the search path. `SCHEMA` names a
+/// namespace, which never does. `DATABASE` and `SYSTEM` name the open database
+/// and may leave the name out entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReindexTarget {
+    /// `REINDEX INDEX <index>`.
+    Index(RelationRef),
+    /// `REINDEX TABLE <table>`.
+    Table(RelationRef),
+    /// `REINDEX SCHEMA <schema>`.
+    Schema(String),
+    /// `REINDEX DATABASE [<database>]`.
+    Database(Option<String>),
+    /// `REINDEX SYSTEM [<database>]`.
+    System(Option<String>),
+}
+
+/// `REINDEX [ ( option … ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM }
+/// [CONCURRENTLY] [name]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReindexStmt {
+    pub target: ReindexTarget,
+    /// The bare `CONCURRENTLY` keyword, which is the older of the two
+    /// spellings. The `(CONCURRENTLY [ <boolean> ])` option lands in
+    /// [`Self::options`] instead, and the executor reads both.
+    pub concurrently: bool,
+    /// The option list uninterpreted, because which names are legal and what a
+    /// bad value is called are `PostgreSQL` refusals the executor words — the
+    /// same division `CREATE TABLESPACE`'s options already follow.
+    pub options: UtilityOptionList,
+}
+
 /// The relation `CLUSTER` was pointed at, plus the index to order it by.
 ///
 /// `PostgreSQL` accepts three spellings that all land here: `CLUSTER t USING i`,
@@ -1184,8 +1227,14 @@ pub enum UtilityStatement {
     /// are still resolved and checked, because that is what decides whether
     /// `PostgreSQL` reports success.
     Analyze(MaintenanceStmt),
-    /// `REINDEX [ ( option … ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM } [CONCURRENTLY] [name]`.
-    Reindex,
+    /// `REINDEX [ ( option … ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM }
+    /// [CONCURRENTLY] [name]`.
+    ///
+    /// There are no indexes to rebuild, but the name is still resolved and
+    /// checked, because that is what decides whether `PostgreSQL` reports
+    /// success — the same reason [`UtilityStatement::Analyze`] carries its
+    /// targets.
+    Reindex(ReindexStmt),
     /// `CHECKPOINT`.
     Checkpoint,
     /// `LOAD 'filename'`.
