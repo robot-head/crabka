@@ -64,12 +64,13 @@ pub enum SchemaDisposition {
     TemporaryCreation,
 }
 
-/// Everything an unqualified relation name needs in order to name a schema.
+/// Everything a written relation name needs in order to name a schema.
 ///
-/// It is one value and not three parameters, because it has exactly the
+/// It is one value and not four parameters, because it has exactly the
 /// lifetime of a session and because every resolution needs all of it. The
 /// path says which schemas to look in. The user is what `"$user"` expands to.
-/// The backend id names the session's own temporary namespace.
+/// The backend id names the session's own temporary namespace. The database is
+/// what a three-part name's leading part is measured against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionScope {
     /// The session's `search_path`, unexpanded.
@@ -79,6 +80,14 @@ pub struct ResolutionScope {
     /// The backend id the wire layer announced for this session, which names
     /// its temporary schema. 0 outside a session.
     pub backend_id: i32,
+    /// The database the session connected to, which a three-part name's
+    /// catalog part has to equal to be a local reference.
+    ///
+    /// This is session state and not a constant: a constant made
+    /// `postgres.public.t` resolve locally from every database and made the
+    /// connected database's own name read as another database's.
+    /// [`crate::exec::DEFAULT_DATABASE`] outside a session.
+    pub database: String,
 }
 
 impl Default for ResolutionScope {
@@ -87,6 +96,7 @@ impl Default for ResolutionScope {
             search_path: SearchPath::default(),
             user: crate::catalog_fn::OBJECT_OWNER.to_string(),
             backend_id: 0,
+            database: crate::exec::DEFAULT_DATABASE.to_string(),
         }
     }
 }
@@ -118,6 +128,7 @@ impl ResolutionScope {
             search_path: self.search_path.searching_first(schema),
             user: self.user.clone(),
             backend_id: self.backend_id,
+            database: self.database.clone(),
         }
     }
 
@@ -364,7 +375,7 @@ impl WrittenRelation {
 /// '"MyTbl"'::regclass         relation named MyTbl
 /// 'MYTABLE'::regclass         relation named mytable
 /// ' public . t '::regclass    relation public.t
-/// 'postgres.public.t'         relation public.t — the catalog part is this db
+/// '<thisdb>.public.t'         relation public.t — the catalog part is this db
 /// 'otherdb.public.t'          0A000 cross-database references are not implem…
 /// 'a.b.c.d'                   42601 improper relation name (too many dotted …
 /// ''  '   '  '.t'  't.'  'a..b'  '"abc'  '"a"b'  'x y'
@@ -382,7 +393,10 @@ impl WrittenRelation {
 /// 42602 `invalid name syntax` for text that is not a qualified name, 42601 for
 /// more than three parts, and 0A000 for a catalog part that names another
 /// database.
-pub fn parse_written_relation(text: &str) -> Result<WrittenRelation, ExecError> {
+pub fn parse_written_relation(
+    scope: &ResolutionScope,
+    text: &str,
+) -> Result<WrittenRelation, ExecError> {
     let parts = split_identifier_string(text).ok_or_else(invalid_name_syntax)?;
     let dotted = parts.join(".");
     let reference = match parts.as_slice() {
@@ -393,7 +407,7 @@ pub fn parse_written_relation(text: &str) -> Result<WrittenRelation, ExecError> 
         [name] => RelationRef::bare(name),
         [schema, name] => RelationRef::qualified(schema, name),
         [catalog, schema, name] => {
-            if catalog != crate::exec::CURRENT_DATABASE {
+            if *catalog != scope.database {
                 return Err(ExecError::Unsupported(format!(
                     "cross-database references are not implemented: \"{dotted}\""
                 )));
@@ -550,7 +564,8 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert!(
-                parse_written_relation(input).expect("parses") == expected,
+                parse_written_relation(ResolutionScope::default_scope(), input).expect("parses")
+                    == expected,
                 "{input:?}"
             );
         }
@@ -598,7 +613,7 @@ mod tests {
             ),
         ];
         for (input, (code, message)) in cases {
-            let error = parse_written_relation(input)
+            let error = parse_written_relation(ResolutionScope::default_scope(), input)
                 .expect_err("refused")
                 .into_pg();
             assert!(
@@ -618,7 +633,7 @@ mod tests {
             ("\"A b\".c", "A b.c"),
             ("postgres.nosuchschema.t", "postgres.nosuchschema.t"),
         ] {
-            let error = parse_written_relation(input)
+            let error = parse_written_relation(ResolutionScope::default_scope(), input)
                 .expect("parses")
                 .undefined_table()
                 .into_pg();

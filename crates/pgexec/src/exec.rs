@@ -1656,8 +1656,12 @@ pub(crate) fn execute_ddl(
             let grantees = resolve_grantees(kv, fctx, grantees)?;
             let mut ops = Vec::new();
             for name in &names {
-                ops.extend(crabka_pgcatalog::grant_table_privileges_ops(
-                    kv, name, &grantees, privileges,
+                ops.extend(privilege_grant_ops(
+                    kv,
+                    name,
+                    &grantees,
+                    privileges,
+                    PrivilegeGrant::Grant,
                 )?);
             }
             Ok((command("GRANT"), ops))
@@ -1718,8 +1722,12 @@ pub(crate) fn execute_ddl(
             let grantees = resolve_grantees(kv, fctx, grantees)?;
             let mut ops = Vec::new();
             for name in &names {
-                ops.extend(crabka_pgcatalog::revoke_table_privileges_ops(
-                    kv, name, &grantees, privileges,
+                ops.extend(privilege_grant_ops(
+                    kv,
+                    name,
+                    &grantees,
+                    privileges,
+                    PrivilegeGrant::Revoke,
                 )?);
             }
             Ok((command("REVOKE"), ops))
@@ -18094,7 +18102,20 @@ fn requalify_view_relation(
 pub(crate) const PG_CATALOG_NAMESPACE_OID: i32 = 11;
 pub(crate) const INFORMATION_SCHEMA_NAMESPACE_OID: i32 = 13_370;
 pub(crate) const PUBLIC_NAMESPACE_OID: i32 = 2200;
-pub(crate) const CURRENT_DATABASE: &str = "postgres";
+/// The database name a session falls back to when nothing told it one.
+///
+/// A session opened over the wire takes its name from the startup packet, and
+/// that is the name every catalog projection answers with. This constant is
+/// only the floor for a session that never saw a startup packet: a planning
+/// context, a unit test, or an embedded caller. It is `PostgreSQL`'s own
+/// `initdb` default so those contexts read the way a fresh cluster does.
+///
+/// Nothing may compare a written name against this constant. The question
+/// "does this name mean the database I am in?" is a question about the
+/// session, answered by [`crate::clock::EvalCtx::database`]; asking it of a
+/// constant made `REINDEX DATABASE <the open database>` fail and
+/// `postgres.public.t` resolve locally from every database at once.
+pub(crate) const DEFAULT_DATABASE: &str = "postgres";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BuiltinTypeRow {
@@ -18613,18 +18634,31 @@ fn virtual_catalog_rows(
         "pg_prepared_statements" => pg_prepared_statement_rows(),
         "pg_roles" => pg_roles_rows(catalog_kv),
         "pg_user" => pg_user_rows(catalog_kv),
-        "information_schema.schemata" => information_schema_schemata_rows(catalog_kv),
-        "information_schema.tables" => information_schema_tables_rows(catalog_kv, ctx.backend_pid),
+        "information_schema.schemata" => {
+            information_schema_schemata_rows(catalog_kv, ctx.database())
+        }
+        "information_schema.tables" => {
+            information_schema_tables_rows(catalog_kv, ctx.database(), ctx.backend_pid)
+        }
         "information_schema.columns" => {
             information_schema_columns_rows(catalog_kv, ctx.backend_pid)
         }
-        "information_schema.triggers" => information_schema_trigger_rows(catalog_kv),
+        "information_schema.triggers" => {
+            information_schema_trigger_rows(catalog_kv, ctx.database())
+        }
         "information_schema.triggered_update_columns" => {
-            information_schema_triggered_update_column_rows(catalog_kv)
+            information_schema_triggered_update_column_rows(catalog_kv, ctx.database())
         }
         "pg_inherits" => pg_inherits_rows(catalog_kv),
         "pg_partitioned_table" => pg_partitioned_table_rows(catalog_kv),
-        _ => crate::catalog_rel::rows(catalog_kv, name, ctx.backend_pid),
+        _ => crate::catalog_rel::rows(
+            catalog_kv,
+            name,
+            crate::catalog_rel::SessionIdent {
+                database: ctx.database(),
+                backend_pid: ctx.backend_pid,
+            },
+        ),
     }
 }
 
@@ -19118,10 +19152,15 @@ impl<'a> PgClassRow<'a> {
 
 fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
+    // Read once for the whole projection rather than per relation: the ACL is
+    // one flat namespace and a per-relation scan would reread it for every
+    // table in the database.
+    let acl = ColumnAcl::read(catalog_kv)?;
     for table in crabka_pgcatalog::list_tables(catalog_kv)? {
         rows.extend(attribute_rows_for_table(
             crate::catalog_rel::table_relation_oid(table.id)?,
             &table,
+            &acl,
         )?);
     }
     // A view's columns are `pg_attribute` rows like any other relation's —
@@ -19146,18 +19185,19 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
             materialized: None,
             checks: Vec::new(),
         };
-        rows.extend(attribute_rows_for_table(oid, &table)?);
+        rows.extend(attribute_rows_for_table(oid, &table, &acl)?);
     }
     for virtual_table in virtual_table_names() {
         let table = virtual_catalog_table(virtual_table);
         rows.extend(attribute_rows_for_table(
             virtual_relation_oid(virtual_table),
             &table,
+            &acl,
         )?);
     }
     for index in BUILTIN_CATALOG_OID_INDEXES {
         let table = builtin_catalog_index_table(index);
-        rows.extend(attribute_rows_for_table(index.oid, &table)?);
+        rows.extend(attribute_rows_for_table(index.oid, &table, &acl)?);
     }
     // A composite type's attributes hang off the relation its `pg_type.typrelid`
     // points at, which is how `\d <type>` and the driver introspection queries
@@ -19182,7 +19222,7 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
             materialized: None,
             checks: Vec::new(),
         };
-        rows.extend(attribute_rows_for_table(relid, &table)?);
+        rows.extend(attribute_rows_for_table(relid, &table, &acl)?);
     }
     Ok(rows)
 }
@@ -19192,12 +19232,15 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
 /// this view by joining `pg_namespace.nspowner` to `pg_authid`, so
 /// `schema_owner` is exactly what `pg_get_userbyid(nspowner)` answers. The
 /// character-set columns and `sql_path` are NULL there too.
-fn information_schema_schemata_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn information_schema_schemata_rows(
+    catalog_kv: &dyn Kv,
+    database: &str,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(crabka_pgcatalog::list_schemas(catalog_kv)?
         .into_iter()
         .map(|schema| {
             vec![
-                text(CURRENT_DATABASE),
+                text(database),
                 text(&schema.name),
                 text(schema_owner_name(&schema.owner)),
                 Datum::Null,
@@ -19241,6 +19284,7 @@ fn is_other_temp_schema(schema: &str, backend_id: i32) -> bool {
 /// from `information_schema.columns`.
 fn information_schema_tables_rows(
     catalog_kv: &dyn Kv,
+    database: &str,
     backend_id: i32,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = crabka_pgcatalog::list_tables(catalog_kv)?
@@ -19250,6 +19294,7 @@ fn information_schema_tables_rows(
         })
         .map(|table| {
             information_schema_table_row(
+                database,
                 &table.name,
                 if table.foreign.is_some() {
                     "FOREIGN"
@@ -19272,19 +19317,20 @@ fn information_schema_tables_rows(
                     catalog_kv, &view.name, false, None, 0,
                 ) & crate::viewwrite::INSERT_EVENT
                     != 0;
-                information_schema_table_row(&view.name, "VIEW", insertable)
+                information_schema_table_row(database, &view.name, "VIEW", insertable)
             }),
     );
     Ok(rows)
 }
 
 fn information_schema_table_row(
+    database: &str,
     name: &crabka_pgcatalog::RelationName,
     table_type: &str,
     insertable: bool,
 ) -> Vec<Datum> {
     vec![
-        text(CURRENT_DATABASE),
+        text(database),
         text(&name.schema),
         text(&name.name),
         text(table_type),
@@ -19368,7 +19414,10 @@ fn information_schema_column_row(
     ])
 }
 
-fn information_schema_trigger_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn information_schema_trigger_rows(
+    catalog_kv: &dyn Kv,
+    database: &str,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgcatalog::trigger::{TriggerLevel, TriggerTiming};
     let triggers = crabka_pgcatalog::trigger::list_triggers(catalog_kv)?;
     let mut rows = Vec::new();
@@ -19407,11 +19456,11 @@ fn information_schema_trigger_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>
                 .collect::<Vec<_>>()
                 .join(", ");
             rows.push(vec![
-                text(CURRENT_DATABASE),
+                text(database),
                 text(&trigger.table.schema),
                 text(&trigger.name),
                 text(event),
-                text(CURRENT_DATABASE),
+                text(database),
                 text(&trigger.table.schema),
                 text(&trigger.table.name),
                 Datum::Int4(i32::try_from(action_order).unwrap_or(i32::MAX)),
@@ -19456,6 +19505,7 @@ fn information_schema_trigger_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>
 
 fn information_schema_triggered_update_column_rows(
     catalog_kv: &dyn Kv,
+    database: &str,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for trigger in crabka_pgcatalog::trigger::list_triggers(catalog_kv)?
@@ -19464,10 +19514,10 @@ fn information_schema_triggered_update_column_rows(
     {
         for column in &trigger.events.update_columns {
             rows.push(vec![
-                text(CURRENT_DATABASE),
+                text(database),
                 text(&trigger.table.schema),
                 text(&trigger.name),
-                text(CURRENT_DATABASE),
+                text(database),
                 text(&trigger.table.schema),
                 text(&trigger.table.name),
                 text(column),
@@ -19627,7 +19677,65 @@ fn escape_sql_string(value: &str) -> String {
 /// PostgreSQL 18.4's `pg_attribute` row per column. `attidentity` and
 /// `attgenerated` carry the empty string for an ordinary column, which is what
 /// PostgreSQL stores and what `\d`'s "Generated"/"Identity" columns test.
-fn attribute_rows_for_table(relid: i32, table: &Table) -> Result<Vec<Vec<Datum>>, ExecError> {
+/// Every column-level grant in the database, keyed the way `pg_attribute`
+/// needs to read it back: relation, then column.
+///
+/// This is `pg_attribute.attacl`. It stays NULL for a column nobody has
+/// granted, which is what `PostgreSQL` stores and what `pg_dump` tests before
+/// it emits a `GRANT`.
+struct ColumnAcl(std::collections::BTreeMap<(crabka_pgcatalog::RelationName, String), Vec<String>>);
+
+impl ColumnAcl {
+    fn read(catalog_kv: &dyn Kv) -> Result<Self, ExecError> {
+        let mut grouped: std::collections::BTreeMap<_, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for privilege in crabka_pgcatalog::list_column_privileges(catalog_kv)? {
+            grouped
+                .entry((privilege.table, privilege.column))
+                .or_default()
+                .push(format!(
+                    "{}={}/{}",
+                    privilege.grantee,
+                    acl_privilege_letter(&privilege.privilege),
+                    crabka_pgcatalog::BOOTSTRAP_ROLE,
+                ));
+        }
+        for entry in grouped.values_mut() {
+            entry.sort();
+        }
+        Ok(Self(grouped))
+    }
+
+    fn of(&self, table: &crabka_pgcatalog::RelationName, column: &str) -> Datum {
+        self.0
+            .get(&(table.clone(), column.to_string()))
+            .map_or(Datum::Null, |items| {
+                Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Text,
+                    items.iter().map(|item| Datum::Text(item.clone())).collect(),
+                ))
+            })
+    }
+}
+
+/// The `aclitem` letter `PostgreSQL` prints for a privilege. Only the four it
+/// allows on a column can reach here, and the catalog refuses to store any
+/// other, so the fallback is unreachable rather than a silent mis-spelling.
+fn acl_privilege_letter(privilege: &str) -> &'static str {
+    match privilege.to_ascii_uppercase().as_str() {
+        "SELECT" => "r",
+        "INSERT" => "a",
+        "UPDATE" => "w",
+        "REFERENCES" => "x",
+        _ => "?",
+    }
+}
+
+fn attribute_rows_for_table(
+    relid: i32,
+    table: &Table,
+    acl: &ColumnAcl,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     table
         .columns
         .iter()
@@ -19666,7 +19774,7 @@ fn attribute_rows_for_table(relid: i32, table: &Table) -> Result<Vec<Vec<Datum>>
                 Datum::Int2(0),
                 int(column_collation_oid(column)),
                 Datum::Int2(-1),
-                Datum::Null,
+                acl.of(&table.name, &column.name),
                 Datum::Null,
                 Datum::Null,
                 Datum::Null,
@@ -20668,7 +20776,11 @@ pub(crate) fn regclass_cast(
 ///
 /// 3F000 for a qualifier naming no schema, 42704 `type "…" does not exist`
 /// otherwise.
-pub(crate) fn resolve_type_name(kv: &dyn Kv, written: &str) -> Result<i32, ExecError> {
+pub(crate) fn resolve_type_name(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    written: &str,
+) -> Result<i32, ExecError> {
     let written = written.trim();
     let parts = crate::relname::split_identifier_string(written)
         .filter(|parts| !parts.is_empty())
@@ -20678,7 +20790,7 @@ pub(crate) fn resolve_type_name(kv: &dyn Kv, written: &str) -> Result<i32, ExecE
     let (schema, name) = match parts.as_slice() {
         [name] => (None, name.clone()),
         [schema, name] => (Some(schema.clone()), name.clone()),
-        [catalog, schema, name] if catalog == CURRENT_DATABASE => {
+        [catalog, schema, name] if *catalog == scope.database => {
             (Some(schema.clone()), name.clone())
         }
         [_, _, _] => {
@@ -25600,6 +25712,142 @@ fn role_spec_name<'a>(spec: &'a crabka_pgparser::ast::RoleSpec, fctx: ForeignCtx
     }
 }
 
+/// Which way a table privilege statement moves the grants it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivilegeGrant {
+    Grant,
+    Revoke,
+}
+
+/// The writes one `GRANT`/`REVOKE … ON <relation>` owes, relation-wide entries
+/// and column-scoped entries alike.
+///
+/// The column list hangs off each privilege and not off the statement, so
+/// `GRANT SELECT (a), UPDATE ON t TO r` is one column grant and one
+/// relation-wide grant, and this walks the list in written order rather than
+/// deciding once for the statement.
+///
+/// A column-scoped entry is *stored*, in its own catalog namespace, and not
+/// dropped on the floor. What it does not yet do is admit a read: the read path
+/// still asks for the relation-wide `SELECT`, so a role holding only column
+/// grants is refused the whole relation where `PostgreSQL` would let it read
+/// the granted columns. That is narrower than `PostgreSQL`, which is the safe
+/// direction to be wrong in, and it is pinned by a test so that widening it is
+/// a deliberate act. Accepting the statement and recording nothing would have
+/// been the unsafe direction — `information_schema.column_privileges` and
+/// `pg_attribute.attacl` would have answered that no grant existed on a
+/// database where one had been made.
+///
+/// # Errors
+///
+/// Returns 0LP01 for a privilege `PostgreSQL` does not allow on a column,
+/// 42703 for a column the relation does not have, or storage/corruption errors
+/// from the catalog KV seam.
+fn privilege_grant_ops(
+    kv: &dyn Kv,
+    relation: &crabka_pgcatalog::RelationName,
+    grantees: &[String],
+    privileges: &[crabka_pgparser::ast::PrivilegeSpec],
+    direction: PrivilegeGrant,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let mut ops = Vec::new();
+    for spec in privileges {
+        let named = [spec.name.clone()];
+        if spec.columns.is_empty() {
+            ops.extend(match direction {
+                PrivilegeGrant::Grant => {
+                    crabka_pgcatalog::grant_table_privileges_ops(kv, relation, grantees, &named)?
+                }
+                PrivilegeGrant::Revoke => {
+                    crabka_pgcatalog::revoke_table_privileges_ops(kv, relation, grantees, &named)?
+                }
+            });
+            continue;
+        }
+        require_column_grantable(&spec.name)?;
+        let columns = resolve_granted_columns(kv, relation, &spec.columns)?;
+        ops.extend(match direction {
+            PrivilegeGrant::Grant => crabka_pgcatalog::grant_column_privileges_ops(
+                kv, relation, &columns, grantees, &named,
+            )?,
+            PrivilegeGrant::Revoke => crabka_pgcatalog::revoke_column_privileges_ops(
+                kv, relation, &columns, grantees, &named,
+            )?,
+        });
+    }
+    Ok(ops)
+}
+
+/// `PostgreSQL`'s `ACL_ALL_RIGHTS_COLUMN` check: four of the eight relation
+/// privileges can be granted on a column, and naming any of the other four
+/// with a column list is 0LP01 rather than a grant on the whole relation.
+fn require_column_grantable(privilege: &str) -> Result<(), ExecError> {
+    let named = privilege.to_ascii_uppercase();
+    if named == "ALL"
+        || named == "ALL PRIVILEGES"
+        || crabka_pgcatalog::COLUMN_PRIVILEGES.contains(&named.as_str())
+    {
+        return Ok(());
+    }
+    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "0LP01",
+        format!("invalid privilege type {named} for column"),
+    )))
+}
+
+/// The columns a column-scoped grant names, checked against the relation.
+///
+/// A synthesised catalog relation is grantable, so its column list has to be
+/// reachable here too — `GRANT SELECT (prosrc) ON pg_proc` is a statement
+/// `pg_dump` writes and the upstream `init_privs` test runs.
+fn resolve_granted_columns(
+    kv: &dyn Kv,
+    relation: &crabka_pgcatalog::RelationName,
+    written: &[String],
+) -> Result<Vec<String>, ExecError> {
+    let held = grantable_relation_columns(kv, relation)?;
+    for column in written {
+        if !held.iter().any(|name| name == column) {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42703",
+                format!(
+                    "column \"{column}\" of relation \"{}\" does not exist",
+                    relation.name
+                ),
+            )));
+        }
+    }
+    Ok(written.to_vec())
+}
+
+/// Every column name a grantable relation has, stored or synthesised.
+fn grantable_relation_columns(
+    kv: &dyn Kv,
+    relation: &crabka_pgcatalog::RelationName,
+) -> Result<Vec<String>, ExecError> {
+    if let Some(key) = virtual_table(&virtual_lookup_key(relation)) {
+        return Ok(virtual_catalog_columns(key)
+            .into_iter()
+            .map(|column| column.name)
+            .collect());
+    }
+    match crabka_pgcatalog::get_table(kv, relation) {
+        Ok(table) => Ok(table
+            .columns
+            .into_iter()
+            .map(|column| column.name)
+            .collect()),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+            Ok(crabka_pgcatalog::get_view(kv, relation)?
+                .columns
+                .into_iter()
+                .map(|column| column.name)
+                .collect())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// `PostgreSQL`'s refusal of a role name nobody holds.
 ///
 /// The catalog seam calls this an undefined *object*, because it answers for
@@ -27159,6 +27407,15 @@ fn drop_table_column(
         return Ok(());
     };
     let table_name = state.table.name.clone();
+    // A grant on the column dies with the column. Leaving it behind would hand
+    // the grant to whatever column is added under that name next.
+    state
+        .ops
+        .extend(crabka_pgcatalog::drop_column_privileges_ops(
+            kv,
+            &table_name,
+            column,
+        )?);
     let triggers = crabka_pgcatalog::trigger::triggers_for_table(kv, state.table.id)?;
     for trigger in triggers {
         let references_column = trigger
@@ -27312,6 +27569,34 @@ fn rename_column_dependencies(
     let table_name = state.table.name.clone();
     for check in &mut state.table.checks {
         check.expr = rewrite_identifier_tokens(&check.expr, old_name, new_name);
+    }
+    // A column grant follows its column. Leaving it under the old name would
+    // strand the grant and hand it to the next column created with that name.
+    let renamed: Vec<_> = crabka_pgcatalog::column_privileges_of(kv, &table_name)?
+        .into_iter()
+        .filter(|privilege| privilege.column == old_name)
+        .collect();
+    for privilege in renamed {
+        let grantees = [privilege.grantee.clone()];
+        let named = [privilege.privilege.clone()];
+        state
+            .ops
+            .extend(crabka_pgcatalog::revoke_column_privileges_ops(
+                kv,
+                &table_name,
+                std::slice::from_ref(&privilege.column),
+                &grantees,
+                &named,
+            )?);
+        state
+            .ops
+            .extend(crabka_pgcatalog::grant_column_privileges_ops(
+                kv,
+                &table_name,
+                &[new_name.to_string()],
+                &grantees,
+                &named,
+            )?);
     }
     // A partitioned parent stores each key column by name as well as by
     // ordinal, and `pg_get_partkeydef` — so `\d` — prints the name. Routing
@@ -28612,10 +28897,14 @@ pub(crate) fn require_tablespace(kv: &dyn Kv, name: &str) -> Result<(), ExecErro
 ///
 /// `PostgreSQL` compares the written name against `get_database_name` and
 /// refuses anything else, including a database that does exist. The engine has
-/// exactly one, so the comparison is against [`CURRENT_DATABASE`] — the same
-/// name `current_database()` and `pg_database` already answer with.
-pub(crate) fn reindex_other_database(name: Option<&str>) -> Option<ExecError> {
-    name.filter(|name| *name != CURRENT_DATABASE).map(|_| {
+/// exactly one, so the comparison is against `open` — the session's own
+/// database, the same name `current_database()` and `pg_database` answer with.
+///
+/// `open` is a parameter and not a constant on purpose. Against a constant the
+/// rule inverted: `REINDEX DATABASE <the database you are in>` was refused
+/// while `REINDEX DATABASE postgres` was accepted from every other database.
+pub(crate) fn reindex_other_database(open: &str, name: Option<&str>) -> Option<ExecError> {
+    name.filter(|name| *name != open).map(|_| {
         ExecError::Remote(crabka_pgwire::error::PgError::error(
             "0A000",
             "can only reindex the currently open database",

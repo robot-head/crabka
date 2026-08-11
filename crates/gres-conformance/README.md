@@ -29,9 +29,12 @@ The substrate-backed leg — the same corpus replayed against a `crabka-gres`
 whose WAL is a Kafka tenant topic — uses `substrate-baseline.json`, and
 [`substrate-baseline.md`](substrate-baseline.md) names every statement behind
 the difference. That leg runs against its own fresh oracle database, so
-`current_database()` can never match; that one statement is now the whole
-difference, and it is enumerated there rather than absorbed into
-`baseline.json`.
+`current_database()` can never match while the two ends are connected to
+differently named databases; that one statement is now the whole difference,
+and it is enumerated there rather than absorbed into `baseline.json`. The same
+now applies to the primary leg — see
+[`substrate-baseline.md`](substrate-baseline.md) for what has to change in the
+harness.
 
 ## Baseline ratchet
 

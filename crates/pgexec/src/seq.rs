@@ -397,7 +397,7 @@ fn written_sequence_name(
     resolve_sequence(
         kv,
         scope,
-        crate::relname::parse_written_relation(written)?.reference,
+        crate::relname::parse_written_relation(scope, written)?.reference,
     )
 }
 

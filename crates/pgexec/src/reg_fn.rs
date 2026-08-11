@@ -156,7 +156,7 @@ pub(crate) fn reg_cast(
     let oid = match value {
         Datum::Text(text) => match parse_oid_literal(kind, text.trim()) {
             Some(oid) => oid,
-            None => resolve(kind, text.trim(), kv)?,
+            None => resolve(kind, text.trim(), kv, ctx.resolution())?,
         },
         Datum::Int4(oid) => *oid,
         Datum::Int8(oid) => match i32::try_from(*oid) {
@@ -215,13 +215,18 @@ fn parse_oid_literal(kind: RegKind, text: &str) -> Option<i32> {
 /// Resolve a written name to an oid, raising exactly what the named type's
 /// input function raises when it cannot. Only the seven types this module owns
 /// reach here; the other four are delegated in [`reg_cast`].
-fn resolve(kind: RegKind, written: &str, kv: &dyn Kv) -> Result<i32, ExecError> {
+fn resolve(
+    kind: RegKind,
+    written: &str,
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+) -> Result<i32, ExecError> {
     match kind {
-        RegKind::Type => crate::exec::resolve_type_name(kv, written),
+        RegKind::Type => crate::exec::resolve_type_name(kv, scope, written),
         RegKind::Proc => resolve_proc(kv, written),
-        RegKind::Procedure => resolve_procedure(kv, written),
+        RegKind::Procedure => resolve_procedure(kv, scope, written),
         RegKind::Oper => resolve_oper(written),
-        RegKind::Operator => resolve_operator(kv, written),
+        RegKind::Operator => resolve_operator(kv, scope, written),
         RegKind::Config => resolve_text_search(kv, written, TextSearch::Config),
         RegKind::Dictionary => resolve_text_search(kv, written, TextSearch::Dictionary),
         RegKind::Namespace => resolve_namespace(kv, written),
@@ -519,8 +524,12 @@ fn proc_name(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
 /// `regprocedurein`: a function name plus the argument types that pick one
 /// overload out. Given those, there is never more than one match, which is why
 /// this has no ambiguity case where [`resolve_proc`] does.
-fn resolve_procedure(kv: &dyn Kv, written: &str) -> Result<i32, ExecError> {
-    let (name, args) = split_name_and_arg_types(kv, written, false)?;
+fn resolve_procedure(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    written: &str,
+) -> Result<i32, ExecError> {
+    let (name, args) = split_name_and_arg_types(kv, scope, written, false)?;
     let (schema, name, _) = qualified(&name)?;
     let wanted: Vec<Datum> = args.into_iter().map(Datum::Int4).collect();
     let namespace = schema
@@ -603,8 +612,12 @@ fn resolve_oper(written: &str) -> Result<i32, ExecError> {
 
 /// `regoperatorin`: an operator name plus its two operand types, `NONE`
 /// standing in for the missing side of a unary operator.
-fn resolve_operator(kv: &dyn Kv, written: &str) -> Result<i32, ExecError> {
-    let (name, args) = split_name_and_arg_types(kv, written, true)?;
+fn resolve_operator(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    written: &str,
+) -> Result<i32, ExecError> {
+    let (name, args) = split_name_and_arg_types(kv, scope, written, true)?;
     let (schema, name, _) = qualified(&name)?;
     match args.len() {
         1 => {
@@ -682,6 +695,7 @@ fn operator_name(oid: i32) -> Option<String> {
 /// `allow_none` — the operator spelling — and an ordinary type name otherwise.
 fn split_name_and_arg_types(
     kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
     written: &str,
     allow_none: bool,
 ) -> Result<(String, Vec<i32>), ExecError> {
@@ -712,7 +726,7 @@ fn split_name_and_arg_types(
                 args.push(0);
                 continue;
             }
-            args.push(crate::exec::resolve_type_name(kv, arg)?);
+            args.push(crate::exec::resolve_type_name(kv, scope, arg)?);
         }
     }
     Ok((name, args))

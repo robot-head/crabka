@@ -282,6 +282,24 @@ pub enum RoleSpec {
     Public,
 }
 
+/// One entry of a `GRANT`/`REVOKE` privilege list, with the columns that
+/// entry alone names.
+///
+/// `PostgreSQL` hangs the column list off each privilege and not off the
+/// statement, so `GRANT SELECT (a), UPDATE (b) ON t TO r` grants `SELECT` on
+/// `a` and `UPDATE` on `b`, and neither privilege reaches the other's column.
+/// A relation-wide grant leaves `columns` empty, which is a different thing
+/// from a grant on no column: an empty written list is a syntax error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegeSpec {
+    /// The privilege keyword, upper-cased the way the parser already
+    /// upper-cases a bare privilege name.
+    pub name: String,
+    /// The columns the privilege is granted on, empty for a relation-wide
+    /// grant. Written in the order the statement wrote them.
+    pub columns: Vec<String>,
+}
+
 /// The boolean attributes a `CREATE`/`ALTER ROLE … WITH` list may set. `None`
 /// leaves the current value alone, which is what `ALTER ROLE` needs: only the
 /// options actually written are applied.
@@ -852,7 +870,9 @@ pub enum Statement {
         if_exists: bool,
     },
     /* SQL parity matrix row: GRANT. */ GrantTablePrivileges {
-        privileges: Vec<String>,
+        /// Each privilege carries its own column list, because that is where
+        /// `PostgreSQL`'s grammar attaches one. See [`PrivilegeSpec`].
+        privileges: Vec<PrivilegeSpec>,
         /// One statement may name several relations, and `PostgreSQL` applies
         /// the whole privilege set to each of them.
         tables: Vec<RelationRef>,
@@ -864,7 +884,9 @@ pub enum Statement {
         grantees: Vec<RoleSpec>,
     },
     /* SQL parity matrix row: REVOKE. */ RevokeTablePrivileges {
-        privileges: Vec<String>,
+        /// Each privilege carries its own column list, because that is where
+        /// `PostgreSQL`'s grammar attaches one. See [`PrivilegeSpec`].
+        privileges: Vec<PrivilegeSpec>,
         /// One statement may name several relations, and `PostgreSQL` applies
         /// the whole privilege set to each of them.
         tables: Vec<RelationRef>,

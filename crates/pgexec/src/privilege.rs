@@ -39,6 +39,27 @@
 //! before it looks for a stored relation — which lands in the same place
 //! `PostgreSQL` does, where they carry a `PUBLIC` `SELECT` grant.
 //!
+//! # What a column-level grant does, and what it does not
+//!
+//! `GRANT SELECT (a) ON t TO r` parses, and the catalog stores it as a real
+//! `pg_attribute.attacl` entry that `information_schema.column_privileges` and
+//! `pg_attribute` both report. It does **not** admit a read.
+//!
+//! Every question this module answers is asked about a relation, because the
+//! one place it is asked — [`ReadPermit::acquire`], reached from
+//! `exec::build_base_table` — runs before the query's projection is resolved
+//! and so does not yet know which columns will be touched. `PostgreSQL` admits
+//! the scan when the role holds `SELECT` on *any* column of the relation and
+//! then charges per referenced column; here a role holding only column grants
+//! is refused the relation outright.
+//!
+//! That is narrower than `PostgreSQL` and it fails closed, which is the safe
+//! direction. It is stated here, and pinned by
+//! `a_column_grant_does_not_admit_a_relation_read`, so that widening it is a
+//! deliberate act and not a side effect. Widening it correctly means carrying
+//! the referenced-column set to the permit, not adding a second check
+//! somewhere else.
+//!
 //! # Who may change the roles themselves
 //!
 //! [`require_role_create`], [`require_role_alter`], [`require_role_drop`] and
@@ -1073,6 +1094,55 @@ mod tests {
         grant(&kv, "stranger", &["SELECT"]);
         let permit = ReadPermit::acquire(&ctx, &table()).expect("granted");
         let _child = ReadPermit::inherited(&permit);
+    }
+
+    /// A column-level grant is stored and reported, and it does not admit a
+    /// read of the relation.
+    ///
+    /// `PostgreSQL` would let this role run `SELECT body FROM document` and
+    /// refuse `SELECT id FROM document`. crabka refuses both, because the
+    /// permit is taken before the projection is known. This test exists to make
+    /// the narrowing deliberate: the day the read path learns which columns a
+    /// query touches, this assertion is the one that has to be rewritten, and
+    /// until then it stops a column grant quietly becoming a relation grant.
+    #[test]
+    fn a_column_grant_does_not_admit_a_relation_read() {
+        let kv = store(&[("reader", RoleAttributes::default(), &[])]);
+        let ctx = PrivilegeCtx::new(&kv, "reader");
+        let ops = crabka_pgcatalog::grant_column_privileges_ops(
+            &kv,
+            &table().name,
+            &["body".to_string()],
+            &["reader".to_string()],
+            &["SELECT".to_string()],
+        )
+        .expect("grant");
+        kv.write_batch(&ops).expect("apply");
+
+        // Stored: the catalog answers for the granted column and only it.
+        assert!(
+            crabka_pgcatalog::has_stored_column_privilege(
+                &kv,
+                &table().name,
+                "body",
+                "reader",
+                "SELECT"
+            )
+            .expect("read")
+        );
+        assert!(
+            !crabka_pgcatalog::has_stored_column_privilege(
+                &kv,
+                &table().name,
+                "id",
+                "reader",
+                "SELECT"
+            )
+            .expect("read")
+        );
+        // Not admitted: the relation-level answer is unmoved.
+        assert!(!holds(&ctx, &table().name, OWNER, Privilege::Select).expect("decide"));
+        assert!(ReadPermit::acquire(&ctx, &table()).is_err());
     }
 
     /// Which privileges each write action demands, and the `SELECT` a statement

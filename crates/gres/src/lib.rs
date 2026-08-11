@@ -2775,6 +2775,13 @@ impl Engine for RuntimeEngine {
 }
 
 impl Session for RuntimeSession {
+    fn set_database(&mut self, name: &str) {
+        match self {
+            Self::Single(session) => session.set_database(name),
+            Self::Multi(session) => session.set_database(name),
+        }
+    }
+
     async fn startup_parameter(
         &mut self,
         name: &str,

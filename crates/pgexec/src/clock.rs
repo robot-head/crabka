@@ -206,6 +206,18 @@ impl EvalCtx {
             .as_deref()
             .unwrap_or_else(|| crate::relname::ResolutionScope::default_scope())
     }
+
+    /// The database this session connected to.
+    ///
+    /// `current_database()`, the single `pg_database` row, `pg_stat_activity`
+    /// and every `information_schema` `*_catalog` column answer with this, so a
+    /// client that connected as `dbname=sales` is never told it is somewhere
+    /// else. It rides on the resolution scope because the same name decides
+    /// whether a three-part `sales.public.t` is a local reference or a
+    /// cross-database one.
+    pub(crate) fn database(&self) -> &str {
+        &self.resolution().database
+    }
 }
 
 impl EvalCtx {

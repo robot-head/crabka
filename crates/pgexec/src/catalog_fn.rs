@@ -1460,7 +1460,7 @@ pub(crate) fn resolve_relation_in_scope(
     scope: &ResolutionScope,
     name: &str,
 ) -> Result<i32, ExecError> {
-    let written = parse_written_relation(name)?;
+    let written = parse_written_relation(scope, name)?;
     let schemas = match &written.reference.schema {
         Some(schema) => vec![schema.clone()],
         None => scope.visible_schemas(kv)?,
@@ -1565,7 +1565,7 @@ fn resolve_relation_name(
     crate::relname::resolve_relation(
         kv,
         scope,
-        &parse_written_relation(name)?.reference,
+        &parse_written_relation(scope, name)?.reference,
         crate::relname::SchemaDisposition::Reference,
     )
 }

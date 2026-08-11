@@ -593,6 +593,7 @@ mod tests {
             ),
             user: crate::catalog_fn::OBJECT_OWNER.to_string(),
             backend_id: 1,
+            ..ResolutionScope::default()
         };
         EvalCtx {
             catalog: Some(std::sync::Arc::clone(kv)),

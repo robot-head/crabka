@@ -953,6 +953,15 @@ where
     // `ParameterStatus` burst, so the client gets `ErrorResponse` and nothing
     // else.
     let mut session = engine.connect_with_pid(cancel.pid);
+    // `database` is not a GUC, so it does not go through `startup_parameter`;
+    // it is the session's identity and the engine is told it outright. Dropping
+    // it here is what made every session believe it was in `postgres`.
+    if let Some((_, database)) = startup_params
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("database"))
+    {
+        session.set_database(database);
+    }
     for (name, value) in &startup_params {
         if !matches!(name.as_str(), "user" | "database")
             && let Err(error) = session.startup_parameter(name, value).await

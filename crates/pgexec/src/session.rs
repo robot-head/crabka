@@ -2711,6 +2711,16 @@ pub struct SqlSession {
     /// in `BackendKeyData` and stamps on the notifications this session
     /// publishes, and the one `pg_backend_pid()` answers with.
     backend_pid: i32,
+    /// The database this connection asked for in its startup packet.
+    ///
+    /// The engine serves one database per process and does not police the
+    /// name, so this is the connection's name for it rather than the server's:
+    /// `current_database()`, the one `pg_database` row, `pg_stat_activity` and
+    /// the `information_schema` `*_catalog` columns all answer with it, so a
+    /// client is never told it is somewhere other than where it connected. A
+    /// session built without a startup packet keeps
+    /// [`crate::exec::DEFAULT_DATABASE`].
+    database: String,
     session_user: String,
     current_role: String,
     /// The row-security recursion guard, one per session. A session runs one
@@ -3177,6 +3187,7 @@ impl SqlSession {
             event_trigger: None,
             notify_replication,
             backend_pid,
+            database: crate::exec::DEFAULT_DATABASE.into(),
             session_user: "public".into(),
             current_role: "public".into(),
             policy_stack: crate::rls::PolicyStack::default(),
@@ -3209,6 +3220,7 @@ impl SqlSession {
             ),
             user: self.current_role.clone(),
             backend_id: self.backend_pid,
+            database: self.database.clone(),
         }
     }
 
@@ -5364,7 +5376,9 @@ impl SqlSession {
             }
             ReindexTarget::Database(database) => {
                 self.prevent_in_transaction_block("REINDEX DATABASE")?;
-                if let Some(error) = crate::exec::reindex_other_database(database.as_deref()) {
+                if let Some(error) =
+                    crate::exec::reindex_other_database(&self.database, database.as_deref())
+                {
                     return Err(error);
                 }
             }
@@ -5375,7 +5389,9 @@ impl SqlSession {
                 if options.concurrently {
                     return Err(crate::exec::reindex_concurrent_system_refusal());
                 }
-                if let Some(error) = crate::exec::reindex_other_database(database.as_deref()) {
+                if let Some(error) =
+                    crate::exec::reindex_other_database(&self.database, database.as_deref())
+                {
                     return Err(error);
                 }
             }
@@ -14769,6 +14785,10 @@ fn attach_range_literal_position(sql: &str, error: PgError) -> PgError {
 }
 
 impl Session for SqlSession {
+    fn set_database(&mut self, name: &str) {
+        self.database = name.to_string();
+    }
+
     async fn startup_parameter(&mut self, name: &str, value: &str) -> Result<(), PgError> {
         if name == "options" {
             let words = shlex::split(value)

@@ -1745,9 +1745,12 @@ fn eval_eager(
                 .insert(name, value);
             Ok(Datum::Int8(value))
         }
+        // The database the session connected to, which is also the one
+        // `pg_database` row's `datname`. The two read the same field so they
+        // cannot disagree; they used to be two separate literals.
         ScalarFunc::CurrentDatabase => {
             require_arity(fc, vals.is_empty())?;
-            Ok(Datum::Text("postgres".into()))
+            Ok(Datum::Text(ctx.database().to_string()))
         }
         ScalarFunc::GetDatabaseEncoding => {
             require_arity(fc, vals.is_empty())?;

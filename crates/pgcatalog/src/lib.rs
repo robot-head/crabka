@@ -663,6 +663,30 @@ pub struct TablePrivilege {
     pub privilege: String,
 }
 
+/// One recorded `GRANT … (column) ON relation TO grantee` — `PostgreSQL`'s
+/// `pg_attribute.attacl`, one row per bit rather than one array per column.
+///
+/// It is a record of its own rather than a field on [`TablePrivilege`] because
+/// the two answer different questions and neither implies the other:
+/// `GRANT SELECT ON t` lets a grantee read every column, present and future,
+/// while `GRANT SELECT (a) ON t` lets it read exactly `a`. Keeping them in
+/// separate key ranges means a relation-level scan never has to step over the
+/// column grants, and a column check never has to filter them out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnPrivilege {
+    /// The relation the column belongs to.
+    pub table: RelationName,
+    /// The column name, stored exactly as the statement spelled it after the
+    /// parser folded case. Unlike [`Self::privilege`] it is not uppercased,
+    /// because a quoted column name is case-sensitive.
+    pub column: String,
+    /// The role the grant names, which may be [`PUBLIC_ROLE`].
+    pub grantee: String,
+    /// One name from [`COLUMN_PRIVILEGES`], uppercased. `ALL` is never stored:
+    /// see [`expand_column_privileges`].
+    pub privilege: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     pub id: TableId,
@@ -2281,8 +2305,9 @@ pub fn drop_schema_ops(
 /// Build the atomic catalog batch for renaming an ordinary or foreign table.
 ///
 /// Immutable IDs key the rows and the local secondary-index entries, so their
-/// physical keys do not move. Index *metadata* and table privileges carry the
-/// table name and are rewritten in the same batch. Index names are preserved.
+/// physical keys do not move. Index *metadata* and both the table-level and
+/// column-level privileges carry the table name and are rewritten in the same
+/// batch. Index names are preserved.
 /// Foreign keys are id-keyed on both sides, so only the denormalized display
 /// names in their payloads are rewritten — on the table's own constraints and
 /// on every constraint that references it. Row-security policies need no
@@ -2358,6 +2383,20 @@ pub fn rename_table_ops(
         ops.push(WriteOp::Put {
             key: table_privilege_key(new_name, &privilege.grantee, &privilege.privilege),
             value: serialize_table_privilege(new_name, &privilege.grantee, &privilege.privilege),
+        });
+    }
+    for (privilege_key, bytes) in kv.scan_prefix(&column_privilege_relation_prefix(name))? {
+        let privilege = deserialize_column_privilege(&bytes)?;
+        let ColumnPrivilege {
+            column,
+            grantee,
+            privilege,
+            ..
+        } = &privilege;
+        ops.push(WriteOp::Delete { key: privilege_key });
+        ops.push(WriteOp::Put {
+            key: column_privilege_key(new_name, column, grantee, privilege),
+            value: serialize_column_privilege(new_name, column, grantee, privilege),
         });
     }
     ops.extend(rename_table_foreign_key_ops(kv, table_id, new_name)?);
@@ -2757,6 +2796,7 @@ pub fn drop_view_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, C
             key: view_key(name),
         }];
         ops.extend(drop_table_privilege_ops(kv, name)?);
+        ops.extend(drop_relation_column_privilege_ops(kv, name)?);
         return Ok(ops);
     }
     if kv.get(&catalog_key(name))?.is_some() {
@@ -4248,6 +4288,7 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
     // an unrelated later one.
     ops.extend(policy::drop_policies_for_table_ops(kv, table.id)?);
     ops.extend(drop_table_privilege_ops(kv, name)?);
+    ops.extend(drop_relation_column_privilege_ops(kv, name)?);
     Ok(ops)
 }
 
@@ -4262,6 +4303,23 @@ fn drop_table_privilege_ops(
 ) -> Result<Vec<WriteOp>, CatalogError> {
     Ok(kv
         .scan_prefix(&table_privilege_relation_prefix(name))?
+        .into_iter()
+        .map(|(key, _)| WriteOp::Delete { key })
+        .collect())
+}
+
+/// Delete every *column* grant recorded against a relation name, for the same
+/// reason as [`drop_table_privilege_ops`]: the keys carry the name, and the
+/// name can come back attached to a different relation.
+///
+/// This is the whole-relation sweep. To drop one column's grants — what
+/// `ALTER TABLE … DROP COLUMN` needs — use [`drop_column_privileges_ops`].
+fn drop_relation_column_privilege_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    Ok(kv
+        .scan_prefix(&column_privilege_relation_prefix(name))?
         .into_iter()
         .map(|(key, _)| WriteOp::Delete { key })
         .collect())
@@ -4284,6 +4342,7 @@ pub fn drop_table(kv: &dyn Kv, name: &RelationName) -> Result<(), CatalogError> 
 const ROLE_PREFIX: &[u8] = b"catalog/role/";
 const ROLE_MEMBERSHIP_PREFIX: &[u8] = b"catalog/role_membership/";
 const TABLE_PRIVILEGE_PREFIX: &[u8] = b"catalog/table_privilege/";
+const COLUMN_PRIVILEGE_PREFIX: &[u8] = b"catalog/column_privilege/";
 const SCHEMA_PRIVILEGE_PREFIX: &[u8] = b"catalog/schema_privilege/";
 
 /// Create a role or login-capable user metadata row.
@@ -4625,6 +4684,11 @@ pub fn drop_role_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogErr
             ops.push(WriteOp::Delete { key });
         }
     }
+    for (key, privilege) in scan_column_privileges(kv)? {
+        if privilege.grantee == name {
+            ops.push(WriteOp::Delete { key });
+        }
+    }
     for (key, _) in kv.scan_prefix(SCHEMA_PRIVILEGE_PREFIX)? {
         let Some(parts) = key::key_parts(&key[SCHEMA_PRIVILEGE_PREFIX.len()..], 3) else {
             return Err(KvError::CorruptRow("schema privilege key is incomplete".into()).into());
@@ -4801,6 +4865,204 @@ pub fn has_stored_table_privilege(
         .is_some())
 }
 
+/// The privileges `PostgreSQL` 18 lets a grant name a *column* of, which is
+/// what `ALL PRIVILEGES (column)` names.
+///
+/// A strict subset of [`TABLE_PRIVILEGES`]: `src/include/utils/acl.h` defines
+/// `ACL_ALL_RIGHTS_COLUMN` as `INSERT|SELECT|UPDATE|REFERENCES`, and the grant
+/// path rejects every other bit with "invalid privilege type … for column".
+/// `DELETE`, `TRUNCATE`, `TRIGGER` and `MAINTAIN` act on a whole relation, so
+/// naming one column of it is meaningless rather than merely unimplemented.
+///
+/// Public for the reason [`TABLE_PRIVILEGES`] is: the set a grant can record is
+/// also the set a privilege *question* may be asked about, and deriving it a
+/// second time is how the two would drift.
+pub const COLUMN_PRIVILEGES: &[&str] = &["SELECT", "INSERT", "UPDATE", "REFERENCES"];
+
+/// Build write ops for recording column privilege grants.
+///
+/// Every named grantee takes every named privilege on every named column, which
+/// is the cross product `GRANT SELECT, UPDATE (a, b) ON t TO r, s` sets bits
+/// for.
+///
+/// Whether the columns are columns of the relation is the caller's question,
+/// not this one's — the same call that parsed the statement holds the relation
+/// and can say `42703` about a name that is not there, and this seam builds
+/// grants for relations it holds no record of at all.
+///
+/// # Errors
+///
+/// Returns undefined-object for a grantee no role holds, or storage/corruption
+/// errors from the catalog KV seam.
+pub fn grant_column_privileges_ops(
+    kv: &dyn Kv,
+    table: &RelationName,
+    columns: &[String],
+    grantees: &[String],
+    privileges: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    column_privilege_ops(kv, table, columns, grantees, privileges, true)
+}
+
+/// Build write ops for removing recorded column privilege grants.
+///
+/// # Errors
+///
+/// Returns undefined-object for a grantee no role holds, or storage/corruption
+/// errors from the catalog KV seam.
+pub fn revoke_column_privileges_ops(
+    kv: &dyn Kv,
+    table: &RelationName,
+    columns: &[String],
+    grantees: &[String],
+    privileges: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    column_privilege_ops(kv, table, columns, grantees, privileges, false)
+}
+
+fn column_privilege_ops(
+    kv: &dyn Kv,
+    table: &RelationName,
+    columns: &[String],
+    grantees: &[String],
+    privileges: &[String],
+    grant: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let privileges = expand_column_privileges(privileges);
+    let mut ops = Vec::new();
+    for grantee in grantees {
+        if !role_is_nameable(kv, grantee)? {
+            return Err(CatalogError::UndefinedObject(grantee.clone()));
+        }
+        for column in columns {
+            for privilege in &privileges {
+                let key = column_privilege_key(table, column, grantee, privilege);
+                ops.push(if grant {
+                    WriteOp::Put {
+                        value: serialize_column_privilege(table, column, grantee, privilege),
+                        key,
+                    }
+                } else {
+                    WriteOp::Delete { key }
+                });
+            }
+        }
+    }
+    Ok(ops)
+}
+
+/// Resolve a statement's privilege list to the exact set of names a column
+/// grant is stored under.
+///
+/// The counterpart of the relation-level expansion, and `ALL` is expanded at
+/// *both* grant and revoke time for the same reason: a stored `ALL` row would
+/// answer neither `GRANT ALL (a)` then `REVOKE SELECT (a)` nor
+/// `GRANT SELECT (a)` then `REVOKE ALL (a)`.
+///
+/// It expands to [`COLUMN_PRIVILEGES`], not to the relation-level set, so
+/// `GRANT ALL (a)` records the four bits `PostgreSQL` records and not four
+/// more that no column grant can carry.
+#[must_use]
+pub fn expand_column_privileges(privileges: &[String]) -> Vec<String> {
+    privileges
+        .iter()
+        .flat_map(|privilege| {
+            let privilege = privilege.trim().to_ascii_uppercase();
+            if privilege == "ALL" || privilege == "ALL PRIVILEGES" {
+                COLUMN_PRIVILEGES.iter().map(|p| (*p).to_string()).collect()
+            } else {
+                vec![privilege]
+            }
+        })
+        .collect()
+}
+
+/// List every recorded column privilege in the cluster.
+///
+/// This is the whole-namespace scan `information_schema.column_privileges`
+/// wants. An enforcement check wants [`column_privileges_of`] or
+/// [`has_stored_column_privilege`] instead.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn list_column_privileges(kv: &dyn Kv) -> Result<Vec<ColumnPrivilege>, CatalogError> {
+    scan_column_privileges(kv).map(|entries| {
+        entries
+            .into_iter()
+            .map(|(_, privilege)| privilege)
+            .collect()
+    })
+}
+
+/// Every recorded column grant on one relation.
+///
+/// A range scan rather than a filter over [`list_column_privileges`], for the
+/// reason [`table_privileges_of`] is: a per-statement check must not cost the
+/// whole cluster's grants. The key layout puts schema and name first so this
+/// is one range, and the column next so a single column's grants are a
+/// sub-range of it.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn column_privileges_of(
+    kv: &dyn Kv,
+    table: &RelationName,
+) -> Result<Vec<ColumnPrivilege>, CatalogError> {
+    kv.scan_prefix(&column_privilege_relation_prefix(table))?
+        .into_iter()
+        .map(|(_, bytes)| deserialize_column_privilege(&bytes))
+        .collect()
+}
+
+/// Whether `grantee` itself holds `privilege` on `table`.`column`.
+///
+/// A point lookup on the one key that would record it. Like
+/// [`has_stored_table_privilege`] it answers the literal question only: it
+/// considers neither `PUBLIC`, role membership nor ownership, and it does not
+/// consider the relation-level grant that would cover the column as well. The
+/// caller composes all of those on top.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn has_stored_column_privilege(
+    kv: &dyn Kv,
+    table: &RelationName,
+    column: &str,
+    grantee: &str,
+    privilege: &str,
+) -> Result<bool, CatalogError> {
+    let privilege = privilege.to_ascii_uppercase();
+    Ok(kv
+        .get(&column_privilege_key(table, column, grantee, &privilege))?
+        .is_some())
+}
+
+/// Build write ops deleting every grant recorded against one column.
+///
+/// `ALTER TABLE … DROP COLUMN` needs this: the keys carry the column name, and
+/// `ADD COLUMN` can hand that name back, so a stranded grant would authorize a
+/// column its grantee was never given anything on. Dropping the whole relation
+/// needs no call here — [`drop_table_ops`] and [`drop_view_ops`] already sweep
+/// the relation's entire column-grant range.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn drop_column_privileges_ops(
+    kv: &dyn Kv,
+    table: &RelationName,
+    column: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    Ok(kv
+        .scan_prefix(&column_privilege_column_prefix(table, column))?
+        .into_iter()
+        .map(|(key, _)| WriteOp::Delete { key })
+        .collect())
+}
+
 /// Build write ops for schema privilege grants.
 ///
 /// # Errors
@@ -4919,6 +5181,13 @@ fn scan_table_privileges(kv: &dyn Kv) -> Result<Vec<(Vec<u8>, TablePrivilege)>, 
         .collect()
 }
 
+fn scan_column_privileges(kv: &dyn Kv) -> Result<Vec<(Vec<u8>, ColumnPrivilege)>, CatalogError> {
+    kv.scan_prefix(COLUMN_PRIVILEGE_PREFIX)?
+        .into_iter()
+        .map(|(key, bytes)| Ok((key, deserialize_column_privilege(&bytes)?)))
+        .collect()
+}
+
 fn role_key(name: &str) -> Vec<u8> {
     let mut key = ROLE_PREFIX.to_vec();
     key.extend_from_slice(name.as_bytes());
@@ -4947,6 +5216,41 @@ fn table_privilege_relation_prefix(table: &RelationName) -> Vec<u8> {
 
 fn table_privilege_key(table: &RelationName, grantee: &str, privilege: &str) -> Vec<u8> {
     let mut key = table_privilege_relation_prefix(table);
+    for part in [grantee, privilege] {
+        key::push_key_part(&mut key, part);
+    }
+    key
+}
+
+/// The key range holding exactly one relation's column grants.
+///
+/// A namespace of its own rather than a deeper part of the table-privilege key,
+/// so a relation-level scan cannot pick up column grants and vice versa. As
+/// there, every full key extends this one and the parts are length-prefixed, so
+/// `t`'s range does not swallow `t2`'s.
+fn column_privilege_relation_prefix(table: &RelationName) -> Vec<u8> {
+    let mut key = COLUMN_PRIVILEGE_PREFIX.to_vec();
+    for part in [&table.schema, &table.name] {
+        key::push_key_part(&mut key, part);
+    }
+    key
+}
+
+/// The key range holding exactly one column's grants — the sub-range a dropped
+/// column's cleanup deletes.
+fn column_privilege_column_prefix(table: &RelationName, column: &str) -> Vec<u8> {
+    let mut key = column_privilege_relation_prefix(table);
+    key::push_key_part(&mut key, column);
+    key
+}
+
+fn column_privilege_key(
+    table: &RelationName,
+    column: &str,
+    grantee: &str,
+    privilege: &str,
+) -> Vec<u8> {
+    let mut key = column_privilege_column_prefix(table, column);
     for part in [grantee, privilege] {
         key::push_key_part(&mut key, part);
     }
@@ -4997,6 +5301,33 @@ fn deserialize_table_privilege(bytes: &[u8]) -> Result<TablePrivilege, CatalogEr
     };
     Ok(TablePrivilege {
         table: RelationName::new(schema, table),
+        grantee: grantee.to_string(),
+        privilege: privilege.to_string(),
+    })
+}
+
+fn serialize_column_privilege(
+    table: &RelationName,
+    column: &str,
+    grantee: &str,
+    privilege: &str,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for part in [&table.schema, &table.name, column, grantee, privilege] {
+        key::push_key_part(&mut bytes, part);
+    }
+    bytes
+}
+
+fn deserialize_column_privilege(bytes: &[u8]) -> Result<ColumnPrivilege, CatalogError> {
+    let parts = key::key_parts(bytes, 5)
+        .ok_or_else(|| KvError::CorruptRow("column privilege has invalid shape".into()))?;
+    let [schema, table, column, grantee, privilege] = parts[..] else {
+        return Err(KvError::CorruptRow("column privilege has invalid shape".into()).into());
+    };
+    Ok(ColumnPrivilege {
+        table: RelationName::new(schema, table),
+        column: column.to_string(),
         grantee: grantee.to_string(),
         privilege: privilege.to_string(),
     })
@@ -6527,6 +6858,383 @@ mod tests {
 
         assert!(privilege_names(&kv, &rel("docs")).is_empty());
         assert!(privilege_names(&kv, &rel("papers")) == sorted_all_table_privileges());
+    }
+
+    fn grant_columns(
+        kv: &dyn Kv,
+        relation: &RelationName,
+        columns: &[&str],
+        grantee: &str,
+        privileges: &[&str],
+    ) {
+        let ops = grant_column_privileges_ops(
+            kv,
+            relation,
+            &strings(columns),
+            &[grantee.to_string()],
+            &strings(privileges),
+        )
+        .expect("grant ops");
+        kv.write_batch(&ops).expect("grant write");
+    }
+
+    fn revoke_columns(
+        kv: &dyn Kv,
+        relation: &RelationName,
+        columns: &[&str],
+        grantee: &str,
+        privileges: &[&str],
+    ) {
+        let ops = revoke_column_privileges_ops(
+            kv,
+            relation,
+            &strings(columns),
+            &[grantee.to_string()],
+            &strings(privileges),
+        )
+        .expect("revoke ops");
+        kv.write_batch(&ops).expect("revoke write");
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn column_grant(
+        relation: &RelationName,
+        column: &str,
+        grantee: &str,
+        privilege: &str,
+    ) -> ColumnPrivilege {
+        ColumnPrivilege {
+            table: relation.clone(),
+            column: column.to_string(),
+            grantee: grantee.to_string(),
+            privilege: privilege.to_string(),
+        }
+    }
+
+    /// Recorded column grants in a fixed order, so a whole-record comparison
+    /// does not depend on how the key encoding happens to sort.
+    fn sorted_column_grants(mut privileges: Vec<ColumnPrivilege>) -> Vec<ColumnPrivilege> {
+        privileges.sort_by(|left, right| {
+            (
+                &left.table.schema,
+                &left.table.name,
+                &left.column,
+                &left.grantee,
+                &left.privilege,
+            )
+                .cmp(&(
+                    &right.table.schema,
+                    &right.table.name,
+                    &right.column,
+                    &right.grantee,
+                    &right.privilege,
+                ))
+        });
+        privileges
+    }
+
+    /// The privilege names recorded against one column, sorted.
+    fn column_privilege_names(kv: &dyn Kv, relation: &RelationName, column: &str) -> Vec<String> {
+        let mut names: Vec<String> = column_privileges_of(kv, relation)
+            .expect("privileges")
+            .into_iter()
+            .filter(|privilege| privilege.column == column)
+            .map(|privilege| privilege.privilege)
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn sorted_all_column_privileges() -> Vec<String> {
+        let mut all: Vec<String> = COLUMN_PRIVILEGES.iter().map(|p| (*p).to_string()).collect();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn has_stored_column_privilege_is_a_point_lookup_on_all_four_parts() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        create_role(&kv, "reader", false).expect("reader");
+        create_role(&kv, "writer", false).expect("writer");
+        grant_columns(&kv, &rel("docs"), &["name"], "reader", &["select"]);
+
+        for probe in ["SELECT", "select", "SeLeCt"] {
+            assert!(
+                has_stored_column_privilege(&kv, &rel("docs"), "name", "reader", probe)
+                    .expect("lookup")
+            );
+        }
+        // One wrong part at a time: column, grantee, privilege.
+        for (column, grantee, privilege) in [
+            ("id", "reader", "SELECT"),
+            ("name", "writer", "SELECT"),
+            ("name", "reader", "UPDATE"),
+        ] {
+            assert!(
+                !has_stored_column_privilege(&kv, &rel("docs"), column, grantee, privilege)
+                    .expect("lookup"),
+                "{column}/{grantee}/{privilege}"
+            );
+        }
+    }
+
+    #[test]
+    fn column_all_expands_to_the_four_column_privileges_at_grant_and_revoke() {
+        use assert2::assert;
+
+        // (granted, revoked, what should remain)
+        let cases: [(&[&str], &[&str], &[&str]); 5] = [
+            (&["ALL"], &[], &["INSERT", "REFERENCES", "SELECT", "UPDATE"]),
+            (&["ALL"], &["SELECT"], &["INSERT", "REFERENCES", "UPDATE"]),
+            (&["SELECT"], &["ALL"], &[]),
+            (&["ALL PRIVILEGES"], &["all"], &[]),
+            (&["select", "insert"], &["SELECT"], &["INSERT"]),
+        ];
+
+        for (index, (granted, revoked, remaining)) in cases.into_iter().enumerate() {
+            let kv = MemKv::new();
+            let relation = rel(&format!("t{index}"));
+            create_table(&kv, &relation, cols()).expect("table");
+            grant_columns(&kv, &relation, &["name"], PUBLIC_ROLE, granted);
+            revoke_columns(&kv, &relation, &["name"], PUBLIC_ROLE, revoked);
+
+            assert!(column_privilege_names(&kv, &relation, "name") == strings(remaining));
+        }
+
+        // `ALL` on a column is the column mask, not the relation mask: the four
+        // relation-only names must never be recorded against a column.
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        grant_columns(&kv, &rel("docs"), &["name"], PUBLIC_ROLE, &["ALL"]);
+        assert!(
+            column_privilege_names(&kv, &rel("docs"), "name") == sorted_all_column_privileges()
+        );
+        for relation_only in ["DELETE", "TRUNCATE", "TRIGGER", "MAINTAIN"] {
+            assert!(
+                !has_stored_column_privilege(&kv, &rel("docs"), "name", PUBLIC_ROLE, relation_only)
+                    .expect("lookup"),
+                "{relation_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn revoking_one_column_privilege_leaves_its_siblings() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        create_role(&kv, "reader", false).expect("reader");
+        grant_columns(
+            &kv,
+            &rel("docs"),
+            &["id", "name"],
+            "reader",
+            &["SELECT", "UPDATE"],
+        );
+        grant_columns(&kv, &rel("docs"), &["name"], PUBLIC_ROLE, &["SELECT"]);
+        revoke_columns(&kv, &rel("docs"), &["name"], "reader", &["SELECT"]);
+
+        assert!(
+            sorted_column_grants(column_privileges_of(&kv, &rel("docs")).expect("privileges"))
+                == vec![
+                    column_grant(&rel("docs"), "id", "reader", "SELECT"),
+                    column_grant(&rel("docs"), "id", "reader", "UPDATE"),
+                    column_grant(&rel("docs"), "name", PUBLIC_ROLE, "SELECT"),
+                    column_grant(&rel("docs"), "name", "reader", "UPDATE"),
+                ]
+        );
+    }
+
+    #[test]
+    fn column_privileges_of_returns_only_the_named_relation() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        // `t` is a byte-prefix of `t2`, as in the relation-level case.
+        create_table(&kv, &rel("t"), cols()).expect("t");
+        create_table(&kv, &rel("t2"), cols()).expect("t2");
+        grant_columns(&kv, &rel("t"), &["name"], PUBLIC_ROLE, &["SELECT"]);
+        grant_columns(&kv, &rel("t2"), &["id"], PUBLIC_ROLE, &["INSERT"]);
+
+        assert!(
+            column_privileges_of(&kv, &rel("t")).expect("privileges")
+                == vec![column_grant(&rel("t"), "name", PUBLIC_ROLE, "SELECT")]
+        );
+        assert!(
+            column_privileges_of(&kv, &rel("t2")).expect("privileges")
+                == vec![column_grant(&rel("t2"), "id", PUBLIC_ROLE, "INSERT")]
+        );
+        assert!(
+            sorted_column_grants(list_column_privileges(&kv).expect("privileges"))
+                == vec![
+                    column_grant(&rel("t"), "name", PUBLIC_ROLE, "SELECT"),
+                    column_grant(&rel("t2"), "id", PUBLIC_ROLE, "INSERT"),
+                ]
+        );
+    }
+
+    /// The two grant kinds share a relation but not a key range, so neither
+    /// scan can see the other's rows.
+    #[test]
+    fn a_relation_grant_and_a_column_grant_do_not_collide() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        create_role(&kv, "reader", false).expect("reader");
+        grant(&kv, &rel("docs"), "reader", &["SELECT"]);
+        grant_columns(&kv, &rel("docs"), &["name"], "reader", &["SELECT"]);
+
+        assert!(
+            list_table_privileges(&kv).expect("privileges")
+                == vec![TablePrivilege {
+                    table: rel("docs"),
+                    grantee: "reader".into(),
+                    privilege: "SELECT".into(),
+                }]
+        );
+        assert!(
+            list_column_privileges(&kv).expect("privileges")
+                == vec![column_grant(&rel("docs"), "name", "reader", "SELECT")]
+        );
+
+        // Revoking one leaves the other exactly as it was.
+        revoke_columns(&kv, &rel("docs"), &["name"], "reader", &["SELECT"]);
+        assert!(list_column_privileges(&kv).expect("privileges").is_empty());
+        assert!(has_stored_table_privilege(&kv, &rel("docs"), "reader", "SELECT").expect("lookup"));
+    }
+
+    #[test]
+    fn column_grants_refuse_a_grantee_no_role_holds() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+
+        for grantee in [PUBLIC_ROLE, BOOTSTRAP_ROLE] {
+            assert!(
+                grant_column_privileges_ops(
+                    &kv,
+                    &rel("docs"),
+                    &strings(&["name"]),
+                    &[grantee.to_string()],
+                    &strings(&["SELECT"]),
+                )
+                .is_ok()
+            );
+        }
+        for ops in [
+            grant_column_privileges_ops(
+                &kv,
+                &rel("docs"),
+                &strings(&["name"]),
+                &strings(&["nobody"]),
+                &strings(&["SELECT"]),
+            ),
+            revoke_column_privileges_ops(
+                &kv,
+                &rel("docs"),
+                &strings(&["name"]),
+                &strings(&["nobody"]),
+                &strings(&["SELECT"]),
+            ),
+        ] {
+            assert!(
+                ops.expect_err("an unheld name is not a grantee")
+                    == CatalogError::UndefinedObject("nobody".into())
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_a_relation_takes_its_column_grants_with_it() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        view_fixture(&kv, "docs_v");
+        grant_columns(&kv, &rel("docs"), &["id", "name"], PUBLIC_ROLE, &["ALL"]);
+        grant_columns(&kv, &rel("docs_v"), &["total"], PUBLIC_ROLE, &["SELECT"]);
+
+        drop_table(&kv, &rel("docs")).expect("drop table");
+        assert!(column_privileges_of(&kv, &rel("docs")).expect("privileges") == vec![]);
+        assert!(
+            column_privileges_of(&kv, &rel("docs_v")).expect("privileges")
+                == vec![column_grant(&rel("docs_v"), "total", PUBLIC_ROLE, "SELECT")]
+        );
+
+        drop_view(&kv, &rel("docs_v")).expect("drop view");
+        assert!(list_column_privileges(&kv).expect("privileges").is_empty());
+
+        // A recreated name must start with no grants, which is the leak the
+        // deletion exists to prevent.
+        create_table(&kv, &rel("docs"), cols()).expect("recreate");
+        assert!(
+            !has_stored_column_privilege(&kv, &rel("docs"), "name", PUBLIC_ROLE, "SELECT")
+                .expect("lookup")
+        );
+    }
+
+    #[test]
+    fn renaming_a_table_moves_its_column_grants_to_the_new_name() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        grant_columns(&kv, &rel("docs"), &["name"], PUBLIC_ROLE, &["ALL"]);
+        let ops = rename_table_ops(&kv, &rel("docs"), &rel("papers")).expect("rename ops");
+        kv.write_batch(&ops).expect("rename write");
+
+        assert!(column_privileges_of(&kv, &rel("docs")).expect("privileges") == vec![]);
+        assert!(
+            sorted_column_grants(column_privileges_of(&kv, &rel("papers")).expect("privileges"))
+                == sorted_all_column_privileges()
+                    .iter()
+                    .map(|privilege| column_grant(&rel("papers"), "name", PUBLIC_ROLE, privilege))
+                    .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dropping_a_column_takes_only_that_columns_grants() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        create_role(&kv, "reader", false).expect("reader");
+        grant_columns(&kv, &rel("docs"), &["id", "name"], "reader", &["ALL"]);
+        grant_columns(&kv, &rel("docs"), &["name"], PUBLIC_ROLE, &["SELECT"]);
+
+        let ops = drop_column_privileges_ops(&kv, &rel("docs"), "name").expect("drop ops");
+        kv.write_batch(&ops).expect("drop write");
+
+        assert!(column_privilege_names(&kv, &rel("docs"), "name") == Vec::<String>::new());
+        assert!(column_privilege_names(&kv, &rel("docs"), "id") == sorted_all_column_privileges());
+    }
+
+    #[test]
+    fn dropping_a_role_takes_its_column_grants_with_it() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        create_table(&kv, &rel("docs"), cols()).expect("table");
+        create_role(&kv, "reader", false).expect("reader");
+        grant_columns(&kv, &rel("docs"), &["name"], "reader", &["SELECT"]);
+        grant_columns(&kv, &rel("docs"), &["name"], PUBLIC_ROLE, &["SELECT"]);
+
+        drop_role(&kv, "reader").expect("drop role");
+
+        assert!(
+            list_column_privileges(&kv).expect("privileges")
+                == vec![column_grant(&rel("docs"), "name", PUBLIC_ROLE, "SELECT")]
+        );
     }
 
     fn check_crud(kv: &dyn Kv) {

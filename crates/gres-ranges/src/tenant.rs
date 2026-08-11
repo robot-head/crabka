@@ -3379,6 +3379,17 @@ impl From<PgError> for GlobalCommitError {
 }
 
 impl Session for GatewaySession {
+    /// Every hosted range's session learns the connected database, because any
+    /// of them may be the one that answers a `pg_database` or
+    /// `current_database()` read. A gateway session's range sessions are all
+    /// opened together in `open_session`, so setting them here reaches all of
+    /// them; a range that arrives later is not seated on this connection.
+    fn set_database(&mut self, name: &str) {
+        for session in self.sessions.values_mut() {
+            session.set_database(name);
+        }
+    }
+
     fn take_notifications(&mut self) -> Option<tokio::sync::mpsc::Receiver<Notification>> {
         self.notifications.take()
     }

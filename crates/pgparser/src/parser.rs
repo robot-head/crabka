@@ -4325,6 +4325,7 @@ impl Parser {
         // object-type keyword, exactly as `SCHEMA name_list` reads in
         // PostgreSQL's `privilege_target`.
         if self.peek_n_is_col_id(1) && self.eat_keyword(Keyword::Schema) {
+            let privileges = self.schema_privilege_names(privileges)?;
             let schemas = self.object_name_list()?;
             self.expect(&Token::Keyword(Keyword::To))?;
             let grantees = self.grantee_list()?;
@@ -4374,6 +4375,7 @@ impl Parser {
         // As in `GRANT`: a bare `REVOKE SELECT ON schema FROM r` revokes on a
         // table called `schema`, and only `SCHEMA <name>` is the object type.
         if self.peek_n_is_col_id(1) && self.eat_keyword(Keyword::Schema) {
+            let privileges = self.schema_privilege_names(privileges)?;
             let schemas = self.object_name_list()?;
             self.expect(&Token::Keyword(Keyword::From))?;
             let grantees = self.grantee_list()?;
@@ -4463,9 +4465,10 @@ impl Parser {
     /// A privilege list is closed by `ON`; a role list by `TO` (`GRANT`) or
     /// `FROM` (`REVOKE`). Scanning for whichever comes first is what makes
     /// `GRANT SELECT ON t TO r` and `GRANT selectors TO r` distinguishable
-    /// without reserving any of the words in between. Parenthesised column
-    /// lists (`GRANT SELECT (a, b) ON …`) are skipped so a `to` column name
-    /// cannot masquerade as the list terminator.
+    /// without reserving any of the words in between. A parenthesised column
+    /// list (`GRANT SELECT (a, b) ON …`) is skipped so a column called `to`
+    /// cannot masquerade as the list terminator; the privilege branch then
+    /// reads the same parentheses again and keeps the columns.
     fn at_role_grant_list(&self) -> bool {
         let mut offset = 0;
         let mut depth = 0usize;
@@ -4492,13 +4495,15 @@ impl Parser {
         Ok(true)
     }
 
-    fn privilege_list_until_on(&mut self) -> Result<Vec<String>, ParseError> {
+    /// The `privilege [ ( column, … ) ] [, …]` list a `GRANT`/`REVOKE` opens
+    /// with, up to the `ON` that closes it.
+    fn privilege_list_until_on(&mut self) -> Result<Vec<crate::ast::PrivilegeSpec>, ParseError> {
         let mut privileges = Vec::new();
         loop {
             if matches!(self.peek(), Token::Keyword(Keyword::On)) {
                 break;
             }
-            privileges.push(self.expect_privilege_name()?);
+            privileges.push(self.privilege_spec()?);
             if !self.eat_comma() {
                 if matches!(self.peek(), Token::Keyword(Keyword::On)) {
                     break;
@@ -4516,6 +4521,44 @@ impl Parser {
             ));
         }
         Ok(privileges)
+    }
+
+    /// One `privilege [ ( column, … ) ]` entry of that list.
+    ///
+    /// `gram.y` writes the column list into the `privilege` production and not
+    /// into the statement, so each privilege carries its own: `GRANT SELECT
+    /// (a), UPDATE (b)` names one column for each and no column for both. An
+    /// empty list is not written — `PostgreSQL`'s `columnList` needs one name —
+    /// so `SELECT ()` is a syntax error rather than a grant on nothing.
+    fn privilege_spec(&mut self) -> Result<crate::ast::PrivilegeSpec, ParseError> {
+        let name = self.expect_privilege_name()?;
+        let mut columns = Vec::new();
+        if self.eat_token(&Token::LParen) {
+            columns = self.ident_list()?;
+            self.expect(&Token::RParen)?;
+        }
+        Ok(crate::ast::PrivilegeSpec { name, columns })
+    }
+
+    /// The privilege names of a `GRANT`/`REVOKE … ON SCHEMA`, which holds no
+    /// column grants.
+    ///
+    /// `PostgreSQL` parses a column list after any privilege, whatever object
+    /// type `ON` names, and refuses one on a non-relation while the statement
+    /// runs. The statement is refused either way, so it is refused here, where
+    /// the privilege list is still the only thing that has been read.
+    fn schema_privilege_names(
+        &self,
+        privileges: Vec<crate::ast::PrivilegeSpec>,
+    ) -> Result<Vec<String>, ParseError> {
+        if privileges.iter().any(|spec| !spec.columns.is_empty()) {
+            return Err(ParseError::new_sqlstate(
+                "0LP01",
+                "column privileges are only valid for relations",
+                self.peek_pos(),
+            ));
+        }
+        Ok(privileges.into_iter().map(|spec| spec.name).collect())
     }
 
     /// The comma-separated relation list a `GRANT`/`REVOKE` names. `PostgreSQL`
@@ -15455,7 +15498,7 @@ mod tests {
     fn grant_and_revoke_split_role_membership_from_privileges() {
         use assert2::assert;
 
-        use crate::ast::RoleSpec;
+        use crate::ast::{PrivilegeSpec, RelationRef, RoleSpec};
         struct Case {
             sql: &'static str,
             want: Statement,
@@ -15500,18 +15543,168 @@ mod tests {
 
         // A column list inside a privilege grant holds words that would
         // otherwise close a role list, so the scan skips it and the statement
-        // still takes the privilege branch — where column-level grants are a
-        // separate, unimplemented thing, which is what it fails as.
+        // still takes the privilege branch, which keeps the columns.
         assert!(
-            crate::parse("GRANT SELECT (a, b) ON t TO r")
-                .expect_err("column-level grants are not supported")
-                .to_string()
-                .contains("privilege list")
+            one("GRANT SELECT (a, b) ON t TO r")
+                == Statement::GrantTablePrivileges {
+                    privileges: vec![PrivilegeSpec {
+                        name: "SELECT".into(),
+                        columns: vec!["a".into(), "b".into()],
+                    }],
+                    tables: vec![RelationRef::bare("t")],
+                    grantees: vec![RoleSpec::Name("r".into())],
+                }
         );
         assert!(matches!(
             one("GRANT ALL ON SCHEMA s TO r"),
             Statement::GrantSchemaPrivileges { .. }
         ));
+    }
+
+    /// A column list binds to the privilege it follows, not to the statement.
+    ///
+    /// `gram.y` writes `opt_column_list` into the `privilege` production, so
+    /// `GRANT SELECT (a), UPDATE (b)` grants two different privileges on two
+    /// different columns. A privilege written without a list keeps an empty
+    /// one and stays a relation-wide grant.
+    #[test]
+    fn a_privilege_carries_the_columns_written_after_it() {
+        use assert2::assert;
+
+        use crate::ast::{PrivilegeSpec, RelationRef, RoleSpec};
+        fn spec(name: &str, columns: &[&str]) -> PrivilegeSpec {
+            PrivilegeSpec {
+                name: name.into(),
+                columns: columns.iter().map(|&c| c.to_string()).collect(),
+            }
+        }
+        struct Case {
+            sql: &'static str,
+            want: Statement,
+        }
+        let cases = [
+            Case {
+                sql: "GRANT SELECT ON pg_proc TO CURRENT_USER",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("SELECT", &[])],
+                    tables: vec![RelationRef::bare("pg_proc")],
+                    grantees: vec![RoleSpec::CurrentUser],
+                },
+            },
+            Case {
+                sql: "GRANT SELECT (prosrc) ON pg_proc TO CURRENT_USER",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("SELECT", &["prosrc"])],
+                    tables: vec![RelationRef::bare("pg_proc")],
+                    grantees: vec![RoleSpec::CurrentUser],
+                },
+            },
+            Case {
+                sql: "GRANT SELECT (rolname, rolsuper) ON pg_authid TO CURRENT_USER",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("SELECT", &["rolname", "rolsuper"])],
+                    tables: vec![RelationRef::bare("pg_authid")],
+                    grantees: vec![RoleSpec::CurrentUser],
+                },
+            },
+            Case {
+                sql: "GRANT SELECT (a), UPDATE (b) ON t TO r",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("SELECT", &["a"]), spec("UPDATE", &["b"])],
+                    tables: vec![RelationRef::bare("t")],
+                    grantees: vec![RoleSpec::Name("r".into())],
+                },
+            },
+            // One list, one bare privilege: the list reaches the privilege it
+            // follows and no other.
+            Case {
+                sql: "GRANT SELECT (a), UPDATE ON t TO r",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("SELECT", &["a"]), spec("UPDATE", &[])],
+                    tables: vec![RelationRef::bare("t")],
+                    grantees: vec![RoleSpec::Name("r".into())],
+                },
+            },
+            Case {
+                sql: "GRANT ALL (a) ON t TO r",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("ALL", &["a"])],
+                    tables: vec![RelationRef::bare("t")],
+                    grantees: vec![RoleSpec::Name("r".into())],
+                },
+            },
+            Case {
+                sql: "GRANT ALL (a, b) ON t TO r",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("ALL", &["a", "b"])],
+                    tables: vec![RelationRef::bare("t")],
+                    grantees: vec![RoleSpec::Name("r".into())],
+                },
+            },
+            Case {
+                sql: "REVOKE SELECT (a) ON t FROM r",
+                want: Statement::RevokeTablePrivileges {
+                    privileges: vec![spec("SELECT", &["a"])],
+                    tables: vec![RelationRef::bare("t")],
+                    grantees: vec![RoleSpec::Name("r".into())],
+                },
+            },
+            Case {
+                sql: "REVOKE SELECT (a), UPDATE (b) ON TABLE s.t FROM PUBLIC",
+                want: Statement::RevokeTablePrivileges {
+                    privileges: vec![spec("SELECT", &["a"]), spec("UPDATE", &["b"])],
+                    tables: vec![RelationRef::qualified("s", "t")],
+                    grantees: vec![RoleSpec::Public],
+                },
+            },
+            // A column is an ordinary identifier, so a bare one folds and a
+            // quoted one keeps every letter it was written with.
+            Case {
+                sql: "GRANT SELECT (\"Col\") ON t TO r",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("SELECT", &["Col"])],
+                    tables: vec![RelationRef::bare("t")],
+                    grantees: vec![RoleSpec::Name("r".into())],
+                },
+            },
+            Case {
+                sql: "GRANT SELECT (Col) ON t TO r",
+                want: Statement::GrantTablePrivileges {
+                    privileges: vec![spec("SELECT", &["col"])],
+                    tables: vec![RelationRef::bare("t")],
+                    grantees: vec![RoleSpec::Name("r".into())],
+                },
+            },
+        ];
+        for case in cases {
+            assert!(one(case.sql) == case.want, "case: {}", case.sql);
+        }
+    }
+
+    /// The column list a privilege may carry is refused where `PostgreSQL`
+    /// refuses one.
+    ///
+    /// `columnList` needs at least one name, so `()` is a syntax error, and an
+    /// unclosed list is one too. A column list on a schema grant is refused as
+    /// well: `PostgreSQL` parses it and rejects it while the statement runs,
+    /// because only a relation has columns.
+    #[test]
+    fn a_privilege_column_list_is_refused_where_postgresql_refuses_it() {
+        use assert2::assert;
+
+        for sql in [
+            "GRANT SELECT () ON t TO r",
+            "GRANT SELECT (a ON t TO r",
+            "GRANT SELECT (a,) ON t TO r",
+            "REVOKE SELECT () ON t FROM r",
+        ] {
+            assert!(crate::parse(sql).is_err(), "case: {sql}");
+        }
+
+        let refused = crate::parse("GRANT USAGE (a) ON SCHEMA s TO r")
+            .expect_err("a schema has no columns to grant on");
+        assert!(refused.sqlstate() == "0LP01");
+        assert!(refused.to_string() == "column privileges are only valid for relations");
     }
 
     /// `CREATE VIEW … WITH (…)` records the reloptions it was written with, and

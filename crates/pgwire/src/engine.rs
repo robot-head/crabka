@@ -346,6 +346,22 @@ pub trait Engine: Send + Sync + 'static {
 /// `tokio::select!`, then await [`Session::cancel_current_query`] before it
 /// reports `ReadyForQuery`. Implementations must make that pair drop-safe.
 pub trait Session: Send {
+    /// Name the database the startup packet asked for, before any GUC is
+    /// applied and before [`Session::startup`].
+    ///
+    /// This is not a GUC — `database` is not settable and a backend never
+    /// reports it — so it does not travel through
+    /// [`Session::startup_parameter`]. It is nonetheless the session's own
+    /// identity: `current_database()`, `pg_database`, `pg_stat_activity` and
+    /// the `information_schema` `*_catalog` columns all have to answer with
+    /// it, and a client that asked for one database and is told it is in
+    /// another has been lied to about where its writes went.
+    ///
+    /// The wire layer calls this exactly once per connection, and only when
+    /// the startup packet carried a name. A session that is never called keeps
+    /// whatever default it was built with.
+    fn set_database(&mut self, _name: &str) {}
+
     /// Apply a GUC supplied in the startup packet before login hooks run.
     fn startup_parameter(
         &mut self,
