@@ -3506,6 +3506,7 @@ mod tests {
         check!(completed.last_sequence == 11);
         check!(completed.current_txn_first_offset == None);
         check!(completed.coordinator_epoch == 17);
+        check!(reopened.producer_transaction_state(ProducerId(77)) == (17, None));
     }
 
     #[test]

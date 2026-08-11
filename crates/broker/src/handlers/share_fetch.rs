@@ -155,7 +155,9 @@ pub(crate) async fn handle(
         Ok(session) => session,
         Err(code) => return encode_error_response(version, code, lock_timeout_ms),
     };
-    if !session.final_request {
+    let (release_before_acquire, release_after_acquire) =
+        session_release_phases(session.final_request);
+    if release_before_acquire {
         mgr.release_session_partitions(&group, &member, &session.released)
             .await;
     }
@@ -265,7 +267,7 @@ pub(crate) async fn handle(
         req.max_wait_ms
     };
     let acquire_result = acquire_records(&acquire, &mut pending, max_wait_ms).await;
-    if session.final_request {
+    if release_after_acquire {
         mgr.release_session_partitions(&group, &member, &session.released)
             .await;
     }
@@ -319,6 +321,10 @@ fn fetch_session_flags(req: &ShareFetchRequest) -> (bool, bool) {
         .flat_map(|topic| &topic.partitions)
         .any(|partition| partition.acknowledgement_batches.is_empty());
     (has_acknowledgements, has_additions)
+}
+
+fn session_release_phases(final_request: bool) -> (bool, bool) {
+    (!final_request, final_request)
 }
 
 fn partition_response(partition_index: i32) -> PartitionData {
@@ -865,6 +871,12 @@ mod tests {
         assert!(fetch_session_flags(&request(vec![addition.clone()])) == (false, true));
         assert!(fetch_session_flags(&request(vec![acknowledgement.clone()])) == (true, false));
         assert!(fetch_session_flags(&request(vec![addition, acknowledgement])) == (true, true));
+    }
+
+    #[test]
+    fn session_release_surrounds_acquisition_at_the_required_phase() {
+        assert!(session_release_phases(false) == (true, false));
+        assert!(session_release_phases(true) == (false, true));
     }
 
     #[test]

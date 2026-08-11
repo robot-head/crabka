@@ -7172,6 +7172,59 @@ protocol = "Plaintext"
     }
 
     #[tokio::test]
+    async fn diskless_index_bootstrap_retries_until_cancelled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bootstrap = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        let snapshot_dir = tempdir().unwrap();
+        let kickoff = KafkaSwapKickoff {
+            cfg: crate::config::KafkaRlmmConfig {
+                bootstrap,
+                num_partitions: 1,
+                replication: 1,
+                snapshot_dir: snapshot_dir.path().to_path_buf(),
+                ..crate::config::KafkaRlmmConfig::default()
+            },
+            broker_id: 1,
+            bootstrap_backoff_initial: std::time::Duration::from_millis(10),
+            bootstrap_backoff_max: std::time::Duration::from_secs(1),
+            reconcile_tick: std::time::Duration::from_secs(1),
+        };
+        let (_image_tx, image_rx) = tokio::sync::watch::channel(Arc::new(
+            crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
+        ));
+        let flusher = DisklessFlusherStartup {
+            partitions: Arc::new(PartitionRegistry::new()),
+            image_rx,
+            object_store: Arc::new(object_store::memory::InMemory::new()),
+            node_id: crabka_raft::NodeId(7),
+            broker_id: 1,
+            flush_config: crate::diskless::flusher::FlushConfig::default(),
+        };
+        let shutdown = CancellationToken::new();
+        let bootstrap = bootstrap_diskless_index_log(
+            Arc::new(tokio::sync::Mutex::new(
+                crate::diskless::wal_index::WalIndexCache::default(),
+            )),
+            kickoff,
+            flusher,
+            shutdown.clone(),
+        );
+        tokio::pin!(bootstrap);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut bootstrap)
+                .await
+                .is_err()
+        );
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), bootstrap)
+            .await
+            .expect("cancelled diskless index bootstrap returns promptly");
+    }
+
+    #[tokio::test]
     async fn start_recovers_existing_partition_dirs() {
         let dir = tempdir().unwrap();
         // Create a partition dir with a log inside.

@@ -370,6 +370,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flusher_skips_noop_trim_when_writer_is_stopped() {
+        let dir = tempdir().unwrap();
+        let handle = test_partition(dir.path(), "orders", 0, true, NodeId(1));
+        let writer = handle
+            .writer_handle
+            .lock()
+            .unwrap()
+            .take()
+            .expect("partition writer");
+        writer.abort();
+        assert!(writer.await.unwrap_err().is_cancelled());
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let index = DisklessIndexLog::start(
+            crabka_remote_storage_topic::InProcessMetadataEventLog::new(1),
+        );
+        let cache = index.cache();
+        let topic_id = Uuid::from_u128(11);
+        let record = flush_once(
+            store,
+            7,
+            &index,
+            cache,
+            &[FlushPartition {
+                topic_id,
+                handle: Arc::clone(&handle),
+                high_watermark: Offset(3),
+            }],
+            &FlushConfig {
+                trim_safety_lag: Some(3),
+                ..FlushConfig::default()
+            },
+        )
+        .await
+        .expect("a no-op trim must not depend on the partition writer")
+        .expect("the durable prefix is flushed");
+
+        assert!(record.entries[0].last_offset == 2);
+        assert!(handle.log.lock().unwrap().log_start_offset() == Offset(0));
+    }
+
+    #[tokio::test]
     async fn committed_projection_wait_requires_the_record_to_be_applied() {
         let cache = Arc::new(AsyncMutex::new(WalIndexCache::default()));
         let record = WalFlushRecord {
