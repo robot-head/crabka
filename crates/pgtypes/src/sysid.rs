@@ -181,20 +181,83 @@ pub fn uint32_in(s: &str, type_name: &'static str) -> Result<u32, TypeError> {
     if rest.iter().any(|b| !is_c_space(*b)) {
         return Err(invalid());
     }
-    // `unsigned long` is wider than `uint32` here, so `strtoul` did not report
-    // the values that overflow the narrower type. `uint32in_subr` accepts one
-    // that round-trips through *either* extension, which is what lets a value
-    // written with a minus sign through.
+    narrow_to_u32(parsed.value).ok_or_else(out_of_range)
+}
+
+/// The `PG_UINT32_MAX != ULONG_MAX` tail of `uint32in_subr`.
+///
+/// `unsigned long` is wider than `uint32` on every platform crabka builds for,
+/// so `strtoul` did not report the values that overflow the narrower type.
+/// `uint32in_subr` keeps one that round-trips through *either* unsigned or
+/// signed extension, which is what lets a value written with a minus sign
+/// through: `-1` arrives here as `ULONG_MAX`, truncates to `4294967295`, and
+/// sign-extends back to `ULONG_MAX`.
+fn narrow_to_u32(value: u64) -> Option<u32> {
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the truncation is the conversion uint32in_subr performs"
     )]
-    let result = parsed.value as u32;
+    let result = value as u32;
     let signed = i64::from(result.cast_signed()).cast_unsigned();
-    if parsed.value != u64::from(result) && parsed.value != signed {
+    (value == u64::from(result) || value == signed).then_some(result)
+}
+
+/// `uint32in_subr` in the `endloc` form — the one `oidvectorin` calls, which
+/// hands the caller everything after the digits instead of insisting that only
+/// whitespace follows.
+///
+/// Returns the value and the byte offset just past the digits `strtoul`
+/// consumed. Dropping the trailing check also drops the *ordering* it imposes:
+/// with no `endloc` a trailing-junk 22P02 pre-empts the narrowing 22003, and
+/// here there is nothing left to pre-empt it.
+fn uint32_prefix_in(s: &str, type_name: &'static str) -> Result<(u32, usize), TypeError> {
+    let out_of_range = || TypeError::OutOfRange {
+        message: format!("value \"{s}\" is out of range for type {type_name}"),
+    };
+    let parsed = strtoul(s.as_bytes(), 0).ok_or_else(|| TypeError::InvalidText {
+        type_name,
+        value: s.to_string(),
+    })?;
+    if parsed.range_error {
         return Err(out_of_range());
     }
-    Ok(result)
+    let value = narrow_to_u32(parsed.value).ok_or_else(out_of_range)?;
+    Ok((value, parsed.consumed))
+}
+
+/// `PostgreSQL`'s `oidvectorin` — `"num num …"`, zero or more `oid`s.
+///
+/// The separator rule is `strtoul`'s, not a split on whitespace: an element
+/// ends at the first byte that is not a digit *of its own base*, and the scan
+/// resumes right there. Base zero means a leading `0` is octal, so `'01 01XYZ'`
+/// is two elements — both the octal `01`, both 1 — followed by the
+/// unconverted `XYZ`, and it is `XYZ` alone that the 22P02 names. Splitting on
+/// whitespace instead would make the second token `01XYZ` and name that.
+///
+/// Every error quotes the whole remaining string from the failing element's
+/// first non-space byte, which is the `s` `uint32in_subr` was handed, and names
+/// `oid` — the element type, never the vector's.
+///
+/// # Errors
+///
+/// 22P02 when an element converts no digits, 22003 when one does not fit `u32`.
+pub fn oidvector_in(s: &str) -> Result<Vec<u32>, TypeError> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    loop {
+        // `oidvectorin` skips the run of whitespace itself before each element
+        // so that an all-space tail ends the scan. Doing it here rather than
+        // leaving it to `strtoul` is also what keeps the leading spaces out of
+        // the string the error message quotes.
+        rest = rest.trim_start_matches(|c: char| u8::try_from(c).is_ok_and(is_c_space));
+        if rest.is_empty() {
+            return Ok(out);
+        }
+        let (value, consumed) = uint32_prefix_in(rest, "oid")?;
+        out.push(value);
+        // `strtoul` reported at least one digit, so this always advances.
+        rest = &rest[consumed..];
+    }
 }
 
 /// `PostgreSQL`'s `uint64in_subr` — `xid8`'s input function.
@@ -492,6 +555,78 @@ mod tests {
                     "{input:?}"
                 ),
             }
+        }
+    }
+
+    /// `oidvectorin`, which is not `uint32_in` applied to whitespace-separated
+    /// tokens. Two rules make the difference visible, and both are load-bearing
+    /// for `pg_input_error_info`:
+    ///
+    /// * an element ends where `strtoul` stops, not where the whitespace is, so
+    ///   `01XYZ` is the octal `01` followed by a separate unconvertible `XYZ`;
+    /// * an error quotes the *whole* remainder from that element's first
+    ///   non-space byte, so `1 2 XY ZW` names `XY ZW`, not `XY`.
+    ///
+    /// Contrast the scalar rows in [`uint32_in_matches_postgresql`]: `08` and
+    /// `0x` are both 22P02 there, because with no `endloc` the trailing bytes
+    /// have to be whitespace. Here they are simply the next element.
+    #[test]
+    fn oidvector_in_matches_postgresql() {
+        let cases: &[(&str, Result<&[u32], &str>)] = &[
+            // Empty and all-space are the empty vector, not an error.
+            ("", Ok(&[])),
+            ("   ", Ok(&[])),
+            ("\t \n ", Ok(&[])),
+            (" 1 2  4 ", Ok(&[1, 2, 4])),
+            ("1", Ok(&[1])),
+            ("1234 1235 987", Ok(&[1234, 1235, 987])),
+            // Base zero, per element.
+            ("010", Ok(&[8])),
+            ("0x10 0x20", Ok(&[16, 32])),
+            ("0b101 1", Ok(&[5, 1])),
+            // Unsigned: a minus sign is negation in `unsigned long`, and the
+            // narrowing check keeps whatever matches after either extension.
+            ("-1", Ok(&[4_294_967_295])),
+            ("1 -1040", Ok(&[1, 4_294_966_256])),
+            ("4294967295", Ok(&[4_294_967_295])),
+            // `strtoul` stops at the first byte that is not a digit of the base
+            // it chose, and the scan resumes there rather than erroring.
+            ("08", Ok(&[0, 8])),
+            ("01 01XYZ 1", Err("22P02: XYZ 1")),
+            ("0x", Err("22P02: x")),
+            // The failing element is named by the whole remaining string.
+            ("1 2 XY ZW", Err("22P02: XY ZW")),
+            ("1,2", Err("22P02: ,2")),
+            ("asdfasd", Err("22P02: asdfasd")),
+            (" - 500", Err("22P02: - 500")),
+            // 22003 quotes the remainder too, and names `oid`.
+            ("01 9999999999", Err("22003: 9999999999")),
+            ("4294967296", Err("22003: 4294967296")),
+            (
+                "1 18446744073709551616 2",
+                Err("22003: 18446744073709551616 2"),
+            ),
+            ("32958209582039852935", Err("22003: 32958209582039852935")),
+        ];
+        for (input, want) in cases {
+            let got = oidvector_in(input);
+            let want = match want {
+                Ok(values) => Ok((*values).to_vec()),
+                Err(spec) => {
+                    let (sqlstate, quoted) = spec.split_once(": ").expect("a coded case");
+                    Err(if sqlstate == "22P02" {
+                        TypeError::InvalidText {
+                            type_name: "oid",
+                            value: quoted.to_string(),
+                        }
+                    } else {
+                        TypeError::OutOfRange {
+                            message: format!("value \"{quoted}\" is out of range for type oid"),
+                        }
+                    })
+                }
+            };
+            assert!(got == want, "{input:?}");
         }
     }
 

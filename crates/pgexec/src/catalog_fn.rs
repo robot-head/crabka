@@ -2278,6 +2278,23 @@ pub(crate) fn default_source_text(
                 .unwrap_or_else(|_| crabka_pgtypes::RegclassValue::unresolved(value.oid));
             crate::viewdef::const_text(&Datum::Regclass(resolved), ty)
         }
+        // A bit-string default deparses with the *literal's* type, not the
+        // column's. PostgreSQL wraps the assignment coercion around the Const
+        // and `pg_get_expr` hides implicit casts, so what prints is the type
+        // the literal already had: `B'0101'` is a `bit` wherever it lands, and
+        // in a `bit varying(5)` column PostgreSQL still prints
+        // `'0101'::"bit"`. A bare `'1001'` has no type of its own, so it is
+        // read by the column's own input function and prints the column's base
+        // type. The stored datum's `varying` flag is what records which of the
+        // two happened, so this reads the flag rather than the column.
+        crabka_pgcatalog::ColumnDefault::Value(value @ Datum::BitString(bits)) => {
+            let literal = if bits.varying {
+                ColumnType::VarBit(None)
+            } else {
+                ColumnType::Bit(None)
+            };
+            crate::viewdef::const_text(value, literal)
+        }
         crabka_pgcatalog::ColumnDefault::Value(value) => crate::viewdef::const_text(value, ty),
     }
 }

@@ -189,10 +189,19 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
                 .collect();
             crate::array::literal_text(&a.dims, &elements).into_bytes()
         }
+        // `oidvectorout` prints `%u` per element, `int2vectorout` `%d`. Both
+        // land in this variant, so the element type picks the reading: an
+        // `oidvector` element is a `u32` carried in an `Int4`, and printing it
+        // signed would turn `4294967295` into `-1`.
         Datum::OidVector(a) => a
             .elems
             .iter()
-            .map(|value| String::from_utf8(encode_text_in(value, style)).expect("valid datum text"))
+            .map(|value| match value {
+                Datum::Int4(oid) if matches!(a.elem, crate::ElemType::Int4) => {
+                    oid.cast_unsigned().to_string()
+                }
+                other => String::from_utf8(encode_text_in(other, style)).expect("valid datum text"),
+            })
             .collect::<Vec<_>>()
             .join(" ")
             .into_bytes(),

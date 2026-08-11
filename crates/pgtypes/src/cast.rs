@@ -662,11 +662,18 @@ pub fn cast_in(
                 vec![crate::ArrayDim::new(0, len)],
             )))
         }
+        // `oidvectorin`, whose element reader is `oidin` — not `int4in`. The
+        // two disagree on the base (`010` is 8, not 10), on the range (an oid
+        // is unsigned, so `-1` and `4294967295` are the same legal value), on
+        // where an element ends, and on the type their errors name. The `u32`
+        // rides in an `Int4` because crabka has no `oid` element type; the bit
+        // pattern is preserved, and both the text and the binary output read it
+        // back unsigned.
         (Datum::Text(s), ColumnType::OidVector) => {
-            let elems = s
-                .split_whitespace()
-                .map(text_to_i32)
-                .collect::<Result<Vec<_>, _>>()?;
+            let elems = crate::sysid::oidvector_in(s)?
+                .into_iter()
+                .map(|oid| Datum::Int4(oid.cast_signed()))
+                .collect::<Vec<_>>();
             let len = i32::try_from(elems.len()).unwrap_or(i32::MAX);
             Ok(Datum::OidVector(crate::datum::ArrayValue::with_dims(
                 crate::ElemType::Int4,
