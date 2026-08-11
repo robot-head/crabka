@@ -788,6 +788,52 @@ mod tests {
         );
     }
 
+    /// An index key is the row encoding, so a type that the row encoding cannot
+    /// tell apart is a type the index cannot tell apart either. `oidvector` and
+    /// `integer[]` are different types that no operator compares, and they now
+    /// build different keys — a probe for one can no longer land on a row of
+    /// the other, and a unique index over a vector column no longer shares a
+    /// key space with an array of the same numbers.
+    #[test]
+    fn a_vector_and_an_array_of_the_same_numbers_build_different_index_keys() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayDim, ArrayValue, Datum, ElemType};
+
+        let value = ArrayValue::with_dims(
+            ElemType::Int4,
+            vec![Datum::Int4(1), Datum::Int4(2)],
+            vec![ArrayDim::new(0, 2)],
+        );
+        let vector = Datum::OidVector(value.clone());
+        let array = Datum::Array(value);
+
+        assert!(vector != array);
+        assert!(
+            secondary_index_entry_prefix(7, 1, std::slice::from_ref(&vector))
+                != secondary_index_entry_prefix(7, 1, std::slice::from_ref(&array))
+        );
+        // `int2vector` shares the datum variant, so the element type is what
+        // separates the two vector types — in the key as in the row.
+        let int2vector = Datum::OidVector(ArrayValue::with_dims(
+            ElemType::Int2,
+            vec![Datum::Int2(1), Datum::Int2(2)],
+            vec![ArrayDim::new(0, 2)],
+        ));
+        assert!(
+            secondary_index_entry_prefix(7, 1, std::slice::from_ref(&vector))
+                != secondary_index_entry_prefix(7, 1, std::slice::from_ref(&int2vector))
+        );
+        assert!(
+            secondary_index_rowid_of(
+                7,
+                1,
+                &secondary_index_entry_key(7, 1, std::slice::from_ref(&vector), 5)
+            )
+            .expect("rowid")
+                == 5
+        );
+    }
+
     /// Key canonicalization must not leak into row storage. A stored
     /// `interval` keeps the months, days, and micros it was given, so `1 mon`
     /// renders `1 mon` and not the `30 days` that its index key folds to.

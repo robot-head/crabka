@@ -107,6 +107,22 @@ mod tag {
     /// recomputing it on read is what keeps the two from disagreeing.
     /// Append-only — no version bump.
     pub const POLYGON: u8 = 44;
+    /// `PostgreSQL` `oidvector` and `int2vector` (`[45]` then [`ARRAY`]'s
+    /// payload). Its own tag rather than [`ARRAY`]'s, because the two are
+    /// different SQL types and only the tag says which was stored: read back
+    /// through [`ARRAY`] a stored `oidvector` becomes an `integer[]`, which
+    /// prints `[0:1]={1,2}` instead of `1 2` and which `=` refuses to compare
+    /// against an `oidvector` literal.
+    ///
+    /// One tag covers both SQL types, as one datum holds both. The element type
+    /// in the payload tells them apart — `oidvector` carries its unsigned oids
+    /// in `Int4` elements, `int2vector` its `Int2` elements — so it needs no
+    /// discriminator of its own.
+    ///
+    /// Append-only — no version bump. Every array already on disk keeps its
+    /// bytes and its meaning, and a decoder that predates this tag rejects it
+    /// as an unknown field tag rather than reading it as something else.
+    pub const OIDVECTOR: u8 = 45;
 }
 
 /// Encodes one row in the current storage format.
@@ -252,21 +268,11 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             }
             // `xml` likewise stores what it was given.
             Datum::Xml(text) => push_tagged_bytes(out, tag::XML, text.as_bytes(), "xml column"),
-            Datum::Array(a) | Datum::OidVector(a) => {
-                out.push(tag::ARRAY);
-                a.elem.write_code(out);
-                let ndim = u8::try_from(a.dims.len()).expect("array dimensions exceed a byte");
-                out.push(ndim);
-                for dim in &a.dims {
-                    out.extend_from_slice(&dim.lower.to_be_bytes());
-                    out.extend_from_slice(&dim.len.to_be_bytes());
-                }
-                let count = u32::try_from(a.elems.len()).expect("array exceeds 4G elements");
-                out.extend_from_slice(&count.to_be_bytes());
-                // Elements reuse the same tagged-field encoding, so a `jsonb`
-                // inside an array (or a NULL element) needs no special case.
-                encode_fields(&a.elems, out);
-            }
+            Datum::Array(a) => encode_array(tag::ARRAY, a, out),
+            // The vector types share the array payload but not its tag: the tag
+            // is the only thing that survives to tell the decoder which SQL type
+            // it is rebuilding.
+            Datum::OidVector(a) => encode_array(tag::OIDVECTOR, a, out),
             Datum::Record(r) => {
                 out.push(tag::RECORD);
                 out.extend_from_slice(&r.ty.map_or(0, |ty| ty.oid).to_be_bytes());
@@ -336,6 +342,27 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             }
         }
     }
+}
+
+/// Append one array-shaped value under `tag`: the element type code, the
+/// dimension header, the element count, then the elements.
+///
+/// [`tag::ARRAY`] and [`tag::OIDVECTOR`] share this payload, so the two differ
+/// on disk by their tag alone — which is what makes the decode unambiguous.
+fn encode_array(tag: u8, value: &crabka_pgtypes::ArrayValue, out: &mut Vec<u8>) {
+    out.push(tag);
+    value.elem.write_code(out);
+    let ndim = u8::try_from(value.dims.len()).expect("array dimensions exceed a byte");
+    out.push(ndim);
+    for dim in &value.dims {
+        out.extend_from_slice(&dim.lower.to_be_bytes());
+        out.extend_from_slice(&dim.len.to_be_bytes());
+    }
+    let count = u32::try_from(value.elems.len()).expect("array exceeds 4G elements");
+    out.extend_from_slice(&count.to_be_bytes());
+    // Elements reuse the same tagged-field encoding, so a `jsonb` inside an
+    // array (or a NULL element) needs no special case.
+    encode_fields(&value.elems, out);
 }
 
 /// Append one system identifier value: its own fixed-width **unsigned** value
@@ -675,23 +702,8 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 .map_err(|_| KvError::CorruptRow("xml text is not valid UTF-8".into()))?;
             Datum::Xml(text.to_string())
         }
-        tag::ARRAY => {
-            let elem = crabka_pgtypes::ElemType::read_code(cur)
-                .ok_or_else(|| KvError::CorruptRow("unknown array element code".to_string()))?;
-            let ndim = take_u8(cur)?;
-            let mut dims = Vec::new();
-            for _ in 0..ndim {
-                let lower = take_i32(cur)?;
-                let len = take_i32(cur)?;
-                dims.push(crabka_pgtypes::ArrayDim::new(lower, len));
-            }
-            let count = take_u32_len(cur)?;
-            let mut elems = Vec::new();
-            for _ in 0..count {
-                elems.push(decode_field(cur)?);
-            }
-            Datum::Array(crabka_pgtypes::ArrayValue::with_dims(elem, elems, dims))
-        }
+        tag::ARRAY => Datum::Array(decode_array(cur)?),
+        tag::OIDVECTOR => Datum::OidVector(decode_array(cur)?),
         tag::RECORD => {
             let type_oid = take_u32_len(cur)?;
             let count = take_u32_len(cur)?;
@@ -840,6 +852,27 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
     })
 }
 
+/// Read the payload [`tag::ARRAY`] and [`tag::OIDVECTOR`] share: the element
+/// type code, the dimension header, the element count, then the elements. The
+/// caller's tag decides which datum wraps the result.
+fn decode_array(cur: &mut &[u8]) -> Result<crabka_pgtypes::ArrayValue, KvError> {
+    let elem = crabka_pgtypes::ElemType::read_code(cur)
+        .ok_or_else(|| KvError::CorruptRow("unknown array element code".to_string()))?;
+    let ndim = take_u8(cur)?;
+    let mut dims = Vec::new();
+    for _ in 0..ndim {
+        let lower = take_i32(cur)?;
+        let len = take_i32(cur)?;
+        dims.push(crabka_pgtypes::ArrayDim::new(lower, len));
+    }
+    let count = take_u32_len(cur)?;
+    let mut elems = Vec::new();
+    for _ in 0..count {
+        elems.push(decode_field(cur)?);
+    }
+    Ok(crabka_pgtypes::ArrayValue::with_dims(elem, elems, dims))
+}
+
 /// A length-prefixed UTF-8 string, the shape every name and label field uses.
 fn take_text(cur: &mut &[u8], what: &str) -> Result<String, KvError> {
     let len = take_u32_len(cur)?;
@@ -964,6 +997,117 @@ mod tests {
         assert!(decode_row(&encode_row(&row)).expect("decode") == row);
     }
 
+    /// `oidvector`, `int2vector` and `integer[]` share one payload, and until
+    /// this tag existed they shared one field tag too — so a stored vector came
+    /// back an array: `[0:1]={1,2}` where `1 2` was written, and `=` against an
+    /// `oidvector` literal failed with "cannot compare integer[] and
+    /// oidvector". The decoded *variant* is the whole assertion. `Datum`
+    /// equality is false across variants, so the round trip pins it.
+    #[test]
+    fn a_vector_decodes_back_as_a_vector_and_never_as_an_array() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayDim, ArrayValue, ElemType};
+
+        let vector = |elem, elems: Vec<Datum>| {
+            let len = i32::try_from(elems.len()).expect("a test vector is short");
+            ArrayValue::with_dims(elem, elems, vec![ArrayDim::new(0, len)])
+        };
+        let cases = vec![
+            // `oidvector` is zero-based and carries its unsigned oids in `Int4`
+            // elements. 4294967295 is the one that reads back as -1 if any step
+            // on the path treats it as signed.
+            (
+                "oidvector",
+                Datum::OidVector(vector(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(2), Datum::Int4(-1)],
+                )),
+            ),
+            // `int2vector` has no datum variant of its own: it is the same
+            // vector with `Int2` elements, so it rides the same tag and the
+            // element code is what separates the two SQL types.
+            (
+                "int2vector",
+                Datum::OidVector(vector(
+                    ElemType::Int2,
+                    vec![Datum::Int2(1), Datum::Int2(-2)],
+                )),
+            ),
+            (
+                "empty oidvector",
+                Datum::OidVector(vector(ElemType::Int4, vec![])),
+            ),
+            // The adversarial twin: an ordinary array with the vector's element
+            // type, elements and zero-based dimension header. The tag is all
+            // that separates it from the first case.
+            (
+                "integer[] in a vector's shape",
+                Datum::Array(vector(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(2), Datum::Int4(-1)],
+                )),
+            ),
+            // And an ordinary one-based array, which must be untouched.
+            (
+                "integer[]",
+                Datum::Array(ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Null, Datum::Int4(3)],
+                )),
+            ),
+        ];
+
+        for (what, value) in &cases {
+            let decoded = decode_row(&encode_row(std::slice::from_ref(value))).expect("decode");
+            assert!(decoded == vec![value.clone()], "{what}");
+        }
+
+        // All of them in one row, which pins the field boundaries too: a vector
+        // must consume exactly its own bytes and leave the next field's tag
+        // where the decoder expects it.
+        let row: Vec<Datum> = cases.into_iter().map(|(_, value)| value).collect();
+        assert!(decode_row(&encode_row(&row)).expect("decode") == row);
+    }
+
+    /// The tag byte is the discriminator and the only difference: a vector and
+    /// the array over the same value agree on every payload byte. Byte-level
+    /// here because that is what the claim is about — one payload format, two
+    /// tags — and because index keys are these bytes.
+    #[test]
+    fn the_field_tag_is_the_only_byte_that_separates_a_vector_from_its_array() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayDim, ArrayValue, ElemType};
+
+        let value = ArrayValue::with_dims(
+            ElemType::Int4,
+            vec![Datum::Int4(1), Datum::Int4(2)],
+            vec![ArrayDim::new(0, 2)],
+        );
+        let array = encode_row(&[Datum::Array(value.clone())]);
+        let vector = encode_row(&[Datum::OidVector(value)]);
+
+        assert!(array[1] == tag::ARRAY);
+        assert!(vector[1] == tag::OIDVECTOR);
+        assert!(array[2..] == vector[2..]);
+        assert!(array != vector);
+    }
+
+    /// The reader is intolerant by design: an unknown field tag is corruption.
+    /// A reader that fell back to a default instead would read a value written
+    /// under a newer tag as whatever that default was — the same silent
+    /// mis-decode the `oidvector` tag exists to end.
+    #[test]
+    fn an_unknown_field_tag_is_corruption_rather_than_a_tolerated_decode() {
+        use assert2::assert;
+
+        for unknown in [tag::OIDVECTOR + 1, 100, 255] {
+            assert!(
+                decode_row(&[ROW_VERSION, unknown]).is_err(),
+                "tag {unknown} decoded"
+            );
+        }
+    }
+
     #[test]
     fn jsonb_tag_layout_is_a_length_prefixed_canonical_text() {
         use assert2::assert;
@@ -992,6 +1136,14 @@ mod tests {
         let mut bytes = vec![ROW_VERSION, tag::JSONB];
         bytes.extend_from_slice(&2u32.to_be_bytes());
         bytes.extend_from_slice(b"{{");
+        assert!(decode_row(&bytes).is_err());
+        // The vector tag reads the same payload, so it refuses the same
+        // corruption rather than returning a short vector.
+        let mut bytes = vec![ROW_VERSION, tag::OIDVECTOR, 200];
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        assert!(decode_row(&bytes).is_err());
+        let mut bytes = vec![ROW_VERSION, tag::OIDVECTOR, 1];
+        bytes.extend_from_slice(&3u32.to_be_bytes());
         assert!(decode_row(&bytes).is_err());
     }
 
