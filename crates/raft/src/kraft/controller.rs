@@ -4849,13 +4849,35 @@ mod tests {
 
     /// A follower with a live leader (heartbeats keep arriving) does not
     /// spuriously elect: the leader stays node 2 across several fetch cycles.
-    #[tokio::test]
+    ///
+    /// Virtual time, because the property under test is a race between two
+    /// timers and wall-clock sleeps lose it on a loaded machine. The previous
+    /// version slept 40ms six times against a 120ms fetch timer, so on a busy
+    /// CI runner a "40ms" sleep overshot, misses accrued, and the follower
+    /// elected. It failed exactly that way once while the same job had another
+    /// test take 968 seconds. Lengthening the sleep only moves the threshold;
+    /// `start_paused` removes the dependence on runner speed entirely.
+    ///
+    /// Advancing past the fetch deadline each cycle also makes the watchdog
+    /// actually run. Re-announcing every 40ms re-armed the timer before it
+    /// could expire, so the expiry path was never entered at all; the probe
+    /// for that is that ten idle periods with no heartbeat leave the leader
+    /// `None`.
+    ///
+    /// What this does NOT pin, measured rather than assumed: deleting the
+    /// `fetch_misses = 0` reset from `Action::SendFetch` leaves the test
+    /// passing. The heartbeats hold the attachment through the core's own
+    /// liveness handling, not through that counter, so the counter's reset is
+    /// unguarded here and a test that means to cover it has to observe the
+    /// miss count directly.
+    #[tokio::test(start_paused = true)]
     async fn follower_with_live_leader_does_not_elect() {
         // Node 1 is a follower in a 3-voter cluster; the NullPeerSender means
         // its fetches fail, but a steady stream of BeginQuorumEpoch heartbeats
         // (which we inject) must keep it attached without electing.
+        let fetch_period = millis(120);
         let (ctrl, _dir) =
-            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], millis(120));
+            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], fetch_period);
         // Attach to leader 2.
         ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
             leader_id: NodeId(2),
@@ -4865,10 +4887,13 @@ mod tests {
         .unwrap();
         await_leader(&ctrl, Some(NodeId(2))).await;
 
-        // Keep re-announcing leader 2 faster than the fetch watchdog would
-        // accumulate the configured number of misses; the leader must remain 2.
-        for _ in 0..6 {
-            tokio::time::sleep(StdDuration::from_millis(40)).await;
+        // One expiry per cycle, cleared by the heartbeat that follows it.
+        let past_deadline =
+            Duration::from_millis(election_timeout_ms(fetch_period).saturating_add(1));
+        let cycles = ControllerFetchMissLimit::default().get() * 2;
+        for _ in 0..cycles {
+            tokio::time::advance(past_deadline).await;
+            tokio::task::yield_now().await;
             ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
                 leader_id: NodeId(2),
                 leader_epoch: 1,
@@ -4876,6 +4901,16 @@ mod tests {
             .await
             .unwrap();
         }
+
+        // The epoch, not the leader, is what proves no election happened. A
+        // heartbeat re-attaches to node 2 whatever went before, so reading the
+        // leader after the last one cannot see an election in the middle of the
+        // run -- it has already been papered over. That is the same blindness
+        // that let the wall-clock version pass on a fast machine and fail on a
+        // slow one, and it would have hidden a lost miss-counter reset here
+        // too. An election increments the epoch and nothing puts it back.
+        let state = ctrl.quorum_state().await.unwrap();
+        assert2::assert!(state.leader_epoch == 1);
         let leader = *ctrl.watch_leader().borrow();
         assert2::assert!(leader == Some(NodeId(2)));
         ctrl.shutdown().await;
