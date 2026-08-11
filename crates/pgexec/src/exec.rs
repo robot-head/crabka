@@ -24765,6 +24765,7 @@ fn alter_table_ops(
             Ok(mut ops) => {
                 ops.extend(rename_relation_comment_ops(kv, table_name, new_name)?);
                 ops.extend(rename_table_view_ops(kv, table_name, new_name)?);
+                ops.extend(rename_name_keyed_metadata_ops(kv, table_name, new_name)?);
                 if let Ok(table) = crabka_pgcatalog::get_table(kv, table_name) {
                     for mut trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)?
                     {
@@ -27099,6 +27100,26 @@ fn rename_column_dependencies(
     for check in &mut state.table.checks {
         check.expr = rewrite_identifier_tokens(&check.expr, old_name, new_name);
     }
+    // A partitioned parent stores each key column by name as well as by
+    // ordinal, and `pg_get_partkeydef` — so `\d` — prints the name. Routing
+    // reads the ordinal and is unaffected, which is what made this quiet: the
+    // partition kept working while `\d` named a column the relation no longer
+    // had. This runs per relation, so an intermediate parent reached by the
+    // recursion is rewritten on its own pass.
+    if let Some(mut scheme) = crate::partition::scheme_of(kv, &table_name)? {
+        let mut touched = false;
+        for key in &mut scheme.keys {
+            if key.name == old_name {
+                key.name = new_name.to_string();
+                touched = true;
+            }
+        }
+        if touched {
+            state
+                .ops
+                .extend(crate::partition::put_scheme_ops(&table_name, &scheme));
+        }
+    }
     for mut index in crabka_pgcatalog::list_table_indexes(kv, &table_name)? {
         if !index
             .columns
@@ -27925,6 +27946,34 @@ fn rewrite_identifier_tokens(source: &str, old_name: &str, new_name: &str) -> St
     }
     out.push_str(&source[cursor..]);
     out
+}
+
+/// Move the metadata families that `pgexec` keys by relation *name* onto a new
+/// name, so `ALTER TABLE … RENAME TO` is invisible to them.
+///
+/// The families `pgcatalog` owns move inside
+/// [`crabka_pgcatalog::rename_table_ops`]; these three sit above it and it
+/// cannot reach them. Leaving them behind is not a cosmetic loss. A renamed
+/// partitioned parent stopped being partitioned at all — `relkind` fell to `r`,
+/// its rows stopped being reachable through it, and its leaf's bound stopped
+/// being enforced. A renamed inheritance parent lost every child, and the old
+/// name it left behind was adopted, rows and all, by the next `CREATE TABLE`
+/// that took it.
+///
+/// `RENAME TO` is the only spelling that changes a relation's catalog name:
+/// `ALTER TABLE … SET SCHEMA` and `ALTER SCHEMA … RENAME TO` are both refused,
+/// and `ALTER MATERIALIZED VIEW … RENAME TO` parses into this same subcommand.
+/// One call site is therefore the whole producer surface, which is what makes
+/// moving the keys sufficient rather than keying them by id instead.
+fn rename_name_keyed_metadata_ops(
+    kv: &dyn Kv,
+    old_name: &crabka_pgcatalog::RelationName,
+    new_name: &crabka_pgcatalog::RelationName,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let mut ops = crate::inheritance::rename_ops(kv, old_name, new_name)?;
+    ops.extend(crate::partition::rename_ops(kv, old_name, new_name)?);
+    ops.extend(crate::relstats::rename_ops(kv, old_name, new_name)?);
+    Ok(ops)
 }
 
 /// Move a relation's comments (and its columns') to a new relation name.

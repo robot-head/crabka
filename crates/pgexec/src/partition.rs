@@ -587,6 +587,76 @@ pub(crate) fn detach_ops(parent: &RelationName, child: &RelationName) -> Vec<Wri
     ]
 }
 
+/// Move every partition link that names `from` onto `to`, so a rename leaves
+/// the partitioning scheme, the bounds and their enforcement exactly as they
+/// were — which is what `PostgreSQL` does.
+///
+/// All three families key on the relation name, and each one lost loses a
+/// different thing. The key definition *is* the fact that the relation is a
+/// partitioned parent, so leaving it behind turns the parent into an ordinary
+/// heap: `relkind` drops from `p` to `r`, `pg_partitioned_table` empties, the
+/// rows under the partitions stop being reachable through it, and it starts
+/// accepting rows of its own that belong in no partition. The parent link
+/// carries the bound, so leaving it behind takes bound enforcement off the leaf.
+/// The parent → child index is what a read of the parent walks, so a leaf
+/// renamed out of it makes the parent unreadable.
+///
+/// The two records that move keep their bytes: a key definition names columns,
+/// and a leaf's record names *its* parent, neither of which a rename of the
+/// relation itself changes. Only a leaf whose parent is the relation being
+/// renamed is re-encoded.
+///
+/// Deletes are emitted before the puts that replace them, so the batch is
+/// correct even where the two collide — which needs the relation to be its own
+/// partition, a cycle `ATTACH PARTITION` refuses.
+pub(crate) fn rename_ops(
+    kv: &dyn Kv,
+    from: &RelationName,
+    to: &RelationName,
+) -> Result<Vec<WriteOp>, ExecError> {
+    let mut ops = Vec::new();
+    if let Some(scheme) = kv.get(&scheme_key(from)).map_err(ExecError::Kv)? {
+        ops.push(WriteOp::Delete {
+            key: scheme_key(from),
+        });
+        ops.push(WriteOp::Put {
+            key: scheme_key(to),
+            value: scheme,
+        });
+    }
+    if let Some(record) = kv.get(&child_key(from)).map_err(ExecError::Kv)? {
+        let (parent, _) = deserialize_child(&record)?;
+        ops.push(WriteOp::Delete {
+            key: child_key(from),
+        });
+        ops.push(WriteOp::Delete {
+            key: children_key(&parent, from),
+        });
+        ops.push(WriteOp::Put {
+            key: child_key(to),
+            value: record,
+        });
+        ops.push(WriteOp::Put {
+            key: children_key(&parent, to),
+            value: Vec::new(),
+        });
+    }
+    for partition in partitions_of(kv, from)? {
+        ops.push(WriteOp::Delete {
+            key: children_key(from, &partition.name),
+        });
+        ops.push(WriteOp::Put {
+            key: children_key(to, &partition.name),
+            value: Vec::new(),
+        });
+        ops.push(WriteOp::Put {
+            key: child_key(&partition.name),
+            value: serialize_child(to, &partition.bound),
+        });
+    }
+    Ok(ops)
+}
+
 /// Write ops that remove `name`'s own partition metadata: its key definition
 /// if it is a parent, and its parent link if it is a partition.
 pub(crate) fn drop_metadata_ops(
@@ -1114,6 +1184,118 @@ mod tests {
             parent_of(&kv, &RelationName::new("other", "c.1"))
                 .expect("link")
                 .is_none()
+        );
+    }
+
+    /// Whether any partition key or value still spells `name`. A rename that
+    /// leaves one behind either strands the metadata or hands it to whatever
+    /// takes the old name next.
+    fn anything_still_names(kv: &crabka_pgkv::MemKv, name: &str) -> bool {
+        let mut needle = Vec::new();
+        push_key_part(&mut needle, name);
+        [SCHEME_PREFIX, CHILD_PREFIX, CHILDREN_PREFIX]
+            .into_iter()
+            .any(|prefix| {
+                kv.scan_prefix(prefix)
+                    .expect("scan")
+                    .into_iter()
+                    .any(|(key, value)| {
+                        [key, value]
+                            .iter()
+                            .any(|bytes| bytes.windows(needle.len()).any(|w| w == needle))
+                    })
+            })
+    }
+
+    /// Renaming the parent turned it back into an ordinary heap: the key
+    /// definition stayed under the old name, `relkind` fell from `p` to `r`,
+    /// the leaf's rows stopped being reachable through it, and it began
+    /// accepting rows that belong in no partition.
+    #[test]
+    fn a_renamed_parent_keeps_its_scheme_and_its_partitions() {
+        let kv = crabka_pgkv::MemKv::default();
+        let parent = RelationName::new("sch", "p");
+        let renamed = RelationName::new("sch", "p_renamed");
+        let child = RelationName::new("sch", "c");
+        write(&kv, put_scheme_ops(&parent, &list_scheme()));
+        write(&kv, attach_ops(&parent, &child, &hash_bound()));
+
+        write(&kv, rename_ops(&kv, &parent, &renamed).expect("ops"));
+
+        assert!(scheme_of(&kv, &renamed).expect("scheme") == Some(list_scheme()));
+        assert!(!is_partitioned(&kv, &parent).expect("read"));
+        assert!(
+            partitions_of(&kv, &renamed).expect("scan")
+                == vec![Partition {
+                    name: child.clone(),
+                    bound: hash_bound(),
+                }]
+        );
+        assert!(parent_of(&kv, &child).expect("link") == Some((renamed, hash_bound())));
+        assert!(!anything_still_names(&kv, "p"));
+    }
+
+    /// Renaming the leaf left the parent naming a relation nothing carried, so
+    /// every read and every write of the parent failed outright.
+    #[test]
+    fn a_renamed_leaf_is_still_its_parents_partition() {
+        let kv = crabka_pgkv::MemKv::default();
+        let parent = RelationName::new("sch", "p");
+        let child = RelationName::new("sch", "c");
+        let renamed = RelationName::new("sch", "c_renamed");
+        write(&kv, put_scheme_ops(&parent, &list_scheme()));
+        write(&kv, attach_ops(&parent, &child, &hash_bound()));
+
+        write(&kv, rename_ops(&kv, &child, &renamed).expect("ops"));
+
+        assert!(
+            partitions_of(&kv, &parent).expect("scan")
+                == vec![Partition {
+                    name: renamed.clone(),
+                    bound: hash_bound(),
+                }]
+        );
+        assert!(parent_of(&kv, &renamed).expect("link") == Some((parent, hash_bound())));
+        assert!(parent_of(&kv, &child).expect("link").is_none());
+        assert!(!anything_still_names(&kv, "c"));
+    }
+
+    /// An intermediate parent is both ends of the rename at once, and the walk
+    /// below it has to survive.
+    #[test]
+    fn renaming_a_sub_partitioned_level_keeps_the_tree_whole() {
+        let kv = crabka_pgkv::MemKv::default();
+        let top = RelationName::new("sch", "top");
+        let mid = RelationName::new("sch", "mid");
+        let renamed = RelationName::new("sch", "middle");
+        let leaf = RelationName::new("sch", "leaf");
+        write(&kv, put_scheme_ops(&top, &list_scheme()));
+        write(&kv, put_scheme_ops(&mid, &list_scheme()));
+        write(&kv, attach_ops(&top, &mid, &hash_bound()));
+        write(&kv, attach_ops(&mid, &leaf, &hash_bound()));
+
+        write(&kv, rename_ops(&kv, &mid, &renamed).expect("ops"));
+
+        assert!(descendants(&kv, &top).expect("walk") == vec![leaf.clone(), renamed.clone()]);
+        assert!(leaves_of(&kv, &top).expect("leaves") == vec![leaf]);
+        assert!(scheme_of(&kv, &renamed).expect("scheme") == Some(list_scheme()));
+        assert!(!anything_still_names(&kv, "mid"));
+    }
+
+    #[test]
+    fn renaming_an_unpartitioned_relation_writes_nothing() {
+        let kv = crabka_pgkv::MemKv::default();
+        let plain = RelationName::new("sch", "plain");
+        write(
+            &kv,
+            attach_ops(
+                &RelationName::new("sch", "p"),
+                &RelationName::new("sch", "c"),
+                &hash_bound(),
+            ),
+        );
+        assert!(
+            rename_ops(&kv, &plain, &RelationName::new("sch", "plain2")).expect("ops") == vec![]
         );
     }
 

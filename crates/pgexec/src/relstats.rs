@@ -20,8 +20,11 @@
 //! * `reltuples` is an estimate that `ANALYZE` overwrites.
 //!
 //! Keys carry the relation name, as the inheritance, partition and tablespace
-//! keyspaces beside them do. A relation renamed out from under these keys loses
-//! them, exactly as it loses its inheritance links today.
+//! keyspaces beside them do, so a rename has to move them. [`rename_ops`] is
+//! that move, and `ALTER TABLE … RENAME TO` calls it beside the inheritance and
+//! partition equivalents. Without it a rename reset `reltuples` to unknown and
+//! cleared `relhassubclass`, which `PostgreSQL` does not: measured on 18.4, an
+//! analyzed parent renamed still reports its row count and its flag.
 
 use std::collections::BTreeMap;
 
@@ -84,6 +87,37 @@ pub(crate) fn set_reltuples_op(relation: &RelationName, reltuples: f32) -> Write
         key: relation_key(TUPLES_PREFIX, relation),
         value: reltuples.to_be_bytes().to_vec(),
     }
+}
+
+/// Move whichever of a relation's statistics exist from `from` to `to`.
+///
+/// Both facts are stored, so both survive a rename in `PostgreSQL`. Presence of
+/// the `relhassubclass` key is the flag, which is why the value is carried over
+/// rather than recomputed: recomputing it from the links would answer false in
+/// the window `ANALYZE` has not yet closed, and that window is exactly what the
+/// stored form exists to keep.
+///
+/// # Errors
+///
+/// Returns storage errors from the catalog KV seam.
+pub(crate) fn rename_ops(
+    kv: &dyn Kv,
+    from: &RelationName,
+    to: &RelationName,
+) -> Result<Vec<WriteOp>, ExecError> {
+    let mut ops = Vec::new();
+    for prefix in [SUBCLASS_PREFIX, TUPLES_PREFIX] {
+        if let Some(value) = kv.get(&relation_key(prefix, from)).map_err(ExecError::Kv)? {
+            ops.push(WriteOp::Delete {
+                key: relation_key(prefix, from),
+            });
+            ops.push(WriteOp::Put {
+                key: relation_key(prefix, to),
+                value,
+            });
+        }
+    }
+    Ok(ops)
 }
 
 /// Forget everything stored about a relation that is going away.
@@ -180,7 +214,7 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv};
 
     use super::{
-        RelStats, UNKNOWN_TUPLES, all, clear_has_subclass_op, drop_metadata_ops, of,
+        RelStats, UNKNOWN_TUPLES, all, clear_has_subclass_op, drop_metadata_ops, of, rename_ops,
         set_has_subclass_op, set_reltuples_op,
     };
 
@@ -276,5 +310,41 @@ mod tests {
         apply(&kv, drop_metadata_ops(&name));
         assert!(of(&kv, &name).expect("read") == RelStats::default());
         assert!(all(&kv).expect("scan").is_empty());
+    }
+
+    #[test]
+    fn renaming_a_relation_carries_both_halves_with_it() {
+        // A rename used to lose both: the next `pg_class` read reported
+        // `reltuples` unknown and `relhassubclass` false for a relation that had
+        // just been analyzed and still had children.
+        let kv = MemKv::new();
+        let before = relation("public", "counted");
+        let after = relation("public", "counted2");
+        apply(
+            &kv,
+            vec![set_has_subclass_op(&before), set_reltuples_op(&before, 7.0)],
+        );
+        apply(&kv, rename_ops(&kv, &before, &after).expect("ops"));
+        assert!(of(&kv, &before).expect("read") == RelStats::default());
+        let moved = of(&kv, &after).expect("read");
+        assert!(same_bits(moved.reltuples, 7.0));
+        assert!(moved.has_subclass);
+        assert!(all(&kv).expect("scan").len() == 1);
+    }
+
+    #[test]
+    fn renaming_a_relation_no_analyze_has_seen_writes_nothing() {
+        let kv = MemKv::new();
+        apply(
+            &kv,
+            vec![set_reltuples_op(&relation("public", "other"), 1.0)],
+        );
+        let ops = rename_ops(
+            &kv,
+            &relation("public", "fresh"),
+            &relation("public", "fresh2"),
+        )
+        .expect("ops");
+        assert!(ops.is_empty());
     }
 }

@@ -70,7 +70,11 @@ pub(crate) fn parents_of(
     else {
         return Ok(Vec::new());
     };
-    let mut cur = value.as_slice();
+    decode_parents(&value)
+}
+
+fn decode_parents(value: &[u8]) -> Result<Vec<RelationName>, ExecError> {
+    let mut cur = value;
     if take(&mut cur, 1)?[0] != VERSION {
         return Err(corrupt("unknown inheritance record version"));
     }
@@ -200,25 +204,20 @@ pub(crate) fn descendants(
 ///
 /// The ops are collected by key rather than pushed, because the two ends of one
 /// link both reach the same index entry: a departing child deletes the entry its
-/// departing parent holds, and that parent deletes it again. Keyed collection
-/// makes "one op per key" a property of the type instead of a rule to keep, and
-/// it puts the batch in key order whatever order the caller's set iterates in.
+/// departing parent holds, and that parent deletes it again. See [`KeyedOps`].
 pub(crate) fn drop_metadata_ops(
     kv: &dyn Kv,
     dropping: &HashSet<RelationName>,
 ) -> Result<Vec<WriteOp>, ExecError> {
-    let mut ops: BTreeMap<Vec<u8>, WriteOp> = BTreeMap::new();
+    let mut ops = KeyedOps::default();
     let mut bereaved = BTreeSet::new();
     for name in dropping {
-        let key = relation_key(PARENTS_PREFIX, name);
-        ops.insert(key.clone(), WriteOp::Delete { key });
+        ops.delete(relation_key(PARENTS_PREFIX, name));
         for parent in parents_of(kv, name)? {
-            let key = child_index_key(&parent, name);
-            ops.insert(key.clone(), WriteOp::Delete { key });
+            ops.delete(child_index_key(&parent, name));
         }
         for child in children_of(kv, name)? {
-            let key = child_index_key(name, &child);
-            ops.insert(key.clone(), WriteOp::Delete { key });
+            ops.delete(child_index_key(name, &child));
             bereaved.insert(child);
         }
     }
@@ -233,17 +232,91 @@ pub(crate) fn drop_metadata_ops(
             .filter(|parent| !dropping.contains(parent))
             .collect();
         let key = relation_key(PARENTS_PREFIX, &child);
-        let op = if remaining.is_empty() {
-            WriteOp::Delete { key: key.clone() }
+        if remaining.is_empty() {
+            ops.delete(key);
         } else {
-            WriteOp::Put {
-                key: key.clone(),
-                value: encode_parents(&remaining),
-            }
-        };
-        ops.insert(key, op);
+            ops.put(key, encode_parents(&remaining));
+        }
     }
-    Ok(ops.into_values().collect())
+    Ok(ops.into_batch())
+}
+
+/// Move every inheritance link that names `from` onto `to`, so a rename is
+/// invisible to the tree the way it is in `PostgreSQL`.
+///
+/// Three link kinds carry the name, and each one lost breaks something
+/// different. The relation's own parent list is keyed by it, so leaving it
+/// behind detaches the renamed relation from its parents. Each parent holds an
+/// index entry naming it, so leaving that behind makes the parent unreadable —
+/// a tree scan resolves a child that no longer answers, and the whole `SELECT`
+/// fails. Each child's parent list *contains* it, so leaving that behind
+/// detaches every child and strands a name that a later `CREATE TABLE` of the
+/// old name silently adopts, along with the rows underneath it.
+///
+/// The record the renamed relation keeps is moved byte for byte rather than
+/// re-encoded: it names that relation's *parents*, and none of them changed.
+///
+/// The ops are collected by key ([`KeyedOps`]) because a relation that is both
+/// a parent and a child of the same relation reaches one index entry from both
+/// loops. The acyclic check refuses that shape, and this batch does not depend
+/// on it having done so.
+pub(crate) fn rename_ops(
+    kv: &dyn Kv,
+    from: &RelationName,
+    to: &RelationName,
+) -> Result<Vec<WriteOp>, ExecError> {
+    let mut ops = KeyedOps::default();
+    if let Some(record) = kv
+        .get(&relation_key(PARENTS_PREFIX, from))
+        .map_err(ExecError::Kv)?
+    {
+        let parents = decode_parents(&record)?;
+        ops.delete(relation_key(PARENTS_PREFIX, from));
+        ops.put(relation_key(PARENTS_PREFIX, to), record);
+        for parent in parents {
+            ops.delete(child_index_key(&parent, from));
+            ops.put(child_index_key(&parent, to), Vec::new());
+        }
+    }
+    for child in children_of(kv, from)? {
+        ops.delete(child_index_key(from, &child));
+        ops.put(child_index_key(to, &child), Vec::new());
+        let parents: Vec<RelationName> = parents_of(kv, &child)?
+            .into_iter()
+            .map(|parent| if parent == *from { to.clone() } else { parent })
+            .collect();
+        ops.put(
+            relation_key(PARENTS_PREFIX, &child),
+            encode_parents(&parents),
+        );
+    }
+    Ok(ops.into_batch())
+}
+
+/// A write batch that holds at most one op per key, whatever order the ops
+/// arrive in.
+///
+/// Both [`drop_metadata_ops`] and [`rename_ops`] reach one key from two
+/// directions, and the reason is the same each time: the two ends of an
+/// inheritance link are two relations, and a statement that touches both ends
+/// addresses the entry between them twice. Keyed collection makes "one op per
+/// key" a property of the type rather than a rule to keep, and it puts the
+/// batch in key order whatever order the caller built it in.
+#[derive(Default)]
+struct KeyedOps(BTreeMap<Vec<u8>, WriteOp>);
+
+impl KeyedOps {
+    fn delete(&mut self, key: Vec<u8>) {
+        self.0.insert(key.clone(), WriteOp::Delete { key });
+    }
+
+    fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        self.0.insert(key.clone(), WriteOp::Put { key, value });
+    }
+
+    fn into_batch(self) -> Vec<WriteOp> {
+        self.0.into_values().collect()
+    }
 }
 
 fn write_string(out: &mut Vec<u8>, value: &str) {
@@ -284,11 +357,11 @@ fn corrupt(message: &str) -> ExecError {
 mod tests {
     use assert2::assert;
     use crabka_pgcatalog::RelationName;
-    use crabka_pgkv::{Kv, MemKv, WriteOp};
+    use crabka_pgkv::{Kv, MemKv, WriteOp, key::push_key_part};
 
     use super::{
         CHILDREN_PREFIX, PARENTS_PREFIX, attach_ops, children_of, descendants, drop_metadata_ops,
-        parents_of,
+        parents_of, rename_ops,
     };
 
     fn relation(name: &str) -> RelationName {
@@ -338,6 +411,98 @@ mod tests {
                 other => panic!("unexpected inheritance op {other:?}"),
             })
             .collect()
+    }
+
+    /// Whether any inheritance key or value still spells `name` — the question
+    /// a rename has to answer "no" to, because a name left behind here is one a
+    /// later `CREATE TABLE` of it silently adopts.
+    fn anything_still_names(kv: &MemKv, name: &str) -> bool {
+        let needle = {
+            let mut bytes = Vec::new();
+            push_key_part(&mut bytes, name);
+            bytes
+        };
+        let window = |bytes: &[u8]| {
+            bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_slice())
+        };
+        [PARENTS_PREFIX, CHILDREN_PREFIX].into_iter().any(|prefix| {
+            kv.scan_prefix(prefix)
+                .expect("scan")
+                .into_iter()
+                .any(|(key, value)| window(&key) || window(&value))
+        })
+    }
+
+    #[test]
+    fn a_renamed_relation_keeps_the_parents_it_had() {
+        let kv = linked(&[("c", &["a", "b"])]);
+        apply(
+            &kv,
+            rename_ops(&kv, &relation("c"), &relation("c2")).expect("ops"),
+        );
+        assert!(
+            parents_of(&kv, &relation("c2")).expect("read") == vec![relation("a"), relation("b")]
+        );
+        assert!(children_of(&kv, &relation("a")).expect("read") == vec![relation("c2")]);
+        assert!(children_of(&kv, &relation("b")).expect("read") == vec![relation("c2")]);
+    }
+
+    #[test]
+    fn a_renamed_parent_is_named_by_the_children_it_had() {
+        // Renaming the parent left the child naming a relation nothing carried:
+        // `SELECT` over the parent lost the child's rows, and an `INSERT` into
+        // the child failed on the ancestor walk.
+        let kv = linked(&[("c", &["p"]), ("d", &["p", "q"])]);
+        apply(
+            &kv,
+            rename_ops(&kv, &relation("p"), &relation("p2")).expect("ops"),
+        );
+        assert!(parents_of(&kv, &relation("c")).expect("read") == vec![relation("p2")]);
+        assert!(
+            parents_of(&kv, &relation("d")).expect("read") == vec![relation("p2"), relation("q")]
+        );
+        assert!(
+            children_of(&kv, &relation("p2")).expect("read") == vec![relation("c"), relation("d")]
+        );
+    }
+
+    #[test]
+    fn the_old_name_is_left_holding_nothing() {
+        // The consequence of leaving one behind is not a dangling key but a
+        // silent adoption: `CREATE TABLE p` after `ALTER TABLE p RENAME TO p2`
+        // took over p2's children, and reading the new empty table returned
+        // their rows.
+        let kv = linked(&[("mid", &["top"]), ("leaf", &["mid"])]);
+        apply(
+            &kv,
+            rename_ops(&kv, &relation("mid"), &relation("middle")).expect("ops"),
+        );
+        assert!(!anything_still_names(&kv, "mid"));
+        assert!(parents_of(&kv, &relation("leaf")).expect("read") == vec![relation("middle")]);
+        assert!(children_of(&kv, &relation("top")).expect("read") == vec![relation("middle")]);
+        assert!(
+            descendants(&kv, &relation("top")).expect("walk")
+                == vec![relation("middle"), relation("leaf")]
+        );
+    }
+
+    #[test]
+    fn the_rename_batch_addresses_each_key_once() {
+        let kv = linked(&[("mid", &["a", "b"]), ("c", &["mid"]), ("d", &["mid"])]);
+        let ops = rename_ops(&kv, &relation("mid"), &relation("middle")).expect("ops");
+        let mut keys = op_keys(&ops);
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert!(keys.len() == total);
+    }
+
+    #[test]
+    fn renaming_a_relation_with_no_links_writes_nothing() {
+        let kv = linked(&[("c", &["p"])]);
+        assert!(rename_ops(&kv, &relation("lonely"), &relation("lonely2")).expect("ops") == vec![]);
     }
 
     #[test]
