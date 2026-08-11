@@ -67,6 +67,9 @@ Environment:
   GRES_PG_REGRESS_BIN           Existing crabka-gres binary; otherwise cargo builds it.
   GRES_PG_REGRESS_PORT          Gres listen port; otherwise an unused port is selected.
   GRES_PG_REGRESS_TIMEOUT       Per-schedule timeout (default: 3600s).
+  GRES_PG_REGRESS_LOCK          Machine-wide run lock (default: /tmp/gres-pg-regress.lock).
+  GRES_PG_REGRESS_WAIT          Queue behind a running certification instead of failing.
+  GRES_PG_REGRESS_NO_LOCK       Skip the lock; timings become unreliable.
   GRES_PG_REGRESS_PROCESS_TOKEN Deterministic backend-id process token (default: 1).
   GRES_PG_REGRESS_RANDOM_SEED   Deterministic initial random seed (default: 1).
   GRES_PG_REGRESS_TOKIO_WORKERS Override Tokio workers (serial defaults to 1;
@@ -475,6 +478,58 @@ main() {
     echo "artifacts: ${artifact_root}"
 }
 
+# Serialise runs across the whole machine.
+#
+# Two concurrent runs do not corrupt each other's results -- each has its own
+# port, data directory and artifact tree -- but they ruin each other's timings,
+# and timings are part of what a run reports. Two overlapping runs drove the
+# load average to 21 and took one lateral join from 7s to over 120s, which
+# looks exactly like a performance regression and is not one.
+#
+# The lock is deliberately NOT under the worktree's target/: a run is usually
+# certified from an isolated `git archive` copy with its own target/, so a
+# per-tree lock would not see the run it needs to wait for. Contention is for
+# the machine's CPUs, so the mutex has to be machine-wide too.
+#
+# Checking `pgrep` instead was tried and does not work: it matches the checking
+# shell's own command line, and it matches stale `tail -f` monitors, so it
+# reports a busy machine that is idle and an idle one that is busy.
+gres_pg_regress_lock() {
+    local lock="${GRES_PG_REGRESS_LOCK:-/tmp/gres-pg-regress.lock}"
+    if [[ "${GRES_PG_REGRESS_NO_LOCK:-0}" == 1 ]]; then
+        return 0
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "warning: flock not found; running without the machine-wide lock" >&2
+        return 0
+    fi
+    # Open read-write rather than `>`: `>` truncates on open, so a second run
+    # would erase the holder's PID before discovering it could not have the
+    # lock, and then report "PID unknown" about a process it just blanked.
+    if ! exec 9<>"$lock"; then
+        echo "warning: cannot open ${lock}; running without the machine-wide lock" >&2
+        return 0
+    fi
+    if flock -n 9; then
+        printf '%s\n' "$$" >"$lock"
+        return 0
+    fi
+    local holder
+    holder="$(cat "$lock" 2>/dev/null || true)"
+    if [[ "${GRES_PG_REGRESS_WAIT:-0}" == 1 ]]; then
+        echo "waiting for the run held by PID ${holder:-unknown} to finish..." >&2
+        flock 9
+        printf '%s\n' "$$" >"$lock"
+        return 0
+    fi
+    echo "error: another pg_regress run holds ${lock} (PID ${holder:-unknown})." >&2
+    echo "       Concurrent runs distort each other's timings." >&2
+    echo "       Set GRES_PG_REGRESS_WAIT=1 to queue behind it," >&2
+    echo "       or GRES_PG_REGRESS_NO_LOCK=1 if you do not care about timings." >&2
+    return 1
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    gres_pg_regress_lock || exit 1
     main "$@"
 fi
