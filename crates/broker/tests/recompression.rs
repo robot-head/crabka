@@ -159,7 +159,7 @@ async fn produce_gzip(addr: SocketAddr, topic: &str, topic_id: Uuid, value: &[u8
         ..Default::default()
     };
     let req = ProduceRequest {
-        acks: 1,
+        acks: -1,
         timeout_ms: 5_000,
         topic_data: vec![TopicProduceData {
             name: topic.into(),
