@@ -955,22 +955,7 @@ async fn handle_actor_message(
             let consumer_kind = group.is_consumer();
             let result = handle_classic_leave_message(group, parked, services, &req, version).await;
             let keep_running = result.is_ok() || !consumer_kind;
-            let result = match result {
-                Ok(members) if version < 3 => LeaveResult {
-                    error_code: members
-                        .first()
-                        .map_or(codes::NONE, |member| member.error_code),
-                    members,
-                },
-                Ok(members) => LeaveResult {
-                    error_code: codes::NONE,
-                    members,
-                },
-                Err(error_code) => LeaveResult {
-                    error_code,
-                    members: Vec::new(),
-                },
-            };
+            let result = classic_leave_result(version, result);
             let _ = reply.send(result);
             keep_running
         }
@@ -1024,6 +1009,30 @@ async fn handle_actor_message(
             *group = CoordinatorGroup::new_consumer(group.group_id.clone());
             true
         }
+    }
+}
+
+fn classic_leave_result(
+    version: i16,
+    result: Result<Vec<MemberResponse>, ErrorCode>,
+) -> LeaveResult {
+    match result {
+        Ok(members) => match version {
+            ..=2 => LeaveResult {
+                error_code: members
+                    .first()
+                    .map_or(codes::NONE, |member| member.error_code),
+                members,
+            },
+            _ => LeaveResult {
+                error_code: codes::NONE,
+                members,
+            },
+        },
+        Err(error_code) => LeaveResult {
+            error_code,
+            members: Vec::new(),
+        },
     }
 }
 
@@ -2364,6 +2373,33 @@ mod tests {
     }
 
     #[test]
+    fn classic_leave_result_uses_the_wire_versions_error_shape() {
+        let legacy = classic_leave_result(
+            2,
+            Ok(vec![MemberResponse {
+                error_code: codes::UNKNOWN_MEMBER_ID,
+                ..Default::default()
+            }]),
+        );
+        check!(legacy.error_code == codes::UNKNOWN_MEMBER_ID);
+        check!(legacy.members[0].error_code == codes::UNKNOWN_MEMBER_ID);
+
+        let batched = classic_leave_result(
+            3,
+            Ok(vec![MemberResponse {
+                error_code: codes::UNKNOWN_MEMBER_ID,
+                ..Default::default()
+            }]),
+        );
+        check!(batched.error_code == codes::NONE);
+        check!(batched.members[0].error_code == codes::UNKNOWN_MEMBER_ID);
+
+        let failed = classic_leave_result(3, Err(codes::COORDINATOR_LOAD_IN_PROGRESS));
+        check!(failed.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        check!(failed.members.is_empty());
+    }
+
+    #[test]
     fn inconsistent_classic_completion_clears_deadline() {
         use super::super::classic_state::{ClassicGroup as ClassicState, Member};
 
@@ -2553,7 +2589,10 @@ mod tests {
             })
             .await
             .unwrap();
-        check!(rx.await.unwrap().error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        let failure = rx.await.unwrap();
+        check!(failure.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        check!(failure.protocol_type.as_deref() == Some("consumer"));
+        check!(failure.protocol_name.as_deref() == Some("range"));
         let view = classic_inspect(&handle).await;
         check!(view.state == ClassicGroupState::CompletingRebalance);
         check!(view.members[0].assignment.is_none());
@@ -2723,6 +2762,44 @@ mod tests {
         check!(persisted.members.is_empty());
         check!(persisted.leader.is_none());
         check!(persisted.protocol_name.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_leave_with_members_remaining_does_not_commit_empty_generation() {
+        use crabka_protocol::owned::leave_group_request::MemberIdentity;
+
+        let (coord, log) = make_coordinator();
+        let mut group = completing_classic_group(&["m1", "m2"]);
+        group.as_classic_mut().unwrap().state = ClassicGroupState::Stable;
+        let prior_generation = group.as_classic().unwrap().generation_id;
+        coord.seed_classic("g", Box::new(group));
+        let handle = coord.find("g").unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicLeave {
+                req: LeaveGroupRequest {
+                    group_id: "g".into(),
+                    members: vec![MemberIdentity {
+                        member_id: "m1".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                version: 3,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+
+        let result = rx.await.unwrap();
+        check!(result.error_code == codes::NONE);
+        check!(result.members[0].error_code == codes::NONE);
+        let view = classic_inspect(&handle).await;
+        check!(view.generation_id == prior_generation);
+        check!(view.members.len() == 1);
+        check!(view.members[0].member_id == "m2");
+        check!(log.batches().await.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -19,7 +19,6 @@ use uuid::Uuid;
 use crate::{
     broker::Broker,
     client_metrics::manager::{ACCEPTED_COMPRESSION_TYPES, ClientAttributes, SubscriptionDecision},
-    codes,
     error::BrokerError,
     handlers::context::TelemetryContext,
 };
@@ -60,8 +59,6 @@ pub(crate) fn handle(
     let image = broker.controller.current_image();
     let resp = match broker.client_metrics.manager.assign(&image, &attrs) {
         SubscriptionDecision::Assign(assignment) => GetTelemetrySubscriptionsResponse {
-            throttle_time_ms: 0,
-            error_code: codes::NONE,
             client_instance_id: echo_id,
             subscription_id: assignment.subscription_id,
             accepted_compression_types: ACCEPTED_COMPRESSION_TYPES.to_vec(),
@@ -89,6 +86,7 @@ mod tests {
     use crabka_protocol::owned::get_telemetry_subscriptions_response;
 
     use super::*;
+    use crate::codes;
 
     crate::test_support::codec_helpers!(
         GetTelemetrySubscriptionsRequest,

@@ -568,9 +568,17 @@ mod tests {
             .submit_change(vec![topic_record("snapshot-topic")])
             .await
             .expect("submit metadata");
+        source
+            .submit_change(vec![topic_record("snapshot-topic-2")])
+            .await
+            .expect("submit second metadata record");
         let expected_offset = i64::try_from(source.quorum_state().last_applied_index)
             .unwrap_or(i64::MAX)
             .saturating_sub(1);
+        assert_ne!(
+            expected_offset, 1,
+            "test must distinguish a constant offset"
+        );
         assert_eq!(source.current_metadata_offset(), expected_offset);
         source.trigger_snapshot().await.expect("snapshot");
         assert!(matches!(
@@ -625,6 +633,67 @@ mod tests {
         not_leader_none(&source.trigger_snapshot().await);
         source.cancel().await;
         assert!(observer.task_drained_for_test().await);
+    }
+
+    #[tokio::test]
+    async fn observer_source_reports_the_replicated_metadata_offset() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Bootstrap,
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg).await.expect("controller");
+        wait_for_controller_leader(&ctrl).await;
+        ctrl.submit_change(vec![topic_record("observed-through-source")])
+            .await
+            .expect("submit metadata");
+        ctrl.submit_change(vec![topic_record("observed-through-source-2")])
+            .await
+            .expect("submit second metadata record");
+        ctrl.submit_change(vec![topic_record("observed-through-source-3")])
+            .await
+            .expect("submit third metadata record");
+        let expected_offset = i64::try_from(ctrl.quorum_state().last_applied_index)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(1);
+        assert!(
+            ![-1, 0, 1].contains(&expected_offset),
+            "test must distinguish every constant-offset mutant"
+        );
+
+        let observer = crate::metadata_observer::MetadataObserver::start(
+            crate::metadata_observer::ObserverConfig {
+                client_dispatch_queue_capacity:
+                    crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                client_frame_max: crabka_client_core::ClientFrameMax::default(),
+                voters: vec![(NodeId(1), ctrl.controller_bound_addr().to_string())],
+                dialer: Arc::new(crabka_raft::PlaintextDialer),
+                client_id: "observer-source-offset-test".into(),
+                cluster_id: Uuid::nil(),
+                max_bytes: crabka_units::mebibytes(1),
+                poll_interval: crabka_units::millis(10),
+                sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
+            },
+        );
+        let writer = Arc::new(RecordingWriter {
+            calls: Mutex::new(Vec::new()),
+        });
+        let source = ObserverSource::new(observer, writer);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if source.current_metadata_offset() == expected_offset {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("observer source catches up");
+
+        assert_eq!(source.current_metadata_offset(), expected_offset);
+        source.cancel().await;
+        ctrl.shutdown().await;
     }
 
     #[tokio::test]

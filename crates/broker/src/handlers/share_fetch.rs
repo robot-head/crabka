@@ -119,8 +119,7 @@ pub(crate) async fn handle(
     let mut requested = HashSet::new();
     let mut requested_order = Vec::new();
     let mut request_rows: HashMap<(uuid::Uuid, i32), FetchPartition> = HashMap::new();
-    let mut has_acknowledgements = false;
-    let mut final_has_additions = false;
+    let (has_acknowledgements, final_has_additions) = fetch_session_flags(&req);
     for topic in &req.topics {
         let topic_id = uuid::Uuid::from_bytes(topic.topic_id.0);
         for partition in &topic.partitions {
@@ -128,8 +127,6 @@ pub(crate) async fn handle(
             if requested.insert(key) {
                 requested_order.push(key);
             }
-            has_acknowledgements |= !partition.acknowledgement_batches.is_empty();
-            final_has_additions |= partition.acknowledgement_batches.is_empty();
             request_rows.insert(key, partition.clone());
         }
     }
@@ -200,10 +197,7 @@ pub(crate) async fn handle(
             None => true,
         };
 
-        let mut out = PartitionData {
-            partition_index,
-            ..Default::default()
-        };
+        let mut out = partition_response(partition_index);
         let ack_batches = request_row.map_or_else(Vec::new, collect_ack_batches);
         let partition_max_bytes = request_row.map_or(0, |row| row.partition_max_bytes);
 
@@ -228,12 +222,7 @@ pub(crate) async fn handle(
 
         if !mgr.topic_leader_is_self(topic_id, partition_index) {
             let (leader_id, leader_epoch) = mgr.current_leader_of(topic_id, partition_index);
-            out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
-            out.current_leader = LeaderIdAndEpoch {
-                leader_id,
-                leader_epoch,
-                ..Default::default()
-            };
+            out = not_leader_response(partition_index, leader_id, leader_epoch);
             pending.push(PendingPartition {
                 topic_id,
                 topic_name,
@@ -316,6 +305,40 @@ async fn acquire_records(
         acquire_pass(context, pending, false).await?;
     }
     Ok(())
+}
+
+fn fetch_session_flags(req: &ShareFetchRequest) -> (bool, bool) {
+    let has_acknowledgements = req
+        .topics
+        .iter()
+        .flat_map(|topic| &topic.partitions)
+        .any(|partition| !partition.acknowledgement_batches.is_empty());
+    let has_additions = req
+        .topics
+        .iter()
+        .flat_map(|topic| &topic.partitions)
+        .any(|partition| partition.acknowledgement_batches.is_empty());
+    (has_acknowledgements, has_additions)
+}
+
+fn partition_response(partition_index: i32) -> PartitionData {
+    PartitionData {
+        partition_index,
+        ..Default::default()
+    }
+}
+
+fn not_leader_response(partition_index: i32, leader_id: i32, leader_epoch: i32) -> PartitionData {
+    PartitionData {
+        partition_index,
+        error_code: codes::NOT_LEADER_OR_FOLLOWER,
+        current_leader: LeaderIdAndEpoch {
+            leader_id,
+            leader_epoch,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn acquisition_timeout_ms(
@@ -664,30 +687,52 @@ async fn control_batch_ranges(
 /// Parks on the append and HW-advance notifies of the partitions that this
 /// broker can lead, under a single timeout. It mirrors the wait construction
 /// in `fetch::long_poll_then_reread`.
-async fn long_poll(broker: &Broker, pending: &[PendingPartition], max_wait_ms: i32) {
-    let mut notifies: Vec<Arc<Notify>> = Vec::new();
-    for p in pending {
-        if !p.leadable || !p.fetchable {
-            continue;
-        }
-        if let Some(part) = p.topic_name.as_deref().and_then(|name| {
-            broker
-                .partitions
-                .get(name, crabka_ids::PartitionIndex(p.partition_index))
-        }) {
-            notifies.push(part.append_notify.clone());
-            notifies.push(part.hw_advance_notify.clone());
-        }
-    }
-    if notifies.is_empty() {
-        return;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LongPollOutcome {
+    NoPartitions,
+    Notified,
+    TimedOut,
+}
+
+async fn long_poll(
+    broker: &Broker,
+    pending: &[PendingPartition],
+    max_wait_ms: i32,
+) -> LongPollOutcome {
+    let notifies = pending
+        .iter()
+        .filter(|partition| partition.leadable)
+        .filter(|partition| partition.fetchable)
+        .filter_map(|partition| {
+            partition.topic_name.as_deref().and_then(|name| {
+                broker
+                    .partitions
+                    .get(name, crabka_ids::PartitionIndex(partition.partition_index))
+            })
+        })
+        .flat_map(|partition| {
+            [
+                partition.append_notify.clone(),
+                partition.hw_advance_notify.clone(),
+            ]
+        })
+        .collect();
+    let max_wait = Duration::from_millis(u64::from(u32::try_from(max_wait_ms).unwrap_or(0)));
+    wait_for_notifications(notifies, max_wait).await
+}
+
+async fn wait_for_notifications(notifies: Vec<Arc<Notify>>, max_wait: Duration) -> LongPollOutcome {
+    let Some(_) = notifies.first() else {
+        return LongPollOutcome::NoPartitions;
+    };
     let waits: Vec<WaitFut> = notifies
         .into_iter()
         .map(|n| Box::pin(async move { n.notified().await }) as WaitFut)
         .collect();
-    let max_wait = Duration::from_millis(u64::from(u32::try_from(max_wait_ms).unwrap_or(0)));
-    let _ = tokio::time::timeout(max_wait, futures_util::future::select_all(waits)).await;
+    match tokio::time::timeout(max_wait, futures_util::future::select_all(waits)).await {
+        Ok(_) => LongPollOutcome::Notified,
+        Err(_) => LongPollOutcome::TimedOut,
+    }
 }
 
 /// Groups the resolved pending partitions back into per-topic response
@@ -736,7 +781,10 @@ mod tests {
     use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
-        owned::{share_fetch_request::AcknowledgementBatch, share_fetch_response},
+        owned::{
+            share_fetch_request::{AcknowledgementBatch, FetchTopic},
+            share_fetch_response,
+        },
         primitives::uuid::Uuid as ProtoUuid,
     };
 
@@ -792,6 +840,64 @@ mod tests {
         let batches = collect_ack_batches(&partition);
 
         assert!(batches == vec![(10, 12, vec![0, 1, 1]), (30, 30, Vec::new())]);
+    }
+
+    #[test]
+    fn fetch_session_flags_distinguish_additions_and_acknowledgements() {
+        let request = |partitions| ShareFetchRequest {
+            topics: vec![FetchTopic {
+                partitions,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let addition = FetchPartition {
+            partition_index: 1,
+            ..Default::default()
+        };
+        let acknowledgement = FetchPartition {
+            partition_index: 2,
+            acknowledgement_batches: vec![AcknowledgementBatch::default()],
+            ..Default::default()
+        };
+
+        assert!(fetch_session_flags(&ShareFetchRequest::default()) == (false, false));
+        assert!(fetch_session_flags(&request(vec![addition.clone()])) == (false, true));
+        assert!(fetch_session_flags(&request(vec![acknowledgement.clone()])) == (true, false));
+        assert!(fetch_session_flags(&request(vec![addition, acknowledgement])) == (true, true));
+    }
+
+    #[test]
+    fn partition_response_helpers_preserve_routing_fields() {
+        let ordinary = partition_response(7);
+        assert!(ordinary.partition_index == 7);
+        assert!(ordinary.error_code == codes::NONE);
+
+        let redirected = not_leader_response(7, 2, 9);
+        assert!(redirected.partition_index == 7);
+        assert!(redirected.error_code == codes::NOT_LEADER_OR_FOLLOWER);
+        assert!(redirected.current_leader.leader_id == 2);
+        assert!(redirected.current_leader.leader_epoch == 9);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn notification_wait_reports_empty_wakeup_and_timeout() {
+        assert!(
+            wait_for_notifications(Vec::new(), Duration::from_secs(1)).await
+                == LongPollOutcome::NoPartitions
+        );
+
+        let notified = Arc::new(Notify::new());
+        notified.notify_one();
+        assert!(
+            wait_for_notifications(vec![notified], Duration::from_secs(1)).await
+                == LongPollOutcome::Notified
+        );
+
+        assert!(
+            wait_for_notifications(vec![Arc::new(Notify::new())], Duration::from_secs(1)).await
+                == LongPollOutcome::TimedOut
+        );
     }
 
     #[test]

@@ -667,6 +667,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn abort_moves_cancels_and_aborts_every_task() {
+        struct DropCounter(Arc<AtomicU64>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let future_log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open future log"),
+        ));
+        let future_logs = DashMap::new();
+        let started = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let cancel = CancellationToken::new();
+        let task_started = Arc::clone(&started);
+        let task_dropped = Arc::clone(&dropped);
+        let task = tokio::spawn(async move {
+            let _drop_counter = DropCounter(task_dropped);
+            task_started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        });
+        future_logs.insert(
+            ("t".to_string(), PartitionIndex(0)),
+            Arc::new(FutureLogState {
+                target_log_dir: dir.path().to_path_buf(),
+                future_path: dir.path().to_path_buf(),
+                future_log,
+                cancel: cancel.clone(),
+                task: Mutex::new(Some(task)),
+            }),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("move task starts");
+
+        abort_moves(&future_logs);
+
+        assert!(future_logs.is_empty());
+        assert!(cancel.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dropped.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted move task drops");
+    }
+
+    #[tokio::test]
     async fn move_error_log_dir_not_found_when_target_unknown() {
         // Empty broker — no partitions, no log dirs. `start_move`
         // returns LogDirNotFound before it ever looks at the

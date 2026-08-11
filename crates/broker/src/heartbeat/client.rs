@@ -96,7 +96,6 @@ fn heartbeat_request(
         broker_id,
         broker_epoch,
         current_metadata_offset,
-        want_fence: false,
         want_shut_down,
         offline_log_dirs,
         ..Default::default()

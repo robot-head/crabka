@@ -264,11 +264,7 @@ async fn wait_for_committed_projection(
         loop {
             {
                 let cache = cache.lock().await;
-                if record.entries.iter().all(|entry| {
-                    cache
-                        .flushed_frontier(entry.topic_id, entry.partition)
-                        .is_some_and(|frontier| frontier > entry.last_offset)
-                }) {
+                if cache.contains_record(record) {
                     return;
                 }
             }
@@ -371,6 +367,34 @@ mod tests {
         assert!(cache.lock().await.flushed_frontier(topic_id, 0) == Some(3));
         assert!(store.head(&Path::from(record.object_key)).await.is_ok());
         assert!(handle.log.lock().unwrap().log_start_offset() == Offset(2));
+    }
+
+    #[tokio::test]
+    async fn committed_projection_wait_requires_the_record_to_be_applied() {
+        let cache = Arc::new(AsyncMutex::new(WalIndexCache::default()));
+        let record = WalFlushRecord {
+            object_key: "diskless-wal/test.ckwl".into(),
+            format_version: 1,
+            entries: vec![WalIndexEntry {
+                topic_id: Uuid::from_u128(11),
+                partition: 0,
+                first_offset: 0,
+                last_offset: 2,
+                byte_start: 0,
+                byte_len: 1,
+            }],
+        };
+
+        let error =
+            wait_for_committed_projection(Arc::clone(&cache), &record, Duration::from_millis(10))
+                .await
+                .expect_err("an unapplied record must time out");
+        assert!(error.to_string().contains("projection timed out"));
+
+        cache.lock().await.apply(&record);
+        wait_for_committed_projection(cache, &record, Duration::from_secs(1))
+            .await
+            .expect("the exact applied record is visible");
     }
 
     #[tokio::test]

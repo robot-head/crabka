@@ -370,11 +370,11 @@ async fn read_kafka_request(
         .map_err(|e| RaftHandshakeError::Protocol(e.to_string()))?;
     let mut frame = vec![0u8; size];
     stream.read_exact(&mut frame).await?;
-    if frame.len() < 4 {
+    let [api_key_hi, api_key_lo, api_version_hi, api_version_lo, ..] = frame.as_slice() else {
         return Err(RaftHandshakeError::Protocol("short request header".into()));
-    }
-    let api_key = i16::from_be_bytes([frame[0], frame[1]]);
-    let api_version = i16::from_be_bytes([frame[2], frame[3]]);
+    };
+    let api_key = i16::from_be_bytes([*api_key_hi, *api_key_lo]);
+    let api_version = i16::from_be_bytes([*api_version_hi, *api_version_lo]);
     let header_version = if is_request_header_flexible(api_key, api_version) {
         2
     } else {
@@ -771,6 +771,17 @@ mod tests {
 
     #[tokio::test]
     async fn read_kafka_request_rejects_short_and_truncated_headers() {
+        for payload_len in 0..4 {
+            let mut frame = Vec::new();
+            frame.extend_from_slice(&u32::try_from(payload_len).unwrap().to_be_bytes());
+            frame.resize(4 + payload_len, 0);
+            let got = read_request_from_frame(frame).await;
+            assert!(
+                matches!(got, Err(RaftHandshakeError::Protocol(_))),
+                "want protocol error for {payload_len}-byte header, got {got:?}"
+            );
+        }
+
         let mut short = Vec::new();
         short.extend_from_slice(&9u32.to_be_bytes());
         short.extend_from_slice(&[0; 9]);

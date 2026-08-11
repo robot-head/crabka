@@ -39,6 +39,8 @@ use crate::{
     },
 };
 
+const UNKNOWN_COORDINATOR_EPOCH: i32 = -1;
+
 /// Live-dependency seam for the KIP-939 idle-transaction reaper.
 ///
 /// `sweep_expired` orchestrates a three-phase abort for each tid. That
@@ -313,7 +315,7 @@ impl TxnCoordinator {
                     producer_id: entry.producer_id,
                     producer_epoch: entry.producer_epoch,
                     marker_type,
-                    coordinator_epoch: -1,
+                    coordinator_epoch: UNKNOWN_COORDINATOR_EPOCH,
                     commit_stamp: None,
                 },
             )
@@ -699,6 +701,11 @@ mod tests {
             num_partitions,
             crabka_units::mebibytes(1),
         )
+    }
+
+    #[test]
+    fn local_marker_uses_the_unknown_coordinator_epoch_sentinel() {
+        check!(UNKNOWN_COORDINATOR_EPOCH == -1);
     }
 
     #[tokio::test]

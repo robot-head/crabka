@@ -575,14 +575,18 @@ impl ReplicatorSupervisor {
             .map(|entry| *entry.key())
             .collect::<Vec<_>>();
         for shard in current {
-            let target_changed =
-                desired.get(&shard) != self.wal_task_targets.get(&shard).as_deref();
-            if (!desired.contains_key(&shard) || target_changed)
-                && let Some((_, token)) = self.wal_tasks.remove(&shard)
-            {
-                self.wal_task_targets.remove(&shard);
-                token.cancel();
+            let target_matches = match (desired.get(&shard), self.wal_task_targets.get(&shard)) {
+                (Some(desired), Some(current)) => desired == current.value(),
+                _ => false,
+            };
+            if target_matches {
+                continue;
             }
+            let Some((_, token)) = self.wal_tasks.remove(&shard) else {
+                continue;
+            };
+            self.wal_task_targets.remove(&shard);
+            token.cancel();
         }
         for (shard, spec) in desired {
             if self.wal_tasks.contains_key(&shard) {
@@ -1481,6 +1485,74 @@ mod tests {
         );
         let short = HashMap::from([(shard, vec![NodeId(1), NodeId(2)])]);
         assert!(supervisor.desired_wal_followers(&image, &short).is_empty());
+    }
+
+    #[test]
+    fn reconcile_wal_followers_retains_only_the_current_target() {
+        use std::collections::BTreeMap;
+
+        let topic_id = Uuid::from_u128(19);
+        let image_at_epoch = |leader_epoch| {
+            let mut overrides = BTreeMap::new();
+            overrides.insert("crabka.diskless".into(), "true".into());
+            image_with(&[
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "diskless".into(),
+                    topic_id,
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                partition_record("diskless", 0, NodeId(1), vec![NodeId(1)], leader_epoch),
+                MetadataRecord::V1TopicConfig(crabka_metadata::TopicConfigRecord {
+                    topic: "diskless".into(),
+                    overrides,
+                }),
+            ])
+        };
+        let image = image_at_epoch(7);
+        let (supervisor, _, _, _) = supervisor_fixture(image.clone());
+        let shard = crate::wal::quorum::registry::ShardId {
+            topic_id,
+            partition: PartitionIndex(0),
+        };
+        let placements = HashMap::from([(shard, vec![NodeId(1), NodeId(2), NodeId(3)])]);
+        let target = WalFollowerSpec {
+            topic: "diskless".into(),
+            leader: NodeId(1),
+            leader_epoch: crabka_metadata::LeaderEpoch(7),
+        };
+        let current = CancellationToken::new();
+        supervisor.wal_tasks.insert(shard, current.clone());
+        supervisor.wal_task_targets.insert(shard, target);
+
+        supervisor.reconcile_wal_followers(&image, &placements);
+
+        assert!(!current.is_cancelled());
+        assert!(supervisor.wal_tasks.contains_key(&shard));
+        assert!(supervisor.wal_task_targets.contains_key(&shard));
+
+        supervisor.reconcile_wal_followers(&image_at_epoch(8), &placements);
+
+        assert!(current.is_cancelled());
+        assert!(!supervisor.wal_tasks.contains_key(&shard));
+        assert!(!supervisor.wal_task_targets.contains_key(&shard));
+
+        let removed = CancellationToken::new();
+        supervisor.wal_tasks.insert(shard, removed.clone());
+        supervisor.wal_task_targets.insert(
+            shard,
+            WalFollowerSpec {
+                topic: "diskless".into(),
+                leader: NodeId(1),
+                leader_epoch: crabka_metadata::LeaderEpoch(8),
+            },
+        );
+
+        supervisor.reconcile_wal_followers(&MetadataImage::new(Uuid::nil()), &HashMap::new());
+
+        assert!(removed.is_cancelled());
+        assert!(!supervisor.wal_tasks.contains_key(&shard));
+        assert!(!supervisor.wal_task_targets.contains_key(&shard));
     }
 
     #[tokio::test]

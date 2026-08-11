@@ -2368,7 +2368,7 @@ impl RuntimeFileConfig {
             whole_bytes_usize
         );
         if let Some(value) = runtime.diskless_wal_trim_safety_lag {
-            if value < 0 {
+            if value.is_negative() {
                 return Err(FileConfigError::InvalidConfig(
                     "diskless_wal_trim_safety_lag must be nonnegative".into(),
                 ));
@@ -4983,6 +4983,18 @@ streams_group_max_size = 19
             .expect_err("reject negative trim lag");
 
         assert!(error.to_string().contains("diskless_wal_trim_safety_lag"));
+    }
+
+    #[test]
+    fn runtime_file_config_accepts_positive_diskless_wal_trim_lag() {
+        let file: FileConfig = toml::from_str("[runtime]\ndiskless_wal_trim_safety_lag = 7\n")
+            .expect("parse runtime config");
+        let mut config = crate::config::BrokerConfig::default();
+
+        file.apply_to(&mut config)
+            .expect("accept positive trim lag");
+
+        assert!(config.diskless_wal_trim_safety_lag == 7);
     }
 
     /// Every time and byte-size runtime key must survive the round trip

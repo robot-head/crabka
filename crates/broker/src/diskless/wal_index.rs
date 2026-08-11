@@ -68,6 +68,20 @@ impl WalIndexCache {
         }
     }
 
+    /// Return whether every entry from this flush record is present in the
+    /// committed projection under the same object key.
+    #[must_use]
+    pub fn contains_record(&self, record: &WalFlushRecord) -> bool {
+        record.entries.iter().all(|entry| {
+            self.by_topic_partition
+                .get(&(entry.topic_id, entry.partition))
+                .and_then(|entries| entries.get(&entry.first_offset))
+                .is_some_and(|(object_key, indexed)| {
+                    object_key == &record.object_key && indexed == entry
+                })
+        })
+    }
+
     /// Return the object and byte range covering `offset`, if one exists.
     #[must_use]
     pub fn lookup(
@@ -153,6 +167,28 @@ mod tests {
         c.apply(&rec);
         let t = Uuid::from_u128(1);
         assert!(c.flushed_frontier(t, 0) == Some(5));
+    }
+
+    #[test]
+    fn contains_record_requires_the_exact_committed_object_and_entry() {
+        let mut cache = WalIndexCache::default();
+        let record = WalFlushRecord {
+            object_key: "o1".into(),
+            format_version: 1,
+            entries: vec![entry(0, 0, 4)],
+        };
+        assert!(!cache.contains_record(&record));
+
+        cache.apply(&record);
+        assert!(cache.contains_record(&record));
+
+        let mut wrong_object = record.clone();
+        wrong_object.object_key = "o2".into();
+        assert!(!cache.contains_record(&wrong_object));
+
+        let mut wrong_entry = record.clone();
+        wrong_entry.entries[0].byte_len += 1;
+        assert!(!cache.contains_record(&wrong_entry));
     }
 
     #[test]
