@@ -690,7 +690,7 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         (Datum::Int2(_) | Datum::Int4(_), Datum::Xid(y)) => oid_operand(a)?.cmp(y),
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
-        (Datum::OidVector(x), Datum::OidVector(y)) => compare_arrays(x, y)?,
+        (Datum::OidVector(x), Datum::OidVector(y)) => compare_vectors(x, y)?,
         // Every circle comparison operator orders by area through PostgreSQL's
         // epsilon FP macros. A NaN area makes all of them false there; here it
         // yields NULL, which excludes the row from a WHERE just the same. No
@@ -870,6 +870,44 @@ fn compare_range_bounds(
 /// dimension lengths, then the lower bounds. A NULL element sorts greater than
 /// any non-NULL one (PostgreSQL's `btarraycmp` treats NULLs as largest), and two
 /// NULLs are equal. The *comparison* is never NULL, unlike a scalar `=`.
+/// `oidvectorlt` and friends, which are not `array_cmp`.
+///
+/// An `oidvector`'s elements are oids, and an oid is unsigned. crabka has no
+/// `oid` element type, so the `u32` rides in an `Int4` with its bit pattern
+/// preserved -- which means the generic element comparison reads it back
+/// *signed* and sorts `4294967295` before `1`. `PostgreSQL` compares through
+/// `oidcmp`, unsigned, and puts `1` first.
+///
+/// `int2vector` shares this datum variant and is genuinely signed, so the
+/// element type is the discriminator: `Int4` elements are oids, `Int2` elements
+/// are int2s and keep the ordinary comparison.
+///
+/// Only ordering is affected. Equality reads the same under either
+/// interpretation, so index probes and unique enforcement were never wrong.
+fn compare_vectors(
+    a: &crate::datum::ArrayValue,
+    b: &crate::datum::ArrayValue,
+) -> Result<Ordering, TypeError> {
+    if a.elem != crate::ElemType::Int4 || b.elem != crate::ElemType::Int4 {
+        return compare_arrays(a, b);
+    }
+    for (x, y) in a.elems.iter().zip(b.elems.iter()) {
+        let ord = match (x, y) {
+            (Datum::Int4(x), Datum::Int4(y)) => x.cast_unsigned().cmp(&y.cast_unsigned()),
+            _ => match (x.is_null(), y.is_null()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => compare(x, y)?.expect("non-NULL operands compare"),
+            },
+        };
+        if ord != Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(a.elems.len().cmp(&b.elems.len()))
+}
+
 fn compare_arrays(
     a: &crate::datum::ArrayValue,
     b: &crate::datum::ArrayValue,
@@ -2241,5 +2279,38 @@ mod tests {
         }
         // A NULL still short-circuits to NULL before the type is consulted.
         assert!(compare(&Datum::Null, &value(ColumnType::Polygon, "((0,0),(1,1))")) == Ok(None));
+    }
+
+    /// `oidvectorlt` is unsigned; `array_cmp` is not.
+    ///
+    /// An oid above 2^31 rides in an `Int4` with its bit pattern intact, so the
+    /// generic element comparison reads it back negative and sorts it first.
+    /// `PostgreSQL` compares oids through `oidcmp`, unsigned. `int2vector`
+    /// shares the datum variant and is genuinely signed, so it must keep the
+    /// ordinary ordering -- that pair is what stops this being fixed by
+    /// reinterpreting every vector element.
+    #[test]
+    fn a_vector_of_oids_orders_unsigned_and_one_of_int2s_does_not() {
+        use assert2::assert;
+
+        use crate::ColumnType;
+        let tz = jiff::tz::TimeZone::UTC;
+        let vector = |ty: ColumnType, text: &str| {
+            crate::cast::cast(&Datum::Text(text.into()), ty, &tz)
+                .unwrap_or_else(|_| panic!("{text}"))
+        };
+        let oidvec = |text: &str| vector(ColumnType::OidVector, text);
+        let int2vec = |text: &str| vector(ColumnType::Int2Vector, text);
+
+        // 4294967295 is -1 as an i32. Unsigned, it is the largest oid there is.
+        assert!(compare(&oidvec("1 2"), &oidvec("4294967295 0")) == Ok(Some(Ordering::Less)));
+        assert!(compare(&oidvec("4294967295 0"), &oidvec("1 2")) == Ok(Some(Ordering::Greater)));
+        assert!(compare(&oidvec("0 1"), &oidvec("0 2")) == Ok(Some(Ordering::Less)));
+        assert!(compare(&oidvec("1 2"), &oidvec("1 2")) == Ok(Some(Ordering::Equal)));
+        // A common prefix orders the shorter first, as array_cmp does.
+        assert!(compare(&oidvec("1"), &oidvec("1 0")) == Ok(Some(Ordering::Less)));
+
+        // int2 elements stay signed: -1 really is below 1 here.
+        assert!(compare(&int2vec("-1 0"), &int2vec("1 0")) == Ok(Some(Ordering::Less)));
     }
 }
