@@ -455,7 +455,7 @@ impl CleanedTransactionMetadata {
     /// The transactional-data state for a given producer.
     #[must_use]
     pub fn txn_state(&self, producer_id: ProducerId) -> TxnDataState {
-        if producer_id.is_none() {
+        if producer_id.get() < 0 {
             return TxnDataState::NotTransactional;
         }
         if self.survivors.contains(&producer_id) {
@@ -681,6 +681,8 @@ mod build_map_tests {
         // Producer 2000's newest data survives; producer 1000's is superseded.
         assert2::assert!(txn.txn_state(ProducerId(2000)) == TxnDataState::DataSurvives);
         assert2::assert!(txn.txn_state(ProducerId(1000)) == TxnDataState::DataFullyGone);
+        assert2::assert!(txn.txn_state(ProducerId(0)) == TxnDataState::DataFullyGone);
+        assert2::assert!(txn.txn_state(ProducerId(-2)) == TxnDataState::NotTransactional);
     }
 }
 
@@ -891,10 +893,7 @@ pub fn rewrite_segments(
             .max()
             .expect("kept non-empty");
         let mut out_batch = RecordBatch {
-            base_offset: batch.base_offset,
             last_offset_delta: last_delta,
-            max_timestamp: batch.max_timestamp,
-            attributes: batch.attributes,
             records: kept,
             ..batch.clone()
         };
@@ -1090,6 +1089,7 @@ mod rewrite_tests {
                 make_record(0, Some(b"k1"), Some(b"v1")), // abs 100
                 make_record(1, Some(b"k2"), Some(b"v2")), // abs 101
                 make_record(2, Some(b"k1"), Some(b"v3")), // abs 102 — kept
+                make_record(3, None, Some(b"unkeyed")),   // abs 103 — dropped
             ],
         );
         let segment_refs = vec![&first_segment];

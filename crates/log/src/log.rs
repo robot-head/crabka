@@ -486,8 +486,11 @@ impl Log {
     }
 
     fn apply_recovered_batch_state(&mut self, batch: &RecordBatch) -> Result<(), LogError> {
-        self.update_owned_producer_entry(batch)?;
         let producer_id = ProducerId(batch.producer_id);
+        if producer_id.get() < 0 {
+            return Ok(());
+        }
+        self.update_owned_producer_entry(batch)?;
         if batch.attributes.is_control_batch() {
             self.pending.remove(&producer_id);
             if let Some(epoch) = batch
@@ -498,7 +501,7 @@ impl Log {
             {
                 self.coordinator_epochs.insert(producer_id, epoch);
             }
-        } else if batch.attributes.is_transactional() && !producer_id.is_none() {
+        } else if batch.attributes.is_transactional() {
             self.pending
                 .entry(producer_id)
                 .or_insert(Offset(batch.base_offset));
@@ -525,7 +528,7 @@ impl Log {
                 let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
                 if batch.attributes.is_control_batch() {
                     self.pending_stamp_ranges.remove(&producer_id);
-                } else if batch.attributes.is_transactional() && !producer_id.is_none() {
+                } else if batch.attributes.is_transactional() && producer_id.get() >= 0 {
                     self.pending_stamp_ranges
                         .entry(producer_id)
                         .or_default()
@@ -539,7 +542,7 @@ impl Log {
 
     fn update_owned_producer_entry(&mut self, batch: &RecordBatch) -> Result<(), LogError> {
         let producer_id = ProducerId(batch.producer_id);
-        if producer_id.is_none() {
+        if producer_id.get() < 0 {
             return Ok(());
         }
         if batch.attributes.is_control_batch() {
@@ -613,7 +616,7 @@ impl Log {
         last_offset_delta: i32,
         base_offset: Offset,
     ) -> Result<Option<(i32, Offset)>, LogError> {
-        if producer_id.is_none() || base_sequence < 0 {
+        if producer_id.get() < 0 || base_sequence < 0 {
             return Ok(None);
         }
         if last_offset_delta < 0 {
@@ -1269,15 +1272,17 @@ impl Log {
 
         // --- .stampindex write (internal sidecar) ---
         // Ordinary verbatim data is stamped now. Transactional verbatim data
-        // is retained below and stamped only if its commit marker lands.
+        // with an assigned producer is retained below and stamped only if its
+        // commit marker lands.
         let last_offset = Offset(base_offset.0 + i64::from(batch.last_offset_delta));
-        if !batch.is_transactional {
+        let is_transactional = batch.is_transactional && batch.producer_id.get() >= 0;
+        if !is_transactional {
             self.record_stamp(base_offset, last_offset)?;
         }
 
         // --- LSO tracking (no control batches on this path) ---
         let pid = batch.producer_id;
-        if batch.is_transactional && !pid.is_none() {
+        if is_transactional {
             // Record the first offset of this txn on this partition; LSO
             // stays put until a commit/abort marker (which arrives via the
             // owned control-batch path).
@@ -1294,7 +1299,7 @@ impl Log {
         self.update_data_producer_entry(
             (batch.producer_id, batch.producer_epoch),
             (batch.base_sequence, batch.last_offset_delta),
-            (base_offset, batch.max_timestamp, batch.is_transactional),
+            (base_offset, batch.max_timestamp, is_transactional),
         )?;
 
         Ok(())
@@ -1402,14 +1407,12 @@ impl Log {
         batch: &mut RecordBatch,
         transaction_stamp: Option<u64>,
     ) -> Result<(), LogError> {
-        if !batch.attributes.is_control_batch() {
-            Self::data_producer_tail(
-                ProducerId(batch.producer_id),
-                batch.base_sequence,
-                batch.last_offset_delta,
-                Offset(batch.base_offset),
-            )?;
-        }
+        Self::data_producer_tail(
+            ProducerId(batch.producer_id),
+            batch.base_sequence,
+            batch.last_offset_delta,
+            Offset(batch.base_offset),
+        )?;
         let (segment_size, index_interval, flush_on_append) = {
             let cfg = self.config.read().unwrap();
             (cfg.segment_size, cfg.index_interval, cfg.flush_on_append)
@@ -1437,13 +1440,14 @@ impl Log {
         // Ordinary data is stamped after the batch is durable. Transactional
         // data stays unstamped until its COMMIT marker lands; an ABORT leaves
         // it unstamped. Control records themselves never receive a stamp.
-        if !batch.attributes.is_control_batch() && !batch.attributes.is_transactional() {
+        let pid = ProducerId(batch.producer_id);
+        let is_transactional = batch.attributes.is_transactional() && pid.get() >= 0;
+        if !batch.attributes.is_control_batch() && !is_transactional {
             let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
             self.record_stamp(Offset(batch.base_offset), last)?;
         }
 
         // --- LSO tracking + .txnindex writes ---
-        let pid = ProducerId(batch.producer_id);
         if batch.attributes.is_control_batch() {
             // Parse the inner control record: key = (version: i16, type: i16) BE.
             // type=0 → ABORT; type=1 → COMMIT.
@@ -1452,11 +1456,12 @@ impl Log {
                 .first()
                 .and_then(|r| r.key.as_deref())
                 .and_then(parse_control_marker_type);
-            if let Some(epoch) = batch
-                .records
-                .first()
-                .and_then(|record| record.value.as_deref())
-                .and_then(parse_control_marker_coordinator_epoch)
+            if pid.get() >= 0
+                && let Some(epoch) = batch
+                    .records
+                    .first()
+                    .and_then(|record| record.value.as_deref())
+                    .and_then(parse_control_marker_coordinator_epoch)
             {
                 self.coordinator_epochs.insert(pid, epoch);
             }
@@ -1495,7 +1500,7 @@ impl Log {
             if self.pending.is_empty() {
                 self.lso = self.log_end_offset();
             }
-        } else if batch.attributes.is_transactional() && !pid.is_none() {
+        } else if is_transactional {
             // Record the first offset of this txn on this partition.
             let base = Offset(batch.base_offset);
             let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
@@ -3586,6 +3591,105 @@ mod tests {
         let mut commit = commit_marker(1000, 0);
         log.append(&mut commit).unwrap();
         assert2::assert!(log.lso() == log.log_end_offset());
+    }
+
+    #[test]
+    fn negative_producer_ids_never_create_transaction_state() {
+        let dir = tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            log.set_stamp_source(std::sync::Arc::new(
+                crate::stamp_source::MonotonicStampSource::new(40, 1),
+            ))
+            .unwrap();
+
+            let mut owned = sample_batch(1);
+            owned.producer_id = -2;
+            owned.producer_epoch = 0;
+            owned.base_sequence = 0;
+            owned.attributes = owned.attributes.with_transactional(true);
+            log.append(&mut owned).unwrap();
+            assert2::assert!(log.lso() == Offset(1));
+            assert2::assert!(log.stamp_for_offset(Offset(0)) == Some(40));
+
+            let mut marker = commit_marker(-2, 0);
+            log.append(&mut marker).unwrap();
+            assert2::assert!(log.producer_transaction_state(ProducerId(-2)) == (-1, None));
+
+            let mut verbatim = test_batch_at(0);
+            verbatim.producer_id = -3;
+            verbatim.producer_epoch = 0;
+            verbatim.base_sequence = 0;
+            verbatim.attributes = verbatim.attributes.with_transactional(true);
+            let (_wire, batch) = verbatim_from(&verbatim, LeaderEpoch(0));
+            log.append_verbatim(&batch).unwrap();
+            assert2::assert!(log.lso() == Offset(3));
+            assert2::assert!(log.stamp_for_offset(Offset(2)) == Some(41));
+            assert2::assert!(log.producer_state_snapshot().is_empty());
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert2::assert!(reopened.lso() == reopened.log_end_offset());
+        assert2::assert!(reopened.producer_transaction_state(ProducerId(-2)) == (-1, None));
+        assert2::assert!(reopened.producer_transaction_state(ProducerId(-3)) == (-1, None));
+        assert2::assert!(reopened.producer_state_snapshot().is_empty());
+    }
+
+    #[test]
+    fn producer_tail_accepts_zero_and_rejects_negative_identity_fields() {
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(0), 0, 1, Offset(10)).unwrap()
+                == Some((1, Offset(11)))
+        );
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(1), 5, 1, Offset(10)).unwrap()
+                == Some((6, Offset(11)))
+        );
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(-2), 0, 0, Offset(10)).unwrap() == None
+        );
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(1), -2, 0, Offset(10)).unwrap() == None
+        );
+    }
+
+    #[test]
+    fn zero_producer_id_and_only_transactional_ranges_survive_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+
+            let mut zero_pid = transactional_batch(0, 3, &["a", "b"]);
+            zero_pid.base_sequence = 5;
+            log.append(&mut zero_pid).unwrap();
+
+            let mut ordinary = sample_batch(1);
+            ordinary.producer_id = 1;
+            ordinary.producer_epoch = 0;
+            ordinary.base_sequence = 7;
+            log.append(&mut ordinary).unwrap();
+
+            let mut negative_pid = transactional_batch(-2, 0, &["ignored"]);
+            negative_pid.base_sequence = 0;
+            log.append(&mut negative_pid).unwrap();
+
+            let state = log.producer_state_snapshot();
+            let zero = state.iter().find(|entry| entry.producer_id == 0).unwrap();
+            assert2::assert!(zero.last_sequence == 6);
+            assert2::assert!(zero.current_txn_first_offset == Some(Offset(0)));
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let state = reopened.producer_state_snapshot();
+        let zero = state.iter().find(|entry| entry.producer_id == 0).unwrap();
+        assert2::assert!(zero.last_sequence == 6);
+        assert2::assert!(zero.current_txn_first_offset == Some(Offset(0)));
+        assert2::assert!(reopened.lso() == Offset(0));
+        assert2::assert!(reopened.pending_stamp_ranges.len() == 1);
+        assert2::assert!(
+            reopened.pending_stamp_ranges.get(&ProducerId(0))
+                == Some(&vec![(Offset(0), Offset(1))])
+        );
     }
 
     #[test]

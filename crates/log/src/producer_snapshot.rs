@@ -197,7 +197,7 @@ fn read(path: &Path) -> Result<HashMap<ProducerId, ProducerSnapshotEntry>, LogEr
         let timestamp = take_i64(&bytes, &mut cursor);
         let coordinator_epoch = take_i32(&bytes, &mut cursor);
         let txn_offset = take_i64(&bytes, &mut cursor);
-        if producer_id.is_none()
+        if producer_id.get() < 0
             || producer_epoch < 0
             || offset_delta < 0
             || txn_offset < -1
@@ -284,6 +284,16 @@ mod tests {
     }
 
     #[test]
+    fn zero_producer_id_snapshot_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = sample_entry();
+        entry.producer_id = ProducerId(0);
+        let entries = HashMap::from([(entry.producer_id, entry)]);
+        let path = write(dir.path(), Offset(102), &entries).unwrap();
+        assert2::assert!(read(&path).unwrap() == entries);
+    }
+
+    #[test]
     fn empty_entry_uses_kafka_marker_sentinels() {
         let entry = ProducerSnapshotEntry::empty(ProducerId(7), 0);
         assert2::assert!(
@@ -329,7 +339,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("short.snapshot");
         for length in 0..10 {
-            fs::write(&path, vec![0; length]).unwrap();
+            let mut bytes = vec![0; length];
+            if length >= 2 {
+                bytes[..2].copy_from_slice(&VERSION.to_be_bytes());
+            }
+            fs::write(&path, bytes).unwrap();
             assert2::assert!(matches!(read(&path), Err(LogError::Corrupt(_))));
         }
     }
@@ -416,6 +430,10 @@ mod tests {
 
     #[test]
     fn rejects_each_invalid_entry_field_independently() {
+        let mut entry = sample_entry();
+        entry.producer_id = ProducerId(-2);
+        assert_rejected(entry);
+
         let mut entry = sample_entry();
         entry.producer_id = ProducerId(-1);
         assert_rejected(entry);
