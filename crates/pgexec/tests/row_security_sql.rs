@@ -671,8 +671,7 @@ async fn copy_from_is_refused_for_a_relation_under_row_security() {
     )
     .await;
 
-    let (sqlstate, message, hint) =
-        error_and_hint_of(&mut alice, "COPY document FROM STDIN").await;
+    let (sqlstate, message, hint) = error_and_hint_of(&mut alice, "COPY document FROM STDIN").await;
     assert!(sqlstate == "0A000");
     assert!(message == "COPY FROM not supported with row-level security");
     assert!(hint.as_deref() == Some("Use INSERT statements instead."));
