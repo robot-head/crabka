@@ -2211,6 +2211,7 @@ mod tests {
                     check!(v.last_offset_delta == 0);
                 }
                 ProduceData::Owned(_) => panic!("expected Verbatim"),
+                ProduceData::OwnedCommitMarker { .. } => panic!("expected producer data"),
             }
         }
 
@@ -2314,6 +2315,7 @@ mod tests {
                     assert!(v.producer_id == crabka_log::ProducerId(100));
                 }
                 ProduceData::Owned(_) => panic!("transactional data batch should pass through"),
+                ProduceData::OwnedCommitMarker { .. } => panic!("expected producer data"),
             }
         }
 
@@ -2367,6 +2369,7 @@ mod tests {
                 ProduceData::Owned(_) => {
                     panic!("lz4 producer batch must pass through verbatim (no decompress)")
                 }
+                ProduceData::OwnedCommitMarker { .. } => panic!("expected producer data"),
             }
         }
 

@@ -81,5 +81,66 @@ pub fn delete_segment_files(dir: &Path, base_offset: Offset) -> Result<(), LogEr
     std::fs::remove_file(name::log_path(dir, base_offset.0))?;
     std::fs::remove_file(name::index_path(dir, base_offset.0))?;
     std::fs::remove_file(name::timeindex_path(dir, base_offset.0))?;
+    remove_optional(name::txnindex_path(dir, base_offset.0))?;
+    remove_optional(name::stampindex_path(dir, base_offset.0))?;
     Ok(())
+}
+
+fn remove_optional(path: std::path::PathBuf) -> Result<(), LogError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(LogError::Io(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn delete_segment_files_removes_required_and_optional_sidecars() {
+        let dir = tempdir().unwrap();
+        let base = Offset(7);
+        let paths = [
+            name::log_path(dir.path(), base.0),
+            name::index_path(dir.path(), base.0),
+            name::timeindex_path(dir.path(), base.0),
+            name::txnindex_path(dir.path(), base.0),
+            name::stampindex_path(dir.path(), base.0),
+        ];
+        for path in &paths {
+            std::fs::write(path, []).unwrap();
+        }
+
+        delete_segment_files(dir.path(), base).unwrap();
+
+        assert2::assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn delete_segment_files_accepts_missing_optional_sidecars() {
+        let dir = tempdir().unwrap();
+        let base = Offset(8);
+        for path in [
+            name::log_path(dir.path(), base.0),
+            name::index_path(dir.path(), base.0),
+            name::timeindex_path(dir.path(), base.0),
+        ] {
+            std::fs::write(path, []).unwrap();
+        }
+
+        delete_segment_files(dir.path(), base).unwrap();
+    }
+
+    #[test]
+    fn remove_optional_propagates_non_missing_errors() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("not-a-file");
+        std::fs::create_dir(&path).unwrap();
+
+        assert2::assert!(let Err(LogError::Io(_)) = remove_optional(path));
+    }
 }

@@ -110,6 +110,12 @@ fn append_produce_batch(
                     .append(&mut batch)
                     .map_err(crate::error::BrokerError::from)
             }
+            ProduceData::OwnedCommitMarker {
+                mut batch,
+                commit_stamp,
+            } => guard
+                .append_with_commit_stamp(&mut batch, commit_stamp)
+                .map_err(crate::error::BrokerError::from),
         };
         results.push(r);
     }
@@ -145,6 +151,13 @@ fn append_produce_batch_at(
                     .map(|()| next)
                     .map_err(crate::error::BrokerError::from)
             }
+            ProduceData::OwnedCommitMarker {
+                mut batch,
+                commit_stamp,
+            } => guard
+                .append_at_with_commit_stamp(&mut batch, next, commit_stamp)
+                .map(|()| next)
+                .map_err(crate::error::BrokerError::from),
         };
         if result.is_ok() {
             next = Offset(next.0 + count);
@@ -1186,7 +1199,10 @@ mod tests {
             Some(test_sequencer()),
         ));
 
-        sync_started_rx.await.expect("first group reached WAL sync");
+        tokio::time::timeout(std::time::Duration::from_secs(10), sync_started_rx)
+            .await
+            .expect("first group did not reach WAL sync")
+            .expect("first group reached WAL sync");
         assert!(log.lock().unwrap().log_end_offset() == Offset(2));
 
         writer.abort();

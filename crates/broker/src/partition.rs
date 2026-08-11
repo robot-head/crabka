@@ -52,6 +52,13 @@ pub enum ProduceData {
     /// Decode and re-encode the owned batch on append (the original path).
     /// The writer mutates `base_offset` before append.
     Owned(RecordBatch),
+    /// An internally built COMMIT marker plus the cross-domain coordinator's
+    /// commit stamp. The stamp is written only to `.stampindex`; it never
+    /// enters the Kafka batch bytes.
+    OwnedCommitMarker {
+        batch: RecordBatch,
+        commit_stamp: u64,
+    },
 }
 
 impl ProduceData {
@@ -62,6 +69,8 @@ impl ProduceData {
                 .expect("verbatim batch offset count is non-negative"),
             Self::Owned(batch) => u32::try_from(batch.last_offset_delta + 1)
                 .expect("owned batch offset count is non-negative"),
+            Self::OwnedCommitMarker { batch, .. } => u32::try_from(batch.last_offset_delta + 1)
+                .expect("commit marker offset count is non-negative"),
         }
     }
 }
@@ -455,6 +464,34 @@ impl Partition {
             .map_err(|_| BrokerError::Txn("ack dropped".into()))?
     }
 
+    /// Append an internally built COMMIT marker with a coordinator-supplied
+    /// commit stamp. The partition writer keeps it ordered with all produce
+    /// and replication appends.
+    ///
+    /// # Errors
+    /// Returns an error if the writer task is unavailable or the log rejects
+    /// the marker/stamp pair.
+    pub(crate) async fn produce_commit_marker(
+        &self,
+        batch: RecordBatch,
+        commit_stamp: u64,
+    ) -> Result<Offset, BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::Produce(ProduceJob {
+                data: ProduceData::OwnedCommitMarker {
+                    batch,
+                    commit_stamp,
+                },
+                ack: ack_tx,
+            }))
+            .await
+            .map_err(|_| BrokerError::Txn("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Txn("ack dropped".into()))?
+    }
+
     /// Cached High Watermark. Awaits `replica_state` cooperatively, so it
     /// does not block tokio worker threads.
     #[must_use]
@@ -798,6 +835,19 @@ mod tests {
         fn assert_clone<T: Clone>() {}
         assert_send::<Partition>();
         assert_clone::<Partition>();
+    }
+
+    #[test]
+    fn commit_marker_record_count_uses_batch_offset_span() {
+        let data = ProduceData::OwnedCommitMarker {
+            batch: crabka_protocol::records::RecordBatch {
+                last_offset_delta: 3,
+                ..crabka_protocol::records::RecordBatch::default()
+            },
+            commit_stamp: 99,
+        };
+
+        check!(data.record_count() == 4);
     }
 
     #[tokio::test]

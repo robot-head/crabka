@@ -29,7 +29,7 @@ use crate::{
                 MarkerDispatchContext, completion_producer_identity, dispatch_markers,
                 prepare_completion_identities,
             },
-            write_txn_markers::append_marker_and_materialize,
+            write_txn_markers::{MarkerAppend, append_marker_and_materialize},
         },
         marker::MarkerType,
         partitioner::partition_for_tid,
@@ -309,10 +309,13 @@ impl TxnCoordinator {
                 &part,
                 self.group_coordinator.as_ref(),
                 &tp.topic,
-                entry.producer_id,
-                entry.producer_epoch,
-                marker_type,
-                -1,
+                MarkerAppend {
+                    producer_id: entry.producer_id,
+                    producer_epoch: entry.producer_epoch,
+                    marker_type,
+                    coordinator_epoch: -1,
+                    commit_stamp: None,
+                },
             )
             .await?;
         }

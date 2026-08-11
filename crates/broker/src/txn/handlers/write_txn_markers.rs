@@ -94,10 +94,13 @@ pub(crate) fn handle(
                                 &part,
                                 Some(&group_coordinator),
                                 &topic.name,
-                                pid,
-                                epoch,
-                                marker_type,
-                                marker_entry.coordinator_epoch,
+                                MarkerAppend {
+                                    producer_id: pid,
+                                    producer_epoch: epoch,
+                                    marker_type,
+                                    coordinator_epoch: marker_entry.coordinator_epoch,
+                                    commit_stamp: None,
+                                },
                             )
                             .await
                             {
@@ -159,11 +162,15 @@ pub(crate) async fn append_marker_and_materialize(
     partition: &crate::partition::Partition,
     group_coordinator: Option<&Arc<GroupCoordinator>>,
     topic: &str,
-    producer_id: crabka_log::ProducerId,
-    producer_epoch: i16,
-    marker_type: MarkerType,
-    coordinator_epoch: i32,
+    marker: MarkerAppend,
 ) -> Result<(), BrokerError> {
+    let MarkerAppend {
+        producer_id,
+        producer_epoch,
+        marker_type,
+        coordinator_epoch,
+        commit_stamp,
+    } = marker;
     let committed_offsets = if marker_type == MarkerType::Commit && topic == OFFSETS_TOPIC {
         let coordinator = group_coordinator.ok_or_else(|| {
             BrokerError::Txn(
@@ -185,12 +192,30 @@ pub(crate) async fn append_marker_and_materialize(
         marker_type,
         coordinator_epoch,
     );
-    partition.produce_batch(marker).await?;
+    if let Some(stamp) = commit_stamp {
+        if marker_type != MarkerType::Commit {
+            return Err(BrokerError::Txn(
+                "a transaction commit stamp cannot be attached to an abort marker".into(),
+            ));
+        }
+        partition.produce_commit_marker(marker, stamp).await?;
+    } else {
+        partition.produce_batch(marker).await?;
+    }
 
     if let (Some(coordinator), offsets) = committed_offsets {
         apply_committed_offsets(coordinator, offsets).await?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MarkerAppend {
+    pub(crate) producer_id: crabka_log::ProducerId,
+    pub(crate) producer_epoch: i16,
+    pub(crate) marker_type: MarkerType,
+    pub(crate) coordinator_epoch: i32,
+    pub(crate) commit_stamp: Option<u64>,
 }
 
 fn pending_offset_entries(
@@ -505,10 +530,13 @@ mod tests {
             &part,
             Some(&broker.group_coordinator),
             OFFSETS_TOPIC,
-            producer_id,
-            5,
-            MarkerType::Abort,
-            0,
+            MarkerAppend {
+                producer_id,
+                producer_epoch: 5,
+                marker_type: MarkerType::Abort,
+                coordinator_epoch: 0,
+                commit_stamp: None,
+            },
         )
         .await
         .expect("abort marker");
@@ -518,6 +546,58 @@ mod tests {
             let log = part.log.lock().expect("offsets log lock");
             assert!(log.pending_transaction_start(producer_id).is_none());
         }
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn internal_marker_path_records_supplied_commit_stamp() {
+        use crabka_protocol::records::{Attributes, Record, RecordBatch};
+
+        let (broker_handle, dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        open_partition(&broker, dir.path(), "stamped-orders", 0);
+        let part = broker
+            .partitions
+            .get("stamped-orders", PartitionIndex(0))
+            .expect("local partition");
+        part.log
+            .lock()
+            .expect("partition log")
+            .set_stamp_source(Arc::new(crabka_log::MonotonicStampSource::new(1, 1)))
+            .expect("install stamp source");
+
+        let producer_id = crabka_log::ProducerId(700);
+        part.produce_batch(RecordBatch {
+            producer_id: producer_id.get(),
+            producer_epoch: 2,
+            attributes: Attributes::default().with_transactional(true),
+            records: vec![Record {
+                value: Some(Bytes::from_static(b"event")),
+                ..Record::default()
+            }],
+            ..RecordBatch::default()
+        })
+        .await
+        .expect("append transactional data");
+        assert!(part.stamp_for_offset(crabka_log::Offset(0)).is_none());
+
+        append_marker_and_materialize(
+            &part,
+            None,
+            "stamped-orders",
+            MarkerAppend {
+                producer_id,
+                producer_epoch: 2,
+                marker_type: MarkerType::Commit,
+                coordinator_epoch: 0,
+                commit_stamp: Some(900),
+            },
+        )
+        .await
+        .expect("commit marker");
+
+        assert!(part.stamp_for_offset(crabka_log::Offset(0)) == Some(900));
+        assert!(part.stamp_for_offset(crabka_log::Offset(1)).is_none());
         broker_handle.shutdown().await;
     }
 }
