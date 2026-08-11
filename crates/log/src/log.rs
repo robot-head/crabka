@@ -9,7 +9,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use crabka_ids::{LeaderEpoch, Offset, ProducerId};
-use crabka_protocol::records::{HEADER_LEN, RecordBatch};
+use crabka_protocol::records::{HEADER_LEN, RecordBatch, increment_sequence};
 use crabka_units::prelude::{ByteSize, ByteSizeExt, TimeExt as _, bytes};
 use tracing::instrument;
 
@@ -624,13 +624,7 @@ impl Log {
                 "negative producer offset delta for producer {producer_id}"
             )));
         }
-        let last_sequence = base_sequence
-            .checked_add(last_offset_delta)
-            .ok_or_else(|| {
-                LogError::InvalidArgument(format!(
-                    "producer sequence overflow for producer {producer_id}"
-                ))
-            })?;
+        let last_sequence = increment_sequence(base_sequence, last_offset_delta);
         let last_offset = base_offset
             .0
             .checked_add(i64::from(last_offset_delta))
@@ -3651,6 +3645,42 @@ mod tests {
         assert2::assert!(
             Log::data_producer_tail(ProducerId(1), -2, 0, Offset(10)).unwrap() == None
         );
+    }
+
+    #[test]
+    fn producer_tail_wraps_sequence_at_signed_maximum() {
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(1), i32::MAX - 1, 2, Offset(10)).unwrap()
+                == Some((0, Offset(12)))
+        );
+    }
+
+    #[test]
+    fn producer_sequence_rollover_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            let mut batch = sample_batch(3);
+            batch.producer_id = 1;
+            batch.producer_epoch = 0;
+            batch.base_sequence = i32::MAX - 1;
+            log.append(&mut batch).unwrap();
+
+            let entry = log.producer_state_snapshot().into_iter().next().unwrap();
+            assert2::assert!(entry.last_sequence == 0);
+            assert2::assert!(entry.last_offset == Offset(2));
+            assert2::assert!(entry.offset_delta == 2);
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let entry = reopened
+            .producer_state_snapshot()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert2::assert!(entry.last_sequence == 0);
+        assert2::assert!(entry.last_offset == Offset(2));
+        assert2::assert!(entry.offset_delta == 2);
     }
 
     #[test]

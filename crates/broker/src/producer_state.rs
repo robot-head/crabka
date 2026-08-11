@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crabka_ids::PartitionIndex;
 use crabka_log::ProducerId;
+use crabka_protocol::records::{decrement_sequence, increment_sequence};
 use crabka_units::{Time, convert::TimeExt as _};
 use dashmap::DashMap;
 use tokio::sync::Mutex;
@@ -41,10 +42,11 @@ pub enum Decision {
     /// Producer is fresh or the sequence is one past the last commit. Caller
     /// should append, then call `commit` with the assigned base offset.
     Append,
-    /// Previously-committed sequence range. Caller should respond with
+    /// Exact retry of the last committed sequence range. Caller should respond with
     /// `error_code = NONE` and `base_offset = base_offset`.
     Duplicate { base_offset: LogOffset },
-    /// `base_sequence != last_sequence + 1`. Caller responds with
+    /// `base_sequence` is not the wrapped successor of `last_sequence` and
+    /// does not exactly match the last committed batch. Caller responds with
     /// `OUT_OF_ORDER_SEQUENCE_NUMBER (45)`.
     OutOfOrder,
     /// `epoch < entry.epoch`. Caller responds with
@@ -56,11 +58,13 @@ pub enum Decision {
 ///
 /// The async `check` is a thin lock-acquiring wrapper over this function. The
 /// decision is a separate function so that the tests can exhaustively test and
-/// property-test it in isolation. See `producer_state_model.rs`.
+/// property-test it in isolation. The caller has already validated that the
+/// two sequence fields are non-negative. See `producer_state_model.rs`.
 pub(crate) fn check_pure(
     entry: Option<&ProducerEntry>,
     producer_epoch: i16,
     base_sequence: i32,
+    last_offset_delta: i32,
 ) -> Decision {
     match entry {
         None => Decision::Append,
@@ -73,18 +77,29 @@ pub(crate) fn check_pure(
                 // or KIP-890 per-EndTxn bump). Accept the first higher-epoch batch.
                 return Decision::Append;
             }
-            if base_sequence <= entry.last_sequence {
+            if base_sequence == increment_sequence(entry.last_sequence, 1) {
+                return Decision::Append;
+            }
+            if matches_last_batch(entry, base_sequence, last_offset_delta) {
                 return Decision::Duplicate {
                     base_offset: entry.base_offset,
                 };
             }
-            if base_sequence == entry.last_sequence + 1 {
-                Decision::Append
-            } else {
-                Decision::OutOfOrder
-            }
+            Decision::OutOfOrder
         }
     }
+}
+
+fn matches_last_batch(entry: &ProducerEntry, base_sequence: i32, last_offset_delta: i32) -> bool {
+    let Some(committed_delta) = entry
+        .last_offset
+        .checked_sub(entry.base_offset)
+        .and_then(|delta| i32::try_from(delta).ok())
+    else {
+        return false;
+    };
+    base_sequence == decrement_sequence(entry.last_sequence, committed_delta)
+        && increment_sequence(base_sequence, last_offset_delta) == entry.last_sequence
 }
 
 /// Per-partition idempotent-producer state, nested under the owning
@@ -171,11 +186,11 @@ impl ProducerState {
     ) -> Decision {
         let handle = self.handle(topic, partition);
         let s = handle.lock().await;
-        let _ = last_offset_delta; // used only by the caller to compute last_sequence on commit
         check_pure(
             s.entries.get(&ProducerId(producer_id)),
             producer_epoch,
             base_sequence,
+            last_offset_delta,
         )
     }
 
@@ -193,7 +208,7 @@ impl ProducerState {
         let (base_offset, last_timestamp) = append;
         let handle = self.handle(topic, partition);
         let mut s = handle.lock().await;
-        let last_sequence = base_sequence + last_offset_delta;
+        let last_sequence = increment_sequence(base_sequence, last_offset_delta);
         let last_offset = base_offset + i64::from(last_offset_delta);
         s.entries.insert(
             ProducerId(producer_id),
@@ -461,6 +476,46 @@ mod tests {
         commit!(s, "t", PartitionIndex(0), 1000, 0, 0, 4, 0, 1).await;
         let d = s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await;
         assert!(d == Decision::Duplicate { base_offset: 0 });
+    }
+
+    #[tokio::test]
+    async fn only_an_exact_retry_of_the_last_batch_is_duplicate() {
+        let s = ProducerState::new();
+        commit!(s, "t", PartitionIndex(0), 1000, 0, 3, 1, 10, 1).await;
+
+        check!(
+            s.check("t", PartitionIndex(0), 1000, 0, 3, 1).await
+                == Decision::Duplicate { base_offset: 10 }
+        );
+        check!(s.check("t", PartitionIndex(0), 1000, 0, 3, 0).await == Decision::OutOfOrder);
+        check!(s.check("t", PartitionIndex(0), 1000, 0, 2, 1).await == Decision::OutOfOrder);
+    }
+
+    #[tokio::test]
+    async fn sequence_rollover_appends_and_commits_without_overflow() {
+        let s = ProducerState::new();
+        commit!(s, "t", PartitionIndex(0), 1000, 0, i32::MAX - 1, 1, 10, 1,).await;
+
+        check!(s.check("t", PartitionIndex(0), 1000, 0, 0, 0).await == Decision::Append);
+        check!(s.check("t", PartitionIndex(0), 1000, 0, 1, 0).await == Decision::OutOfOrder);
+
+        commit!(s, "t", PartitionIndex(0), 1000, 0, 0, 2, 12, 2).await;
+        let entry = s.snapshot("t", PartitionIndex(0)).await[0].1;
+        check!(entry.last_sequence == 2);
+        check!(entry.last_offset == 14);
+    }
+
+    #[tokio::test]
+    async fn batch_can_cross_sequence_rollover() {
+        let s = ProducerState::new();
+        commit!(s, "t", PartitionIndex(0), 1000, 0, i32::MAX - 1, 2, 20, 1,).await;
+
+        check!(
+            s.check("t", PartitionIndex(0), 1000, 0, i32::MAX - 1, 2)
+                .await
+                == Decision::Duplicate { base_offset: 20 }
+        );
+        check!(s.check("t", PartitionIndex(0), 1000, 0, 1, 0).await == Decision::Append);
     }
 
     #[tokio::test]
@@ -798,7 +853,7 @@ mod fuzz {
             // Reference: per-epoch highest accepted sequence (must stay contiguous).
             let mut hi: HashMap<i16, i32> = HashMap::new();
             for (epoch, base_seq) in ops {
-                let d = check_pure(entry.as_ref(), epoch, base_seq);
+                let d = check_pure(entry.as_ref(), epoch, base_seq, 0);
                 match d {
                     Decision::Append => {
                         if let Some(e) = &entry {
@@ -836,16 +891,16 @@ mod fuzz {
                         let e = entry.as_ref().expect("Duplicate implies an entry");
                         prop_assert_eq!(epoch, e.epoch);
                         prop_assert!(
-                            base_seq <= e.last_sequence,
-                            "Duplicate must be within committed range"
+                            base_seq == e.last_sequence,
+                            "single-record duplicate must match the committed sequence"
                         );
                     }
                     Decision::OutOfOrder => {
                         let e = entry.as_ref().expect("OutOfOrder implies an entry");
                         prop_assert_eq!(epoch, e.epoch);
                         prop_assert!(
-                            base_seq > e.last_sequence + 1,
-                            "OutOfOrder must be a real gap"
+                            base_seq != e.last_sequence && base_seq != e.last_sequence + 1,
+                            "OutOfOrder must be neither a retry nor the next sequence"
                         );
                     }
                     Decision::Fenced => {

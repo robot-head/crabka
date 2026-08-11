@@ -76,7 +76,7 @@ impl Model for ProducerModel {
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
         let ProdAction::Submit(epoch, base_seq) = action;
         let entry = entry_of(last);
-        let decision = check_pure(entry.as_ref(), epoch, base_seq);
+        let decision = check_pure(entry.as_ref(), epoch, base_seq, 0);
         let mut s = last.clone();
         match decision {
             Decision::Append => {
@@ -100,14 +100,17 @@ impl Model for ProducerModel {
             }
             Decision::Duplicate { .. } => {
                 assert!(
-                    last.initialized && epoch == last.epoch && base_seq <= last.last_sequence,
+                    last.initialized && epoch == last.epoch && base_seq == last.last_sequence,
                     "Duplicate misclassified: epoch={epoch} base_seq={base_seq} state={last:?}"
                 );
                 None
             }
             Decision::OutOfOrder => {
                 assert!(
-                    last.initialized && epoch == last.epoch && base_seq > last.last_sequence + 1,
+                    last.initialized
+                        && epoch == last.epoch
+                        && base_seq != last.last_sequence
+                        && base_seq != last.last_sequence + 1,
                     "OutOfOrder misclassified: epoch={epoch} base_seq={base_seq} state={last:?}"
                 );
                 None

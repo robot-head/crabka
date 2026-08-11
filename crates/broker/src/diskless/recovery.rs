@@ -101,13 +101,13 @@ mod tests {
 
         assert!(
             producer_state
-                .check("orders", PartitionIndex(0), 42, 3, 0, 2)
+                .check("orders", PartitionIndex(0), 42, 3, 0, 1)
                 .await
                 == Decision::Duplicate { base_offset: 0 }
         );
         assert!(
             producer_state
-                .check("orders", PartitionIndex(0), 42, 3, 2, 1)
+                .check("orders", PartitionIndex(0), 42, 3, 2, 0)
                 .await
                 == Decision::Append
         );
@@ -135,13 +135,13 @@ mod tests {
 
         assert!(
             producer_state
-                .check("orders", PartitionIndex(0), 42, 3, 0, 2)
+                .check("orders", PartitionIndex(0), 42, 3, 0, 1)
                 .await
                 == Decision::Duplicate { base_offset: 0 }
         );
         assert!(
             producer_state
-                .check("orders", PartitionIndex(0), 42, 3, 2, 1)
+                .check("orders", PartitionIndex(0), 42, 3, 2, 0)
                 .await
                 == Decision::Append
         );
@@ -201,19 +201,19 @@ mod tests {
 
         assert!(
             producer_state
-                .check("orders", PartitionIndex(0), 0, 3, 0, 1)
+                .check("orders", PartitionIndex(0), 0, 3, 0, 0)
                 .await
                 == Decision::Duplicate { base_offset: 0 }
         );
         assert!(
             producer_state
-                .check("orders", PartitionIndex(0), -1, 3, 5, 1)
+                .check("orders", PartitionIndex(0), -1, 3, 5, 0)
                 .await
                 == Decision::Append
         );
         assert!(
             producer_state
-                .check("orders", PartitionIndex(0), 43, 3, -1, 1)
+                .check("orders", PartitionIndex(0), 43, 3, -1, 0)
                 .await
                 == Decision::Append
         );

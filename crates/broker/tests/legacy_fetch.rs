@@ -12,6 +12,7 @@ use assert2::{assert, check};
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_compression::CompressionType;
 use crabka_protocol::{
     Decode, Encode,
@@ -184,6 +185,15 @@ async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBat
 /// example `max_bytes`, which is v3+. One struct therefore works for v0 to
 /// v3.
 async fn fetch_legacy_raw(addr: std::net::SocketAddr, topic: &str, version: i16) -> Vec<u8> {
+    fetch_legacy_raw_at(addr, topic, version, 0).await
+}
+
+async fn fetch_legacy_raw_at(
+    addr: std::net::SocketAddr,
+    topic: &str,
+    version: i16,
+    fetch_offset: i64,
+) -> Vec<u8> {
     use crabka_protocol::kafka_3_6_2::owned::fetch_request::{
         FetchPartition, FetchRequest, FetchTopic,
     };
@@ -197,7 +207,7 @@ async fn fetch_legacy_raw(addr: std::net::SocketAddr, topic: &str, version: i16)
             topic: topic.to_string(),
             partitions: vec![FetchPartition {
                 partition: 0,
-                fetch_offset: 0,
+                fetch_offset,
                 partition_max_bytes: 1 << 20,
                 ..Default::default()
             }],
@@ -492,32 +502,41 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
 /// Control batches, that is txn markers, have no representation in the v0 and
 /// v1 `MessageSet` format, so a down-converted Fetch response must drop them.
 ///
-/// The test produces a single control batch, fetches at v3, and confirms that
-/// the partition comes back with no records and no error. This drives the
-/// `Ok(None)` arm of the Fetch handler's down-conversion loop.
-#[tokio::test]
+/// The test commits a real transaction, fetches from its marker offset at v3,
+/// and confirms that the partition comes back with no records and no error.
+/// This drives the `Ok(None)` arm of the Fetch handler's down-conversion loop
+/// without violating Kafka's rule that clients cannot produce control batches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fetch_v3_drops_control_batch() {
     let p = support::start().await;
     create_topic(&p.client, "legacy_fetch_ctrl").await;
 
-    // Only the control bit matters for the down-conversion drop. Keep the
-    // batch non-transactional / non-idempotent so the produce path appends
-    // it directly without txn-coordinator or producer-state validation.
-    let batch = RecordBatch {
-        attributes: Attributes::default().with_control(true),
-        last_offset_delta: 0,
-        records: vec![Record {
-            offset_delta: 0,
-            key: Some(Bytes::from_static(b"\x00\x00\x00\x00")),
-            value: Some(Bytes::from_static(b"\x00\x00")),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
     let addr = p.broker.listen_addr();
-    produce_batch(addr, "legacy_fetch_ctrl", batch).await;
+    let producer = Producer::builder()
+        .bootstrap(addr.to_string())
+        .transactional_id("legacy-fetch-control-marker")
+        .build()
+        .await
+        .unwrap();
+    producer.init_transactions().await.unwrap();
+    let transaction = producer.begin_transaction().await.unwrap();
+    producer
+        .send(ProducerRecord {
+            topic: "legacy_fetch_ctrl".into(),
+            value: Some(Bytes::from_static(b"data-before-marker")),
+            ..Default::default()
+        })
+        .await
+        .await
+        .expect("delivery channel")
+        .expect("transactional produce");
+    transaction.commit().await.expect("commit transaction");
+    p.broker
+        .wait_until_local_log_end_offset("legacy_fetch_ctrl", 0, 2)
+        .await;
 
-    let resp_body = fetch_legacy_raw(addr, "legacy_fetch_ctrl", 3).await;
+    // Offset 0 is the data batch; offset 1 is the internally generated marker.
+    let resp_body = fetch_legacy_raw_at(addr, "legacy_fetch_ctrl", 3, 1).await;
     let mut cur: &[u8] = &resp_body;
     let fetch_resp =
         LegacyFetchResponse::decode(&mut cur, 3).expect("decode LegacyFetchResponse v3");
@@ -533,5 +552,6 @@ async fn fetch_v3_drops_control_batch() {
         "control batch must be dropped, leaving no records on the wire"
     );
 
+    producer.close().await.unwrap();
     p.broker.shutdown().await;
 }
