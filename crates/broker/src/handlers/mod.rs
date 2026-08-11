@@ -188,10 +188,8 @@ pub(crate) mod fetch_downconvert;
 pub(crate) mod fetch_snapshot;
 pub(crate) mod find_coordinator;
 pub(crate) mod get_replica_log_info;
-// KIP-714 client telemetry. Pair of no-op handlers — `get` advertises
-// "no metrics subscribed" so well-behaved clients skip `push` entirely;
-// `push` is wired defensively in case a client races the subscription
-// re-fetch.
+// KIP-714 client telemetry. `get` assigns configured subscriptions and `push`
+// validates, decodes, and exports OTLP metrics to the configured sinks.
 pub(crate) mod get_telemetry_subscriptions;
 pub(crate) mod heartbeat;
 pub(crate) mod incremental_alter_configs;

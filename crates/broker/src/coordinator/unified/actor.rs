@@ -10,7 +10,7 @@
 //! all-members-joined early-complete, or the leader's `SyncGroup`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -707,32 +707,130 @@ fn handle_classic_heartbeat_message(
 async fn handle_classic_leave_message(
     group: &mut CoordinatorGroup,
     parked: &mut ParkedWaiters,
-    offsets_log: &dyn OffsetsLog,
+    services: ActorServices<'_>,
     request: &LeaveGroupRequest,
     version: i16,
 ) -> Result<Vec<MemberResponse>, ErrorCode> {
-    let Some(state) = group.as_classic_mut() else {
-        return Ok(Vec::new());
-    };
-    let previous = state.clone();
-    let before_members: Vec<String> = state.members.keys().cloned().collect();
-    let responses = classic_ops::handle_leave(state, request, version);
-    let removed: Vec<String> = before_members
-        .into_iter()
-        .filter(|member_id| !state.members.contains_key(member_id))
-        .collect();
-    if !removed.is_empty() && state.members.is_empty() {
-        state.generation_id += 1;
-        if let Err(error) = flush_classic_metadata(state, offsets_log).await {
-            *state = previous;
-            tracing::warn!(group_id = %state.group_id, %error,
-                "classic LeaveGroup log write failed");
-            return Err(codes::COORDINATOR_LOAD_IN_PROGRESS);
+    if let Some(state) = group.as_classic_mut() {
+        let previous = state.clone();
+        let before_members: Vec<String> = state.members.keys().cloned().collect();
+        let responses = classic_ops::handle_leave(state, request, version);
+        let removed: Vec<String> = before_members
+            .into_iter()
+            .filter(|member_id| !state.members.contains_key(member_id))
+            .collect();
+        if !removed.is_empty() && state.members.is_empty() {
+            state.generation_id += 1;
+            if let Err(error) = flush_classic_metadata(state, services.offsets_log).await {
+                *state = previous;
+                tracing::warn!(group_id = %state.group_id, %error,
+                    "classic LeaveGroup log write failed");
+                return Err(codes::COORDINATOR_LOAD_IN_PROGRESS);
+            }
         }
+        drain_removed_classic_waiters(&removed, &mut parked.joiners, &mut parked.followers);
+        maybe_complete_classic(state, &mut parked.joiners, &mut parked.followers);
+        return Ok(responses);
     }
-    drain_removed_classic_waiters(&removed, &mut parked.joiners, &mut parked.followers);
-    maybe_complete_classic(state, &mut parked.joiners, &mut parked.followers);
+
+    let Some(state) = group.as_consumer_mut() else {
+        return Err(codes::UNKNOWN_MEMBER_ID);
+    };
+    let (responses, removed) = resolve_consumer_classic_leave(state, request, version);
+    if removed.is_empty() {
+        return Ok(responses);
+    }
+    for member_id in &removed {
+        state.remove_member(member_id);
+    }
+    run_reconcile(state, services.config, services.metadata);
+    let mut pending = snapshot_pending_after_change(state, &[], true);
+    for member_id in &removed {
+        pending.member_metadata.push((member_id.clone(), None));
+        pending.target_per_member.push((member_id.clone(), None));
+        pending.current_per_member.push((member_id.clone(), None));
+    }
+    flush_pending(
+        state,
+        pending,
+        services.offsets_log,
+        services.coordinator,
+        chrono_now_ms(),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(group_id = %state.group_id, %error,
+            "hosted classic LeaveGroup log write failed");
+        codes::COORDINATOR_LOAD_IN_PROGRESS
+    })?;
+    maybe_downgrade(
+        group,
+        services.config,
+        services.metadata,
+        services.offsets_log,
+        services.coordinator,
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(group_id = %group.group_id, %error,
+            "hosted classic LeaveGroup downgrade log write failed");
+        codes::COORDINATOR_LOAD_IN_PROGRESS
+    })?;
     Ok(responses)
+}
+
+/// Resolves a classic `LeaveGroup` request against a consumer-kind group.
+/// Resolution happens before any removal, matching Kafka's batch semantics:
+/// duplicate valid identities all succeed but produce one set of tombstones.
+fn resolve_consumer_classic_leave(
+    state: &GroupState,
+    request: &LeaveGroupRequest,
+    version: i16,
+) -> (Vec<MemberResponse>, Vec<String>) {
+    let identities: Vec<(&str, Option<&str>)> = if version >= 3 {
+        request
+            .members
+            .iter()
+            .map(|member| {
+                (
+                    member.member_id.as_str(),
+                    member.group_instance_id.as_deref(),
+                )
+            })
+            .collect()
+    } else {
+        vec![(request.member_id.as_str(), None)]
+    };
+    let mut seen = HashSet::new();
+    let mut removed = Vec::new();
+    let responses = identities
+        .into_iter()
+        .map(|(member_id, instance_id)| {
+            let (resolved, error_code) = match instance_id {
+                Some(instance_id) => match state.current_member_for_instance(instance_id) {
+                    Some(current) if member_id.is_empty() || current == member_id => {
+                        (Some(current), codes::NONE)
+                    }
+                    Some(_) => (None, codes::FENCED_INSTANCE_ID),
+                    None => (None, codes::UNKNOWN_MEMBER_ID),
+                },
+                None if state.members.contains_key(member_id) => (Some(member_id), codes::NONE),
+                None => (None, codes::UNKNOWN_MEMBER_ID),
+            };
+            if let Some(resolved) = resolved
+                && seen.insert(resolved.to_string())
+            {
+                removed.push(resolved.to_string());
+            }
+            MemberResponse {
+                member_id: member_id.to_string(),
+                group_instance_id: instance_id.map(str::to_string),
+                error_code,
+                ..Default::default()
+            }
+        })
+        .collect();
+    (responses, removed)
 }
 
 async fn handle_classic_delete_message(
@@ -854,9 +952,9 @@ async fn handle_actor_message(
             version,
             reply,
         } => {
-            let result =
-                handle_classic_leave_message(group, parked, services.offsets_log, &req, version)
-                    .await;
+            let consumer_kind = group.is_consumer();
+            let result = handle_classic_leave_message(group, parked, services, &req, version).await;
+            let keep_running = result.is_ok() || !consumer_kind;
             let result = match result {
                 Ok(members) if version < 3 => LeaveResult {
                     error_code: members
@@ -874,7 +972,7 @@ async fn handle_actor_message(
                 },
             };
             let _ = reply.send(result);
-            true
+            keep_running
         }
         GroupActorMessage::ClassicDelete { reply } => {
             handle_classic_delete_message(group, services.offsets_log, reply).await
@@ -2587,7 +2685,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn classic_last_member_leave_persists_empty_generation() {
+    async fn classic_leave_last_member_persists_empty_generation() {
         use crabka_protocol::owned::leave_group_request::MemberIdentity;
 
         let (coord, log) = make_coordinator();
@@ -2628,7 +2726,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn classic_legacy_leave_append_failure_rolls_back_and_reports_error() {
+    async fn classic_leave_legacy_append_failure_rolls_back_and_reports_error() {
         let (coord, log) = make_coordinator();
         let mut group = completing_classic_group(&["m1"]);
         group.as_classic_mut().unwrap().state = ClassicGroupState::Stable;
@@ -4648,6 +4746,97 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_leave_removes_a_hosted_member_from_an_upgraded_group() {
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Bidirectional);
+        let handle = seed_classic_member(&coord, "m-classic", "t", None);
+        let joined = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        check!(joined.error_code == codes::NONE);
+        let native = joined.member_id.expect("native member id");
+
+        let response = classic_leave(&handle, "m-classic").await;
+        check!(response.len() == 1);
+        check!(response[0].error_code == codes::NONE);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Describe { reply: tx })
+            .await
+            .unwrap();
+        let view = rx.await.unwrap();
+        check!(view.members.len() == 1);
+        check!(view.members[0].member_id == native);
+        check!(!view.members[0].is_classic);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_leave_of_last_native_member_triggers_downgrade() {
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Bidirectional);
+        let handle = seed_classic_member(&coord, "m-classic", "t", None);
+        let joined = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        check!(joined.error_code == codes::NONE);
+        let native = joined.member_id.expect("native member id");
+
+        let response = classic_leave(&handle, &native).await;
+        check!(response.len() == 1);
+        check!(response[0].error_code == codes::NONE);
+
+        let view = classic_inspect(&handle).await;
+        check!(view.members.len() == 1);
+        check!(view.members[0].member_id.as_str() == "m-classic");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_leave_consumer_log_failure_stops_the_actor() {
+        use crabka_protocol::owned::leave_group_request::MemberIdentity;
+
+        let (coord, log) = make_coordinator();
+        let handle = coord.get_or_create_consumer("g");
+        let joined = consumer_heartbeat(&handle, "", 0, None).await;
+        check!(joined.error_code == codes::NONE);
+        let native = joined.member_id.expect("native member id");
+        log.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicLeave {
+                req: LeaveGroupRequest {
+                    group_id: "g".into(),
+                    members: vec![MemberIdentity {
+                        member_id: native,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                version: 3,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let result = rx.await.unwrap();
+        check!(result.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        check!(result.members.is_empty());
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        check!(
+            handle
+                .tx
+                .send(GroupActorMessage::InspectAny { reply: tx })
+                .await
+                .is_err(),
+            "a consumer-kind log failure must stop the actor"
+        );
+    }
+
     /// Scenario 2: KIP-345 static identity must survive both flips. A classic
     /// member with `group.instance.id = "inst-a"` joins, then the group
     /// upgrades, then it downgrades. The restored classic member must still
@@ -4999,5 +5188,105 @@ mod tests {
         check!(step.response.member_epoch == 1);
         check!(group.target.per_member["m1"][&topic_id].clone() == vec![0, 1]);
         check!(!step.pending.is_empty());
+    }
+
+    #[test]
+    fn consumer_classic_leave_resolves_batch_and_static_identities() {
+        use crabka_protocol::owned::leave_group_request::MemberIdentity;
+
+        let mut group = GroupState::new("g");
+        let dynamic = ConsumerGroupHeartbeatRequest {
+            member_id: "m1".into(),
+            ..Default::default()
+        };
+        group.add_or_update_member(build_member(
+            "m1",
+            &dynamic,
+            crate::coordinator::unified::ClientIdentity { id: "c", host: "h" },
+            Instant::now(),
+        ));
+        let static_request = ConsumerGroupHeartbeatRequest {
+            member_id: "m-static".into(),
+            instance_id: Some("instance-a".into()),
+            ..Default::default()
+        };
+        group.add_or_update_member(build_member(
+            "m-static",
+            &static_request,
+            crate::coordinator::unified::ClientIdentity { id: "c", host: "h" },
+            Instant::now(),
+        ));
+        let request = LeaveGroupRequest {
+            members: vec![
+                MemberIdentity {
+                    member_id: "missing".into(),
+                    ..Default::default()
+                },
+                MemberIdentity {
+                    member_id: String::new(),
+                    group_instance_id: Some("instance-a".into()),
+                    ..Default::default()
+                },
+                MemberIdentity {
+                    member_id: "stale".into(),
+                    group_instance_id: Some("instance-a".into()),
+                    ..Default::default()
+                },
+                MemberIdentity {
+                    member_id: "m1".into(),
+                    ..Default::default()
+                },
+                MemberIdentity {
+                    member_id: "m1".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (responses, removed) = resolve_consumer_classic_leave(&group, &request, 3);
+        check!(
+            responses
+                .iter()
+                .map(|response| response.error_code)
+                .collect::<Vec<_>>()
+                == vec![
+                    codes::UNKNOWN_MEMBER_ID,
+                    codes::NONE,
+                    codes::FENCED_INSTANCE_ID,
+                    codes::NONE,
+                    codes::NONE,
+                ]
+        );
+        check!(
+            responses
+                .iter()
+                .map(|response| (
+                    response.member_id.as_str(),
+                    response.group_instance_id.as_deref(),
+                ))
+                .collect::<Vec<_>>()
+                == vec![
+                    ("missing", None),
+                    ("", Some("instance-a")),
+                    ("stale", Some("instance-a")),
+                    ("m1", None),
+                    ("m1", None),
+                ]
+        );
+        check!(removed == vec!["m-static".to_string(), "m1".to_string()]);
+        check!(
+            group.members.len() == 2,
+            "resolution must not mutate the group"
+        );
+
+        let legacy = LeaveGroupRequest {
+            member_id: "m1".into(),
+            ..Default::default()
+        };
+        let (responses, removed) = resolve_consumer_classic_leave(&group, &legacy, 2);
+        check!(responses.len() == 1);
+        check!(responses[0].error_code == codes::NONE);
+        check!(removed == vec!["m1".to_string()]);
     }
 }
