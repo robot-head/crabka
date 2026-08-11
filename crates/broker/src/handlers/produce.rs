@@ -105,9 +105,10 @@ pub(crate) async fn handle(
     // `transactional_id`, `acks`, `timeout_ms`, and per-topic / per-partition
     // headers plus each partition's `records` field as a zero-copy `Bytes`
     // slice of the request frame — via `produce_framing`. The record BODIES
-    // are NOT decoded or decompressed here: a producer-LZ4-compressed batch
-    // (1 KiB → 100 KiB) stays compressed, and the per-record parse + the
-    // owned-struct materialization are skipped entirely. The owned
+    // are NOT decoded or decompressed here. Per-partition validation later
+    // parses every record and transiently decompresses compressed bodies, but
+    // skips owned-record materialization and preserves the original wire
+    // bytes whenever no conversion is required. The owned
     // `RecordBatch` is decoded lazily, per partition, ONLY when the
     // verbatim-passthrough predicate fails (legacy magic, control batch,
     // log-append-time, broker-side recompression, multi-batch slice, or a
@@ -509,9 +510,10 @@ async fn process_partition(
     // Decide verbatim-passthrough vs owned-decode and extract the HEADER
     // fields the gates below need (producer id/epoch/sequence,
     // last_offset_delta, max_timestamp, attributes). On the verbatim path
-    // this is a header-only CRC check — the (possibly LZ4-compressed) record
-    // body is NEVER decompressed or materialized. The owned fallback decodes
-    // the records (decompressing) here, exactly as before. A null /
+    // this verifies the CRC and complete record structure while retaining the
+    // original wire bytes. Compressed bodies are transiently decompressed for
+    // validation but never re-encoded. The owned fallback fully materializes
+    // the records, exactly as before. A null /
     // undecodable field returns INVALID_REQUEST / INVALID_RECORD, preserving
     // the prior error-code ordering (before the leadership gate).
     let prepared = match prepare_batch(
@@ -579,8 +581,8 @@ async fn process_partition(
     // so it runs first. Non-transactional batches (pid < 0 or
     // is_transactional=false) skip directly to the dedup gate.
     // All header fields below come from `prepared` — sourced from the v2
-    // batch HEADER on the verbatim path (no record decode), or from the
-    // decoded owned `RecordBatch` header on the fallback path.
+    // batch HEADER on the verbatim path, or from the decoded owned
+    // `RecordBatch` header on the fallback path.
     if prepared.attributes.is_transactional() && part.diskless {
         out.error_code = codes::INVALID_TXN_STATE;
         return Ok(out);
@@ -980,8 +982,7 @@ enum PartitionPayload {
     /// v≥3 native records bytes captured zero-copy from the request frame.
     /// The value is a refcount view and not a copy. Nothing has validated or
     /// decompressed it yet. The per-partition dispatch validates the header
-    /// only and then decides between verbatim and owned. It decompresses on
-    /// the owned fallback only.
+    /// and record structure, then decides between verbatim and owned.
     Slice(Bytes),
     /// Legacy v0-2 payload, or any pre-decoded payload. It always takes the
     /// owned path. The handler up-converts a v0/v1 `MessageSet` and never
@@ -1146,8 +1147,8 @@ fn resolve_topic_compression(
 ///
 /// The gates are the leadership epoch stamp, the transactional verify, the
 /// idempotent dedup, and the `acks=-1` HW target. The struct holds these
-/// fields WITHOUT any materialization or decompression of the records. On the
-/// verbatim path they come from the v2 batch header through
+/// fields without materializing owned records. On the verbatim path they come
+/// from the v2 batch header through
 /// [`validate_one_v2_batch`]. On the owned fallback they come from the decoded
 /// [`RecordBatch`] header. The values are identical on both paths.
 #[derive(Debug)]
@@ -1168,7 +1169,7 @@ struct PreparedBatch {
 #[derive(Debug)]
 enum PreparedSource {
     /// Validated, single, CRC-checked v2 batch. The writer appends the
-    /// producer's exact bytes. No decode and no decompression happened.
+    /// producer's exact bytes after every declared record was parsed.
     Verbatim(Bytes),
     /// Decoded owned batch. This is the complete fallback path. When the
     /// producer compressed the batch, `RecordBatch::decode` decompressed it
@@ -1203,15 +1204,15 @@ impl PreparedBatch {
 }
 
 /// Decide the append shape for one partition's records and extract the header
-/// fields that the gates need, WITHOUT decompression on the verbatim path.
+/// fields that the gates need without materializing owned records on the
+/// verbatim path.
 ///
 /// The verbatim-passthrough predicate holds only when ALL of these hold. It
 /// matches the writer's recompression gate exactly:
 ///   1. the records are a v≥3 native-v2 slice, not legacy and not a wire-null
 ///      field;
-///   2. the slice is exactly one complete, CRC-valid v2 batch. This step
-///      re-validates the producer's CRC from the header only and materializes
-///      no record;
+///   2. the slice is exactly one complete, CRC-valid v2 batch whose body
+///      contains exactly the declared structurally valid records;
 ///   3. `timestamp_type == CreateTime`; a client-supplied log-append-time
 ///      batch is invalid;
 ///   4. there is no broker-side recompression. The topic's `compression.type`
@@ -1219,10 +1220,10 @@ impl PreparedBatch {
 ///      own codec.
 ///
 /// On any miss the function decodes the records into an owned `RecordBatch`.
-/// That is the complete fallback, and it is the only place that decompresses.
-/// [`decode_owned_batch`] up-converts the legacy v0-2 payloads. The owned arm
-/// is a complete alternative, so a revert of this feature means "always take
-/// the owned path".
+/// That is the complete fallback. The verbatim path transiently decompresses
+/// compressed bodies only to validate their record structure, then discards
+/// that buffer and retains the original compressed wire bytes.
+/// [`decode_owned_batch`] up-converts the legacy v0-2 payloads.
 ///
 /// The function returns the response error *code* on a bad field, either
 /// `INVALID_REQUEST` or `INVALID_RECORD`.
@@ -1263,10 +1264,11 @@ fn prepare_batch(
     // Extract the header fields into owned values up front so the borrow of
     // `bytes` (via the `ValidatedBatch`) ends before any `owned_fallback(bytes)`
     // move or the final `Verbatim(bytes)` construction.
-    let header = match validate_one_v2_batch(&bytes) {
-        Ok(v) if v.total_len == bytes.len() => ValidatedHeader::from(&v),
+    let validated = match validate_one_v2_batch(&bytes) {
+        Ok(batch) if batch.total_len == bytes.len() => batch,
         _ => return owned_fallback(bytes),
     };
+    let header = ValidatedHeader::from(&validated);
     let attributes = header.attributes;
     validate_client_batch_header(header)?;
 
@@ -1276,6 +1278,9 @@ fn prepare_batch(
     {
         return owned_fallback(bytes);
     }
+    validated
+        .validate_records(policy)
+        .map_err(|_| codes::INVALID_RECORD)?;
 
     Ok(PreparedBatch::from_header(header, bytes))
 }
@@ -1804,7 +1809,7 @@ mod tests {
     }
 
     #[test]
-    fn record_decompression_policy_limits_owned_produce_fallbacks() {
+    fn record_decompression_policy_limits_owned_and_verbatim_produce() {
         let policy = RecordDecompressionPolicy::new(fraction(1.0), bytes(1), bytes(32)).unwrap();
         let metrics = crate::metrics::BrokerMetrics::new();
 
@@ -1817,6 +1822,16 @@ mod tests {
             ..Default::default()
         };
         let wire = encode_batch(&v2);
+        let error = prepare_batch(
+            PartitionPayload::Slice(wire.clone()),
+            None,
+            "t",
+            &metrics,
+            policy,
+        )
+        .unwrap_err();
+        assert!(error == crate::codes::INVALID_RECORD);
+
         let error = prepare_batch(
             PartitionPayload::Slice(wire.clone()),
             Some(CompressionType::Zstd),
@@ -2216,16 +2231,16 @@ mod tests {
 
     // ── verbatim passthrough predicate (prepare_batch + build_produce_data) ──
     //
-    // These drive the new header-only dispatch end to end: `prepare_batch`
-    // extracts the v2 header fields (WITHOUT decompressing) and decides
-    // verbatim-vs-owned; `build_produce_data` maps the result to the writer's
-    // `ProduceData`, stamping the leader epoch.
+    // These drive the zero-copy dispatch end to end: `prepare_batch` validates
+    // the v2 batch and decides verbatim-vs-owned; `build_produce_data` maps the
+    // result to the writer's `ProduceData`, stamping the leader epoch.
     mod verbatim {
         use assert2::{assert, check};
         use bytes::{Bytes, BytesMut};
         use crabka_compression::{CompressionType, RecordDecompressionPolicy};
         use crabka_protocol::records::{
-            Attributes, Record, RecordBatch, RecordsPayload, TimestampType,
+            Attributes, CRC_COVERAGE_START, HEADER_LEN, Record, RecordBatch, RecordsPayload,
+            TimestampType,
         };
 
         use super::super::{
@@ -2236,6 +2251,11 @@ mod tests {
             let mut buf = BytesMut::new();
             b.encode(&mut buf).unwrap();
             buf.freeze()
+        }
+
+        fn refresh_batch_crc(encoded: &mut [u8]) {
+            let crc = crc32c::crc32c(&encoded[CRC_COVERAGE_START..]);
+            encoded[CRC_COVERAGE_START - 4..CRC_COVERAGE_START].copy_from_slice(&crc.to_be_bytes());
         }
 
         fn plain_batch() -> RecordBatch {
@@ -2461,6 +2481,23 @@ mod tests {
         }
 
         #[test]
+        fn rejects_crc_valid_malformed_record_body() {
+            let mut wire = encode(&plain_batch()).to_vec();
+            wire[HEADER_LEN] = 0; // zero-length first record body
+            refresh_batch_crc(&mut wire);
+
+            let error = prepare_batch(
+                PartitionPayload::Slice(Bytes::from(wire)),
+                None,
+                "t",
+                &crate::metrics::BrokerMetrics::new(),
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap_err();
+            assert!(error == crate::codes::INVALID_RECORD);
+        }
+
+        #[test]
         fn fallback_on_multiple_batches_in_slice() {
             // Kafka v2 records fields contain exactly one batch. A second
             // batch is invalid and must never be silently discarded.
@@ -2498,17 +2535,16 @@ mod tests {
             }
         }
 
-        /// A producer-LZ4-compressed batch takes the verbatim path WITHOUT
-        /// decompression, even when its DECOMPRESSED form is 100 KiB and its
+        /// A producer-LZ4-compressed batch stays verbatim after structural
+        /// validation, even when its decompressed form is 100 KiB and its
         /// compressed wire bytes are tiny.
         ///
         /// The stored `Verbatim.bytes` equal the compressed wire bytes, which
         /// are much smaller than the decompressed payload. The header fields
         /// `last_offset_delta` and `max_timestamp` come straight from the v2
-        /// header. This test pins the "no decompress on the verbatim path"
-        /// guarantee.
+        /// header. This test pins the no-reencoding guarantee.
         #[test]
-        fn lz4_batch_passes_through_without_decompress() {
+        fn lz4_batch_passes_through_without_reencoding() {
             // 100 KiB of highly-compressible payload across many records.
             let big = vec![b'A'; 100 * 1024];
             let mut b = RecordBatch {
@@ -2524,7 +2560,7 @@ mod tests {
             });
             let wire = encode(&b);
             // The compressed wire bytes must be far smaller than the raw payload,
-            // so an accidental decompress would be obvious.
+            // so an accidental re-encode to an uncompressed batch is obvious.
             assert!(
                 wire.len() < big.len() / 4,
                 "lz4 wire ({} B) should be much smaller than raw ({} B)",
@@ -2546,7 +2582,7 @@ mod tests {
                     check!(v.leader_epoch == 3);
                 }
                 ProduceData::Owned(_) => {
-                    panic!("lz4 producer batch must pass through verbatim (no decompress)")
+                    panic!("lz4 producer batch must pass through verbatim")
                 }
                 ProduceData::OwnedCommitMarker { .. } => panic!("expected producer data"),
             }
@@ -2556,8 +2592,8 @@ mod tests {
         ///
         /// `prepare_batch` exposes `producer_id`, `producer_epoch`,
         /// `base_sequence`, and `last_offset_delta`. It reads them from the v2
-        /// header and decodes no record. The values match what an owned decode
-        /// of the same bytes would give.
+        /// header without materializing owned records. The values match what
+        /// an owned decode of the same bytes would give.
         #[test]
         fn header_fields_drive_dedup_on_verbatim_path() {
             let mut b = plain_batch();
@@ -2576,8 +2612,8 @@ mod tests {
                     ..Default::default()
                 },
             ]);
-            // Force lz4 so a decode would have to decompress; the verbatim path
-            // must NOT, yet still surface identical header fields.
+            // Force lz4 so validation must decompress while the append still
+            // retains the producer's exact compressed bytes.
             b.attributes = b.attributes.with_compression(CompressionType::Lz4);
             let wire = encode(&b);
 

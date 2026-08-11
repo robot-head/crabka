@@ -1,8 +1,9 @@
 //! End-to-end coverage for the verbatim produce passthrough, which is the
-//! header-only decode path. The broker stores a producer-LZ4-compressed v2
-//! batch WITHOUT a decompress or re-encode, and the batch round-trips
-//! byte-identically on Fetch. A recompression-forcing topic config, a control
-//! batch, and an idempotent producer all behave correctly across the path.
+//! zero-copy append path. The broker structurally validates a
+//! producer-LZ4-compressed v2 batch, stores the original bytes without
+//! re-encoding, and round-trips them byte-identically on Fetch. A
+//! recompression-forcing topic config, a control batch, and an idempotent
+//! producer all behave correctly across the path.
 //!
 //! These tests complement the unit tests in
 //! `handlers::produce::tests::verbatim`, which pin the dispatch
@@ -26,7 +27,7 @@ use crabka_protocol::{
         produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
     },
     primitives::uuid::Uuid as WireUuid,
-    records::{Attributes, HEADER_LEN, Record, RecordBatch, RecordsPayload},
+    records::{Attributes, CRC_COVERAGE_START, HEADER_LEN, Record, RecordBatch, RecordsPayload},
 };
 
 async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUuid {
@@ -155,6 +156,15 @@ async fn produce_batches(
     topic_id: WireUuid,
     batches: Vec<RecordBatch>,
 ) -> Result<i64, i16> {
+    produce_payload(client, topic, topic_id, RecordsPayload::V2(batches)).await
+}
+
+async fn produce_payload(
+    client: &crabka_client_core::Client,
+    topic: &str,
+    topic_id: WireUuid,
+    records: RecordsPayload,
+) -> Result<i64, i16> {
     let resp = client
         .send(ProduceRequest {
             acks: 1,
@@ -164,7 +174,7 @@ async fn produce_batches(
                 topic_id,
                 partition_data: vec![PartitionProduceData {
                     index: 0,
-                    records: Some(RecordsPayload::V2(batches)),
+                    records: Some(records),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -235,9 +245,8 @@ async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
 }
 
 /// A producer-LZ4-compressed v2 batch whose DECOMPRESSED form is large
-/// (~100 KiB) takes the verbatim path. The broker stores it WITHOUT a
-/// decompress and keeps the Lz4 codec, with no recompression. The data
-/// round-trips correctly on Fetch.
+/// (~100 KiB) takes the verbatim path. The broker validates it, retains the
+/// Lz4 codec with no recompression, and round-trips the data on Fetch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lz4_batch_passes_through_and_roundtrips() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -251,7 +260,7 @@ async fn lz4_batch_passes_through_and_roundtrips() {
     let topic_id = topic_id_for(&client, "lz4t").await;
 
     // 200 records of a highly-compressible 512-byte value → ~100 KiB raw,
-    // tiny compressed. A decompress on the produce path would be obvious.
+    // tiny compressed. An accidental uncompressed re-encode is obvious.
     let value = vec![b'Z'; 512];
     let b = batch(CompressionType::Lz4, 200, &value);
     let wire = encode_batch(&b);
@@ -415,11 +424,42 @@ async fn client_control_batch_is_rejected() {
     broker.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crc_valid_malformed_record_body_is_rejected() {
+    let (broker, bootstrap, _dir) = boot().await;
+    create_topic(&broker, &bootstrap, "malformed-body").await;
+
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(bootstrap)
+        .build()
+        .await
+        .unwrap();
+    let topic_id = topic_id_for(&client, "malformed-body").await;
+    let mut wire = encode_batch(&batch(CompressionType::None, 1, b"valid")).to_vec();
+    wire[HEADER_LEN] = 0; // zero-length first record body
+    let crc = crc32c::crc32c(&wire[CRC_COVERAGE_START..]);
+    wire[CRC_COVERAGE_START - 4..CRC_COVERAGE_START].copy_from_slice(&crc.to_be_bytes());
+
+    let error = produce_payload(
+        &client,
+        "malformed-body",
+        topic_id,
+        RecordsPayload::Raw(Bytes::from(wire)),
+    )
+    .await
+    .expect_err("CRC alone cannot make a malformed record body valid");
+    check!(error == 87);
+    check!(broker.local_log_end_offset("malformed-body", 0) == Some(0));
+
+    broker.shutdown().await;
+}
+
 /// Idempotent-producer dedup runs on the HEADER fields that the verbatim path
 /// exposes: pid, epoch, `base_sequence`, and `last_offset_delta`. Two appends
 /// with increasing sequences both succeed. A retry of the latest sequence is a
 /// duplicate and returns the SAME base offset. An out-of-order sequence is
-/// rejected. The broker never decompresses the lz4 batches for any of this.
+/// rejected. Structural validation may transiently decompress the lz4 body,
+/// but the append retains the producer's original compressed bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotent_dedup_over_verbatim_path() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -448,7 +488,7 @@ async fn idempotent_dedup_over_verbatim_path() {
     // Retry the MOST RECENT batch (seq 3..=4) → DUPLICATE: the dedup tracker
     // tracks the last committed batch and echoes its base offset (3), no error.
     // This is driven purely by the header pid/epoch/base_sequence — the lz4
-    // body is never decompressed.
+    // body is never re-encoded.
     let base_dup = produce_one(&client, "idem", topic_id, idempotent_lz4_batch(9_001, 3, 2))
         .await
         .expect("duplicate must be NONE");
