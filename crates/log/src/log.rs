@@ -1,7 +1,7 @@
 //! `Log`: a sorted collection of `Segment`s with append, read, and truncate.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -438,15 +438,15 @@ impl Log {
             next = snapshot_offset.max(next);
         }
 
-        let boundaries: Vec<Offset> = self
+        let mut boundaries: BTreeSet<Offset> = self
             .segments
             .iter()
             .map(Segment::base_offset)
             .skip(1)
             .chain(self.active.iter().map(Segment::base_offset))
-            .filter(|boundary| *boundary > next)
             .collect();
-        let mut boundary_index = 0;
+        let mut boundaries = boundaries.split_off(&next);
+        let _ = boundaries.remove(&next);
         while next < end {
             let read = self.read(next, crabka_units::mebibytes(1))?;
             if read.batches.is_empty() {
@@ -457,15 +457,11 @@ impl Log {
             let mut advanced_to = next;
             for batch in &read.batches {
                 self.apply_recovered_batch_state(batch)?;
-                advanced_to = Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
-                while boundary_index < boundaries.len() && boundaries[boundary_index] <= advanced_to
-                {
-                    producer_snapshot::write(
-                        &self.dir,
-                        boundaries[boundary_index],
-                        &self.producer_state,
-                    )?;
-                    boundary_index += 1;
+                (_, advanced_to) = Self::recovered_batch_offsets(advanced_to, batch)?;
+                let covered: Vec<_> = boundaries.range(..=advanced_to).copied().collect();
+                for boundary in covered {
+                    producer_snapshot::write(&self.dir, boundary, &self.producer_state)?;
+                    let _ = boundaries.remove(&boundary);
                 }
             }
             if advanced_to <= next {
@@ -525,7 +521,12 @@ impl Log {
             }
             for batch in &read.batches {
                 let producer_id = ProducerId(batch.producer_id);
-                let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
+                let (last, advanced_to) = Self::recovered_batch_offsets(next, batch)?;
+                if advanced_to <= next {
+                    return Err(LogError::Corrupt(format!(
+                        "transaction-stamp recovery did not advance past offset {next}"
+                    )));
+                }
                 if batch.attributes.is_control_batch() {
                     self.pending_stamp_ranges.remove(&producer_id);
                 } else if batch.attributes.is_transactional() && producer_id.get() >= 0 {
@@ -534,10 +535,32 @@ impl Log {
                         .or_default()
                         .push((Offset(batch.base_offset), last));
                 }
-                next = last + 1;
+                next = advanced_to;
             }
         }
         Ok(())
+    }
+
+    fn recovered_batch_offsets(
+        current: Offset,
+        batch: &RecordBatch,
+    ) -> Result<(Offset, Offset), LogError> {
+        let last = batch
+            .base_offset
+            .checked_add(i64::from(batch.last_offset_delta))
+            .map(Offset)
+            .ok_or_else(|| {
+                LogError::Corrupt(format!("log recovery offset overflow at {current}"))
+            })?;
+        let advanced_to = last.0.checked_add(1).map(Offset).ok_or_else(|| {
+            LogError::Corrupt(format!("log recovery offset overflow at {current}"))
+        })?;
+        if advanced_to <= current {
+            return Err(LogError::Corrupt(format!(
+                "log recovery did not advance past offset {current}"
+            )));
+        }
+        Ok((last, advanced_to))
     }
 
     fn update_owned_producer_entry(&mut self, batch: &RecordBatch) -> Result<(), LogError> {
@@ -3470,6 +3493,9 @@ mod tests {
         check!(open.current_txn_first_offset == Some(Offset(0)));
 
         log.append(&mut commit_marker(77, 4)).unwrap();
+        // Roll once more so the newest snapshot, rather than the replay tail,
+        // is the only durable source of the completed coordinator epoch.
+        log.append(&mut sample_batch(1)).unwrap();
         drop(log);
         let reopened = Log::open(dir.path(), config).unwrap();
         let completed = reopened
@@ -3480,6 +3506,46 @@ mod tests {
         check!(completed.last_sequence == 11);
         check!(completed.current_txn_first_offset == None);
         check!(completed.coordinator_epoch == 17);
+    }
+
+    #[test]
+    fn recovery_recreates_missing_producer_snapshot_at_segment_boundary() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_size: bytes(1),
+            ..LogConfig::default()
+        };
+        {
+            let mut log = Log::open(dir.path(), config.clone()).unwrap();
+            for (base_sequence, timestamp) in [(0, 10), (2, 20), (4, 30)] {
+                let mut batch = sample_batch(2);
+                batch.producer_id = 42;
+                batch.producer_epoch = 3;
+                batch.base_sequence = base_sequence;
+                batch.max_timestamp = timestamp;
+                log.append(&mut batch).unwrap();
+            }
+        }
+
+        let missing = producer_snapshot::path(dir.path(), Offset(4));
+        check!(missing.exists());
+        std::fs::remove_file(&missing).unwrap();
+
+        let reopened = Log::open(dir.path(), config).unwrap();
+        check!(missing.exists());
+        let (_, boundary_state) = producer_snapshot::latest_at_or_before(dir.path(), Offset(4))
+            .unwrap()
+            .unwrap();
+        let boundary = boundary_state.get(&ProducerId(42)).unwrap();
+        check!(boundary.last_sequence == 3);
+        check!(boundary.last_offset == Offset(3));
+        let recovered = reopened
+            .producer_state_snapshot()
+            .into_iter()
+            .find(|entry| entry.producer_id == 42)
+            .unwrap();
+        check!(recovered.last_sequence == 5);
+        check!(recovered.last_offset == Offset(5));
     }
 
     // ---- helpers for transactional tests ----
@@ -3656,6 +3722,28 @@ mod tests {
     }
 
     #[test]
+    fn recovered_batch_offsets_require_checked_progress() {
+        let mut batch = sample_batch(3);
+        batch.base_offset = 10;
+        assert2::assert!(
+            Log::recovered_batch_offsets(Offset(10), &batch).unwrap() == (Offset(12), Offset(13))
+        );
+
+        batch.last_offset_delta = -1;
+        assert2::assert!(matches!(
+            Log::recovered_batch_offsets(Offset(10), &batch),
+            Err(LogError::Corrupt(message)) if message.contains("did not advance")
+        ));
+
+        batch.base_offset = i64::MAX;
+        batch.last_offset_delta = 1;
+        assert2::assert!(matches!(
+            Log::recovered_batch_offsets(Offset(i64::MAX), &batch),
+            Err(LogError::Corrupt(message)) if message.contains("offset overflow")
+        ));
+    }
+
+    #[test]
     fn producer_sequence_rollover_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -3681,6 +3769,43 @@ mod tests {
         assert2::assert!(entry.last_sequence == 0);
         assert2::assert!(entry.last_offset == Offset(2));
         assert2::assert!(entry.offset_delta == 2);
+    }
+
+    #[test]
+    fn higher_epoch_control_marker_clears_data_batch_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            let mut data = transactional_batch(88, 4, &["a", "b"]);
+            data.base_sequence = 10;
+            log.append(&mut data).unwrap();
+            log.append(&mut commit_marker(88, 5)).unwrap();
+
+            let entry = log
+                .producer_state_snapshot()
+                .into_iter()
+                .find(|entry| entry.producer_id == 88)
+                .unwrap();
+            check!(entry.producer_epoch == 5);
+            check!(entry.last_sequence == -1);
+            check!(entry.last_offset == Offset(-1));
+            check!(entry.offset_delta == 0);
+            check!(entry.current_txn_first_offset == None);
+            check!(entry.coordinator_epoch == 17);
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let entry = reopened
+            .producer_state_snapshot()
+            .into_iter()
+            .find(|entry| entry.producer_id == 88)
+            .unwrap();
+        check!(entry.producer_epoch == 5);
+        check!(entry.last_sequence == -1);
+        check!(entry.last_offset == Offset(-1));
+        check!(entry.offset_delta == 0);
+        check!(entry.current_txn_first_offset == None);
+        check!(entry.coordinator_epoch == 17);
     }
 
     #[test]
