@@ -894,8 +894,9 @@ pub(crate) fn eval_scalar(
     fc: &FuncCall,
     scope: Option<&Scope>,
     ctx: &EvalCtx,
-    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+    eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
+    let mut eval_child = bpchar_text_arguments(fc, scope, eval_child);
     if crate::text_search_fn::is_text_search_func(&fc.name) {
         return crate::text_search_fn::eval_text_search(fc, ctx, eval_child);
     }
@@ -1055,6 +1056,66 @@ pub(crate) fn eval_scalar(
             eval_eager(f, fc, &vals, ctx)
         }
     }
+}
+
+/// Wrap an argument evaluator so a `character(n)` argument arrives with its
+/// blank padding removed.
+///
+/// This is one place, not one per function, because it is one cast:
+/// `PostgreSQL` declares almost every string function over `text` and reaches it
+/// from `character` through the implicit `text(bpchar)` coercion described on
+/// [`crabka_pgtypes::string::bpchar_to_text`]. `lower`, `replace`, `lpad`,
+/// `substr`, `quote_literal`, `to_tsvector` and `length` (whose `bpcharlen`
+/// overload measures with `bcTruelen`) therefore all agree with the trimmed
+/// value, and each one that did not was a divergence.
+///
+/// [`preserves_bpchar_padding`] carries the exceptions, and every scalar family
+/// this evaluator dispatches to is covered — the `json`, `array` and date/time
+/// families are separate arms of `crate::eval` and never reach here, which is
+/// what keeps `to_jsonb(c)` and `ARRAY[c]` padded as `PostgreSQL` leaves them.
+///
+/// Without a scope there is no static type to consult, so the wrapper is inert:
+/// a padded `text` value is never mistaken for a `character` one.
+fn bpchar_text_arguments<'a>(
+    fc: &FuncCall,
+    scope: Option<&'a Scope>,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> impl FnMut(&Expr) -> Result<Datum, ExecError> {
+    let scope = scope.filter(|_| !preserves_bpchar_padding(&fc.name));
+    move |expr: &Expr| {
+        let value = eval_child(expr)?;
+        let Some(scope) = scope else { return Ok(value) };
+        Ok(crate::eval::bpchar_to_text_value(expr, scope, &value)?.unwrap_or(value))
+    }
+}
+
+/// The scalar functions that read a `character` argument's padding rather than
+/// casting it to `text`, measured on 18.4.
+///
+/// Two reasons put a name here. `concat`, `concat_ws` and `format` are declared
+/// `VARIADIC "any"` and render each argument with its own output function, and
+/// `bpcharout` returns the padded datum — so `concat('x'::char(8), 'Z')` is
+/// `'x       Z'` while `'x'::char(8) || 'Z'` is `'xZ'`. `coalesce`, `nullif`,
+/// `greatest`, `least` and `pg_typeof` are polymorphic and hand the argument
+/// back (or describe it) as the `character` it still is.
+///
+/// `octet_length` and `bit_length` are the third case: `bpcharoctetlen` is a
+/// real `character` overload that measures the stored, padded datum, so
+/// `octet_length('x'::char(8))` is 8 where `length('x'::char(8))` is 1.
+fn preserves_bpchar_padding(name: &str) -> bool {
+    matches!(
+        name,
+        "bit_length"
+            | "coalesce"
+            | "concat"
+            | "concat_ws"
+            | "format"
+            | "greatest"
+            | "least"
+            | "nullif"
+            | "octet_length"
+            | "pg_typeof"
+    ) || crate::xml_fn::is_xml_func(name)
 }
 
 /// Coerce `unknown` literal arguments into the fixed type the scalar function

@@ -91,6 +91,73 @@ pub(crate) fn cast_value(
     )
 }
 
+/// Apply `PostgreSQL`'s `bpchar → text` cast to a value whose *static* type is
+/// `character(n)`.
+///
+/// The value layer cannot do this on its own. `character`, `character varying`
+/// and `text` all reach the row as a bare [`Datum::Text`], so nothing about the
+/// padded string says the padding is a `character(n)` artifact rather than data
+/// a `text` column really holds. Only the static type knows, and only the
+/// executor holds the static type — so the cast that
+/// [`crabka_pgtypes::string::bpchar_to_text`] describes is applied here, at each
+/// point a `character` expression enters a `text` context.
+///
+/// Both guards are load-bearing. The trailing-space test settles the ordinary
+/// case without a type inference at all, which matters because this sits inside
+/// the per-row expression loop; and the inference itself is what keeps a `text`
+/// column that genuinely ends in a space (`'a '::text = 'a '`) intact.
+/// `Ok(None)` means the value is not a padded `character`, so the caller keeps
+/// the one it already has rather than paying for a copy.
+pub(crate) fn bpchar_to_text_value(
+    expr: &Expr,
+    scope: &Scope,
+    value: &Datum,
+) -> Result<Option<Datum>, ExecError> {
+    let Datum::Text(text) = value else {
+        return Ok(None);
+    };
+    if !text.ends_with(' ') || !matches!(infer_type(expr, scope)?, ColumnType::Char(_)) {
+        return Ok(None);
+    }
+    Ok(Some(Datum::Text(
+        crabka_pgtypes::string::bpchar_to_text(text).to_owned(),
+    )))
+}
+
+/// [`bpchar_to_text_value`] over an operand pair, for the comparison and
+/// concatenation operators — the families with no `bpchar` overload of their
+/// own, so `PostgreSQL` resolves them through the implicit cast to `text`.
+///
+/// `LIKE` and the regular-expression operators are deliberately absent:
+/// `bpcharlike` and `bpcharregexeq` read the padded datum, so `'a'::char(3) LIKE
+/// 'a'` is false on `PostgreSQL` exactly as it is here.
+///
+/// Each side is judged separately, because `'x'::char(8) = 'x '::text` is false
+/// on `PostgreSQL` — only the `character` side is trimmed.
+fn bpchar_to_text_operands(
+    op: BinaryOp,
+    left: (&Expr, &Datum),
+    right: (&Expr, &Datum),
+    scope: &Scope,
+) -> Result<(Option<Datum>, Option<Datum>), ExecError> {
+    if !matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::Concat
+    ) {
+        return Ok((None, None));
+    }
+    Ok((
+        bpchar_to_text_value(left.0, scope, left.1)?,
+        bpchar_to_text_value(right.0, scope, right.1)?,
+    ))
+}
+
 /// [`cast_value`] in the session's styles, so an ambiguous all-numeric date
 /// literal is read under the session's `DateStyle` field order.
 pub(crate) fn cast_value_in(
@@ -326,9 +393,13 @@ fn eval_depth_inner(
             })? {
                 return Ok(result);
             }
+            // `x IN (a, b)` is `x = a OR x = b`, so every operand takes the same
+            // `character → text` cast the `=` operator takes.
             let x = eval_depth(expr, scope, values, ctx, d)?;
+            let x = bpchar_to_text_value(expr, scope, &x)?.unwrap_or(x);
             eval_in_list(expr, &x, list, *negated, ctx, |e| {
-                eval_depth(e, scope, values, ctx, d)
+                let item = eval_depth(e, scope, values, ctx, d)?;
+                Ok(bpchar_to_text_value(e, scope, &item)?.unwrap_or(item))
             })
         }
         Expr::Between {
@@ -339,9 +410,14 @@ fn eval_depth_inner(
         } => {
             reject_uncomparable_comparison(BinaryOp::Ge, expr, low, scope)?;
             reject_uncomparable_comparison(BinaryOp::Le, expr, high, scope)?;
+            // `x BETWEEN lo AND hi` expands to two comparisons, which take the
+            // `character → text` cast as `>=` and `<=` do.
             let x = eval_depth(expr, scope, values, ctx, d)?;
+            let x = bpchar_to_text_value(expr, scope, &x)?.unwrap_or(x);
             let lo = eval_depth(low, scope, values, ctx, d)?;
+            let lo = bpchar_to_text_value(low, scope, &lo)?.unwrap_or(lo);
             let hi = eval_depth(high, scope, values, ctx, d)?;
+            let hi = bpchar_to_text_value(high, scope, &hi)?.unwrap_or(hi);
             eval_between((expr, &x), (low, &lo), (high, &hi), *negated, ctx)
         }
         Expr::Like {
@@ -384,6 +460,18 @@ fn eval_depth_inner(
                 return Ok(empty);
             }
             let v = eval_depth(expr, scope, values, ctx, d)?;
+            // `character → text`/`varchar` (and `name`, which shares `Text`
+            // here) is the written spelling of the one cast function every
+            // implicit coercion also goes through, so it drops the blank padding
+            // here too: `'x'::char(8)::text` is `'x'`. A cast BACK to
+            // `character` is not this cast — `bpchar(bpchar)` re-pads to the new
+            // length — so those targets are excluded.
+            let v = match ty {
+                ColumnType::Text | ColumnType::Varchar(_) => {
+                    bpchar_to_text_value(expr, scope, &v)?.unwrap_or(v)
+                }
+                _ => v,
+            };
             // The `reg*` family is the one set of casts that needs the catalog:
             // a name has to be resolved to its oid (PostgreSQL's `reg*in`), and
             // an oid has to be resolved *back* to the name `reg*out` prints,
@@ -1290,6 +1378,14 @@ pub(crate) fn apply_binary_of(
     ) {
         infer_binary_type(op, left, right, scope)?;
     }
+    // A `character` operand is cast to `text` first: `=`, the other five
+    // comparisons and `||` have no `bpchar` overload, so PostgreSQL reaches them
+    // through the implicit cast, and the padding never takes part. `LIKE` and
+    // the regular-expression operators are NOT here — `bpcharlike` and
+    // `bpcharregexeq` read the padded datum, so `'a'::char(3) LIKE 'a'` is false
+    // on PostgreSQL exactly as it is here.
+    let (lb, rb) = bpchar_to_text_operands(op, (left, l), (right, r), scope)?;
+    let (l, r) = (lb.as_ref().unwrap_or(l), rb.as_ref().unwrap_or(r));
     let (lc, rc) = coerce_untyped_literal_operands(op, left, right, l, r, ctx)?;
     let (l, r) = (lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r));
     if op == BinaryOp::Concat {

@@ -13749,6 +13749,7 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
     // can create one.
     let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
     let error = attach_reg_cast_literal_position(sql, error);
+    let error = attach_query_analysis_position(sql, stmt, error);
     attach_undefined_function_position(
         sql,
         stmt,
@@ -14424,6 +14425,284 @@ fn attach_reg_cast_literal_position(sql: &str, error: PgError) -> PgError {
         [position] => error.with_position(*position),
         _ => error,
     }
+}
+
+/// The top-level clause a token sits in, for [`attach_query_analysis_position`].
+///
+/// `PostgreSQL` analyses a `SELECT` one clause at a time and reports the
+/// position of the first reference that fails, so which clause a token belongs
+/// to is what decides the caret. A token inside parentheses keeps the clause
+/// that encloses them — `count(b)` in the target list is a target-list
+/// reference, and `parseCheckAggregates` blames it there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryClause {
+    /// Everything before `FROM`: the target list, which also carries the
+    /// `ORDER BY` expressions as resjunk entries by the time the grouping check
+    /// walks it.
+    Target,
+    From,
+    Where,
+    GroupBy,
+    Having,
+    OrderBy,
+    /// A clause none of these checks reports from (`LIMIT`, `RETURNING`, the
+    /// text before a `CREATE VIEW`'s `SELECT`).
+    Other,
+}
+
+/// Label every token with the top-level clause it belongs to.
+fn query_clauses(tokens: &[(crabka_pgparser::token::Token, usize)]) -> Vec<QueryClause> {
+    use crabka_pgparser::token::{Keyword, Token};
+
+    let mut clause = QueryClause::Other;
+    let mut depth = 0_usize;
+    let mut out = Vec::with_capacity(tokens.len());
+    for (index, (token, _)) in tokens.iter().enumerate() {
+        match token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            // A keyword nested in parentheses belongs to a subquery, whose
+            // clauses are its own; only the outermost level moves this cursor.
+            Token::Keyword(keyword) if depth == 0 => {
+                let followed_by_by = matches!(
+                    tokens.get(index + 1).map(|next| &next.0),
+                    Some(Token::Keyword(Keyword::By))
+                );
+                clause = match keyword {
+                    Keyword::Select => QueryClause::Target,
+                    Keyword::From => QueryClause::From,
+                    Keyword::Where => QueryClause::Where,
+                    Keyword::Group if followed_by_by => QueryClause::GroupBy,
+                    Keyword::Having => QueryClause::Having,
+                    Keyword::Order if followed_by_by => QueryClause::OrderBy,
+                    Keyword::Limit
+                    | Keyword::Offset
+                    | Keyword::Returning
+                    | Keyword::Union
+                    | Keyword::Intersect
+                    | Keyword::Except => QueryClause::Other,
+                    _ => clause,
+                };
+            }
+            _ => {}
+        }
+        out.push(clause);
+    }
+    out
+}
+
+/// The one-based source position of the first reference to `column` inside one
+/// of `clauses`, searched in the order given.
+///
+/// A message that qualifies the column (`"t.b"`) still matches a bare `b` in the
+/// source, because `PostgreSQL` names the range-table entry the reference
+/// resolved to and the query need not have written it. The reverse is guarded:
+/// an `Ident` preceded by a dot is somebody else's qualified reference and never
+/// answers for a bare name.
+fn column_reference_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    labels: &[QueryClause],
+    (qualifier, column): (Option<&str>, &str),
+    clauses: &[QueryClause],
+) -> Option<usize> {
+    use crabka_pgparser::token::Token;
+
+    let is_ident = |index: usize, want: &str| matches!(tokens.get(index).map(|entry| &entry.0), Some(Token::Ident(name)) if name == want);
+    let is_dot = |index: usize| matches!(tokens.get(index).map(|e| &e.0), Some(Token::Dot));
+    let position = |index: usize| sql[..tokens[index].1].chars().count() + 1;
+
+    for wanted in clauses {
+        let mut written = None;
+        let mut bare = None;
+        for (index, label) in labels.iter().enumerate() {
+            if label != wanted {
+                continue;
+            }
+            if written.is_none()
+                && let Some(qualifier) = qualifier
+                && is_ident(index, qualifier)
+                && is_dot(index + 1)
+                && is_ident(index + 2, column)
+            {
+                written = Some(position(index));
+            }
+            if bare.is_none()
+                && is_ident(index, column)
+                && !(index > 0 && is_dot(index - 1))
+                && !is_dot(index + 1)
+            {
+                bare = Some(position(index));
+            }
+        }
+        // A written qualification is the closer match, whichever came first.
+        if let Some(found) = written.or(bare) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Point `PostgreSQL`'s caret at the reference that failed parse analysis, for
+/// the grouping and name-resolution errors it reports from a query's own source.
+///
+/// `PostgreSQL` analyses a `SELECT` in a fixed order — target list, `WHERE`,
+/// `HAVING`, `ORDER BY`, `GROUP BY` (`transformSelectStmt` does `ORDER BY` first
+/// "because both transformGroupClause and transformDistinctClause need the
+/// results") — and reports the first reference that fails. The ungrouped-column
+/// check runs later still, over the target list and then the `HAVING`
+/// qualification, with the `ORDER BY` expressions already appended to the target
+/// list as resjunk entries. Both orders are reproduced here, which is why
+/// `SELECT count(*) FROM t GROUP BY a ORDER BY b` blames the `b` in `ORDER BY`
+/// while `SELECT count(b) FROM x, y GROUP BY x.b/2` blames the one inside
+/// `count`.
+///
+/// # Why the ambiguity family is restricted to queries
+///
+/// A caret costs two lines when the error is one `PostgreSQL` does not raise.
+/// Measured on the 18.4 corpus, `MERGE` and `INSERT … ON CONFLICT` are where
+/// Crabka's own name resolution is over-strict: the twelve ambiguity reports it
+/// raises there have no counterpart upstream, while every ambiguity report it
+/// shares with `PostgreSQL` comes from a plain query. Decorating only the query
+/// form is therefore the whole gain and none of the cost. The grouping families
+/// need no such gate — Crabka raises them only from a query already.
+fn attach_query_analysis_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    if error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let labels = query_clauses(&tokens);
+    let found = match error.code.as_str() {
+        "42803" => ungrouped_column_position(sql, &tokens, &labels, &error.message),
+        "42P10" | "42P01" => group_by_position(sql, &tokens, &labels, &error.message)
+            .or_else(|| from_clause_entry_position(sql, &tokens, &error.message)),
+        "42702" if matches!(stmt, Statement::Query(_)) => {
+            ambiguous_column_position(sql, &tokens, &labels, &error.message)
+        }
+        _ => None,
+    };
+    match found {
+        Some(position) => error.with_position(position),
+        None => error,
+    }
+}
+
+/// `column "t.b" must appear in the GROUP BY clause or be used in an aggregate
+/// function` — reported by `parseCheckAggregates` over the target list (which
+/// carries `ORDER BY` by then) and then the `HAVING` qualification.
+fn ungrouped_column_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    labels: &[QueryClause],
+    message: &str,
+) -> Option<usize> {
+    let reference = message.strip_prefix("column \"")?.strip_suffix(
+        "\" must appear in the GROUP BY clause or be used in an aggregate function",
+    )?;
+    let (qualifier, column) = match reference.rsplit_once('.') {
+        Some((qualifier, column)) => (Some(qualifier), column),
+        None => (None, reference),
+    };
+    column_reference_position(
+        sql,
+        tokens,
+        labels,
+        (qualifier, column),
+        &[
+            QueryClause::Target,
+            QueryClause::OrderBy,
+            QueryClause::Having,
+        ],
+    )
+}
+
+/// `column reference "b" is ambiguous` — reported by the first clause
+/// `transformSelectStmt` resolves it in.
+fn ambiguous_column_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    labels: &[QueryClause],
+    message: &str,
+) -> Option<usize> {
+    let column = message
+        .strip_prefix("column reference \"")?
+        .strip_suffix("\" is ambiguous")?;
+    // A qualified spelling is not ambiguous, so the message never carries one.
+    if column.contains('.') {
+        return None;
+    }
+    column_reference_position(
+        sql,
+        tokens,
+        labels,
+        (None, column),
+        &[
+            QueryClause::Target,
+            QueryClause::Where,
+            QueryClause::Having,
+            QueryClause::OrderBy,
+            QueryClause::GroupBy,
+        ],
+    )
+}
+
+/// `GROUP BY position 3 is not in select list` — the caret goes on the constant
+/// the clause wrote, not on the clause keyword.
+fn group_by_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    labels: &[QueryClause],
+    message: &str,
+) -> Option<usize> {
+    use crabka_pgparser::token::Token;
+
+    let rest = message.strip_suffix(" is not in select list")?;
+    let (clause, wanted) = if let Some(digits) = rest.strip_prefix("GROUP BY position ") {
+        (QueryClause::GroupBy, digits)
+    } else {
+        (
+            QueryClause::OrderBy,
+            rest.strip_prefix("ORDER BY position ")?,
+        )
+    };
+    tokens
+        .iter()
+        .zip(labels)
+        .find(|((token, _), label)| {
+            **label == clause && matches!(token, Token::IntLit(digits) if digits == wanted)
+        })
+        .map(|((_, offset), _)| sql[..*offset].chars().count() + 1)
+}
+
+/// `invalid reference to FROM-clause entry for table "xx1"` — the caret goes on
+/// the qualifier that named the unreachable entry.
+///
+/// `PostgreSQL` also reports this for an *unqualified* reference that resolved
+/// to that entry (`… where f1 = x1` under a `LATERAL`), and the message carries
+/// no column to find it by. Those stay undecorated rather than guessing.
+fn from_clause_entry_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    message: &str,
+) -> Option<usize> {
+    use crabka_pgparser::token::Token;
+
+    let table = message
+        .strip_prefix("invalid reference to FROM-clause entry for table \"")?
+        .strip_suffix('"')?;
+    tokens
+        .windows(2)
+        .find(|pair| {
+            matches!(&pair[0].0, Token::Ident(name) if name == table)
+                && matches!(pair[1].0, Token::Dot)
+        })
+        .map(|pair| sql[..pair[0].1].chars().count() + 1)
 }
 
 /// Add PostgreSQL's caret only when the source proves which range cast failed.

@@ -33,6 +33,30 @@ pub fn apply_varchar_typmod(
     apply_string_typmod(value, limit, false, how)
 }
 
+/// The `bpchar → text` cast: strip the blank padding [`apply_char_typmod`] added.
+///
+/// `PostgreSQL` reaches every other string type from `character(n)` through this
+/// one cast function (`text(bpchar)`, which is `rtrim1`), registered in `pg_cast`
+/// as an *implicit* conversion. So the padding is invisible to everything the
+/// type does not own: `lower`, `||`, `length`, a comparison against `text`, and
+/// a written `::text` all see the trimmed value, and the documentation states it
+/// as a rule of the type rather than of any one function — "trailing spaces are
+/// removed when converting a `character` value to one of the other string
+/// types".
+///
+/// The padding survives only where `PostgreSQL` has a `bpchar` overload that
+/// reads the stored datum: `bpcharout` (so a projected `char(8)` column still
+/// prints eight wide), `bpcharoctetlen`, `bpcharlike`, `bpcharregexeq`, and the
+/// output-function paths (`concat`, `format`, an array or record member).
+///
+/// The `bpchar` comparison operators (`bpchareq`, `bpcharlt`, `hashbpchar`) do
+/// not read the padding either — they measure with `bcTruelen` — so trimming a
+/// `character` operand before an ordinary text comparison reproduces them.
+#[must_use]
+pub fn bpchar_to_text(value: &str) -> &str {
+    value.trim_end_matches(' ')
+}
+
 /// Apply a `char(n)`/`character(n)` modifier to a text value.
 ///
 /// # Errors
@@ -109,8 +133,25 @@ fn truncate(
 #[cfg(test)]
 mod tests {
     use Coercion::{Assignment, Explicit};
+    use assert2::assert;
 
     use super::*;
+
+    /// The cast undoes exactly what [`apply_char_typmod`] added, and nothing
+    /// else: only blanks go, only from the end, and a value that is all blanks
+    /// becomes the empty string rather than staying one blank wide.
+    #[test]
+    fn the_text_cast_removes_only_the_blank_padding() {
+        for (limit, value) in [(8_u16, "xxxx"), (3, "a"), (5, "  a"), (2, "")] {
+            let padded = apply_char_typmod(value, Some(limit), Assignment).expect("pads");
+            assert!(padded.chars().count() == usize::from(limit));
+            assert!(bpchar_to_text(&padded) == value.trim_end_matches(' '));
+        }
+        // Leading and interior blanks are data, and a tab is not padding.
+        assert!(bpchar_to_text("  a  b  ") == "  a  b");
+        assert!(bpchar_to_text("a\t") == "a\t");
+        assert!(bpchar_to_text("   ") == "");
+    }
 
     #[test]
     fn varchar_typmod_enforces_character_length() {
