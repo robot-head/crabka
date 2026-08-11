@@ -205,9 +205,7 @@ fn persist_quorum_membership(
         fs::rename(&path, &backup)?;
     }
     if let Err(error) = fs::rename(&temporary, &path) {
-        if backup.exists() && !path.exists() {
-            let _ = fs::rename(&backup, &path);
-        }
+        restore_membership_backup(&backup, &path);
         return Err(error.into());
     }
     if backup.exists() {
@@ -221,6 +219,12 @@ fn persist_quorum_membership(
     #[cfg(unix)]
     fs::File::open(root)?.sync_all()?;
     Ok(())
+}
+
+fn restore_membership_backup(backup: &std::path::Path, path: &std::path::Path) {
+    if let (Ok(true), Ok(false)) = (backup.try_exists(), path.try_exists()) {
+        let _ = fs::rename(backup, path);
+    }
 }
 
 fn replica_config(config: &LogConfig) -> LogConfig {
@@ -310,11 +314,19 @@ mod tests {
     };
 
     use assert2::assert;
+    use crabka_compression::CompressionType;
     use crabka_kraft_core::NodeId;
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::records::{Record, RecordBatch};
 
     use super::*;
+
+    #[test]
+    fn strict_majority_requires_more_than_half_of_every_voter_set() {
+        for (voters, required) in [(1, 1), (2, 2), (3, 2), (4, 3), (5, 3)] {
+            assert!(engine::strict_majority(voters) == required);
+        }
+    }
 
     async fn append_source(
         store: &QuorumWalStore,
@@ -326,6 +338,28 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn split_batches_preserves_compressed_wire_boundaries() {
+        let mut wire = bytes::BytesMut::new();
+        for base_offset in [0, 20] {
+            let mut compressed = batch(20);
+            compressed.base_offset = base_offset;
+            compressed.attributes = compressed.attributes.with_compression(CompressionType::Lz4);
+            for record in &mut compressed.records {
+                record.value = Some(bytes::Bytes::from(vec![b'x'; 256]));
+            }
+            compressed.encode(&mut wire).unwrap();
+        }
+
+        let batches = engine::split_batches(&wire.freeze()).unwrap();
+
+        assert!(batches.len() == 2);
+        assert!(batches[0].base_offset == Offset(0));
+        assert!(batches[0].last_offset == Offset(19));
+        assert!(batches[1].base_offset == Offset(20));
+        assert!(batches[1].last_offset == Offset(39));
     }
 
     #[test]
@@ -656,6 +690,11 @@ mod tests {
         assert!(store.engine.replica_end_offsets() == vec![leo]);
         assert!(store.trim_to_offset(leo).await.unwrap() == leo);
         assert!(store.engine.replica_start_offsets() == vec![leo]);
+        assert!(
+            !store
+                .engine
+                .record_follower_ack(NodeId(2), Offset(leo.0 - 1))
+        );
 
         let (_results, next) = append_source(&store, 1).await;
         let syncing = Arc::clone(&store);
@@ -668,6 +707,108 @@ mod tests {
         store.engine.configure_distributed(NodeId(1), &[]);
         let error = sync.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("placement disappeared"));
+    }
+
+    #[tokio::test]
+    async fn durable_advance_waits_for_an_offset_strictly_after_the_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        let store = Arc::new(
+            QuorumWalStore::for_distributed_partition(
+                Uuid::new_v4(),
+                PartitionIndex(0),
+                source,
+                None,
+                3,
+            )
+            .unwrap(),
+        );
+        store
+            .engine
+            .configure_distributed(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        let (_results, first) = append_source(&store, 1).await;
+        let syncing = Arc::clone(&store);
+        let sync = tokio::spawn(async move { syncing.sync_durable(first).await });
+        assert!(store.engine.record_follower_ack(NodeId(2), first));
+        assert!(sync.await.unwrap().unwrap() == first);
+
+        let engine = Arc::clone(&store.engine);
+        let mut waiting = tokio::spawn(async move { engine.wait_for_durable_advance(first).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+
+        let (_results, second) = append_source(&store, 1).await;
+        let syncing = Arc::clone(&store);
+        let sync = tokio::spawn(async move { syncing.sync_durable(second).await });
+        assert!(
+            !store
+                .engine
+                .record_follower_ack(NodeId(2), Offset(first.0 - 1))
+        );
+        assert!(store.engine.record_follower_ack(NodeId(2), second));
+
+        assert!(sync.await.unwrap().unwrap() == second);
+        assert!(waiting.await.unwrap() == second);
+    }
+
+    #[tokio::test]
+    async fn distributed_wal_rejects_misordered_or_incomplete_voter_sets() {
+        for voters in [
+            vec![NodeId(2), NodeId(1), NodeId(3)],
+            vec![NodeId(1), NodeId(2)],
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = Arc::new(Mutex::new(
+                Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+            ));
+            let store = QuorumWalStore::for_distributed_partition(
+                Uuid::new_v4(),
+                PartitionIndex(0),
+                source,
+                None,
+                3,
+            )
+            .unwrap();
+            let (_results, leo) = append_source(&store, 1).await;
+
+            store.engine.configure_distributed(NodeId(1), &voters);
+
+            assert!(!store.engine.record_follower_ack(NodeId(2), leo));
+            assert!(store.engine.durable_watermark() == Offset(0));
+        }
+    }
+
+    #[tokio::test]
+    async fn distributed_wal_reconfiguration_replaces_the_remote_voter_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+        let store = QuorumWalStore::for_distributed_partition(
+            Uuid::new_v4(),
+            PartitionIndex(0),
+            source,
+            None,
+            3,
+        )
+        .unwrap();
+        let (_results, leo) = append_source(&store, 1).await;
+        store
+            .engine
+            .configure_distributed(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+
+        store
+            .engine
+            .configure_distributed(NodeId(1), &[NodeId(1), NodeId(3), NodeId(4)]);
+
+        assert!(!store.engine.record_follower_ack(NodeId(2), leo));
+        assert!(store.engine.record_follower_ack(NodeId(3), leo));
+        assert!(store.engine.durable_watermark() == leo);
     }
 
     #[tokio::test]
@@ -945,6 +1086,25 @@ mod tests {
         .unwrap();
 
         assert!(!load_or_prepare_quorum_membership(root.path(), &voter_ids).unwrap());
+    }
+
+    #[test]
+    fn quorum_membership_restore_only_uses_a_backup_when_the_primary_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join(QUORUM_STATE_FILE);
+        let backup = root.path().join(QUORUM_STATE_BACKUP_FILE);
+        fs::write(&backup, b"backup-only").unwrap();
+
+        restore_membership_backup(&backup, &primary);
+
+        assert!(fs::read(&primary).unwrap() == b"backup-only");
+        assert!(!backup.exists());
+
+        fs::write(&primary, b"current").unwrap();
+        fs::write(&backup, b"stale-backup").unwrap();
+        restore_membership_backup(&backup, &primary);
+        assert!(fs::read(&primary).unwrap() == b"current");
+        assert!(fs::read(&backup).unwrap() == b"stale-backup");
     }
 
     #[test]

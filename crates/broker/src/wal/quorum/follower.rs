@@ -65,6 +65,18 @@ struct DurableRange {
     end: Offset,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalFetchFrontiers {
+    start: Offset,
+    end: Offset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchProgress {
+    Idle,
+    Advanced,
+}
+
 impl FollowerLog {
     fn open(config: &Config) -> Result<Self, crate::BrokerError> {
         let voter_dir = |root: &std::path::Path| {
@@ -205,7 +217,7 @@ impl FollowerLog {
                 crate::BrokerError::Replication("WAL fetch offset overflow".into())
             })?);
         }
-        if expected > leader_end {
+        if expected.cmp(&leader_end).is_gt() {
             return Err(crate::BrokerError::Replication(format!(
                 "WAL fetch ends at {}, beyond leader LEO {}",
                 expected.0, leader_end.0
@@ -259,16 +271,12 @@ fn recover_durable_offset(log: &mut Log, path: &Path) -> Result<(), crate::Broke
                     ))
                 })?;
             match offsets.as_slice() {
-                [end] => Ok(DurableRange {
-                    start: log.log_start_offset(),
-                    end: Offset(*end),
-                }),
                 [start, end] => Ok(DurableRange {
                     start: Offset(*start),
                     end: Offset(*end),
                 }),
                 _ => Err(crate::BrokerError::Replication(format!(
-                    "decode WAL durable offsets {}: expected one or two offsets",
+                    "decode WAL durable offsets {}: expected two offsets",
                     checkpoint.display()
                 ))),
             }
@@ -276,21 +284,18 @@ fn recover_durable_offset(log: &mut Log, path: &Path) -> Result<(), crate::Broke
     )?;
     let start = log.log_start_offset();
     let end = log.log_end_offset();
-    if durable.start < start || durable.start > durable.end || durable.end > end {
+    let (true, true) = (
+        (start..=end).contains(&durable.start),
+        (durable.start..=end).contains(&durable.end),
+    ) else {
         return Err(crate::BrokerError::Replication(format!(
             "WAL durable range {}..{} is outside recovered range {}..{}",
             durable.start.0, durable.end.0, start.0, end.0
         )));
-    }
-    if durable.end < end {
-        log.truncate_to(durable.end)?;
-    }
-    if durable.start > start {
-        log.trim_to_offset(durable.start)?;
-    }
-    if durable.end < end || durable.start > start {
-        log.sync()?;
-    }
+    };
+    log.truncate_to(durable.end)?;
+    log.trim_to_offset(durable.start)?;
+    log.sync()?;
     write_durable_offset(path, durable)?;
     Ok(())
 }
@@ -309,9 +314,7 @@ fn write_durable_offset(path: &Path, durable: DurableRange) -> Result<(), crate:
         std::fs::rename(path, &backup)?;
     }
     if let Err(error) = std::fs::rename(&temporary, path) {
-        if backup.exists() && !path.exists() {
-            let _ = std::fs::rename(&backup, path);
-        }
+        restore_durable_offset_backup(path, &backup);
         return Err(error.into());
     }
     if backup.exists() {
@@ -322,6 +325,13 @@ fn write_durable_offset(path: &Path, durable: DurableRange) -> Result<(), crate:
         std::fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
+}
+
+fn restore_durable_offset_backup(path: &Path, backup: &Path) {
+    let (Ok(false), Ok(true)) = (path.try_exists(), backup.try_exists()) else {
+        return;
+    };
+    let _ = std::fs::rename(backup, path);
 }
 
 pub(crate) async fn run(config: Config) {
@@ -337,9 +347,10 @@ pub(crate) async fn run(config: Config) {
         }
         match FollowerLog::open(&config) {
             Ok(follower) => {
-                if let Err(error) = run_inner(&config, &follower).await
-                    && !config.shutdown.is_cancelled()
-                {
+                if let Err(error) = run_inner(&config, &follower).await {
+                    if config.shutdown.is_cancelled() {
+                        return;
+                    }
                     warn!(error = %error, "diskless WAL follower stopped; retrying");
                 }
             }
@@ -347,9 +358,12 @@ pub(crate) async fn run(config: Config) {
                 warn!(error = %error, "diskless WAL follower could not open its log; retrying");
             }
         }
-        if sleep_or_cancel(&config, config.replication.unexpected_error_backoff)
-            .await
-            .is_err()
+        if sleep_or_cancel(
+            &config.shutdown,
+            config.replication.unexpected_error_backoff,
+        )
+        .await
+        .is_err()
         {
             return;
         }
@@ -381,52 +395,56 @@ async fn run_inner(config: &Config, follower: &FollowerLog) -> Result<(), String
                 }
                 Err(error) => {
                     warn!(error = %error, "diskless WAL fetch failed; reconnecting");
-                    sleep_or_cancel(config, config.replication.send_error_backoff).await?;
+                    sleep_or_cancel(&config.shutdown, config.replication.send_error_backoff)
+                        .await?;
                     connection = connect_with_backoff(config).await?;
                     continue;
                 }
             },
         };
         let Some(partition) = response_partition(response, config.shard) else {
-            sleep_or_cancel(config, config.replication.unexpected_error_backoff).await?;
+            sleep_or_cancel(
+                &config.shutdown,
+                config.replication.unexpected_error_backoff,
+            )
+            .await?;
             continue;
         };
         match partition.error_code {
             codes::NONE => {
-                let leader_end = Offset(partition.last_stable_offset);
-                let leader_start = Offset(partition.log_start_offset);
-                if leader_start.0 < 0
-                    || leader_end.0 < 0
-                    || partition.high_watermark > leader_end.0
-                    || partition.log_start_offset > leader_end.0
-                {
-                    return Err("leader returned invalid WAL frontiers".into());
-                }
+                let frontiers = validate_fetch_frontiers(&partition)?;
                 follower
-                    .trim_to(leader_start)
+                    .trim_to(frontiers.start)
                     .await
                     .map_err(|error| error.to_string())?;
                 let appended = follower
-                    .append(requested, leader_end, partition.records)
+                    .append(requested, frontiers.end, partition.records)
                     .await
                     .map_err(|error| error.to_string())?;
-                if appended == requested {
-                    sleep_or_cancel(config, config.replication.throttle_exhausted_backoff).await?;
+                match fetch_progress(requested, appended)? {
+                    FetchProgress::Idle => {
+                        sleep_or_cancel(
+                            &config.shutdown,
+                            config.replication.throttle_exhausted_backoff,
+                        )
+                        .await?;
+                    }
+                    FetchProgress::Advanced => {}
                 }
             }
             codes::OFFSET_OUT_OF_RANGE => {
-                if partition.log_start_offset < 0
-                    || partition.log_start_offset > partition.last_stable_offset
-                {
-                    return Err("leader returned invalid WAL reset offset".into());
-                }
+                let reset = validate_reset_offset(&partition)?;
                 follower
-                    .reset_to(Offset(partition.log_start_offset))
+                    .reset_to(reset)
                     .await
                     .map_err(|error| error.to_string())?;
             }
             codes::UNKNOWN_TOPIC_OR_PARTITION => {
-                sleep_or_cancel(config, config.replication.unknown_topic_retry_delay).await?;
+                sleep_or_cancel(
+                    &config.shutdown,
+                    config.replication.unknown_topic_retry_delay,
+                )
+                .await?;
             }
             codes::NOT_LEADER_OR_FOLLOWER
             | codes::FENCED_LEADER_EPOCH
@@ -436,9 +454,46 @@ async fn run_inner(config: &Config, follower: &FollowerLog) -> Result<(), String
                     error_code,
                     "diskless WAL follower received an unexpected error"
                 );
-                sleep_or_cancel(config, config.replication.unexpected_error_backoff).await?;
+                sleep_or_cancel(
+                    &config.shutdown,
+                    config.replication.unexpected_error_backoff,
+                )
+                .await?;
             }
         }
+    }
+}
+
+fn validate_fetch_frontiers(partition: &PartitionData) -> Result<WalFetchFrontiers, String> {
+    let start = Offset(partition.log_start_offset);
+    let high_watermark = Offset(partition.high_watermark);
+    let end = Offset(partition.last_stable_offset);
+    let (true, true) = (
+        (Offset(0)..=end).contains(&start),
+        (start..=end).contains(&high_watermark),
+    ) else {
+        return Err("leader returned invalid WAL frontiers".into());
+    };
+    Ok(WalFetchFrontiers { start, end })
+}
+
+fn validate_reset_offset(partition: &PartitionData) -> Result<Offset, String> {
+    let start = Offset(partition.log_start_offset);
+    let end = Offset(partition.last_stable_offset);
+    let true = (Offset(0)..=end).contains(&start) else {
+        return Err("leader returned invalid WAL reset offset".into());
+    };
+    Ok(start)
+}
+
+fn fetch_progress(requested: Offset, appended: Offset) -> Result<FetchProgress, String> {
+    match appended.cmp(&requested) {
+        std::cmp::Ordering::Less => Err(format!(
+            "WAL follower regressed from requested offset {} to {}",
+            requested.0, appended.0
+        )),
+        std::cmp::Ordering::Equal => Ok(FetchProgress::Idle),
+        std::cmp::Ordering::Greater => Ok(FetchProgress::Advanced),
     }
 }
 
@@ -461,10 +516,7 @@ async fn connect_with_backoff(config: &Config) -> Result<Connection, String> {
             config.leader_port,
             config.inter_broker_listener_protocol,
             &config.inter_broker_server_name,
-            ConnectionOptions {
-                client_id: config.client_id.clone(),
-                ..ConnectionOptions::default()
-            },
+            follower_connection_options(&config.client_id),
         );
         let result = tokio::select! {
             () = config.shutdown.cancelled() => return Err("cancelled".into()),
@@ -480,21 +532,27 @@ async fn connect_with_backoff(config: &Config) -> Result<Connection, String> {
                     "diskless WAL follower connect failed; retrying after {}",
                     delay.human()
                 );
-                sleep_or_cancel(config, delay).await?;
-                let doubled = delay * 2.0;
-                delay = if doubled > config.replication.reconnect_delay_cap {
-                    config.replication.reconnect_delay_cap
-                } else {
-                    doubled
-                };
+                sleep_or_cancel(&config.shutdown, delay).await?;
+                delay = next_reconnect_delay(delay, config.replication.reconnect_delay_cap);
             }
         }
     }
 }
 
-async fn sleep_or_cancel(config: &Config, delay: Time) -> Result<(), String> {
+fn follower_connection_options(client_id: &str) -> ConnectionOptions {
+    ConnectionOptions {
+        client_id: client_id.to_owned(),
+        ..ConnectionOptions::default()
+    }
+}
+
+fn next_reconnect_delay(delay: Time, cap: Time) -> Time {
+    (delay + delay).min(cap)
+}
+
+async fn sleep_or_cancel(shutdown: &CancellationToken, delay: Time) -> Result<(), String> {
     tokio::select! {
-        () = config.shutdown.cancelled() => Err("cancelled".into()),
+        () = shutdown.cancelled() => Err("cancelled".into()),
         () = tokio::time::sleep(delay.to_std()) => Ok(()),
     }
 }
@@ -522,12 +580,156 @@ async fn run_blocking<T: Send + 'static>(
 mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
+    use assert2::assert;
     use crabka_ids::PartitionIndex;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
+    use crabka_units::{millis, secs};
 
     use super::*;
     use crate::wal::{WalStore as _, quorum::registry::WalShardRegistry};
+
+    fn test_config(root: &Path, shutdown: CancellationToken) -> Config {
+        Config {
+            node_id: NodeId(2),
+            topic: "diskless".into(),
+            shard: ShardId {
+                topic_id: uuid::Uuid::from_u128(99),
+                partition: PartitionIndex(0),
+            },
+            leader_node_id: NodeId(1),
+            leader_epoch: 7,
+            leader_host: "127.0.0.1".into(),
+            leader_port: 0,
+            log_dirs: vec![root.to_path_buf()],
+            storage: LogConfig::default(),
+            client_id: "wal-follower-test".into(),
+            shutdown,
+            inter_broker_client: Arc::new(crate::network::client::InterBrokerClient::new(
+                None, None,
+            )),
+            inter_broker_listener_protocol: ListenerProtocol::Plaintext,
+            inter_broker_server_name: "localhost".into(),
+            replication: ReplicationRuntimeConfig::default(),
+        }
+    }
+
+    fn frontiers(start: i64, high_watermark: i64, end: i64) -> PartitionData {
+        PartitionData {
+            log_start_offset: start,
+            high_watermark,
+            last_stable_offset: end,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fetch_frontiers_require_an_ordered_nonnegative_range() {
+        assert!(
+            validate_fetch_frontiers(&frontiers(5, 6, 7))
+                == Ok(WalFetchFrontiers {
+                    start: Offset(5),
+                    end: Offset(7),
+                })
+        );
+        for invalid in [
+            frontiers(-1, 0, 1),
+            frontiers(0, -1, 1),
+            frontiers(0, 2, 1),
+            frontiers(2, 2, 1),
+            frontiers(0, 0, -1),
+        ] {
+            assert!(validate_fetch_frontiers(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn reset_offset_must_fall_inside_the_leader_log() {
+        assert!(validate_reset_offset(&frontiers(5, 5, 7)) == Ok(Offset(5)));
+        for invalid in [frontiers(-1, 0, 7), frontiers(8, 8, 7), frontiers(0, 0, -1)] {
+            assert!(validate_reset_offset(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn fetch_progress_distinguishes_idle_advance_and_regression() {
+        assert!(fetch_progress(Offset(4), Offset(4)) == Ok(FetchProgress::Idle));
+        assert!(fetch_progress(Offset(4), Offset(5)) == Ok(FetchProgress::Advanced));
+        assert!(fetch_progress(Offset(4), Offset(3)).is_err());
+    }
+
+    #[test]
+    fn follower_connection_and_backoff_policy_preserve_runtime_values() {
+        let options = follower_connection_options("wal-client");
+        assert!(options.client_id == "wal-client");
+        assert!(next_reconnect_delay(millis(100), secs(1)) == millis(200));
+        assert!(next_reconnect_delay(millis(600), secs(1)) == secs(1));
+        assert!(next_reconnect_delay(secs(1), secs(1)) == secs(1));
+    }
+
+    #[test]
+    fn durable_offset_backup_is_restored_only_when_primary_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DURABLE_OFFSET_FILE);
+        let backup = dir.path().join(DURABLE_OFFSET_BACKUP_FILE);
+        std::fs::write(&backup, "0 4\n").unwrap();
+
+        restore_durable_offset_backup(&path, &backup);
+
+        assert!(std::fs::read_to_string(&path).unwrap() == "0 4\n");
+        assert!(!backup.exists());
+        std::fs::write(&backup, "0 3\n").unwrap();
+
+        restore_durable_offset_backup(&path, &backup);
+
+        assert!(std::fs::read_to_string(&path).unwrap() == "0 4\n");
+        assert!(std::fs::read_to_string(&backup).unwrap() == "0 3\n");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn follower_sleep_completes_on_delay_or_cancellation() {
+        let shutdown = CancellationToken::new();
+        assert!(sleep_or_cancel(&shutdown, millis(10)).await.is_ok());
+
+        shutdown.cancel();
+        assert!(sleep_or_cancel(&shutdown, secs(1)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn follower_run_retries_until_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let shutdown = CancellationToken::new();
+        let config = test_config(dir.path(), shutdown.clone());
+        let mut task = tokio::spawn(run(config));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut task)
+                .await
+                .is_err()
+        );
+        shutdown.cancel();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn follower_inner_loop_propagates_connect_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let config = test_config(dir.path(), shutdown);
+        let follower = FollowerLog::for_log(
+            Log::open(dir.path().join("follower"), LogConfig::default()).unwrap(),
+        );
+
+        let error = run_inner(&config, &follower).await.unwrap_err();
+
+        assert!(error == "cancelled");
+    }
 
     #[tokio::test]
     async fn follower_appends_and_syncs_a_contiguous_fetch() {
@@ -567,6 +769,39 @@ mod tests {
 
         assert!(error.to_string().contains("not contiguous"));
         assert_eq!(follower.end_offset(), Offset(0));
+    }
+
+    #[tokio::test]
+    async fn follower_accepts_a_partial_fetch_and_rejects_a_leader_overrun() {
+        let dir = tempfile::tempdir().unwrap();
+        let follower = FollowerLog::for_log(Log::open(dir.path(), LogConfig::default()).unwrap());
+        let first = RecordBatch {
+            base_offset: 0,
+            records: vec![Record::default()],
+            ..RecordBatch::default()
+        };
+
+        let end = follower
+            .append(Offset(0), Offset(2), Some(RecordsPayload::V2(vec![first])))
+            .await
+            .unwrap();
+
+        assert!(end == Offset(1));
+        let beyond_leader = RecordBatch {
+            base_offset: 1,
+            records: vec![Record::default()],
+            ..RecordBatch::default()
+        };
+        let error = follower
+            .append(
+                Offset(1),
+                Offset(1),
+                Some(RecordsPayload::V2(vec![beyond_leader])),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("beyond leader LEO"));
+        assert!(follower.end_offset() == Offset(1));
     }
 
     #[tokio::test]
@@ -644,6 +879,36 @@ mod tests {
 
         assert_eq!(reopened.log_end_offset(), Offset(1));
         assert_eq!(std::fs::read_to_string(checkpoint).unwrap().trim(), "0 1");
+    }
+
+    #[test]
+    fn follower_recovery_rejects_incomplete_and_invalid_durable_ranges() {
+        for (checkpoint_value, expected_error) in [
+            ("1\n", "expected two offsets"),
+            ("-1 0\n", "outside recovered range"),
+            ("1 0\n", "outside recovered range"),
+            ("0 2\n", "outside recovered range"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let checkpoint = dir.path().join(DURABLE_OFFSET_FILE);
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            let mut batch = RecordBatch {
+                records: vec![Record::default()],
+                ..RecordBatch::default()
+            };
+            log.append(&mut batch).unwrap();
+            log.sync().unwrap();
+            std::fs::write(&checkpoint, checkpoint_value).unwrap();
+
+            let error = recover_durable_offset(&mut log, &checkpoint).unwrap_err();
+
+            assert!(
+                error.to_string().contains(expected_error),
+                "checkpoint {checkpoint_value:?}: {error}"
+            );
+            assert!(log.log_start_offset() == Offset(0));
+            assert!(log.log_end_offset() == Offset(1));
+        }
     }
 
     #[tokio::test]

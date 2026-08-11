@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use crabka_ids::{Offset, PartitionIndex};
+use crabka_ids::PartitionIndex;
 use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt},
@@ -4446,6 +4446,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
     if let Some(durable_watermark) = recovered_durable_watermark {
         initial_replica_state.recompute_hw_for_wal_durable(durable_watermark);
     }
+    let initial_wal_watermark = initial_replica_state.hw;
     let replica_state = Arc::new(tokio::sync::Mutex::new(initial_replica_state));
     let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
     let current_leader = Arc::new(AtomicU64::new(0));
@@ -4469,13 +4470,14 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         let hw_advance_notify = hw_advance_notify.clone();
         tokio::spawn(async move {
             let watermark_updates = async move {
-                let mut observed = Offset(-1);
+                let mut observed = initial_wal_watermark;
                 loop {
                     let durable = engine.wait_for_durable_advance(observed).await;
                     observed = durable;
                     let mut state = replica_state.lock().await;
                     let previous = state.hw;
-                    if state.recompute_hw_for_wal_durable(durable) > previous {
+                    state.recompute_hw_for_wal_durable(durable);
+                    if state.hw != previous {
                         hw_advance_notify.notify_waiters();
                     }
                 }
@@ -5308,7 +5310,7 @@ mod tests {
             sequencer: None,
         })
         .expect("spawn recovered partition");
-        assert!(partition.high_watermark().await == Offset(0));
+        assert!(partition.high_watermark().await == crabka_log::Offset(0));
 
         let acknowledgement = crate::wal::quorum::wire::fetch_request(
             crate::wal::quorum::wire::QuorumGroup::diskless_wal(topic_id, PartitionIndex(0)),
@@ -5324,7 +5326,7 @@ mod tests {
 
         partition
             .await_hw_at_least(
-                Offset(2),
+                crabka_log::Offset(2),
                 std::time::Instant::now() + std::time::Duration::from_secs(2),
             )
             .await

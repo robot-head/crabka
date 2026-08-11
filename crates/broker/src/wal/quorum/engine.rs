@@ -61,6 +61,10 @@ struct DistributedQuorum {
     durable_offsets: HashMap<NodeId, Offset>,
 }
 
+pub(super) fn strict_majority(voter_count: usize) -> usize {
+    voter_count.div_euclid(2).saturating_add(1)
+}
+
 /// One response from the leader-side WAL fetch path.
 #[derive(Debug)]
 pub(crate) struct WalFetchData {
@@ -88,7 +92,9 @@ impl WalShardEngine {
         let expected_voters = replicas.len();
         let durable_watermark = match mode {
             OpenMode::BootstrapFrom(source) => bootstrap_durable_prefix(&replicas, source)?,
-            OpenMode::Recover => recover_durable_prefix(&replicas, expected_voters / 2 + 1)?,
+            OpenMode::Recover => {
+                recover_durable_prefix(&replicas, strict_majority(expected_voters))?
+            }
             OpenMode::Distributed => replicas[0].log.lock().log_start_offset(),
         };
         Ok(Self {
@@ -151,7 +157,7 @@ impl WalShardEngine {
         }
         if distributed
             .as_ref()
-            .is_some_and(|current| current.me == me && current.voters == voters)
+            .is_some_and(|current| current.voters == voters)
         {
             return;
         }
@@ -190,7 +196,8 @@ impl WalShardEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .is_some_and(|quorum| from != quorum.me && quorum.voters.contains(&from));
+            .and_then(|quorum| quorum.voters.get(1..))
+            .is_some_and(|followers| followers.contains(&from));
         if !is_remote_voter {
             return false;
         }
@@ -201,7 +208,7 @@ impl WalShardEngine {
             let log = source.log.lock();
             (log.log_start_offset(), log.log_end_offset())
         };
-        if offset < log_start || offset > log_end {
+        if !(log_start..=log_end).contains(&offset) {
             return false;
         }
         self.record_durable_offset(from, offset, log_start, log_end)
@@ -226,7 +233,7 @@ impl WalShardEngine {
         loop {
             let advanced = self.durable_advanced.notified();
             let current = self.durable_watermark();
-            if current > after {
+            if current.cmp(&after).is_gt() {
                 return current;
             }
             advanced.await;
@@ -282,7 +289,7 @@ impl WalShardEngine {
                     "diskless WAL broker placement is not available".into(),
                 ));
             }
-            sync_log(source.clone()).await?;
+            sync_replica(source.clone(), &[]).await?;
             self.local_durable.fetch_max(target.0, Ordering::AcqRel);
             let me = self
                 .distributed
@@ -330,7 +337,7 @@ impl WalShardEngine {
                 synced += 1;
             }
         }
-        let required = self.expected_voters / 2 + 1;
+        let required = strict_majority(self.expected_voters);
         if synced < required {
             return Err(BrokerError::Replication(format!(
                 "wal quorum has {synced} synced replicas, needs {required}"
@@ -362,10 +369,7 @@ impl WalShardEngine {
             .get(&from)
             .copied()
             .unwrap_or(log_start);
-        if offset < previous {
-            return false;
-        }
-        if offset > previous {
+        if offset.cmp(&previous).is_gt() {
             quorum.durable_offsets.insert(from, offset);
         }
         let follower_ends = quorum
@@ -385,7 +389,7 @@ impl WalShardEngine {
         let durable = Offset(crabka_verified::recompute_high_watermark(
             leader_end.0,
             &follower_ends,
-            quorum.voters.len() / 2 + 1,
+            strict_majority(quorum.voters.len()),
             current.0,
             log_start.0,
         ));
@@ -584,12 +588,17 @@ pub(super) fn split_batches(bytes: &Bytes) -> Result<Vec<BatchBytes>, BrokerErro
     let mut offset = 0usize;
     while offset < bytes.len() {
         let mut cur = bytes.slice(offset..);
+        let remaining = cur.len();
         let batch = RecordBatch::decode(&mut cur)
             .map_err(|err| BrokerError::Replication(format!("decode WAL batch: {err}")))?;
-        let len = batch.encoded_len();
-        if len == 0 || len > bytes.len() - offset {
-            return Err(BrokerError::Replication("invalid WAL batch length".into()));
-        }
+        let consumed = remaining
+            .checked_sub(cur.len())
+            .and_then(std::num::NonZeroUsize::new)
+            .ok_or_else(|| BrokerError::Replication("invalid WAL batch length".into()))?;
+        let end = offset
+            .checked_add(consumed.get())
+            .filter(|end| bytes.get(offset..*end).is_some())
+            .ok_or_else(|| BrokerError::Replication("invalid WAL batch length".into()))?;
         let base_offset = Offset(batch.base_offset);
         let delta = i64::from(batch.last_offset_delta);
         let last_offset = Offset(
@@ -603,7 +612,7 @@ pub(super) fn split_batches(bytes: &Bytes) -> Result<Vec<BatchBytes>, BrokerErro
             base_offset,
             last_offset,
             verbatim: VerbatimBatch {
-                bytes: bytes.slice(offset..offset + len),
+                bytes: bytes.slice(offset..end),
                 last_offset_delta: batch.last_offset_delta,
                 max_timestamp: batch.max_timestamp,
                 leader_epoch: LeaderEpoch(batch.partition_leader_epoch),
@@ -613,7 +622,7 @@ pub(super) fn split_batches(bytes: &Bytes) -> Result<Vec<BatchBytes>, BrokerErro
                 is_transactional: batch.attributes.is_transactional(),
             },
         });
-        offset += len;
+        offset = end;
     }
     Ok(out)
 }
@@ -628,20 +637,6 @@ pub(super) async fn sync_replica(log: ShardLog, batches: &[BatchBytes]) -> Resul
         tokio::task::spawn_blocking(move || sync_replica_blocking(&log, &batches))
             .await
             .map_err(|e| BrokerError::Replication(format!("wal replica task panicked: {e}")))?
-    }
-}
-
-async fn sync_log(log: ShardLog) -> Result<(), BrokerError> {
-    if tokio::runtime::Handle::current().runtime_flavor()
-        == tokio::runtime::RuntimeFlavor::MultiThread
-    {
-        tokio::task::block_in_place(|| log.lock().sync().map_err(Into::into))
-    } else {
-        tokio::task::spawn_blocking(move || log.lock().sync().map_err(Into::into))
-            .await
-            .map_err(|error| {
-                crate::partition_writer::storage_failure_error("wal sync task panicked", error)
-            })?
     }
 }
 
