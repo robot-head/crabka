@@ -619,6 +619,14 @@ pub fn cast_in(
         (Datum::Json(text), ColumnType::Jsonb) => crate::jsonb::parse(text).map(Datum::Jsonb),
         (Datum::Jsonb(j), ColumnType::Json) => Ok(Datum::Json(j.to_text())),
         (Datum::OidVector(vector), ColumnType::OidVector) => Ok(Datum::OidVector(vector.clone())),
+        // Identity only when the elements already are int2s. There is no
+        // oidvector -> int2vector cast upstream, so a vector of oids reaching
+        // here has to fall through and be refused.
+        (Datum::OidVector(vector), ColumnType::Int2Vector)
+            if vector.elem == crate::ElemType::Int2 =>
+        {
+            Ok(Datum::OidVector(vector.clone()))
+        }
         (Datum::TsVector(vector), ColumnType::TsVector) => Ok(Datum::TsVector(vector.clone())),
         (Datum::TsQuery(query), ColumnType::TsQuery) => Ok(Datum::TsQuery(query.clone())),
         // text → jsonb is `jsonb_in` (22P02 on bad JSON).

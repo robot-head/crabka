@@ -1455,7 +1455,11 @@ fn coerce_untyped_literal_operands(
         // `ARRAY['a'] || 'b'` must stay `anyarray || anyelement`.
         let array_type = match other {
             Datum::Array(array) => Some(array.column_type()),
-            Datum::OidVector(_) => Some(ColumnType::OidVector),
+            Datum::OidVector(v) => Some(if v.elem == crabka_pgtypes::ElemType::Int2 {
+                ColumnType::Int2Vector
+            } else {
+                ColumnType::OidVector
+            }),
             _ => None,
         };
         if let Some(array_type) = array_type {
@@ -4742,7 +4746,8 @@ fn json_or_array_operator_result_type(
     ) {
         let same_array_family = match (lt, rt) {
             (ColumnType::Array(left), ColumnType::Array(right)) => left == right,
-            (ColumnType::OidVector, ColumnType::OidVector) => true,
+            (ColumnType::OidVector, ColumnType::OidVector)
+            | (ColumnType::Int2Vector, ColumnType::Int2Vector) => true,
             _ => false,
         };
         if same_array_family {

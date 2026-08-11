@@ -197,3 +197,38 @@ async fn a_stored_oidvector_orders_unsigned() {
     assert!(query(&mut session, "SELECT max(v) FROM ov").await == ["4294967295 0"]);
     assert!(query(&mut session, "SELECT min(v) FROM ov").await == ["1 2"]);
 }
+
+/// An `int2vector` column can be written to, and says it is an `int2vector`.
+///
+/// `int2vector` has no datum variant of its own -- both vector types land in
+/// `Datum::OidVector` and only the element type separates them -- and
+/// `ColumnType::of` reported every one of them as `oidvector`. So the
+/// assignment check saw oidvector against an int2vector column and refused:
+/// `CREATE TABLE` succeeded and every `INSERT` was a 42804, whichever way the
+/// value was spelled. `pg_typeof` was the same root cause wearing a different
+/// hat.
+#[tokio::test]
+async fn an_int2vector_column_stores_and_reports_its_own_type() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(&mut session, "CREATE TABLE iv (id int4, v int2vector)").await;
+    run(&mut session, "INSERT INTO iv VALUES (1, '1 2')").await;
+    run(&mut session, "INSERT INTO iv VALUES (2, '3 4'::int2vector)").await;
+
+    assert!(query(&mut session, "SELECT v FROM iv ORDER BY id").await == ["1 2", "3 4"]);
+    assert!(
+        query(&mut session, "SELECT pg_typeof(v) FROM iv ORDER BY id").await
+            == ["int2vector", "int2vector"]
+    );
+    assert!(query(&mut session, "SELECT pg_typeof('1 2'::int2vector)").await == ["int2vector"]);
+    assert!(query(&mut session, "SELECT pg_typeof('1 2'::oidvector)").await == ["oidvector"]);
+
+    // int2 elements are signed, unlike an oidvector's, and the round trip
+    // keeps them so.
+    run(&mut session, "INSERT INTO iv VALUES (3, '-1 0')").await;
+    assert!(query(&mut session, "SELECT v FROM iv WHERE id = 3").await == ["-1 0"]);
+    assert!(query(&mut session, "SELECT v FROM iv ORDER BY v LIMIT 1").await == ["-1 0"]);
+
+    // The two vector types stay distinct: there is no cast between them.
+    assert!(sqlstate(&mut session, "INSERT INTO iv VALUES (4, '1 2'::oidvector)").await == "42804");
+}

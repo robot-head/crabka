@@ -1986,7 +1986,19 @@ impl Datum {
             Datum::Xml(_) => Some(ColumnType::Xml),
             Datum::Jsonb(_) => Some(ColumnType::Jsonb),
             Datum::Array(a) => Some(a.column_type()),
-            Datum::OidVector(_) => Some(ColumnType::OidVector),
+            // `int2vector` has no datum variant of its own -- both vector
+            // types land in `OidVector` -- so the element type is what says
+            // which one this is, the same discriminator `oidvectorout` versus
+            // `int2vectorout` uses in `encoding.rs`. Reporting every vector as
+            // `oidvector` made an `int2vector` column impossible to write to:
+            // the assignment check saw oidvector against int2vector and
+            // refused, so `CREATE TABLE` succeeded and every `INSERT` was a
+            // 42804.
+            Datum::OidVector(v) => Some(if v.elem == ElemType::Int2 {
+                ColumnType::Int2Vector
+            } else {
+                ColumnType::OidVector
+            }),
             Datum::Record(r) => Some(r.column_type()),
             Datum::Enum(e) => Some(e.column_type()),
             Datum::Regclass(_) => Some(ColumnType::Regclass),
