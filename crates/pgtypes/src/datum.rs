@@ -1370,8 +1370,9 @@ pub enum Datum {
     Numeric(NumericValue),
     /// SP37: PostgreSQL `date`: a calendar date (no time-of-day, no timezone).
     Date(jiff::civil::Date),
-    /// SP37: PostgreSQL `time without time zone`: time-of-day only.
-    Time(jiff::civil::Time),
+    /// SP37: PostgreSQL `time without time zone`: time-of-day only, as
+    /// microseconds since midnight so the `24:00:00` boundary is representable.
+    Time(crate::datetime::PgTime),
     /// PostgreSQL `time with time zone`: a clock reading and its UTC offset.
     Timetz(crate::datetime::TimeTz),
     /// SP37: PostgreSQL `timestamp without time zone`: date + time-of-day, no timezone.

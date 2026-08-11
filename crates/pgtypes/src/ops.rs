@@ -256,8 +256,15 @@ fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
         // date + time / time + date → timestamp (combine the calendar date and
         // the wall-clock time; the time's days/months are irrelevant — a Time has
         // no date component).
-        (Datum::Date(d), Datum::Time(t)) => Ok(Datum::Timestamp(combine_date_time(*d, *t))),
-        (Datum::Time(t), Datum::Date(d)) => Ok(Datum::Timestamp(combine_date_time(*d, *t))),
+        (Datum::Date(d), Datum::Time(t)) | (Datum::Time(t), Datum::Date(d)) => {
+            // `24:00:00` lands on the next day, which the last representable
+            // date has none of.
+            combine_date_time(*d, *t)
+                .map(Datum::Timestamp)
+                .ok_or_else(|| TypeError::DatetimeOutOfRange {
+                    message: "timestamp out of range".to_string(),
+                })
+        }
         // time + interval / interval + time → time (uses ONLY the interval micros,
         // wrapping mod 24 h; the interval's days/months are ignored — a Time has no
         // date).

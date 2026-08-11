@@ -426,35 +426,31 @@ pub fn timestamp_diff(a: DateTime, b: DateTime) -> Result<Interval, TypeError> {
 /// `time` has no date, so it ignores the interval's `months`/`days`. It also
 /// wraps the result modulo 24 h (`time '23:00' + interval '2 hours'` →
 /// `01:00:00`, `time '12:00' + interval '1 day'` → `12:00:00`).
-pub fn time_plus_interval(t: Time, iv: Interval) -> Time {
-    // Micros-of-day of the input time.
-    let base = i64::from(t.hour()) * 3_600_000_000
-        + i64::from(t.minute()) * 60_000_000
-        + i64::from(t.second()) * 1_000_000
-        + i64::from(t.subsec_nanosecond() / 1_000);
+/// The result is reduced into `[0, 24:00:00)`, so it never lands on the
+/// `24:00:00` boundary: PostgreSQL's `time_pl_interval` subtracts a whole day
+/// from a sum that reaches one, which makes `time '24:00:00' + interval '0'`
+/// come out as `00:00:00`.
+pub fn time_plus_interval(t: PgTime, iv: Interval) -> PgTime {
     // Add the interval micros and wrap into [0, 86_400_000_000) (the `.rem_euclid`
     // keeps a negative shift positive, so `time '00:30' - interval '1 hour'`
     // wraps to `23:30:00`).
     // `iv.micros` comes from a user-supplied interval, so the sum can leave
     // `i64` for an extreme one; wrapping into the day is the same answer
     // whichever multiple of a day the shift is, so reduce first.
-    let micros = base
+    let micros = t
+        .micros_of_day()
         .wrapping_add(iv.micros.rem_euclid(USECS_PER_DAY_I64))
         .rem_euclid(USECS_PER_DAY_I64);
-    let hour = (micros / 3_600_000_000) as i8;
-    let rem = micros % 3_600_000_000;
-    let minute = (rem / 60_000_000) as i8;
-    let rem = rem % 60_000_000;
-    let second = (rem / 1_000_000) as i8;
-    let nanos = ((rem % 1_000_000) * 1_000) as i32;
-    Time::new(hour, minute, second, nanos)
-        .expect("a micros-of-day in [0, 86_400_000_000) is always a valid Time")
+    PgTime(micros)
 }
 
-/// Combine a `Date` and a `Time` into a `DateTime` (PostgreSQL's `date + time`
-/// and `time + date` → `timestamp`).
-pub fn combine_date_time(d: Date, t: Time) -> DateTime {
-    d.to_datetime(t)
+/// Combine a `Date` and a `time` into a `DateTime` (PostgreSQL's `date + time`
+/// and `time + date` → `timestamp`). A `24:00:00` reading lands at midnight on
+/// the following day, so `date '2020-01-01' + time '24:00:00'` is
+/// `2020-01-02 00:00:00`. `None` when that day is past the end of the calendar.
+#[must_use]
+pub fn combine_date_time(d: Date, t: PgTime) -> Option<DateTime> {
+    t.on_date(d)
 }
 
 /// Add an `Interval` to a `timestamptz` instant, calendar-aware in `tz`. The
@@ -1034,16 +1030,115 @@ pub fn date_from_binary(b: &[u8]) -> Result<Date, TypeError> {
 // time without time zone
 // ---------------------------------------------------------------------------
 
+/// A PostgreSQL `time`: microseconds since midnight, `0..=86_400_000_000`.
+///
+/// This is not a `jiff::civil::Time`, and it cannot be. PostgreSQL's `time`
+/// reaches one microsecond past the last civil reading of the day — `24:00:00`
+/// is a legal value, distinct from `00:00:00`, that `'23:59:60'` and
+/// `'23:59:59.9999999'` round up to. jiff's civil clock stops at
+/// `23:59:59.999999999`, so the boundary has no civil spelling and the type has
+/// to be an offset from midnight instead, which is exactly how PostgreSQL's own
+/// `TimeADT` stores it.
+///
+/// The ordering is the ordering of the microsecond count, so `24:00:00` sorts
+/// above every other reading and does not collide with midnight, and `Hash`
+/// agrees with `Eq` because both come from that one integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PgTime(i64);
+
+impl PgTime {
+    /// `00:00:00`, the low end of the range.
+    pub const MIDNIGHT: Self = Self(0);
+    /// `24:00:00`, the high end. One microsecond more is out of range.
+    pub const END_OF_DAY: Self = Self(MICROS_PER_DAY);
+
+    /// A `time` from microseconds since midnight, or `None` outside
+    /// `0..=86_400_000_000`.
+    #[must_use]
+    pub fn from_micros_of_day(micros: i64) -> Option<Self> {
+        (0..=MICROS_PER_DAY)
+            .contains(&micros)
+            .then_some(Self(micros))
+    }
+
+    /// Microseconds since midnight, `0..=86_400_000_000`.
+    #[must_use]
+    pub const fn micros_of_day(self) -> i64 {
+        self.0
+    }
+
+    /// The hour field, `0..=24`. It is `24` only for [`PgTime::END_OF_DAY`].
+    #[must_use]
+    pub const fn hour(self) -> i8 {
+        (self.0 / 3_600_000_000) as i8
+    }
+
+    /// The minute field, `0..=59`.
+    #[must_use]
+    pub const fn minute(self) -> i8 {
+        (self.0 % 3_600_000_000 / 60_000_000) as i8
+    }
+
+    /// The whole-second field, `0..=59`.
+    #[must_use]
+    pub const fn second(self) -> i8 {
+        (self.0 % 60_000_000 / 1_000_000) as i8
+    }
+
+    /// The sub-second field in nanoseconds. Always a whole number of
+    /// microseconds, because that is the resolution PostgreSQL stores.
+    #[must_use]
+    pub const fn subsec_nanosecond(self) -> i32 {
+        (self.0 % 1_000_000 * 1_000) as i32
+    }
+
+    /// The equivalent civil clock reading, or `None` for `24:00:00`, which has
+    /// none.
+    #[must_use]
+    pub fn to_civil(self) -> Option<Time> {
+        (self != Self::END_OF_DAY).then(|| {
+            Time::new(
+                self.hour(),
+                self.minute(),
+                self.second(),
+                self.subsec_nanosecond(),
+            )
+            .expect("microseconds below a day are a valid clock reading")
+        })
+    }
+
+    /// The civil date-and-time this reading names on `date`, carrying
+    /// `24:00:00` into the following day the way PostgreSQL's `date + time`
+    /// does. `None` when that day is past the end of the calendar.
+    fn on_date(self, date: Date) -> Option<DateTime> {
+        match self.to_civil() {
+            Some(t) => Some(date.to_datetime(t)),
+            None => date.tomorrow().ok().map(date_to_midnight),
+        }
+    }
+}
+
+impl From<Time> for PgTime {
+    fn from(t: Time) -> Self {
+        Self(
+            i64::from(t.hour()) * 3_600_000_000
+                + i64::from(t.minute()) * 60_000_000
+                + i64::from(t.second()) * 1_000_000
+                + i64::from(t.subsec_nanosecond() / 1_000),
+        )
+    }
+}
+
 /// Parse a `time` literal. `PostgreSQL` accepts a leading date and a trailing
 /// zone here and discards both, so `'2003-03-07 15:36:39 America/New_York'` is a
 /// legal `time`. A zone *name* still has to be resolvable, which is why the
 /// same text without its date is a syntax error.
-pub fn parse_time(s: &str) -> Result<Time, TypeError> {
+pub fn parse_time(s: &str) -> Result<PgTime, TypeError> {
     parse_time_in(s, DateOrder::default(), &TimeZone::UTC)
 }
 
 /// [`parse_time`] with the session's `DateStyle` field order and zone.
-pub fn parse_time_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<Time, TypeError> {
+pub fn parse_time_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<PgTime, TypeError> {
     // `time_in` names the type `time` in its errors, not the canonical
     // `time without time zone` that `pg_typeof` and `format_type` report.
     let type_name = "time";
@@ -1061,15 +1156,12 @@ pub fn parse_time_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<Time, T
         }
         Decoded::Parts(parts) => parts.micros_of_day,
     };
-    // `24:00:00` is a legal `time` in PostgreSQL but has no jiff representation;
-    // crabka reports it as out of range rather than silently folding it onto
-    // midnight, which is a different value.
-    if micros >= MICROS_PER_DAY {
-        return Err(TypeError::DatetimeFieldOverflow {
-            value: s.to_string(),
-        });
-    }
-    Ok(time_from_micros_of_day(micros))
+    // `24:00:00` is the top of the range, not past it, and `'23:59:60'` and
+    // `'23:59:59.9999999'` round up onto it. One microsecond further is out of
+    // range.
+    PgTime::from_micros_of_day(micros).ok_or_else(|| TypeError::DatetimeFieldOverflow {
+        value: s.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,7 +1180,7 @@ pub fn parse_time_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<Time, T
 #[derive(Debug, Clone, Copy)]
 pub struct TimeTz {
     /// The wall-clock reading, as written.
-    pub time: Time,
+    pub time: PgTime,
     /// The UTC offset the reading was taken at.
     pub offset: Offset,
 }
@@ -1153,26 +1245,28 @@ pub fn parse_timetz_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<TimeT
         Decoded::Special(_) => return Err(syntax()),
         Decoded::Parts(parts) => parts,
     };
-    if parts.micros_of_day >= MICROS_PER_DAY {
-        return Err(TypeError::DatetimeFieldOverflow {
+    let time = PgTime::from_micros_of_day(parts.micros_of_day).ok_or_else(|| {
+        TypeError::DatetimeFieldOverflow {
             value: s.to_string(),
-        });
-    }
-    let time = time_from_micros_of_day(parts.micros_of_day);
+        }
+    })?;
+    // A moving zone is resolved against the instant the reading names, which for
+    // `24:00:00` is midnight on the following day.
+    let instant_on = |date: Date| time.on_date(date).unwrap_or_else(|| date_to_midnight(date));
     let offset = match parts.zone {
         Some(Zone::Offset(offset)) => offset,
         // A zone whose offset moves needs a date to be resolved against; the
         // decoder has already refused one that has neither a date nor a single
         // offset for all time, so a dateless zone here resolves without one.
         Some(Zone::Named(zone)) => match parts.date {
-            Some(date) => zone_offset_for(date.to_datetime(time), &zone),
+            Some(date) => zone_offset_for(instant_on(date), &zone),
             None => zone.to_fixed_offset().map_err(|_| syntax())?,
         },
         None => {
             let date = parts
                 .date
                 .unwrap_or_else(|| tz.to_datetime(clock_now()).date());
-            zone_offset_for(date.to_datetime(time), tz)
+            zone_offset_for(instant_on(date), tz)
         }
     };
     Ok(TimeTz { time, offset })
@@ -1205,58 +1299,35 @@ pub fn timetz_from_binary(b: &[u8]) -> Result<TimeTz, TypeError> {
     })?;
     let micros = i64::from_be_bytes(arr[0..8].try_into().expect("eight bytes"));
     let west = i32::from_be_bytes(arr[8..12].try_into().expect("four bytes"));
-    if !(0..MICROS_PER_DAY).contains(&micros) {
-        return Err(TypeError::DatetimeFieldOverflow {
+    let time =
+        PgTime::from_micros_of_day(micros).ok_or_else(|| TypeError::DatetimeFieldOverflow {
             value: micros.to_string(),
-        });
-    }
+        })?;
     let offset = Offset::from_seconds(-west).map_err(|_| TypeError::DatetimeFieldOverflow {
         value: west.to_string(),
     })?;
-    Ok(TimeTz {
-        time: time_from_micros_of_day(micros),
-        offset,
-    })
+    Ok(TimeTz { time, offset })
 }
 
-/// Rebuild a clock reading from microseconds since midnight, the inverse of
+/// Rebuild a `time` from microseconds since midnight, the inverse of
 /// [`time_to_micros_of_day`].
 ///
 /// # Panics
 ///
-/// Panics unless `micros` is in `0..86_400_000_000`.
+/// Panics unless `micros` is in `0..=86_400_000_000`.
 #[must_use]
-pub fn time_from_micros_of_day_public(micros: i64) -> Time {
-    time_from_micros_of_day(micros)
+pub fn time_from_micros_of_day_public(micros: i64) -> PgTime {
+    PgTime::from_micros_of_day(micros).expect("microseconds within a day")
 }
 
-/// Microseconds since midnight for a clock reading.
+/// Microseconds since midnight for a `time`.
 #[must_use]
-pub fn time_to_micros_of_day(t: Time) -> i64 {
-    i64::from(t.hour()) * 3_600_000_000
-        + i64::from(t.minute()) * 60_000_000
-        + i64::from(t.second()) * 1_000_000
-        + i64::from(t.subsec_nanosecond() / 1_000)
+pub fn time_to_micros_of_day(t: PgTime) -> i64 {
+    t.micros_of_day()
 }
 
 /// Microseconds in one calendar day, the modulus of a clock reading.
 const MICROS_PER_DAY: i64 = 86_400_000_000;
-
-/// Rebuild a clock reading from microseconds since midnight.
-///
-/// # Panics
-///
-/// Panics unless `micros` is in `0..MICROS_PER_DAY`.
-fn time_from_micros_of_day(mut micros: i64) -> Time {
-    let hour = (micros / 3_600_000_000) as i8;
-    micros %= 3_600_000_000;
-    let minute = (micros / 60_000_000) as i8;
-    micros %= 60_000_000;
-    let second = (micros / 1_000_000) as i8;
-    micros %= 1_000_000;
-    Time::new(hour, minute, second, (micros * 1_000) as i32)
-        .expect("microseconds within a day are a valid clock reading")
-}
 
 /// Round a fractional-seconds digit string to PostgreSQL's microsecond
 /// resolution.
@@ -1295,38 +1366,28 @@ fn round_fraction_to_micros(digits: &str) -> Option<u32> {
     Some(micros + u32::from(round_up))
 }
 
-/// Render a `time` as `HH:MM:SS[.ffffff]` (PostgreSQL `time_out`).
-pub fn time_to_text(t: Time) -> String {
+/// Render a `time` as `HH:MM:SS[.ffffff]` (PostgreSQL `time_out`). The hour is
+/// `24` for [`PgTime::END_OF_DAY`].
+pub fn time_to_text(t: PgTime) -> String {
     let mut out = format!("{:02}:{:02}:{:02}", t.hour(), t.minute(), t.second());
     push_subsecond(&mut out, t.subsec_nanosecond());
     out
 }
 
 /// `time_send`: i64 big-endian microseconds since midnight.
-pub fn time_to_binary(t: Time) -> [u8; 8] {
-    let micros = i64::from(t.hour()) * 3_600_000_000
-        + i64::from(t.minute()) * 60_000_000
-        + i64::from(t.second()) * 1_000_000
-        + i64::from(t.subsec_nanosecond() / 1_000);
-    micros.to_be_bytes()
+pub fn time_to_binary(t: PgTime) -> [u8; 8] {
+    t.micros_of_day().to_be_bytes()
 }
 
 /// `time_recv`: i64 big-endian microseconds since midnight.
-pub fn time_from_binary(b: &[u8]) -> Result<Time, TypeError> {
+pub fn time_from_binary(b: &[u8]) -> Result<PgTime, TypeError> {
     let arr: [u8; 8] = b.try_into().map_err(|_| TypeError::InvalidDatetimeFormat {
         type_name: "time without time zone",
         value: format!("{b:?}"),
     })?;
-    let mut micros = i64::from_be_bytes(arr);
-    let hour = (micros / 3_600_000_000) as i8;
-    micros %= 3_600_000_000;
-    let minute = (micros / 60_000_000) as i8;
-    micros %= 60_000_000;
-    let second = (micros / 1_000_000) as i8;
-    micros %= 1_000_000;
-    let nanos = (micros * 1_000) as i32;
-    Time::new(hour, minute, second, nanos).map_err(|_| TypeError::DatetimeFieldOverflow {
-        value: i64::from_be_bytes(arr).to_string(),
+    let micros = i64::from_be_bytes(arr);
+    PgTime::from_micros_of_day(micros).ok_or_else(|| TypeError::DatetimeFieldOverflow {
+        value: micros.to_string(),
     })
 }
 
@@ -1367,11 +1428,17 @@ fn combine_parts(date: Date, micros_of_day: i64, s: &str) -> Result<DateTime, Ty
     let overflow = || TypeError::DatetimeFieldOverflow {
         value: s.to_string(),
     };
-    if micros_of_day >= MICROS_PER_DAY {
-        let next = date.tomorrow().map_err(|_| overflow())?;
-        return Ok(next.to_datetime(time_from_micros_of_day(micros_of_day - MICROS_PER_DAY)));
-    }
-    Ok(date.to_datetime(time_from_micros_of_day(micros_of_day)))
+    let (date, micros_of_day) = if micros_of_day >= MICROS_PER_DAY {
+        (
+            date.tomorrow().map_err(|_| overflow())?,
+            micros_of_day - MICROS_PER_DAY,
+        )
+    } else {
+        (date, micros_of_day)
+    };
+    PgTime::from_micros_of_day(micros_of_day)
+        .and_then(|t| t.on_date(date))
+        .ok_or_else(overflow)
 }
 
 /// Reject a literal outside the finite range, the timestamp counterpart of
@@ -3056,6 +3123,22 @@ impl DateTimeFields {
             tz_offset_secs,
         }
     }
+
+    /// Build the field struct for a bare `time`, whose date patterns render
+    /// against a fixed 2000-01-01 the way PostgreSQL's `to_char(time, …)` does.
+    /// The hour is taken from the reading itself rather than from a combined
+    /// datetime, so `24:00:00` renders as hour 24 instead of rolling into the
+    /// next day.
+    #[must_use]
+    pub fn from_time(t: PgTime, tz_offset_secs: Option<i32>) -> Self {
+        let mut fields =
+            Self::from_civil(date_to_midnight(Date::constant(2000, 1, 1)), tz_offset_secs);
+        fields.hour = t.hour() as u32;
+        fields.minute = t.minute() as u32;
+        fields.second = t.second() as u32;
+        fields.micros = (t.subsec_nanosecond() / 1_000) as u32;
+        fields
+    }
 }
 
 /// The field source the `to_char` renderer reads. Both `DateTimeFields` (a
@@ -3480,10 +3563,13 @@ fn pad_roman(numeral: &str, fm: bool) -> String {
 
 /// Render the meridiem string variants. `lower` lowercases; `dotted` inserts the
 /// dots (`A.M.`/`P.M.`). `hour` is `i64` so the shared renderer also serves an
-/// interval source (where AM/PM has no clock meaning, not a corpus case); for a
-/// civil `0..=23` hour the `>= 12` test is unchanged.
+/// interval source, and a `time` reaches `24`, so the hour is folded into the
+/// day first: PostgreSQL tests `tm_hour % HOURS_PER_DAY >= HOURS_PER_DAY / 2`,
+/// which puts `24:00:00` and `interval '24 hours'` in AM rather than PM. The
+/// remainder truncates toward zero, as C's does, so a negative interval hour
+/// stays negative and reads AM.
 fn meridiem(hour: i64, lower: bool, dotted: bool) -> String {
-    let pm = hour >= 12;
+    let pm = hour % 24 >= 12;
     let s = match (pm, dotted) {
         (false, false) => "AM",
         (true, false) => "PM",
@@ -5561,13 +5647,22 @@ pub fn make_date(year: i32, month: i32, day: i32) -> Result<Date, TypeError> {
 }
 
 /// `make_time(hour, min, sec)`; the fractional part of `sec` becomes microseconds
-/// (PG resolution). An out-of-range field (hour 24, minute 60, …) → 22008.
-pub fn make_time(hour: i32, min: i32, sec: f64) -> Result<Time, TypeError> {
+/// (PG resolution). An out-of-range field (minute 60, hour 25, …) → 22008.
+/// `make_time(24, 0, 0)` is the one hour-24 call PostgreSQL allows, because
+/// `24:00:00` is a `time`; any non-zero minute or second beside it is not.
+pub fn make_time(hour: i32, min: i32, sec: f64) -> Result<PgTime, TypeError> {
     let label = || format!("{hour}:{min}:{sec}");
     let h = i8::try_from(hour).map_err(|_| field_overflow(label()))?;
     let mi = i8::try_from(min).map_err(|_| field_overflow(label()))?;
     let (s, nanos) = split_seconds(sec).ok_or_else(|| field_overflow(label()))?;
-    Time::new(h, mi, s, nanos).map_err(|_| field_overflow(label()))
+    if h == 24 {
+        return (mi == 0 && s == 0 && nanos == 0)
+            .then_some(PgTime::END_OF_DAY)
+            .ok_or_else(|| field_overflow(label()));
+    }
+    Time::new(h, mi, s, nanos)
+        .map(PgTime::from)
+        .map_err(|_| field_overflow(label()))
 }
 
 /// Civil-`DateTime` builder shared by `make_timestamp` / `make_timestamptz` (the
@@ -5583,7 +5678,7 @@ pub fn make_timestamp_civil(
 ) -> Result<DateTime, TypeError> {
     let date = make_date(y, mo, d)?;
     let time = make_time(h, mi, sec)?;
-    Ok(date.to_datetime(time))
+    combine_date_time(date, time).ok_or_else(|| field_overflow(format!("{y}-{mo}-{d} {h}:{mi}")))
 }
 
 /// `make_interval(years, months, weeks, days, hours, mins, secs)`: weeks fold into
@@ -5875,6 +5970,13 @@ mod format_tests {
             None,
         );
         assert_eq!(format_datetime("HH12 PM", &g).expect("noon"), "12 PM");
+        // `24:00:00` folds into the day before the meridiem test, so it reads
+        // AM like the midnight it sits one day above, not PM.
+        let h = DateTimeFields::from_time(super::PgTime::END_OF_DAY, None);
+        use assert2::assert;
+        assert!(format_datetime("HH24:MI:SS", &h).expect("end") == "24:00:00");
+        assert!(format_datetime("HH12 AM", &h).expect("end") == "12 AM");
+        assert!(format_datetime("SSSS", &h).expect("end") == "86400");
     }
 
     #[test]
@@ -6646,10 +6748,11 @@ mod io_tests {
     }
 
     /// Rounding can carry past the end of the day. PostgreSQL's `time` domain is
-    /// closed at `24:00:00` and its `timestamp` range reaches 294276 AD, so it
-    /// carries in both cases; crabka's representations stop one value earlier, so
-    /// a timestamp carries the date and a `time` fails. Neither may wrap back to
-    /// midnight of the day it started in, because that is a different instant.
+    /// closed at `24:00:00`, which [`PgTime`] holds, so the carry lands on the
+    /// boundary. Its `timestamp` range reaches 294276 AD where jiff's stops at
+    /// 9999, so a timestamp carries the date until the calendar runs out and
+    /// then fails. Neither may wrap back to midnight of the day it started in,
+    /// because that is a different instant.
     #[test]
     fn rounding_across_midnight_carries_the_date_and_never_wraps() {
         use assert2::assert;
@@ -6658,9 +6761,9 @@ mod io_tests {
 
         // Below the carry, the value is untouched.
         assert!(time_to_text(parse_time("23:59:59.9999994").expect("time")) == "23:59:59.999999");
-        // PostgreSQL 18.4 answers `24:00:00` here; jiff's `Time` cannot hold it.
-        assert!(let Err(TypeError::DatetimeFieldOverflow { .. }) = parse_time("23:59:59.9999995"));
-        assert!(let Err(TypeError::DatetimeFieldOverflow { .. }) = parse_time("23:59:59.9999999"));
+        // At and above it, the carry lands on `24:00:00`, never back on midnight.
+        assert!(time_to_text(parse_time("23:59:59.9999995").expect("time")) == "24:00:00");
+        assert!(time_to_text(parse_time("23:59:59.9999999").expect("time")) == "24:00:00");
 
         // A timestamp has a date to carry into, exactly as PostgreSQL does.
         for literal in ["2024-01-01 23:59:59.9999995", "2024-01-01 23:59:59.9999999"] {
@@ -7358,8 +7461,15 @@ mod make_justify_tests {
         // make_time(hour, min, sec) — fractional seconds → micros.
         assert_eq!(
             make_time(13, 45, 6.5).expect("t"),
-            jiff::civil::time(13, 45, 6, 500_000_000)
+            super::PgTime::from(jiff::civil::time(13, 45, 6, 500_000_000))
         );
+        // `24:00:00` is the one hour-24 reading PostgreSQL's `make_time` builds.
+        {
+            use assert2::assert;
+            assert!(make_time(24, 0, 0.0).expect("t") == super::PgTime::END_OF_DAY);
+        }
+        assert!(make_time(24, 0, 1.0).is_err());
+        assert!(make_time(24, 1, 0.0).is_err());
         assert_eq!(
             make_timestamp_civil(2024, 7, 4, 13, 45, 6.0).expect("ts"),
             jiff::civil::datetime(2024, 7, 4, 13, 45, 6, 0)
@@ -7392,9 +7502,9 @@ mod make_justify_tests {
     #[test]
     fn make_boundary_and_overflow() {
         use super::{Interval, make_interval, make_time};
-        // make_time(24, 0, 0) is out of range → 22008.
+        // make_time(25, 0, 0) is out of range → 22008.
         assert_eq!(
-            make_time(24, 0, 0.0).expect_err("hour 24").sqlstate(),
+            make_time(25, 0, 0.0).expect_err("hour 25").sqlstate(),
             "22008"
         );
         // A negative interval field is representable (PG allows negative make_interval).

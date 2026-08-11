@@ -217,7 +217,9 @@ pub(crate) fn eval_datetime(
         }
         DtFunc::CurrentTime => {
             require_arity(fc, args.is_empty())?;
-            Ok(Datum::Time(ctx.time_zone.to_datetime(ctx.now).time()))
+            Ok(Datum::Time(
+                ctx.time_zone.to_datetime(ctx.now).time().into(),
+            ))
         }
         DtFunc::LocalTimestamp => {
             require_arity(fc, args.is_empty())?;
@@ -701,7 +703,9 @@ fn julian_day(date: Date) -> i64 {
 /// gives.
 fn julian_datetime_str(dt: DateTime) -> String {
     let day = julian_day(dt.date());
-    let micros = i128::from(crabka_pgtypes::datetime::time_to_micros_of_day(dt.time()));
+    let micros = i128::from(crabka_pgtypes::datetime::time_to_micros_of_day(
+        dt.time().into(),
+    ));
     let scale = 10_i128.pow(20);
     let per_day = 86_400_000_000_i128;
     let frac = (micros * scale + per_day / 2) / per_day;
@@ -773,7 +777,7 @@ fn extract_from_datetime(
 fn extract_from_time(
     unit: &str,
     field: &str,
-    t: Time,
+    t: crabka_pgtypes::datetime::PgTime,
     tz_offset_secs: Option<i64>,
 ) -> Result<String, ExecError> {
     let type_name = if tz_offset_secs.is_some() {

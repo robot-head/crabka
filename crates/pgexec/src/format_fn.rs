@@ -453,10 +453,9 @@ fn to_char(value: &Datum, template: &str, ctx: &EvalCtx, name: &str) -> Result<D
             datetime::format_datetime(template, &fields).map_err(map_type)?
         }
         Datum::Time(t) => {
-            // Only the clock patterns are meaningful for a bare time; combine with a
-            // fixed date so the field struct is well-formed.
-            let dt = datetime::combine_date_time(jiff::civil::date(2000, 1, 1), *t);
-            let fields = datetime::DateTimeFields::from_civil(dt, None);
+            // Only the clock patterns are meaningful for a bare time; the field
+            // struct carries a fixed date so it is well-formed.
+            let fields = datetime::DateTimeFields::from_time(*t, None);
             datetime::format_datetime(template, &fields).map_err(map_type)?
         }
         Datum::Timestamptz(ts) => {
@@ -1032,7 +1031,7 @@ mod tests {
     fn make_time_make_timestamp_justify_interval() {
         assert_eq!(
             ev("make_time(8, 15, 30)"),
-            Datum::Time(jiff::civil::time(8, 15, 30, 0))
+            Datum::Time(jiff::civil::time(8, 15, 30, 0).into())
         );
         assert_eq!(
             ev("make_timestamp(2024, 7, 4, 13, 45, 6)"),

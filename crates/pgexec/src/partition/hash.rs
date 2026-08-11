@@ -580,7 +580,7 @@ mod tests {
             ((23, 59, 59, 999_999_000), 9_209_345_884_917_619_299),
         ];
         for ((hour, minute, second, nanos), expected) in vectors {
-            let value = Datum::Time(jiff::civil::time(hour, minute, second, nanos));
+            let value = Datum::Time(jiff::civil::time(hour, minute, second, nanos).into());
             assert!(hash_of(value) == expected.cast_unsigned());
         }
     }
@@ -757,7 +757,7 @@ mod tests {
             (Datum::Numeric(NumericValue::from(1_i64)), "numeric"),
             (
                 Datum::Timetz(TimeTz {
-                    time: jiff::civil::time(1, 2, 3, 0),
+                    time: jiff::civil::time(1, 2, 3, 0).into(),
                     offset: jiff::tz::Offset::UTC,
                 }),
                 "time with time zone",

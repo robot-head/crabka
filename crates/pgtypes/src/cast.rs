@@ -905,7 +905,7 @@ pub fn cast_in(
             if crate::datetime::timestamp_is_infinite(*dt) {
                 return Ok(Datum::Null);
             }
-            Ok(Datum::Time(dt.time()))
+            Ok(Datum::Time(dt.time().into()))
         }
         // timestamp → timestamptz: interpret wall-clock as session tz → instant.
         (Datum::Timestamp(dt), ColumnType::Timestamptz) => {
@@ -942,7 +942,7 @@ pub fn cast_in(
             if crate::datetime::timestamptz_is_infinite(*ts) {
                 return Ok(Datum::Null);
             }
-            Ok(Datum::Time(tz.to_datetime(*ts).time()))
+            Ok(Datum::Time(tz.to_datetime(*ts).time().into()))
         }
         // timetz identity, and the two casts PostgreSQL defines for it. A `time`
         // gains the session zone's offset; a `timestamptz` keeps its own.
@@ -957,7 +957,7 @@ pub fn cast_in(
                 return Ok(Datum::Null);
             }
             Ok(Datum::Timetz(crate::datetime::TimeTz {
-                time: tz.to_datetime(*ts).time(),
+                time: tz.to_datetime(*ts).time().into(),
                 offset: tz.to_offset(*ts),
             }))
         }
