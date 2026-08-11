@@ -63,6 +63,9 @@ pub const ILLEGAL_GENERATION: i16 = 22;
 pub const INCONSISTENT_GROUP_PROTOCOL: i16 = 23;
 pub const UNKNOWN_MEMBER_ID: i16 = 25;
 pub const REBALANCE_IN_PROGRESS: i16 = 27;
+/// `INVALID_TIMESTAMP` (32): a producer supplied a timestamp type or value
+/// that the broker cannot accept for the target topic.
+pub const INVALID_TIMESTAMP: i16 = 32;
 pub const MEMBER_ID_REQUIRED: i16 = 79;
 /// `GROUP_MAX_SIZE_REACHED` (81): a new member cannot join because the group
 /// already has its configured maximum number of members.
@@ -424,6 +427,11 @@ mod tests {
     fn not_enough_replicas_codes_have_expected_values() {
         assert!(NOT_ENOUGH_REPLICAS == 19);
         assert!(NOT_ENOUGH_REPLICAS_AFTER_APPEND == 20);
+    }
+
+    #[test]
+    fn invalid_timestamp_code_matches_kafka() {
+        assert!(INVALID_TIMESTAMP == 32);
     }
 
     #[test]
