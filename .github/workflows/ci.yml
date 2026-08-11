@@ -316,7 +316,13 @@ jobs:
   rust:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
-    timeout-minutes: 60
+    # 90, not 60. Runner speed varies by about 2x for identical work: commit
+    # 13a30156c finished this job in 36 minutes on one run and was killed at
+    # the 60-minute wall on another, and 5699969f5 took 40, 48 and 53 minutes
+    # on three runs of the same tree. With the limit inside that spread the
+    # job failed at random, which reads as a regression in whatever happened
+    # to be pushed. The instrumented coverage build is the slow part.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
