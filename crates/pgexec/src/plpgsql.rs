@@ -312,6 +312,15 @@ pub(crate) async fn execute_trigger_function(
 ) -> Result<Datum, ExecError> {
     let block = crate::routine::parse_plpgsql_body(routine)?;
     let is_event_trigger = invocation.event.is_some();
+    // An event trigger's body can raise the event that fired it -- a DROP inside
+    // an `ON sql_drop` body is enough -- and nothing on this path counts the
+    // nesting. `trigger::invoke` guards the row-trigger path, but
+    // `fire_event_triggers` reaches this function directly, so an unguarded
+    // event trigger recurses until the stack is gone and the process aborts,
+    // taking every other connection with it.
+    let _event_call_depth = is_event_trigger
+        .then(|| session.plpgsql_enter_call())
+        .transpose()?;
     let mut frame = root_frame();
     frame.label = Some(routine.name.clone());
     let record_types: Arc<[ColumnType]> = Arc::from(invocation.column_types);

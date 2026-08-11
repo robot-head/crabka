@@ -653,40 +653,157 @@ fn map_event(value: parsed::EventTriggerEvent) -> EventTriggerEvent {
     }
 }
 
+/// The role a privilege check should be made against, for a session that may
+/// have authenticated as nobody.
+///
+/// Such a session carries `PUBLIC` and acts as the bootstrap superuser, the
+/// same rule `ForeignCtx::effective_role` applies. It is spelled out here
+/// because `create_event` is handed the role name rather than the context that
+/// method hangs off.
+fn acting_role(role: &str) -> &str {
+    if role == crabka_pgcatalog::PUBLIC_ROLE {
+        crabka_pgcatalog::BOOTSTRAP_ROLE
+    } else {
+        role
+    }
+}
+
+/// One row of `PostgreSQL`'s command-tag table.
+///
+/// The rows come from `cmdtaglist.h` unedited, so the flags are the ones the
+/// server itself consults rather than a reading of them: `event_trigger_ok` is
+/// `command_tag_event_trigger_ok`, and `table_rewrite_ok` is
+/// `command_tag_table_rewrite_ok`.
+struct CommandTag {
+    /// The tag as `PostgreSQL` spells it, which is upper case throughout.
+    name: &'static str,
+    /// Whether a `ddl_command_start`/`ddl_command_end`/`sql_drop` trigger may
+    /// name the tag, and whether such a trigger fires for the command at all.
+    event_trigger_ok: bool,
+    /// Whether a `table_rewrite` trigger may name the tag.
+    table_rewrite_ok: bool,
+}
+
+include!("event_command_tags.rs");
+
+/// `PostgreSQL`'s `GetCommandTagEnum`: the table row for a tag a user wrote, or
+/// `None` for `CMDTAG_UNKNOWN`.
+///
+/// The comparison ignores case because `GetCommandTagEnum` compares with
+/// `pg_strcasecmp`, which is why `when tag in ('create table')` is a valid
+/// filter. The scan is linear rather than the server's binary search: it runs
+/// once per tag named in a `CREATE EVENT TRIGGER`, and a linear scan needs no
+/// argument about whether case-insensitive comparison preserves the header's
+/// ordering.
+fn lookup_command_tag(name: &str) -> Option<&'static CommandTag> {
+    COMMAND_TAGS
+        .iter()
+        .find(|tag| tag.name.eq_ignore_ascii_case(name))
+}
+
+/// The 0A000 `PostgreSQL` raises for a tag that exists but is closed to event
+/// triggers.
+///
+/// The message quotes the user's spelling, not the canonical tag, which is what
+/// `validate_ddl_tags` does with its `%s`.
+fn unsupported_event_trigger_tag(written: &str) -> ExecError {
+    trigger_error(
+        "0A000",
+        format!("event triggers are not supported for {written}"),
+    )
+}
+
+/// Check a `CREATE EVENT TRIGGER`'s `WHEN` clause, in the order
+/// `CreateEventTrigger` checks it.
+///
+/// The order is load-bearing: every filter variable is named and counted before
+/// any tag value is looked at, so `when food in (…) and tag in ('bogus')`
+/// complains about `food` and `when tag in (…) and tag in (…)` complains about
+/// the repeat rather than about a tag.
+///
+/// # Errors
+///
+/// 42601 for a filter variable that is not `tag`, for the same variable twice,
+/// and for a value that is no command tag at all; 0A000 for tag filtering on a
+/// `login` trigger and for a real tag this event may not filter on.
+fn validate_event_trigger_filters(
+    event: parsed::EventTriggerEvent,
+    filters: &[parsed::EventTriggerFilter],
+) -> Result<(), ExecError> {
+    let mut seen_tag = false;
+    for filter in filters {
+        if !filter.variable.eq_ignore_ascii_case("tag") {
+            return Err(trigger_error(
+                "42601",
+                format!("unrecognized filter variable \"{}\"", filter.variable),
+            ));
+        }
+        if seen_tag {
+            return Err(trigger_error(
+                "42601",
+                format!(
+                    "filter variable \"{}\" specified more than once",
+                    filter.variable
+                ),
+            ));
+        }
+        seen_tag = true;
+    }
+    if !seen_tag {
+        return Ok(());
+    }
+    if event == parsed::EventTriggerEvent::Login {
+        return Err(trigger_error(
+            "0A000",
+            "tag filtering is not supported for login event triggers",
+        ));
+    }
+    for value in filters.iter().flat_map(|filter| &filter.values) {
+        let tag = lookup_command_tag(value);
+        // A `table_rewrite` trigger takes the other flag, and takes it without
+        // the "not recognized" arm: `validate_table_rewrite_tags` asks
+        // `command_tag_table_rewrite_ok(CMDTAG_UNKNOWN)`, which is false, so an
+        // invented tag comes back as "not supported" there rather than as the
+        // 42601 a DDL trigger would raise.
+        if event == parsed::EventTriggerEvent::TableRewrite {
+            if !tag.is_some_and(|tag| tag.table_rewrite_ok) {
+                return Err(unsupported_event_trigger_tag(value));
+            }
+            continue;
+        }
+        let Some(tag) = tag else {
+            return Err(trigger_error(
+                "42601",
+                format!("filter value \"{value}\" not recognized for filter variable \"tag\""),
+            ));
+        };
+        if !tag.event_trigger_ok {
+            return Err(unsupported_event_trigger_tag(value));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn create_event(
     kv: &dyn Kv,
     stmt: &parsed::CreateEventTrigger,
     owner: &str,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
+    if !crate::rls::role_is_superuser(kv, acting_role(owner))? {
+        return Err(ExecError::EventTriggerPrivilege {
+            message: format!(
+                "permission denied to create event trigger \"{}\"",
+                stmt.name
+            ),
+            hint: "Must be superuser to create an event trigger.",
+        });
+    }
+    validate_event_trigger_filters(stmt.event, &stmt.filters)?;
     if get_event_trigger(kv, &stmt.name)?.is_some() {
         return Err(ExecError::DuplicateObject(format!(
             "event trigger \"{}\" already exists",
             stmt.name
         )));
-    }
-    for filter in &stmt.filters {
-        if filter.variable != "tag" {
-            return Err(trigger_error(
-                "22023",
-                format!("filter variable \"{}\" not recognized", filter.variable),
-            ));
-        }
-        if stmt.event == parsed::EventTriggerEvent::Login {
-            return Err(trigger_error(
-                "22023",
-                "filter variable TAG is not supported for event LOGIN",
-            ));
-        }
-        if let Some(value) = filter
-            .values
-            .iter()
-            .find(|value| !EVENT_COMMAND_TAGS.contains(&value.as_str()))
-        {
-            return Err(trigger_error(
-                "22023",
-                format!("filter value \"{value}\" not recognized for filter variable \"tag\""),
-            ));
-        }
     }
     let (function_oid, function) = trigger_routine(kv, &stmt.function, true)?;
     let trigger = EventTrigger {
@@ -723,7 +840,21 @@ pub(crate) fn alter_event(
     let mut ops = Vec::new();
     match action {
         parsed::AlterEventTriggerAction::Enable(mode) => trigger.enabled = map_enabled(*mode),
-        parsed::AlterEventTriggerAction::OwnerTo(owner) => trigger.owner = owner.clone(),
+        parsed::AlterEventTriggerAction::OwnerTo(owner) => {
+            // The same rule `CREATE EVENT TRIGGER` enforces, applied to the
+            // incoming owner: an event trigger runs its function for every DDL
+            // command in the database, so handing one to a non-superuser is the
+            // privilege escalation the create-time check exists to prevent.
+            if !crate::rls::role_is_superuser(kv, owner)? {
+                return Err(ExecError::EventTriggerPrivilege {
+                    message: format!(
+                        "permission denied to change owner of event trigger \"{name}\""
+                    ),
+                    hint: "The owner of an event trigger must be a superuser.",
+                });
+            }
+            trigger.owner = owner.clone();
+        }
         parsed::AlterEventTriggerAction::RenameTo(new_name) => {
             if get_event_trigger(kv, new_name)?.is_some() {
                 return Err(ExecError::DuplicateObject(format!(
@@ -754,17 +885,24 @@ pub(crate) fn drop_event(
     Ok(command("DROP EVENT TRIGGER", drop_event_trigger_ops(name)))
 }
 
+/// Whether event triggers stay out of a statement's way.
+///
+/// The answer is the tag table's, not a list of its own: a command fires event
+/// triggers exactly when `command_tag_event_trigger_ok` says its tag may be
+/// filtered on. That covers the global objects `PostgreSQL` keeps event
+/// triggers away from — roles, databases, tablespaces, event triggers
+/// themselves — without naming them twice, and it makes an unmapped statement
+/// silent rather than firing under the tag `UNKNOWN`, which is a tag no
+/// `PostgreSQL` client would ever see.
 pub(crate) fn event_trigger_ddl_is_excluded(stmt: &parsed::Statement) -> bool {
-    matches!(
-        stmt,
-        parsed::Statement::CreateEventTrigger(_)
-            | parsed::Statement::AlterEventTrigger { .. }
-            | parsed::Statement::DropEventTrigger { .. }
-            | parsed::Statement::CreateRole { .. }
-            | parsed::Statement::DropRole { .. }
-    )
+    !lookup_command_tag(event_command_tag(stmt)).is_some_and(|tag| tag.event_trigger_ok)
 }
 
+/// The command tag a statement reports to an event trigger.
+///
+/// `UNKNOWN` is the fallthrough for a statement with no tag of its own. It is
+/// never a tag a trigger sees, because [`event_trigger_ddl_is_excluded`] finds
+/// no table row for it and keeps the triggers from firing at all.
 pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
     use parsed::Statement;
     match stmt {
@@ -787,6 +925,27 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         Statement::CreateView { .. } => "CREATE VIEW",
         Statement::AlterView { .. } => "ALTER VIEW",
         Statement::DropView { .. } => "DROP VIEW",
+        Statement::CreateMaterializedView { .. } => "CREATE MATERIALIZED VIEW",
+        Statement::RefreshMaterializedView { .. } => "REFRESH MATERIALIZED VIEW",
+        Statement::DropMaterializedView { .. } => "DROP MATERIALIZED VIEW",
+        Statement::CreatePolicy(_) => "CREATE POLICY",
+        Statement::AlterPolicy { .. } => "ALTER POLICY",
+        Statement::DropPolicy { .. } => "DROP POLICY",
+        Statement::CreateAggregate(_) => "CREATE AGGREGATE",
+        Statement::AlterAggregate { .. } => "ALTER AGGREGATE",
+        Statement::DropAggregate { .. } => "DROP AGGREGATE",
+        // The tags below are all `event_trigger_ok = false`, so naming them
+        // here is what keeps the triggers quiet for those commands rather than
+        // what makes them fire. They are global objects, or the event-trigger
+        // DDL an event trigger must not be able to interfere with.
+        Statement::CreateRole { .. } => "CREATE ROLE",
+        Statement::AlterRole { .. } => "ALTER ROLE",
+        Statement::DropRole { .. } => "DROP ROLE",
+        Statement::GrantRoles { .. } => "GRANT ROLE",
+        Statement::RevokeRoles { .. } => "REVOKE ROLE",
+        Statement::CreateEventTrigger(_) => "CREATE EVENT TRIGGER",
+        Statement::AlterEventTrigger { .. } => "ALTER EVENT TRIGGER",
+        Statement::DropEventTrigger { .. } => "DROP EVENT TRIGGER",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
         Statement::AlterSchema { .. } => "ALTER SCHEMA",
         Statement::DropSchema { .. } => "DROP SCHEMA",
@@ -859,60 +1018,6 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         _ => "UNKNOWN",
     }
 }
-
-const EVENT_COMMAND_TAGS: &[&str] = &[
-    "ALTER DOMAIN",
-    "ALTER FOREIGN DATA WRAPPER",
-    "ALTER FUNCTION",
-    "ALTER PROCEDURE",
-    "ALTER ROUTINE",
-    "ALTER SCHEMA",
-    "ALTER SERVER",
-    "ALTER TABLE",
-    "ALTER TEXT SEARCH CONFIGURATION",
-    "ALTER TEXT SEARCH DICTIONARY",
-    "ALTER TRIGGER",
-    "ALTER TYPE",
-    "ALTER USER MAPPING",
-    "COMMENT",
-    "CREATE DOMAIN",
-    "CREATE FOREIGN DATA WRAPPER",
-    "CREATE FOREIGN TABLE",
-    "CREATE FUNCTION",
-    "CREATE INDEX",
-    "CREATE PROCEDURE",
-    "CREATE ROUTINE",
-    "CREATE SCHEMA",
-    "CREATE SEQUENCE",
-    "CREATE SERVER",
-    "CREATE TABLE",
-    "CREATE TEXT SEARCH CONFIGURATION",
-    "CREATE TEXT SEARCH DICTIONARY",
-    "CREATE TRIGGER",
-    "CREATE TYPE",
-    "CREATE USER MAPPING",
-    "CREATE VIEW",
-    "DROP DOMAIN",
-    "DROP FOREIGN DATA WRAPPER",
-    "DROP FOREIGN TABLE",
-    "DROP FUNCTION",
-    "DROP INDEX",
-    "DROP PROCEDURE",
-    "DROP ROUTINE",
-    "DROP SCHEMA",
-    "DROP SEQUENCE",
-    "DROP SERVER",
-    "DROP TABLE",
-    "DROP TEXT SEARCH CONFIGURATION",
-    "DROP TEXT SEARCH DICTIONARY",
-    "DROP TRIGGER",
-    "DROP TYPE",
-    "DROP USER MAPPING",
-    "DROP VIEW",
-    "GRANT",
-    "IMPORT FOREIGN SCHEMA",
-    "REVOKE",
-];
 
 pub(crate) fn is_drop_ddl(stmt: &parsed::Statement) -> bool {
     matches!(

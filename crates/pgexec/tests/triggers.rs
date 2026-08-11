@@ -647,7 +647,10 @@ async fn sql_drop_reports_cascaded_views_triggers_and_constraints() {
 #[tokio::test]
 async fn event_trigger_catalog_reports_transferred_owner() {
     let engine = SqlEngine::new();
-    exec(&engine, "CREATE ROLE event_trigger_owner").await;
+    // SUPERUSER because `PostgreSQL` will not let an event trigger belong to a
+    // role that is not one: the trigger's function runs for every DDL statement
+    // anyone issues, so its owner has to be a role that could already do that.
+    exec(&engine, "CREATE ROLE event_trigger_owner SUPERUSER").await;
     exec(
         &engine,
         "CREATE FUNCTION owned_event_trigger_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$
@@ -755,7 +758,10 @@ async fn trigger_arguments_rows_and_event_tags_are_validated() {
         )
         .await
         .unwrap_err();
-    assert_eq!(error.code, "22023");
+    // 42601, not 22023: `validate_ddl_tags` raises ERRCODE_SYNTAX_ERROR for a
+    // string that is no command tag, and keeps 0A000 for a real tag event
+    // triggers may not have. See `tests/event_trigger_command_tags.rs`.
+    assert_eq!(error.code, "42601");
     exec(&engine, "CREATE SEQUENCE trigger_sequence").await;
     exec(&engine, "DROP SEQUENCE trigger_sequence").await;
     assert_eq!(

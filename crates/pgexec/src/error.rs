@@ -407,6 +407,22 @@ pub enum ExecError {
         /// it here even when the statement named a schema.
         relation: String,
     },
+    /// An event trigger was created by, or handed to, a role that is not a
+    /// superuser (42501).
+    ///
+    /// An event trigger runs its function for every DDL command anyone issues
+    /// in the database, so the role behind it can act on statements it did not
+    /// write; `PostgreSQL` closes that off by admitting only superusers, and
+    /// spells the reason out in a `HINT` because the rule is not one a caller
+    /// would infer from "permission denied". The two sites word both lines
+    /// differently, so both travel with the error.
+    EventTriggerPrivilege {
+        /// `permission denied to create event trigger "t"`, or the
+        /// change-owner spelling.
+        message: String,
+        /// PostgreSQL's `HINT`, naming the superuser rule.
+        hint: &'static str,
+    },
     /// A scalar function's own error, carrying the SQLSTATE and the message
     /// PostgreSQL spells out at that call site — `setseed`'s range check
     /// (22023), `format`'s specifier diagnostics (22023/22004), `encode`'s
@@ -1248,6 +1264,9 @@ impl ExecError {
             .with_detail(format!("Failing row contains {row}.")),
             ExecError::PermissionDenied { kind, relation } => {
                 PgError::error("42501", format!("permission denied for {kind} {relation}"))
+            }
+            ExecError::EventTriggerPrivilege { message, hint } => {
+                PgError::error("42501", message).with_hint(hint)
             }
             ExecError::RowSecurityRefused(relation) => PgError::error(
                 "42501",
