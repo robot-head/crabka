@@ -62,6 +62,8 @@ pub(crate) fn decode_fetch(body: &[u8]) -> Option<WalFetchRequest> {
 pub(crate) fn decode_fetch_request(request: &FetchRequest) -> Option<WalFetchRequest> {
     let topic = request.topics.first()?;
     let partition = topic.partitions.first()?;
+    let max_bytes = request.max_bytes.min(partition.partition_max_bytes);
+    let max_bytes = std::num::NonZeroU32::new(u32::try_from(max_bytes).ok()?)?;
     let group = if topic.topic_id == KRAFT_METADATA_TOPIC_ID {
         QuorumGroup::Metadata
     } else {
@@ -77,7 +79,7 @@ pub(crate) fn decode_fetch_request(request: &FetchRequest) -> Option<WalFetchReq
         group,
         from: crabka_raft::NodeId(u64::try_from(request.replica_state.replica_id).ok()?),
         fetch_offset: partition.fetch_offset,
-        max_size: ByteSize::from_bytes_i64(i64::from(request.max_bytes.max(0))),
+        max_size: ByteSize::from_bytes(u64::from(max_bytes.get())),
     })
 }
 
@@ -251,5 +253,32 @@ mod tests {
         request.encode(&mut body, KIP_595_FETCH_VERSION).unwrap();
 
         assert_eq!(classify_fetch(&body), None);
+    }
+
+    #[test]
+    fn fetch_request_applies_both_byte_caps() {
+        let group = QuorumGroup::diskless_wal(uuid::Uuid::from_u128(42), PartitionIndex(3));
+        let max_size = ByteSize::from_bytes(4_096);
+        let request = fetch_request(group, NodeId(2), 7, 11, max_size);
+
+        assert2::check!(request.max_bytes == 4_096);
+        assert2::check!(request.topics[0].partitions[0].partition_max_bytes == 4_096);
+        assert2::check!(decode_fetch_request(&request).unwrap().max_size == max_size);
+    }
+
+    #[test]
+    fn decode_fetch_request_requires_positive_effective_byte_cap() {
+        let group = QuorumGroup::diskless_wal(uuid::Uuid::from_u128(42), PartitionIndex(3));
+        let mut request = fetch_request(group, NodeId(2), 7, 11, ByteSize::from_bytes(4_096));
+
+        request.max_bytes = 0;
+        assert2::check!(decode_fetch_request(&request).is_none());
+        request.max_bytes = 2_048;
+        request.topics[0].partitions[0].partition_max_bytes = 1_024;
+        assert2::check!(
+            decode_fetch_request(&request).unwrap().max_size == ByteSize::from_bytes(1_024)
+        );
+        request.topics[0].partitions[0].partition_max_bytes = 0;
+        assert2::check!(decode_fetch_request(&request).is_none());
     }
 }

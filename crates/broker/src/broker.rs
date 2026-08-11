@@ -1727,12 +1727,10 @@ fn spawn_rlmm_bootstrap(
 
 fn spawn_diskless_bootstrap(
     broker: &Arc<Broker>,
-    kickoff: Option<&KafkaSwapKickoff>,
+    handle: &Arc<crate::diskless::read::DisklessReadHandle>,
+    kickoff: &KafkaSwapKickoff,
     shutdown: &CancellationToken,
-) -> Option<JoinHandle<()>> {
-    let (Some(handle), Some(kickoff)) = (broker.diskless_read.as_ref(), kickoff) else {
-        return None;
-    };
+) -> JoinHandle<()> {
     let cache = Arc::clone(&handle.index);
     let flusher = DisklessFlusherStartup {
         partitions: Arc::clone(&broker.partitions),
@@ -1744,9 +1742,9 @@ fn spawn_diskless_bootstrap(
     };
     let kickoff = kickoff.clone();
     let shutdown = shutdown.clone();
-    Some(tokio::spawn(async move {
+    tokio::spawn(async move {
         bootstrap_diskless_index_log(cache, kickoff, flusher, shutdown).await;
-    }))
+    })
 }
 
 async fn start_metadata_phase(
@@ -1854,6 +1852,19 @@ async fn finish_broker_startup(
         audit_writer_handle: tokio::sync::Mutex::new(runtime.audit_writer_handle),
         handlers: crate::handlers::registry::build_registry(),
     });
+    let diskless_bootstrap = match (
+        broker.diskless_read.as_ref(),
+        runtime.kafka_swap_kickoff.as_ref(),
+    ) {
+        (Some(handle), Some(kickoff)) => Some((handle, kickoff)),
+        (None, None) => None,
+        _ => {
+            broker.supervisor_shutdown.cancel();
+            return Err(BrokerError::Startup(
+                "diskless read and bootstrap configuration must be enabled together".into(),
+            ));
+        }
+    };
     let (shutdown, listener_tasks) = spawn_listener_tasks(&broker, bound);
     emit_broker_started(&broker, runtime.audit_led_partition).await;
     let topic_rlmm_task = spawn_rlmm_bootstrap(
@@ -1862,8 +1873,8 @@ async fn finish_broker_startup(
         runtime.kafka_swap_kickoff.as_ref(),
         &shutdown,
     );
-    let diskless_task =
-        spawn_diskless_bootstrap(&broker, runtime.kafka_swap_kickoff.as_ref(), &shutdown);
+    let diskless_task = diskless_bootstrap
+        .map(|(handle, kickoff)| spawn_diskless_bootstrap(&broker, handle, kickoff, &shutdown));
     Ok(BrokerHandle {
         listen_addr,
         shutdown,
