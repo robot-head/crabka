@@ -61,6 +61,12 @@ pub(crate) struct CopyInFormat {
     /// `None` when no `HEADER` was written; otherwise the spelling, because
     /// `MATCH` checks the line it consumes and `TRUE` only discards it.
     pub(crate) header: Option<CopyHeader>,
+    /// `FORCE_NOT_NULL`, as written. Resolved against the copy's column list
+    /// by [`CopyInFormat::force_flags`] rather than here, because the names it
+    /// carries mean nothing until the relation is known.
+    force_not_null: Option<CopyColumns>,
+    /// `FORCE_NULL`, as written.
+    force_null: Option<CopyColumns>,
 }
 
 fn invalid_parameter(message: &str) -> ExecError {
@@ -186,12 +192,23 @@ fn refuse_unhandled_copy_from_options(options: &CopyOptions) -> Result<(), ExecE
 
 /// The server encoding is UTF-8 and there is no transcoding machinery, so an
 /// `ENCODING` naming anything else would be read as a promise the copy cannot
-/// keep. `PostgreSQL` spells the alias set out in `pg_wchar.h`; the two names
-/// that reach UTF-8 are all this engine can answer to.
+/// keep. `PostgreSQL` spells the alias set out in `pg_wchar.h`; the names that
+/// ask for no conversion at all are all this engine can answer to.
+///
+/// `SQL_ASCII` is one of them: it is `PostgreSQL`'s "do not convert", so a copy
+/// under it moves the server's own bytes in either direction, which is what
+/// this engine does anyway. The one divergence is on the way in — `PostgreSQL`
+/// stores whatever bytes arrive, valid UTF-8 or not, and this engine still
+/// requires them to be UTF-8, so it refuses a payload `PostgreSQL` would have
+/// stored and only been unable to read back.
 fn refuse_unhandled_encoding(encoding: Option<&str>) -> Result<(), ExecError> {
     match encoding {
         None => Ok(()),
-        Some(name) if name.eq_ignore_ascii_case("utf8") || name.eq_ignore_ascii_case("utf-8") => {
+        Some(name)
+            if name.eq_ignore_ascii_case("utf8")
+                || name.eq_ignore_ascii_case("utf-8")
+                || name.eq_ignore_ascii_case("sql_ascii") =>
+        {
             Ok(())
         }
         Some(name) => Err(ExecError::Unsupported(format!(
@@ -206,14 +223,76 @@ impl CopyInFormat {
         // reported as unsupported rather than as a complaint about the value of
         // an option that would have been ignored anyway.
         refuse_unhandled_copy_from_options(options)?;
-        if options.format == CopyFormat::Csv {
-            return Err(ExecError::Unsupported("COPY CSV is not supported".into()));
-        }
         Ok(Self {
             framing: CopyFraming::resolve(options)?,
             header: options.header.filter(|header| *header != CopyHeader::False),
+            force_not_null: options.force_not_null.clone(),
+            force_null: options.force_null.clone(),
         })
     }
+
+    /// Whether this copy has to know the names of the columns it fills before
+    /// it can read a byte: `HEADER MATCH` checks them against the first line,
+    /// and the two `FORCE_` options name them.
+    pub(crate) fn needs_column_names(&self) -> bool {
+        self.header == Some(CopyHeader::Match)
+            || self.force_not_null.is_some()
+            || self.force_null.is_some()
+    }
+
+    /// Resolve `FORCE_NOT_NULL` and `FORCE_NULL` to one flag per field.
+    ///
+    /// `columns` is the copy's own column list, in the order the data supplies
+    /// the fields; `relation_columns` is every column the relation has.
+    /// `PostgreSQL` resolves each name against the *relation* first — a name
+    /// that is not a column at all is an undefined column — and only then
+    /// checks that it is one of the columns the copy reads, which is a
+    /// different complaint. Both are raised before the copy reads any data, so
+    /// neither can arrive after copy-in mode has been announced.
+    pub(crate) fn force_flags(
+        &self,
+        columns: &[String],
+        relation_columns: &[String],
+        relation: &str,
+    ) -> Result<CopyForceFlags, ExecError> {
+        let resolve = |option: Option<&CopyColumns>, spelling: &str| match option {
+            None => Ok(vec![false; columns.len()]),
+            Some(CopyColumns::All) => Ok(vec![true; columns.len()]),
+            Some(CopyColumns::Named(named)) => {
+                let mut flags = vec![false; columns.len()];
+                for name in named {
+                    if !relation_columns.iter().any(|column| column == name) {
+                        return Err(undefined_copy_column(name, Some(relation)));
+                    }
+                    let Some(index) = columns.iter().position(|column| column == name) else {
+                        return Err(ExecError::Remote(PgError::error(
+                            "42P10",
+                            format!("{spelling} column \"{name}\" not referenced by COPY"),
+                        )));
+                    };
+                    flags[index] = true;
+                }
+                Ok(flags)
+            }
+        };
+        Ok(CopyForceFlags {
+            not_null: resolve(self.force_not_null.as_ref(), "FORCE_NOT_NULL")?,
+            null: resolve(self.force_null.as_ref(), "FORCE_NULL")?,
+        })
+    }
+}
+
+/// `FORCE_NOT_NULL` and `FORCE_NULL` resolved to one flag per copied field.
+///
+/// Both are CSV-only, and both act on the *raw* field rather than the decoded
+/// one: `FORCE_NOT_NULL` keeps an unquoted null string as that literal string,
+/// and `FORCE_NULL` turns a quoted one into a NULL. A field can carry both
+/// flags, in which case neither fires — an unquoted null string is already not
+/// null and a quoted one is already the string.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CopyForceFlags {
+    not_null: Vec<bool>,
+    null: Vec<bool>,
 }
 
 impl CopyOutFormat {
@@ -489,71 +568,402 @@ pub(crate) struct CopyRow<'a> {
     pub(crate) raw: &'a str,
 }
 
-/// The header line of a `COPY … FROM` payload, when the copy has one.
+/// The end-of-line style a payload's first line establishes.
 ///
-/// Only a `HEADER MATCH` failure asks, so this re-reads the first line rather
-/// than the decode carrying it: the decode that would have returned it is the
-/// one that just failed.
-pub(crate) fn header_line_of<'a>(data: &'a [u8], format: &CopyInFormat) -> Option<&'a str> {
-    format.header?;
-    let text = std::str::from_utf8(data).ok()?;
-    let line = text.split('\n').next()?;
-    Some(line.strip_suffix('\r').unwrap_or(line))
+/// `PostgreSQL` reads the style off the first terminator it meets and then
+/// holds every later line to it, so a file that mixes styles is a malformed
+/// file rather than a lenient read. The state is per payload, which is why it
+/// lives on the reader rather than being recomputed per line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EolStyle {
+    Unknown,
+    Nl,
+    CrNl,
+    Cr,
 }
 
-/// Decode a `COPY … FROM` text-format payload into per-row raw values.
+/// One step of [`CopyLineReader`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyLine<'a> {
+    /// A line of data, with its terminator already consumed and not included.
+    Data(&'a str),
+    /// The text-format `\.` marker. Nothing after it is data.
+    End,
+    /// The payload is exhausted.
+    Exhausted,
+}
+
+/// `PostgreSQL`'s `CopyReadLineText`, for both formats.
+///
+/// The two formats differ in exactly two ways, and both are here rather than in
+/// the field splitters:
+///
+/// - CSV tracks quoting, because a `\r` or a `\n` inside a quoted field is data
+///   and does not end the line. Text has no quoting and so no such state.
+/// - text reads `\` as an escape, which is what makes `\.` on a line of its own
+///   the end of the data. In CSV a backslash is an ordinary character and `\.`
+///   is never a marker — psql strips the `\.` it sees in a script before it
+///   sends anything, so a `\.` that reaches a CSV copy came from a file and is
+///   a value.
+struct CopyLineReader<'a> {
+    text: &'a str,
+    /// The byte offset of the next unread character. Always on a character
+    /// boundary: every byte this reader compares against is ASCII, and no
+    /// UTF-8 continuation byte is.
+    pos: usize,
+    eol: EolStyle,
+    /// `Some((quote, escape))` in CSV mode. `escape` is `None` when it is the
+    /// same character as the quote, which is the common case and needs no
+    /// separate tracking.
+    csv: Option<(u8, Option<u8>)>,
+    /// Physical line breaks swallowed inside the last line's quoted fields.
+    embedded: u64,
+}
+
+impl<'a> CopyLineReader<'a> {
+    fn new(text: &'a str, format: &CopyInFormat) -> Self {
+        Self {
+            text,
+            pos: 0,
+            eol: EolStyle::Unknown,
+            csv: format
+                .framing
+                .csv
+                .map(|csv| (csv.quote, (csv.escape != csv.quote).then_some(csv.escape))),
+            embedded: 0,
+        }
+    }
+
+    /// How many physical line breaks the last line hid inside quoted fields,
+    /// clearing the count for the next one.
+    fn take_embedded_lines(&mut self) -> u64 {
+        std::mem::take(&mut self.embedded)
+    }
+
+    /// The byte at `offset`, or `0` past the end — `PostgreSQL` pads its input
+    /// buffer with a NUL for exactly this look-ahead, and the padding is
+    /// observable: it is what makes a `\.` at the very end of a payload a
+    /// marker that is not alone on its line.
+    fn peek(&self, offset: usize) -> u8 {
+        self.text.as_bytes().get(offset).copied().unwrap_or(0)
+    }
+
+    fn read(&mut self) -> Result<CopyLine<'a>, ExecError> {
+        let bytes = self.text.as_bytes();
+        let start = self.pos;
+        let csv = self.csv.is_some();
+        let mut in_quote = false;
+        let mut last_was_esc = false;
+        self.embedded = 0;
+        while self.pos < bytes.len() {
+            let at = self.pos;
+            let c = bytes[at];
+            self.pos += 1;
+            if let Some((quote, escape)) = self.csv {
+                if in_quote && Some(c) == escape {
+                    last_was_esc = !last_was_esc;
+                }
+                if c == quote && !last_was_esc {
+                    in_quote = !in_quote;
+                }
+                if Some(c) != escape {
+                    last_was_esc = false;
+                }
+                let eol_char = if self.eol == EolStyle::Cr {
+                    b'\r'
+                } else {
+                    b'\n'
+                };
+                if in_quote && c == eol_char {
+                    self.embedded += 1;
+                }
+            }
+            if c == b'\r' && !in_quote {
+                match self.eol {
+                    EolStyle::Unknown | EolStyle::CrNl => {
+                        if self.peek(self.pos) == b'\n' {
+                            self.pos += 1;
+                            self.eol = EolStyle::CrNl;
+                        } else if self.eol == EolStyle::CrNl {
+                            return Err(stray_carriage_return(csv));
+                        } else {
+                            self.eol = EolStyle::Cr;
+                        }
+                    }
+                    EolStyle::Nl => return Err(stray_carriage_return(csv)),
+                    EolStyle::Cr => {}
+                }
+                return Ok(CopyLine::Data(&self.text[start..at]));
+            }
+            if c == b'\n' && !in_quote {
+                if matches!(self.eol, EolStyle::Cr | EolStyle::CrNl) {
+                    return Err(stray_newline(csv));
+                }
+                self.eol = EolStyle::Nl;
+                return Ok(CopyLine::Data(&self.text[start..at]));
+            }
+            if c == b'\\' && !csv {
+                if self.pos >= bytes.len() {
+                    break;
+                }
+                if bytes[self.pos] != b'.' {
+                    // Whatever it escapes is not a marker, and skipping it is
+                    // what keeps `\\.` a backslash followed by a period.
+                    self.pos += 1;
+                    continue;
+                }
+                self.pos += 1;
+                self.read_end_marker(start, at)?;
+                return Ok(CopyLine::End);
+            }
+        }
+        if self.pos == start {
+            return Ok(CopyLine::Exhausted);
+        }
+        // A payload whose last line has no terminator still ends in a row:
+        // PostgreSQL reports EOF and hands the partial line on.
+        Ok(CopyLine::Data(&self.text[start..]))
+    }
+
+    /// The rest of a `\.` marker, once the `.` has been consumed.
+    ///
+    /// `start` is where the line began and `marker` where its backslash sits,
+    /// so anything between them is data before the marker.
+    fn read_end_marker(&mut self, start: usize, marker: usize) -> Result<(), ExecError> {
+        if self.eol == EolStyle::CrNl {
+            let next = self.peek(self.pos);
+            self.pos += 1;
+            if next == b'\n' {
+                return Err(marker_style_mismatch());
+            }
+            if next != b'\r' {
+                return Err(marker_not_alone());
+            }
+        }
+        let next = self.peek(self.pos);
+        self.pos += 1;
+        if next != b'\r' && next != b'\n' {
+            return Err(marker_not_alone());
+        }
+        let matches_style = match self.eol {
+            EolStyle::Nl | EolStyle::CrNl => next == b'\n',
+            EolStyle::Cr => next == b'\r',
+            EolStyle::Unknown => true,
+        };
+        if !matches_style {
+            return Err(marker_style_mismatch());
+        }
+        if marker > start {
+            return Err(marker_not_alone());
+        }
+        Ok(())
+    }
+}
+
+fn stray_carriage_return(csv: bool) -> ExecError {
+    if csv {
+        bad_copy_format("unquoted carriage return found in data".into())
+    } else {
+        bad_copy_format("literal carriage return found in data".into())
+    }
+}
+
+fn stray_newline(csv: bool) -> ExecError {
+    if csv {
+        bad_copy_format("unquoted newline found in data".into())
+    } else {
+        bad_copy_format("literal newline found in data".into())
+    }
+}
+
+fn marker_not_alone() -> ExecError {
+    bad_copy_format("end-of-copy marker is not alone on its line".into())
+}
+
+fn marker_style_mismatch() -> ExecError {
+    bad_copy_format("end-of-copy marker does not match previous newline style".into())
+}
+
+/// Decode a `COPY … FROM` payload into per-row raw values.
 ///
 /// The NULL comparison is against the field *before* de-escaping, as
 /// `PostgreSQL`'s `CopyReadAttributesText` does it: with `NULL 'NUL'` an
-/// incoming `\N` is not a null but the one-character string `N`.
-pub(crate) fn decode_copy_text<'a>(
+/// incoming `\N` is not a null but the one-character string `N`. CSV compares
+/// against the raw field too, and additionally requires that no quote appeared
+/// in it — `""` is the empty string even when the null string is empty, which
+/// is how a CSV copy distinguishes the two at all.
+pub(crate) fn decode_copy_rows<'a>(
     data: &'a [u8],
     format: &CopyInFormat,
     columns: &[String],
+    force: &CopyForceFlags,
+    relation: &str,
 ) -> Result<Vec<CopyRow<'a>>, ExecError> {
     let text = std::str::from_utf8(data)
         .map_err(|_| ExecError::Syntax("invalid byte sequence for encoding \"UTF8\"".into()))?;
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
+    let mut reader = CopyLineReader::new(text, format);
     let mut rows = Vec::new();
     let mut header_pending = format.header.is_some();
-    let mut lines = text.split('\n').peekable();
     let mut number = 0_u64;
-    while let Some(raw_line) = lines.next() {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+    // A failure inside the line reader is a failure reading the line the counter
+    // has not reached yet, and PostgreSQL reports it against that line with
+    // nothing quoted — the line it would have quoted is the one it could not
+    // assemble.
+    let at_next_line = |number: u64| {
+        move |error| {
+            crate::exec::with_copy_context(
+                error,
+                copy_context(relation, number + 1, CopyContext::LineNumber),
+            )
+        }
+    };
+    while let CopyLine::Data(line) = reader.read().map_err(at_next_line(number))? {
         number += 1;
-        // PostgreSQL's text-format end-of-data marker: clients on the old
-        // PQputline/PQendcopy API (pgbench -i among them) send a final `\.`
-        // line; it terminates the data and everything after it is ignored.
-        if line == r"\." {
-            break;
-        }
-        if raw_line.is_empty() && lines.peek().is_none() && text.ends_with('\n') {
-            continue;
-        }
+        let at_line = |error| {
+            crate::exec::with_copy_context(
+                error,
+                copy_context(relation, number, CopyContext::Line { raw: line }),
+            )
+        };
         if header_pending {
             header_pending = false;
             if format.header == Some(CopyHeader::Match) {
-                match_header_line(line, format, columns)?;
+                match_header_line(line, format, columns).map_err(at_line)?;
             }
+            number += reader.take_embedded_lines();
             continue;
         }
         rows.push(CopyRow {
-            values: split_text_fields(line, format.framing.delimiter)
-                .into_iter()
-                .map(|field| {
-                    if field == format.framing.null {
-                        return Ok(None);
-                    }
-                    decode_copy_text_field(field).map(Some)
-                })
-                .collect::<Result<_, _>>()?,
+            values: decode_copy_line(line, format, force).map_err(at_line)?,
             line: number,
             raw: line,
         });
+        // A CSV field may hold newlines, and PostgreSQL counts the physical
+        // lines it read rather than the rows it kept.
+        number += reader.take_embedded_lines();
     }
     Ok(rows)
+}
+
+/// One line's fields, de-escaped, `None` for the ones that are NULL.
+fn decode_copy_line(
+    line: &str,
+    format: &CopyInFormat,
+    force: &CopyForceFlags,
+) -> Result<Vec<Option<String>>, ExecError> {
+    let Some(csv) = format.framing.csv else {
+        return split_text_fields(line, format.framing.delimiter)
+            .into_iter()
+            .map(|field| {
+                if field == format.framing.null {
+                    return Ok(None);
+                }
+                decode_copy_text_field(field).map(Some)
+            })
+            .collect();
+    };
+    let fields = split_csv_fields(line, format.framing.delimiter, csv)?;
+    Ok(fields
+        .into_iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let forced_not_null = force.not_null.get(index).copied().unwrap_or(false);
+            let forced_null = force.null.get(index).copied().unwrap_or(false);
+            if !field.quoted && field.value == format.framing.null {
+                // FORCE_NOT_NULL keeps it as the null string spelled out.
+                return forced_not_null.then_some(field.value);
+            }
+            if forced_null && field.value == format.framing.null {
+                return None;
+            }
+            Some(field.value)
+        })
+        .collect())
+}
+
+/// One CSV field, de-escaped.
+struct CsvField {
+    value: String,
+    /// Whether a quote character appeared anywhere in the raw field. Only an
+    /// unquoted field can be the null string, so this is what keeps `""`
+    /// distinct from an empty unquoted field.
+    quoted: bool,
+}
+
+/// `PostgreSQL`'s `CopyReadAttributesCSV`.
+///
+/// The scan alternates between "not in quote" and "in quote". Outside quotes
+/// the delimiter ends the field and a quote opens one; inside, the escape
+/// character consumes a following quote or escape, and an unescaped quote
+/// closes. A field may open and close quotes more than once, so `a"b"c` is
+/// `abc` — `PostgreSQL` accepts it rather than complaining.
+fn split_csv_fields(
+    line: &str,
+    delimiter: u8,
+    csv: CsvFraming,
+) -> Result<Vec<CsvField>, ExecError> {
+    let bytes = line.as_bytes();
+    let mut fields = Vec::new();
+    let mut index = 0;
+    loop {
+        let mut value = Vec::new();
+        let mut quoted = false;
+        let found_delimiter = loop {
+            // Outside quotes: the delimiter ends the field, a quote opens one,
+            // and the end of the line ends the field too.
+            let opened_quote = loop {
+                let Some(&c) = bytes.get(index) else {
+                    break None;
+                };
+                index += 1;
+                if c == delimiter {
+                    break Some(false);
+                }
+                if c == csv.quote {
+                    quoted = true;
+                    break Some(true);
+                }
+                value.push(c);
+            };
+            match opened_quote {
+                None => break false,
+                Some(false) => break true,
+                Some(true) => {}
+            }
+            // Inside quotes: only the escape and the quote are special, and
+            // the escape is only special before one of the two. When the two
+            // characters are the same this is what makes `""` a quote.
+            loop {
+                let Some(&c) = bytes.get(index) else {
+                    return Err(bad_copy_format("unterminated CSV quoted field".into()));
+                };
+                index += 1;
+                if c == csv.escape
+                    && let Some(&next) = bytes.get(index)
+                    && (next == csv.escape || next == csv.quote)
+                {
+                    value.push(next);
+                    index += 1;
+                    continue;
+                }
+                if c == csv.quote {
+                    break;
+                }
+                value.push(c);
+            }
+        };
+        // The line was UTF-8, and the delimiter, the quote and the escape are
+        // each a single ASCII byte, so none of them can be part of a
+        // multi-byte sequence and none of the bytes this splitter drops can
+        // leave a partial character behind.
+        fields.push(CsvField {
+            value: String::from_utf8(value).expect("csv fields split on ascii boundaries"),
+            quoted,
+        });
+        if !found_delimiter {
+            return Ok(fields);
+        }
+    }
 }
 
 /// A malformed `COPY` payload: `PostgreSQL`'s `bad_copy_file_format`.
@@ -571,7 +981,10 @@ fn match_header_line(
     format: &CopyInFormat,
     columns: &[String],
 ) -> Result<(), ExecError> {
-    let fields = split_text_fields(line, format.framing.delimiter);
+    // The header is split by the copy's own format, so a CSV header can quote
+    // a name that holds the delimiter. No `FORCE_` flag reaches it: PostgreSQL
+    // matches the header before it applies them.
+    let fields = decode_copy_line(line, format, &CopyForceFlags::default())?;
     if fields.len() != columns.len() {
         return Err(bad_copy_format(format!(
             "wrong number of fields in header line: got {}, expected {}",
@@ -581,14 +994,13 @@ fn match_header_line(
     }
     for (index, (field, expected)) in fields.iter().zip(columns).enumerate() {
         let field_number = index + 1;
-        if *field == format.framing.null {
+        let Some(got) = field else {
             return Err(bad_copy_format(format!(
                 "column name mismatch in header line field {field_number}: got null value (\"{}\"), expected \"{expected}\"",
                 format.framing.null
             )));
-        }
-        let got = decode_copy_text_field(field)?;
-        if got != *expected {
+        };
+        if got != expected {
             return Err(bad_copy_format(format!(
                 "column name mismatch in header line field {field_number}: got \"{got}\", expected \"{expected}\""
             )));
@@ -629,7 +1041,7 @@ mod tests {
     use assert2::assert;
     use crabka_pgparser::ast::{CopyColumns, CopyFormat, CopyHeader, CopyOptions};
 
-    use super::{CopyInFormat, CopyOutFormat, decode_copy_text};
+    use super::{CopyForceFlags, CopyInFormat, CopyOutFormat, decode_copy_rows};
     use crate::error::ExecError;
 
     fn options(build: impl FnOnce(&mut CopyOptions)) -> CopyOptions {
@@ -1028,9 +1440,10 @@ mod tests {
     /// other encoding name is refused rather than silently ignored.
     #[test]
     fn the_server_encoding_is_the_only_encoding_accepted() {
-        for name in ["UTF8", "utf-8"] {
+        for name in ["UTF8", "utf-8", "SQL_ASCII", "sql_ascii"] {
             assert!(CopyOutFormat::resolve(&options(|o| o.encoding = Some(name.into()))).is_ok());
         }
+        assert!(CopyOutFormat::resolve(&options(|o| o.encoding = Some("LATIN1".into()))).is_err());
     }
 
     /// The decoder reads what the encoder wrote, under the same options.
@@ -1096,11 +1509,17 @@ mod tests {
         let columns = ["s".to_string(), "n".to_string()];
         for case in cases {
             let format = CopyInFormat::resolve(&case.options).expect("options resolve");
-            let decoded = decode_copy_text(case.data.as_bytes(), &format, &columns)
-                .expect("decode")
-                .into_iter()
-                .map(|row| row.values)
-                .collect::<Vec<_>>();
+            let decoded = decode_copy_rows(
+                case.data.as_bytes(),
+                &format,
+                &columns,
+                &CopyForceFlags::default(),
+                "t",
+            )
+            .expect("decode")
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>();
             assert!(decoded == case.expected, "{}", case.name);
         }
     }
@@ -1111,7 +1530,7 @@ mod tests {
     fn copy_from_stops_at_the_end_of_data_marker() {
         let format = CopyInFormat::resolve(&CopyOptions::default()).expect("options resolve");
         let decode = |data: &[u8]| {
-            decode_copy_text(data, &format, &[])
+            decode_copy_rows(data, &format, &[], &CopyForceFlags::default(), "t")
                 .expect("decode")
                 .into_iter()
                 .map(|row| row.values)
@@ -1135,22 +1554,32 @@ mod tests {
             .expect("options resolve");
         let columns = ["s".to_string(), "n".to_string()];
         assert!(
-            error_of(decode_copy_text(b"s\twrong\na\t1\n", &format, &columns))
-                == (
-                    "22P04".to_string(),
-                    "column name mismatch in header line field 2: got \"wrong\", expected \"n\""
-                        .to_string()
-                )
+            error_of(decode_copy_rows(
+                b"s\twrong\na\t1\n",
+                &format,
+                &columns,
+                &CopyForceFlags::default(),
+                "t"
+            )) == (
+                "22P04".to_string(),
+                "column name mismatch in header line field 2: got \"wrong\", expected \"n\""
+                    .to_string()
+            )
         );
         assert!(
-            error_of(decode_copy_text(b"s\n", &format, &columns))
-                == (
-                    "22P04".to_string(),
-                    "wrong number of fields in header line: got 1, expected 2".to_string()
-                )
+            error_of(decode_copy_rows(
+                b"s\n",
+                &format,
+                &columns,
+                &CopyForceFlags::default(),
+                "t"
+            )) == (
+                "22P04".to_string(),
+                "wrong number of fields in header line: got 1, expected 2".to_string()
+            )
         );
         assert!(
-            error_of(decode_copy_text(b"s\t\\N\na\t1\n", &format, &columns))
+            error_of(decode_copy_rows(b"s\t\\N\na\t1\n", &format, &columns, &CopyForceFlags::default(), "t"))
                 == (
                     "22P04".to_string(),
                     "column name mismatch in header line field 2: got null value (\"\\N\"), expected \"n\""
@@ -1168,10 +1597,6 @@ mod tests {
             message: &'static str,
         }
         let cases = [
-            Case {
-                options: csv(|_| {}),
-                message: "COPY CSV is not supported",
-            },
             Case {
                 options: options(|o| o.default = Some("D".into())),
                 message: "COPY DEFAULT is not supported",

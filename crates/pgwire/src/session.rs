@@ -1475,6 +1475,11 @@ impl ResultSink for WireResultSink<'_> {
             }
             ResultPage::Command { tag, .. } => backend::command_complete(self.out, &tag),
             ResultPage::Empty { .. } => backend::empty_query_response(self.out),
+            ResultPage::CopyOut { stream, .. } => {
+                self.rows += stream.rows.len();
+                self.pages += 1;
+                write_copy_out(self.out, &stream);
+            }
         }
         Ok(())
     }

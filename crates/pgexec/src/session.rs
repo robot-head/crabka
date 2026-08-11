@@ -23,11 +23,10 @@ use std::{
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgmvcc::{clog::XidStatus, visibility::Snapshot};
 use crabka_pgparser::ast::{
-    BinaryOp, CopyDestination, CopyDirection, CopyHeader, CopySource, CopyStmt, CopyTarget,
-    CursorTarget, DiscardTarget, ExplainOptions, Expr, FetchDirection, FuncArgs, IsolationLevel,
-    JoinConstraint, OnConflict, OnConflictAction, OnConflictTarget, QueryBody, QueryExpr,
-    ResetTarget, SelectItem, SetExpr, Statement, TableExpr, TableLockMode, UnaryOp, UnlistenTarget,
-    UtilityStatement,
+    BinaryOp, CopyDestination, CopyDirection, CopySource, CopyStmt, CopyTarget, CursorTarget,
+    DiscardTarget, ExplainOptions, Expr, FetchDirection, FuncArgs, IsolationLevel, JoinConstraint,
+    OnConflict, OnConflictAction, OnConflictTarget, QueryBody, QueryExpr, ResetTarget, SelectItem,
+    SetExpr, Statement, TableExpr, TableLockMode, UnaryOp, UnlistenTarget, UtilityStatement,
 };
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
 use crabka_pgwire::{
@@ -10133,30 +10132,26 @@ impl SqlSession {
         for chunk in chunks {
             data.extend_from_slice(&chunk);
         }
-        // Only `HEADER MATCH` reads the names, and resolving them costs a
-        // catalog round trip, so the ordinary load does not pay for it.
-        let header_columns = if format.header == Some(CopyHeader::Match) {
-            self.copy_target_column_names(target)?
+        // Only `HEADER MATCH` and the two `FORCE_` options read the names, and
+        // resolving them costs a catalog round trip, so the ordinary load does
+        // not pay for it.
+        let (header_columns, force) = if format.needs_column_names() {
+            let lists = self.copy_column_lists(target)?;
+            let force = format.force_flags(&lists.copied, &lists.relation, &lists.relation_name)?;
+            (lists.copied, force)
         } else {
-            Vec::new()
+            (Vec::new(), crate::copyfmt::CopyForceFlags::default())
         };
-        // A `HEADER MATCH` failure is raised by the decode rather than by a row,
-        // and PostgreSQL reports it with the same `CONTEXT` a failing row gets:
-        // the header is line 1, and it is quoted whole.
-        let rows =
-            crate::copyfmt::decode_copy_text(&data, &format, &header_columns).map_err(|error| {
-                match crate::copyfmt::header_line_of(&data, &format) {
-                    Some(header) => crate::exec::with_copy_context(
-                        error,
-                        crate::copyfmt::copy_context(
-                            &target.name.name,
-                            1,
-                            crate::copyfmt::CopyContext::Line { raw: header },
-                        ),
-                    ),
-                    None => error,
-                }
-            })?;
+        // Every failure the decode can raise — a malformed line, a bad header,
+        // an unterminated CSV field — is reported with the same `CONTEXT` a
+        // failing row gets, so the decode is told the relation to name.
+        let rows = crate::copyfmt::decode_copy_rows(
+            &data,
+            &format,
+            &header_columns,
+            &force,
+            &target.name.name,
+        )?;
         match &self.state {
             TxnState::InTransaction(_) => {
                 self.ensure_table_write_guard().await;
@@ -10859,6 +10854,16 @@ fn copy_to_stdout_stmt(stmt: &Statement) -> Option<&CopyStmt> {
         }
         _ => None,
     }
+}
+
+/// The three column facts a `COPY … FROM` needs before it reads a byte.
+struct CopyColumnLists {
+    /// The columns the copy fills, in the order its data supplies the fields.
+    copied: Vec<String>,
+    /// Every column the relation has.
+    relation: Vec<String>,
+    /// The relation's own unqualified name, for the messages that quote it.
+    relation_name: String,
 }
 
 /// The relation a `COPY … FROM` loads into.
@@ -12997,9 +13002,11 @@ impl SqlSession {
             crate::rls::RowSecurity::Refuse { relation } => {
                 Err(ExecError::RowSecurityRefused(relation))
             }
-            crate::rls::RowSecurity::Restricted { .. } => Err(ExecError::Unsupported(
-                "COPY FROM not supported with row-level security. Use INSERT statements instead."
-                    .into(),
+            // The hint is a `HINT` field rather than a second sentence in the
+            // message, which is where PostgreSQL puts it.
+            crate::rls::RowSecurity::Restricted { .. } => Err(ExecError::Remote(
+                PgError::error("0A000", "COPY FROM not supported with row-level security")
+                    .with_hint("Use INSERT statements instead."),
             )),
         }
     }
@@ -13020,13 +13027,18 @@ impl SqlSession {
         }
     }
 
-    /// The names of the columns a `COPY … FROM` fills, in the order its data
-    /// supplies them: the statement's own column list, or the relation's
-    /// columns in attribute order when it wrote none.
-    fn copy_target_column_names(
+    /// The columns a `COPY … FROM` fills — the statement's own column list, or
+    /// the relation's columns in attribute order when it wrote none —
+    /// alongside every column the relation has and the relation's own name.
+    ///
+    /// `FORCE_NOT_NULL` and `FORCE_NULL` need all three: a name either of them
+    /// carries is an undefined column when the relation does not have it and a
+    /// not-referenced one when the relation has it but the copy does not read
+    /// it, and `PostgreSQL` words those two differently.
+    fn copy_column_lists(
         &self,
         target: crate::exec::CopyIntoTarget<'_>,
-    ) -> Result<Vec<String>, ExecError> {
+    ) -> Result<CopyColumnLists, ExecError> {
         let table = crabka_pgcatalog::get_table(
             self.catalog_kv.as_ref(),
             &crate::relname::resolve_relation(
@@ -13036,7 +13048,12 @@ impl SqlSession {
                 crate::relname::SchemaDisposition::Utility,
             )?,
         )?;
-        match target.columns {
+        let all: Vec<String> = table
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let copied = match target.columns {
             Some(columns) => columns
                 .iter()
                 .map(|column| {
@@ -13045,13 +13062,14 @@ impl SqlSession {
                         .map(|_| column.clone())
                         .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
                 })
-                .collect(),
-            None => Ok(table
-                .columns
-                .iter()
-                .map(|column| column.name.clone())
-                .collect()),
-        }
+                .collect::<Result<Vec<String>, ExecError>>()?,
+            None => all.clone(),
+        };
+        Ok(CopyColumnLists {
+            copied,
+            relation: all,
+            relation_name: table.name.name.clone(),
+        })
     }
 
     fn copy_in_start(&mut self, copy: &CopyStmt) -> Result<CopyInResponse, PgError> {
@@ -13065,14 +13083,18 @@ impl SqlSession {
         // it again once the data arrives. What matters is that an option this
         // engine cannot honour is refused *before* copy-in mode is announced:
         // afterwards psql reads the rest of the script as data.
-        crate::copyfmt::CopyInFormat::resolve(&copy.options).map_err(ExecError::into_pg)?;
+        let format =
+            crate::copyfmt::CopyInFormat::resolve(&copy.options).map_err(ExecError::into_pg)?;
         self.precheck_copy_from(copy).map_err(ExecError::into_pg)?;
-        let columns = self
-            .copy_target_column_names(target)
+        let lists = self.copy_column_lists(target).map_err(ExecError::into_pg)?;
+        // Same timing rule: a `FORCE_NOT_NULL` naming a column this copy does
+        // not read is refused here, not once the first row arrives.
+        format
+            .force_flags(&lists.copied, &lists.relation, &lists.relation_name)
             .map_err(ExecError::into_pg)?;
         Ok(CopyInResponse {
             overall_format: 0,
-            column_formats: vec![0; columns.len()],
+            column_formats: vec![0; lists.copied.len()],
         })
     }
 
@@ -14869,6 +14891,24 @@ impl Session for SqlSession {
             return sink.send(ResultPage::Empty { result_index: 0 }).await;
         }
         for (result_index, stmt) in statements.iter().enumerate() {
+            // A `COPY … TO STDOUT` is answered with a copy-out block rather
+            // than rows, and the block is a page like any other, so a query
+            // string may hold one anywhere among its statements. Caught here
+            // rather than in `run_copy_to` because only this loop is on the
+            // wire: a copy inside a SQL function body has no framing to write
+            // into, and `run_copy_to` still refuses it.
+            if let Some(copy) = copy_to_stdout_stmt(stmt).cloned() {
+                let stream = self.copy_out_stream(&copy).await.map_err(|error| {
+                    self.mark_transaction_failed();
+                    error.into_pg()
+                })?;
+                sink.send(ResultPage::CopyOut {
+                    result_index,
+                    stream,
+                })
+                .await?;
+                continue;
+            }
             if let Some(result) = self
                 .stream_eligible_select(stmt, sql, result_index, page_rows, sink)
                 .await

@@ -66,6 +66,17 @@ pub enum ResultPage {
     Empty {
         result_index: usize,
     },
+    /// A whole `COPY … TO STDOUT` block: `CopyOutResponse`, every row, then
+    /// `CopyDone` and the command tag.
+    ///
+    /// A copy-out is one indivisible page rather than a stream of them for the
+    /// same reason [`CopyOutStream`] carries the whole copy: the engine only
+    /// has one once the copy has already succeeded, so there is no state in
+    /// which half a block has been written and the rest cannot be.
+    CopyOut {
+        result_index: usize,
+        stream: CopyOutStream,
+    },
 }
 
 /// Backpressured consumer for bounded simple-query result pages.
@@ -114,6 +125,16 @@ impl CollectingResultSink {
                         return Err(malformed_result_pages(result_index, results.len()));
                     }
                     results.push(QueryResult::Empty);
+                }
+                // A copy-out is a wire state, and a sink that collects
+                // `QueryResult`s has nowhere to put one: `QueryResult` has no
+                // variant that carries copy data, and inventing a command tag
+                // for it would report a copy that never reached anybody.
+                ResultPage::CopyOut { .. } => {
+                    return Err(PgError::error(
+                        "0A000",
+                        "COPY TO STDOUT requires pgwire CopyOut messages",
+                    ));
                 }
                 ResultPage::Rows {
                     result_index,

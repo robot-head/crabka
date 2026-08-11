@@ -419,7 +419,6 @@ async fn copy_from_refuses_an_option_it_cannot_honour_before_entering_copy_in() 
     run(&mut session, "CREATE TABLE loaded (s text, n text)").await;
 
     for sql in [
-        "COPY loaded FROM STDIN WITH (FORMAT CSV)",
         "COPY loaded FROM STDIN WITH (DEFAULT 'D')",
         "COPY loaded FROM STDIN WITH (ON_ERROR IGNORE)",
         "COPY loaded FROM STDIN WITH (ENCODING 'LATIN1')",
@@ -434,14 +433,19 @@ async fn copy_from_refuses_an_option_it_cannot_honour_before_entering_copy_in() 
 
     // FREEZE asks for a visibility shortcut, not a different framing: the rows
     // it loads are the same rows, so it is accepted and ignored. `pgbench -i`
-    // sends it.
-    assert!(
-        session
-            .begin_copy_in("COPY loaded FROM STDIN WITH (FREEZE)")
-            .await
-            .expect("freeze is accepted")
-            .is_some()
-    );
+    // sends it. CSV is a framing the loader now reads, so it is accepted too.
+    for sql in [
+        "COPY loaded FROM STDIN WITH (FREEZE)",
+        "COPY loaded FROM STDIN WITH (FORMAT CSV)",
+    ] {
+        assert!(
+            session
+                .begin_copy_in(sql)
+                .await
+                .unwrap_or_else(|error| panic!("{sql} is accepted: {error:?}"))
+                .is_some()
+        );
+    }
 }
 
 /// The `CONTEXT` a failing `COPY … FROM` row carries.

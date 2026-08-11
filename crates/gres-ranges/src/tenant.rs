@@ -3583,7 +3583,12 @@ impl<S: crabka_pgwire::engine::ResultSink> crabka_pgwire::engine::ResultSink
                 result_index, tag, ..
             } => (result_index, tag.is_some()),
             crabka_pgwire::engine::ResultPage::Command { result_index, .. }
-            | crabka_pgwire::engine::ResultPage::Empty { result_index } => (result_index, true),
+            | crabka_pgwire::engine::ResultPage::Empty { result_index }
+            // A copy-out block is one whole result, so it is terminal like a
+            // command tag; only its index needs the offset.
+            | crabka_pgwire::engine::ResultPage::CopyOut { result_index, .. } => {
+                (result_index, true)
+            }
         };
         *index = index
             .checked_add(self.offset)
