@@ -2217,6 +2217,35 @@ fn create_table_primary_key_columns<'a>(
     primary_key_columns
 }
 
+/// Which datum a column DEFAULT stores: the one the statement wrote, or the one
+/// that coercing it to the column type produced.
+///
+/// `PostgreSQL` stores a default as the EXPRESSION, with the coercion wrapped
+/// around the literal, so `pg_get_expr` — which hides a binary-coercible cast —
+/// prints the literal's own type. crabka stores the value, so the only
+/// surviving record of what the statement wrote is the datum's own flavour.
+///
+/// For a bit string that record is free to keep. `bit` and `bit varying` are
+/// binary-coercible in both directions, and `BitString::varying` changes no
+/// rendered bit, so the written datum and the coerced one print the same text
+/// and only the deparsed type differs. That is what makes `B'0101'` in a `bit
+/// varying(5)` column deparse `'0101'::"bit"` while a bare `'1001'` deparses
+/// `'1001'::bit varying`. Requiring the two to compare equal is what keeps the
+/// LENGTH coercion, which does change bits: `B'101'` in a `bit(5)` column is
+/// still the 22026 `PostgreSQL` raises, not a default of the wrong width.
+///
+/// It stops at bit strings deliberately. `inet`/`cidr` share a datum the same
+/// way and their flag is excluded from equality the same way, but
+/// `Inet::is_cidr` DOES change the rendered text — a `/32` prints its mask as a
+/// `cidr` and hides it as an `inet` — so keeping the written flavour there
+/// would change the value and not merely its label.
+fn stored_default_value(written: Datum, coerced: Datum) -> Datum {
+    match (&written, &coerced) {
+        (Datum::BitString(_), Datum::BitString(_)) if written == coerced => written,
+        _ => coerced,
+    }
+}
+
 fn column_from_ast(
     table_name: &crabka_pgcatalog::RelationName,
     column: &crabka_pgparser::ast::ColumnDef,
@@ -2251,9 +2280,10 @@ fn column_from_ast(
             crabka_pgparser::ast::ColumnConstraintKind::Null => catalog_column.not_null = false,
             crabka_pgparser::ast::ColumnConstraintKind::Default(expr) => {
                 let value = eval_assignment_value(expr, column.ty, &Scope::empty(), &[], ctx)?;
-                let value = coerce(value, column.ty, ctx)?;
-                ensure_default_can_be_persisted(&value)?;
-                catalog_column.default = Some(ColumnDefault::Value(value));
+                let coerced = coerce(value.clone(), column.ty, ctx)?;
+                ensure_default_can_be_persisted(&coerced)?;
+                catalog_column.default =
+                    Some(ColumnDefault::Value(stored_default_value(value, coerced)));
             }
             crabka_pgparser::ast::ColumnConstraintKind::PrimaryKey => {
                 catalog_column.not_null = true;
@@ -18082,6 +18112,15 @@ struct BuiltinTypeRow {
     array: i32,
 }
 
+/// `pg_type.oid` of `_timetz`. `ElemType` has no `timetz` variant, so crabka
+/// cannot build a `timetz[]` value, but `timetz.typarray` still has to resolve
+/// — the same position `_inet` and `_money` are in. `crabka_pgtypes::oids` has
+/// no constant for an array type it cannot construct.
+const TIMETZ_ARRAY_OID: i32 = 1270;
+
+/// `pg_type.oid` of `_int2vector`, which is in that same position.
+const INT2VECTOR_ARRAY_OID: i32 = 1006;
+
 fn virtual_catalog_relation(
     catalog_kv: &dyn Kv,
     name: &crabka_pgcatalog::RelationName,
@@ -20840,6 +20879,14 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             array: 1013,
         },
         BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::INT2VECTOR as i32,
+            name: "int2vector",
+            len: -1,
+            category: "A",
+            elem: crabka_pgtypes::oids::INT2 as i32,
+            array: INT2VECTOR_ARRAY_OID,
+        },
+        BuiltinTypeRow {
             oid: crabka_pgtypes::oids::REGPROCEDURE as i32,
             name: "regprocedure",
             len: 4,
@@ -21090,6 +21137,14 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             category: "D",
             elem: 0,
             array: crabka_pgtypes::oids::TIMEARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TIMETZ as i32,
+            name: "timetz",
+            len: 12,
+            category: "D",
+            elem: 0,
+            array: TIMETZ_ARRAY_OID,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::TIMESTAMP as i32,
@@ -21343,6 +21398,22 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 len: -1,
                 category: "A",
                 elem: crabka_pgtypes::oids::OIDVECTOR as i32,
+                array: 0,
+            },
+            BuiltinTypeRow {
+                oid: INT2VECTOR_ARRAY_OID,
+                name: "_int2vector",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::INT2VECTOR as i32,
+                array: 0,
+            },
+            BuiltinTypeRow {
+                oid: TIMETZ_ARRAY_OID,
+                name: "_timetz",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::TIMETZ as i32,
                 array: 0,
             },
             BuiltinTypeRow {
@@ -23281,7 +23352,9 @@ fn partition_definition(
                 crabka_pgparser::ast::ColumnConstraintKind::Null => target.not_null = false,
                 crabka_pgparser::ast::ColumnConstraintKind::Default(expr) => {
                     let value = eval_assignment_value(expr, target.ty, &Scope::empty(), &[], ctx)?;
-                    target.default = Some(ColumnDefault::Value(coerce(value, target.ty, ctx)?));
+                    let coerced = coerce(value.clone(), target.ty, ctx)?;
+                    target.default =
+                        Some(ColumnDefault::Value(stored_default_value(value, coerced)));
                 }
                 other => {
                     return Err(ExecError::Unsupported(format!(
@@ -25838,13 +25911,11 @@ fn alter_table_action_ops(
         Action::SetDefault { column, expr } => {
             let index = state.column_index(column)?;
             let ty = state.table.columns[index].ty;
-            let value = coerce(
-                eval_assignment_value(expr, ty, &Scope::empty(), &[], &ddl_ctx)?,
-                ty,
-                &ddl_ctx,
-            )?;
-            ensure_default_can_be_persisted(&value)?;
-            state.table.columns[index].default = Some(ColumnDefault::Value(value));
+            let written = eval_assignment_value(expr, ty, &Scope::empty(), &[], &ddl_ctx)?;
+            let coerced = coerce(written.clone(), ty, &ddl_ctx)?;
+            ensure_default_can_be_persisted(&coerced)?;
+            state.table.columns[index].default =
+                Some(ColumnDefault::Value(stored_default_value(written, coerced)));
             Ok(())
         }
         Action::DropDefault(column) => {

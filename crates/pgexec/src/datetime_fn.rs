@@ -288,7 +288,9 @@ pub(crate) fn eval_datetime(
                 Datum::Text(s) => s.to_ascii_lowercase(),
                 other => return Err(type_error("date_trunc", other)),
             };
-            let unit = canonical_unit(&unit).ok_or_else(|| unknown_field(&unit))?;
+            let type_name =
+                date_trunc_type_name(&source).ok_or_else(|| type_error("date_trunc", &source))?;
+            let unit = canonical_unit(&unit).ok_or_else(|| unknown_field(&unit, type_name))?;
             date_trunc(unit, &source, zone.as_ref(), &ctx.time_zone)
         }
         // ---- age ----
@@ -580,7 +582,8 @@ fn unsupported_field(field: &str, type_name: &str) -> ExecError {
 /// parses it. `tz` is the session zone, and only the timezone-* fields of a
 /// timestamptz use it.
 fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<String>, ExecError> {
-    let unit = canonical_unit(field).ok_or_else(|| unknown_field(field))?;
+    let type_name = extract_type_name(source).ok_or_else(|| type_error("extract", source))?;
+    let unit = canonical_unit(field).ok_or_else(|| unknown_field(field, type_name))?;
     match source {
         Datum::Date(d) => {
             // A `date` has no clock or zone, so PostgreSQL refuses those units,
@@ -845,8 +848,46 @@ fn extract_from_interval(unit: &str, field: &str, iv: Interval) -> Result<String
     })
 }
 
-fn unknown_field(field: &str) -> ExecError {
-    invalid_param(format!("unit \"{field}\" not recognized"))
+/// 22023: a unit no datetime function has ever heard of (`fortnight`).
+///
+/// `PostgreSQL` names the source type as `format_type_be` spells it, so the
+/// same unrecognised unit reads differently over a `time` and over a `timetz`.
+/// The wording is the whole message, not a value inside the `SET`/`RESET`
+/// sentence [`ExecError::InvalidParameterValue`] builds.
+fn unknown_field(field: &str, type_name: &str) -> ExecError {
+    ExecError::InvalidParameterValueMessage(format!(
+        "unit \"{field}\" not recognized for type {type_name}"
+    ))
+}
+
+/// The type an `extract` diagnostic names, for the six source types the
+/// function accepts. `None` for anything else, which `PostgreSQL` turns away
+/// during function resolution and never reports as a unit failure.
+fn extract_type_name(source: &Datum) -> Option<&'static str> {
+    match source {
+        Datum::Date(_)
+        | Datum::Time(_)
+        | Datum::Timetz(_)
+        | Datum::Timestamp(_)
+        | Datum::Timestamptz(_)
+        | Datum::Interval(_) => source.column_type().map(ColumnType::name),
+        _ => None,
+    }
+}
+
+/// The type a `date_trunc` diagnostic names.
+///
+/// `PostgreSQL` has no `date_trunc(text, date)`: a `date` argument is coerced
+/// to `timestamptz` before the call, so a `date` reports the type it was
+/// coerced to and never its own.
+fn date_trunc_type_name(source: &Datum) -> Option<&'static str> {
+    match source {
+        Datum::Date(_) => Some(ColumnType::Timestamptz.name()),
+        Datum::Timestamp(_) | Datum::Timestamptz(_) | Datum::Interval(_) => {
+            source.column_type().map(ColumnType::name)
+        }
+        _ => None,
+    }
 }
 
 /// century containing AD year `y` (PG: 2000 is in century 20, 2001 starts century 21).
@@ -945,10 +986,14 @@ fn date_trunc(
             // A non-finite timestamp truncates to itself, but the unit is still
             // validated first.
             if crabka_pgtypes::datetime::timestamp_is_infinite(*dt) {
-                trunc_datetime(unit, DateTime::default())?;
+                trunc_datetime(unit, ColumnType::Timestamp.name(), DateTime::default())?;
                 return Ok(Datum::Timestamp(*dt));
             }
-            Ok(Datum::Timestamp(trunc_datetime(unit, *dt)?))
+            Ok(Datum::Timestamp(trunc_datetime(
+                unit,
+                ColumnType::Timestamp.name(),
+                *dt,
+            )?))
         }
         // PostgreSQL has no `date_trunc(text, date)`: the date is coerced to
         // `timestamptz`, so the result carries the session zone.
@@ -965,7 +1010,7 @@ fn date_trunc(
         ),
         Datum::Timestamptz(ts) => {
             if crabka_pgtypes::datetime::timestamptz_is_infinite(*ts) {
-                trunc_datetime(unit, DateTime::default())?;
+                trunc_datetime(unit, ColumnType::Timestamptz.name(), DateTime::default())?;
                 return Ok(Datum::Timestamptz(*ts));
             }
             let tz = zone.unwrap_or(session_tz);
@@ -973,7 +1018,7 @@ fn date_trunc(
             // the timeline.
             let offset = tz.to_offset(*ts);
             let dt = tz.to_datetime(*ts);
-            let truncated = trunc_datetime(unit, dt)?;
+            let truncated = trunc_datetime(unit, ColumnType::Timestamptz.name(), dt)?;
             let instant = if unit_redoes_zone(unit) {
                 // Truncating to a day or coarser moves the reading far enough
                 // that its offset has to be worked out afresh, and the midnight
@@ -1008,8 +1053,10 @@ fn unit_redoes_zone(unit: &str) -> bool {
     )
 }
 
-/// Zero out every field below `unit` in a civil datetime.
-fn trunc_datetime(unit: &str, dt: DateTime) -> Result<DateTime, ExecError> {
+/// Zero out every field below `unit` in a civil datetime. `type_name` is the
+/// source type the caller reports, since the same civil datetime stands in for
+/// a `timestamp` and for a `timestamptz` rendered in its zone.
+fn trunc_datetime(unit: &str, type_name: &str, dt: DateTime) -> Result<DateTime, ExecError> {
     let d = dt.date();
     let (y, m, day) = (d.year(), d.month(), d.day());
     let t = dt.time();
@@ -1051,7 +1098,7 @@ fn trunc_datetime(unit: &str, dt: DateTime) -> Result<DateTime, ExecError> {
             let my = ((millennium_of(i64::from(y)) - 1) * 1000 + 1) as i16;
             mk(my, 1, 1, 0, 0, 0)?
         }
-        _ => return Err(unsupported_field(unit, "timestamp without time zone")),
+        _ => return Err(unsupported_field(unit, type_name)),
     })
 }
 
@@ -1118,7 +1165,16 @@ fn trunc_interval(unit: &str, iv: Interval) -> Result<Interval, ExecError> {
             days: 0,
             micros: 0,
         },
-        _ => return Err(unknown_field(unit)),
+        // `week` is the one unit PostgreSQL refuses for `interval` with an
+        // explanation: months are stored apart from days, and a month is not a
+        // whole number of weeks, so there is no week boundary to truncate to.
+        "week" => {
+            return Err(ExecError::UnsupportedWithDetail {
+                message: format!("unit \"{unit}\" not supported for type interval"),
+                detail: "Months usually have fractional weeks.".into(),
+            });
+        }
+        _ => return Err(unsupported_field(unit, "interval")),
     })
 }
 

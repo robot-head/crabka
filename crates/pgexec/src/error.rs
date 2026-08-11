@@ -46,6 +46,14 @@ pub enum ExecError {
     DuplicateAlias(String),
     /// In-grammar but unimplemented (0A000), for example $1 parameters.
     Unsupported(String),
+    /// The same condition as [`ExecError::Unsupported`] where `PostgreSQL`
+    /// writes a DETAIL line beside the message. `date_trunc('week', interval)`
+    /// is one: the unit is refused, and the DETAIL says why a month has no
+    /// whole number of weeks.
+    UnsupportedWithDetail {
+        message: String,
+        detail: String,
+    },
     /// Wrong type in a context that demands a specific one (42804), for example
     /// a non-boolean WHERE.
     TypeMismatch(String),
@@ -275,6 +283,12 @@ pub enum ExecError {
     /// (22023), for example an unknown time-zone name, or a non-default
     /// `datestyle`.
     InvalidParameterValue(String),
+    /// The same 22023 with the message written in full rather than wrapped in
+    /// the `SET`/`RESET` sentence [`ExecError::InvalidParameterValue`] adds.
+    /// `PostgreSQL` raises this SQLSTATE well outside the configuration
+    /// family — `EXTRACT`'s unrecognised unit names the unit and the source
+    /// type, and nothing else.
+    InvalidParameterValueMessage(String),
     /// SP37: a `SET`/`SHOW`/`RESET` named a configuration parameter that does not
     /// exist (42704).
     UnrecognizedParameter(String),
@@ -1033,6 +1047,9 @@ impl ExecError {
                 format!("table name \"{t}\" specified more than once"),
             ),
             ExecError::Unsupported(m) => PgError::error("0A000", m),
+            ExecError::UnsupportedWithDetail { message, detail } => {
+                PgError::error("0A000", message).with_detail(detail)
+            }
             ExecError::TypeMismatch(m) => PgError::error("42804", m),
             ExecError::NotNullViolation { column, table } => PgError::error(
                 "23502",
@@ -1202,6 +1219,7 @@ impl ExecError {
             ExecError::InvalidParameterValue(v) => {
                 PgError::error("22023", format!("invalid value for parameter: \"{v}\""))
             }
+            ExecError::InvalidParameterValueMessage(m) => PgError::error("22023", m),
             ExecError::UnrecognizedParameter(n) => PgError::error(
                 "42704",
                 format!("unrecognized configuration parameter \"{n}\""),
