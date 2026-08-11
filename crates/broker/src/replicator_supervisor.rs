@@ -627,12 +627,16 @@ impl ReplicatorSupervisor {
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
         let wal_placements = desired_wal_placements(image, self.diskless_wal_local_replica_count);
         for (shard, voters) in &wal_placements {
-            if voters.len() < self.diskless_wal_local_replica_count {
+            let shortfall = self
+                .diskless_wal_local_replica_count
+                .saturating_sub(voters.len());
+            if let Some(shortfall) = std::num::NonZeroUsize::new(shortfall) {
                 warn!(
                     topic_id = %shard.topic_id,
                     partition = shard.partition.0,
                     available = voters.len(),
                     required = self.diskless_wal_local_replica_count,
+                    shortfall = shortfall.get(),
                     "diskless WAL placement lacks enough distinct-rack registered brokers"
                 );
             }
