@@ -508,6 +508,9 @@ impl Log {
 
     fn rebuild_pending_stamp_ranges(&mut self) -> Result<(), LogError> {
         self.pending_stamp_ranges.clear();
+        if self.pending.is_empty() {
+            return Ok(());
+        }
         let mut next = self.log_start_offset();
         let end = self.log_end_offset();
         while next < end {
@@ -1868,7 +1871,9 @@ impl Log {
             });
         }
 
-        producer_snapshot::remove_after(&self.dir, offset)?;
+        if !self.segments.is_empty() {
+            producer_snapshot::remove_after(&self.dir, offset)?;
+        }
 
         // Drop sealed segments whose base_offset >= offset.
         while let Some(last_sealed) = self.segments.last() {
@@ -1943,7 +1948,9 @@ impl Log {
                 index.truncate_from(offset)?;
             }
         }
-        self.rebuild_producer_and_transaction_state()?;
+        if !self.producer_state.is_empty() {
+            self.rebuild_producer_and_transaction_state()?;
+        }
         // After truncation, LSO can't exceed log_end_offset.
         self.lso = self.lso.min(self.log_end_offset());
         // Drop leader-epoch checkpoint entries for the truncated-away tail so
@@ -3057,6 +3064,89 @@ mod tests {
         log.truncate_to(Offset(3)).unwrap();
         // First batch (offsets 0..=2) survives; last_offset == 2, end == 3.
         assert2::assert!(log.log_end_offset() == 3);
+    }
+
+    #[test]
+    fn truncate_to_rebuilds_producer_state_from_surviving_batches() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        let mut first = sample_batch(2);
+        first.producer_id = 42;
+        first.producer_epoch = 3;
+        first.base_sequence = 7;
+        first.max_timestamp = 100;
+        log.append(&mut first).unwrap();
+        let mut discarded = sample_batch(2);
+        discarded.producer_id = 42;
+        discarded.producer_epoch = 3;
+        discarded.base_sequence = 9;
+        discarded.max_timestamp = 200;
+        log.append(&mut discarded).unwrap();
+        let mut later = sample_batch(2);
+        later.producer_id = 42;
+        later.producer_epoch = 3;
+        later.base_sequence = 11;
+        later.max_timestamp = 300;
+        log.append(&mut later).unwrap();
+
+        log.truncate_to(Offset(2)).unwrap();
+
+        assert2::assert!(
+            log.producer_state_snapshot()
+                == vec![ProducerSnapshotEntry {
+                    producer_id: ProducerId(42),
+                    producer_epoch: 3,
+                    last_sequence: 8,
+                    last_offset: Offset(1),
+                    offset_delta: 1,
+                    timestamp: 100,
+                    coordinator_epoch: -1,
+                    current_txn_first_offset: None,
+                }]
+        );
+        assert2::assert!(
+            producer_snapshot::list(dir.path())
+                .unwrap()
+                .into_iter()
+                .map(|(offset, _)| offset)
+                .collect::<Vec<_>>()
+                == vec![Offset(2)]
+        );
+    }
+
+    #[test]
+    fn truncate_to_removes_future_empty_producer_snapshots() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..3 {
+            log.append(&mut sample_batch(2)).unwrap();
+        }
+        assert2::assert!(log.producer_state.is_empty());
+
+        log.truncate_to(Offset(2)).unwrap();
+
+        assert2::assert!(
+            producer_snapshot::list(dir.path())
+                .unwrap()
+                .into_iter()
+                .map(|(offset, _)| offset)
+                .collect::<Vec<_>>()
+                == vec![Offset(2)]
+        );
     }
 
     #[test]
