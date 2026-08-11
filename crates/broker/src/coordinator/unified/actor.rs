@@ -4826,15 +4826,11 @@ mod tests {
         check!(result.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
         check!(result.members.is_empty());
 
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        check!(
-            handle
-                .tx
-                .send(GroupActorMessage::InspectAny { reply: tx })
-                .await
-                .is_err(),
-            "a consumer-kind log failure must stop the actor"
-        );
+        await_until("consumer-kind log failure stops the actor", || {
+            handle.tx.is_closed()
+        })
+        .await;
+        check!(handle.tx.is_closed());
     }
 
     /// Scenario 2: KIP-345 static identity must survive both flips. A classic

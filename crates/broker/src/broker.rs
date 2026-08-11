@@ -543,6 +543,10 @@ async fn recover_storage_and_groups(
                     startup_image.partition_next_offset(&topic, partition_id),
                 )
                 .await?;
+            } else {
+                producer_state
+                    .rebuild_from_log(&topic, PartitionIndex(partition_id), &log)
+                    .await?;
             }
             let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
                 topic: topic.clone(),

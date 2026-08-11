@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use crabka_ids::{Offset, PartitionIndex};
 use crabka_log::{Log, LogConfig};
-use crabka_protocol::records::RecordBatch;
-use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 use crate::{error::BrokerError, producer_state::ProducerState};
 
@@ -47,46 +45,17 @@ pub(crate) async fn rebuild_producer_state(
     log: &Log,
     producer_state: &Arc<ProducerState>,
 ) -> Result<(), BrokerError> {
-    // The rebuild replays every batch in the log, so the read is uncapped.
-    let raw = log
-        .read_raw(
-            log.log_start_offset(),
-            log.log_end_offset(),
-            ByteSize::from_bytes(u64::MAX),
-        )
-        .map_err(BrokerError::from)?;
-    let mut cur: &[u8] = &raw.bytes;
-    while !cur.is_empty() {
-        let before = cur.len();
-        let batch = RecordBatch::decode(&mut cur).map_err(|error| {
-            BrokerError::Txn(format!("diskless producer-state rebuild: {error}"))
-        })?;
-        if cur.len() == before {
-            return Err(BrokerError::Txn(
-                "diskless producer-state rebuild made no progress".into(),
-            ));
-        }
-        if batch.producer_id < 0 {
-            continue;
-        }
-        producer_state
-            .commit(
-                topic,
-                partition,
-                (batch.producer_id, batch.producer_epoch),
-                (batch.base_sequence, batch.last_offset_delta),
-                (batch.base_offset, batch.max_timestamp),
-            )
-            .await;
-    }
-    Ok(())
+    producer_state
+        .rebuild_from_log(topic, partition, log)
+        .await
+        .map_err(BrokerError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
     use bytes::Bytes;
-    use crabka_protocol::records::{Attributes, Record};
+    use crabka_protocol::records::{Attributes, Record, RecordBatch};
     use tempfile::tempdir;
 
     use super::*;
@@ -139,6 +108,82 @@ mod tests {
         assert!(
             producer_state
                 .check("orders", PartitionIndex(0), 42, 3, 2, 1)
+                .await
+                == Decision::Append
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_rebuild_ignores_transaction_control_markers() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        log.append(&mut idempotent_batch(0, 0, 2)).unwrap();
+        let mut marker = crate::txn::marker::build_marker_batch(
+            crabka_log::ProducerId(42),
+            3,
+            Offset(2),
+            crate::txn::marker::MarkerType::Commit,
+            0,
+        );
+        marker.base_sequence = 0;
+        log.append(&mut marker).unwrap();
+        let producer_state = Arc::new(ProducerState::new());
+
+        rebuild_producer_state("orders", PartitionIndex(0), &log, &producer_state)
+            .await
+            .unwrap();
+
+        assert!(
+            producer_state
+                .check("orders", PartitionIndex(0), 42, 3, 0, 2)
+                .await
+                == Decision::Duplicate { base_offset: 0 }
+        );
+        assert!(
+            producer_state
+                .check("orders", PartitionIndex(0), 42, 3, 2, 1)
+                .await
+                == Decision::Append
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_rebuild_ignores_invalid_producer_identity_and_sequence() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+
+        let mut producer_zero = idempotent_batch(0, 0, 1);
+        producer_zero.producer_id = 0;
+        log.append(&mut producer_zero).unwrap();
+
+        let mut invalid_id = idempotent_batch(1, 5, 1);
+        invalid_id.producer_id = -1;
+        log.append(&mut invalid_id).unwrap();
+
+        let mut invalid_sequence = idempotent_batch(2, -1, 1);
+        invalid_sequence.producer_id = 43;
+        log.append(&mut invalid_sequence).unwrap();
+
+        let producer_state = Arc::new(ProducerState::new());
+        rebuild_producer_state("orders", PartitionIndex(0), &log, &producer_state)
+            .await
+            .unwrap();
+
+        assert!(
+            producer_state
+                .check("orders", PartitionIndex(0), 0, 3, 0, 1)
+                .await
+                == Decision::Duplicate { base_offset: 0 }
+        );
+        assert!(
+            producer_state
+                .check("orders", PartitionIndex(0), -1, 3, 5, 1)
+                .await
+                == Decision::Append
+        );
+        assert!(
+            producer_state
+                .check("orders", PartitionIndex(0), 43, 3, -1, 1)
                 .await
                 == Decision::Append
         );
