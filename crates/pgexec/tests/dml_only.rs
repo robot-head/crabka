@@ -175,19 +175,44 @@ async fn the_command_tag_counts_the_whole_tree() {
     }
 }
 
-/// `only` is still an ordinary identifier when no name follows it, so a table
-/// actually called `only` remains reachable.
+/// A table called `only` is reachable, and quoting is how: `ONLY` is a
+/// `reserved_keyword`, so the bare word is always the modifier and never a name.
+///
+/// `PostgreSQL` 18.4 refuses every bare spelling below, and where it puts the
+/// caret says why: on the `UPDATE` it points at the `=` rather than at `only`,
+/// because it read the modifier and then wanted the relation that never came.
+/// This parser used to read a lone `only` as a relation of that name, which is
+/// the same under-refusal as `CREATE TABLE t (check int)` — a word reached a
+/// name position as a plain identifier and nothing asked whether `PostgreSQL`
+/// reserves it.
 #[tokio::test]
-async fn a_table_called_only_is_still_reachable() {
+async fn a_table_called_only_needs_its_quotes() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
-    run(&mut session, "CREATE TABLE only (id int4)").await;
-    run(&mut session, "INSERT INTO only VALUES (1)").await;
-    run(&mut session, "UPDATE only SET id = 2").await;
-    assert!(query(&mut session, "SELECT id FROM only").await == rows(&["2"]));
-    run(&mut session, "DELETE FROM only").await;
-    assert!(query(&mut session, "SELECT id FROM only").await == rows(&[]));
-    run(&mut session, "TRUNCATE only").await;
+
+    for sql in [
+        "CREATE TABLE only (id int4)",
+        "INSERT INTO only VALUES (1)",
+        "UPDATE only SET id = 2",
+        "SELECT id FROM only",
+        "DELETE FROM only",
+        "TRUNCATE only",
+    ] {
+        let error = outcome(&mut session, sql)
+            .await
+            .expect_err("`only` is reserved, so it is not a name");
+        assert!(error.code == "42601", "{sql} reported {}", error.code);
+    }
+
+    // Quoted, the same six statements are the ones 18.4 accepts, and the table
+    // round-trips through all of them.
+    run(&mut session, r#"CREATE TABLE "only" (id int4)"#).await;
+    run(&mut session, r#"INSERT INTO "only" VALUES (1)"#).await;
+    run(&mut session, r#"UPDATE "only" SET id = 2"#).await;
+    assert!(query(&mut session, r#"SELECT id FROM "only""#).await == rows(&["2"]));
+    run(&mut session, r#"DELETE FROM "only""#).await;
+    assert!(query(&mut session, r#"SELECT id FROM "only""#).await == rows(&[]));
+    run(&mut session, r#"TRUNCATE "only""#).await;
 }
 
 // ── A partitioned parent ─────────────────────────────────────────────────────

@@ -183,10 +183,16 @@ fn the_marker_words_stay_ordinary_identifiers() {
     assert!(references.columns == columns(&["period"]));
     assert!(!references.period);
 
+    // `period` and `without` are unreserved, so both stay ordinary names.
     for sql in [
-        "CREATE TABLE t (without int4range, overlaps daterange, PRIMARY KEY (without, overlaps))",
+        "CREATE TABLE t (without int4range, PRIMARY KEY (without))",
         "CREATE TABLE t (period text, without text)",
     ] {
         assert!(parse(sql).is_ok(), "{sql}");
     }
+
+    // `overlaps` is not one of them: PostgreSQL classifies it
+    // `type_func_name_keyword`, so 18.4 answers
+    // `syntax error at or near "overlaps"` for a column of that name.
+    assert!(parse("CREATE TABLE t (overlaps daterange)").is_err());
 }
