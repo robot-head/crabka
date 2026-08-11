@@ -71,7 +71,7 @@ impl ClientMetricsCollector {
 
     /// The count of points that are not stale. This method also removes the
     /// stale entries in place.
-    #[allow(dead_code)] // diagnostic helper; used in tests and future scrape-metrics endpoint
+    #[cfg(test)]
     pub(crate) fn live_point_count(&self) -> usize {
         let now = Instant::now();
         let mut guard = self.points.lock().expect("prom sink mutex poisoned");

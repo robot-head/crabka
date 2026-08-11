@@ -514,7 +514,13 @@ pub async fn write_fetch_plan<S>(stream: &mut S, ops: Vec<WriteOp>) -> Result<()
 where
     S: AsyncWrite + SendfileSink + Unpin,
 {
-    for op in ops {
+    let mut ops = ops.into_iter();
+    let first = ops.next().ok_or_else(|| {
+        BrokerError::Io(std::io::Error::other(
+            "fetch handler produced an empty write plan",
+        ))
+    })?;
+    for op in std::iter::once(first).chain(ops) {
         match op {
             WriteOp::Inline(b) => {
                 stream.write_all(&b).await.map_err(BrokerError::Io)?;
@@ -821,6 +827,23 @@ mod tests {
     use super::*;
 
     const DEFAULT_MAX_FRAME_BYTES: usize = 100 * 1024 * 1024;
+
+    #[tokio::test]
+    async fn writer_rejects_an_empty_fetch_plan() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connect = tokio::spawn(tokio::net::TcpStream::connect(
+            listener.local_addr().unwrap(),
+        ));
+        let (mut server, _) = listener.accept().await.unwrap();
+        let client = connect.await.unwrap().unwrap();
+
+        let error = write_fetch_plan(&mut server, Vec::new())
+            .await
+            .expect_err("empty plans cannot form a Kafka response frame");
+
+        assert!(error.to_string().contains("empty write plan"));
+        drop(client);
+    }
 
     fn raw_batch(base: i64) -> Bytes {
         let rb = RecordBatch {

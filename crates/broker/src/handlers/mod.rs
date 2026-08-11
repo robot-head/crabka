@@ -7,8 +7,6 @@
 //! return the encoded bytes. The bytes are ready to send after
 //! `network::dispatch` prepends the response header.
 
-#![allow(dead_code)] // handler modules are registered as each API is enabled.
-
 /// Raw wire `api_key` (i16) that selects the RPC.
 ///
 /// This is the numeric form of a [`crabka_protocol::api_key::ApiKey`] variant.
@@ -34,9 +32,7 @@ pub(crate) mod context;
 pub(crate) use context::{RequestContext, TelemetryContext};
 
 pub(crate) mod registry;
-pub(crate) use registry::DispatchRegistry;
-#[allow(unused_imports)] // Staged for later dispatch-registry handler families.
-pub(crate) use registry::{DispatchEntry, DispatchKind, PlainHandler, RequestQuotaPolicy};
+pub(crate) use registry::{DispatchEntry, DispatchKind, DispatchRegistry, RequestQuotaPolicy};
 
 pub(crate) fn encode_response<R: Encode>(
     resp: &R,
@@ -192,10 +188,8 @@ pub(crate) mod fetch_downconvert;
 pub(crate) mod fetch_snapshot;
 pub(crate) mod find_coordinator;
 pub(crate) mod get_replica_log_info;
-// KIP-714 client telemetry. Pair of no-op handlers — `get` advertises
-// "no metrics subscribed" so well-behaved clients skip `push` entirely;
-// `push` is wired defensively in case a client races the subscription
-// re-fetch.
+// KIP-714 client telemetry. `get` assigns configured subscriptions and `push`
+// validates, decodes, and exports OTLP metrics to the configured sinks.
 pub(crate) mod get_telemetry_subscriptions;
 pub(crate) mod heartbeat;
 pub(crate) mod incremental_alter_configs;
@@ -315,6 +309,7 @@ mod tests {
             principal: &principal,
             peer: &peer,
             client_id: "admin-client",
+            connection_id: "connection-a",
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };
@@ -402,6 +397,7 @@ mod tests {
             principal: &principal,
             peer: &peer,
             client_id: "client-a",
+            connection_id: "connection-a",
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };

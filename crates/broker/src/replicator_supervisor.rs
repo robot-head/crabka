@@ -38,6 +38,13 @@ use crate::{
 /// materialization, and dir-assignment reports on this pair.
 pub(crate) type TopicPartition = (String, i32);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WalFollowerSpec {
+    topic: String,
+    leader: NodeId,
+    leader_epoch: crabka_metadata::LeaderEpoch,
+}
+
 /// `(topic, partition)` pairs where `node_id` is in `replicas` AND
 /// `leader != node_id`. For each such pair the broker should run a follower
 /// replicator task. This is a single O(P) walk. It runs on every
@@ -63,6 +70,37 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
         .all_partitions()
         .filter(|p| p.replicas.contains(&node_id))
         .map(|p| (p.topic.clone(), p.partition))
+        .collect()
+}
+
+/// WAL voter placement for every diskless partition in one metadata image.
+/// The partition leader is first, then rack-distinct registered brokers are
+/// preferred by the placement policy.
+pub(crate) fn desired_wal_placements(
+    image: &MetadataImage,
+    voter_count: usize,
+) -> HashMap<crate::wal::quorum::registry::ShardId, Vec<NodeId>> {
+    let brokers = image.brokers().cloned().collect::<Vec<_>>();
+    image
+        .all_partitions()
+        .filter(|partition| {
+            crate::broker::diskless_topic_config(image.topic_config(&partition.topic))
+        })
+        .filter(|partition| image.broker(partition.leader).is_some())
+        .filter_map(|partition| {
+            let topic_id = image.topic(&partition.topic)?.topic_id;
+            Some((
+                crate::wal::quorum::registry::ShardId {
+                    topic_id,
+                    partition: PartitionIndex(partition.partition),
+                },
+                crate::wal::quorum::placement::select_voters(
+                    brokers.iter().cloned(),
+                    partition.leader,
+                    voter_count,
+                ),
+            ))
+        })
         .collect()
 }
 
@@ -287,6 +325,8 @@ pub(crate) struct ReplicatorSupervisor {
     /// spawn time. On reconcile, if the tuple changes, the supervisor
     /// cancels the task and respawns it against the new leader.
     task_targets: DashMap<TopicPartition, (NodeId, crabka_metadata::LeaderEpoch)>,
+    wal_tasks: DashMap<crate::wal::quorum::registry::ShardId, CancellationToken>,
+    wal_task_targets: DashMap<crate::wal::quorum::registry::ShardId, WalFollowerSpec>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
     /// KIP-932 share coordinator. Each reconcile refreshes its view of
@@ -423,6 +463,8 @@ impl ReplicatorSupervisor {
             client_id,
             tasks: DashMap::new(),
             task_targets: DashMap::new(),
+            wal_tasks: DashMap::new(),
+            wal_task_targets: DashMap::new(),
             shutdown,
             txn_coordinator,
             share_coordinator,
@@ -486,7 +528,125 @@ impl ReplicatorSupervisor {
         }
     }
 
+    fn desired_wal_followers(
+        &self,
+        image: &MetadataImage,
+        placements: &HashMap<crate::wal::quorum::registry::ShardId, Vec<NodeId>>,
+    ) -> HashMap<crate::wal::quorum::registry::ShardId, WalFollowerSpec> {
+        image
+            .all_partitions()
+            .filter(|partition| {
+                crate::broker::diskless_topic_config(image.topic_config(&partition.topic))
+            })
+            .filter_map(|partition| {
+                let topic = image.topic(&partition.topic)?;
+                let shard = crate::wal::quorum::registry::ShardId {
+                    topic_id: topic.topic_id,
+                    partition: PartitionIndex(partition.partition),
+                };
+                let voters = placements.get(&shard)?;
+                (voters.len() == self.diskless_wal_local_replica_count
+                    && voters.first() == Some(&partition.leader)
+                    && partition.leader != self.node_id
+                    && voters.contains(&self.node_id))
+                .then(|| {
+                    (
+                        shard,
+                        WalFollowerSpec {
+                            topic: partition.topic.clone(),
+                            leader: partition.leader,
+                            leader_epoch: partition.leader_epoch,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn reconcile_wal_followers(
+        &self,
+        image: &MetadataImage,
+        placements: &HashMap<crate::wal::quorum::registry::ShardId, Vec<NodeId>>,
+    ) {
+        let desired = self.desired_wal_followers(image, placements);
+        let current = self
+            .wal_tasks
+            .iter()
+            .map(|entry| *entry.key())
+            .collect::<Vec<_>>();
+        for shard in current {
+            let target_matches = match (desired.get(&shard), self.wal_task_targets.get(&shard)) {
+                (Some(desired), Some(current)) => desired == current.value(),
+                _ => false,
+            };
+            if target_matches {
+                continue;
+            }
+            let Some((_, token)) = self.wal_tasks.remove(&shard) else {
+                continue;
+            };
+            self.wal_task_targets.remove(&shard);
+            token.cancel();
+        }
+        for (shard, spec) in desired {
+            if self.wal_tasks.contains_key(&shard) {
+                continue;
+            }
+            let Some(broker) = image.broker(spec.leader) else {
+                warn!(
+                    topic = %spec.topic,
+                    partition = shard.partition.0,
+                    leader = spec.leader.0,
+                    "diskless WAL leader broker is not registered; deferring follower"
+                );
+                continue;
+            };
+            let (leader_host, leader_port) =
+                resolve_leader_endpoint(broker, &self.inter_broker_listener_name);
+            let token = CancellationToken::new();
+            self.wal_tasks.insert(shard, token.clone());
+            self.wal_task_targets.insert(shard, spec.clone());
+            tokio::spawn(crate::wal::quorum::follower::run(
+                crate::wal::quorum::follower::Config {
+                    node_id: self.node_id,
+                    topic: spec.topic,
+                    shard,
+                    leader_node_id: spec.leader,
+                    leader_epoch: spec.leader_epoch.0,
+                    leader_host,
+                    leader_port,
+                    log_dirs: self.log_dirs.clone(),
+                    storage: self.log_config.clone(),
+                    client_id: self.client_id.clone(),
+                    shutdown: token,
+                    inter_broker_client: self.inter_broker_client.clone(),
+                    inter_broker_listener_protocol: self.inter_broker_listener_protocol,
+                    inter_broker_server_name: self.inter_broker_server_name.clone(),
+                    replication: self.replication.clone(),
+                },
+            ));
+        }
+    }
+
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
+        let wal_placements = desired_wal_placements(image, self.diskless_wal_local_replica_count);
+        for (shard, voters) in &wal_placements {
+            let shortfall = self
+                .diskless_wal_local_replica_count
+                .saturating_sub(voters.len());
+            if let Some(shortfall) = std::num::NonZeroUsize::new(shortfall) {
+                warn!(
+                    topic_id = %shard.topic_id,
+                    partition = shard.partition.0,
+                    available = voters.len(),
+                    required = self.diskless_wal_local_replica_count,
+                    shortfall = shortfall.get(),
+                    "diskless WAL placement lacks enough distinct-rack registered brokers"
+                );
+            }
+        }
+        self.wal_shards.replace_placements(&wal_placements);
+
         let local_set = desired_local_set(self.node_id, image);
 
         // A DeleteTopics handler tears down its local partition immediately
@@ -497,12 +657,26 @@ impl ReplicatorSupervisor {
         // idempotently repaired on the next watch delivery.
         self.prune_deleted_topic_partitions(image);
 
+        // A reassignment can remove this broker from a live partition's
+        // replica set without deleting the topic. Stop and remove that local
+        // runtime before materializing the new desired set. Partitions that
+        // are absent from metadata are left alone here: startup recovery can
+        // discover an on-disk partition before its topic record arrives, and
+        // `prune_deleted_topic_partitions` handles known topic tombstones.
+        self.prune_unassigned_partitions(&local_set, image);
+
         // 0. Materialize the on-disk partition for every assignment where
         //    self is in `replicas`, regardless of leader/follower role.
         //    Additionally: sync the partition's cached leader + epoch
         //    (idempotent), and for partitions where self is leader,
         //    install the ISR into ReplicaState for HW computation.
         self.reconcile_local_partitions(&local_set, image).await;
+
+        // Start WAL followers only after reassignment pruning completes. A
+        // broker that just stopped hosting the ordinary partition deletes its
+        // old shard directory during pruning; starting first would race that
+        // deletion against the new follower log.
+        self.reconcile_wal_followers(image, &wal_placements);
 
         // Push topic-config overrides onto every locally-hosted partition.
         // Pushes are idempotent — sending the same `LogConfig` is a cheap
@@ -610,34 +784,70 @@ impl ReplicatorSupervisor {
             let obsolete = known_topic_ids
                 .iter()
                 .filter(|(name, id)| current_topic_ids.get(*name) != Some(*id))
-                .map(|(name, _)| name.clone())
-                .collect::<HashSet<_>>();
+                .map(|(name, id)| (name.clone(), *id))
+                .collect::<HashMap<_, _>>();
             *known_topic_ids = current_topic_ids;
             obsolete
         };
         for partition in self.partitions.arcs() {
-            if !obsolete_topics.contains(&partition.topic) {
-                continue;
-            }
-            let topic = partition.topic.clone();
-            let index = partition.index;
-            let Some(removed) = self.partitions.remove(&topic, index) else {
+            let Some(&topic_id) = obsolete_topics.get(&partition.topic) else {
                 continue;
             };
-            self.reported_dirs.remove(&(topic.clone(), index.get()));
-            let owning_dir = removed.log_dir.load_full();
-            let partition_dir = crate::log_dir::partition_dir(&owning_dir, &topic, index.get());
-            if let Err(error) = std::fs::remove_dir_all(&partition_dir)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                warn!(
-                    topic = %topic,
-                    partition = index.get(),
-                    path = %partition_dir.display(),
-                    error = %error,
-                    "failed to prune deleted topic partition directory"
-                );
+            self.prune_partition(&partition, topic_id);
+        }
+    }
+
+    fn prune_unassigned_partitions(
+        &self,
+        local_set: &HashSet<TopicPartition>,
+        image: &MetadataImage,
+    ) {
+        for partition in self.partitions.arcs() {
+            let key = (partition.topic.clone(), partition.index.get());
+            let Some(topic_id) = image.topic(&key.0).map(|topic| topic.topic_id) else {
+                continue;
+            };
+            if image.partition(&key.0, key.1).is_none() || local_set.contains(&key) {
+                continue;
             }
+            self.prune_partition(&partition, topic_id);
+        }
+    }
+
+    fn prune_partition(&self, partition: &crate::partition::Partition, topic_id: uuid::Uuid) {
+        let topic = &partition.topic;
+        let index = partition.index;
+        let Some(removed) = self.partitions.remove(topic, index) else {
+            return;
+        };
+        if let Some(writer) = removed.take_writer_handle() {
+            writer.abort();
+        }
+        self.reported_dirs.remove(&(topic.clone(), index.get()));
+        let owning_dir = removed.log_dir.load_full();
+        if let Err(error) = crate::wal::quorum::remove_shard(
+            self.wal_shards.as_ref(),
+            &owning_dir,
+            topic,
+            topic_id,
+            index,
+        ) {
+            warn!(
+                topic = %topic,
+                partition = index.get(),
+                error = %error,
+                "failed to prune WAL shard"
+            );
+        }
+        let partition_dir = crate::log_dir::partition_dir(&owning_dir, topic, index.get());
+        if let Err(error) = remove_partition_dir(&partition_dir) {
+            warn!(
+                topic = %topic,
+                partition = index.get(),
+                path = %partition_dir.display(),
+                error = %error,
+                "failed to prune partition directory"
+            );
         }
     }
 
@@ -676,12 +886,6 @@ impl ReplicatorSupervisor {
                 // up toward ISR re-admission.
                 part.install_isr(&part_record.isr, &part_record.replicas, part_record.leader)
                     .await;
-                if part.diskless
-                    && let Some(next_offset) = image.partition_next_offset(&key.0, key.1)
-                {
-                    part.install_diskless_durable_hw(crabka_ids::Offset(next_offset))
-                        .await;
-                }
             }
         }
     }
@@ -775,10 +979,20 @@ impl ReplicatorSupervisor {
         for entry in &self.tasks {
             entry.value().cancel();
         }
+        for entry in &self.wal_tasks {
+            entry.value().cancel();
+        }
     }
 
     pub(crate) fn spawn(self) -> JoinHandle<()> {
         tokio::spawn(self.run())
+    }
+}
+
+fn remove_partition_dir(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 
@@ -1070,7 +1284,9 @@ mod tests {
             metrics: crate::metrics::BrokerMetrics::default(),
             log_dir_ids: crate::log_dir_id::LogDirIds::resolve(&[dir.path().to_path_buf()]),
             hot_tail: Arc::new(crate::diskless::hot_tail::HotTailCache::default()),
-            wal_shards: Arc::new(crate::wal::quorum::registry::WalShardRegistry::new()),
+            wal_shards: Arc::new(crate::wal::quorum::registry::WalShardRegistry::new(
+                crabka_raft::NodeId(2),
+            )),
         });
         supervisor.assign_dirs_reporter = reporter.clone();
         (supervisor, partitions, reporter, dir)
@@ -1173,6 +1389,170 @@ mod tests {
                     ("c".to_string(), -1),
                 ])
         );
+    }
+
+    #[test]
+    fn desired_wal_placements_cover_only_diskless_topics_and_prefer_distinct_racks() {
+        use std::collections::BTreeMap;
+
+        let topic_id = Uuid::from_u128(17);
+        let mut overrides = BTreeMap::new();
+        overrides.insert("crabka.diskless".into(), "true".into());
+        let mut broker1 = broker_record(NodeId(1));
+        broker1.rack = Some("a".into());
+        let mut broker2 = broker_record(NodeId(2));
+        broker2.rack = Some("b".into());
+        let mut broker3 = broker_record(NodeId(3));
+        broker3.rack = Some("c".into());
+        let mut broker4 = broker_record(NodeId(4));
+        broker4.rack = Some("a".into());
+        let image = image_with(&[
+            MetadataRecord::V1BrokerRegistration(broker4),
+            MetadataRecord::V1BrokerRegistration(broker2),
+            MetadataRecord::V1BrokerRegistration(broker1),
+            MetadataRecord::V1BrokerRegistration(broker3),
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "diskless".into(),
+                topic_id,
+                partitions: 1,
+                replication_factor: 3,
+            }),
+            partition_record(
+                "diskless",
+                0,
+                NodeId(2),
+                vec![NodeId(1), NodeId(2), NodeId(3)],
+                0,
+            ),
+            MetadataRecord::V1TopicConfig(crabka_metadata::TopicConfigRecord {
+                topic: "diskless".into(),
+                overrides,
+            }),
+            topic_record("classic", 1),
+            partition_record("classic", 0, NodeId(1), vec![NodeId(1)], 0),
+        ]);
+
+        let placements = desired_wal_placements(&image, 3);
+
+        assert!(placements.len() == 1);
+        assert!(
+            placements.get(&crate::wal::quorum::registry::ShardId {
+                topic_id,
+                partition: PartitionIndex(0),
+            }) == Some(&vec![NodeId(2), NodeId(1), NodeId(3)])
+        );
+    }
+
+    #[test]
+    fn desired_wal_followers_include_only_complete_nonleader_placements() {
+        use std::collections::BTreeMap;
+
+        let topic_id = Uuid::from_u128(18);
+        let mut overrides = BTreeMap::new();
+        overrides.insert("crabka.diskless".into(), "true".into());
+        let image = image_with(&[
+            MetadataRecord::V1BrokerRegistration(broker_record(NodeId(1))),
+            MetadataRecord::V1BrokerRegistration(broker_record(NodeId(2))),
+            MetadataRecord::V1BrokerRegistration(broker_record(NodeId(3))),
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "diskless".into(),
+                topic_id,
+                partitions: 1,
+                replication_factor: 1,
+            }),
+            partition_record("diskless", 0, NodeId(1), vec![NodeId(1)], 7),
+            MetadataRecord::V1TopicConfig(crabka_metadata::TopicConfigRecord {
+                topic: "diskless".into(),
+                overrides,
+            }),
+        ]);
+        let (supervisor, _, _, _) = supervisor_fixture(image.clone());
+        let shard = crate::wal::quorum::registry::ShardId {
+            topic_id,
+            partition: PartitionIndex(0),
+        };
+        let complete = HashMap::from([(shard, vec![NodeId(1), NodeId(2), NodeId(3)])]);
+
+        let desired = supervisor.desired_wal_followers(&image, &complete);
+
+        assert!(
+            desired.get(&shard)
+                == Some(&WalFollowerSpec {
+                    topic: "diskless".into(),
+                    leader: NodeId(1),
+                    leader_epoch: crabka_metadata::LeaderEpoch(7),
+                })
+        );
+        let short = HashMap::from([(shard, vec![NodeId(1), NodeId(2)])]);
+        assert!(supervisor.desired_wal_followers(&image, &short).is_empty());
+    }
+
+    #[test]
+    fn reconcile_wal_followers_retains_only_the_current_target() {
+        use std::collections::BTreeMap;
+
+        let topic_id = Uuid::from_u128(19);
+        let image_at_epoch = |leader_epoch| {
+            let mut overrides = BTreeMap::new();
+            overrides.insert("crabka.diskless".into(), "true".into());
+            image_with(&[
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "diskless".into(),
+                    topic_id,
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                partition_record("diskless", 0, NodeId(1), vec![NodeId(1)], leader_epoch),
+                MetadataRecord::V1TopicConfig(crabka_metadata::TopicConfigRecord {
+                    topic: "diskless".into(),
+                    overrides,
+                }),
+            ])
+        };
+        let image = image_at_epoch(7);
+        let (supervisor, _, _, _) = supervisor_fixture(image.clone());
+        let shard = crate::wal::quorum::registry::ShardId {
+            topic_id,
+            partition: PartitionIndex(0),
+        };
+        let placements = HashMap::from([(shard, vec![NodeId(1), NodeId(2), NodeId(3)])]);
+        let target = WalFollowerSpec {
+            topic: "diskless".into(),
+            leader: NodeId(1),
+            leader_epoch: crabka_metadata::LeaderEpoch(7),
+        };
+        let current = CancellationToken::new();
+        supervisor.wal_tasks.insert(shard, current.clone());
+        supervisor.wal_task_targets.insert(shard, target);
+
+        supervisor.reconcile_wal_followers(&image, &placements);
+
+        assert!(!current.is_cancelled());
+        assert!(supervisor.wal_tasks.contains_key(&shard));
+        assert!(supervisor.wal_task_targets.contains_key(&shard));
+
+        supervisor.reconcile_wal_followers(&image_at_epoch(8), &placements);
+
+        assert!(current.is_cancelled());
+        assert!(!supervisor.wal_tasks.contains_key(&shard));
+        assert!(!supervisor.wal_task_targets.contains_key(&shard));
+
+        let removed = CancellationToken::new();
+        supervisor.wal_tasks.insert(shard, removed.clone());
+        supervisor.wal_task_targets.insert(
+            shard,
+            WalFollowerSpec {
+                topic: "diskless".into(),
+                leader: NodeId(1),
+                leader_epoch: crabka_metadata::LeaderEpoch(8),
+            },
+        );
+
+        supervisor.reconcile_wal_followers(&MetadataImage::new(Uuid::nil()), &HashMap::new());
+
+        assert!(removed.is_cancelled());
+        assert!(!supervisor.wal_tasks.contains_key(&shard));
+        assert!(!supervisor.wal_task_targets.contains_key(&shard));
     }
 
     #[tokio::test]
@@ -1288,7 +1668,9 @@ mod tests {
         let partitions = Arc::new(PartitionRegistry::new());
         let topic_id = uuid::Uuid::from_u128(0xD15C);
         let hot_tail = Arc::new(crate::diskless::hot_tail::HotTailCache::default());
-        let wal_shards = Arc::new(crate::wal::quorum::registry::WalShardRegistry::new());
+        let wal_shards = Arc::new(crate::wal::quorum::registry::WalShardRegistry::new(
+            crabka_raft::NodeId(0),
+        ));
 
         materialize_partition(MaterializePartitionConfig {
             partitions: &partitions,
@@ -1469,6 +1851,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_does_not_treat_reserved_diskless_offset_as_durable() {
+        use std::collections::BTreeMap;
+
+        use crabka_metadata::PartitionOffsetAdvanceRecord;
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("crabka.diskless".into(), "true".into());
+        let img = image_with(&[
+            topic_record("diskless", 1),
+            partition_record("diskless", 0, NodeId(2), vec![NodeId(2)], 0),
+            MetadataRecord::V1TopicConfig(crabka_metadata::TopicConfigRecord {
+                topic: "diskless".into(),
+                overrides,
+            }),
+            MetadataRecord::V1PartitionOffsetAdvance(PartitionOffsetAdvanceRecord {
+                topic: "diskless".into(),
+                partition: 0,
+                count: 7,
+            }),
+        ]);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
+
+        supervisor.reconcile(&img).await;
+
+        let partition = partitions
+            .get("diskless", PartitionIndex(0))
+            .expect("diskless leader materialized");
+        assert!(partition.high_watermark().await == crabka_log::Offset(0));
+    }
+
+    #[tokio::test]
     async fn reconcile_materializes_follower_but_does_not_install_isr() {
         let img = image_with(&[
             topic_record("t", 1),
@@ -1527,8 +1940,29 @@ mod tests {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let deleted_topic_id = active.topic("deleted").expect("deleted topic").topic_id;
+        let deleted_shard = crate::wal::quorum::registry::ShardId {
+            topic_id: deleted_topic_id,
+            partition: PartitionIndex(0),
+        };
+        supervisor.wal_shards.insert(
+            deleted_shard,
+            Arc::new(crate::wal::quorum::engine::WalShardEngine::for_logs(
+                std::collections::BTreeMap::from([(NodeId(2), original["deleted"].log.clone())]),
+            )),
+        );
+        let deleted_wal_dir = crate::wal::quorum::shard_dir(
+            dir.path(),
+            "deleted",
+            Some(deleted_topic_id),
+            PartitionIndex(0),
+        );
+        std::fs::create_dir_all(&deleted_wal_dir).expect("deleted WAL shard directory");
 
         supervisor.reconcile(&after_delete).await;
+
+        assert!(supervisor.wal_shards.get(deleted_shard).is_none());
+        assert!(!deleted_wal_dir.exists());
 
         let actual = ["deleted", "live", "recreated", "startup-only"]
             .into_iter()
@@ -1568,6 +2002,78 @@ mod tests {
             },
         ];
         assert!(actual == expected);
+    }
+
+    #[tokio::test]
+    async fn reconcile_prunes_partition_after_local_replica_is_reassigned() {
+        let topic = topic_record("moved", 1);
+        let assigned = image_with(&[
+            topic.clone(),
+            partition_record("moved", 0, NodeId(2), vec![NodeId(2)], 0),
+        ]);
+        let reassigned = image_with(&[
+            topic,
+            partition_record("moved", 0, NodeId(1), vec![NodeId(1)], 1),
+        ]);
+        let (supervisor, partitions, _reporter, dir) = supervisor_fixture(assigned.clone());
+        supervisor.reconcile(&assigned).await;
+
+        let original = partitions
+            .get("moved", PartitionIndex(0))
+            .expect("assigned partition");
+        let topic_id = assigned.topic("moved").expect("topic").topic_id;
+        let shard = crate::wal::quorum::registry::ShardId {
+            topic_id,
+            partition: PartitionIndex(0),
+        };
+        supervisor.wal_shards.insert(
+            shard,
+            Arc::new(crate::wal::quorum::engine::WalShardEngine::for_logs(
+                std::collections::BTreeMap::from([(NodeId(2), original.log.clone())]),
+            )),
+        );
+        let wal_dir =
+            crate::wal::quorum::shard_dir(dir.path(), "moved", Some(topic_id), PartitionIndex(0));
+        std::fs::create_dir_all(&wal_dir).expect("WAL shard directory");
+
+        supervisor.reconcile(&reassigned).await;
+
+        assert!(!partitions.contains("moved", PartitionIndex(0)));
+        assert!(!dir.path().join("moved-0").exists());
+        assert!(supervisor.wal_shards.get(shard).is_none());
+        assert!(!wal_dir.exists());
+        assert!(original.take_writer_handle().is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_partition_until_its_metadata_record_arrives() {
+        let image = image_with(&[topic_record("pending", 1)]);
+        let (supervisor, partitions, _reporter, dir) = supervisor_fixture(image.clone());
+        supervisor
+            .materialize_local_partition(&image, "pending", 0)
+            .expect("startup partition");
+        let original = partitions
+            .get("pending", PartitionIndex(0))
+            .expect("startup partition");
+
+        supervisor.reconcile(&image).await;
+
+        let current = partitions
+            .get("pending", PartitionIndex(0))
+            .expect("pending metadata must not delete local storage");
+        assert!(Arc::ptr_eq(&original, &current));
+        assert!(dir.path().join("pending-0").exists());
+    }
+
+    #[test]
+    fn remove_partition_dir_is_idempotent_but_reports_other_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing");
+        remove_partition_dir(&missing).expect("missing directory is already removed");
+
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"not a directory").expect("test file");
+        assert!(remove_partition_dir(&file).is_err());
     }
 
     #[tokio::test]
@@ -1678,9 +2184,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         use crabka_log::LogConfig;
-        use crabka_metadata::{
-            MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
-        };
+        use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
         use tempfile::tempdir;
         use uuid::Uuid;
 
@@ -1706,10 +2210,12 @@ mod tests {
         }));
         let mut overrides = BTreeMap::new();
         overrides.insert("retention.ms".to_string(), "60000".to_string());
-        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
-            topic: "t".into(),
-            overrides,
-        }));
+        img.apply(&MetadataRecord::V1TopicConfig(
+            crabka_metadata::TopicConfigRecord {
+                topic: "t".into(),
+                overrides,
+            },
+        ));
 
         // Materialize the partition on disk.
         let dir = tempdir().expect("tempdir");

@@ -392,6 +392,28 @@ impl AcquisitionState {
         }
     }
 
+    /// Releases every record currently acquired by `member` back to
+    /// `Available`. The delivery count is retained for the next delivery.
+    ///
+    /// Session close and connection disconnect call this method so records do
+    /// not remain locked until their timeout after the consumer is gone.
+    pub fn release_member(&mut self, member: &str) {
+        let mut changed = false;
+        for batch in &mut self.batches {
+            if batch.state == RecordState::Acquired && batch.acquired_by.as_deref() == Some(member)
+            {
+                batch.state = RecordState::Available;
+                batch.acquired_by = None;
+                batch.lock_deadline = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.dirty = true;
+            self.coalesce();
+        }
+    }
+
     /// True if and only if `member` currently holds every offset in
     /// `[first, last]` as Acquired.
     fn range_acquired_by(&self, member: &str, first: Offset, last: Offset) -> bool {
@@ -638,6 +660,22 @@ mod tests {
         assert!(acq2[0].delivery_count == 2);
         // Released records stay in the window; SPSO did not advance.
         assert!(s.start_offset == 0);
+    }
+
+    #[test]
+    fn session_release_makes_only_members_records_available() {
+        let mut state = AcquisitionState::new(Offset(0));
+        state.materialize(Offset(4), 100);
+        let _ = state.acquire("m1", 2, i32::MAX, t0(), LOCK, 5);
+        let _ = state.acquire("m2", 2, i32::MAX, t0(), LOCK, 5);
+
+        state.release_member("m1");
+
+        let reacquired = state.acquire("m3", 10, i32::MAX, t0(), LOCK, 5);
+        assert!(reacquired.len() == 1);
+        assert!(reacquired[0].first == Offset(0));
+        assert!(reacquired[0].last == Offset(1));
+        assert!(reacquired[0].delivery_count == 2);
     }
 
     #[test]

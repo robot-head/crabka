@@ -7,10 +7,6 @@
 //! - a [`Notify`] that fires after every successful append. Long-poll Fetch
 //!   uses it to wake when new data arrives.
 
-// Fields (`log`, `writer_tx`, `append_notify`) are consumed by the Produce
-// + Fetch handlers landing in Tasks 15-16; keep this allow until then.
-#![allow(dead_code)]
-
 use std::{
     path::PathBuf,
     sync::{
@@ -21,7 +17,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use crabka_ids::PartitionIndex;
-use crabka_log::{AbortedTxn, Log, Offset, ReadOutput, VerbatimBatch};
+use crabka_log::{Log, Offset, ReadOutput, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
 use crabka_units::ByteSize;
 use tokio::{
@@ -56,6 +52,13 @@ pub enum ProduceData {
     /// Decode and re-encode the owned batch on append (the original path).
     /// The writer mutates `base_offset` before append.
     Owned(RecordBatch),
+    /// An internally built COMMIT marker plus the cross-domain coordinator's
+    /// commit stamp. The stamp is written only to `.stampindex`; it never
+    /// enters the Kafka batch bytes.
+    OwnedCommitMarker {
+        batch: RecordBatch,
+        commit_stamp: u64,
+    },
 }
 
 impl ProduceData {
@@ -66,6 +69,8 @@ impl ProduceData {
                 .expect("verbatim batch offset count is non-negative"),
             Self::Owned(batch) => u32::try_from(batch.last_offset_delta + 1)
                 .expect("owned batch offset count is non-negative"),
+            Self::OwnedCommitMarker { batch, .. } => u32::try_from(batch.last_offset_delta + 1)
+                .expect("commit marker offset count is non-negative"),
         }
     }
 }
@@ -216,9 +221,9 @@ pub struct Partition {
     /// True for Slice 1 diskless partitions whose client-visible HW may only
     /// advance through the WAL durable-sync path.
     pub(crate) diskless: bool,
-    /// Held so the writer task is reaped when every `Partition` handle is
-    /// dropped. Not accessed after construction.
-    pub writer_handle: Arc<JoinHandle<()>>,
+    /// Retained so broker shutdown can abort and await the writer task after
+    /// all request handlers have drained.
+    pub(crate) writer_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl Partition {
@@ -385,19 +390,6 @@ impl Partition {
         }
     }
 
-    /// Return aborted transactions from the active segment's `.txnindex`
-    /// whose offset range overlaps `[start, end)`.
-    ///
-    /// Locks the `Arc<Mutex<Log>>` briefly. Returns an empty `Vec` if
-    /// the mutex is poisoned.
-    #[must_use]
-    pub fn aborted_in_range(&self, start: Offset, end: Offset) -> Vec<AbortedTxn> {
-        match self.log.lock() {
-            Ok(g) => g.aborted_in_range(start, end),
-            Err(_) => Vec::new(),
-        }
-    }
-
     /// The additional internal stamp coordinate that covers `offset`. Returns
     /// `None` when this partition is unstamped, that is, when no
     /// [`crabka_log::StampSource`] is injected, or when no stamped range
@@ -406,12 +398,22 @@ impl Partition {
     /// Locks the `Arc<Mutex<Log>>` briefly. This is a server-side query only.
     /// No produce or fetch handler consults it, so the stamp cannot leak into
     /// any client-facing response. Returns `None` if the mutex is poisoned.
+    #[cfg(test)]
     #[must_use]
     pub fn stamp_for_offset(&self, offset: Offset) -> Option<u64> {
         match self.log.lock() {
             Ok(g) => g.stamp_for_offset(offset),
             Err(_) => None,
         }
+    }
+
+    /// Remove and return the writer task handle exactly once. Broker shutdown
+    /// uses this after request handlers drain, then aborts and awaits the task.
+    pub(crate) fn take_writer_handle(&self) -> Option<JoinHandle<()>> {
+        self.writer_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Read batches from the underlying [`Log`] that start at `offset`, and
@@ -462,6 +464,34 @@ impl Partition {
             .map_err(|_| BrokerError::Txn("ack dropped".into()))?
     }
 
+    /// Append an internally built COMMIT marker with a coordinator-supplied
+    /// commit stamp. The partition writer keeps it ordered with all produce
+    /// and replication appends.
+    ///
+    /// # Errors
+    /// Returns an error if the writer task is unavailable or the log rejects
+    /// the marker/stamp pair.
+    pub(crate) async fn produce_commit_marker(
+        &self,
+        batch: RecordBatch,
+        commit_stamp: u64,
+    ) -> Result<Offset, BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::Produce(ProduceJob {
+                data: ProduceData::OwnedCommitMarker {
+                    batch,
+                    commit_stamp,
+                },
+                ack: ack_tx,
+            }))
+            .await
+            .map_err(|_| BrokerError::Txn("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Txn("ack dropped".into()))?
+    }
+
     /// Cached High Watermark. Awaits `replica_state` cooperatively, so it
     /// does not block tokio worker threads.
     #[must_use]
@@ -490,20 +520,6 @@ impl Partition {
         if advanced {
             self.hw_advance_notify.notify_waiters();
         }
-    }
-
-    pub(crate) async fn install_diskless_durable_hw(&self, durable_leo: Offset) -> Offset {
-        let advanced = {
-            let mut st = self.replica_state.lock().await;
-            let previous = st.hw;
-            st.recompute_hw_for_wal_durable(durable_leo);
-            st.hw = st.hw.max(previous);
-            st.hw > previous
-        };
-        if advanced {
-            self.hw_advance_notify.notify_waiters();
-        }
-        self.high_watermark().await
     }
 
     /// Install (or reinstall) the ISR membership and seed non-leader
@@ -704,7 +720,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         (p, dir)
     }
@@ -748,7 +764,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         (p, dir)
     }
@@ -821,6 +837,19 @@ mod tests {
         assert_clone::<Partition>();
     }
 
+    #[test]
+    fn commit_marker_record_count_uses_batch_offset_span() {
+        let data = ProduceData::OwnedCommitMarker {
+            batch: crabka_protocol::records::RecordBatch {
+                last_offset_delta: 3,
+                ..crabka_protocol::records::RecordBatch::default()
+            },
+            commit_stamp: 99,
+        };
+
+        check!(data.record_count() == 4);
+    }
+
     #[tokio::test]
     async fn debug_does_not_dump_log() {
         let dir = tempdir().expect("tempdir");
@@ -841,7 +870,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let s = format!("{p:?}");
         // topic/partition_id appear; the mutex/log internals must NOT appear
@@ -882,7 +911,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         assert!(p.high_watermark().await == 42);
     }
@@ -907,7 +936,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         p.install_isr(
             &[
@@ -992,27 +1021,6 @@ mod tests {
             futures_util::poll!(&mut waiter).is_pending(),
             "diskless ISR install must not release HW before WAL sync"
         );
-    }
-
-    #[tokio::test]
-    async fn install_diskless_durable_hw_advances_and_notifies_monotonically() {
-        let hw_advance_notify = Arc::new(Notify::new());
-        let (mut p, _td) = test_partition(hw_advance_notify.clone());
-        p.diskless = true;
-
-        let waiter = hw_advance_notify.notified();
-        tokio::pin!(waiter);
-        assert!(futures_util::poll!(&mut waiter).is_pending());
-
-        assert!(p.install_diskless_durable_hw(Offset(4)).await == Offset(4));
-        assert!(p.high_watermark().await == Offset(4));
-        assert!(futures_util::poll!(&mut waiter).is_ready());
-
-        let waiter = hw_advance_notify.notified();
-        tokio::pin!(waiter);
-        assert!(futures_util::poll!(&mut waiter).is_pending());
-        assert!(p.install_diskless_durable_hw(Offset(2)).await == Offset(4));
-        assert!(futures_util::poll!(&mut waiter).is_pending());
     }
 
     #[tokio::test]
@@ -1135,7 +1143,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         p.await_hw_at_least(Offset(50), deadline)
@@ -1163,7 +1171,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
         let result = p.await_hw_at_least(Offset(100), deadline).await;
@@ -1193,7 +1201,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
 
         // Append a 3-record batch so log_end_offset() == 3.
@@ -1295,7 +1303,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

@@ -429,6 +429,9 @@ async fn handle_heartbeat(
     // KIP-1071 mirrors KIP-848: epoch 0 from an unknown member is a first
     // join. The client may supply its own id; an empty id mints a server UUID.
     if req.member_epoch == 0 && !actor.state.members.contains_key(&req.member_id) {
+        if actor.state.members.len() >= config.max_size {
+            return Ok(error_resp(codes::GROUP_MAX_SIZE_REACHED, config));
+        }
         let new_member_id = first_join_member_id(&req.member_id);
         let m = build_member(&new_member_id, req, client_id, client_host, now);
         actor.state.add_or_update_member(m);
@@ -1311,6 +1314,39 @@ mod tests {
         .await;
         assert!(resp.error_code == codes::NONE);
         assert!(resp.member_epoch == epoch);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn member_limit_rejects_only_new_members() {
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let metadata: Arc<dyn MetadataProvider> = Arc::new(EmptyMetadata);
+        let coord = Arc::new(GroupCoordinator::new(
+            NextGenConfig::default(),
+            ShareGroupConfig::default(),
+            metadata,
+            log,
+            StreamsGroupConfig {
+                max_size: 1,
+                ..StreamsGroupConfig::default()
+            },
+        ));
+        let handle = coord.get_or_create_streams("g");
+        let request = |member_id: &str, member_epoch| StreamsGroupHeartbeatRequest {
+            group_id: "g".into(),
+            member_id: member_id.into(),
+            member_epoch,
+            ..Default::default()
+        };
+
+        let joined = heartbeat(&handle, request("m1", 0)).await;
+        check!(joined.error_code == codes::NONE);
+
+        let rejected = heartbeat(&handle, request("m2", 0)).await;
+        check!(rejected.error_code == codes::GROUP_MAX_SIZE_REACHED);
+
+        let existing = heartbeat(&handle, request("m1", joined.member_epoch)).await;
+        check!(existing.error_code == codes::NONE);
+        check!(existing.member_epoch == joined.member_epoch);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

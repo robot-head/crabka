@@ -76,30 +76,41 @@ pub(crate) fn handle(
             error_code = ec;
             throttle_time_ms = throttle_ms;
         }
-        PushDecision::Accept { .. } => {
+        PushDecision::Accept => {
             // authorize_push guarantees compression is supported on Accept.
             // A terminating push that later fails to decode still fences the
             // instance and drops those metrics (best-effort, matches Kafka).
             let ct = codec.expect("authorize_push guarantees a supported codec on Accept");
-            // Bound decompressed output to guard against a decompression bomb
-            // in the client-metrics payload.
-            let max_output = decompressed_output_bound(
-                ByteSize::from_bytes(u64::try_from(req.metrics.len()).unwrap_or(u64::MAX)),
-                broker.config.telemetry_max_decompression_ratio,
-                broker.config.telemetry_decompressed_output_floor,
-                broker.config.telemetry_decompressed_output_ceiling,
-            );
-            match crabka_compression::decompress(ct, &req.metrics, max_output) {
-                Ok(raw) => match otlp::decode_metrics(&raw) {
-                    Ok(md) => {
-                        let instance_str = instance.to_string();
-                        let points = flatten_for_prometheus(&md, &instance_str, ctx.client_id);
-                        broker.client_metrics.prometheus.ingest(&points);
-                        broker.client_metrics.otlp.forward(md, &instance_str);
+            if !req.metrics.is_empty() {
+                // Bound decompressed output to guard against a decompression
+                // bomb in the client-metrics payload.
+                let max_output = decompressed_output_bound(
+                    ByteSize::from_bytes(u64::try_from(req.metrics.len()).unwrap_or(u64::MAX)),
+                    broker.config.telemetry_max_decompression_ratio,
+                    broker.config.telemetry_decompressed_output_floor,
+                    broker.config.telemetry_decompressed_output_ceiling,
+                );
+                let decoded = match crabka_compression::decompress(ct, &req.metrics, max_output) {
+                    Ok(raw) => match otlp::decode_metrics(&raw) {
+                        Ok(md) => Some(md),
+                        Err(e) => {
+                            tracing::debug!(error = %e, "client-metrics OTLP decode failed");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::debug!(error = %e, "client-metrics decompress failed");
+                        None
                     }
-                    Err(e) => tracing::debug!(error = %e, "client-metrics OTLP decode failed"),
-                },
-                Err(e) => tracing::debug!(error = %e, "client-metrics decompress failed"),
+                };
+                if let Some(md) = decoded {
+                    let instance_str = instance.to_string();
+                    let points = flatten_for_prometheus(&md, &instance_str, ctx.client_id);
+                    broker.client_metrics.prometheus.ingest(&points);
+                    broker.client_metrics.otlp.forward(md, &instance_str);
+                } else {
+                    error_code = codes::INVALID_RECORD;
+                }
             }
         }
     }
@@ -200,9 +211,11 @@ mod tests {
         Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
         ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
     };
+    use prost::Message as _;
     use uuid::Uuid;
 
     use super::*;
+    use crate::client_metrics::manager::SubscriptionDecision;
 
     fn number_point(value: number_data_point::Value) -> NumberDataPoint {
         NumberDataPoint {
@@ -296,8 +309,7 @@ mod tests {
         broker_handle.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn handle_accept_path_preserves_success_response_fields() {
+    async fn push_payload(payload: Bytes) -> i16 {
         let (broker_handle, _dir) = start_broker().await;
         let broker = broker_handle.broker_arc_for_test();
         let instance = Uuid::from_u128(0x1234);
@@ -308,7 +320,7 @@ mod tests {
             software_name: "test-client",
             software_version: "1.0.0",
         };
-        let assignment = broker.client_metrics.manager.assign(
+        let SubscriptionDecision::Assign(assignment) = broker.client_metrics.manager.assign(
             &crabka_metadata::MetadataImage::new(Uuid::nil()),
             &crate::client_metrics::manager::ClientAttributes {
                 client_instance_id: instance,
@@ -318,15 +330,15 @@ mod tests {
                 source_address: ctx.peer.ip().to_string(),
                 source_port: ctx.peer.port(),
             },
-        );
-        let compressed = crabka_compression::compress(CompressionType::Gzip, b"not-otlp")
-            .expect("compress telemetry payload");
+        ) else {
+            panic!("fresh client must receive a subscription");
+        };
         let req = PushTelemetryRequest {
             client_instance_id: ProtoUuid(*instance.as_bytes()),
             subscription_id: assignment.subscription_id,
             terminating: false,
             compression_type: i8::try_from(CompressionType::Gzip.as_attribute_bits()).unwrap(),
-            metrics: compressed,
+            metrics: payload,
             ..Default::default()
         };
 
@@ -340,9 +352,42 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
         broker_handle.shutdown().await;
+        resp.error_code
+    }
+
+    #[tokio::test]
+    async fn valid_payload_is_accepted() {
+        let raw = metrics_data(vec![Metric {
+            name: "cpu.utilization".into(),
+            data: Some(metric::Data::Gauge(Gauge {
+                data_points: vec![number_point(number_data_point::Value::AsDouble(0.75))],
+            })),
+            ..Default::default()
+        }])
+        .encode_to_vec();
+        let payload = crabka_compression::compress(CompressionType::Gzip, &raw)
+            .expect("compress telemetry payload");
+
+        assert!(push_payload(payload).await == codes::NONE);
+    }
+
+    #[tokio::test]
+    async fn malformed_otlp_payload_returns_invalid_record() {
+        let payload = crabka_compression::compress(CompressionType::Gzip, b"not-otlp")
+            .expect("compress telemetry payload");
+
+        assert!(push_payload(payload).await == codes::INVALID_RECORD);
+    }
+
+    #[tokio::test]
+    async fn malformed_compressed_payload_returns_invalid_record() {
+        assert!(push_payload(Bytes::from_static(b"not-gzip")).await == codes::INVALID_RECORD);
+    }
+
+    #[tokio::test]
+    async fn empty_payload_is_accepted_without_decode() {
+        assert!(push_payload(Bytes::new()).await == codes::NONE);
     }
 
     #[test]

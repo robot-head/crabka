@@ -43,7 +43,7 @@ use crate::{
     network::client::InterBrokerClient,
     txn::{
         decision::{CompletionDecision, decide_end_txn_completion, decide_phase1_transition},
-        handlers::write_txn_markers::append_marker_and_materialize,
+        handlers::write_txn_markers::{MarkerAppend, append_marker_and_materialize},
         marker::MarkerType,
         state::{TopicPartition, TxnEntry, TxnState},
         util::now_millis,
@@ -608,10 +608,13 @@ pub(crate) async fn dispatch_markers(
                     &part,
                     context.group_coordinator,
                     &tp.topic,
-                    entry.producer_id,
-                    entry.producer_epoch,
-                    marker_type,
-                    coordinator_epoch,
+                    MarkerAppend {
+                        producer_id: entry.producer_id,
+                        producer_epoch: entry.producer_epoch,
+                        marker_type,
+                        coordinator_epoch,
+                        commit_stamp: None,
+                    },
                 )
                 .await?;
             }

@@ -46,7 +46,6 @@ pub(crate) struct ComputedSubscription {
 struct ClientInstance {
     subscription_id: i32,
     push_interval: Duration,
-    metrics: Vec<String>,
     last_get: Instant,
     last_push: Option<Instant>,
     terminating: bool,
@@ -59,15 +58,14 @@ pub(crate) struct SubscriptionAssignment {
     pub metrics: Vec<String>,
 }
 
+pub(crate) enum SubscriptionDecision {
+    Assign(SubscriptionAssignment),
+    Reject { error_code: i16, throttle_ms: i32 },
+}
+
 pub(crate) enum PushDecision {
-    Accept {
-        #[allow(dead_code)] // carried for future per-prefix filtering
-        metrics: Vec<String>,
-    },
-    Reject {
-        error_code: i16,
-        throttle_ms: i32,
-    },
+    Accept,
+    Reject { error_code: i16, throttle_ms: i32 },
 }
 
 pub(crate) struct ClientMetricsManager {
@@ -100,12 +98,20 @@ impl ClientMetricsManager {
         &self,
         image: &MetadataImage,
         attrs: &ClientAttributes,
-    ) -> SubscriptionAssignment {
+    ) -> SubscriptionDecision {
+        self.assign_at(image, attrs, Instant::now())
+    }
+
+    fn assign_at(
+        &self,
+        image: &MetadataImage,
+        attrs: &ClientAttributes,
+        now: Instant,
+    ) -> SubscriptionDecision {
         // `push_interval_ms` is both a wire field and a byte-exact input to the
         // subscription-id hash, so the interval crosses into milliseconds here.
         let computed = compute_subscription(image, attrs, self.default_interval.millis_i32());
         let sub_id = subscription_id(&computed, attrs.client_instance_id);
-        let now = Instant::now();
         let mut guard = self
             .instances
             .lock()
@@ -114,27 +120,45 @@ impl ClientMetricsManager {
         let push_interval = Duration::from_millis(
             u64::try_from(computed.push_interval_ms).expect("validated positive push interval"),
         );
-        let inst = guard
-            .entry(attrs.client_instance_id)
-            .or_insert(ClientInstance {
-                subscription_id: sub_id,
-                push_interval,
-                metrics: computed.metrics.clone(),
-                last_get: now,
-                last_push: None,
-                terminating: false,
-                last_error: crate::codes::NONE,
-            });
-        inst.subscription_id = sub_id;
-        inst.push_interval = push_interval;
-        inst.metrics.clone_from(&computed.metrics);
-        inst.last_get = now;
-        inst.last_error = crate::codes::NONE;
-        SubscriptionAssignment {
+        if let Some(inst) = guard.get_mut(&attrs.client_instance_id) {
+            inst.subscription_id = sub_id;
+            inst.push_interval = push_interval;
+
+            let retry_after_error = matches!(
+                inst.last_error,
+                crate::codes::UNKNOWN_SUBSCRIPTION_ID | crate::codes::UNSUPPORTED_COMPRESSION_TYPE
+            );
+            let last_message = inst
+                .last_push
+                .map_or(inst.last_get, |last_push| inst.last_get.max(last_push));
+            if !retry_after_error && now.duration_since(last_message) < push_interval {
+                inst.last_error = crate::codes::THROTTLING_QUOTA_EXCEEDED;
+                return SubscriptionDecision::Reject {
+                    error_code: crate::codes::THROTTLING_QUOTA_EXCEEDED,
+                    throttle_ms: computed.push_interval_ms,
+                };
+            }
+
+            inst.last_get = now;
+            inst.last_error = crate::codes::NONE;
+        } else {
+            guard.insert(
+                attrs.client_instance_id,
+                ClientInstance {
+                    subscription_id: sub_id,
+                    push_interval,
+                    last_get: now,
+                    last_push: None,
+                    terminating: false,
+                    last_error: crate::codes::NONE,
+                },
+            );
+        }
+        SubscriptionDecision::Assign(SubscriptionAssignment {
             subscription_id: sub_id,
             push_interval_ms: computed.push_interval_ms,
             metrics: computed.metrics,
-        }
+        })
     }
 
     pub(crate) fn authorize_push(
@@ -193,6 +217,7 @@ impl ClientMetricsManager {
         // 5. Unsupported compression codec → UNSUPPORTED_COMPRESSION_TYPE.
         //    Do NOT update last_push on this path.
         if !compression_supported {
+            inst.last_error = crate::codes::UNSUPPORTED_COMPRESSION_TYPE;
             return PushDecision::Reject {
                 error_code: crate::codes::UNSUPPORTED_COMPRESSION_TYPE,
                 throttle_ms: 0,
@@ -203,20 +228,21 @@ impl ClientMetricsManager {
         //    Do NOT update last_push on this path.
         let max_payload_len = self.telemetry_max.bytes_usize();
         if payload_len > max_payload_len {
+            inst.last_error = crate::codes::TELEMETRY_TOO_LARGE;
             return PushDecision::Reject {
                 error_code: crate::codes::TELEMETRY_TOO_LARGE,
                 throttle_ms: 0,
             };
         }
 
-        // 7. Success: update state and return accepted metrics.
+        // 7. Success: update state. Metric prefixes are advisory to the
+        // client; the broker does not filter the OTLP payload by name.
         inst.last_push = Some(now);
         inst.last_error = crate::codes::NONE;
-        let metrics = inst.metrics.clone();
         if terminating {
             inst.terminating = true;
         }
-        PushDecision::Accept { metrics }
+        PushDecision::Accept
     }
 
     /// Drops an instance that has been idle for longer than
@@ -368,6 +394,13 @@ mod tests {
         }
     }
 
+    fn expect_assignment(decision: SubscriptionDecision) -> SubscriptionAssignment {
+        let SubscriptionDecision::Assign(assignment) = decision else {
+            panic!("expected subscription assignment");
+        };
+        assignment
+    }
+
     #[test]
     fn no_subscription_means_no_metrics() {
         let img = MetadataImage::new(Uuid::nil());
@@ -486,11 +519,11 @@ mod tests {
             source_address: "1.2.3.4".into(),
             source_port: 1,
         };
-        let assigned = m.assign(&img, &attrs);
+        let assigned = expect_assignment(m.assign(&img, &attrs));
         // First push after assign is allowed (compression_supported=true).
         assert!(matches!(
             m.authorize_push(id, assigned.subscription_id, false, true, 10),
-            PushDecision::Accept { .. }
+            PushDecision::Accept
         ));
         // Immediate second push (interval not elapsed, no new get) is throttled —
         // even if the payload would also be oversized; throttle wins per Kafka order.
@@ -515,17 +548,114 @@ mod tests {
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::INVALID_REQUEST
         ));
         // Re-assign to get a fresh get-timestamp (acts as a new allowance).
-        let assigned2 = m.assign(&img, &attrs);
+        let assigned2 = expect_assignment(m.assign(&img, &attrs));
         // Oversized payload with fresh get → TELEMETRY_TOO_LARGE.
         assert!(matches!(
             m.authorize_push(id, assigned2.subscription_id, false, true, 2048),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::TELEMETRY_TOO_LARGE
         ));
-        // Unsupported compression with fresh get + small payload → UNSUPPORTED_COMPRESSION_TYPE.
-        let assigned3 = m.assign(&img, &attrs);
+        // Unsupported compression on a fresh instance + small payload →
+        // UNSUPPORTED_COMPRESSION_TYPE.
+        let mut attrs2 = attrs.clone();
+        attrs2.client_instance_id = Uuid::from_u128(8);
+        let assigned3 = expect_assignment(m.assign(&img, &attrs2));
         assert!(matches!(
-            m.authorize_push(id, assigned3.subscription_id, false, false, 10),
+            m.authorize_push(
+                attrs2.client_instance_id,
+                assigned3.subscription_id,
+                false,
+                false,
+                10
+            ),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::UNSUPPORTED_COMPRESSION_TYPE
+        ));
+    }
+
+    #[test]
+    fn get_subscription_throttles_but_allows_error_recovery() {
+        let m = ClientMetricsManager::new(crabka_units::kibibytes(1), crabka_units::minutes(5));
+        let id = Uuid::from_u128(7);
+        let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
+        let attrs = ClientAttributes {
+            client_instance_id: id,
+            client_id: "c".into(),
+            software_name: "n".into(),
+            software_version: "v".into(),
+            source_address: "1.2.3.4".into(),
+            source_port: 1,
+        };
+        let assigned = expect_assignment(m.assign(&img, &attrs));
+
+        assert!(matches!(
+            m.assign(&img, &attrs),
+            SubscriptionDecision::Reject { error_code, throttle_ms }
+                if error_code == crate::codes::THROTTLING_QUOTA_EXCEEDED
+                    && throttle_ms == 60_000
+        ));
+
+        assert!(matches!(
+            m.authorize_push(
+                id,
+                assigned.subscription_id ^ 0x5555,
+                false,
+                true,
+                10
+            ),
+            PushDecision::Reject { error_code, .. }
+                if error_code == crate::codes::UNKNOWN_SUBSCRIPTION_ID
+        ));
+        let assigned = expect_assignment(m.assign(&img, &attrs));
+
+        assert!(matches!(
+            m.authorize_push(id, assigned.subscription_id, false, false, 10),
+            PushDecision::Reject { error_code, .. }
+                if error_code == crate::codes::UNSUPPORTED_COMPRESSION_TYPE
+        ));
+        let _ = expect_assignment(m.assign(&img, &attrs));
+    }
+
+    #[test]
+    fn get_subscription_is_throttled_after_a_recent_push() {
+        let m = ClientMetricsManager::new(crabka_units::kibibytes(1), crabka_units::minutes(5));
+        let id = Uuid::from_u128(7);
+        let img = img_with("all", &[("metrics", "*"), ("interval.ms", "100")]);
+        let attrs = ClientAttributes {
+            client_instance_id: id,
+            client_id: "c".into(),
+            software_name: "n".into(),
+            software_version: "v".into(),
+            source_address: "1.2.3.4".into(),
+            source_port: 1,
+        };
+        let assigned = expect_assignment(m.assign(&img, &attrs));
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(matches!(
+            m.authorize_push(id, assigned.subscription_id, false, true, 10),
+            PushDecision::Accept
+        ));
+
+        assert!(matches!(
+            m.assign(&img, &attrs),
+            SubscriptionDecision::Reject { error_code, .. }
+                if error_code == crate::codes::THROTTLING_QUOTA_EXCEEDED
+        ));
+    }
+
+    #[test]
+    fn get_subscription_accepts_exact_interval_boundary() {
+        let m = ClientMetricsManager::new(crabka_units::kibibytes(1), crabka_units::minutes(5));
+        let img = img_with("all", &[("metrics", "*"), ("interval.ms", "100")]);
+        let attrs = attrs();
+        let start = Instant::now();
+        let _ = expect_assignment(m.assign_at(&img, &attrs, start));
+
+        assert!(matches!(
+            m.assign_at(&img, &attrs, start + Duration::from_millis(99)),
+            SubscriptionDecision::Reject { .. }
+        ));
+        assert!(matches!(
+            m.assign_at(&img, &attrs, start + Duration::from_millis(100)),
+            SubscriptionDecision::Assign(_)
         ));
     }
 }

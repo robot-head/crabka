@@ -1,8 +1,9 @@
 //! End-to-end coverage for the verbatim produce passthrough, which is the
-//! header-only decode path. The broker stores a producer-LZ4-compressed v2
-//! batch WITHOUT a decompress or re-encode, and the batch round-trips
-//! byte-identically on Fetch. A recompression-forcing topic config, a control
-//! batch, and an idempotent producer all behave correctly across the path.
+//! zero-copy append path. The broker structurally validates a
+//! producer-LZ4-compressed v2 batch, stores the original bytes without
+//! re-encoding, and round-trips them byte-identically on Fetch. A
+//! recompression-forcing topic config, a control batch, and an idempotent
+//! producer all behave correctly across the path.
 //!
 //! These tests complement the unit tests in
 //! `handlers::produce::tests::verbatim`, which pin the dispatch
@@ -26,7 +27,7 @@ use crabka_protocol::{
         produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
     },
     primitives::uuid::Uuid as WireUuid,
-    records::{Attributes, HEADER_LEN, Record, RecordBatch, RecordsPayload},
+    records::{Attributes, CRC_COVERAGE_START, HEADER_LEN, Record, RecordBatch, RecordsPayload},
 };
 
 async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUuid {
@@ -65,6 +66,15 @@ fn batch(codec: CompressionType, n: usize, value: &[u8]) -> RecordBatch {
         });
     }
     b
+}
+
+fn idempotent_lz4_batch(producer_id: i64, base_sequence: i32, n: usize) -> RecordBatch {
+    let mut batch = batch(CompressionType::Lz4, n, &[b'I'; 1024]);
+    batch.max_timestamp = 77;
+    batch.producer_id = producer_id;
+    batch.producer_epoch = 0;
+    batch.base_sequence = base_sequence;
+    batch
 }
 
 fn encode_batch(b: &RecordBatch) -> Bytes {
@@ -146,6 +156,15 @@ async fn produce_batches(
     topic_id: WireUuid,
     batches: Vec<RecordBatch>,
 ) -> Result<i64, i16> {
+    produce_payload(client, topic, topic_id, RecordsPayload::V2(batches)).await
+}
+
+async fn produce_payload(
+    client: &crabka_client_core::Client,
+    topic: &str,
+    topic_id: WireUuid,
+    records: RecordsPayload,
+) -> Result<i64, i16> {
     let resp = client
         .send(ProduceRequest {
             acks: 1,
@@ -155,7 +174,7 @@ async fn produce_batches(
                 topic_id,
                 partition_data: vec![PartitionProduceData {
                     index: 0,
-                    records: Some(RecordsPayload::V2(batches)),
+                    records: Some(records),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -175,9 +194,9 @@ async fn produce_batches(
 /// Fetch partition 0 from offset 0 and return the first decoded batch.
 ///
 /// `n` is the number of records already produced to partition 0. With a single
-/// broker at RF=1 the high-watermark tracks the local log end offset, so a wait
-/// for LEO >= n makes the produced records readable before one deterministic
-/// fetch. No polling loop is needed.
+/// broker at RF=1 the high-watermark follows the local log end offset, but the
+/// writer updates it after the append acknowledgement. Wait for the actual
+/// high-watermark so one deterministic fetch cannot race that update.
 async fn fetch_first_batch(
     broker: &crabka_broker::BrokerHandle,
     client: &crabka_client_core::Client,
@@ -185,7 +204,7 @@ async fn fetch_first_batch(
     topic_id: WireUuid,
     n: i64,
 ) -> RecordBatch {
-    broker.wait_until_local_log_end_offset(topic, 0, n).await;
+    broker.wait_until_high_watermark(topic, 0, n).await;
     let resp = client
         .send(FetchRequest {
             replica_id: -1,
@@ -226,9 +245,8 @@ async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
 }
 
 /// A producer-LZ4-compressed v2 batch whose DECOMPRESSED form is large
-/// (~100 KiB) takes the verbatim path. The broker stores it WITHOUT a
-/// decompress and keeps the Lz4 codec, with no recompression. The data
-/// round-trips correctly on Fetch.
+/// (~100 KiB) takes the verbatim path. The broker validates it, retains the
+/// Lz4 codec with no recompression, and round-trips the data on Fetch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lz4_batch_passes_through_and_roundtrips() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -242,7 +260,7 @@ async fn lz4_batch_passes_through_and_roundtrips() {
     let topic_id = topic_id_for(&client, "lz4t").await;
 
     // 200 records of a highly-compressible 512-byte value → ~100 KiB raw,
-    // tiny compressed. A decompress on the produce path would be obvious.
+    // tiny compressed. An accidental uncompressed re-encode is obvious.
     let value = vec![b'Z'; 512];
     let b = batch(CompressionType::Lz4, 200, &value);
     let wire = encode_batch(&b);
@@ -367,11 +385,11 @@ async fn recompression_config_takes_owned_path() {
     broker.shutdown().await;
 }
 
-/// A control batch never takes the verbatim path, because its LSO bookkeeping
-/// needs the inner marker record. A produced control batch must route to the
-/// owned path and stay correct on fetch.
+/// Control batches are broker-internal transaction markers. A client-authored
+/// control batch must be rejected before either the verbatim or owned append
+/// path can write it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn control_batch_takes_owned_path() {
+async fn client_control_batch_is_rejected() {
     let (broker, bootstrap, _dir) = boot().await;
     create_topic(&broker, &bootstrap, "ctrl").await;
 
@@ -397,24 +415,51 @@ async fn control_batch_takes_owned_path() {
         ..Default::default()
     });
 
-    produce_one(&client, "ctrl", topic_id, b.clone())
+    let error = produce_one(&client, "ctrl", topic_id, b)
         .await
-        .expect("produce ok");
+        .expect_err("clients cannot append control batches");
+    check!(error == 87);
+    check!(broker.local_log_end_offset("ctrl", 0) == Some(0));
 
-    let fetched = fetch_first_batch(&broker, &client, "ctrl", topic_id, 1).await;
-    assert!(
-        fetched.attributes.is_control_batch(),
-        "control bit preserved"
-    );
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crc_valid_malformed_record_body_is_rejected() {
+    let (broker, bootstrap, _dir) = boot().await;
+    create_topic(&broker, &bootstrap, "malformed-body").await;
+
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(bootstrap)
+        .build()
+        .await
+        .unwrap();
+    let topic_id = topic_id_for(&client, "malformed-body").await;
+    let mut wire = encode_batch(&batch(CompressionType::None, 1, b"valid")).to_vec();
+    wire[HEADER_LEN] = 0; // zero-length first record body
+    let crc = crc32c::crc32c(&wire[CRC_COVERAGE_START..]);
+    wire[CRC_COVERAGE_START - 4..CRC_COVERAGE_START].copy_from_slice(&crc.to_be_bytes());
+
+    let error = produce_payload(
+        &client,
+        "malformed-body",
+        topic_id,
+        RecordsPayload::Raw(Bytes::from(wire)),
+    )
+    .await
+    .expect_err("CRC alone cannot make a malformed record body valid");
+    check!(error == 87);
+    check!(broker.local_log_end_offset("malformed-body", 0) == Some(0));
 
     broker.shutdown().await;
 }
 
 /// Idempotent-producer dedup runs on the HEADER fields that the verbatim path
 /// exposes: pid, epoch, `base_sequence`, and `last_offset_delta`. Two appends
-/// with increasing sequences both succeed. A retry of the first sequence is a
+/// with increasing sequences both succeed. A retry of the latest sequence is a
 /// duplicate and returns the SAME base offset. An out-of-order sequence is
-/// rejected. The broker never decompresses the lz4 batches for any of this.
+/// rejected. Structural validation may transiently decompress the lz4 body,
+/// but the append retains the producer's original compressed bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotent_dedup_over_verbatim_path() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -427,37 +472,14 @@ async fn idempotent_dedup_over_verbatim_path() {
         .unwrap();
     let topic_id = topic_id_for(&client, "idem").await;
 
-    // Build an lz4 idempotent batch with explicit pid/epoch/base_sequence so
-    // the dedup gate must read those from the header (no record decode).
-    let big = vec![b'I'; 1024];
-    let make = |base_seq: i32, n: usize| -> RecordBatch {
-        let mut b = RecordBatch {
-            last_offset_delta: i32::try_from(n).unwrap() - 1,
-            max_timestamp: 77,
-            producer_id: 9_001,
-            producer_epoch: 0,
-            base_sequence: base_seq,
-            ..RecordBatch::default()
-        };
-        b.attributes = b.attributes.with_compression(CompressionType::Lz4);
-        for i in 0..n {
-            b.records.push(Record {
-                offset_delta: i32::try_from(i).unwrap(),
-                value: Some(Bytes::copy_from_slice(&big)),
-                ..Default::default()
-            });
-        }
-        b
-    };
-
     // seq 0..=2 (3 records) → base offset 0.
-    let base0 = produce_one(&client, "idem", topic_id, make(0, 3))
+    let base0 = produce_one(&client, "idem", topic_id, idempotent_lz4_batch(9_001, 0, 3))
         .await
         .expect("first append ok");
     assert!(base0 == 0);
 
     // seq 3..=4 (2 records) → base offset 3.
-    let base1 = produce_one(&client, "idem", topic_id, make(3, 2))
+    let base1 = produce_one(&client, "idem", topic_id, idempotent_lz4_batch(9_001, 3, 2))
         .await
         .expect("second append ok");
     assert!(base1 == 3);
@@ -466,8 +488,8 @@ async fn idempotent_dedup_over_verbatim_path() {
     // Retry the MOST RECENT batch (seq 3..=4) → DUPLICATE: the dedup tracker
     // tracks the last committed batch and echoes its base offset (3), no error.
     // This is driven purely by the header pid/epoch/base_sequence — the lz4
-    // body is never decompressed.
-    let base_dup = produce_one(&client, "idem", topic_id, make(3, 2))
+    // body is never re-encoded.
+    let base_dup = produce_one(&client, "idem", topic_id, idempotent_lz4_batch(9_001, 3, 2))
         .await
         .expect("duplicate must be NONE");
     assert!(base_dup == 3, "duplicate returns the committed base offset");
@@ -475,10 +497,81 @@ async fn idempotent_dedup_over_verbatim_path() {
     // An out-of-order sequence (skip ahead past last+1) →
     // OUT_OF_ORDER_SEQUENCE_NUMBER (45). The last committed sequence is 4, so
     // base_sequence 99 leaves a gap.
-    let err = produce_one(&client, "idem", topic_id, make(99, 1))
-        .await
-        .expect_err("out-of-order must error");
+    let err = produce_one(
+        &client,
+        "idem",
+        topic_id,
+        idempotent_lz4_batch(9_001, 99, 1),
+    )
+    .await
+    .expect_err("out-of-order must error");
     assert!(err == 45, "out-of-order sequence must be 45; got {err}");
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idempotent_sequence_rollover_over_verbatim_path() {
+    let (broker, bootstrap, _dir) = boot().await;
+    create_topic(&broker, &bootstrap, "idem-rollover").await;
+
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(bootstrap)
+        .build()
+        .await
+        .unwrap();
+    let topic_id = topic_id_for(&client, "idem-rollover").await;
+
+    // This batch spans MAX-1, MAX, 0. Kafka sequences wrap modulo 2^31.
+    let first = produce_one(
+        &client,
+        "idem-rollover",
+        topic_id,
+        idempotent_lz4_batch(9_002, i32::MAX - 1, 3),
+    )
+    .await
+    .expect("batch crossing producer-sequence rollover");
+    check!(first == 0);
+
+    let next = produce_one(
+        &client,
+        "idem-rollover",
+        topic_id,
+        idempotent_lz4_batch(9_002, 1, 1),
+    )
+    .await
+    .expect("wrapped successor");
+    check!(next == 3);
+
+    let duplicate = produce_one(
+        &client,
+        "idem-rollover",
+        topic_id,
+        idempotent_lz4_batch(9_002, 1, 1),
+    )
+    .await
+    .expect("exact retry");
+    check!(duplicate == 3);
+
+    let wrong_span = produce_one(
+        &client,
+        "idem-rollover",
+        topic_id,
+        idempotent_lz4_batch(9_002, 1, 2),
+    )
+    .await
+    .expect_err("same base sequence with a different span is not a duplicate");
+    check!(wrong_span == 45);
+
+    let gap = produce_one(
+        &client,
+        "idem-rollover",
+        topic_id,
+        idempotent_lz4_batch(9_002, 3, 1),
+    )
+    .await
+    .expect_err("sequence gap after rollover");
+    check!(gap == 45);
 
     broker.shutdown().await;
 }

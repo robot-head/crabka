@@ -22,6 +22,14 @@ use crate::BrokerError;
 
 /// Default number of local durable copies in a diskless WAL quorum.
 pub const DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT: usize = 3;
+/// Default cadence of diskless WAL object-store flushes.
+pub const DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL: Time = millis(250);
+/// Default byte ceiling for one diskless WAL object-store flush.
+pub const DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE: ByteSize = mebibytes(8);
+/// Default committed-offset lag retained behind the diskless WAL trim frontier.
+pub const DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG: i64 = 1;
+/// Default wait for a published diskless WAL index record to be projected.
+pub const DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT: Time = secs(5);
 
 /// `KRaft` `process.roles`. A node is a metadata-quorum `Controller`, a data
 /// `Broker`, or both. Default is the combined set `[Controller, Broker]`.
@@ -245,8 +253,16 @@ pub struct BrokerConfig {
     pub client_metrics_stale_push_intervals: u32,
     /// Capacity of each coordinator actor mailbox.
     pub coordinator_actor_mailbox_capacity: usize,
-    /// Number of local durable replicas in each diskless WAL quorum.
+    /// Number of broker voters in each diskless WAL quorum.
     pub diskless_wal_local_replica_count: usize,
+    /// Cadence of diskless WAL object-store flushes.
+    pub diskless_wal_flush_interval: Time,
+    /// Maximum bytes included in one diskless WAL object-store flush.
+    pub diskless_wal_flush_max_size: ByteSize,
+    /// Committed offsets retained behind the diskless WAL trim frontier.
+    pub diskless_wal_trim_safety_lag: i64,
+    /// Maximum wait for a published diskless WAL index record to be projected.
+    pub diskless_wal_index_projection_timeout: Time,
     /// Capacity of the unclean-recovery work queue.
     pub unclean_recovery_queue_capacity: usize,
     /// Maximum bytes read while recovering share state.
@@ -1070,6 +1086,10 @@ impl BrokerConfig {
             client_metrics_stale_push_intervals: 3,
             coordinator_actor_mailbox_capacity: 64,
             diskless_wal_local_replica_count: DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT,
+            diskless_wal_flush_interval: DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL,
+            diskless_wal_flush_max_size: DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE,
+            diskless_wal_trim_safety_lag: DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG,
+            diskless_wal_index_projection_timeout: DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT,
             unclean_recovery_queue_capacity: 256,
             share_recovery_read_max: mebibytes(1),
             share_session_cache_max_when_unlimited: 10_000,
@@ -1466,7 +1486,7 @@ impl BrokerConfig {
             streams.max_session_timeout,
             streams.min_heartbeat_interval,
             streams.max_heartbeat_interval,
-            None,
+            Some(streams.max_size),
         )?;
 
         if let RlmmKind::TopicBacked(config) = &self.remote_log_metadata {
@@ -1567,6 +1587,14 @@ impl BrokerConfig {
             ("gauge_poll_interval", self.gauge_poll_interval),
             ("isr_scan_interval", self.isr_scan_interval),
             ("cleaner_interval", self.cleaner_interval),
+            (
+                "diskless_wal_flush_interval",
+                self.diskless_wal_flush_interval,
+            ),
+            (
+                "diskless_wal_index_projection_timeout",
+                self.diskless_wal_index_projection_timeout,
+            ),
             (
                 "future_log_move_retry_backoff",
                 self.future_log_move_retry_backoff,
@@ -1792,8 +1820,22 @@ impl BrokerConfig {
                 )));
             }
         }
+        if self.diskless_wal_local_replica_count.is_multiple_of(2) {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "diskless_wal_local_replica_count must be odd".into(),
+            ));
+        }
+        if self.diskless_wal_trim_safety_lag < 0 {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "diskless_wal_trim_safety_lag must be nonnegative".into(),
+            ));
+        }
         for (name, value) in [
             ("audit_tail_read_max", self.audit_tail_read_max),
+            (
+                "diskless_wal_flush_max_size",
+                self.diskless_wal_flush_max_size,
+            ),
             ("share_recovery_read_max", self.share_recovery_read_max),
             ("socket_request_max", self.socket_request_max),
             ("sendfile_min", self.sendfile_min),
@@ -1989,6 +2031,10 @@ impl Default for BrokerConfig {
             client_metrics_stale_push_intervals: 3,
             coordinator_actor_mailbox_capacity: 64,
             diskless_wal_local_replica_count: DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT,
+            diskless_wal_flush_interval: DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL,
+            diskless_wal_flush_max_size: DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE,
+            diskless_wal_trim_safety_lag: DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG,
+            diskless_wal_index_projection_timeout: DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT,
             unclean_recovery_queue_capacity: 256,
             share_recovery_read_max: mebibytes(1),
             share_session_cache_max_when_unlimited: 10_000,
@@ -2447,12 +2493,21 @@ mod tests {
 
     #[test]
     fn rejects_non_positive_runtime_scalars() {
-        let cases: [RuntimeInvalidator; 19] = [
+        let cases: [RuntimeInvalidator; 22] = [
             ("startup_leader_wait_timeout", |c| {
                 c.startup_leader_wait_timeout = <Time as TimeExt>::ZERO;
             }),
             ("cleaner_interval", |c| {
                 c.cleaner_interval = <Time as TimeExt>::ZERO;
+            }),
+            ("diskless_wal_flush_interval", |c| {
+                c.diskless_wal_flush_interval = <Time as TimeExt>::ZERO;
+            }),
+            ("diskless_wal_index_projection_timeout", |c| {
+                c.diskless_wal_index_projection_timeout = <Time as TimeExt>::ZERO;
+            }),
+            ("diskless_wal_flush_max_size", |c| {
+                c.diskless_wal_flush_max_size = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("client_metrics_default_interval", |c| {
                 c.client_metrics_default_interval = <Time as TimeExt>::ZERO;
@@ -2549,6 +2604,12 @@ mod tests {
             }),
             ("diskless_wal_local_replica_count must be positive", |c| {
                 c.diskless_wal_local_replica_count = 0;
+            }),
+            ("diskless_wal_local_replica_count must be odd", |c| {
+                c.diskless_wal_local_replica_count = 2;
+            }),
+            ("diskless_wal_trim_safety_lag must be nonnegative", |c| {
+                c.diskless_wal_trim_safety_lag = -1;
             }),
             ("unclean_recovery_queue_capacity must be positive", |c| {
                 c.unclean_recovery_queue_capacity = 0;
@@ -2721,6 +2782,10 @@ mod tests {
             &config,
             "share group heartbeat interval is outside its bounds",
         );
+
+        let mut config = BrokerConfig::default();
+        config.streams_group.max_size = 0;
+        assert_invalid_runtime(&config, "streams group maximum size must be positive");
     }
 
     #[test]

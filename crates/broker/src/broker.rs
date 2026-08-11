@@ -16,7 +16,10 @@ use crabka_units::{
 };
 use dashmap::DashMap;
 use futures_util::future::BoxFuture;
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    task::{JoinHandle, JoinSet},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -62,10 +65,6 @@ const TEST_AWAITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// The running broker. Library callers get a [`BrokerHandle`] from
 /// [`Broker::start`]; this struct is the shared internal state.
-// `config`, `metadata`, `partitions` are consumed by the per-API handlers
-// landing in Tasks 12-16; allow dead_code on the struct until the handlers
-// pick them up.
-#[allow(dead_code)]
 pub struct Broker {
     pub(crate) config: BrokerConfig,
     /// Metadata authority for this broker. For combined/controller nodes
@@ -118,6 +117,7 @@ pub struct Broker {
     /// this is `true` keeps the per-connection path infallible-by-construction.
     /// When `false` (non-Linux, no `tls` module, or no TLS configured), TLS
     /// listeners serve the exact userspace rustls path (byte-identical wire).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) ktls_enabled: bool,
     /// Shared outbound dialer used by the replicator, raft transport,
     /// and controller-heartbeat loops. When `inter_broker_credentials`
@@ -125,13 +125,6 @@ pub struct Broker {
     /// to a plain `TcpStream::connect`. The new wiring is transparent
     /// for the legacy PLAINTEXT-only path.
     pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
-    /// Resolved protocol of the inter-broker listener (matched from
-    /// `BrokerConfig::effective_listeners()` against
-    /// `inter_broker_listener_name`). Threaded into outbound inter-broker
-    /// dials. The replicator and heartbeat hold their own copies. The
-    /// `EndTxn` marker fan-out reads this one, so TLS / SASL run when the
-    /// listener demands them.
-    pub(crate) inter_broker_listener_protocol: crabka_security::ListenerProtocol,
     /// KIP-966 offset-aware unclean recovery. Cloneable handle that
     /// enqueues recovery jobs onto the Unclean Recovery Manager task.
     /// Used by the `ElectLeaders UNCLEAN` handler (which awaits the
@@ -191,10 +184,6 @@ pub struct Broker {
     /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before they
     /// touch the dir.
     pub(crate) log_dir_status: crate::log_dir_status::LogDirRegistry,
-    /// KIP-858: stable UUID per configured log.dir, minted + persisted at
-    /// startup. Shared with the heartbeat client (`offline_log_dirs` UUID list)
-    /// and the assignment reporter (`AssignReplicasToDirs` handler).
-    pub(crate) log_dir_ids: crate::log_dir_id::LogDirIds,
     /// KIP-714 client-metrics receiver: subscription manager + Prometheus
     /// collector + OTLP forwarder. Shared so the push handler
     /// and the scrape path both touch the same instance.
@@ -213,6 +202,7 @@ pub struct Broker {
     /// `KafkaTopicAuditSink`. Disabled (`AuditLog::disabled()`) when
     /// `BrokerConfig::audit_enabled` is `false`.
     pub(crate) audit_log: std::sync::Arc<crabka_audit::AuditLog>,
+    pub(crate) audit_writer_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     handlers: DispatchRegistry,
 }
 
@@ -228,10 +218,10 @@ struct DisklessRuntime {
 }
 
 impl DisklessRuntime {
-    fn new() -> Self {
+    fn new(node_id: crabka_raft::NodeId) -> Self {
         Self {
             hot_tail: Arc::new(crate::diskless::hot_tail::HotTailCache::default()),
-            wal_shards: Arc::new(crate::wal::quorum::registry::WalShardRegistry::new()),
+            wal_shards: Arc::new(crate::wal::quorum::registry::WalShardRegistry::new(node_id)),
         }
     }
 }
@@ -264,6 +254,7 @@ fn prepare_raft_transport(
                 gssapi: config.gssapi.clone(),
                 protocol: config.controller_listener_protocol,
                 controller: Arc::clone(&controller_cell),
+                max_frame_bytes: config.socket_request_max.bytes_usize(),
                 authorizer: Arc::clone(&config.authorizer),
             };
             Some(Arc::new(handshake) as Arc<dyn crabka_raft::RaftListenerHandshake>)
@@ -552,6 +543,10 @@ async fn recover_storage_and_groups(
                     startup_image.partition_next_offset(&topic, partition_id),
                 )
                 .await?;
+            } else {
+                producer_state
+                    .rebuild_from_log(&topic, PartitionIndex(partition_id), &log)
+                    .await?;
             }
             let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
                 topic: topic.clone(),
@@ -785,9 +780,13 @@ fn start_audit_pipeline(
     partitions: &Arc<PartitionRegistry>,
     metrics: &crate::metrics::BrokerMetrics,
     supervisor_shutdown: &CancellationToken,
-) -> (Option<PartitionIndex>, Arc<crabka_audit::AuditLog>) {
+) -> (
+    Option<PartitionIndex>,
+    Arc<crabka_audit::AuditLog>,
+    Option<JoinHandle<()>>,
+) {
     if !config.audit_enabled {
-        return (None, crabka_audit::AuditLog::disabled());
+        return (None, crabka_audit::AuditLog::disabled(), None);
     }
     let image = controller.current_image();
     let led_partition = (0_i32..)
@@ -799,7 +798,7 @@ fn start_audit_pipeline(
         .find(|(_, record)| record.leader == config.node_id)
         .map(|(index, _)| PartitionIndex(index));
     let (log, receiver) = crabka_audit::AuditLog::new(config.audit_event_queue_capacity);
-    if let Some(partition_index) = led_partition {
+    let writer_handle = if let Some(partition_index) = led_partition {
         let sink = Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
             Arc::clone(partitions),
             config.audit_topic.clone(),
@@ -840,7 +839,7 @@ fn start_audit_pipeline(
                 sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             },
         );
-        tokio::spawn(writer.run());
+        let writer_handle = tokio::spawn(writer.run());
         spawn_audit_metrics(
             stats,
             log.clone(),
@@ -848,14 +847,16 @@ fn start_audit_pipeline(
             config.audit_stats_poll_interval,
             supervisor_shutdown.child_token(),
         );
+        Some(writer_handle)
     } else {
         tracing::warn!("no audit partition led by this broker; audit records will drop");
-    }
+        None
+    };
     config.authorizer = Arc::new(crate::audit_authorizer::AuditingAuthorizer::new(
         Arc::clone(&config.authorizer),
         log.clone(),
     ));
-    (led_partition, log)
+    (led_partition, log, writer_handle)
 }
 
 fn spawn_broker_gauge_updater(
@@ -1338,8 +1339,16 @@ fn spawn_cluster_data_maintenance(
 }
 
 fn kafka_swap_kickoff(config: &BrokerConfig) -> Option<KafkaSwapKickoff> {
-    let crate::config::RlmmKind::TopicBacked(metadata_config) = &config.remote_log_metadata else {
-        return None;
+    config.remote_storage_backend.as_ref()?;
+    // The diskless WAL index is always topic-backed, even when tests opt the
+    // KIP-405 RLMM itself into its in-memory implementation.
+    let default_metadata_config;
+    let metadata_config = match &config.remote_log_metadata {
+        crate::config::RlmmKind::TopicBacked(metadata_config) => metadata_config,
+        crate::config::RlmmKind::InMemory => {
+            default_metadata_config = crate::config::KafkaRlmmConfig::default();
+            &default_metadata_config
+        }
     };
     let listeners = config.effective_listeners();
     let inter_broker = listeners
@@ -1716,20 +1725,26 @@ fn spawn_rlmm_bootstrap(
     }))
 }
 
-fn spawn_diskless_index_bootstrap(
+fn spawn_diskless_bootstrap(
     broker: &Arc<Broker>,
-    kickoff: Option<&KafkaSwapKickoff>,
+    handle: &Arc<crate::diskless::read::DisklessReadHandle>,
+    kickoff: &KafkaSwapKickoff,
     shutdown: &CancellationToken,
-) -> Option<JoinHandle<()>> {
-    let (Some(handle), Some(kickoff)) = (broker.diskless_read.as_ref(), kickoff) else {
-        return None;
-    };
+) -> JoinHandle<()> {
     let cache = Arc::clone(&handle.index);
+    let flusher = DisklessFlusherStartup {
+        partitions: Arc::clone(&broker.partitions),
+        image_rx: broker.controller.watch_image(),
+        object_store: handle.object_store(),
+        node_id: broker.config.node_id,
+        broker_id: broker.config.broker_id,
+        flush_config: crate::diskless::flusher::FlushConfig::from_broker(&broker.config),
+    };
     let kickoff = kickoff.clone();
     let shutdown = shutdown.clone();
-    Some(tokio::spawn(async move {
-        bootstrap_diskless_index_log(cache, kickoff, shutdown).await;
-    }))
+    tokio::spawn(async move {
+        bootstrap_diskless_index_log(cache, kickoff, flusher, shutdown).await;
+    })
 }
 
 async fn start_metadata_phase(
@@ -1767,7 +1782,6 @@ type BrokerCoordinatorSet = (
 
 struct BrokerStorageStartup {
     log_dir_status: crate::log_dir_status::LogDirRegistry,
-    log_dir_ids: crate::log_dir_id::LogDirIds,
     diskless: DisklessRuntime,
 }
 
@@ -1817,7 +1831,6 @@ async fn finish_broker_startup(
         tls_dynamic: transport.0,
         ktls_enabled: transport.1,
         inter_broker_client: transport.2,
-        inter_broker_listener_protocol: runtime.inter_listener_protocol,
         unclean_recovery: runtime.unclean_recovery,
         metrics: runtime.metrics,
         metrics_bound_addr: runtime.metrics_bound_addr,
@@ -1832,13 +1845,26 @@ async fn finish_broker_startup(
         hot_tail: storage.diskless.hot_tail,
         wal_shards: storage.diskless.wal_shards,
         log_dir_status: storage.log_dir_status,
-        log_dir_ids: storage.log_dir_ids,
         client_metrics: runtime.client_metrics,
         #[cfg(any(test, feature = "test-helpers"))]
         offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         audit_log: runtime.audit_log,
+        audit_writer_handle: tokio::sync::Mutex::new(runtime.audit_writer_handle),
         handlers: crate::handlers::registry::build_registry(),
     });
+    let diskless_bootstrap = match (
+        broker.diskless_read.as_ref(),
+        runtime.kafka_swap_kickoff.as_ref(),
+    ) {
+        (Some(handle), Some(kickoff)) => Some((handle, kickoff)),
+        (None, None) => None,
+        _ => {
+            broker.supervisor_shutdown.cancel();
+            return Err(BrokerError::Startup(
+                "diskless read and bootstrap configuration must be enabled together".into(),
+            ));
+        }
+    };
     let (shutdown, listener_tasks) = spawn_listener_tasks(&broker, bound);
     emit_broker_started(&broker, runtime.audit_led_partition).await;
     let topic_rlmm_task = spawn_rlmm_bootstrap(
@@ -1847,14 +1873,14 @@ async fn finish_broker_startup(
         runtime.kafka_swap_kickoff.as_ref(),
         &shutdown,
     );
-    let diskless_index_task =
-        spawn_diskless_index_bootstrap(&broker, runtime.kafka_swap_kickoff.as_ref(), &shutdown);
+    let diskless_task = diskless_bootstrap
+        .map(|(handle, kickoff)| spawn_diskless_bootstrap(&broker, handle, kickoff, &shutdown));
     Ok(BrokerHandle {
         listen_addr,
         shutdown,
         listener_tasks,
         topic_rlmm_task,
-        diskless_index_task,
+        diskless_task,
         broker,
     })
 }
@@ -1942,6 +1968,7 @@ struct BrokerRuntimeStartup {
     diskless_read: Option<Arc<crate::diskless::read::DisklessReadHandle>>,
     client_metrics: Arc<crate::client_metrics::ClientMetrics>,
     audit_log: Arc<crabka_audit::AuditLog>,
+    audit_writer_handle: Option<JoinHandle<()>>,
     audit_led_partition: Option<PartitionIndex>,
     kafka_swap_kickoff: Option<KafkaSwapKickoff>,
     kafka_swap_target: Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
@@ -1975,7 +2002,7 @@ async fn start_broker_runtime(
             listener.protocol
         });
     let metrics = crate::metrics::BrokerMetrics::new();
-    let (audit_led_partition, audit_log) = start_audit_pipeline(
+    let (audit_led_partition, audit_log, audit_writer_handle) = start_audit_pipeline(
         config,
         &**controller,
         storage.0,
@@ -2066,6 +2093,7 @@ async fn start_broker_runtime(
         diskless_read: remote.diskless_read,
         client_metrics,
         audit_log,
+        audit_writer_handle,
         audit_led_partition,
         kafka_swap_kickoff,
         kafka_swap_target: remote.swap_target,
@@ -2145,22 +2173,48 @@ impl Broker {
     }
 }
 
-/// Lifecycle handle returned by [`Broker::start`]. Drop or call
-/// [`shutdown`](BrokerHandle::shutdown) to stop the broker.
+/// Lifecycle handle returned by [`Broker::start`]. Call
+/// [`shutdown`](BrokerHandle::shutdown) for an orderly stop. Dropping the
+/// handle requests best-effort cancellation of all retained tasks.
 pub struct BrokerHandle {
     listen_addr: SocketAddr,
     shutdown: CancellationToken,
     /// One task per `ListenerSpec` bound during `Broker::start`. `shutdown()`
-    /// awaits every task to drain in-flight connections.
+    /// awaits every task after it stops all active connections.
     listener_tasks: Vec<JoinHandle<()>>,
     /// Topic-backed RLMM bootstrap and assignment task. Retained so shutdown
     /// can join it before the Tokio runtime drops.
     topic_rlmm_task: Option<JoinHandle<()>>,
-    /// Topic-backed diskless WAL index projection task. Retained so shutdown
-    /// can join it before the Tokio runtime drops.
-    diskless_index_task: Option<JoinHandle<()>>,
-    /// Held so partition writer tasks live as long as the handle.
+    /// Topic-backed diskless WAL index projection and object flusher task.
+    /// Retained so shutdown can join it before the Tokio runtime drops.
+    diskless_task: Option<JoinHandle<()>>,
+    /// Shared broker state, including the registries that own background task
+    /// handles.
     broker: Arc<Broker>,
+}
+
+fn take_partition_writer_tasks(partitions: &PartitionRegistry) -> Vec<JoinHandle<()>> {
+    partitions
+        .arcs()
+        .into_iter()
+        .filter_map(|partition| partition.take_writer_handle())
+        .collect()
+}
+
+async fn shutdown_partition_writers(partitions: &PartitionRegistry) {
+    let tasks = take_partition_writer_tasks(partitions);
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
+}
+
+fn abort_partition_writers(partitions: &PartitionRegistry) {
+    for task in take_partition_writer_tasks(partitions) {
+        task.abort();
+    }
 }
 
 impl BrokerHandle {
@@ -3474,18 +3528,6 @@ impl BrokerHandle {
     /// Cancel the listener and drain in-flight connections. The returned
     /// future completes when the listener task exits.
     pub async fn shutdown(mut self) {
-        // Emit the BrokerStopping lifecycle event before tearing down
-        // partitions. This record may be dropped if the audit partition is
-        // already gone — acceptable for Slice 1; durable shutdown auditing
-        // is Slice 3.
-        self.broker
-            .audit_log
-            .emit(crabka_audit::AuditEvent::Lifecycle {
-                kind: crabka_audit::LifecycleKind::BrokerStopping,
-                node_id: i64::from(self.broker.config.broker_id),
-                time_ms: crate::time_util::now_ms(),
-            });
-
         // Cancel the replicator supervisor BEFORE the controller drops:
         // in-flight replication tasks must observe a clean cancellation
         // rather than a torn-down metadata-watch channel.
@@ -3505,18 +3547,55 @@ impl BrokerHandle {
         if let Some(task) = self.topic_rlmm_task.take() {
             let _ = task.await;
         }
-        if let Some(task) = self.diskless_index_task.take() {
+        if let Some(task) = self.diskless_task.take() {
             let _ = task.await;
         }
         for t in self.listener_tasks.drain(..) {
             let _ = t.await;
         }
+        self.broker
+            .audit_log
+            .emit(crabka_audit::AuditEvent::Lifecycle {
+                kind: crabka_audit::LifecycleKind::BrokerStopping,
+                node_id: i64::from(self.broker.config.broker_id),
+                time_ms: crate::time_util::now_ms(),
+            });
+        self.broker.audit_log.close();
+        if let Some(task) = self.broker.audit_writer_handle.lock().await.take() {
+            let _ = task.await;
+        }
+        crate::future_log::shutdown_moves(&self.broker.future_logs).await;
+        shutdown_partition_writers(&self.broker.partitions).await;
         // Shut down the raft engine so this broker's openraft instance stops
         // participating in elections after the broker is logically dead.
         // Without this, a killed broker's in-process raft engine keeps ticking
         // and re-elects itself, preventing the surviving nodes from detecting
         // the leader failure and electing a replacement.
         self.broker.controller.cancel().await;
+    }
+}
+
+impl Drop for BrokerHandle {
+    fn drop(&mut self) {
+        self.broker.supervisor_shutdown.cancel();
+        self.shutdown.cancel();
+        self.broker.audit_log.close();
+        if let Ok(mut handle) = self.broker.audit_writer_handle.try_lock()
+            && let Some(task) = handle.take()
+        {
+            task.abort();
+        }
+        for task in self.listener_tasks.drain(..) {
+            task.abort();
+        }
+        if let Some(task) = self.topic_rlmm_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.diskless_task.take() {
+            task.abort();
+        }
+        crate::future_log::abort_moves(&self.broker.future_logs);
+        abort_partition_writers(&self.broker.partitions);
     }
 }
 
@@ -3731,7 +3810,7 @@ impl Broker {
             ktls_enabled,
             inter_broker_client,
         } = prepare_startup_transport(&config).await?;
-        let diskless_runtime = DisklessRuntime::new();
+        let diskless_runtime = DisklessRuntime::new(config.node_id);
 
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
@@ -3875,7 +3954,6 @@ impl Broker {
             runtime,
             BrokerStorageStartup {
                 log_dir_status,
-                log_dir_ids,
                 diskless: diskless_runtime,
             },
         )
@@ -4078,9 +4156,19 @@ async fn bootstrap_topic_rlmm(
     tokio::join!(image_watcher, reconciler);
 }
 
+struct DisklessFlusherStartup {
+    partitions: Arc<PartitionRegistry>,
+    image_rx: tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>>,
+    object_store: Arc<dyn object_store::ObjectStore>,
+    node_id: crabka_metadata::NodeId,
+    broker_id: i32,
+    flush_config: crate::diskless::flusher::FlushConfig,
+}
+
 async fn bootstrap_diskless_index_log(
     cache: Arc<tokio::sync::Mutex<crate::diskless::wal_index::WalIndexCache>>,
     config: KafkaSwapKickoff,
+    flusher: DisklessFlusherStartup,
     shutdown: CancellationToken,
 ) {
     let log_config = metadata_log_config(
@@ -4098,13 +4186,25 @@ async fn bootstrap_diskless_index_log(
         match started {
             Ok(log) => {
                 let log: Arc<dyn crabka_remote_storage_topic::MetadataEventLog> = log;
-                let _index =
+                let index_log =
                     crate::diskless::index_log::DisklessIndexLog::start_with_cache(log, cache);
                 tracing::info!(
                     topic = crate::diskless::index_log::DISKLESS_WAL_INDEX_TOPIC,
-                    "diskless WAL index projection started"
+                    "diskless WAL index projection and object flusher started"
                 );
-                shutdown.cancelled().await;
+                crate::diskless::flusher::run(
+                    crate::diskless::flusher::FlusherContext {
+                        partitions: flusher.partitions,
+                        image_rx: flusher.image_rx,
+                        object_store: flusher.object_store,
+                        index_log,
+                        node_id: flusher.node_id,
+                        broker_id: flusher.broker_id,
+                    },
+                    flusher.flush_config,
+                    shutdown,
+                )
+                .await;
                 return;
             }
             Err(error) => {
@@ -4197,6 +4297,12 @@ pub(crate) fn diskless_topic_config(
         .is_some_and(|value| value == "true")
 }
 
+type PartitionWal = (
+    Option<crate::wal::SharedWal>,
+    Option<crabka_log::Offset>,
+    Option<Arc<crate::wal::quorum::engine::WalShardEngine>>,
+);
+
 fn partition_wal(
     identity: (&str, Option<uuid::Uuid>, PartitionIndex),
     log_dir: &std::path::Path,
@@ -4205,20 +4311,31 @@ fn partition_wal(
     hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
     replica_count: usize,
-) -> Result<Option<crate::wal::SharedWal>, BrokerError> {
+) -> Result<PartitionWal, BrokerError> {
     let (topic, topic_id, partition_id) = identity;
     if !diskless {
-        return Ok(None);
+        return Ok((None, None, None));
     }
-    let wal = crate::wal::quorum::QuorumWalStore::for_partition(
-        topic,
-        topic_id,
-        partition_id,
-        log_dir,
-        log,
-        hot_tail,
-        replica_count,
-    )?;
+    let wal = if let (Some(topic_id), Some(_)) = (topic_id, wal_shards.as_ref()) {
+        crate::wal::quorum::QuorumWalStore::for_distributed_partition(
+            topic_id,
+            partition_id,
+            log,
+            hot_tail,
+            replica_count,
+        )?
+    } else {
+        crate::wal::quorum::QuorumWalStore::for_partition(
+            topic,
+            topic_id,
+            partition_id,
+            log_dir,
+            log,
+            hot_tail,
+            replica_count,
+        )?
+    };
+    let durable_watermark = wal.engine().durable_watermark();
     if let (Some(topic_id), Some(registry)) = (topic_id, wal_shards) {
         registry.insert(
             crate::wal::quorum::registry::ShardId {
@@ -4228,7 +4345,12 @@ fn partition_wal(
             wal.engine(),
         );
     }
-    Ok(Some(Arc::new(wal) as crate::wal::SharedWal))
+    let engine = wal.engine();
+    Ok((
+        Some(Arc::new(wal) as crate::wal::SharedWal),
+        Some(durable_watermark),
+        Some(engine),
+    ))
 }
 
 /// Create the partition runtime (mpsc channel + writer task + notify).
@@ -4309,7 +4431,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         sequencer,
     } = config;
     let log = Arc::new(Mutex::new(log));
-    let wal = partition_wal(
+    let (wal, recovered_durable_watermark, wal_engine) = partition_wal(
         (&topic, topic_id, partition_id),
         &log_dir,
         Arc::clone(&log),
@@ -4320,14 +4442,17 @@ pub(crate) fn try_spawn_partition_with_sequencer(
     )?;
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(partition_writer_queue_depth);
     let notify = Arc::new(tokio::sync::Notify::new());
-    let replica_state = Arc::new(tokio::sync::Mutex::new(
-        crate::replica_state::ReplicaState::new(),
-    ));
+    let mut initial_replica_state = crate::replica_state::ReplicaState::new();
+    if let Some(durable_watermark) = recovered_durable_watermark {
+        initial_replica_state.recompute_hw_for_wal_durable(durable_watermark);
+    }
+    let initial_wal_watermark = initial_replica_state.hw;
+    let replica_state = Arc::new(tokio::sync::Mutex::new(initial_replica_state));
     let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
     let current_leader = Arc::new(AtomicU64::new(0));
     let current_leader_epoch = Arc::new(AtomicI32::new(0));
     let log_dir = Arc::new(arc_swap::ArcSwap::from_pointee(log_dir));
-    let writer = tokio::spawn(crate::partition_writer::run_with_sequencer(
+    let writer_future = crate::partition_writer::run_with_sequencer(
         (topic.clone(), partition_id),
         (log.clone(), log_dir.clone()),
         rx,
@@ -4339,7 +4464,32 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         (log_dir_status, producer_state, wal),
         (producer_id_expiration, max_produce_group),
         sequencer,
-    ));
+    );
+    let writer = if let Some(engine) = wal_engine {
+        let replica_state = replica_state.clone();
+        let hw_advance_notify = hw_advance_notify.clone();
+        tokio::spawn(async move {
+            let watermark_updates = async move {
+                let mut observed = initial_wal_watermark;
+                loop {
+                    let durable = engine.wait_for_durable_advance(observed).await;
+                    observed = durable;
+                    let mut state = replica_state.lock().await;
+                    let previous = state.hw;
+                    state.recompute_hw_for_wal_durable(durable);
+                    if state.hw != previous {
+                        hw_advance_notify.notify_waiters();
+                    }
+                }
+            };
+            tokio::select! {
+                () = writer_future => {}
+                () = watermark_updates => {}
+            }
+        })
+    } else {
+        tokio::spawn(writer_future)
+    };
     Ok(Arc::new(Partition {
         topic,
         index: partition_id,
@@ -4352,7 +4502,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         current_leader,
         current_leader_epoch,
         diskless,
-        writer_handle: Arc::new(writer),
+        writer_handle: Arc::new(Mutex::new(Some(writer))),
     }))
 }
 
@@ -4549,17 +4699,29 @@ fn connection_creation_delay(rate: f64, maximum: Time) -> Time {
     Time::from_micros(i64::try_from(delay_micros).unwrap_or(i64::MAX)).min(maximum)
 }
 
+async fn shutdown_connection_tasks(connections: &mut JoinSet<()>) {
+    connections.shutdown().await;
+}
+
 async fn accept_loop(
     broker: Arc<Broker>,
     listener: TcpListener,
     spec: crate::config::ListenerSpec,
     shutdown: CancellationToken,
 ) {
+    let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {
                 tracing::info!(name = %spec.name, "listener shutting down");
                 break;
+            }
+            result = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = result
+                    && error.is_panic()
+                {
+                    tracing::warn!(?error, name = %spec.name, "connection task panicked");
+                }
             }
             accept = listener.accept() => {
                 match accept {
@@ -4616,7 +4778,7 @@ async fn accept_loop(
                         }
                         let b = broker.clone();
                         let s = spec.clone();
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             // Hold the connection guard for the lifetime of the
                             // connection; dropping it releases the global +
                             // per-IP slots.
@@ -4640,6 +4802,7 @@ async fn accept_loop(
             }
         }
     }
+    shutdown_connection_tasks(&mut connections).await;
 }
 
 /// Tune an accepted broker connection before serving it.
@@ -4990,7 +5153,10 @@ mod tests {
             Err(tokio::sync::mpsc::error::TrySendError::Full(_))
         ));
 
-        partition.writer_handle.abort();
+        partition
+            .take_writer_handle()
+            .expect("partition writer handle")
+            .abort();
     }
 
     #[test]
@@ -5026,6 +5192,7 @@ mod tests {
                 3,
             )
             .expect("partition wal")
+            .0
             .is_none()
         );
         assert!(
@@ -5039,8 +5206,135 @@ mod tests {
                 3,
             )
             .expect("partition wal")
+            .0
             .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn diskless_partition_starts_at_recovered_wal_watermark() {
+        let dir = tempdir().expect("tempdir");
+        let partition_dir = crate::log_dir::partition_dir(dir.path(), "recovered", 0);
+        std::fs::create_dir_all(&partition_dir).expect("partition directory");
+        let mut log =
+            crabka_log::Log::open(&partition_dir, crabka_log::LogConfig::default()).unwrap();
+        let mut batch = crabka_protocol::records::RecordBatch {
+            last_offset_delta: 1,
+            records: vec![
+                crabka_protocol::records::Record::default(),
+                crabka_protocol::records::Record {
+                    offset_delta: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        log.append(&mut batch).expect("append recovered records");
+
+        let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
+            topic: "recovered".into(),
+            topic_id: Some(uuid::Uuid::new_v4()),
+            partition_id: PartitionIndex(0),
+            log_dir: dir.path().to_path_buf(),
+            log,
+            log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: millis(1),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
+            diskless: true,
+            hot_tail: None,
+            wal_shards: None,
+            sequencer: None,
+        })
+        .expect("spawn recovered partition");
+
+        assert!(partition.high_watermark().await == crabka_log::Offset(2));
+        partition
+            .take_writer_handle()
+            .expect("partition writer handle")
+            .abort();
+    }
+
+    #[tokio::test]
+    async fn distributed_wal_ack_restores_the_partition_watermark() {
+        let dir = tempdir().expect("tempdir");
+        let topic_id = uuid::Uuid::new_v4();
+        let shard = crate::wal::quorum::registry::ShardId {
+            topic_id,
+            partition: PartitionIndex(0),
+        };
+        let registry = Arc::new(crate::wal::quorum::registry::WalShardRegistry::new(
+            crabka_raft::NodeId(1),
+        ));
+        registry.replace_placements(&std::collections::HashMap::from([(
+            shard,
+            vec![
+                crabka_raft::NodeId(1),
+                crabka_raft::NodeId(2),
+                crabka_raft::NodeId(3),
+            ],
+        )]));
+        let partition_dir = crate::log_dir::partition_dir(dir.path(), "recovered", 0);
+        std::fs::create_dir_all(&partition_dir).expect("partition directory");
+        let mut log =
+            crabka_log::Log::open(&partition_dir, crabka_log::LogConfig::default()).unwrap();
+        let mut batch = crabka_protocol::records::RecordBatch {
+            last_offset_delta: 1,
+            records: vec![
+                crabka_protocol::records::Record::default(),
+                crabka_protocol::records::Record {
+                    offset_delta: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        log.append(&mut batch).expect("append recovered records");
+        let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
+            topic: "recovered".into(),
+            topic_id: Some(topic_id),
+            partition_id: PartitionIndex(0),
+            log_dir: dir.path().to_path_buf(),
+            log,
+            log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: millis(1),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
+            diskless: true,
+            hot_tail: None,
+            wal_shards: Some(registry.clone()),
+            sequencer: None,
+        })
+        .expect("spawn recovered partition");
+        assert!(partition.high_watermark().await == crabka_log::Offset(0));
+
+        let acknowledgement = crate::wal::quorum::wire::fetch_request(
+            crate::wal::quorum::wire::QuorumGroup::diskless_wal(topic_id, PartitionIndex(0)),
+            crabka_raft::NodeId(2),
+            0,
+            2,
+            crabka_units::mebibytes(1),
+        );
+        registry
+            .route_fetch_request(&acknowledgement)
+            .expect("WAL route")
+            .expect("WAL response");
+
+        partition
+            .await_hw_at_least(
+                crabka_log::Offset(2),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .await
+            .expect("restored WAL watermark");
+        partition
+            .take_writer_handle()
+            .expect("partition writer handle")
+            .abort();
     }
 
     fn consumer_group_seed(member_id: &str) -> crate::coordinator::unified::GroupSeed {
@@ -6621,21 +6915,104 @@ protocol = "Plaintext"
     }
 
     #[tokio::test]
+    async fn shutdown_connection_tasks_aborts_and_awaits_every_task() {
+        struct DropCounter(Arc<AtomicUsize>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let mut connections = JoinSet::new();
+        for _ in 0..2 {
+            let task_started = Arc::clone(&started);
+            let task_dropped = Arc::clone(&dropped);
+            connections.spawn(async move {
+                let _drop_counter = DropCounter(task_dropped);
+                task_started.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            });
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection tasks start");
+
+        shutdown_connection_tasks(&mut connections).await;
+
+        assert!(connections.is_empty());
+        assert!(dropped.load(Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
     async fn start_and_shutdown_clean() {
         let dir = tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
         let handle = Broker::start(config).await.unwrap();
         let broker = handle.broker_arc_for_test();
         let addr = handle.listen_addr();
+        let partition = local_partition_with_records(dir.path(), "shutdown", 0, &[]);
+        broker
+            .partitions
+            .insert("shutdown".to_string(), PartitionIndex(0), partition.clone());
         assert!(addr.port() != 0);
         let stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("listener accepts before shutdown");
         wait_for_connection_count(&broker, 1, "accept_loop did not register live connection").await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("broker shutdown completes");
+        assert!(broker.connections.total() == 0);
+        assert!(partition.take_writer_handle().is_none());
+        let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+        assert!(
+            partition
+                .writer_tx
+                .send(WriterMessage::Compact { ack })
+                .await
+                .is_err()
+        );
         drop(stream);
-        wait_for_connection_count(&broker, 0, "connection guard did not release client slot").await;
-        handle.shutdown().await;
         assert_listener_stops_accepting(addr).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_handle_stops_idle_connections_and_partition_writers() {
+        let dir = tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.unwrap();
+        let broker = handle.broker_arc_for_test();
+        let addr = handle.listen_addr();
+        let partition = local_partition_with_records(dir.path(), "drop-shutdown", 0, &[]);
+        broker.partitions.insert(
+            "drop-shutdown".to_string(),
+            PartitionIndex(0),
+            partition.clone(),
+        );
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("listener accepts before handle drop");
+        wait_for_connection_count(&broker, 1, "accept_loop did not register live connection").await;
+
+        drop(handle);
+
+        wait_for_connection_count(
+            &broker,
+            0,
+            "dropping BrokerHandle did not stop the idle connection",
+        )
+        .await;
+        assert!(partition.take_writer_handle().is_none());
+        assert_listener_stops_accepting(addr).await;
+        drop(stream);
+        broker.controller.cancel().await;
     }
 
     #[tokio::test]
@@ -6667,6 +7044,24 @@ protocol = "Plaintext"
                 "current {current:?}"
             );
         }
+    }
+
+    #[test]
+    fn diskless_index_gets_topic_kickoff_with_in_memory_rlmm() {
+        let dir = tempdir().unwrap();
+        let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        check!(matches!(
+            config.remote_log_metadata,
+            crate::config::RlmmKind::InMemory
+        ));
+        check!(kafka_swap_kickoff(&config).is_none());
+
+        config.remote_storage_backend = Some(crate::config::RemoteStorageBackend::Local {
+            dir: dir.path().join("objects"),
+        });
+        let kickoff = kafka_swap_kickoff(&config).expect("diskless index kickoff");
+        check!(kickoff.cfg.num_partitions == crate::config::DEFAULT_RLMM_TOPIC_NUM_PARTITIONS);
+        check!(kickoff.cfg.replication == crate::config::DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR);
     }
 
     #[test]
@@ -6774,6 +7169,59 @@ protocol = "Plaintext"
         // dial before anything could activate the topic-backed manager.
         assert!(metrics.tiered_storage_rlmm_bootstrap_attempts.get() == 1);
         assert!(metrics.tiered_storage_rlmm_topic_backed.get() == 0);
+    }
+
+    #[tokio::test]
+    async fn diskless_index_bootstrap_retries_until_cancelled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bootstrap = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        let snapshot_dir = tempdir().unwrap();
+        let kickoff = KafkaSwapKickoff {
+            cfg: crate::config::KafkaRlmmConfig {
+                bootstrap,
+                num_partitions: 1,
+                replication: 1,
+                snapshot_dir: snapshot_dir.path().to_path_buf(),
+                ..crate::config::KafkaRlmmConfig::default()
+            },
+            broker_id: 1,
+            bootstrap_backoff_initial: std::time::Duration::from_millis(10),
+            bootstrap_backoff_max: std::time::Duration::from_secs(1),
+            reconcile_tick: std::time::Duration::from_secs(1),
+        };
+        let (_image_tx, image_rx) = tokio::sync::watch::channel(Arc::new(
+            crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
+        ));
+        let flusher = DisklessFlusherStartup {
+            partitions: Arc::new(PartitionRegistry::new()),
+            image_rx,
+            object_store: Arc::new(object_store::memory::InMemory::new()),
+            node_id: crabka_raft::NodeId(7),
+            broker_id: 1,
+            flush_config: crate::diskless::flusher::FlushConfig::default(),
+        };
+        let shutdown = CancellationToken::new();
+        let bootstrap = bootstrap_diskless_index_log(
+            Arc::new(tokio::sync::Mutex::new(
+                crate::diskless::wal_index::WalIndexCache::default(),
+            )),
+            kickoff,
+            flusher,
+            shutdown.clone(),
+        );
+        tokio::pin!(bootstrap);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut bootstrap)
+                .await
+                .is_err()
+        );
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), bootstrap)
+            .await
+            .expect("cancelled diskless index bootstrap returns promptly");
     }
 
     #[tokio::test]

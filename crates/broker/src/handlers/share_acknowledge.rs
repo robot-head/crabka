@@ -67,16 +67,21 @@ pub(crate) async fn handle(
     let group = req.group_id.clone().unwrap_or_default();
     let member = req.member_id.clone().unwrap_or_default();
 
-    if let Err(code) =
-        broker
-            .share_partition_leaders
-            .validate_session(&group, &member, req.share_session_epoch)
-    {
-        return encode_error_response(version, code, lock_timeout_ms);
-    }
+    let released = match broker.share_partition_leaders.update_acknowledge_session(
+        &group,
+        &member,
+        req.share_session_epoch,
+    ) {
+        Ok(released) => released,
+        Err(code) => return encode_error_response(version, code, lock_timeout_ms),
+    };
 
     let now = Instant::now();
     let responses = process_topics(broker, &req, ctx, &cfg, &group, &member, now).await;
+    broker
+        .share_partition_leaders
+        .release_session_partitions(&group, &member, &released)
+        .await;
 
     let resp = ShareAcknowledgeResponse {
         throttle_time_ms: 0,
@@ -324,7 +329,26 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
         let topic_id = ProtoUuid([8; 16]);
-        let req_bytes = encode_request(&request(topic_id, &[3, 5]));
+        let session_partitions = std::collections::HashSet::from([
+            (uuid::Uuid::from_bytes(topic_id.0), 3),
+            (uuid::Uuid::from_bytes(topic_id.0), 5),
+        ]);
+        broker
+            .share_partition_leaders
+            .update_fetch_session(
+                "g1",
+                "member-1",
+                ctx.connection_id,
+                0,
+                &session_partitions,
+                &std::collections::HashSet::new(),
+                false,
+                false,
+            )
+            .expect("open share session");
+        let mut request = request(topic_id, &[3, 5]);
+        request.share_session_epoch = 1;
+        let req_bytes = encode_request(&request);
 
         let resp = handle(&broker, version, 1, &req_bytes, &ctx)
             .await

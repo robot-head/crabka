@@ -1,11 +1,6 @@
 //! Sparse offset index. Each entry is 8 bytes: `relative_offset` as u32 BE
 //! and position as u32 BE. Entries increase monotonically.
 
-// `truncate_by_position`, `truncate_by_relative_offset`, `entry_count`,
-// and `TimeIndex::{lookup, last_entry}` are consumed by log truncation,
-// recovery, and lookup-by-time paths.
-#![allow(dead_code)]
-
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -138,6 +133,7 @@ impl OffsetIndex {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -362,11 +358,13 @@ impl TimeIndex {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn last_entry(&self) -> Option<(i64, u32)> {
         self.entries.last().copied()
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }

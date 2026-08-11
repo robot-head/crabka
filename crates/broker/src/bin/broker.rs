@@ -202,6 +202,14 @@ struct RuntimeArgs {
     coordinator_actor_mailbox_capacity: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_DISKLESS_WAL_LOCAL_REPLICA_COUNT", value_parser = parse_positive_count)]
     diskless_wal_local_replica_count: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_DISKLESS_WAL_FLUSH_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    diskless_wal_flush_interval: Option<Time>,
+    #[arg(long, env = "CRABKA_DISKLESS_WAL_FLUSH_MAX_SIZE", value_parser = crabka_units::parse::positive_byte_size)]
+    diskless_wal_flush_max_size: Option<ByteSize>,
+    #[arg(long, env = "CRABKA_DISKLESS_WAL_TRIM_SAFETY_LAG", value_parser = clap::value_parser!(i64).range(0..))]
+    diskless_wal_trim_safety_lag: Option<i64>,
+    #[arg(long, env = "CRABKA_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    diskless_wal_index_projection_timeout: Option<Time>,
     #[arg(long, env = "CRABKA_UNCLEAN_RECOVERY_QUEUE_CAPACITY", value_parser = parse_positive_count)]
     unclean_recovery_queue_capacity: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_SHARE_RECOVERY_READ_MAX", value_parser = crabka_units::parse::positive_byte_size)]
@@ -275,6 +283,8 @@ struct RuntimeArgs {
     share_group_session_timeout: Option<Time>,
     #[arg(long, env = "CRABKA_SHARE_GROUP_HEARTBEAT_INTERVAL", value_parser = crabka_units::parse::positive_time)]
     share_group_heartbeat_interval: Option<Time>,
+    #[arg(long, env = "CRABKA_SHARE_GROUP_MAX_SIZE", value_parser = parse_positive_count)]
+    share_group_max_size: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_SHARE_GROUP_RECORD_LOCK_DURATION", value_parser = crabka_units::parse::positive_time)]
     share_group_record_lock_duration: Option<Time>,
     #[arg(long, env = "CRABKA_SHARE_GROUP_MAX_DELIVERY_ATTEMPTS", value_parser = clap::value_parser!(i16).range(1..))]
@@ -284,10 +294,14 @@ struct RuntimeArgs {
     #[arg(long, env = "CRABKA_SHARE_GROUP_ISOLATION_LEVEL", value_parser = parse_share_isolation)]
     share_group_isolation_level:
         Option<crabka_broker::coordinator::unified::share::config::ShareIsolationLevel>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_ENABLE", action = clap::ArgAction::Set)]
+    streams_group_enable: Option<bool>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_SESSION_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
     streams_group_session_timeout: Option<Time>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_HEARTBEAT_INTERVAL", value_parser = crabka_units::parse::positive_time)]
     streams_group_heartbeat_interval: Option<Time>,
+    #[arg(long, env = "CRABKA_STREAMS_GROUP_MAX_SIZE", value_parser = parse_positive_count)]
+    streams_group_max_size: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_STREAMS_INTERNAL_TOPIC_REPLICATION_FACTOR", value_parser = parse_positive_i16)]
     streams_internal_topic_replication_factor: Option<PositiveI16>,
     #[arg(long, env = "CRABKA_STREAMS_GROUP_NUM_STANDBY_REPLICAS", value_parser = clap::value_parser!(i32).range(0..))]
@@ -395,6 +409,10 @@ impl RuntimeArgs {
             classic_group_initial_rebalance_delay,
             sync_group_follower_wait,
             share_recovery_read_max,
+            diskless_wal_flush_interval,
+            diskless_wal_flush_max_size,
+            diskless_wal_trim_safety_lag,
+            diskless_wal_index_projection_timeout,
         );
         copy_refined_runtime!(
             self,
@@ -480,6 +498,8 @@ impl RuntimeArgs {
             self,
             runtime,
             share_group_max_inflight_records,
+            share_group_max_size,
+            streams_group_max_size,
             streams_internal_topic_replication_factor,
         );
         copy_plain_runtime!(
@@ -487,6 +507,7 @@ impl RuntimeArgs {
             runtime,
             share_group_enable,
             share_group_max_delivery_attempts,
+            streams_group_enable,
             streams_group_num_standby_replicas,
             streams_group_num_warmup_replicas,
             streams_group_acceptable_recovery_lag,
@@ -1428,6 +1449,22 @@ mod tests {
                 vec!["crabka-broker", "--diskless-wal-local-replica-count=5"],
                 true,
             ),
+            (
+                vec!["crabka-broker", "--diskless-wal-flush-interval=0ms"],
+                false,
+            ),
+            (
+                vec!["crabka-broker", "--diskless-wal-flush-max-size=4MiB"],
+                true,
+            ),
+            (
+                vec!["crabka-broker", "--diskless-wal-trim-safety-lag=-1"],
+                false,
+            ),
+            (
+                vec!["crabka-broker", "--diskless-wal-trim-safety-lag=0"],
+                true,
+            ),
             (vec!["crabka-broker", "--client-frame-max=101MiB"], false),
             (
                 vec![
@@ -1502,6 +1539,10 @@ mod tests {
                 ("CRABKA_LOG_TIMESTAMP_SCAN_WINDOW", Some("32KiB")),
                 ("CRABKA_TRANSACTION_RECOVERY_READ_MAX", Some("3MiB")),
                 ("CRABKA_DISKLESS_WAL_LOCAL_REPLICA_COUNT", Some("5")),
+                ("CRABKA_DISKLESS_WAL_FLUSH_INTERVAL", Some("125ms")),
+                ("CRABKA_DISKLESS_WAL_FLUSH_MAX_SIZE", Some("4MiB")),
+                ("CRABKA_DISKLESS_WAL_TRIM_SAFETY_LAG", Some("0")),
+                ("CRABKA_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT", Some("3s")),
                 ("CRABKA_BROKER_CLIENT_DISPATCH_QUEUE_CAPACITY", Some("7")),
                 ("CRABKA_BROKER_CLIENT_FRAME_MAX", Some("32KiB")),
             ],
@@ -1535,6 +1576,10 @@ mod tests {
                 assert!(config.log_config.timestamp_scan_window == crabka_units::kibibytes(32));
                 assert!(config.transaction_recovery_read_max == crabka_units::mebibytes(3));
                 assert!(config.diskless_wal_local_replica_count == 5);
+                assert!(config.diskless_wal_flush_interval == crabka_units::millis(125));
+                assert!(config.diskless_wal_flush_max_size == crabka_units::mebibytes(4));
+                assert!(config.diskless_wal_trim_safety_lag == 0);
+                assert!(config.diskless_wal_index_projection_timeout == crabka_units::secs(3));
                 assert!(config.client_dispatch_queue_capacity.get() == 7);
                 assert!(config.client_frame_max.size() == crabka_units::kibibytes(32));
             },
@@ -1572,6 +1617,25 @@ mod tests {
                 assert!(config.client_frame_max.size() == crabka_units::kibibytes(64));
             },
         );
+    }
+
+    #[test]
+    fn group_member_limits_and_streams_switch_apply_from_cli() {
+        let args = Args::try_parse_from([
+            "crabka-broker",
+            "--share-group-max-size=17",
+            "--streams-group-enable=false",
+            "--streams-group-max-size=19",
+        ])
+        .expect("parse group limits");
+        let mut config = BrokerConfig::default();
+
+        args.apply_runtime_to(&mut config, None)
+            .expect("apply group limits");
+
+        assert!(config.share_group.max_size == 17);
+        assert!(!config.streams_group.enable);
+        assert!(config.streams_group.max_size == 19);
     }
 
     #[test]

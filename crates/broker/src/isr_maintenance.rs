@@ -2,8 +2,6 @@
 //! last-fetch time against `replica_lag_time_max` and proposes an
 //! `AlterPartition` shrink or expand to the controller leader.
 
-#![allow(dead_code)]
-
 use std::{
     sync::Arc,
     time::{Duration, Instant},

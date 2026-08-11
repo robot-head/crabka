@@ -546,6 +546,7 @@ async fn serve_connection_stream<S>(
     )
     .to_owned();
     let mut auth = initial_connection_auth(is_sasl_listener, mtls_principal);
+    let connection_id = uuid::Uuid::new_v4().to_string();
     // Track live connections for the duration of this serve loop. The
     // gauge is decremented when `_conn` drops on any loop exit (EOF,
     // decode/send error, or SASL-session expiry).
@@ -660,6 +661,7 @@ async fn serve_connection_stream<S>(
             frame: &frame,
             auth: &auth,
             peer: &peer,
+            connection_id: &connection_id,
             listener_name: &spec.name,
             client_software_name: &client_software.0,
             client_software_version: &client_software.1,
@@ -668,6 +670,10 @@ async fn serve_connection_stream<S>(
             break;
         }
     }
+    broker
+        .share_partition_leaders
+        .release_connection(&connection_id)
+        .await;
     tracing::info!("connection closed");
 }
 
@@ -869,6 +875,7 @@ async fn handle_fetch_frame_from_parsed(
         principal,
         peer,
         parsed.client_id.unwrap_or(""),
+        "",
         sendfile_capable && parsed.api_version >= 4,
         "",
     );
@@ -948,6 +955,7 @@ struct DispatchContext<'a, 'request> {
     frame: &'a Bytes,
     auth: &'a crate::network::auth::ConnectionAuth,
     peer: &'a SocketAddr,
+    connection_id: &'a str,
     listener_name: &'a str,
     client_software_name: &'a str,
     client_software_version: &'a str,
@@ -963,6 +971,7 @@ async fn dispatch_registered_bytes(
         frame,
         auth,
         peer,
+        connection_id,
         listener_name,
         client_software_name,
         client_software_version,
@@ -975,6 +984,7 @@ async fn dispatch_registered_bytes(
                 principal_or_anonymous(auth),
                 peer,
                 parsed.client_id.unwrap_or(""),
+                connection_id,
                 false,
                 listener_name,
             );
@@ -1009,6 +1019,7 @@ async fn dispatch_registered_bytes(
                 principal_or_anonymous(auth),
                 peer,
                 parsed.client_id.unwrap_or(""),
+                connection_id,
                 false,
                 "",
             );

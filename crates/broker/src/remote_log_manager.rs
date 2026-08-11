@@ -624,8 +624,7 @@ async fn copy_one(
         offset_index: ex.offset_index_path.clone(),
         time_index: ex.time_index_path.clone(),
         transaction_index: ex.transaction_index_path.clone(),
-        // Crabka does not (yet) write producer-id snapshot files.
-        producer_snapshot_index: None,
+        producer_snapshot_index: Some(ex.producer_snapshot_path.clone()),
         leader_epoch_index: leader_epoch_index_bytes(&epochs),
     };
 
@@ -1129,6 +1128,11 @@ mod tests {
             check!(!rsm.fetch_log_segment(md, 0, None).unwrap().is_empty());
             check!(!rsm.fetch_index(md, IndexType::Offset).unwrap().is_empty());
             check!(
+                !rsm.fetch_index(md, IndexType::ProducerSnapshot)
+                    .unwrap()
+                    .is_empty()
+            );
+            check!(
                 !rsm.fetch_index(md, IndexType::LeaderEpoch)
                     .unwrap()
                     .is_empty()
@@ -1214,6 +1218,7 @@ mod tests {
             offset_index_path: write("00.index", b"i"),
             time_index_path: write("00.timeindex", b"t"),
             transaction_index_path: None,
+            producer_snapshot_path: write("10.snapshot", b"snapshot"),
             leader_epochs: Vec::new(),
         };
 
@@ -1234,6 +1239,7 @@ mod tests {
             offset_index_path: std::path::PathBuf::new(),
             time_index_path: std::path::PathBuf::new(),
             transaction_index_path: None,
+            producer_snapshot_path: std::path::PathBuf::new(),
             leader_epochs: Vec::new(),
         }
     }

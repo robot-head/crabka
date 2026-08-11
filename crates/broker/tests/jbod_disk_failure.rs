@@ -381,13 +381,18 @@ async fn heartbeat_with_offline_log_dirs_is_accepted() {
     // Wait until the broker has registered itself and elected a raft leader
     // (so the heartbeat handler reaches the leader branch, not NOT_CONTROLLER).
     handle.wait_until_controller_leader().await;
+    let broker_epoch = handle
+        .controller_image_for_test()
+        .broker(crabka_raft::NodeId(handle.node_id()))
+        .expect("registered broker")
+        .broker_epoch;
 
     // Send a heartbeat with a made-up offline dir UUID. The broker is the
     // only replica so alive_isr is empty → no change → no error.
     let fake_offline_dir = uuid::Uuid::from_u128(0xDEAD_1234);
     let req = BrokerHeartbeatRequest {
         broker_id: 1, // for_tests default broker_id
-        broker_epoch: -1,
+        broker_epoch,
         current_metadata_offset: 0,
         want_fence: false,
         want_shut_down: false,

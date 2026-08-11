@@ -171,6 +171,7 @@ pub(crate) async fn handle(
         // create of the same topic name would then reopen the deleted topic's
         // WAL, including stale transactional visibility state.
         let local_partitions = partitions.partitions_of(&name);
+        let topic_id = image.topic(&name).map(|topic| topic.topic_id);
 
         // Snapshot the (topic_id, partition_id) of every tiered
         // partition BEFORE the controller commits the delete and we tear
@@ -195,6 +196,22 @@ pub(crate) async fn handle(
                     // JBOD: the partition may live in any log dir; resolve
                     // its actual location (existing-location wins).
                     let dir = log_dir::place_partition_dir(&log_dirs, &name, idx.get());
+                    if let (Some(topic_id), Some(owning_dir)) = (topic_id, dir.parent())
+                        && let Err(error) = crate::wal::quorum::remove_shard(
+                            broker.wal_shards.as_ref(),
+                            owning_dir,
+                            &name,
+                            topic_id,
+                            idx,
+                        )
+                    {
+                        tracing::warn!(
+                            topic = %name,
+                            partition = idx.get(),
+                            error = %error,
+                            "failed to remove deleted topic WAL shard"
+                        );
+                    }
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 // Now that the local tear-down is done, fire off

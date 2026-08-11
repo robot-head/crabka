@@ -11,8 +11,6 @@
 //! `false` keeps Kafka's safe-by-default behavior. The partition stays
 //! unavailable until a former ISR member returns.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};
@@ -20,7 +18,9 @@ use crabka_raft::NodeId;
 use tracing::warn;
 
 use crate::{
-    config_keys::{RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, resolve_recovery_strategy},
+    config_keys::{
+        RecoveryStrategy, resolve_recovery_strategy, resolve_unclean_leader_election_enabled,
+    },
     error::BrokerError,
     heartbeat::controller_state::ControllerLivenessState,
 };
@@ -115,16 +115,6 @@ pub(crate) fn failover_one(
     }
 }
 
-/// Read `unclean.leader.election.enable` for a topic. The default is
-/// `false` when the key is unset or unparseable. This function is central so
-/// the failover path and any future caller stay consistent.
-fn unclean_election_enabled(image: &MetadataImage, topic: &str) -> bool {
-    image
-        .topic_config(topic)
-        .and_then(|m| m.get(UNCLEAN_LEADER_ELECTION_ENABLE))
-        .is_some_and(|v| v == "true")
-}
-
 /// Compute the failover `MetadataRecord` changes for `dead` against
 /// `image`. Pure: no I/O beyond `liveness.is_alive` lookups. This function is
 /// separate so the failover policy, including the KIP-841 unclean toggle, is
@@ -151,7 +141,7 @@ pub(crate) async fn compute_failover_changes(
             continue;
         }
         let strategy = resolve_recovery_strategy(image, &pr.topic);
-        let unclean_enabled = unclean_election_enabled(image, &pr.topic);
+        let unclean_enabled = resolve_unclean_leader_election_enabled(image, &pr.topic);
         match failover_one(pr, dead, &alive, strategy, unclean_enabled) {
             FailoverDecision::Elect {
                 leader,
@@ -271,7 +261,7 @@ pub(crate) async fn compute_offline_dir_failover_changes(
             continue;
         }
         let strategy = resolve_recovery_strategy(image, &pr.topic);
-        let unclean_enabled = unclean_election_enabled(image, &pr.topic);
+        let unclean_enabled = resolve_unclean_leader_election_enabled(image, &pr.topic);
         match failover_one(pr, broker, &alive, strategy, unclean_enabled) {
             FailoverDecision::Elect {
                 leader,
@@ -886,7 +876,7 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use crabka_metadata::TopicConfigRecord;
+    use crabka_metadata::{BrokerConfigRecord, TopicConfigRecord};
 
     use super::compute_failover_changes;
     use crate::config_keys::{
@@ -901,6 +891,14 @@ mod tests {
         img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
             topic: topic.into(),
             overrides,
+        }));
+    }
+
+    fn set_cluster_default(img: &mut MetadataImage, key: &str, value: &str) {
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+            config_name: key.into(),
+            config_value: Some(value.into()),
         }));
     }
 
@@ -1557,6 +1555,44 @@ mod tests {
             plan.changes,
         );
         assert!(plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Balanced)]);
+    }
+
+    #[tokio::test]
+    async fn failover_uses_cluster_default_recovery_settings() {
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        set_cluster_default(&mut img, UNCLEAN_RECOVERY_STRATEGY, "Balanced");
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+
+        let plan =
+            compute_failover_changes(&img, NodeId(1), &l, &crate::metrics::BrokerMetrics::new())
+                .await;
+
+        assert!(plan.changes.is_empty());
+        assert!(plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Balanced)]);
+    }
+
+    #[tokio::test]
+    async fn topic_none_overrides_cluster_strategy_and_uses_cluster_legacy_flag() {
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        set_cluster_default(&mut img, UNCLEAN_RECOVERY_STRATEGY, "Balanced");
+        set_cluster_default(&mut img, UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "None");
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+
+        let plan =
+            compute_failover_changes(&img, NodeId(1), &l, &crate::metrics::BrokerMetrics::new())
+                .await;
+
+        assert!(plan.recoveries.is_empty());
+        let change = one_partition_change(&plan.changes);
+        assert!(change.leader == 2);
+        assert!(change.isr == vec![NodeId(2)]);
     }
 
     #[tokio::test]

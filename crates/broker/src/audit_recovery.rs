@@ -104,7 +104,7 @@ mod tests {
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         (p, dir)
     }

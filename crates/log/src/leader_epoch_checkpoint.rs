@@ -11,8 +11,6 @@
 //!
 //! The byte layout stays the same, so `kafka-dump-log` can read these files.
 
-#![allow(dead_code)]
-
 use std::{fmt::Write as _, fs, io::Write, path::PathBuf};
 
 use crabka_ids::{LeaderEpoch, Offset};

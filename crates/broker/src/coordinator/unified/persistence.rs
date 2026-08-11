@@ -147,10 +147,8 @@ impl OffsetCommitValue {
     }
 }
 
-// The migration downgrade path writes this wire-faithful k2 value, and
-// bootstrap replay decodes it. Regular classic rebalances still keep their
-// membership in memory only; wiring their stable snapshots through this same
-// codec remains separate coordinator work.
+// Migration downgrades and normal classic group transitions write this
+// wire-faithful k2 value. Bootstrap replay decodes the latest snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMetadataValue {
     pub protocol_type: String,

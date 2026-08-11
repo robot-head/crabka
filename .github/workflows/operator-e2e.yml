@@ -949,8 +949,10 @@ jobs:
             -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
             -d '{"schemaType":"AVRO","schema":"{\"type\":\"record\",\"name\":\"O\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"}]}"}' | tee /tmp/reg.json
           grep -q '"id"' /tmp/reg.json
-          # GET it back by version.
-          run_curl curl -sf "$BASE/subjects/orders-value/versions/1" | tee /tmp/get.json
+          # GET it back by version. Registration is durable before the POST
+          # returns, but the read-side cache can take a moment to observe it.
+          run_curl curl -sf --retry 15 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+            "$BASE/subjects/orders-value/versions/1" | tee /tmp/get.json
           grep -q 'orders-value' /tmp/get.json
       - name: Dump diagnostics on failure
         if: failure()

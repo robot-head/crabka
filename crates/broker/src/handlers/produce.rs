@@ -105,9 +105,10 @@ pub(crate) async fn handle(
     // `transactional_id`, `acks`, `timeout_ms`, and per-topic / per-partition
     // headers plus each partition's `records` field as a zero-copy `Bytes`
     // slice of the request frame — via `produce_framing`. The record BODIES
-    // are NOT decoded or decompressed here: a producer-LZ4-compressed batch
-    // (1 KiB → 100 KiB) stays compressed, and the per-record parse + the
-    // owned-struct materialization are skipped entirely. The owned
+    // are NOT decoded or decompressed here. Per-partition validation later
+    // parses every record and transiently decompresses compressed bodies, but
+    // skips owned-record materialization and preserves the original wire
+    // bytes whenever no conversion is required. The owned
     // `RecordBatch` is decoded lazily, per partition, ONLY when the
     // verbatim-passthrough predicate fails (legacy magic, control batch,
     // log-append-time, broker-side recompression, multi-batch slice, or a
@@ -509,9 +510,10 @@ async fn process_partition(
     // Decide verbatim-passthrough vs owned-decode and extract the HEADER
     // fields the gates below need (producer id/epoch/sequence,
     // last_offset_delta, max_timestamp, attributes). On the verbatim path
-    // this is a header-only CRC check — the (possibly LZ4-compressed) record
-    // body is NEVER decompressed or materialized. The owned fallback decodes
-    // the records (decompressing) here, exactly as before. A null /
+    // this verifies the CRC and complete record structure while retaining the
+    // original wire bytes. Compressed bodies are transiently decompressed for
+    // validation but never re-encoded. The owned fallback fully materializes
+    // the records, exactly as before. A null /
     // undecodable field returns INVALID_REQUEST / INVALID_RECORD, preserving
     // the prior error-code ordering (before the leadership gate).
     let prepared = match prepare_batch(
@@ -579,8 +581,8 @@ async fn process_partition(
     // so it runs first. Non-transactional batches (pid < 0 or
     // is_transactional=false) skip directly to the dedup gate.
     // All header fields below come from `prepared` — sourced from the v2
-    // batch HEADER on the verbatim path (no record decode), or from the
-    // decoded owned `RecordBatch` header on the fallback path.
+    // batch HEADER on the verbatim path, or from the decoded owned
+    // `RecordBatch` header on the fallback path.
     if prepared.attributes.is_transactional() && part.diskless {
         out.error_code = codes::INVALID_TXN_STATE;
         return Ok(out);
@@ -980,8 +982,7 @@ enum PartitionPayload {
     /// v≥3 native records bytes captured zero-copy from the request frame.
     /// The value is a refcount view and not a copy. Nothing has validated or
     /// decompressed it yet. The per-partition dispatch validates the header
-    /// only and then decides between verbatim and owned. It decompresses on
-    /// the owned fallback only.
+    /// and record structure, then decides between verbatim and owned.
     Slice(Bytes),
     /// Legacy v0-2 payload, or any pre-decoded payload. It always takes the
     /// owned path. The handler up-converts a v0/v1 `MessageSet` and never
@@ -1146,8 +1147,8 @@ fn resolve_topic_compression(
 ///
 /// The gates are the leadership epoch stamp, the transactional verify, the
 /// idempotent dedup, and the `acks=-1` HW target. The struct holds these
-/// fields WITHOUT any materialization or decompression of the records. On the
-/// verbatim path they come from the v2 batch header through
+/// fields without materializing owned records. On the verbatim path they come
+/// from the v2 batch header through
 /// [`validate_one_v2_batch`]. On the owned fallback they come from the decoded
 /// [`RecordBatch`] header. The values are identical on both paths.
 #[derive(Debug)]
@@ -1168,7 +1169,7 @@ struct PreparedBatch {
 #[derive(Debug)]
 enum PreparedSource {
     /// Validated, single, CRC-checked v2 batch. The writer appends the
-    /// producer's exact bytes. No decode and no decompression happened.
+    /// producer's exact bytes after every declared record was parsed.
     Verbatim(Bytes),
     /// Decoded owned batch. This is the complete fallback path. When the
     /// producer compressed the batch, `RecordBatch::decode` decompressed it
@@ -1203,28 +1204,26 @@ impl PreparedBatch {
 }
 
 /// Decide the append shape for one partition's records and extract the header
-/// fields that the gates need, WITHOUT decompression on the verbatim path.
+/// fields that the gates need without materializing owned records on the
+/// verbatim path.
 ///
 /// The verbatim-passthrough predicate holds only when ALL of these hold. It
 /// matches the writer's recompression gate exactly:
 ///   1. the records are a v≥3 native-v2 slice, not legacy and not a wire-null
 ///      field;
-///   2. the slice is exactly one complete, CRC-valid v2 batch. This step
-///      re-validates the producer's CRC from the header only and materializes
-///      no record;
-///   3. `timestamp_type == CreateTime`, so there is no log-append-time
-///      rewrite, which would touch CRC-covered header bytes;
-///   4. the batch is **not** a control batch. Its LSO bookkeeping needs the
-///      inner marker record, which the header-only path cannot read;
-///   5. there is no broker-side recompression. The topic's `compression.type`
+///   2. the slice is exactly one complete, CRC-valid v2 batch whose body
+///      contains exactly the declared structurally valid records;
+///   3. `timestamp_type == CreateTime`; a client-supplied log-append-time
+///      batch is invalid;
+///   4. there is no broker-side recompression. The topic's `compression.type`
 ///      is `producer` pass-through, which is `None`, OR it equals the batch's
 ///      own codec.
 ///
 /// On any miss the function decodes the records into an owned `RecordBatch`.
-/// That is the complete fallback, and it is the only place that decompresses.
-/// [`decode_owned_batch`] up-converts the legacy v0-2 payloads. The owned arm
-/// is a complete alternative, so a revert of this feature means "always take
-/// the owned path".
+/// That is the complete fallback. The verbatim path transiently decompresses
+/// compressed bodies only to validate their record structure, then discards
+/// that buffer and retains the original compressed wire bytes.
+/// [`decode_owned_batch`] up-converts the legacy v0-2 payloads.
 ///
 /// The function returns the response error *code* on a bad field, either
 /// `INVALID_REQUEST` or `INVALID_RECORD`.
@@ -1238,8 +1237,9 @@ fn prepare_batch(
     let bytes = match payload {
         // Legacy / pre-decoded payload: always owned.
         PartitionPayload::Owned(rp) => {
-            return decode_owned_batch(rp, topic_name, metrics, policy)
-                .map(PreparedBatch::from_owned);
+            let batch = decode_owned_batch(rp, topic_name, metrics, policy)?;
+            validate_owned_client_batch(&batch)?;
+            return Ok(PreparedBatch::from_owned(batch));
         }
         PartitionPayload::Null => return Err(codes::INVALID_REQUEST),
         PartitionPayload::Slice(b) => b,
@@ -1254,31 +1254,33 @@ fn prepare_batch(
     // message-format clients) and surfaces INVALID_RECORD on malformed bytes.
     let owned_fallback = |bytes: Bytes| -> Result<PreparedBatch, i16> {
         match RecordsPayload::from_bytes_with_policy(bytes, policy) {
-            Ok(rp) => {
-                decode_owned_batch(rp, topic_name, metrics, policy).map(PreparedBatch::from_owned)
-            }
+            Ok(rp) => decode_owned_batch(rp, topic_name, metrics, policy).and_then(|batch| {
+                validate_owned_client_batch(&batch)?;
+                Ok(PreparedBatch::from_owned(batch))
+            }),
             Err(_) => Err(codes::INVALID_RECORD),
         }
     };
     // Extract the header fields into owned values up front so the borrow of
     // `bytes` (via the `ValidatedBatch`) ends before any `owned_fallback(bytes)`
     // move or the final `Verbatim(bytes)` construction.
-    let header = match validate_one_v2_batch(&bytes) {
-        Ok(v) if v.total_len == bytes.len() => ValidatedHeader::from(&v),
+    let validated = match validate_one_v2_batch(&bytes) {
+        Ok(batch) if batch.total_len == bytes.len() => batch,
         _ => return owned_fallback(bytes),
     };
+    let header = ValidatedHeader::from(&validated);
     let attributes = header.attributes;
+    validate_client_batch_header(header)?;
 
-    // (3) CreateTime only. (4) No control batches.
-    if attributes.timestamp_type() != TimestampType::CreateTime || attributes.is_control_batch() {
-        return owned_fallback(bytes);
-    }
-    // (5) No recompression: producer pass-through, or target == current codec.
+    // (4) No recompression: producer pass-through, or target == current codec.
     if let Some(target) = topic_compression
         && target != attributes.compression()
     {
         return owned_fallback(bytes);
     }
+    validated
+        .validate_records(policy)
+        .map_err(|_| codes::INVALID_RECORD)?;
 
     Ok(PreparedBatch::from_header(header, bytes))
 }
@@ -1288,8 +1290,10 @@ fn prepare_batch(
 /// afterward.
 #[derive(Debug, Clone, Copy)]
 struct ValidatedHeader {
+    base_offset: i64,
     attributes: Attributes,
     last_offset_delta: i32,
+    records_count: i32,
     max_timestamp: i64,
     producer_id: i64,
     producer_epoch: i16,
@@ -1299,8 +1303,10 @@ struct ValidatedHeader {
 impl From<&ValidatedBatch<'_>> for ValidatedHeader {
     fn from(v: &ValidatedBatch<'_>) -> Self {
         Self {
+            base_offset: v.header.base_offset.get(),
             attributes: Attributes(v.header.attributes.get()),
             last_offset_delta: v.header.last_offset_delta.get(),
+            records_count: v.header.records_count.get(),
             max_timestamp: v.header.max_timestamp.get(),
             producer_id: v.header.producer_id.get(),
             producer_epoch: v.header.producer_epoch.get(),
@@ -1309,12 +1315,61 @@ impl From<&ValidatedBatch<'_>> for ValidatedHeader {
     }
 }
 
-/// Decode or up-convert a legacy or pre-decoded `RecordsPayload` into a single
-/// owned `RecordBatch`.
+/// Apply Kafka's client-origin v2 batch-header invariants without decoding
+/// the record body. Every field is covered by the batch CRC that
+/// [`validate_one_v2_batch`] checked before this function runs.
+fn validate_client_batch_header(batch: ValidatedHeader) -> Result<(), i16> {
+    validate_client_batch_fields(
+        batch.attributes,
+        batch.base_offset,
+        batch.last_offset_delta,
+        batch.records_count,
+        batch.producer_id,
+        batch.base_sequence,
+    )
+}
+
+fn validate_owned_client_batch(batch: &RecordBatch) -> Result<(), i16> {
+    let records_count = i32::try_from(batch.records.len()).map_err(|_| codes::INVALID_RECORD)?;
+    validate_client_batch_fields(
+        batch.attributes,
+        batch.base_offset,
+        batch.last_offset_delta,
+        records_count,
+        batch.producer_id,
+        batch.base_sequence,
+    )
+}
+
+fn validate_client_batch_fields(
+    attributes: Attributes,
+    base_offset: i64,
+    last_offset_delta: i32,
+    records_count: i32,
+    producer_id: i64,
+    base_sequence: i32,
+) -> Result<(), i16> {
+    let offset_count = last_offset_delta.checked_add(1);
+    if base_offset != 0
+        || offset_count.is_none_or(|count| count <= 0 || count != records_count)
+        || records_count <= 0
+        || attributes.is_control_batch()
+        || (producer_id >= 0 && base_sequence < 0)
+    {
+        return Err(codes::INVALID_RECORD);
+    }
+    if attributes.timestamp_type() != TimestampType::CreateTime {
+        return Err(codes::INVALID_TIMESTAMP);
+    }
+    Ok(())
+}
+
+/// Decode or up-convert a legacy or pre-decoded `RecordsPayload` into one
+/// owned record batch.
 ///
-/// The function up-converts a v0/v1 `MessageSet` and counts it once. An empty
-/// v2 sequence gives `INVALID_REQUEST`. A failed up-conversion gives
-/// `INVALID_RECORD`.
+/// The function up-converts a v0/v1 `MessageSet` and counts it once. A v2
+/// sequence with anything other than one batch gives `INVALID_RECORD`, as does
+/// a failed up-conversion.
 fn decode_owned_batch(
     payload: RecordsPayload,
     topic_name: &str,
@@ -1322,24 +1377,23 @@ fn decode_owned_batch(
     policy: RecordDecompressionPolicy,
 ) -> Result<RecordBatch, i16> {
     match payload {
-        RecordsPayload::V2(batches) => batches.into_iter().next().ok_or(codes::INVALID_REQUEST),
-        RecordsPayload::Raw(bytes) => RecordsPayload::from_bytes_with_policy(bytes, policy)
-            .ok()
-            .and_then(|p| match p {
-                RecordsPayload::V2(mut v) => v.drain(..).next(),
-                RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => None,
-                #[cfg(any(
-                    target_os = "linux",
-                    target_os = "macos",
-                    target_os = "ios",
-                    target_os = "tvos",
-                    target_os = "watchos",
-                    target_os = "freebsd",
-                    target_os = "dragonfly",
-                ))]
-                RecordsPayload::FileRegions(_) => None,
-            })
-            .ok_or(codes::INVALID_REQUEST),
+        RecordsPayload::V2(batches) => exactly_one_v2_batch(batches),
+        RecordsPayload::Raw(bytes) => match RecordsPayload::from_bytes_with_policy(bytes, policy) {
+            Ok(RecordsPayload::V2(batches)) => exactly_one_v2_batch(batches),
+            Ok(RecordsPayload::Raw(_) | RecordsPayload::Legacy(_)) | Err(_) => {
+                Err(codes::INVALID_RECORD)
+            }
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
+            Ok(RecordsPayload::FileRegions(_)) => Err(codes::INVALID_RECORD),
+        },
         #[cfg(any(
             target_os = "linux",
             target_os = "macos",
@@ -1356,6 +1410,16 @@ fn decode_owned_batch(
                     if !topic_name.is_empty() {
                         metrics.record_produce_message_conversion(topic_name);
                     }
+                    let mut rb = rb;
+                    rb.base_offset = 0;
+                    rb.last_offset_delta = i32::try_from(rb.records.len())
+                        .map_err(|_| codes::INVALID_RECORD)?
+                        .checked_sub(1)
+                        .ok_or(codes::INVALID_RECORD)?;
+                    for (offset, record) in rb.records.iter_mut().enumerate() {
+                        record.offset_delta =
+                            i32::try_from(offset).map_err(|_| codes::INVALID_RECORD)?;
+                    }
                     Ok(rb)
                 }
                 Err(e) => {
@@ -1365,6 +1429,13 @@ fn decode_owned_batch(
             }
         }
     }
+}
+
+fn exactly_one_v2_batch(mut batches: Vec<RecordBatch>) -> Result<RecordBatch, i16> {
+    if batches.len() != 1 {
+        return Err(codes::INVALID_RECORD);
+    }
+    Ok(batches.pop().expect("length checked"))
 }
 
 /// Build the writer's [`ProduceData`] from a prepared batch and stamp the
@@ -1383,6 +1454,8 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
             leader_epoch: crabka_log::LeaderEpoch(leader_epoch),
             // Wrap the produce path's decode-side `i64` into the log seam's `ProducerId`.
             producer_id: crabka_log::ProducerId(prepared.producer_id),
+            producer_epoch: prepared.producer_epoch,
+            base_sequence: prepared.base_sequence,
             is_transactional,
             bytes,
         }),
@@ -1412,8 +1485,8 @@ mod tests {
 
     use super::{
         FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionInput, PartitionPayload,
-        PartitionServices, build_topic_error_response, decode_owned_batch, prepare_batch,
-        process_partition, produce_bytes_by_qos_tier, resolve_topic_compression,
+        PartitionServices, PreparedSource, build_topic_error_response, decode_owned_batch,
+        prepare_batch, process_partition, produce_bytes_by_qos_tier, resolve_topic_compression,
         topic_min_insync_replicas,
     };
 
@@ -1690,11 +1763,53 @@ mod tests {
             RecordDecompressionPolicy::default(),
         )
         .unwrap_err();
-        assert!(err == crate::codes::INVALID_REQUEST);
+        assert!(err == crate::codes::INVALID_RECORD);
     }
 
     #[test]
-    fn record_decompression_policy_limits_owned_produce_fallbacks() {
+    fn legacy_produce_offsets_are_reassigned_consecutively() {
+        let records = vec![
+            crabka_records_legacy::ParsedRecord {
+                offset: Offset(10),
+                timestamp: Some(100),
+                key: None,
+                value: Some(Bytes::from_static(b"a")),
+            },
+            crabka_records_legacy::ParsedRecord {
+                offset: Offset(20),
+                timestamp: Some(200),
+                key: None,
+                value: Some(Bytes::from_static(b"b")),
+            },
+        ];
+        let mut legacy = BytesMut::new();
+        crabka_records_legacy::encode_flat_message_set(
+            records,
+            crabka_records_legacy::Magic::V1,
+            &mut legacy,
+        );
+
+        let prepared = prepare_batch(
+            PartitionPayload::Owned(RecordsPayload::Legacy(legacy.freeze())),
+            None,
+            "orders",
+            &crate::metrics::BrokerMetrics::new(),
+            RecordDecompressionPolicy::default(),
+        )
+        .unwrap();
+        match prepared.source {
+            PreparedSource::Owned(batch) => {
+                check!(batch.base_offset == 0);
+                check!(batch.last_offset_delta == 1);
+                check!(batch.records[0].offset_delta == 0);
+                check!(batch.records[1].offset_delta == 1);
+            }
+            PreparedSource::Verbatim(_) => panic!("expected one converted owned batch"),
+        }
+    }
+
+    #[test]
+    fn record_decompression_policy_limits_owned_and_verbatim_produce() {
         let policy = RecordDecompressionPolicy::new(fraction(1.0), bytes(1), bytes(32)).unwrap();
         let metrics = crate::metrics::BrokerMetrics::new();
 
@@ -1707,6 +1822,16 @@ mod tests {
             ..Default::default()
         };
         let wire = encode_batch(&v2);
+        let error = prepare_batch(
+            PartitionPayload::Slice(wire.clone()),
+            None,
+            "t",
+            &metrics,
+            policy,
+        )
+        .unwrap_err();
+        assert!(error == crate::codes::INVALID_RECORD);
+
         let error = prepare_batch(
             PartitionPayload::Slice(wire.clone()),
             Some(CompressionType::Zstd),
@@ -2106,15 +2231,17 @@ mod tests {
 
     // ── verbatim passthrough predicate (prepare_batch + build_produce_data) ──
     //
-    // These drive the new header-only dispatch end to end: `prepare_batch`
-    // extracts the v2 header fields (WITHOUT decompressing) and decides
-    // verbatim-vs-owned; `build_produce_data` maps the result to the writer's
-    // `ProduceData`, stamping the leader epoch.
+    // These drive the zero-copy dispatch end to end: `prepare_batch` validates
+    // the v2 batch and decides verbatim-vs-owned; `build_produce_data` maps the
+    // result to the writer's `ProduceData`, stamping the leader epoch.
     mod verbatim {
         use assert2::{assert, check};
         use bytes::{Bytes, BytesMut};
         use crabka_compression::{CompressionType, RecordDecompressionPolicy};
-        use crabka_protocol::records::{Attributes, Record, RecordBatch, TimestampType};
+        use crabka_protocol::records::{
+            Attributes, CRC_COVERAGE_START, HEADER_LEN, Record, RecordBatch, RecordsPayload,
+            TimestampType,
+        };
 
         use super::super::{
             PartitionPayload, PreparedSource, ProduceData, build_produce_data, prepare_batch,
@@ -2126,9 +2253,14 @@ mod tests {
             buf.freeze()
         }
 
+        fn refresh_batch_crc(encoded: &mut [u8]) {
+            let crc = crc32c::crc32c(&encoded[CRC_COVERAGE_START..]);
+            encoded[CRC_COVERAGE_START - 4..CRC_COVERAGE_START].copy_from_slice(&crc.to_be_bytes());
+        }
+
         fn plain_batch() -> RecordBatch {
             RecordBatch {
-                base_offset: 999,
+                base_offset: 0,
                 partition_leader_epoch: -1,
                 last_offset_delta: 0,
                 max_timestamp: 42,
@@ -2211,6 +2343,7 @@ mod tests {
                     check!(v.last_offset_delta == 0);
                 }
                 ProduceData::Owned(_) => panic!("expected Verbatim"),
+                ProduceData::OwnedCommitMarker { .. } => panic!("expected producer data"),
             }
         }
 
@@ -2249,23 +2382,81 @@ mod tests {
         }
 
         #[test]
-        fn fallback_on_log_append_time() {
+        fn rejects_client_log_append_time() {
             let mut b = plain_batch();
             b.attributes = b
                 .attributes
                 .with_timestamp_type(TimestampType::LogAppendTime);
             let wire = encode(&b);
-            let data = dispatch_slice(wire, None, 0);
-            assert!(matches!(data, ProduceData::Owned(_)));
+            let err = prepare_batch(
+                PartitionPayload::Slice(wire),
+                None,
+                "t",
+                &crate::metrics::BrokerMetrics::new(),
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap_err();
+            assert!(err == crate::codes::INVALID_TIMESTAMP);
         }
 
         #[test]
-        fn fallback_on_control_batch() {
+        fn rejects_client_control_batch() {
             let mut b = plain_batch();
             b.attributes = Attributes::default().with_control(true);
             let wire = encode(&b);
-            let data = dispatch_slice(wire, None, 0);
-            assert!(matches!(data, ProduceData::Owned(_)));
+            let err = prepare_batch(
+                PartitionPayload::Slice(wire),
+                None,
+                "t",
+                &crate::metrics::BrokerMetrics::new(),
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap_err();
+            assert!(err == crate::codes::INVALID_RECORD);
+        }
+
+        #[test]
+        fn rejects_invalid_client_batch_metadata_on_header_and_owned_paths() {
+            let mut invalid_base_offset = plain_batch();
+            invalid_base_offset.base_offset = 1;
+
+            let mut invalid_offset_range = plain_batch();
+            invalid_offset_range.last_offset_delta = -1;
+
+            let mut inconsistent_count = plain_batch();
+            inconsistent_count.last_offset_delta = 1;
+
+            let mut empty = plain_batch();
+            empty.records.clear();
+
+            let mut invalid_sequence = plain_batch();
+            invalid_sequence.producer_id = 7;
+            invalid_sequence.producer_epoch = 0;
+            invalid_sequence.base_sequence = -1;
+
+            for (name, batch) in [
+                ("invalid base offset", invalid_base_offset),
+                ("invalid offset range", invalid_offset_range),
+                ("inconsistent count", inconsistent_count),
+                ("empty batch", empty),
+                ("invalid producer sequence", invalid_sequence),
+            ] {
+                let payloads = [
+                    PartitionPayload::Slice(encode(&batch)),
+                    PartitionPayload::Owned(RecordsPayload::V2(vec![batch])),
+                ];
+                for payload in payloads {
+                    let err = prepare_batch(
+                        payload,
+                        None,
+                        "t",
+                        &crate::metrics::BrokerMetrics::new(),
+                        RecordDecompressionPolicy::default(),
+                    )
+                    .unwrap_err();
+                    assert!(err == crate::codes::INVALID_RECORD, "case: {name}");
+                }
+            }
         }
 
         #[test]
@@ -2290,14 +2481,39 @@ mod tests {
         }
 
         #[test]
+        fn rejects_crc_valid_malformed_record_body() {
+            let mut wire = encode(&plain_batch()).to_vec();
+            wire[HEADER_LEN] = 0; // zero-length first record body
+            refresh_batch_crc(&mut wire);
+
+            let error = prepare_batch(
+                PartitionPayload::Slice(Bytes::from(wire)),
+                None,
+                "t",
+                &crate::metrics::BrokerMetrics::new(),
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap_err();
+            assert!(error == crate::codes::INVALID_RECORD);
+        }
+
+        #[test]
         fn fallback_on_multiple_batches_in_slice() {
-            // Two concatenated batches in one slice → not a single batch → owned.
+            // Kafka v2 records fields contain exactly one batch. A second
+            // batch is invalid and must never be silently discarded.
             let b = plain_batch();
             let mut two = BytesMut::new();
             b.encode(&mut two).unwrap();
             b.encode(&mut two).unwrap();
-            let data = dispatch_slice(two.freeze(), None, 0);
-            assert!(matches!(data, ProduceData::Owned(_)));
+            let err = prepare_batch(
+                PartitionPayload::Slice(two.freeze()),
+                None,
+                "t",
+                &crate::metrics::BrokerMetrics::new(),
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap_err();
+            assert!(err == crate::codes::INVALID_RECORD);
         }
 
         #[test]
@@ -2305,6 +2521,7 @@ mod tests {
             let mut b = plain_batch();
             b.producer_id = 100;
             b.producer_epoch = 0;
+            b.base_sequence = 0;
             b.attributes = b.attributes.with_transactional(true);
             let wire = encode(&b);
             let data = dispatch_slice(wire, None, 0);
@@ -2314,20 +2531,20 @@ mod tests {
                     assert!(v.producer_id == crabka_log::ProducerId(100));
                 }
                 ProduceData::Owned(_) => panic!("transactional data batch should pass through"),
+                ProduceData::OwnedCommitMarker { .. } => panic!("expected producer data"),
             }
         }
 
-        /// A producer-LZ4-compressed batch takes the verbatim path WITHOUT
-        /// decompression, even when its DECOMPRESSED form is 100 KiB and its
+        /// A producer-LZ4-compressed batch stays verbatim after structural
+        /// validation, even when its decompressed form is 100 KiB and its
         /// compressed wire bytes are tiny.
         ///
         /// The stored `Verbatim.bytes` equal the compressed wire bytes, which
         /// are much smaller than the decompressed payload. The header fields
         /// `last_offset_delta` and `max_timestamp` come straight from the v2
-        /// header. This test pins the "no decompress on the verbatim path"
-        /// guarantee.
+        /// header. This test pins the no-reencoding guarantee.
         #[test]
-        fn lz4_batch_passes_through_without_decompress() {
+        fn lz4_batch_passes_through_without_reencoding() {
             // 100 KiB of highly-compressible payload across many records.
             let big = vec![b'A'; 100 * 1024];
             let mut b = RecordBatch {
@@ -2343,7 +2560,7 @@ mod tests {
             });
             let wire = encode(&b);
             // The compressed wire bytes must be far smaller than the raw payload,
-            // so an accidental decompress would be obvious.
+            // so an accidental re-encode to an uncompressed batch is obvious.
             assert!(
                 wire.len() < big.len() / 4,
                 "lz4 wire ({} B) should be much smaller than raw ({} B)",
@@ -2365,8 +2582,9 @@ mod tests {
                     check!(v.leader_epoch == 3);
                 }
                 ProduceData::Owned(_) => {
-                    panic!("lz4 producer batch must pass through verbatim (no decompress)")
+                    panic!("lz4 producer batch must pass through verbatim")
                 }
+                ProduceData::OwnedCommitMarker { .. } => panic!("expected producer data"),
             }
         }
 
@@ -2374,8 +2592,8 @@ mod tests {
         ///
         /// `prepare_batch` exposes `producer_id`, `producer_epoch`,
         /// `base_sequence`, and `last_offset_delta`. It reads them from the v2
-        /// header and decodes no record. The values match what an owned decode
-        /// of the same bytes would give.
+        /// header without materializing owned records. The values match what
+        /// an owned decode of the same bytes would give.
         #[test]
         fn header_fields_drive_dedup_on_verbatim_path() {
             let mut b = plain_batch();
@@ -2384,8 +2602,18 @@ mod tests {
             b.base_sequence = 17;
             b.last_offset_delta = 2;
             b.max_timestamp = 555;
-            // Force lz4 so a decode would have to decompress; the verbatim path
-            // must NOT, yet still surface identical header fields.
+            b.records.extend([
+                Record {
+                    value: Some(Bytes::from_static(b"second")),
+                    ..Default::default()
+                },
+                Record {
+                    value: Some(Bytes::from_static(b"third")),
+                    ..Default::default()
+                },
+            ]);
+            // Force lz4 so validation must decompress while the append still
+            // retains the producer's exact compressed bytes.
             b.attributes = b.attributes.with_compression(CompressionType::Lz4);
             let wire = encode(&b);
 

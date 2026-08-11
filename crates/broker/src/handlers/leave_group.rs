@@ -70,9 +70,8 @@ pub(crate) async fn handle(
             );
         }
 
-        let members = match coordinator.find(&req.group_id) {
-            // No such group; respond OK but no member responses.
-            None => Vec::new(),
+        let result = match coordinator.find(&req.group_id) {
+            None => unknown_group_result(),
             Some(handle) => {
                 let (tx, rx) = oneshot::channel();
                 if handle
@@ -85,7 +84,10 @@ pub(crate) async fn handle(
                     .await
                     .is_err()
                 {
-                    Vec::new()
+                    crate::coordinator::unified::actor::LeaveResult {
+                        error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                        members: Vec::new(),
+                    }
                 } else {
                     rx.await.unwrap_or_default()
                 }
@@ -93,12 +95,19 @@ pub(crate) async fn handle(
         };
 
         let resp = LeaveGroupResponse {
-            error_code: codes::NONE,
+            error_code: result.error_code,
             throttle_time_ms: 0,
-            members,
+            members: result.members,
             ..Default::default()
         };
         crate::handlers::encode_response(&resp, version)
+    }
+}
+
+fn unknown_group_result() -> crate::coordinator::unified::actor::LeaveResult {
+    crate::coordinator::unified::actor::LeaveResult {
+        error_code: codes::UNKNOWN_MEMBER_ID,
+        members: Vec::new(),
     }
 }
 
@@ -146,5 +155,12 @@ mod tests {
             ) == (codes::GROUP_AUTHORIZATION_FAILED, 0, vec![], true),
             "response decoder consumed all bytes"
         );
+    }
+
+    #[test]
+    fn classic_leave_missing_group_yields_unknown_member_id() {
+        let result = unknown_group_result();
+        assert!(result.error_code == codes::UNKNOWN_MEMBER_ID);
+        assert!(result.members.is_empty());
     }
 }

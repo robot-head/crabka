@@ -96,6 +96,7 @@ mod index;
 mod leader_epoch_checkpoint;
 mod log;
 mod name;
+mod producer_snapshot;
 mod recovery;
 mod retention;
 mod segment;
@@ -113,6 +114,7 @@ sendfile_cfg! {
     pub use log::RawReadDesc;
 }
 pub use log::{CompactionContext, Log, RawRead, ReadOutput, SegmentExport, VerbatimBatch};
+pub use producer_snapshot::ProducerSnapshotEntry;
 sendfile_cfg! {
     pub use segment::RawSegmentDesc;
 }

@@ -83,7 +83,16 @@ pub(crate) fn handle(
                         Ok(()) => codes::NONE,
                         Err(MoveError::LogDirNotFound) => codes::LOG_DIR_NOT_FOUND,
                         Err(MoveError::ReplicaNotAvailable) => codes::REPLICA_NOT_AVAILABLE,
-                        Err(MoveError::Storage(_)) => codes::KAFKA_STORAGE_ERROR,
+                        Err(MoveError::Storage(error)) => {
+                            tracing::warn!(
+                                topic = %topic.name,
+                                partition = partition_index,
+                                target = %target_path.display(),
+                                error = %error,
+                                "replica log-dir move failed"
+                            );
+                            codes::KAFKA_STORAGE_ERROR
+                        }
                     };
                     per_partition.insert((topic.name.clone(), partition_index), code);
                 }

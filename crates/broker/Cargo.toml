@@ -44,6 +44,7 @@ crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-compression = { version = "0.3.9", path = "../compression", default-features = false }
 crabka-raft = { version = "0.3.8", path = "../raft" }
 crabka-kraft-core = { version = "0.3.8", path = "../kraft-core" }
+crabka-verified = { version = "0.3", path = "../verified" }
 crabka-voters = { version = "0.3.8", path = "../voters" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
 crabka-authz = { version = "0.3.8", path = "../authz" }
@@ -147,7 +148,6 @@ proptest = { workspace = true }
 crabka-broker-test-helpers = { path = "test-helpers" }
 crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3", path = "../client-producer" }
-crabka-verified = { version = "0.3", path = "../verified" }
 # Host-side raw `Client::send(DescribeGroupsRequest)` against the
 # real-Kafka Docker capture (`describe_groups_jvm.rs`).
 crabka-client-core = { version = "0.3", path = "../client-core", features = ["mock"] }

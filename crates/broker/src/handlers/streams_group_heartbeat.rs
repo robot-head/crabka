@@ -122,13 +122,6 @@ pub(crate) async fn handle(
     }
 }
 
-/// The response the handler returns when the streams protocol is disabled on
-/// this broker, because the feature is unfinalized or the config kill-switch
-/// is off.
-fn disabled_response() -> StreamsGroupHeartbeatResponse {
-    error(codes::UNSUPPORTED_VERSION)
-}
-
 fn error(code: i16) -> StreamsGroupHeartbeatResponse {
     StreamsGroupHeartbeatResponse {
         error_code: code,
@@ -312,12 +305,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn disabled_feature_yields_unsupported_version() {
-        let resp = disabled_response();
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-    }
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {

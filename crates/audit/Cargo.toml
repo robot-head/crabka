@@ -17,6 +17,7 @@ categories = ["development-tools::debugging"]
 workspace = true
 
 [dependencies]
+arc-swap.workspace = true
 derive_more = { workspace = true }
 ring = { workspace = true }
 sha2 = { workspace = true }

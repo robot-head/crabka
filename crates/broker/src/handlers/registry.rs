@@ -179,10 +179,6 @@ impl DispatchEntry {
         }
     }
 
-    pub(crate) fn api_key(self) -> ApiKey {
-        self.api_key
-    }
-
     pub(crate) fn kind(self) -> DispatchKind {
         self.kind
     }
@@ -195,6 +191,7 @@ impl DispatchEntry {
         self.flexible_min != i16::MAX && version >= self.flexible_min
     }
 
+    #[cfg(test)]
     pub(crate) fn is_plain(self) -> bool {
         matches!(self.kind, DispatchKind::Plain(_))
     }
@@ -213,6 +210,7 @@ impl DispatchRegistry {
         self.table.get(&api_key).copied()
     }
 
+    #[cfg(test)]
     pub(crate) fn get_plain(&self, api_key: ApiKeyCode) -> Option<PlainHandler> {
         match self.get(api_key)?.kind {
             DispatchKind::Plain(handler) => Some(handler),
@@ -220,6 +218,7 @@ impl DispatchRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn registered_api_keys(&self) -> impl Iterator<Item = ApiKeyCode> + '_ {
         self.table.keys().copied()
     }

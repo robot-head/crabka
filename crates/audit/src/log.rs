@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use arc_swap::ArcSwapOption;
 use crabka_units::prelude::{Time, TimeExt as _};
 use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::mpsc;
@@ -30,7 +31,7 @@ use crate::{
 /// synchronous `Authorizer::authorize` trait and from async request handlers.
 #[derive(Debug)]
 pub struct AuditLog {
-    tx: Option<mpsc::Sender<AuditEvent>>,
+    tx: ArcSwapOption<mpsc::Sender<AuditEvent>>,
     dropped: AtomicU64,
 }
 
@@ -41,7 +42,7 @@ impl AuditLog {
         let (tx, rx) = mpsc::channel(capacity);
         (
             Arc::new(Self {
-                tx: Some(tx),
+                tx: ArcSwapOption::new(Some(Arc::new(tx))),
                 dropped: AtomicU64::new(0),
             }),
             rx,
@@ -52,7 +53,7 @@ impl AuditLog {
     #[must_use]
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self {
-            tx: None,
+            tx: ArcSwapOption::new(None),
             dropped: AtomicU64::new(0),
         })
     }
@@ -62,11 +63,21 @@ impl AuditLog {
     /// This method does not block. If the queue is full, it drops the event and
     /// counts the drop. Durable spooling is Slice 3 / AU-5.
     pub fn emit(&self, event: AuditEvent) {
-        let Some(tx) = &self.tx else { return };
+        let Some(tx) = self.tx.load_full() else {
+            return;
+        };
         if tx.try_send(event).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             tracing::warn!("audit event dropped (queue full or writer stopped)");
         }
+    }
+
+    /// Close the event stream for every clone of this handle.
+    ///
+    /// Events already in the queue remain available to the writer. Once they
+    /// are drained, the writer exits cleanly.
+    pub fn close(&self) {
+        self.tx.store(None);
     }
 
     /// Count of events dropped because of backpressure.
@@ -539,6 +550,20 @@ mod tests {
         // node_id 1,2,3 preserved in order via the OCSF "device.uid" field.
         let v0: serde_json::Value = serde_json::from_slice(&recs[0].value).unwrap();
         check!(v0["device"]["uid"] == "1");
+    }
+
+    #[tokio::test]
+    async fn close_ends_stream_for_every_log_clone_after_queued_events() {
+        let (log, mut rx) = AuditLog::new(16);
+        let clone = Arc::clone(&log);
+        log.emit(life(1));
+
+        clone.close();
+        log.emit(life(2));
+
+        check!(rx.recv().await == Some(life(1)));
+        check!(rx.recv().await.is_none());
+        check!(log.dropped() == 0);
     }
 
     #[test]

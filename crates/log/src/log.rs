@@ -1,7 +1,7 @@
 //! `Log`: a sorted collection of `Segment`s with append, read, and truncate.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -9,7 +9,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use crabka_ids::{LeaderEpoch, Offset, ProducerId};
-use crabka_protocol::records::{HEADER_LEN, RecordBatch};
+use crabka_protocol::records::{HEADER_LEN, RecordBatch, increment_sequence};
 use crabka_units::prelude::{ByteSize, ByteSizeExt, TimeExt as _, bytes};
 use tracing::instrument;
 
@@ -17,7 +17,9 @@ use crate::{
     config::LogConfig,
     error::LogError,
     leader_epoch_checkpoint::LeaderEpochCheckpoint,
-    name, retention,
+    name,
+    producer_snapshot::{self, ProducerSnapshotEntry},
+    retention,
     segment::{RawSegmentRead, Segment},
     stamp_index::{StampEntry, StampIndex},
     stamp_source::StampSource,
@@ -75,10 +77,19 @@ pub struct Log {
     /// applies a commit or abort marker for that `producer_id`.
     pending: HashMap<ProducerId, Offset>,
 
+    /// Exact data-batch ranges for each in-flight transaction. A commit
+    /// marker stamps only these ranges, so interleaved transactions and
+    /// ordinary records never inherit another transaction's commit stamp.
+    pending_stamp_ranges: HashMap<ProducerId, Vec<(Offset, Offset)>>,
+
     /// Last transaction-coordinator epoch observed in a durable commit or
     /// abort marker for each producer. The marker value carries this field,
     /// so log recovery can rebuild it without a separate sidecar.
     coordinator_epochs: HashMap<ProducerId, i32>,
+
+    /// Producer sequence, epoch, and transaction metadata persisted in
+    /// Kafka-compatible `.snapshot` files at segment boundaries.
+    producer_state: HashMap<ProducerId, ProducerSnapshotEntry>,
 
     /// Active segment's `TxnIndex`. The log reopens it on segment roll.
     active_txn_index: TxnIndex,
@@ -90,11 +101,10 @@ pub struct Log {
     /// source across all hosted partitions when internal stamping is enabled.
     stamp_source: Option<std::sync::Arc<dyn StampSource>>,
 
-    /// Active segment's `.stampindex` sidecar. It is present exactly when a
-    /// [`StampSource`] is injected. The log reopens it on segment roll, in
-    /// the same way as `active_txn_index`. The stamp is derived state stored
-    /// beside the wire-exact `.log`. No produce or fetch path ever reads it.
-    active_stamp_index: Option<StampIndex>,
+    /// Open `.stampindex` sidecars keyed by segment base offset. Transactional
+    /// data can commit after its segment rolls, so the log keeps sealed
+    /// indexes available instead of retaining only the active one.
+    stamp_indexes: BTreeMap<Offset, StampIndex>,
 
     /// Per-partition leader-epoch checkpoint. All segments share it, and
     /// epoch history accumulates over the log's lifetime.
@@ -247,6 +257,10 @@ pub struct VerbatimBatch {
     pub leader_epoch: LeaderEpoch,
     /// `producer_id` from the header (for LSO/transaction tracking).
     pub producer_id: ProducerId,
+    /// `producer_epoch` from the header.
+    pub producer_epoch: i16,
+    /// `base_sequence` from the header.
+    pub base_sequence: i32,
     /// `true` when the batch's attributes mark it transactional.
     pub is_transactional: bool,
 }
@@ -278,6 +292,8 @@ pub struct SegmentExport {
     pub time_index_path: PathBuf,
     /// Path to the `.txnindex` file, present only when it exists on disk.
     pub transaction_index_path: Option<PathBuf>,
+    /// Producer-state snapshot at `last_offset + 1`.
+    pub producer_snapshot_path: PathBuf,
     /// Leader epochs whose coverage overlaps `[base_offset, last_offset]`,
     /// as `(epoch, start_offset)` clamped to `base_offset`, ordered by
     /// offset. May be empty when no epochs were recorded for this log.
@@ -382,56 +398,80 @@ impl Log {
             start_offset_override: None,
             lso,
             pending: HashMap::new(),
+            pending_stamp_ranges: HashMap::new(),
             coordinator_epochs: HashMap::new(),
+            producer_state: HashMap::new(),
             active_txn_index,
             stamp_source: None,
-            active_stamp_index: None,
+            stamp_indexes: BTreeMap::new(),
             epoch_checkpoint,
             reconciled_frontier: Offset(0),
         };
-        log.rebuild_transaction_state()?;
+        log.rebuild_producer_and_transaction_state()?;
         Ok(log)
     }
 
-    /// Reconstruct open transactions and the LSO from durable batches. The
-    /// in-memory `pending` map is not itself persisted, so a restart must replay
-    /// transactional data and control markers before serving read-committed
-    /// fetches or accepting a delayed transaction marker.
-    fn rebuild_transaction_state(&mut self) -> Result<(), LogError> {
+    /// Restore the latest valid producer snapshot, then replay the uncovered
+    /// log tail. Missing boundary snapshots are created during the replay so
+    /// every sealed segment can be copied to remote storage with its matching
+    /// producer state.
+    fn rebuild_producer_and_transaction_state(&mut self) -> Result<(), LogError> {
         self.pending.clear();
+        self.pending_stamp_ranges.clear();
         self.coordinator_epochs.clear();
-        let mut next = self.log_start_offset();
+        self.producer_state.clear();
         let end = self.log_end_offset();
+        let mut next = self.log_start_offset();
+        if let Some((snapshot_offset, entries)) =
+            producer_snapshot::latest_at_or_before(&self.dir, end)?
+        {
+            self.producer_state = entries;
+            for (&producer_id, entry) in &self.producer_state {
+                if let Some(first_offset) = entry.current_txn_first_offset {
+                    self.pending.insert(producer_id, first_offset);
+                }
+                if entry.coordinator_epoch >= 0 {
+                    self.coordinator_epochs
+                        .insert(producer_id, entry.coordinator_epoch);
+                }
+            }
+            next = snapshot_offset.max(next);
+        }
+
+        let mut boundaries: BTreeSet<Offset> = self
+            .segments
+            .iter()
+            .map(Segment::base_offset)
+            .skip(1)
+            .chain(self.active.iter().map(Segment::base_offset))
+            .collect();
+        let mut boundaries = boundaries.split_off(&next);
+        let _ = boundaries.remove(&next);
         while next < end {
             let read = self.read(next, crabka_units::mebibytes(1))?;
             if read.batches.is_empty() {
-                break;
+                return Err(LogError::Corrupt(format!(
+                    "producer-state recovery made no progress at offset {next}"
+                )));
             }
             let mut advanced_to = next;
             for batch in &read.batches {
-                let producer_id = ProducerId(batch.producer_id);
-                if batch.attributes.is_control_batch() {
-                    self.pending.remove(&producer_id);
-                    if let Some(epoch) = batch
-                        .records
-                        .first()
-                        .and_then(|record| record.value.as_deref())
-                        .and_then(parse_control_marker_coordinator_epoch)
-                    {
-                        self.coordinator_epochs.insert(producer_id, epoch);
-                    }
-                } else if batch.attributes.is_transactional() && !producer_id.is_none() {
-                    self.pending
-                        .entry(producer_id)
-                        .or_insert(Offset(batch.base_offset));
+                self.apply_recovered_batch_state(batch)?;
+                (_, advanced_to) = Self::recovered_batch_offsets(advanced_to, batch)?;
+                let covered: Vec<_> = boundaries.range(..=advanced_to).copied().collect();
+                for boundary in covered {
+                    producer_snapshot::write(&self.dir, boundary, &self.producer_state)?;
+                    let _ = boundaries.remove(&boundary);
                 }
-                advanced_to = Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
             }
             if advanced_to <= next {
-                break;
+                return Err(LogError::Corrupt(format!(
+                    "producer-state recovery did not advance past offset {next}"
+                )));
             }
             next = advanced_to;
         }
+        self.rebuild_pending_stamp_ranges()?;
         self.lso = self
             .pending
             .values()
@@ -439,6 +479,185 @@ impl Log {
             .min()
             .unwrap_or_else(|| self.log_end_offset());
         Ok(())
+    }
+
+    fn apply_recovered_batch_state(&mut self, batch: &RecordBatch) -> Result<(), LogError> {
+        let producer_id = ProducerId(batch.producer_id);
+        if producer_id.get() < 0 {
+            return Ok(());
+        }
+        self.update_owned_producer_entry(batch)?;
+        if batch.attributes.is_control_batch() {
+            self.pending.remove(&producer_id);
+            if let Some(epoch) = batch
+                .records
+                .first()
+                .and_then(|record| record.value.as_deref())
+                .and_then(parse_control_marker_coordinator_epoch)
+            {
+                self.coordinator_epochs.insert(producer_id, epoch);
+            }
+        } else if batch.attributes.is_transactional() {
+            self.pending
+                .entry(producer_id)
+                .or_insert(Offset(batch.base_offset));
+        }
+        Ok(())
+    }
+
+    fn rebuild_pending_stamp_ranges(&mut self) -> Result<(), LogError> {
+        self.pending_stamp_ranges.clear();
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let mut next = self.log_start_offset();
+        let end = self.log_end_offset();
+        while next < end {
+            let read = self.read(next, crabka_units::mebibytes(1))?;
+            if read.batches.is_empty() {
+                return Err(LogError::Corrupt(format!(
+                    "transaction-stamp recovery made no progress at offset {next}"
+                )));
+            }
+            for batch in &read.batches {
+                let producer_id = ProducerId(batch.producer_id);
+                let (last, advanced_to) = Self::recovered_batch_offsets(next, batch)?;
+                if advanced_to <= next {
+                    return Err(LogError::Corrupt(format!(
+                        "transaction-stamp recovery did not advance past offset {next}"
+                    )));
+                }
+                if batch.attributes.is_control_batch() {
+                    self.pending_stamp_ranges.remove(&producer_id);
+                } else if batch.attributes.is_transactional() && producer_id.get() >= 0 {
+                    self.pending_stamp_ranges
+                        .entry(producer_id)
+                        .or_default()
+                        .push((Offset(batch.base_offset), last));
+                }
+                next = advanced_to;
+            }
+        }
+        Ok(())
+    }
+
+    fn recovered_batch_offsets(
+        current: Offset,
+        batch: &RecordBatch,
+    ) -> Result<(Offset, Offset), LogError> {
+        let last = batch
+            .base_offset
+            .checked_add(i64::from(batch.last_offset_delta))
+            .map(Offset)
+            .ok_or_else(|| {
+                LogError::Corrupt(format!("log recovery offset overflow at {current}"))
+            })?;
+        let advanced_to = last.0.checked_add(1).map(Offset).ok_or_else(|| {
+            LogError::Corrupt(format!("log recovery offset overflow at {current}"))
+        })?;
+        if advanced_to <= current {
+            return Err(LogError::Corrupt(format!(
+                "log recovery did not advance past offset {current}"
+            )));
+        }
+        Ok((last, advanced_to))
+    }
+
+    fn update_owned_producer_entry(&mut self, batch: &RecordBatch) -> Result<(), LogError> {
+        let producer_id = ProducerId(batch.producer_id);
+        if producer_id.get() < 0 {
+            return Ok(());
+        }
+        if batch.attributes.is_control_batch() {
+            let entry = self
+                .producer_state
+                .entry(producer_id)
+                .or_insert_with(|| ProducerSnapshotEntry::empty(producer_id, batch.producer_epoch));
+            if entry.producer_epoch != batch.producer_epoch {
+                // Kafka clears the retained data-batch metadata when an end
+                // marker advances the producer epoch (transaction version 2).
+                entry.last_sequence = -1;
+                entry.last_offset = Offset(-1);
+                entry.offset_delta = 0;
+            }
+            entry.producer_epoch = batch.producer_epoch;
+            entry.timestamp = batch.max_timestamp;
+            entry.current_txn_first_offset = None;
+            if let Some(epoch) = batch
+                .records
+                .first()
+                .and_then(|record| record.value.as_deref())
+                .and_then(parse_control_marker_coordinator_epoch)
+            {
+                entry.coordinator_epoch = epoch;
+            }
+            return Ok(());
+        }
+        self.update_data_producer_entry(
+            (producer_id, batch.producer_epoch),
+            (batch.base_sequence, batch.last_offset_delta),
+            (
+                Offset(batch.base_offset),
+                batch.max_timestamp,
+                batch.attributes.is_transactional(),
+            ),
+        )
+    }
+
+    fn update_data_producer_entry(
+        &mut self,
+        producer: (ProducerId, i16),
+        sequence: (i32, i32),
+        append: (Offset, i64, bool),
+    ) -> Result<(), LogError> {
+        let (producer_id, producer_epoch) = producer;
+        let (base_sequence, last_offset_delta) = sequence;
+        let (base_offset, timestamp, is_transactional) = append;
+        let Some((last_sequence, last_offset)) =
+            Self::data_producer_tail(producer_id, base_sequence, last_offset_delta, base_offset)?
+        else {
+            return Ok(());
+        };
+        let entry = self
+            .producer_state
+            .entry(producer_id)
+            .or_insert_with(|| ProducerSnapshotEntry::empty(producer_id, producer_epoch));
+        entry.producer_epoch = producer_epoch;
+        entry.last_sequence = last_sequence;
+        entry.last_offset = last_offset;
+        entry.offset_delta = last_offset_delta;
+        entry.timestamp = timestamp;
+        if is_transactional && entry.current_txn_first_offset.is_none() {
+            entry.current_txn_first_offset = Some(base_offset);
+        }
+        Ok(())
+    }
+
+    fn data_producer_tail(
+        producer_id: ProducerId,
+        base_sequence: i32,
+        last_offset_delta: i32,
+        base_offset: Offset,
+    ) -> Result<Option<(i32, Offset)>, LogError> {
+        if producer_id.get() < 0 || base_sequence < 0 {
+            return Ok(None);
+        }
+        if last_offset_delta < 0 {
+            return Err(LogError::InvalidArgument(format!(
+                "negative producer offset delta for producer {producer_id}"
+            )));
+        }
+        let last_sequence = increment_sequence(base_sequence, last_offset_delta);
+        let last_offset = base_offset
+            .0
+            .checked_add(i64::from(last_offset_delta))
+            .map(Offset)
+            .ok_or_else(|| {
+                LogError::InvalidArgument(format!(
+                    "producer offset overflow for producer {producer_id}"
+                ))
+            })?;
+        Ok(Some((last_sequence, last_offset)))
     }
 
     /// Directory this log was opened against. The broker's intra-broker
@@ -516,6 +735,8 @@ impl Log {
             });
         }
 
+        producer_snapshot::remove_all(&self.dir)?;
+
         // Drop every sealed segment + its on-disk files.
         while let Some(popped) = self.segments.pop() {
             let base = popped.base_offset();
@@ -523,6 +744,8 @@ impl Log {
             let _ = fs::remove_file(name::log_path(&self.dir, base.0));
             let _ = fs::remove_file(name::index_path(&self.dir, base.0));
             let _ = fs::remove_file(name::timeindex_path(&self.dir, base.0));
+            let _ = fs::remove_file(name::txnindex_path(&self.dir, base.0));
+            let _ = fs::remove_file(name::stampindex_path(&self.dir, base.0));
         }
 
         // Drop the active segment + its on-disk files.
@@ -532,6 +755,8 @@ impl Log {
             let _ = fs::remove_file(name::log_path(&self.dir, base.0));
             let _ = fs::remove_file(name::index_path(&self.dir, base.0));
             let _ = fs::remove_file(name::timeindex_path(&self.dir, base.0));
+            let _ = fs::remove_file(name::txnindex_path(&self.dir, base.0));
+            let _ = fs::remove_file(name::stampindex_path(&self.dir, base.0));
         }
 
         // Clear the start override so the derived value takes over.
@@ -541,11 +766,15 @@ impl Log {
         self.active_txn_index = TxnIndex::open(new_active.txn_index_path())?;
         let stamp_index_path = new_active.stamp_index_path();
         self.pending.clear(); // reset_to is a hard reset (after divergence)
+        self.pending_stamp_ranges.clear();
+        self.coordinator_epochs.clear();
+        self.producer_state.clear();
+        self.stamp_indexes.clear();
         self.lso = new_active.last_offset() + 1; // = new_base (empty segment)
         self.active = Some(new_active);
         self.dir_sync_needed = true;
         // Preserve any injected stamp source; reopen its (fresh) sidecar.
-        self.reopen_active_stamp_index(stamp_index_path)?;
+        self.reopen_active_stamp_index(new_base, stamp_index_path)?;
         // The log now holds no records, so the leader-epoch cache must hold no
         // entries (Kafka's truncateFullyAndStartAt → leaderEpochCache.clearAndFlush).
         // Leaving stale entries makes a follower advertise a `last_fetched_epoch`
@@ -611,6 +840,13 @@ impl Log {
         )
     }
 
+    /// Producer state restored from the newest valid Kafka-compatible
+    /// snapshot and the uncovered local log tail.
+    #[must_use]
+    pub fn producer_state_snapshot(&self) -> Vec<ProducerSnapshotEntry> {
+        self.producer_state.values().copied().collect()
+    }
+
     /// Close all segments. Drop runs automatically when `self` moves;
     /// this method just names the operation explicitly.
     pub fn close(self) {
@@ -665,9 +901,11 @@ impl Log {
     /// Inject the [`StampSource`] that folds the additional internal stamp
     /// coordinate into this partition.
     ///
-    /// This method opens or recovers the active segment's `.stampindex`. From
-    /// this point every durably-appended data batch records a stamped range
-    /// there.
+    /// This method opens or recovers every local segment's `.stampindex`.
+    /// From this point each durable non-transactional batch is stamped at
+    /// append, while transactional batches are stamped together when their
+    /// COMMIT marker lands. Aborted and still-open transactions stay
+    /// unstamped.
     ///
     /// This is the only switch that enables the feature. With no source
     /// injected the log stamps nothing and its bytes are identical to those
@@ -684,12 +922,35 @@ impl Log {
         &mut self,
         source: std::sync::Arc<dyn StampSource>,
     ) -> Result<(), LogError> {
-        let path = self
-            .active
-            .as_ref()
-            .expect("active segment must exist after Log::open")
-            .stamp_index_path();
-        self.active_stamp_index = Some(StampIndex::open(path)?);
+        let mut indexes = self
+            .segments
+            .iter()
+            .chain(self.active.iter())
+            .map(|segment| {
+                Ok((
+                    segment.base_offset(),
+                    StampIndex::open(segment.stamp_index_path())?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, LogError>>()?;
+        let pending_ranges: Vec<(Offset, Offset)> = self
+            .pending_stamp_ranges
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        for index in indexes.values_mut() {
+            index.remove_ranges(&pending_ranges)?;
+        }
+        if let Some(horizon) = indexes
+            .values()
+            .flat_map(StampIndex::entries)
+            .map(|entry| entry.stamp)
+            .max()
+        {
+            source.observe(horizon);
+        }
+        self.stamp_indexes = indexes;
         self.stamp_source = Some(source);
         Ok(())
     }
@@ -708,35 +969,58 @@ impl Log {
     ///
     /// The result is `None` when the partition is unstamped, that is, when no
     /// source is injected. It is also `None` when no stamped range covers
-    /// `offset`. This method reads only the active segment's `.stampindex`,
-    /// in the same way as [`Log::aborted_in_range`]. This is an internal,
-    /// server-side query. No produce or fetch handler calls it, so the stamp
-    /// can never reach a client-facing response.
+    /// `offset`. This method searches all local segment indexes because a
+    /// transaction can commit after the segment holding its data has rolled.
+    /// This is an internal, server-side query. No produce or fetch handler
+    /// calls it, so the stamp can never reach a client-facing response.
     #[must_use]
     pub fn stamp_for_offset(&self, offset: Offset) -> Option<u64> {
-        self.active_stamp_index.as_ref()?.stamp_for_offset(offset)
+        self.stamp_indexes
+            .values()
+            .find_map(|index| index.stamp_for_offset(offset))
     }
 
     /// Record a stamped `[base, last]` range for a durably-appended data
     /// batch.
     ///
-    /// This method does nothing when no [`StampSource`] is injected. Callers
-    /// invoke it strictly after the batch is durable, only for non-control
-    /// batches, and in append order, which is offset order. Recorded ranges
-    /// therefore do not overlap and their `base_offset`s strictly increase.
-    /// That satisfies the ordering precondition of [`StampIndex::append`].
+    /// This method does nothing when no [`StampSource`] is injected.
     fn record_stamp(&mut self, base: Offset, last: Offset) -> Result<(), LogError> {
-        if let (Some(index), Some(source)) =
-            (self.active_stamp_index.as_mut(), self.stamp_source.as_ref())
-        {
-            let stamp = source.next_stamp();
-            index.append(StampEntry {
-                base_offset: base,
-                last_offset: last,
-                stamp,
-            })?;
+        let Some(source) = self.stamp_source.as_ref() else {
+            return Ok(());
+        };
+        self.record_stamp_value(base, last, source.next_stamp())
+    }
+
+    /// Record a supplied commit stamp for one transactional data range.
+    fn record_stamp_value(
+        &mut self,
+        base: Offset,
+        last: Offset,
+        stamp: u64,
+    ) -> Result<(), LogError> {
+        if self.stamp_source.is_none() {
+            return Ok(());
         }
-        Ok(())
+        // Retention can remove an old transactional batch before its marker
+        // arrives. There is no local data left to stamp in that case, and the
+        // marker must still be allowed to close the transaction.
+        if last < self.local_log_start_offset() {
+            return Ok(());
+        }
+        let (_, index) = self
+            .stamp_indexes
+            .range_mut(..=base)
+            .next_back()
+            .ok_or_else(|| {
+                LogError::Corrupt(format!(
+                    "no stamp index segment covers transactional range {base}..={last}"
+                ))
+            })?;
+        index.upsert(StampEntry {
+            base_offset: base,
+            last_offset: last,
+            stamp,
+        })
     }
 
     /// Reopen the active `.stampindex` for a new active segment.
@@ -747,12 +1031,15 @@ impl Log {
     ///
     /// # Errors
     /// Returns an error when opening the `.stampindex` sidecar fails.
-    fn reopen_active_stamp_index(&mut self, path: PathBuf) -> Result<(), LogError> {
-        self.active_stamp_index = if self.stamp_source.is_some() {
-            Some(StampIndex::open(path)?)
-        } else {
-            None
-        };
+    fn reopen_active_stamp_index(
+        &mut self,
+        base_offset: Offset,
+        path: PathBuf,
+    ) -> Result<(), LogError> {
+        if self.stamp_source.is_some() {
+            self.stamp_indexes
+                .insert(base_offset, StampIndex::open(path)?);
+        }
         Ok(())
     }
 
@@ -776,7 +1063,7 @@ impl Log {
         let assigned_base = self.log_end_offset();
         tracing::Span::current().record("assigned_base", assigned_base.0);
         batch.base_offset = assigned_base.0;
-        self.append_preserving_offset(batch)?;
+        self.append_preserving_offset(batch, None)?;
         // Record epoch transition when the epoch is valid and exceeds the
         // previously recorded epoch (or no epoch has been recorded yet).
         if leader_epoch.is_known()
@@ -787,6 +1074,29 @@ impl Log {
         {
             self.epoch_checkpoint.append(leader_epoch, assigned_base)?;
         }
+        Ok(assigned_base)
+    }
+
+    /// Append a commit-marker batch with a coordinator-supplied transaction
+    /// stamp and return its assigned base offset.
+    ///
+    /// The stamp is internal metadata. It is not encoded into the marker or
+    /// any client-facing bytes. The marker must be a COMMIT control batch and
+    /// a [`StampSource`] must already be installed.
+    ///
+    /// # Errors
+    /// Returns an error for a non-commit batch, a missing stamp source, or any
+    /// log/index I/O failure.
+    pub fn append_with_commit_stamp(
+        &mut self,
+        batch: &mut RecordBatch,
+        stamp: u64,
+    ) -> Result<Offset, LogError> {
+        self.validate_commit_stamp_batch(batch)?;
+        let assigned_base = self.log_end_offset();
+        batch.base_offset = assigned_base.0;
+        self.observe_stamp(stamp);
+        self.append_preserving_offset(batch, Some(stamp))?;
         Ok(assigned_base)
     }
 
@@ -941,6 +1251,12 @@ impl Log {
         batch: &VerbatimBatch,
         base_offset: Offset,
     ) -> Result<(), LogError> {
+        Self::data_producer_tail(
+            batch.producer_id,
+            batch.base_sequence,
+            batch.last_offset_delta,
+            base_offset,
+        )?;
         let (segment_size, index_interval, flush_on_append) = {
             let cfg = self.config.read().unwrap();
             (cfg.segment_size, cfg.index_interval, cfg.flush_on_append)
@@ -971,24 +1287,37 @@ impl Log {
             self.active_segment_flush()?;
         }
 
-        // --- .stampindex write (internal sidecar; never a control batch on
-        // this path, so every verbatim batch is stampable data). Written
-        // strictly after the batch is durable, exactly like the `.txnindex`
-        // below, and affects no offset/LSO/HWM/wire-byte state. ---
+        // --- .stampindex write (internal sidecar) ---
+        // Ordinary verbatim data is stamped now. Transactional verbatim data
+        // with an assigned producer is retained below and stamped only if its
+        // commit marker lands.
         let last_offset = Offset(base_offset.0 + i64::from(batch.last_offset_delta));
-        self.record_stamp(base_offset, last_offset)?;
+        let is_transactional = batch.is_transactional && batch.producer_id.get() >= 0;
+        if !is_transactional {
+            self.record_stamp(base_offset, last_offset)?;
+        }
 
         // --- LSO tracking (no control batches on this path) ---
         let pid = batch.producer_id;
-        if batch.is_transactional && !pid.is_none() {
+        if is_transactional {
             // Record the first offset of this txn on this partition; LSO
             // stays put until a commit/abort marker (which arrives via the
             // owned control-batch path).
             self.pending.entry(pid).or_insert(base_offset);
+            self.pending_stamp_ranges
+                .entry(pid)
+                .or_default()
+                .push((base_offset, last_offset));
         } else if self.pending.is_empty() {
             // Non-transactional batch with no in-flight txns: LSO advances.
             self.lso = self.log_end_offset();
         }
+
+        self.update_data_producer_entry(
+            (batch.producer_id, batch.producer_epoch),
+            (batch.base_sequence, batch.last_offset_delta),
+            (base_offset, batch.max_timestamp, is_transactional),
+        )?;
 
         Ok(())
     }
@@ -1043,7 +1372,7 @@ impl Log {
         // `partition_leader_epoch` is the raw KIP-320 wire `int32`; wrap it here.
         let leader_epoch = LeaderEpoch(batch.partition_leader_epoch);
         batch.base_offset = offset.0;
-        self.append_preserving_offset(batch)?;
+        self.append_preserving_offset(batch, None)?;
         // Mirror the leader-side epoch bookkeeping in [`Log::append`]: record the
         // batch's leader epoch when it advances past the latest recorded epoch,
         // so a follower's leader-epoch checkpoint tracks replicated epochs.
@@ -1058,13 +1387,49 @@ impl Log {
         Ok(())
     }
 
+    /// Append a replicated commit marker at `offset` with its internal commit
+    /// stamp. This is the follower counterpart of
+    /// [`Log::append_with_commit_stamp`].
+    ///
+    /// # Errors
+    /// Returns an error for an offset mismatch, a non-commit batch, a missing
+    /// stamp source, or any log/index I/O failure.
+    pub fn append_at_with_commit_stamp(
+        &mut self,
+        batch: &mut RecordBatch,
+        offset: Offset,
+        stamp: u64,
+    ) -> Result<(), LogError> {
+        let expected = self.append_at_expected_offset();
+        if offset != expected {
+            return Err(LogError::OffsetMismatch {
+                expected,
+                actual: offset,
+            });
+        }
+        self.validate_commit_stamp_batch(batch)?;
+        batch.base_offset = offset.0;
+        self.observe_stamp(stamp);
+        self.append_preserving_offset(batch, Some(stamp))
+    }
+
     /// Internal helper shared by [`Log::append`] and [`Log::append_at`].
     ///
     /// This function rolls the segment if necessary, appends to the active
     /// segment, and honors `config.flush_on_append`. It does NOT reassign
     /// `batch.base_offset`. Callers must set that field first. It also
     /// updates the LSO and the active `.txnindex` from the batch attributes.
-    fn append_preserving_offset(&mut self, batch: &mut RecordBatch) -> Result<(), LogError> {
+    fn append_preserving_offset(
+        &mut self,
+        batch: &mut RecordBatch,
+        transaction_stamp: Option<u64>,
+    ) -> Result<(), LogError> {
+        Self::data_producer_tail(
+            ProducerId(batch.producer_id),
+            batch.base_sequence,
+            batch.last_offset_delta,
+            Offset(batch.base_offset),
+        )?;
         let (segment_size, index_interval, flush_on_append) = {
             let cfg = self.config.read().unwrap();
             (cfg.segment_size, cfg.index_interval, cfg.flush_on_append)
@@ -1089,20 +1454,17 @@ impl Log {
         }
 
         // --- .stampindex write (internal sidecar) ---
-        // Stamp only data batches, never control batches (commit/abort
-        // markers): the stamp is a coordinate for records, not markers.
-        // Written strictly after the batch is durable, mirroring the
-        // `.txnindex` write below, so no offset/LSO/HWM/wire-byte effect.
-        // (First-cut: transactional data is stamped here at append rather
-        // than at commit-marker time; commit-time stamping via the internal
-        // cross-domain bridge is out-of-scope follow-up.)
-        if !batch.attributes.is_control_batch() {
+        // Ordinary data is stamped after the batch is durable. Transactional
+        // data stays unstamped until its COMMIT marker lands; an ABORT leaves
+        // it unstamped. Control records themselves never receive a stamp.
+        let pid = ProducerId(batch.producer_id);
+        let is_transactional = batch.attributes.is_transactional() && pid.get() >= 0;
+        if !batch.attributes.is_control_batch() && !is_transactional {
             let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
             self.record_stamp(Offset(batch.base_offset), last)?;
         }
 
         // --- LSO tracking + .txnindex writes ---
-        let pid = ProducerId(batch.producer_id);
         if batch.attributes.is_control_batch() {
             // Parse the inner control record: key = (version: i16, type: i16) BE.
             // type=0 → ABORT; type=1 → COMMIT.
@@ -1111,15 +1473,16 @@ impl Log {
                 .first()
                 .and_then(|r| r.key.as_deref())
                 .and_then(parse_control_marker_type);
-            if let Some(epoch) = batch
-                .records
-                .first()
-                .and_then(|record| record.value.as_deref())
-                .and_then(parse_control_marker_coordinator_epoch)
+            if pid.get() >= 0
+                && let Some(epoch) = batch
+                    .records
+                    .first()
+                    .and_then(|record| record.value.as_deref())
+                    .and_then(parse_control_marker_coordinator_epoch)
             {
                 self.coordinator_epochs.insert(pid, epoch);
             }
-            if let Some(start) = self.pending.remove(&pid) {
+            if let Some(start) = self.pending.get(&pid).copied() {
                 let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
                 if marker_type == Some(0)
                 /* ABORT */
@@ -1131,13 +1494,38 @@ impl Log {
                     })?;
                 }
             }
+            let stamp_ranges = self
+                .pending_stamp_ranges
+                .get(&pid)
+                .cloned()
+                .unwrap_or_default();
+            if marker_type == Some(1) && !stamp_ranges.is_empty() {
+                let stamp = transaction_stamp
+                    .or_else(|| self.stamp_source.as_ref().map(|source| source.next_stamp()));
+                if let Some(stamp) = stamp {
+                    for (base, last) in stamp_ranges {
+                        self.record_stamp_value(base, last, stamp)?;
+                    }
+                }
+            }
+            // Keep the in-memory transaction state until all durable sidecar
+            // writes succeed. A caller can then retry a marker whose log
+            // append succeeded but whose index update failed.
+            self.pending.remove(&pid);
+            self.pending_stamp_ranges.remove(&pid);
             // LSO can advance only when no pending txns remain.
             if self.pending.is_empty() {
                 self.lso = self.log_end_offset();
             }
-        } else if batch.attributes.is_transactional() && !pid.is_none() {
+        } else if is_transactional {
             // Record the first offset of this txn on this partition.
-            self.pending.entry(pid).or_insert(Offset(batch.base_offset));
+            let base = Offset(batch.base_offset);
+            let last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
+            self.pending.entry(pid).or_insert(base);
+            self.pending_stamp_ranges
+                .entry(pid)
+                .or_default()
+                .push((base, last));
             // LSO stays where it is until commit/abort.
         } else {
             // Non-transactional batch. LSO advances only when no in-flight txns.
@@ -1146,7 +1534,36 @@ impl Log {
             }
         }
 
+        self.update_owned_producer_entry(batch)?;
+
         Ok(())
+    }
+
+    fn validate_commit_stamp_batch(&self, batch: &RecordBatch) -> Result<(), LogError> {
+        let is_commit = batch.attributes.is_control_batch()
+            && batch
+                .records
+                .first()
+                .and_then(|record| record.key.as_deref())
+                .and_then(parse_control_marker_type)
+                == Some(1);
+        if !is_commit {
+            return Err(LogError::InvalidArgument(
+                "an explicit transaction stamp requires a COMMIT control batch".into(),
+            ));
+        }
+        if self.stamp_source.is_none() {
+            return Err(LogError::InvalidArgument(
+                "an explicit transaction stamp requires an installed stamp source".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn observe_stamp(&self, stamp: u64) {
+        if let Some(source) = &self.stamp_source {
+            source.observe(stamp);
+        }
     }
 
     #[instrument(
@@ -1158,6 +1575,11 @@ impl Log {
     fn roll_active_segment(&mut self) -> Result<(), LogError> {
         let new_base = self.log_end_offset();
         tracing::Span::current().record("new_base", new_base.0);
+        // The snapshot must never become durable ahead of the records it
+        // describes. Flush the segment first, then fsync and publish the
+        // boundary snapshot.
+        self.active_segment_flush()?;
+        producer_snapshot::write(&self.dir, new_base, &self.producer_state)?;
         let mut old = self
             .active
             .take()
@@ -1169,7 +1591,7 @@ impl Log {
         let stamp_index_path = new_seg.stamp_index_path();
         self.active = Some(new_seg);
         self.dir_sync_needed = true;
-        self.reopen_active_stamp_index(stamp_index_path)?;
+        self.reopen_active_stamp_index(new_base, stamp_index_path)?;
         Ok(())
     }
 
@@ -1471,6 +1893,10 @@ impl Log {
             });
         }
 
+        if !self.segments.is_empty() {
+            producer_snapshot::remove_after(&self.dir, offset)?;
+        }
+
         // Drop sealed segments whose base_offset >= offset.
         while let Some(last_sealed) = self.segments.last() {
             if last_sealed.base_offset() >= offset {
@@ -1480,6 +1906,9 @@ impl Log {
                 let _ = fs::remove_file(name::log_path(&self.dir, base.0));
                 let _ = fs::remove_file(name::index_path(&self.dir, base.0));
                 let _ = fs::remove_file(name::timeindex_path(&self.dir, base.0));
+                let _ = fs::remove_file(name::txnindex_path(&self.dir, base.0));
+                let _ = fs::remove_file(name::stampindex_path(&self.dir, base.0));
+                self.stamp_indexes.remove(&base);
             } else {
                 break;
             }
@@ -1494,6 +1923,9 @@ impl Log {
             let _ = fs::remove_file(name::log_path(&self.dir, base.0));
             let _ = fs::remove_file(name::index_path(&self.dir, base.0));
             let _ = fs::remove_file(name::timeindex_path(&self.dir, base.0));
+            let _ = fs::remove_file(name::txnindex_path(&self.dir, base.0));
+            let _ = fs::remove_file(name::stampindex_path(&self.dir, base.0));
+            self.stamp_indexes.remove(&base);
         }
 
         // If no active segment, promote the last sealed one (if any) and
@@ -1504,16 +1936,23 @@ impl Log {
                     .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
                 seg.truncate_to_relative(rel)?;
                 self.active_txn_index = TxnIndex::open(seg.txn_index_path())?;
+                let base = seg.base_offset();
                 let stamp_index_path = seg.stamp_index_path();
                 self.active = Some(seg);
-                self.reopen_active_stamp_index(stamp_index_path)?;
+                self.stamp_indexes
+                    .retain(|segment_base, _| *segment_base <= base);
+                self.reopen_active_stamp_index(base, stamp_index_path)?;
+                if let Some(index) = self.stamp_indexes.get_mut(&base) {
+                    index.truncate_from(offset)?;
+                }
             } else {
                 let new_seg = Segment::create(&self.dir, offset)?;
                 self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
                 let stamp_index_path = new_seg.stamp_index_path();
                 self.active = Some(new_seg);
                 self.dir_sync_needed = true;
-                self.reopen_active_stamp_index(stamp_index_path)?;
+                self.stamp_indexes.clear();
+                self.reopen_active_stamp_index(offset, stamp_index_path)?;
             }
         } else if let Some(active) = self.active.as_mut()
             && active.last_offset() >= offset
@@ -1524,8 +1963,15 @@ impl Log {
                 .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
             active.truncate_to_relative(rel)?;
             self.active_txn_index = TxnIndex::open(active.txn_index_path())?;
+            let base = active.base_offset();
             let stamp_index_path = active.stamp_index_path();
-            self.reopen_active_stamp_index(stamp_index_path)?;
+            self.reopen_active_stamp_index(base, stamp_index_path)?;
+            if let Some(index) = self.stamp_indexes.get_mut(&base) {
+                index.truncate_from(offset)?;
+            }
+        }
+        if !self.producer_state.is_empty() {
+            self.rebuild_producer_and_transaction_state()?;
         }
         // After truncation, LSO can't exceed log_end_offset.
         self.lso = self.lso.min(self.log_end_offset());
@@ -1597,6 +2043,8 @@ impl Log {
         let drop_set: HashSet<Offset> = to_drop.iter().copied().collect();
         self.segments
             .retain(|s| !drop_set.contains(&s.base_offset()));
+        self.stamp_indexes
+            .retain(|base, _| !drop_set.contains(base));
         for base in &to_drop {
             let _ = retention::delete_segment_files(&self.dir, *base);
         }
@@ -1674,6 +2122,7 @@ impl Log {
         let evict: HashSet<Offset> = to_evict.iter().copied().collect();
         tracing::Span::current().record("evicted", evict.len());
         self.segments.retain(|s| !evict.contains(&s.base_offset()));
+        self.stamp_indexes.retain(|base, _| !evict.contains(base));
         for base in to_evict {
             let _ = retention::delete_segment_files(&self.dir, base);
         }
@@ -1816,6 +2265,8 @@ impl Log {
         let drop_set: HashSet<Offset> = to_drop.iter().copied().collect();
         self.segments
             .retain(|s| !drop_set.contains(&s.base_offset()));
+        self.stamp_indexes
+            .retain(|base, _| !drop_set.contains(base));
         for base in &to_drop {
             let _ = retention::delete_segment_files(&self.dir, *base);
         }
@@ -1872,6 +2323,7 @@ impl Log {
                     offset_index_path: name::index_path(&self.dir, base.0),
                     time_index_path: name::timeindex_path(&self.dir, base.0),
                     transaction_index_path: txn.exists().then_some(txn),
+                    producer_snapshot_path: producer_snapshot::path(&self.dir, next_base),
                     leader_epochs: epochs_for_range(&epoch_entries, base, last),
                 }
             })
@@ -2213,6 +2665,8 @@ mod tests {
             max_timestamp: producer.max_timestamp,
             leader_epoch,
             producer_id: ProducerId(producer.producer_id),
+            producer_epoch: producer.producer_epoch,
+            base_sequence: producer.base_sequence,
             is_transactional: producer.attributes.is_transactional(),
         };
         (wire, vb)
@@ -2527,7 +2981,11 @@ mod tests {
         log.append(&mut sample_batch(1)).unwrap();
         log.sync().unwrap();
 
-        assert2::assert!(sync_observer::take_segment_flushes() == vec![Offset(0), Offset(1)]);
+        // Rolling flushes offset 0 before publishing its producer snapshot;
+        // explicit sync then flushes both the sealed and active segments.
+        assert2::assert!(
+            sync_observer::take_segment_flushes() == vec![Offset(0), Offset(0), Offset(1)]
+        );
     }
 
     #[test]
@@ -2628,6 +3086,89 @@ mod tests {
         log.truncate_to(Offset(3)).unwrap();
         // First batch (offsets 0..=2) survives; last_offset == 2, end == 3.
         assert2::assert!(log.log_end_offset() == 3);
+    }
+
+    #[test]
+    fn truncate_to_rebuilds_producer_state_from_surviving_batches() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        let mut first = sample_batch(2);
+        first.producer_id = 42;
+        first.producer_epoch = 3;
+        first.base_sequence = 7;
+        first.max_timestamp = 100;
+        log.append(&mut first).unwrap();
+        let mut discarded = sample_batch(2);
+        discarded.producer_id = 42;
+        discarded.producer_epoch = 3;
+        discarded.base_sequence = 9;
+        discarded.max_timestamp = 200;
+        log.append(&mut discarded).unwrap();
+        let mut later = sample_batch(2);
+        later.producer_id = 42;
+        later.producer_epoch = 3;
+        later.base_sequence = 11;
+        later.max_timestamp = 300;
+        log.append(&mut later).unwrap();
+
+        log.truncate_to(Offset(2)).unwrap();
+
+        assert2::assert!(
+            log.producer_state_snapshot()
+                == vec![ProducerSnapshotEntry {
+                    producer_id: ProducerId(42),
+                    producer_epoch: 3,
+                    last_sequence: 8,
+                    last_offset: Offset(1),
+                    offset_delta: 1,
+                    timestamp: 100,
+                    coordinator_epoch: -1,
+                    current_txn_first_offset: None,
+                }]
+        );
+        assert2::assert!(
+            producer_snapshot::list(dir.path())
+                .unwrap()
+                .into_iter()
+                .map(|(offset, _)| offset)
+                .collect::<Vec<_>>()
+                == vec![Offset(2)]
+        );
+    }
+
+    #[test]
+    fn truncate_to_removes_future_empty_producer_snapshots() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..3 {
+            log.append(&mut sample_batch(2)).unwrap();
+        }
+        assert2::assert!(log.producer_state.is_empty());
+
+        log.truncate_to(Offset(2)).unwrap();
+
+        assert2::assert!(
+            producer_snapshot::list(dir.path())
+                .unwrap()
+                .into_iter()
+                .map(|(offset, _)| offset)
+                .collect::<Vec<_>>()
+                == vec![Offset(2)]
+        );
     }
 
     #[test]
@@ -2894,6 +3435,120 @@ mod tests {
         assert2::assert!(log_files.len() >= 2);
     }
 
+    #[test]
+    fn producer_snapshot_survives_local_segment_deletion_and_restart() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_size: bytes(1),
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config.clone()).unwrap();
+        let mut producer = sample_batch(2);
+        producer.producer_id = 42;
+        producer.producer_epoch = 3;
+        producer.base_sequence = 7;
+        producer.max_timestamp = 1_234;
+        log.append(&mut producer).unwrap();
+
+        // The second append rolls the producer batch into a sealed segment and
+        // writes the snapshot at the new segment's base offset.
+        log.append(&mut sample_batch(1)).unwrap();
+        let export = log.tierable_segments().into_iter().next().unwrap();
+        check!(export.producer_snapshot_path.exists());
+        let local_start = export.last_offset + 1;
+        check!(log.delete_local_segments_through(local_start).unwrap() == 1);
+        drop(log);
+
+        let reopened = Log::open(dir.path(), config).unwrap();
+        let entry = reopened
+            .producer_state_snapshot()
+            .into_iter()
+            .find(|entry| entry.producer_id == 42)
+            .unwrap();
+        check!(entry.producer_epoch == 3);
+        check!(entry.last_sequence == 8);
+        check!(entry.last_offset == 1);
+        check!(entry.offset_delta == 1);
+        check!(entry.timestamp == 1_234);
+    }
+
+    #[test]
+    fn snapshot_recovery_preserves_open_and_completed_transaction_fields() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_size: bytes(1),
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config.clone()).unwrap();
+        let mut data = transactional_batch(77, 4, &["a", "b"]);
+        data.base_sequence = 10;
+        log.append(&mut data).unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+
+        let open = log
+            .producer_state_snapshot()
+            .into_iter()
+            .find(|entry| entry.producer_id == 77)
+            .unwrap();
+        check!(open.current_txn_first_offset == Some(Offset(0)));
+
+        log.append(&mut commit_marker(77, 4)).unwrap();
+        // Roll once more so the newest snapshot, rather than the replay tail,
+        // is the only durable source of the completed coordinator epoch.
+        log.append(&mut sample_batch(1)).unwrap();
+        drop(log);
+        let reopened = Log::open(dir.path(), config).unwrap();
+        let completed = reopened
+            .producer_state_snapshot()
+            .into_iter()
+            .find(|entry| entry.producer_id == 77)
+            .unwrap();
+        check!(completed.last_sequence == 11);
+        check!(completed.current_txn_first_offset == None);
+        check!(completed.coordinator_epoch == 17);
+        check!(reopened.producer_transaction_state(ProducerId(77)) == (17, None));
+    }
+
+    #[test]
+    fn recovery_recreates_missing_producer_snapshot_at_segment_boundary() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_size: bytes(1),
+            ..LogConfig::default()
+        };
+        {
+            let mut log = Log::open(dir.path(), config.clone()).unwrap();
+            for (base_sequence, timestamp) in [(0, 10), (2, 20), (4, 30)] {
+                let mut batch = sample_batch(2);
+                batch.producer_id = 42;
+                batch.producer_epoch = 3;
+                batch.base_sequence = base_sequence;
+                batch.max_timestamp = timestamp;
+                log.append(&mut batch).unwrap();
+            }
+        }
+
+        let missing = producer_snapshot::path(dir.path(), Offset(4));
+        check!(missing.exists());
+        std::fs::remove_file(&missing).unwrap();
+
+        let reopened = Log::open(dir.path(), config).unwrap();
+        check!(missing.exists());
+        let (_, boundary_state) = producer_snapshot::latest_at_or_before(dir.path(), Offset(4))
+            .unwrap()
+            .unwrap();
+        let boundary = boundary_state.get(&ProducerId(42)).unwrap();
+        check!(boundary.last_sequence == 3);
+        check!(boundary.last_offset == Offset(3));
+        let recovered = reopened
+            .producer_state_snapshot()
+            .into_iter()
+            .find(|entry| entry.producer_id == 42)
+            .unwrap();
+        check!(recovered.last_sequence == 5);
+        check!(recovered.last_offset == Offset(5));
+    }
+
     // ---- helpers for transactional tests ----
 
     /// A transactional (non-control) batch for the given pid/epoch containing `values`.
@@ -3000,6 +3655,200 @@ mod tests {
     }
 
     #[test]
+    fn negative_producer_ids_never_create_transaction_state() {
+        let dir = tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            log.set_stamp_source(std::sync::Arc::new(
+                crate::stamp_source::MonotonicStampSource::new(40, 1),
+            ))
+            .unwrap();
+
+            let mut owned = sample_batch(1);
+            owned.producer_id = -2;
+            owned.producer_epoch = 0;
+            owned.base_sequence = 0;
+            owned.attributes = owned.attributes.with_transactional(true);
+            log.append(&mut owned).unwrap();
+            assert2::assert!(log.lso() == Offset(1));
+            assert2::assert!(log.stamp_for_offset(Offset(0)) == Some(40));
+
+            let mut marker = commit_marker(-2, 0);
+            log.append(&mut marker).unwrap();
+            assert2::assert!(log.producer_transaction_state(ProducerId(-2)) == (-1, None));
+
+            let mut verbatim = test_batch_at(0);
+            verbatim.producer_id = -3;
+            verbatim.producer_epoch = 0;
+            verbatim.base_sequence = 0;
+            verbatim.attributes = verbatim.attributes.with_transactional(true);
+            let (_wire, batch) = verbatim_from(&verbatim, LeaderEpoch(0));
+            log.append_verbatim(&batch).unwrap();
+            assert2::assert!(log.lso() == Offset(3));
+            assert2::assert!(log.stamp_for_offset(Offset(2)) == Some(41));
+            assert2::assert!(log.producer_state_snapshot().is_empty());
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert2::assert!(reopened.lso() == reopened.log_end_offset());
+        assert2::assert!(reopened.producer_transaction_state(ProducerId(-2)) == (-1, None));
+        assert2::assert!(reopened.producer_transaction_state(ProducerId(-3)) == (-1, None));
+        assert2::assert!(reopened.producer_state_snapshot().is_empty());
+    }
+
+    #[test]
+    fn producer_tail_accepts_zero_and_rejects_negative_identity_fields() {
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(0), 0, 1, Offset(10)).unwrap()
+                == Some((1, Offset(11)))
+        );
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(1), 5, 1, Offset(10)).unwrap()
+                == Some((6, Offset(11)))
+        );
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(-2), 0, 0, Offset(10)).unwrap() == None
+        );
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(1), -2, 0, Offset(10)).unwrap() == None
+        );
+    }
+
+    #[test]
+    fn producer_tail_wraps_sequence_at_signed_maximum() {
+        assert2::assert!(
+            Log::data_producer_tail(ProducerId(1), i32::MAX - 1, 2, Offset(10)).unwrap()
+                == Some((0, Offset(12)))
+        );
+    }
+
+    #[test]
+    fn recovered_batch_offsets_require_checked_progress() {
+        let mut batch = sample_batch(3);
+        batch.base_offset = 10;
+        assert2::assert!(
+            Log::recovered_batch_offsets(Offset(10), &batch).unwrap() == (Offset(12), Offset(13))
+        );
+
+        batch.last_offset_delta = -1;
+        assert2::assert!(matches!(
+            Log::recovered_batch_offsets(Offset(10), &batch),
+            Err(LogError::Corrupt(message)) if message.contains("did not advance")
+        ));
+
+        batch.base_offset = i64::MAX;
+        batch.last_offset_delta = 1;
+        assert2::assert!(matches!(
+            Log::recovered_batch_offsets(Offset(i64::MAX), &batch),
+            Err(LogError::Corrupt(message)) if message.contains("offset overflow")
+        ));
+    }
+
+    #[test]
+    fn producer_sequence_rollover_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            let mut batch = sample_batch(3);
+            batch.producer_id = 1;
+            batch.producer_epoch = 0;
+            batch.base_sequence = i32::MAX - 1;
+            log.append(&mut batch).unwrap();
+
+            let entry = log.producer_state_snapshot().into_iter().next().unwrap();
+            assert2::assert!(entry.last_sequence == 0);
+            assert2::assert!(entry.last_offset == Offset(2));
+            assert2::assert!(entry.offset_delta == 2);
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let entry = reopened
+            .producer_state_snapshot()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert2::assert!(entry.last_sequence == 0);
+        assert2::assert!(entry.last_offset == Offset(2));
+        assert2::assert!(entry.offset_delta == 2);
+    }
+
+    #[test]
+    fn higher_epoch_control_marker_clears_data_batch_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            let mut data = transactional_batch(88, 4, &["a", "b"]);
+            data.base_sequence = 10;
+            log.append(&mut data).unwrap();
+            log.append(&mut commit_marker(88, 5)).unwrap();
+
+            let entry = log
+                .producer_state_snapshot()
+                .into_iter()
+                .find(|entry| entry.producer_id == 88)
+                .unwrap();
+            check!(entry.producer_epoch == 5);
+            check!(entry.last_sequence == -1);
+            check!(entry.last_offset == Offset(-1));
+            check!(entry.offset_delta == 0);
+            check!(entry.current_txn_first_offset == None);
+            check!(entry.coordinator_epoch == 17);
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let entry = reopened
+            .producer_state_snapshot()
+            .into_iter()
+            .find(|entry| entry.producer_id == 88)
+            .unwrap();
+        check!(entry.producer_epoch == 5);
+        check!(entry.last_sequence == -1);
+        check!(entry.last_offset == Offset(-1));
+        check!(entry.offset_delta == 0);
+        check!(entry.current_txn_first_offset == None);
+        check!(entry.coordinator_epoch == 17);
+    }
+
+    #[test]
+    fn zero_producer_id_and_only_transactional_ranges_survive_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+
+            let mut zero_pid = transactional_batch(0, 3, &["a", "b"]);
+            zero_pid.base_sequence = 5;
+            log.append(&mut zero_pid).unwrap();
+
+            let mut ordinary = sample_batch(1);
+            ordinary.producer_id = 1;
+            ordinary.producer_epoch = 0;
+            ordinary.base_sequence = 7;
+            log.append(&mut ordinary).unwrap();
+
+            let mut negative_pid = transactional_batch(-2, 0, &["ignored"]);
+            negative_pid.base_sequence = 0;
+            log.append(&mut negative_pid).unwrap();
+
+            let state = log.producer_state_snapshot();
+            let zero = state.iter().find(|entry| entry.producer_id == 0).unwrap();
+            assert2::assert!(zero.last_sequence == 6);
+            assert2::assert!(zero.current_txn_first_offset == Some(Offset(0)));
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let state = reopened.producer_state_snapshot();
+        let zero = state.iter().find(|entry| entry.producer_id == 0).unwrap();
+        assert2::assert!(zero.last_sequence == 6);
+        assert2::assert!(zero.current_txn_first_offset == Some(Offset(0)));
+        assert2::assert!(reopened.lso() == Offset(0));
+        assert2::assert!(reopened.pending_stamp_ranges.len() == 1);
+        assert2::assert!(
+            reopened.pending_stamp_ranges.get(&ProducerId(0))
+                == Some(&vec![(Offset(0), Offset(1))])
+        );
+    }
+
+    #[test]
     fn reopen_rebuilds_pending_transactions_and_lso() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -3013,8 +3862,16 @@ mod tests {
         let mut reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
         assert2::assert!(reopened.pending_transaction_start(ProducerId(1000)) == Some(Offset(0)));
         assert2::assert!(reopened.lso() == Offset(0));
+        reopened
+            .set_stamp_source(std::sync::Arc::new(
+                crate::stamp_source::MonotonicStampSource::new(30, 1),
+            ))
+            .unwrap();
 
         reopened.append(&mut commit_marker(1000, 4)).unwrap();
+        check!(reopened.stamp_for_offset(Offset(0)) == Some(30));
+        check!(reopened.stamp_for_offset(Offset(1)) == Some(30));
+        check!(reopened.stamp_for_offset(Offset(2)) == None);
         assert2::assert!(reopened.producer_transaction_state(ProducerId(1000)) == (17, None));
         assert2::assert!(
             reopened
@@ -3035,6 +3892,21 @@ mod tests {
         assert2::assert!(
             recovered_again.producer_transaction_state(ProducerId(1000)) == (17, Some(Offset(3)))
         );
+    }
+
+    #[test]
+    fn reopen_does_not_treat_non_transactional_producer_data_as_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            let mut batch = sample_batch(1);
+            batch.producer_id = 42;
+            log.append(&mut batch).unwrap();
+        }
+
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        check!(reopened.pending_transaction_start(ProducerId(42)) == None);
+        check!(reopened.lso() == reopened.log_end_offset());
     }
 
     // ---- .stampindex append-path wiring tests ----
@@ -3104,9 +3976,8 @@ mod tests {
         assert2::assert!(!dir.path().join("00000000000000000000.stampindex").exists());
     }
 
-    /// The commit or abort marker of a transaction is NOT stamped. A stamp is
-    /// a coordinate for data records, not for markers. The log stamps the two
-    /// data batches around the marker, but not the marker's own offset.
+    /// Transactional data stays unstamped until commit. The commit marker is
+    /// not stamped because a stamp is a coordinate for data records.
     #[test]
     fn control_markers_are_not_stamped() {
         let (dir, mut log) = test_log();
@@ -3118,6 +3989,8 @@ mod tests {
         // Transactional data at offsets 0..=1, then its commit marker at 2.
         log.append(&mut transactional_batch(1000, 0, &["a", "b"]))
             .unwrap();
+        check!(log.stamp_for_offset(Offset(0)) == None);
+        check!(log.stamp_for_offset(Offset(1)) == None);
         log.append(&mut commit_marker(1000, 0)).unwrap();
         // A following non-txn data batch at offset 3.
         log.append(&mut sample_batch(1)).unwrap();
@@ -3143,6 +4016,376 @@ mod tests {
                     },
                 ]
         );
+    }
+
+    #[test]
+    fn commit_stamps_only_matching_interleaved_transaction_ranges() {
+        let (_dir, mut log) = test_log();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(10, 10),
+        ))
+        .unwrap();
+
+        log.append(&mut transactional_batch(1000, 0, &["a"]))
+            .unwrap(); // offset 0
+        log.append(&mut transactional_batch(2000, 0, &["b", "c"]))
+            .unwrap(); // offsets 1..=2
+        log.append(&mut transactional_batch(1000, 0, &["d"]))
+            .unwrap(); // offset 3
+
+        log.append(&mut commit_marker(2000, 0)).unwrap(); // offset 4
+        check!(log.stamp_for_offset(Offset(0)) == None);
+        check!(log.stamp_for_offset(Offset(1)) == Some(10));
+        check!(log.stamp_for_offset(Offset(2)) == Some(10));
+        check!(log.stamp_for_offset(Offset(3)) == None);
+
+        log.append(&mut commit_marker(1000, 0)).unwrap(); // offset 5
+        check!(log.stamp_for_offset(Offset(0)) == Some(20));
+        check!(log.stamp_for_offset(Offset(3)) == Some(20));
+        check!(log.stamp_for_offset(Offset(4)) == None);
+        check!(log.stamp_for_offset(Offset(5)) == None);
+    }
+
+    #[test]
+    fn abort_leaves_transactional_data_unstamped() {
+        let (_dir, mut log) = test_log();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(7, 1),
+        ))
+        .unwrap();
+
+        log.append(&mut transactional_batch(1000, 0, &["a", "b"]))
+            .unwrap();
+        log.append(&mut abort_marker(1000, 0)).unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+
+        check!(log.stamp_for_offset(Offset(0)) == None);
+        check!(log.stamp_for_offset(Offset(1)) == None);
+        check!(log.stamp_for_offset(Offset(2)) == None);
+        check!(log.stamp_for_offset(Offset(3)) == Some(7));
+    }
+
+    #[test]
+    fn commit_succeeds_after_transaction_data_is_retained_away() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(7, 1),
+        ))
+        .unwrap();
+        log.append(&mut transactional_batch(1000, 0, &["old"]))
+            .unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+        log.trim_to_offset(Offset(1)).unwrap();
+
+        log.append(&mut commit_marker(1000, 0)).unwrap();
+
+        check!(log.lso() == log.log_end_offset());
+        check!(log.stamp_for_offset(Offset(0)) == None);
+    }
+
+    #[test]
+    fn supplied_commit_stamp_is_recorded_and_observed() {
+        let (_dir, mut log) = test_log();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(1, 1),
+        ))
+        .unwrap();
+
+        log.append(&mut transactional_batch(1000, 0, &["a", "b"]))
+            .unwrap();
+        log.append_with_commit_stamp(&mut commit_marker(1000, 0), 100)
+            .unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+
+        check!(log.stamp_for_offset(Offset(0)) == Some(100));
+        check!(log.stamp_for_offset(Offset(1)) == Some(100));
+        check!(log.stamp_for_offset(Offset(2)) == None);
+        check!(log.stamp_for_offset(Offset(3)) == Some(101));
+    }
+
+    #[test]
+    fn supplied_commit_stamp_rejects_invalid_marker_paths() {
+        let (_dir, mut log) = test_log();
+        let error = log
+            .append_with_commit_stamp(&mut commit_marker(1000, 0), 100)
+            .unwrap_err();
+        assert2::assert!(let LogError::InvalidArgument(_) = error);
+        check!(log.log_end_offset() == Offset(0));
+
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(1, 1),
+        ))
+        .unwrap();
+        let error = log
+            .append_with_commit_stamp(&mut abort_marker(1000, 0), 100)
+            .unwrap_err();
+        assert2::assert!(let LogError::InvalidArgument(_) = error);
+        let error = log
+            .append_with_commit_stamp(&mut sample_batch(1), 100)
+            .unwrap_err();
+        assert2::assert!(let LogError::InvalidArgument(_) = error);
+        check!(log.log_end_offset() == Offset(0));
+    }
+
+    #[test]
+    fn replicated_commit_uses_supplied_stamp() {
+        let (_dir, mut log) = test_log();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(1, 1),
+        ))
+        .unwrap();
+        log.append(&mut transactional_batch(1000, 0, &["a"]))
+            .unwrap();
+
+        log.append_at_with_commit_stamp(&mut commit_marker(1000, 0), Offset(1), 40)
+            .unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+
+        check!(log.stamp_for_offset(Offset(0)) == Some(40));
+        check!(log.stamp_for_offset(Offset(1)) == None);
+        check!(log.stamp_for_offset(Offset(2)) == Some(41));
+    }
+
+    #[test]
+    fn installing_source_observes_durable_stamp_horizon() {
+        let dir = tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            log.set_stamp_source(std::sync::Arc::new(
+                crate::stamp_source::MonotonicStampSource::new(100, 1),
+            ))
+            .unwrap();
+            log.append(&mut sample_batch(1)).unwrap();
+        }
+
+        let mut reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        reopened
+            .set_stamp_source(std::sync::Arc::new(
+                crate::stamp_source::MonotonicStampSource::new(1, 1),
+            ))
+            .unwrap();
+        reopened.append(&mut sample_batch(1)).unwrap();
+
+        check!(reopened.stamp_for_offset(Offset(0)) == Some(100));
+        check!(reopened.stamp_for_offset(Offset(1)) == Some(101));
+    }
+
+    #[test]
+    fn startup_hides_legacy_append_stamp_for_open_transaction() {
+        let dir = tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            log.append(&mut transactional_batch(1000, 0, &["a"]))
+                .unwrap();
+        }
+        let path = dir.path().join("00000000000000000000.stampindex");
+        let mut legacy = StampIndex::open(path).unwrap();
+        legacy
+            .append(StampEntry {
+                base_offset: Offset(0),
+                last_offset: Offset(0),
+                stamp: 5,
+            })
+            .unwrap();
+
+        let mut reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        reopened
+            .set_stamp_source(std::sync::Arc::new(
+                crate::stamp_source::MonotonicStampSource::new(10, 1),
+            ))
+            .unwrap();
+        check!(reopened.stamp_for_offset(Offset(0)) == None);
+
+        reopened.append(&mut commit_marker(1000, 0)).unwrap();
+        check!(reopened.stamp_for_offset(Offset(0)) == Some(10));
+    }
+
+    #[test]
+    fn transaction_commit_stamps_data_in_sealed_segments() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(50, 1),
+        ))
+        .unwrap();
+
+        log.append(&mut transactional_batch(1000, 0, &["a"]))
+            .unwrap(); // segment 0
+        log.append(&mut transactional_batch(1000, 0, &["b"]))
+            .unwrap(); // segment 1
+        log.append(&mut commit_marker(1000, 0)).unwrap(); // segment 2
+
+        check!(log.stamp_for_offset(Offset(0)) == Some(50));
+        check!(log.stamp_for_offset(Offset(1)) == Some(50));
+        check!(log.stamp_for_offset(Offset(2)) == None);
+        assert2::assert!(
+            StampIndex::open(dir.path().join("00000000000000000000.stampindex"))
+                .unwrap()
+                .entries()
+                == [StampEntry {
+                    base_offset: Offset(0),
+                    last_offset: Offset(0),
+                    stamp: 50,
+                }]
+        );
+        assert2::assert!(
+            StampIndex::open(dir.path().join("00000000000000000001.stampindex"))
+                .unwrap()
+                .entries()
+                == [StampEntry {
+                    base_offset: Offset(1),
+                    last_offset: Offset(1),
+                    stamp: 50,
+                }]
+        );
+    }
+
+    #[test]
+    fn truncate_removes_stamps_for_discarded_tail() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(10, 1),
+        ))
+        .unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+        check!(log.stamp_for_offset(Offset(1)) == Some(11));
+
+        log.truncate_to(Offset(1)).unwrap();
+        check!(log.stamp_for_offset(Offset(0)) == Some(10));
+        check!(log.stamp_for_offset(Offset(1)) == None);
+        assert2::assert!(
+            StampIndex::open(dir.path().join("00000000000000000000.stampindex"))
+                .unwrap()
+                .entries()
+                == [StampEntry {
+                    base_offset: Offset(0),
+                    last_offset: Offset(0),
+                    stamp: 10,
+                }]
+        );
+    }
+
+    #[test]
+    fn truncate_preserves_stamp_indexes_before_promoted_segment() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(10, 1),
+        ))
+        .unwrap();
+        for _ in 0..3 {
+            log.append(&mut sample_batch(1)).unwrap();
+        }
+
+        log.truncate_to(Offset(2)).unwrap();
+
+        check!(log.stamp_for_offset(Offset(0)) == Some(10));
+        check!(log.stamp_for_offset(Offset(1)) == Some(11));
+        check!(log.stamp_for_offset(Offset(2)) == None);
+    }
+
+    #[test]
+    fn trim_removes_only_evicted_segment_stamp_indexes() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(10, 1),
+        ))
+        .unwrap();
+        for _ in 0..3 {
+            log.append(&mut sample_batch(1)).unwrap();
+        }
+
+        log.trim_to_offset(Offset(1)).unwrap();
+
+        check!(log.stamp_for_offset(Offset(0)) == None);
+        check!(log.stamp_for_offset(Offset(1)) == Some(11));
+        check!(log.stamp_for_offset(Offset(2)) == Some(12));
+    }
+
+    #[test]
+    fn tick_removes_only_retained_away_segment_stamp_indexes() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                retention: Some(millis(1)),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(10, 1),
+        ))
+        .unwrap();
+        for _ in 0..3 {
+            log.append(&mut sample_batch(1)).unwrap();
+        }
+
+        log.tick(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+
+        check!(log.stamp_for_offset(Offset(0)) == None);
+        check!(log.stamp_for_offset(Offset(1)) == None);
+        check!(log.stamp_for_offset(Offset(2)) == Some(12));
+    }
+
+    #[test]
+    fn tiered_local_delete_removes_only_deleted_segment_stamp_indexes() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_size: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.set_stamp_source(std::sync::Arc::new(
+            crate::stamp_source::MonotonicStampSource::new(10, 1),
+        ))
+        .unwrap();
+        for _ in 0..3 {
+            log.append(&mut sample_batch(1)).unwrap();
+        }
+
+        check!(log.delete_local_segments_through(Offset(1)).unwrap() == 1);
+
+        check!(log.stamp_for_offset(Offset(0)) == None);
+        check!(log.stamp_for_offset(Offset(1)) == Some(11));
+        check!(log.stamp_for_offset(Offset(2)) == Some(12));
     }
 
     /// The verbatim replication append path stamps the *full* offset span of

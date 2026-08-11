@@ -24,6 +24,10 @@ pub trait WalStore: Send + Sync {
     /// Make all records up to `leo` durable; return the durable LEO. Never
     /// regresses the durable watermark.
     async fn sync_durable(&self, leo: Offset) -> Result<Offset, BrokerError>;
+
+    /// Discard the durable prefix below `new_start` after the object index has
+    /// committed it. Returns the resulting local log start offset.
+    async fn trim_to_offset(&self, new_start: Offset) -> Result<Offset, BrokerError>;
 }
 
 /// Convenience alias for an injected WAL medium (present only for diskless topics).

@@ -49,6 +49,19 @@ pub(super) fn is_known_broker_config(name: &str) -> bool {
         crate::throttle::LEADER_THROTTLED_RATE_KEY
             | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
             | crate::throttle::ALTER_LOG_DIRS_THROTTLED_RATE_KEY
+            | config_keys::UNCLEAN_LEADER_ELECTION_ENABLE
+            | config_keys::UNCLEAN_RECOVERY_STRATEGY
+    )
+}
+
+/// Returns `true` for a topic setting that the controller may inherit from
+/// the cluster-wide default broker-config resource. Per-broker values would
+/// have no deterministic meaning for controller policy, so handlers reject
+/// them.
+pub(super) fn is_cluster_default_topic_config(name: &str) -> bool {
+    matches!(
+        name,
+        config_keys::UNCLEAN_LEADER_ELECTION_ENABLE | config_keys::UNCLEAN_RECOVERY_STRATEGY
     )
 }
 
@@ -63,6 +76,9 @@ pub(super) fn validate_broker_config_value(name: &str, value: &str) -> Result<()
             .parse::<i64>()
             .map(|_| ())
             .map_err(|e| format!("invalid rate: {e}")),
+        config_keys::UNCLEAN_LEADER_ELECTION_ENABLE | config_keys::UNCLEAN_RECOVERY_STRATEGY => {
+            config_keys::validate_topic_config(name, value)
+        }
         _ => Err(format!("unknown broker config {name}")),
     }
 }
@@ -376,6 +392,16 @@ fn handle_broker_scoped(
             out.error_message = Some(format!("unknown broker config {}", cfg.name));
             return; // halt processing this resource
         }
+        if node_id != crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID
+            && is_cluster_default_topic_config(&cfg.name)
+        {
+            out.error_code = codes::INVALID_CONFIG;
+            out.error_message = Some(format!(
+                "broker config {} is valid only on the cluster-default resource",
+                cfg.name
+            ));
+            return;
+        }
         let new_value = match cfg.config_operation {
             OP_SET => {
                 let v = cfg.value.clone().unwrap_or_default();
@@ -475,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn broker_scoped_rate_config_accepted() {
+    fn broker_scoped_configs_recognized() {
         assert!(is_known_broker_config(
             crate::throttle::LEADER_THROTTLED_RATE_KEY
         ));
@@ -484,6 +510,12 @@ mod tests {
         ));
         assert!(is_known_broker_config(
             crate::throttle::ALTER_LOG_DIRS_THROTTLED_RATE_KEY
+        ));
+        assert!(is_known_broker_config(
+            config_keys::UNCLEAN_LEADER_ELECTION_ENABLE
+        ));
+        assert!(is_known_broker_config(
+            config_keys::UNCLEAN_RECOVERY_STRATEGY
         ));
     }
 
@@ -563,10 +595,10 @@ mod tests {
         let img = make_image_with_broker(crabka_audit::NodeId(1));
         let resource = make_resource(
             "",
-            vec![make_set_cfg(
-                crate::throttle::LEADER_THROTTLED_RATE_KEY,
-                "2048",
-            )],
+            vec![
+                make_set_cfg(crate::throttle::LEADER_THROTTLED_RATE_KEY, "2048"),
+                make_set_cfg(config_keys::UNCLEAN_RECOVERY_STRATEGY, "Balanced"),
+            ],
         );
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
@@ -574,12 +606,55 @@ mod tests {
         assert!(out.error_code == codes::NONE);
         assert!(
             to_submit
-                == vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-                    node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
-                    config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.to_string(),
-                    config_value: Some("2048".to_string()),
-                })]
+                == vec![
+                    MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                        node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+                        config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.to_string(),
+                        config_value: Some("2048".to_string()),
+                    }),
+                    MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                        node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+                        config_name: config_keys::UNCLEAN_RECOVERY_STRATEGY.to_string(),
+                        config_value: Some("Balanced".to_string()),
+                    }),
+                ]
         );
+    }
+
+    #[test]
+    fn recovery_settings_reject_per_broker_scope() {
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
+        for (key, value) in [
+            (config_keys::UNCLEAN_LEADER_ELECTION_ENABLE, "true"),
+            (config_keys::UNCLEAN_RECOVERY_STRATEGY, "Balanced"),
+        ] {
+            let resource = make_resource("1", vec![make_set_cfg(key, value)]);
+            let mut out = AlterConfigsResourceResponse::default();
+            let mut to_submit = Vec::new();
+
+            handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
+
+            assert!(out.error_code == codes::INVALID_CONFIG, "key {key}");
+            assert!(to_submit.is_empty(), "key {key}");
+        }
+    }
+
+    #[test]
+    fn recovery_settings_validate_cluster_default_values() {
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
+        for (key, value) in [
+            (config_keys::UNCLEAN_LEADER_ELECTION_ENABLE, "yes"),
+            (config_keys::UNCLEAN_RECOVERY_STRATEGY, "fast"),
+        ] {
+            let resource = make_resource("", vec![make_set_cfg(key, value)]);
+            let mut out = AlterConfigsResourceResponse::default();
+            let mut to_submit = Vec::new();
+
+            handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
+
+            assert!(out.error_code == codes::INVALID_CONFIG, "key {key}");
+            assert!(to_submit.is_empty(), "key {key}");
+        }
     }
 
     #[test]

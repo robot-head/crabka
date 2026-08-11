@@ -6,8 +6,6 @@
 //! `V1Partition` update. The task submits one batch per tick when the
 //! cluster-wide imbalance ratio crosses the configured threshold.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use async_trait::async_trait;

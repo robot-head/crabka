@@ -9,8 +9,6 @@
 
 // Several variants and the `principal` accessor are exercised by the PLAIN,
 // SCRAM, and admin paths — keep the surface in one place.
-#![allow(dead_code)]
-
 use std::{collections::HashMap, hash::BuildHasher};
 
 use crabka_protocol::{
@@ -165,21 +163,6 @@ impl ConnectionAuth {
         } else {
             None
         }
-    }
-
-    /// KIP-48: whether the current session authenticated with a delegation
-    /// token. The four delegation-token RPC handlers read it to gate
-    /// token-creating-token (`Create`) and visibility restriction
-    /// (`Describe`). It is `false` for any non-`Authenticated` state.
-    #[must_use]
-    pub fn authenticated_via_token(&self) -> bool {
-        matches!(
-            self,
-            Self::Authenticated {
-                authenticated_via_token: true,
-                ..
-            }
-        )
     }
 
     /// Whether the broker may serve `api_key` in the current auth state.

@@ -272,10 +272,25 @@ pub(super) fn handle_sync(state: &mut ClassicState, req: &SyncGroupRequest) -> S
 
     let is_leader = state.leader_id.as_deref() == Some(&req.member_id);
     if is_leader {
-        let assignments = req
+        let supplied: std::collections::HashMap<&str, &Bytes> = req
             .assignments
             .iter()
-            .map(|a| (a.member_id.clone(), a.assignment.clone()))
+            .map(|a| (a.member_id.as_str(), &a.assignment))
+            .collect();
+        // Kafka installs an assignment for every current member. A leader may
+        // omit a member from the request; that member gets an empty assignment
+        // instead of retaining bytes from the previous generation.
+        let assignments = state
+            .members
+            .keys()
+            .map(|member_id| {
+                (
+                    member_id.clone(),
+                    supplied
+                        .get(member_id.as_str())
+                        .map_or_else(Bytes::new, |assignment| (*assignment).clone()),
+                )
+            })
             .collect();
         state.install_assignments(assignments);
         SyncAction::LeaderInstalled(read_sync_result(
@@ -754,6 +769,28 @@ mod tests {
             SyncAction::Immediate(r) => assert!(r.assignment == Bytes::from_static(b"F")),
             _ => panic!("expected Immediate follower assignment"),
         }
+    }
+
+    #[test]
+    fn sync_leader_clears_omitted_member_assignment() {
+        let mut g = stable_two_member_group();
+        let generation = g.generation_id;
+        let leader = g.leader_id.clone().unwrap();
+        let omitted = if leader == "m1" { "m2" } else { "m1" };
+        g.members.get_mut(omitted).unwrap().assignment = Some(Bytes::from_static(b"stale"));
+
+        let mut req = sync_req(&leader, generation);
+        req.assignments = vec![SyncGroupRequestAssignment {
+            member_id: leader,
+            assignment: Bytes::from_static(b"leader"),
+            ..Default::default()
+        }];
+        assert!(matches!(
+            handle_sync(&mut g, &req),
+            SyncAction::LeaderInstalled(_)
+        ));
+
+        check!(g.members[omitted].assignment.as_deref() == Some(&b""[..]));
     }
 
     #[test]
