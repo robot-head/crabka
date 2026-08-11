@@ -368,9 +368,9 @@ pub enum ExecError {
         /// The view whose option rejected the row, which for a chain of views
         /// is the innermost one that rejected it rather than the one written.
         view: String,
-        /// The rendered row, already parenthesized — see
-        /// `crate::viewwrite::failing_row`.
-        row: String,
+        /// The rendered row, already parenthesized, and `None` when the caller
+        /// may not be shown it — see `crate::rls::describe_row`.
+        row: Option<String>,
     },
     /// `row_security = off` and the named relation has a row-security policy
     /// that would have applied (42501). `PostgreSQL` fails the statement rather
@@ -468,10 +468,22 @@ pub enum ExecError {
     UnrecognizedPartitionStrategy(String),
     /// An inserted row's partition key matched no partition of the target
     /// partitioned table, and there is no `DEFAULT` partition (23514).
-    NoPartitionForRow(String),
-    /// A row written straight into a leaf partition falls outside that
-    /// partition's own bound (23514).
-    PartitionConstraintViolation(String),
+    ///
+    /// `key` is the rendered partition key of the failing row, and `None` when
+    /// the caller may not be shown it. See `exec::may_describe_row`.
+    NoPartitionForRow {
+        relation: String,
+        key: Option<String>,
+    },
+    /// A row written straight into a leaf partition falls outside the bound of
+    /// that partition or of one of its ancestors (23514).
+    ///
+    /// `row` is the rendered failing row, and `None` when the caller may not be
+    /// shown it. See `exec::may_describe_row`.
+    PartitionConstraintViolation {
+        relation: String,
+        row: Option<String>,
+    },
     /// `ATTACH PARTITION` found stored rows outside the bound being attached
     /// (23514).
     PartitionConstraintViolationOnExistingRows(String),
@@ -1257,11 +1269,16 @@ impl ExecError {
                 "WITH CHECK OPTION is supported only on automatically updatable views",
             )
             .with_hint(hint),
-            ExecError::ViewCheckOptionViolation { view, row } => PgError::error(
-                "44000",
-                format!("new row violates check option for view \"{view}\""),
-            )
-            .with_detail(format!("Failing row contains {row}.")),
+            ExecError::ViewCheckOptionViolation { view, row } => {
+                let error = PgError::error(
+                    "44000",
+                    format!("new row violates check option for view \"{view}\""),
+                );
+                match row {
+                    Some(row) => error.with_detail(format!("Failing row contains {row}.")),
+                    None => error,
+                }
+            }
             ExecError::PermissionDenied { kind, relation } => {
                 PgError::error("42501", format!("permission denied for {kind} {relation}"))
             }
@@ -1332,14 +1349,27 @@ impl ExecError {
                 "22023",
                 format!("unrecognized partitioning strategy \"{strategy}\""),
             ),
-            ExecError::NoPartitionForRow(relation) => PgError::error(
-                "23514",
-                format!("no partition of relation \"{relation}\" found for row"),
-            ),
-            ExecError::PartitionConstraintViolation(relation) => PgError::error(
-                "23514",
-                format!("new row for relation \"{relation}\" violates partition constraint"),
-            ),
+            ExecError::NoPartitionForRow { relation, key } => {
+                let error = PgError::error(
+                    "23514",
+                    format!("no partition of relation \"{relation}\" found for row"),
+                );
+                match key {
+                    Some(key) => error
+                        .with_detail(format!("Partition key of the failing row contains {key}.")),
+                    None => error,
+                }
+            }
+            ExecError::PartitionConstraintViolation { relation, row } => {
+                let error = PgError::error(
+                    "23514",
+                    format!("new row for relation \"{relation}\" violates partition constraint"),
+                );
+                match row {
+                    Some(row) => error.with_detail(format!("Failing row contains {row}.")),
+                    None => error,
+                }
+            }
             ExecError::PartitionConstraintViolationOnExistingRows(relation) => PgError::error(
                 "23514",
                 format!("partition constraint of relation \"{relation}\" is violated by some row"),

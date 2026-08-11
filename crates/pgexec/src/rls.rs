@@ -389,6 +389,91 @@ impl LockingReadGate {
     }
 }
 
+/// Describe the row a constraint rejected, for the `DETAIL` line that follows
+/// it — `PostgreSQL`'s `ExecBuildSlotValueDescription`.
+///
+/// `None` means *print no `DETAIL` at all*, which is upstream's answer whenever
+/// the caller could not have read the row for itself. The four clauses, in the
+/// order upstream applies them:
+///
+/// 1. An active row-level security policy hides the row outright, whatever the
+///    privileges say.
+/// 2. Table-level `SELECT` describes every column: `(v1, v2, v3)`.
+/// 3. Otherwise only the columns the caller can already see — upstream keeps a
+///    column when the caller holds column-level `SELECT` on it *or* supplied a
+///    value for it, on the reasoning that its own data is not a disclosure.
+///    That form names its columns: `(c1, c3) = (1, 10)`. There are no
+///    column-level grants here — the parser refuses `GRANT … (column)` — so
+///    `modified` is the whole test.
+/// 4. Nothing the caller may see means no `DETAIL`.
+///
+/// `modified` is upstream's `modifiedCols`, given by column *name* rather than
+/// ordinal so the set survives the permutation of a row into a leaf partition's
+/// own column order.
+///
+/// A catalog read that does not answer is a refusal, not an opening: the
+/// description is a disclosure, so an error leaves it closed.
+pub(crate) fn describe_row(
+    privileges: &crate::privilege::PrivilegeCtx<'_>,
+    security: &RlsCtx<'_>,
+    table: &Table,
+    row: &[Datum],
+    modified: &[String],
+    ctx: &crate::clock::EvalCtx,
+) -> Option<String> {
+    if !matches!(
+        decide(security, table, PolicyCommand::Select),
+        Ok(RowSecurity::Open)
+    ) {
+        return None;
+    }
+    let field = |ordinal: usize, column: &crabka_pgcatalog::Column| {
+        // A virtual generated column is never stored; the row carries a NULL
+        // placeholder at its position, and upstream prints the word rather than
+        // that placeholder.
+        if column
+            .generated
+            .as_ref()
+            .is_some_and(|generated| generated.kind == crabka_pgcatalog::GeneratedKind::Virtual)
+        {
+            return "virtual".to_string();
+        }
+        row.get(ordinal).map_or_else(
+            || "null".to_string(),
+            |value| crate::partition::field_text(value, ctx),
+        )
+    };
+    if matches!(
+        crate::privilege::holds(
+            privileges,
+            &table.name,
+            &table.owner,
+            crate::privilege::Privilege::Select,
+        ),
+        Ok(true)
+    ) {
+        let values = table
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(ordinal, column)| field(ordinal, column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!("({values})"));
+    }
+    let (names, values): (Vec<_>, Vec<_>) = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| modified.contains(&column.name))
+        .map(|(ordinal, column)| (column.name.clone(), field(ordinal, column)))
+        .unzip();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!("({}) = ({})", names.join(", "), values.join(", ")))
+}
+
 /// Decide row security for one relation and one command.
 ///
 /// # Errors
@@ -1012,29 +1097,82 @@ pub(crate) struct WriteChecks {
     /// Innermost view first, which is the order `PostgreSQL` reports a row that
     /// fails more than one view's option.
     views: Vec<crate::viewwrite::ViewCheck>,
+    /// The columns the statement supplied values for, by name — upstream's
+    /// `modifiedCols`, needed only to describe a row a check option rejected.
+    /// See [`describe_row`].
+    modified: Vec<String>,
+    /// Who the description is decided for, carried from the statement's write
+    /// context because the trigger path that reaches [`WriteChecks::permit_row`]
+    /// has the catalog but not the effective role.
+    describe_as: Describer,
+}
+
+/// The identity a rejected row is described *to*, and the `row_security`
+/// setting in force — everything [`describe_row`] needs beyond a catalog
+/// handle, which its caller already has.
+///
+/// The role here is the *invoking* one, `CURRENT_USER`, and deliberately not
+/// the effective role the statement's privilege checks run under. They differ
+/// when a write is rewritten through a view, which borrows the view owner's
+/// rights to reach the relation underneath: `PostgreSQL` reads `GetUserId()` at
+/// this point, which view rewriting does not move, so the question the
+/// description answers is "may the person who typed this see the row", not "may
+/// the statement reach the relation". Deciding it the other way would let a
+/// view launder a row past the privilege system into an error message.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Describer {
+    role: String,
+    row_security: bool,
+}
+
+impl Describer {
+    pub(crate) fn new(role: &str, row_security: bool) -> Self {
+        Self {
+            role: role.to_string(),
+            row_security,
+        }
+    }
+
+    pub(crate) fn privileges<'a>(&'a self, kv: &'a dyn Kv) -> crate::privilege::PrivilegeCtx<'a> {
+        crate::privilege::PrivilegeCtx::new(kv, &self.role)
+    }
+
+    pub(crate) fn security<'a>(&'a self, kv: &'a dyn Kv) -> RlsCtx<'a> {
+        RlsCtx::new(kv, &self.role, self.row_security)
+    }
 }
 
 impl WriteChecks {
     /// A write that reaches no view, carrying only the relation's own policies.
-    pub(crate) const fn plain(security: RowSecurityCheck) -> Self {
+    pub(crate) fn plain(security: RowSecurityCheck) -> Self {
         Self {
             security,
             views: Vec::new(),
+            modified: Vec::new(),
+            describe_as: Describer::default(),
         }
     }
 
     /// The same, plus the check options collected while rewriting through a
-    /// chain of views.
+    /// chain of views, the columns the statement wrote, and whose eyes a
+    /// rejected row would be described to.
     pub(crate) fn through_views(
         security: RowSecurityCheck,
         views: Vec<crate::viewwrite::ViewCheck>,
+        modified: Vec<String>,
+        describe_as: Describer,
     ) -> Self {
-        Self { security, views }
+        Self {
+            security,
+            views,
+            modified,
+            describe_as,
+        }
     }
 
     /// A write that neither row security nor a view check reaches, for the
     /// stated reason.
-    pub(crate) const fn exempt(why: CheckExemption) -> Self {
+    pub(crate) fn exempt(why: CheckExemption) -> Self {
         Self::plain(RowSecurityCheck::exempt(why))
     }
 
@@ -1050,6 +1188,7 @@ impl WriteChecks {
     /// raises.
     pub(crate) fn permit_row(
         &self,
+        kv: &dyn Kv,
         table: &Table,
         row: &[Datum],
         ctx: &crate::clock::EvalCtx,
@@ -1064,7 +1203,14 @@ impl WriteChecks {
                 if !crate::exec::row_matches(Some(&check.qual), &scope, row, ctx)? {
                     return Err(ExecError::ViewCheckOptionViolation {
                         view: check.view.clone(),
-                        row: crate::viewwrite::failing_row(row, ctx),
+                        row: describe_row(
+                            &self.describe_as.privileges(kv),
+                            &self.describe_as.security(kv),
+                            table,
+                            row,
+                            &self.modified,
+                            ctx,
+                        ),
                     });
                 }
             }

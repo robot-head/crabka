@@ -49,7 +49,6 @@ use crabka_pgparser::ast::{
     BinaryOp, DistinctClause, Expr, QueryBody, QueryExpr, RelationRef, SelectItem, SelectStmt,
     SetExpr, Statement, TableExpr,
 };
-use crabka_pgtypes::Datum;
 
 use crate::error::ExecError;
 
@@ -871,35 +870,6 @@ fn map_table_expr(item: &mut TableExpr, replace: &mut impl FnMut(&Expr, bool) ->
             table.context = map_expr(&table.context, true, replace);
         }
     }
-}
-
-/// Render the row a check option rejected the way `PostgreSQL`'s
-/// `ExecBuildSlotValueDescription` does: each value's output form, comma
-/// separated, `null` for a null, each value cut to 64 characters.
-pub(crate) fn failing_row(row: &[Datum], ctx: &crate::clock::EvalCtx) -> String {
-    /// `PostgreSQL`'s `maxfieldlen`.
-    const MAX_FIELD: usize = 64;
-    let rendered = row
-        .iter()
-        .map(|value| match value {
-            Datum::Null => "null".to_string(),
-            other => {
-                let text = String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
-                    other,
-                    &ctx.time_zone,
-                ))
-                .into_owned();
-                if text.chars().count() > MAX_FIELD {
-                    let cut: String = text.chars().take(MAX_FIELD).collect();
-                    format!("{cut}...")
-                } else {
-                    text
-                }
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("({rendered})")
 }
 
 /// `1 << CMD_UPDATE`, `1 << CMD_INSERT` and `1 << CMD_DELETE` — the bits

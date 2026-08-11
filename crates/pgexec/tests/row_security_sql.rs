@@ -58,6 +58,27 @@ async fn error_of(session: &mut SqlSession, sql: &str) -> (String, String) {
     (error.code.clone(), error.message)
 }
 
+/// The SQLSTATE, message and `HINT` a statement was refused with.
+///
+/// `PostgreSQL` carries the remedy in a separate `HINT` field rather than
+/// running it onto the end of the message, so a test that pins only the message
+/// cannot tell a correct split from a dropped sentence.
+async fn error_and_hint_of(
+    session: &mut SqlSession,
+    sql: &str,
+) -> (String, String, Option<String>) {
+    let error = session
+        .simple_query(sql)
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{sql} should have failed"));
+    let hint = error
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.hint.clone());
+    (error.code.clone(), error.message.clone(), hint)
+}
+
 /// A `COPY … TO STDOUT`'s whole payload, as the client would receive it.
 async fn copied(session: &mut SqlSession, sql: &str) -> String {
     let stream = session
@@ -650,12 +671,11 @@ async fn copy_from_is_refused_for_a_relation_under_row_security() {
     )
     .await;
 
-    let (sqlstate, message) = error_of(&mut alice, "COPY document FROM STDIN").await;
+    let (sqlstate, message, hint) =
+        error_and_hint_of(&mut alice, "COPY document FROM STDIN").await;
     assert!(sqlstate == "0A000");
-    assert!(
-        message
-            == "COPY FROM not supported with row-level security. Use INSERT statements instead."
-    );
+    assert!(message == "COPY FROM not supported with row-level security");
+    assert!(hint.as_deref() == Some("Use INSERT statements instead."));
 
     // With the GUC off it is the ordinary 42501 instead, because a policy would
     // have applied — and it still arrives before copy-in mode.

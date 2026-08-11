@@ -283,10 +283,15 @@ impl<'a> WriteContext<'a> {
     /// `INSERT`, `INSERT … SELECT`, a partition-routed insert, `MERGE`'s insert
     /// action, and `COPY … FROM`. Putting the test anywhere else would mean
     /// finding all of them again.
+    ///
+    /// `modified` names the columns the statement supplied values for, which
+    /// only matters if a check option rejects a row and the caller may not read
+    /// the relation — see [`crate::rls::describe_row`].
     fn row_check(
         &self,
         table: &Table,
         command: crabka_pgcatalog::policy::PolicyCommand,
+        modified: &[String],
     ) -> Result<crate::rls::WriteChecks, ExecError> {
         let governor = self.governor(table);
         crate::privilege::require(
@@ -305,7 +310,37 @@ impl<'a> WriteContext<'a> {
         Ok(crate::rls::WriteChecks::through_views(
             security,
             self.view_checks.to_vec(),
+            modified.to_vec(),
+            self.describer(),
         ))
+    }
+
+    /// The columns `target_idx` names, which is what a statement "supplied
+    /// values for" — upstream's `modifiedCols`, by name so the set survives the
+    /// permutation of a row into a leaf partition's own column order.
+    fn modified_columns(table: &Table, target_idx: &[usize]) -> Vec<String> {
+        target_idx
+            .iter()
+            .filter_map(|ordinal| table.columns.get(*ordinal))
+            .map(|column| column.name.clone())
+            .collect()
+    }
+
+    /// Whose eyes a rejected row would be described to — `CURRENT_USER`, not
+    /// the role whose rights the statement borrows, for the reason
+    /// [`crate::rls::Describer`] gives.
+    ///
+    /// `PUBLIC` normalizes to the bootstrap superuser here exactly as it does
+    /// in [`ForeignCtx::effective_role`]: a session that authenticated as
+    /// nobody is acting as that role, and comparing the pseudo-role against a
+    /// relation's owner would answer "no" for every relation in the database.
+    fn describer(&self) -> crate::rls::Describer {
+        let role = if self.eval_ctx.current_user == crabka_pgcatalog::PUBLIC_ROLE {
+            crabka_pgcatalog::BOOTSTRAP_ROLE
+        } else {
+            &self.eval_ctx.current_user
+        };
+        crate::rls::Describer::new(role, self.fctx.row_security)
     }
 
     fn rls(&self) -> crate::rls::RlsCtx<'_> {
@@ -4555,28 +4590,98 @@ fn reshape_returning_for_tree(
     Ok(out)
 }
 
-/// A row written straight into a leaf partition must still satisfy that leaf's
-/// own bound, `PostgreSQL`'s implicit per-partition `CHECK`, reported as 23514.
-fn check_partition_constraint(kv: &dyn Kv, table: &Table, row: &[Datum]) -> Result<(), ExecError> {
-    let Some((parent, bound)) = crate::partition::parent_of(kv, &table.name)? else {
-        return Ok(());
-    };
-    let parent_table = crabka_pgcatalog::get_table(kv, &parent)?;
-    let Some(scheme) = crate::partition::scheme_of(kv, &parent)? else {
-        return Ok(());
-    };
-    let ordinals = column_mapping(&parent_table, table)?;
-    let parent_row = ordinals
-        .iter()
-        .map(|ordinal| row.get(*ordinal).cloned().unwrap_or(Datum::Null))
-        .collect::<Vec<_>>();
-    let siblings = crate::partition::partitions_of(kv, &parent)?;
-    if crate::partition::satisfies(&scheme, &bound, &siblings, &parent_row)? {
-        return Ok(());
+/// Describe a rejected row for this write's caller, or answer `None` when that
+/// caller may not be shown it. A forwarder to the one gate,
+/// [`crate::rls::describe_row`], which is where the rule lives.
+fn describe_row(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    row: &[Datum],
+    modified: &[String],
+) -> Option<String> {
+    let describer = write_ctx.describer();
+    crate::rls::describe_row(
+        &describer.privileges(write_ctx.catalog_kv),
+        &describer.security(write_ctx.catalog_kv),
+        table,
+        row,
+        modified,
+        write_ctx.eval_ctx,
+    )
+}
+
+/// The same decision for a description that names only the partition key —
+/// `PostgreSQL`'s `ExecBuildSlotPartitionKeyDescription`, which is a separate
+/// function upstream with a separate rule.
+///
+/// It has no `modifiedCols` fallback: a caller without table-level `SELECT`
+/// must hold it on *every* key column or be told nothing, and there is no
+/// trimmed middle form. With no column-level grants in this engine that
+/// collapses to the table-level test.
+fn may_describe_key(write_ctx: &WriteContext<'_>, table: &Table) -> bool {
+    let describer = write_ctx.describer();
+    let kv = write_ctx.catalog_kv;
+    matches!(
+        crate::rls::decide(
+            &describer.security(kv),
+            table,
+            crabka_pgcatalog::policy::PolicyCommand::Select,
+        ),
+        Ok(crate::rls::RowSecurity::Open)
+    ) && matches!(
+        crate::privilege::holds(
+            &describer.privileges(kv),
+            &table.name,
+            &table.owner,
+            crate::privilege::Privilege::Select,
+        ),
+        Ok(true)
+    )
+}
+
+/// A row written straight into a leaf partition must still satisfy the bound of
+/// that leaf *and of every ancestor above it*, `PostgreSQL`'s implicit
+/// per-partition `CHECK`, reported as 23514.
+///
+/// The whole chain, not the immediate parent alone: `PostgreSQL` builds the
+/// constraint with `RelationGetPartitionQual`, which walks up to the root, so a
+/// row that falls inside a leaf's own bound and outside its grandparent's is
+/// still refused. Checking one level would store a row that no routed `INSERT`
+/// could ever have put there, and that the parent would then never return.
+///
+/// Whichever level declines it, the error names the relation the statement
+/// wrote and quotes that relation's row, because that is the row the caller
+/// offered.
+fn check_partition_constraint(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    row: &[Datum],
+    modified: &[String],
+) -> Result<(), ExecError> {
+    let kv = write_ctx.catalog_kv;
+    let mut current = table.clone();
+    let mut current_row = row.to_vec();
+    while let Some((parent, bound)) = crate::partition::parent_of(kv, &current.name)? {
+        let parent_table = crabka_pgcatalog::get_table(kv, &parent)?;
+        let Some(scheme) = crate::partition::scheme_of(kv, &parent)? else {
+            return Ok(());
+        };
+        let ordinals = column_mapping(&parent_table, &current)?;
+        let parent_row = ordinals
+            .iter()
+            .map(|ordinal| current_row.get(*ordinal).cloned().unwrap_or(Datum::Null))
+            .collect::<Vec<_>>();
+        let siblings = crate::partition::partitions_of(kv, &parent)?;
+        if !crate::partition::satisfies(&scheme, &bound, &siblings, &parent_row)? {
+            return Err(ExecError::PartitionConstraintViolation {
+                relation: table.name.to_string(),
+                row: describe_row(write_ctx, table, row, modified),
+            });
+        }
+        current = parent_table;
+        current_row = parent_row;
     }
-    Err(ExecError::PartitionConstraintViolation(
-        table.name.to_string(),
-    ))
+    Ok(())
 }
 
 /// `INSERT` into a partitioned parent: every proposed row is routed to the leaf
@@ -4633,12 +4738,15 @@ async fn partitioned_insert(
     // PostgreSQL judges a routed row by the policies of the relation the
     // statement named, never the leaf's own — the same rule the read gate
     // applies to a partition tree.
-    let check = write_ctx.row_check(&parent, crabka_pgcatalog::policy::PolicyCommand::Insert)?;
+    let supplied = WriteContext::modified_columns(&parent, &target_idx);
+    let check = write_ctx.row_check(
+        &parent,
+        crabka_pgcatalog::policy::PolicyCommand::Insert,
+        &supplied,
+    )?;
     for row_exprs in &rows {
         let full = build_insert_row(&parent, &target_idx, row_exprs, ctx)?;
-        let Some((leaf, leaf_row)) = route_row_to_leaf(catalog_kv, &parent, &full)? else {
-            return Err(ExecError::NoPartitionForRow(parent.name.to_string()));
-        };
+        let (leaf, leaf_row) = route_row_to_leaf(write_ctx, &parent, &full)?;
         let Some(leaf_row) = crate::trigger::fire_before_row(
             catalog_kv,
             crate::trigger::WriteTarget {
@@ -4654,7 +4762,7 @@ async fn partitioned_insert(
         else {
             continue;
         };
-        check_partition_constraint(catalog_kv, &leaf, &leaf_row)?;
+        check_partition_constraint(write_ctx, &leaf, &leaf_row, &supplied)?;
         let local_indexes = writable_local_indexes(catalog_kv, &leaf)?;
         let fk_ctx = match leaf_fk.entry(leaf.id) {
             std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
@@ -4769,6 +4877,7 @@ fn permit_view_checks(
     write_ctx: &WriteContext<'_>,
     view: &Table,
     row: &[Datum],
+    modified: &[String],
 ) -> Result<(), ExecError> {
     let ctx = write_ctx.eval_ctx;
     let scope = Scope::single(view, &view.name.name);
@@ -4776,7 +4885,7 @@ fn permit_view_checks(
         if !row_matches(Some(&check.qual), &scope, row, ctx)? {
             return Err(ExecError::ViewCheckOptionViolation {
                 view: check.view.clone(),
-                row: crate::viewwrite::failing_row(row, ctx),
+                row: describe_row(write_ctx, view, row, modified),
             });
         }
     }
@@ -5222,7 +5331,12 @@ async fn execute_view_dml(
                 else {
                     continue;
                 };
-                permit_view_checks(write_ctx, &view, &result)?;
+                permit_view_checks(
+                    write_ctx,
+                    &view,
+                    &result,
+                    &WriteContext::modified_columns(&view, &targets),
+                )?;
                 count += 1;
                 if returning.is_some() {
                     returned.push(ReturnedRow {
@@ -5296,7 +5410,7 @@ async fn execute_view_dml(
                 else {
                     continue;
                 };
-                permit_view_checks(write_ctx, &view, &result)?;
+                permit_view_checks(write_ctx, &view, &result, &updated)?;
                 count += 1;
                 if returning.is_some() {
                     returned.push(ReturnedRow::updated(
@@ -5480,8 +5594,12 @@ async fn execute_write_body(
             }
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
             let fk_ctx = crate::fk::StatementFkContext::resolve(catalog_kv, &t)?;
-            let insert_check =
-                write_ctx.row_check(&t, crabka_pgcatalog::policy::PolicyCommand::Insert)?;
+            let supplied = WriteContext::modified_columns(&t, &target_idx);
+            let insert_check = write_ctx.row_check(
+                &t,
+                crabka_pgcatalog::policy::PolicyCommand::Insert,
+                &supplied,
+            )?;
             // Arbiter resolution is statement-level: a bad conflict target is an
             // error even when no row would have conflicted.
             let arbiters = match on_conflict {
@@ -5531,7 +5649,7 @@ async fn execute_write_body(
                 else {
                     continue;
                 };
-                check_partition_constraint(catalog_kv, &t, &full)?;
+                check_partition_constraint(write_ctx, &t, &full, &supplied)?;
                 if let Some(on_conflict) = on_conflict {
                     let plan =
                         arbitrate_insert_row(write_ctx, &t, &arbiters, on_conflict, &full, writes)
@@ -5654,8 +5772,17 @@ async fn execute_write_body(
             )?;
             let mut n: u64 = 0;
             let mut returned_rows = returning.as_ref().map(|_| Vec::new()).unwrap_or_default();
-            let update_check =
-                write_ctx.row_check(&t, crabka_pgcatalog::policy::PolicyCommand::Update)?;
+            // The `SET` list, which is both what the triggers are told changed
+            // and the set a rejected row may be described by.
+            let updated_columns: Vec<String> = assignments
+                .iter()
+                .flat_map(|assignment| assignment.targets.iter().cloned())
+                .collect();
+            let update_check = write_ctx.row_check(
+                &t,
+                crabka_pgcatalog::policy::PolicyCommand::Update,
+                &updated_columns,
+            )?;
             for (rowid, _xmin, scanned_row) in write_candidate_rows(
                 write_ctx,
                 &t,
@@ -5711,10 +5838,6 @@ async fn execute_write_body(
                     continue;
                 }
                 let next = apply_assignments(&t, &targets, &source.scope, &joined, ctx)?;
-                let updated_columns: Vec<String> = assignments
-                    .iter()
-                    .flat_map(|assignment| assignment.targets.iter().cloned())
-                    .collect();
                 let Some(next) = crate::trigger::fire_before_row(
                     catalog_kv,
                     crate::trigger::WriteTarget {
@@ -5730,7 +5853,7 @@ async fn execute_write_body(
                 else {
                     continue;
                 };
-                check_partition_constraint(catalog_kv, &t, &next)?;
+                check_partition_constraint(write_ctx, &t, &next, &updated_columns)?;
                 apply_locked_row_update(
                     write_ctx,
                     &t,
@@ -6916,8 +7039,11 @@ async fn execute_merge(
             })
             .collect::<Result<Vec<_>, ExecError>>()?;
         let full = build_insert_row(&t, &target_idx, &evaluated, ctx)?;
-        let merge_insert_check =
-            write_ctx.row_check(&t, crabka_pgcatalog::policy::PolicyCommand::Insert)?;
+        let merge_insert_check = write_ctx.row_check(
+            &t,
+            crabka_pgcatalog::policy::PolicyCommand::Insert,
+            &WriteContext::modified_columns(&t, &target_idx),
+        )?;
         let Some(full) = crate::trigger::fire_before_row(
             write_ctx.catalog_kv,
             crate::trigger::WriteTarget {
@@ -7136,8 +7262,11 @@ async fn apply_merge_row_action(
                 write_ctx.catalog_kv,
                 crate::trigger::WriteTarget {
                     table: t,
-                    check: &write_ctx
-                        .row_check(t, crabka_pgcatalog::policy::PolicyCommand::Update)?,
+                    check: &write_ctx.row_check(
+                        t,
+                        crabka_pgcatalog::policy::PolicyCommand::Update,
+                        &updated_columns,
+                    )?,
                 },
                 crate::trigger::DmlEvent::Update,
                 &updated_columns,
@@ -7335,14 +7464,18 @@ pub(crate) async fn execute_copy_write(
     // for a partitioned INSERT. `COPY … FROM` into a relation under row
     // security is refused before the statement runs (see the session's copy-in
     // start), so this check is the second line rather than the first.
-    let copy_check =
-        write_ctx.row_check(&table, crabka_pgcatalog::policy::PolicyCommand::Insert)?;
     // Hoisted for the same reason as the index set, and cached per routed leaf
     // below: one resolution per relation, never one per row.
     let parent_fk = crate::fk::StatementFkContext::resolve(catalog_kv, &table)?;
     let mut leaf_fk: HashMap<TableId, crate::fk::StatementFkContext> = HashMap::new();
     let mut writes = StatementWrites::default();
     let target_idx = resolve_targets(&table, target.columns)?;
+    let copied_columns = WriteContext::modified_columns(&table, &target_idx);
+    let copy_check = write_ctx.row_check(
+        &table,
+        crabka_pgcatalog::policy::PolicyCommand::Insert,
+        &copied_columns,
+    )?;
     let n_rows = rows.len() as u64;
     crate::trigger::fire_statement(
         catalog_kv,
@@ -7397,19 +7530,13 @@ pub(crate) async fn execute_copy_write(
         // does; the reserved rowid block belongs to the parent, so a routed row
         // takes one from its own leaf instead.
         let (table, rowid, full, routed) = if partitioned {
-            let Some((leaf, leaf_row)) = route_row_to_leaf(catalog_kv, &table, &full)
-                .map_err(|error| at_line(error, row))?
-            else {
-                return Err(at_line(
-                    ExecError::NoPartitionForRow(table.name.to_string()),
-                    row,
-                ));
-            };
+            let (leaf, leaf_row) =
+                route_row_to_leaf(write_ctx, &table, &full).map_err(|error| at_line(error, row))?;
             let (leaf_rowid, seq_op) = seq.alloc(kv, leaf.id, 1)?;
             ops.extend(seq_op);
             (leaf, leaf_rowid, leaf_row, true)
         } else {
-            check_partition_constraint(catalog_kv, &table, &full)
+            check_partition_constraint(write_ctx, &table, &full, &copied_columns)
                 .map_err(|error| at_line(error, row))?;
             (table.clone(), rowid, full, false)
         };
@@ -9608,7 +9735,11 @@ async fn apply_insert_conflict_update(
         write_ctx.catalog_kv,
         crate::trigger::WriteTarget {
             table,
-            check: &write_ctx.row_check(table, crabka_pgcatalog::policy::PolicyCommand::Update)?,
+            check: &write_ctx.row_check(
+                table,
+                crabka_pgcatalog::policy::PolicyCommand::Update,
+                &updated_columns,
+            )?,
         },
         crate::trigger::DmlEvent::Update,
         &updated_columns,
@@ -15789,22 +15920,33 @@ fn reshape_row(row: Vec<Datum>, ordinals: Option<&[usize]>) -> Vec<Datum> {
 /// The leaf partition a row of `parent`'s shape belongs to, together with the
 /// row permuted into that leaf's own column order.
 ///
-/// `None` means no partition accepts the row, which is `PostgreSQL`'s 23514.
+/// A row no partition accepts is `PostgreSQL`'s 23514, raised here rather than
+/// reported upwards, because only this frame knows *which* relation declined
+/// it. In a multi-level tree that is the sub-partitioned child the row reached,
+/// not the parent the statement named, and the key quoted alongside it is that
+/// child's own key — which need not share a single column with the parent's.
+/// Naming the root instead would report a key the row never failed against.
 fn route_row_to_leaf(
-    kv: &dyn Kv,
+    write_ctx: &WriteContext<'_>,
     parent: &Table,
     row: &[Datum],
-) -> Result<Option<(Table, Vec<Datum>)>, ExecError> {
+) -> Result<(Table, Vec<Datum>), ExecError> {
+    let kv = write_ctx.catalog_kv;
     let Some(scheme) = crate::partition::scheme_of(kv, &parent.name)? else {
-        return Ok(Some((parent.clone(), row.to_vec())));
+        return Ok((parent.clone(), row.to_vec()));
     };
     let partitions = crate::partition::partitions_of(kv, &parent.name)?;
     let Some(chosen) = crate::partition::route(&scheme, &partitions, row)? else {
-        return Ok(None);
+        return Err(ExecError::NoPartitionForRow {
+            relation: parent.name.to_string(),
+            key: may_describe_key(write_ctx, parent)
+                .then(|| crate::partition::key_description(&scheme, row, write_ctx.eval_ctx))
+                .transpose()?,
+        });
     };
     let child = crabka_pgcatalog::get_table(kv, &chosen.name)?;
     let child_row = permuted_row(row, &column_mapping(&child, parent)?);
-    route_row_to_leaf(kv, &child, &child_row)
+    route_row_to_leaf(write_ctx, &child, &child_row)
 }
 
 /// Read one base-relation `FROM` item: a CTE, a transition relation, a virtual

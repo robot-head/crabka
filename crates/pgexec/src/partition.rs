@@ -687,6 +687,71 @@ fn key_values(scheme: &Scheme, row: &[Datum]) -> Result<Vec<Datum>, ExecError> {
         .collect()
 }
 
+/// One value of a diagnostic row or key description, in `PostgreSQL`'s
+/// `maxfieldlen` form: the type's *output* text — no quotes around a string and
+/// no `::type` annotation, unlike [`bound_datum_text`], which spells a literal —
+/// cut to 64 bytes on a character boundary with a trailing `...` when it is
+/// longer, and the bare word `null` for a NULL.
+///
+/// Shared with [`crate::rls::describe_row`], which renders whole rows by the
+/// same rule: `ExecBuildSlotValueDescription` and
+/// `ExecBuildSlotPartitionKeyDescription` format a field identically, and two
+/// copies of the rule could disagree about a cut.
+pub(crate) fn field_text(value: &Datum, ctx: &crate::clock::EvalCtx) -> String {
+    /// `PostgreSQL`'s `maxfieldlen`.
+    const MAX_FIELD: usize = 64;
+    match value {
+        Datum::Null => "null".to_string(),
+        other => {
+            let text = String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
+                other,
+                &ctx.time_zone,
+            ))
+            .into_owned();
+            if text.len() <= MAX_FIELD {
+                return text;
+            }
+            // `pg_mbcliplen`: the longest prefix inside the budget that does
+            // not split a character, so a multi-byte character straddling the
+            // limit stops the cut short of it rather than at it.
+            let cut = (0..=MAX_FIELD)
+                .rev()
+                .find(|end| text.is_char_boundary(*end))
+                .unwrap_or(0);
+            format!("{}...", &text[..cut])
+        }
+    }
+}
+
+/// `PostgreSQL`'s `ExecBuildSlotPartitionKeyDescription` — the `(key) = (values)`
+/// body of the `DETAIL` line that follows a routing failure.
+///
+/// The key is spelled as `pg_get_partkeydef_columns` spells it, so a column
+/// name is quoted only when it has to be — unlike the whole-row description in
+/// [`crate::rls::describe_row`], whose column list upstream writes unquoted.
+/// The values are the row's key columns alone, not the whole row.
+///
+/// Only the caller decides whether this may be shown at all. Building it is
+/// unconditional; disclosing it is not. See `exec::may_describe_key`.
+pub(crate) fn key_description(
+    scheme: &Scheme,
+    row: &[Datum],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<String, ExecError> {
+    let columns = scheme
+        .keys
+        .iter()
+        .map(|key| crate::catalog_fn::quote_identifier(&key.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = key_values(scheme, row)?
+        .iter()
+        .map(|value| field_text(value, ctx))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!("({columns}) = ({values})"))
+}
+
 /// Compare two partition-key datums. `None` means the comparison had no answer,
 /// because either operand was NULL or the two types do not compare. Every
 /// caller treats that as "does not belong here" and does not guess.

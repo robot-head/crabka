@@ -1757,7 +1757,7 @@ pub(crate) fn fire_before_row(
     }
     // The row every trigger has had its say about is the one the policy judges.
     if let Some(row) = &new {
-        check.permit_row(table, row, ctx)?;
+        check.permit_row(kv, table, row, ctx)?;
     }
     Ok(new)
 }
