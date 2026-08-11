@@ -1383,6 +1383,8 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
             leader_epoch: crabka_log::LeaderEpoch(leader_epoch),
             // Wrap the produce path's decode-side `i64` into the log seam's `ProducerId`.
             producer_id: crabka_log::ProducerId(prepared.producer_id),
+            producer_epoch: prepared.producer_epoch,
+            base_sequence: prepared.base_sequence,
             is_transactional,
             bytes,
         }),

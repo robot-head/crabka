@@ -1293,6 +1293,8 @@ mod tests {
                 max_timestamp: 1_234,
                 leader_epoch: crabka_log::LeaderEpoch(5),
                 producer_id: crabka_log::ProducerId(-1),
+                producer_epoch: -1,
+                base_sequence: -1,
                 is_transactional: false,
             }),
             ack,

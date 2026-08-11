@@ -3195,6 +3195,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-units",
  "crabka-verified",
+ "crc32c",
  "hex",
  "mutants",
  "proptest",

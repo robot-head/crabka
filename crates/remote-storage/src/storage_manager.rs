@@ -52,9 +52,9 @@ impl IndexType {
 ///
 /// Mirrors Kafka's `LogSegmentData`. `transaction_index` is optional; a
 /// segment with no aborted transactions has no `.txnindex` file.
-/// `producer_snapshot_index` is optional too. Crabka does not yet write
-/// producer-id snapshots, so it is usually `None`, while Kafka always has
-/// one. The broker passes the leader-epoch index as bytes and not as a path,
+/// `producer_snapshot_index` is optional too so third-party callers can copy
+/// legacy segments that predate snapshots. krabka log exports provide one.
+/// The broker passes the leader-epoch index as bytes and not as a path,
 /// because it holds the relevant slice in memory at copy time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogSegmentData {
@@ -66,7 +66,8 @@ pub struct LogSegmentData {
     pub time_index: PathBuf,
     /// Path to the `.txnindex` file, when present.
     pub transaction_index: Option<PathBuf>,
-    /// Path to the producer-id `.snapshot` file, when present.
+    /// Path to the producer-id `.snapshot` file, when present. Older segment
+    /// sources can omit it; krabka log exports always provide one.
     pub producer_snapshot_index: Option<PathBuf>,
     /// Serialized leader-epoch index bytes for this segment's offset range.
     pub leader_epoch_index: Bytes,

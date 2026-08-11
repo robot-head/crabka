@@ -4,16 +4,11 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crabka_ids::{Offset, PartitionIndex};
+use crabka_ids::PartitionIndex;
 use crabka_log::ProducerId;
-use crabka_units::{
-    ByteSize, Time,
-    convert::{ByteSizeExt as _, TimeExt as _},
-};
+use crabka_units::{Time, convert::TimeExt as _};
 use dashmap::DashMap;
 use tokio::sync::Mutex;
-
-const PRODUCER_RECOVERY_READ_BYTES: u64 = 8_388_608;
 
 use crate::partition::LogOffset;
 
@@ -116,75 +111,45 @@ impl ProducerState {
     /// from its durable log.
     ///
     /// Startup calls this for disk-backed and diskless partitions before the
-    /// partition writer starts. Reads are bounded so recovery does not copy an
-    /// entire partition into memory. Control batches do not advance producer
-    /// sequences and are therefore excluded.
+    /// partition writer starts. `Log::open` has already loaded the latest
+    /// valid Kafka-compatible producer snapshot and replayed its uncovered
+    /// tail, including state whose source segment was removed locally after
+    /// remote-tier copy.
     ///
     /// # Errors
-    /// Returns an error when the log cannot be read or a recovered batch has
-    /// an invalid offset or sequence range.
+    /// This currently cannot fail; the result remains fallible so startup can
+    /// preserve its existing error boundary if snapshot projection gains a
+    /// checked conversion later.
     pub async fn rebuild_from_log(
         &self,
         topic: &str,
         partition: PartitionIndex,
         log: &crabka_log::Log,
     ) -> Result<(), crabka_log::LogError> {
-        let mut entries = HashMap::new();
-        let mut next = log.log_start_offset();
-        let end = log.log_end_offset();
         let recovered_at = crate::txn::util::now_millis();
-
-        while next < end {
-            let read = log.read(next, ByteSize::from_bytes(PRODUCER_RECOVERY_READ_BYTES))?;
-            if read.batches.is_empty() {
-                return Err(crabka_log::LogError::Corrupt(format!(
-                    "producer-state recovery made no progress at offset {next}"
-                )));
-            }
-            for batch in read.batches {
-                let last_offset = batch
-                    .base_offset
-                    .checked_add(i64::from(batch.last_offset_delta))
-                    .ok_or_else(|| {
-                        crabka_log::LogError::Corrupt(format!(
-                            "producer-state offset overflow at batch {}",
-                            batch.base_offset
-                        ))
-                    })?;
-                next = Offset(last_offset.checked_add(1).ok_or_else(|| {
-                    crabka_log::LogError::Corrupt(format!(
-                        "producer-state cursor overflow after offset {last_offset}"
-                    ))
-                })?);
-
-                if batch.producer_id < 0
-                    || batch.base_sequence < 0
-                    || batch.attributes.is_control_batch()
-                {
-                    continue;
-                }
-                let last_sequence = batch
-                    .base_sequence
-                    .checked_add(batch.last_offset_delta)
-                    .ok_or_else(|| {
-                        crabka_log::LogError::Corrupt(format!(
-                            "producer-state sequence overflow for producer {}",
-                            batch.producer_id
-                        ))
-                    })?;
-                entries.insert(
-                    ProducerId(batch.producer_id),
+        let entries = log
+            .producer_state_snapshot()
+            .into_iter()
+            .map(|entry| {
+                let base_offset = if entry.last_offset >= 0 {
+                    entry.last_offset.0 - i64::from(entry.offset_delta)
+                } else {
+                    // A marker-only producer has no retained data batch.
+                    -1
+                };
+                (
+                    entry.producer_id,
                     ProducerEntry {
-                        epoch: batch.producer_epoch,
-                        last_sequence,
-                        last_offset,
-                        base_offset: batch.base_offset,
-                        last_timestamp: batch.max_timestamp,
+                        epoch: entry.producer_epoch,
+                        last_sequence: entry.last_sequence,
+                        last_offset: entry.last_offset.0,
+                        base_offset,
+                        last_timestamp: entry.timestamp,
                         last_activity_ms: recovered_at,
                     },
-                );
-            }
-        }
+                )
+            })
+            .collect();
 
         self.handle(topic, partition).lock().await.entries = entries;
         Ok(())

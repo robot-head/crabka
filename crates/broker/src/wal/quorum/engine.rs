@@ -608,6 +608,8 @@ pub(super) fn split_batches(bytes: &Bytes) -> Result<Vec<BatchBytes>, BrokerErro
                 max_timestamp: batch.max_timestamp,
                 leader_epoch: LeaderEpoch(batch.partition_leader_epoch),
                 producer_id: ProducerId(batch.producer_id),
+                producer_epoch: batch.producer_epoch,
+                base_sequence: batch.base_sequence,
                 is_transactional: batch.attributes.is_transactional(),
             },
         });

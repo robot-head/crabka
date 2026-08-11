@@ -43,6 +43,10 @@ pub fn txnindex_path(dir: &Path, base_offset: i64) -> std::path::PathBuf {
     dir.join(format!("{}.txnindex", format_base_offset(base_offset)))
 }
 
+pub fn producer_snapshot_path(dir: &Path, offset: i64) -> std::path::PathBuf {
+    dir.join(format!("{}.snapshot", format_base_offset(offset)))
+}
+
 /// Path to the per-segment `.stampindex` sidecar. It holds the additional
 /// internal stamp coordinate and is never a client-facing file.
 pub fn stampindex_path(dir: &Path, base_offset: i64) -> std::path::PathBuf {

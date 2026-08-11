@@ -148,6 +148,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn producer_rebuild_preserves_marker_only_base_offset_sentinel() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut marker = crate::txn::marker::build_marker_batch(
+            crabka_log::ProducerId(42),
+            3,
+            Offset(0),
+            crate::txn::marker::MarkerType::Commit,
+            0,
+        );
+        log.append(&mut marker).unwrap();
+        let snapshot = log.producer_state_snapshot();
+        assert!(snapshot.len() == 1);
+        assert!(snapshot[0].last_offset == Offset(-1));
+        assert!(snapshot[0].offset_delta == 0);
+        let producer_state = Arc::new(ProducerState::new());
+
+        rebuild_producer_state("orders", PartitionIndex(0), &log, &producer_state)
+            .await
+            .unwrap();
+
+        let entries = producer_state.snapshot("orders", PartitionIndex(0)).await;
+        assert!(entries.len() == 1);
+        assert!(entries[0].0 == 42);
+        assert!(entries[0].1.base_offset == -1);
+        assert!(entries[0].1.last_offset == -1);
+        assert!(entries[0].1.last_sequence == -1);
+    }
+
+    #[tokio::test]
     async fn producer_rebuild_ignores_invalid_producer_identity_and_sequence() {
         let dir = tempdir().unwrap();
         let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
