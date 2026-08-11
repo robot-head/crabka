@@ -26,6 +26,21 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MIN_TRUNCATED_ROOT = 12
 TRUNCATED_ROOT = "<TRUNCATED_ROOT>"
 
+# A user object's OID depends on how many objects the schedule created before
+# it, so it moves whenever anything upstream in the run changes. `stats` echoes
+# one back in a statement, which made that file's digest differ between two runs
+# over identical corpus input -- 140636, 140637 and 140638 across three runs --
+# and report as "same-count-different", the one classification the ratchet
+# refuses by design. It reads as a hidden regression and is nothing.
+#
+# Deliberately narrow. 59 distinct six-digit numbers appear across 44 result
+# files and every one but this is ordinary data: int4 and int8 values, numerics,
+# row counts. Eliding six-digit numbers as a class would erase real differences
+# to fix a single line, which is how the earlier root-path elision went wrong.
+# So this matches only an OID handed to a `pg_stat_get_*` function.
+PG_STAT_OID = re.compile(r"\b(pg_stat_get_[a-z_]+)\(\d+\)")
+PG_STAT_OID_TOKEN = r"\1(<OID>)"
+
 
 class BaselineError(ValueError):
     """An invalid pg_regress result or baseline."""
@@ -188,6 +203,7 @@ def canonical_failure(
             for root, token in replacements:
                 line = line.replace(root, token)
             line = elide_truncated_root(line, replacements)
+            line = PG_STAT_OID.sub(PG_STAT_OID_TOKEN, line)
         if line.startswith("@@ "):
             hunks += 1
             in_hunk = True

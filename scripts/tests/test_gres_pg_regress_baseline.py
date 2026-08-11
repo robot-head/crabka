@@ -239,6 +239,56 @@ class BaselineTest(unittest.TestCase):
             documents[1]["failures"]["xml"]["sha256"],
         )
 
+    def test_generate_is_stable_when_a_pg_stat_oid_moves(self) -> None:
+        # A user object's OID depends on how many objects the schedule built
+        # before it, so it shifts whenever anything upstream changes. Two runs
+        # over identical corpus input produced 140636 and 140638, and the file
+        # reported as same-count-different -- the one classification the
+        # ratchet refuses, so it reads as a hidden regression and is nothing.
+        documents = []
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, oid in (("a", "140636"), ("b", "140638")):
+                root = Path(temporary) / name
+                root.mkdir()
+                dataset = Dataset(root, ["stats"], {"stats": (1, "same")})
+                dataset.diff.write_text(
+                    context_line_diff(
+                        root, "stats", f"pg_stat_get_function_calls({oid})"
+                    ),
+                    encoding="utf-8",
+                )
+                result = run("generate", *dataset.arguments())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                documents.append(json.loads(result.stdout))
+
+        self.assertEqual(
+            documents[0]["failures"]["stats"]["sha256"],
+            documents[1]["failures"]["stats"]["sha256"],
+        )
+
+    def test_a_six_digit_value_that_is_not_a_pg_stat_oid_stays_distinct(self) -> None:
+        # 59 distinct six-digit numbers appear across 44 result files and all
+        # but one are ordinary data. Eliding them as a class would hash two
+        # genuinely different results the same.
+        documents = []
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, value in (("a", "140636"), ("b", "140638")):
+                root = Path(temporary) / name
+                root.mkdir()
+                dataset = Dataset(root, ["int8"], {"int8": (1, "same")})
+                dataset.diff.write_text(
+                    context_line_diff(root, "int8", f"int8 '{value}'"),
+                    encoding="utf-8",
+                )
+                result = run("generate", *dataset.arguments())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                documents.append(json.loads(result.stdout))
+
+        self.assertNotEqual(
+            documents[0]["failures"]["int8"]["sha256"],
+            documents[1]["failures"]["int8"]["sha256"],
+        )
+
     def test_check_accepts_all_pass_command_log_without_diff(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
