@@ -238,7 +238,7 @@ trybuild = "1"
 # TTL field on the value (no built-in expiry).
 lru = "0.18"
 # Schema Registry (crabka-schema-registry) — schema parsing + canonical form.
-apache-avro = "0.21"
+apache-avro = "0.22"
 prost-reflect = "0.16"
 jsonschema = { version = "0.49", default-features = false }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
