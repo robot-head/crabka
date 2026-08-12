@@ -683,6 +683,11 @@ pub(crate) fn execute_ddl(
             {
                 return Err(reject_partitioned_foreign_key(&pending.name));
             }
+            // The whole list, after `LIKE` and `INHERITS` have contributed: no
+            // spelling of the statement may put a system column name on a
+            // relation with storage. `CREATE TABLE AS` and `SELECT INTO` build
+            // one of these and run it, so they are covered here too.
+            crate::scope::reject_system_column_names(cols.iter().map(|c| c.name.as_str()))?;
             let partition_scheme = partition_by
                 .as_ref()
                 .map(|spec| partition_scheme_from_ast(spec, &cols, &pending_indexes))
@@ -1201,6 +1206,10 @@ pub(crate) fn execute_ddl(
                     return Err(ExecError::DuplicateOutputColumn(column.name.clone()));
                 }
             }
+            // A materialized view has storage, so it is one of the relkinds
+            // `CheckAttributeNamesTypes` covers — unlike the plain view a few
+            // arms above, which is exempt and may name a column `ctid`.
+            crate::scope::reject_system_column_names(columns.iter().map(|c| c.name.as_str()))?;
             // Created unpopulated whatever `WITH DATA` said: the flag is what
             // makes a scan legal, and it is only true once the rows are actually
             // there. A `WITH DATA` create that fails partway therefore leaves
@@ -1820,6 +1829,7 @@ pub(crate) fn execute_ddl(
         } => {
             let name = resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?;
             crate::usertype::ensure_relation_type_name_available(kv, &name)?;
+            crate::scope::reject_system_column_names(columns.iter().map(|c| c.name.as_str()))?;
             let cols = columns
                 .iter()
                 .map(|c| Column::new(c.name.clone(), c.ty))
@@ -1910,6 +1920,13 @@ pub(crate) fn execute_ddl(
                     SchemaDisposition::Creation,
                 )?;
                 crate::usertype::ensure_relation_type_name_available(kv, &into)?;
+                // The remote schema chooses these names, so this is the one
+                // creation path where the refusal reports something the session
+                // did not write. It is still the right answer: the relation
+                // would have a column no reference could reach.
+                crate::scope::reject_system_column_names(
+                    table.columns.iter().map(|c| c.name.as_str()),
+                )?;
                 let id = match cursor {
                     Some(next) => next,
                     None => crabka_pgcatalog::read_next_table_id(kv)?,
@@ -26136,6 +26153,12 @@ fn alter_table_action_ops(
             if_not_exists,
             column,
         } => {
+            // Before `IF NOT EXISTS`, which is where `PostgreSQL` puts it:
+            // `check_for_column_name_collision` finds a system column by its
+            // negative attnum and raises whatever the clause said, because the
+            // name is taken by something `ADD COLUMN IF NOT EXISTS` cannot
+            // decide it already added.
+            crate::scope::reject_system_column_names([column.name.as_str()])?;
             if state.table.column_index(&column.name).is_some() {
                 if *if_not_exists {
                     return Ok(());
@@ -26650,6 +26673,9 @@ fn alter_table_action_ops(
                 .table
                 .column_index(column)
                 .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+            // The last route to a relation carrying a system column name, and
+            // the one that stays open after every creation path is closed.
+            crate::scope::reject_system_column_names([new_name.as_str()])?;
             if state.table.column_index(new_name).is_some() {
                 return Err(ExecError::DuplicateColumn {
                     column: new_name.clone(),

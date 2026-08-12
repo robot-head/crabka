@@ -1,5 +1,6 @@
-//! The `ctid` system column, over a stored relation and over one the engine
-//! synthesises.
+//! The system columns: `ctid` over a stored relation and over one the engine
+//! synthesises, and the six names no relation with storage may declare a column
+//! of.
 //!
 //! No test here asserts a particular `ctid`. The value is implementation
 //! defined — `PostgreSQL` moves it on `UPDATE` and renumbers every one of them
@@ -237,4 +238,59 @@ async fn a_statement_that_reads_ctid_still_does_not_expand_it() {
     // stitched onto the end of the composite.
     let whole = grid(&engine, "SELECT t, ctid FROM t ORDER BY a").await;
     assert!(whole[0][0] == Some("(1,one)".to_string()));
+}
+
+/// No relation with storage may declare a column named after a system column.
+///
+/// `PostgreSQL` raises this in `CheckAttributeNamesTypes`, which covers every
+/// relkind except a view and a composite type, and the message is quoted
+/// verbatim by `errors.sql` and `alter_table.sql`.
+#[tokio::test]
+async fn a_relation_with_storage_may_not_declare_a_system_column_name() {
+    let engine = fixture().await;
+    // Every one of the six, and every DDL path that can name a column.
+    let refused = [
+        "CREATE TABLE bad (ctid int)",
+        "CREATE TABLE bad (xmin int)",
+        "CREATE TABLE bad (xmax int)",
+        "CREATE TABLE bad (cmin int)",
+        "CREATE TABLE bad (cmax int)",
+        "CREATE TABLE bad (a int, tableoid int)",
+        "CREATE TABLE bad AS SELECT 1 AS ctid",
+        "SELECT 1 AS xmin INTO bad",
+        "CREATE MATERIALIZED VIEW bad AS SELECT 1 AS ctid",
+        "CREATE TABLE bad (a int) PARTITION BY RANGE (ctid)",
+        "ALTER TABLE t ADD COLUMN xmin integer",
+        // Refused even under IF NOT EXISTS: the name is taken by something the
+        // clause cannot decide it already added.
+        "ALTER TABLE t ADD COLUMN IF NOT EXISTS ctid integer",
+        // The route that stays open once every creation path is closed.
+        "ALTER TABLE t RENAME COLUMN a TO ctid",
+    ];
+    for sql in refused {
+        let error = error_of(&engine, sql).await;
+        assert!(
+            error.as_deref().is_some_and(|error| {
+                error.contains("conflicts with a system column name")
+                    || error.contains("cannot use system column")
+            }),
+            "{sql} answered {error:?}"
+        );
+    }
+    // A view has no system attributes to collide with, so `PostgreSQL` exempts
+    // it — `tid.sql` creates exactly this one — and the column it declares is
+    // an ordinary column of the view.
+    assert!(error_of(&engine, "CREATE VIEW fake AS SELECT 1 AS ctid, 2 AS a").await == None);
+    assert!(
+        grid(&engine, "SELECT * FROM fake").await
+            == vec![vec![Some("1".to_string()), Some("2".to_string())]]
+    );
+    // Nothing about the rule touches an ordinary name.
+    for sql in [
+        "CREATE TABLE fine (a int, b text)",
+        "ALTER TABLE t ADD COLUMN c int",
+        "ALTER TABLE t RENAME COLUMN c TO d",
+    ] {
+        assert!(error_of(&engine, sql).await == None, "{sql}");
+    }
 }

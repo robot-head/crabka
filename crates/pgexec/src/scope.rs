@@ -89,6 +89,42 @@ pub(crate) const TABLEOID_COLUMN: &str = "tableoid";
 /// for this row's storage", and the engine does hold one — see [`row_ctid`].
 pub(crate) const CTID_COLUMN: &str = "ctid";
 
+/// `PostgreSQL`'s six system columns, at `attnum` -6 through -1.
+///
+/// Two of them the engine answers ([`TABLEOID_COLUMN`] and [`CTID_COLUMN`]) and
+/// four it does not, but every one of the six is a name a relation with storage
+/// may not declare a column of, may not partition by, and may not read from a
+/// generation expression. Those three rules are about the NAME and not about
+/// whether the engine can produce a value for it, so they are all stated
+/// against this one list.
+pub(crate) const SYSTEM_COLUMNS: [&str; 6] =
+    [TABLEOID_COLUMN, "cmax", "xmax", "cmin", "xmin", CTID_COLUMN];
+
+/// Is `name` one of [`SYSTEM_COLUMNS`]?
+pub(crate) fn is_system_column(name: &str) -> bool {
+    SYSTEM_COLUMNS.contains(&name)
+}
+
+/// The 42701 a relation with storage owes for declaring a column named after a
+/// system column, or `Ok(())` when every name in `names` is free.
+///
+/// `PostgreSQL` raises it in `CheckAttributeNamesTypes`, for every relkind
+/// except a view and a composite type: those two have no system attributes to
+/// collide with, which is why `CREATE VIEW v AS SELECT 1 AS ctid` is valid and
+/// `tid.sql` writes one. Callers therefore pass a relation that has storage —
+/// an ordinary table, a partition, a materialized view or a foreign table — and
+/// nothing else.
+pub(crate) fn reject_system_column_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ExecError> {
+    for name in names {
+        if is_system_column(name) {
+            return Err(ExecError::SystemColumnName(name.to_string()));
+        }
+    }
+    Ok(())
+}
+
 /// The `ctid` of the row whose storage identity is `identity`.
 ///
 /// The identity is the row's rowid for a stored relation, and the row's

@@ -133,6 +133,15 @@ pub enum ExecError {
     /// [`ExecError::DuplicateColumn`] there is no relation to name: the first
     /// has none yet, and `PostgreSQL` leaves it out of the second.
     DuplicateOutputColumn(String),
+    /// A relation with storage declared a column named after one of
+    /// `PostgreSQL`'s six system columns (42701).
+    ///
+    /// A 42701 and not a 42939 because `PostgreSQL` reads it as the name being
+    /// taken: `CheckAttributeNamesTypes` raises `ERRCODE_DUPLICATE_COLUMN`
+    /// beside the two duplicate cases above. Views and composite types are
+    /// exempt there, and are exempt here — `CREATE VIEW v AS SELECT 1 AS ctid`
+    /// is valid `PostgreSQL` and `tid.sql` writes it.
+    SystemColumnName(String),
     /// An `ANALYZE`/`VACUUM ANALYZE` column list names one column twice
     /// (42701). Distinct from [`ExecError::DuplicateColumn`], which reports a
     /// collision with a column that is already there; here both mentions are
@@ -1122,6 +1131,10 @@ impl ExecError {
             ExecError::DuplicateOutputColumn(column) => PgError::error(
                 "42701",
                 format!("column \"{column}\" specified more than once"),
+            ),
+            ExecError::SystemColumnName(column) => PgError::error(
+                "42701",
+                format!("column name \"{column}\" conflicts with a system column name"),
             ),
             ExecError::RepeatedMaintenanceColumn { column, table } => PgError::error(
                 "42701",
