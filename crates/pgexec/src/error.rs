@@ -142,6 +142,17 @@ pub enum ExecError {
     /// exempt there, and are exempt here — `CREATE VIEW v AS SELECT 1 AS ctid`
     /// is valid `PostgreSQL` and `tid.sql` writes it.
     SystemColumnName(String),
+    /// A `SET` list assigned to one of `PostgreSQL`'s six system columns
+    /// (0A000).
+    ///
+    /// A 0A000 and not the 42703 an unknown column gets, because the name is
+    /// not unknown: `parse_target.c` resolves it, finds a negative `attnum` and
+    /// raises `ERRCODE_FEATURE_NOT_SUPPORTED`. The distinction became worth
+    /// making when a `ctid` in the same statement's `WHERE` started resolving —
+    /// "does not exist" is a poor answer about a column the statement just
+    /// read. Only a relation that declares no column of the name reaches this;
+    /// a view may declare one, and its own updatability rule answers instead.
+    AssignSystemColumn(String),
     /// An `ANALYZE`/`VACUUM ANALYZE` column list names one column twice
     /// (42701). Distinct from [`ExecError::DuplicateColumn`], which reports a
     /// collision with a column that is already there; here both mentions are
@@ -1135,6 +1146,10 @@ impl ExecError {
             ExecError::SystemColumnName(column) => PgError::error(
                 "42701",
                 format!("column name \"{column}\" conflicts with a system column name"),
+            ),
+            ExecError::AssignSystemColumn(column) => PgError::error(
+                "0A000",
+                format!("cannot assign to system column \"{column}\""),
             ),
             ExecError::RepeatedMaintenanceColumn { column, table } => PgError::error(
                 "42701",

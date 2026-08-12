@@ -805,12 +805,30 @@ pub(crate) fn dml_reads_target(
         return true;
     }
     let returned = returning.is_some_and(|returning| {
+        // `OLD` and `NEW` are the target under two more names — the same rows,
+        // before and after — so a reference through either reads the target.
+        // Left out, `DELETE FROM t RETURNING old.secret` handed every column of
+        // every row to a caller holding `DELETE` and no `SELECT`; the `UPDATE`
+        // spelling was covered only incidentally, by its `SET` list reading a
+        // column of its own.
+        let spellings = [
+            qualifier,
+            returning.old_alias.as_deref().unwrap_or("old"),
+            returning.new_alias.as_deref().unwrap_or("new"),
+        ];
+        let reads_any = |expr| {
+            spellings
+                .iter()
+                .any(|spelling| expr_reads_relation(table, spelling, expr))
+        };
         returning.items.iter().any(|item| match item {
             // `*` and `t.*` name every column the target has; a qualified one
             // that names some other relation is that relation's business.
             SelectItem::Wildcard => true,
-            SelectItem::QualifiedWildcard(named) => named.eq_ignore_ascii_case(qualifier),
-            SelectItem::Expr { expr, .. } => reads(expr),
+            SelectItem::QualifiedWildcard(written) => spellings
+                .iter()
+                .any(|spelling| written.eq_ignore_ascii_case(spelling)),
+            SelectItem::Expr { expr, .. } => reads_any(expr),
         })
     });
     if returned {
@@ -837,13 +855,23 @@ pub(crate) fn dml_reads_target(
 /// name the target shares with a joined relation — an ambiguous reference,
 /// which the executor rejects anyway — and never under-counts, which is the
 /// direction a privilege test should err in.
+///
+/// A bare SYSTEM column counts too, and it is not declared. `PostgreSQL` marks
+/// one for `SELECT` like any other (`markRTEForSelectPriv` puts the negative
+/// attnum in `selectedCols`, and a negative attnum has no column ACL to consult,
+/// so the check falls back to the whole relation). Without this a caller
+/// holding `DELETE` and not `SELECT` could write `DELETE FROM t WHERE ctid =
+/// '(0,1)'` and read the row count back as an oracle over rows it may not see —
+/// which is reachable only since a `ctid` started resolving on this path.
 fn expr_reads_relation(table: &Table, qualifier: &str, expr: &crabka_pgparser::ast::Expr) -> bool {
     use crabka_pgparser::ast::Expr;
     match expr {
         Expr::Column {
             table: Some(named), ..
         } => named.eq_ignore_ascii_case(qualifier),
-        Expr::Column { table: None, name } => table.column_index(name).is_some(),
+        Expr::Column { table: None, name } => {
+            table.column_index(name).is_some() || crate::scope::is_system_column(name)
+        }
         _ => crate::exec::expr_children(expr)
             .into_iter()
             .any(|child| expr_reads_relation(table, qualifier, child)),

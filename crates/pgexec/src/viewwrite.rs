@@ -46,8 +46,8 @@
 use crabka_pgcatalog::{RelationName, View, ViewCheckOption};
 use crabka_pgkv::Kv;
 use crabka_pgparser::ast::{
-    BinaryOp, DistinctClause, Expr, QueryBody, QueryExpr, RelationRef, SelectItem, SelectStmt,
-    SetExpr, Statement, TableExpr,
+    BinaryOp, DistinctClause, Expr, QueryBody, QueryExpr, RelationRef, Returning, SelectItem,
+    SelectStmt, SetExpr, Statement, TableExpr,
 };
 
 use crate::error::ExecError;
@@ -290,6 +290,49 @@ impl ViewRewrite {
             Some(name) => Err(ExecError::UndefinedColumn(name)),
             None => Ok(()),
         }
+    }
+
+    /// The 42703 a `RETURNING` list owes for naming a column the view does not
+    /// project, or `Ok(())` when every reference it makes is the view's.
+    ///
+    /// [`Self::reject_foreign_columns`] guards the `WHERE` for the reason
+    /// stated where it is called: substitution leaves an unknown name alone,
+    /// and the base relation the rewrite puts underneath answers it. A
+    /// `RETURNING` list was never guarded, so `UPDATE v SET c = … RETURNING
+    /// hidden` handed back a column of the base relation to a caller holding
+    /// nothing but the view — the leak a view exists to prevent, and one the
+    /// caller could not get through `SELECT` by any spelling.
+    ///
+    /// The `OLD`/`NEW` image aliases are judged with the view's own qualifier.
+    /// They name the same relation through a second spelling, so admitting them
+    /// unjudged would leave `old.hidden` open once `hidden` is closed.
+    pub(crate) fn reject_foreign_returning(
+        &self,
+        returning: Option<&Returning>,
+        qualifier: &str,
+        strict: bool,
+    ) -> Result<(), ExecError> {
+        let Some(returning) = returning else {
+            return Ok(());
+        };
+        let images = [
+            returning.old_alias.as_deref().unwrap_or("old"),
+            returning.new_alias.as_deref().unwrap_or("new"),
+        ];
+        for item in &returning.items {
+            match item {
+                SelectItem::Expr { expr, alias: _ } => {
+                    self.reject_foreign_columns(expr, qualifier, strict)?;
+                    for image in images {
+                        self.reject_foreign_columns(expr, image, true)?;
+                    }
+                }
+                // `*` and `old.*` expand to the view's own columns, through
+                // `wildcard_items` and through the image's declared columns.
+                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => {}
+            }
+        }
+        Ok(())
     }
 
     /// Rewrite an expression written in an `ON CONFLICT` clause.

@@ -5,10 +5,12 @@
 //! replaces the single-`crabka_pgcatalog::Table` column lookup that every prior
 //! slice used.
 
-use crabka_pgcatalog::Table;
+use crabka_pgcatalog::{Table, TableId};
 use crabka_pgparser::ast::{
-    DistinctClause, Expr, FrameBound, FuncArgs, JoinConstraint, QueryBody, QueryExpr, SelectItem,
-    SelectStmt, SetExpr, TableExpr, WindowCall, WindowRef, WindowSpec,
+    ArraySubscript, Assignment, AssignmentValue, Cte, CteBody, DistinctClause, Expr, FrameBound,
+    FuncArgs, InsertSource, JoinConstraint, MergeAction, MergeSource, MergeWhen, OnConflict,
+    OnConflictAction, OnConflictTarget, QueryBody, QueryExpr, Returning, SelectItem, SelectStmt,
+    SetExpr, Statement, TableExpr, WindowCall, WindowRef, WindowSpec, WithClause,
 };
 use crabka_pgtypes::{ColumnType, Datum, RecordValue};
 
@@ -140,22 +142,51 @@ pub(crate) fn reject_system_column_names<'a>(
 /// until the row is updated or the table is rewritten, so a statement that
 /// survives one of those was already outside the contract.
 ///
-/// The 64-bit identity is split across the two fields a `tid` has, high half
-/// into the block and low half into the offset. Two rows of one relation
-/// therefore differ, up to 2^48 rows, which is past the point `PostgreSQL`'s
-/// own `ItemPointer` stops being able to address them: a 4-billion-block heap
-/// of 8 kB pages holds about 1.2e12 tuples. Identity 0 is never handed out —
-/// rowids and ordinals both start at 1 — so no row is ever stamped `(0,0)`, the
-/// value `PostgreSQL` reserves for an invalid item pointer.
+/// The identity is laid out over the two fields a `tid` has as though it were a
+/// heap: consecutive identities fill one block, and the next one starts the
+/// next block. Two rows of one relation therefore differ, up to 2^38 of them,
+/// which is past the point `PostgreSQL`'s own `ItemPointer` stops being able to
+/// address them: a 4-billion-block heap of 8 kB pages holds about 1.2e12
+/// tuples. Identity 0 is never handed out — rowids and ordinals both start at 1
+/// — and no identity maps to `(0,0)`, the value `PostgreSQL` reserves for an
+/// invalid item pointer.
 pub(crate) fn row_ctid(identity: u64) -> Datum {
+    let ordinal = identity.saturating_sub(1);
     Datum::Tid(crabka_pgtypes::Tid {
-        // Saturating rather than wrapping: past 2^48 rows in one relation the
-        // low half no longer separates them whatever the high half does, and a
-        // pinned block is at least monotone with the identity.
-        block: u32::try_from(identity >> 16).unwrap_or(u32::MAX),
-        offset: u16::try_from(identity & u64::from(u16::MAX)).unwrap_or(u16::MAX),
+        // Saturating rather than wrapping: past 2^38 rows in one relation the
+        // block no longer separates them, and a pinned block is at least
+        // monotone with the identity.
+        block: u32::try_from(ordinal / ROWS_PER_BLOCK).unwrap_or(u32::MAX),
+        // Always in `1..=ROWS_PER_BLOCK`, so the cast cannot fail.
+        offset: u16::try_from(ordinal % ROWS_PER_BLOCK + 1).unwrap_or(u16::MAX),
     })
 }
+
+/// How many rows one block of [`row_ctid`]'s address space holds.
+///
+/// The engine has no heap, so nothing here forces a number — but *some* number
+/// is forced, because a statement may read the block and the offset apart. The
+/// first attempt split the identity in half, which put 65536 rows in every
+/// block, and three regression tests fill a relation by inserting until the
+/// `ctid` reaches block 3:
+///
+/// ```text
+/// LOOP
+///   INSERT INTO brin_summarize VALUES (1) RETURNING ctid INTO curtid;
+///   EXIT WHEN curtid > tid '(2, 0)';
+/// END LOOP;
+/// ```
+///
+/// That took 131073 inserts and 93 seconds apiece, against 320 ms for the same
+/// file when the column did not resolve at all. A block has to fill at a rate a
+/// statement written against a real heap finds reasonable.
+///
+/// 64 is what an 8 kB page holds of a row around 100 bytes wide, which is the
+/// size `tidrangescan` uses when it fills "at least two pages" with 200 rows and
+/// then trims each page to its first ten tuples. Any value from 10 to 95 leaves
+/// that file with the rows `PostgreSQL` is left with; 64 is in the middle of the
+/// range and is what the arithmetic would give.
+const ROWS_PER_BLOCK: u64 = 64;
 
 impl ColumnBinding {
     /// Is this column hidden from `*`?
@@ -346,6 +377,67 @@ impl SystemColumns {
             scope.push_ctid(qualifier);
         }
     }
+
+    /// Resolve the one value that is a fact about the relation rather than
+    /// about any row of it, so the rows can be stamped without asking again.
+    ///
+    /// # Errors
+    ///
+    /// Returns a catalog error when the relation's oid cannot be derived.
+    pub(crate) fn stamp(self, table: TableId) -> Result<SystemStamp, ExecError> {
+        Ok(SystemStamp {
+            oid: self
+                .tableoid
+                .then(|| crate::catalog_rel::table_relation_oid(table))
+                .transpose()?
+                .map(Datum::Int4),
+            columns: self,
+        })
+    }
+}
+
+/// The system columns one relation carries, together with the values they take.
+///
+/// [`SystemColumns`] alone can say a scan carries `tableoid` without anything
+/// holding the oid to stamp, and a caller that pushed the binding but not the
+/// value would hand the layers above a row whose width disagrees with its
+/// schema. Pairing the two here means the scope and the row are extended from
+/// one value, by [`Self::extend_scope`] and [`Self::extend_row`], and cannot
+/// disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SystemStamp {
+    columns: SystemColumns,
+    /// The relation's oid, present exactly when `columns.tableoid` is set.
+    oid: Option<Datum>,
+}
+
+impl SystemStamp {
+    /// Append the bindings to `scope`, qualified by `qualifier`.
+    pub(crate) fn extend_scope(&self, scope: &mut Scope, qualifier: &str) {
+        self.columns.extend_scope(scope, qualifier);
+    }
+
+    /// How many columns this stamp adds to a scope, and to a row.
+    pub(crate) fn width(&self) -> usize {
+        usize::from(self.columns.tableoid) + usize::from(self.columns.ctid)
+    }
+
+    /// Append the values to `row`, in the order [`Self::extend_scope`] appends
+    /// their bindings.
+    ///
+    /// `identity` is the row's storage identity, which [`row_ctid`] describes.
+    /// It is read only when this stamp carries `ctid`, so a relation that has
+    /// no identity to give may pass any value as long as it also asked for no
+    /// `ctid` — which [`SystemColumns::of`] guarantees for a relation that
+    /// stores no rows, because such a relation never reaches it.
+    pub(crate) fn extend_row(&self, row: &mut Vec<Datum>, identity: u64) {
+        if let Some(oid) = &self.oid {
+            row.push(oid.clone());
+        }
+        if self.columns.ctid {
+            row.push(row_ctid(identity));
+        }
+    }
 }
 
 impl StatementRefs {
@@ -360,6 +452,27 @@ impl StatementRefs {
     pub(crate) fn of_select(select: &SelectStmt) -> Self {
         let mut refs = Self::default();
         refs.add_select(select);
+        refs
+    }
+
+    /// Every reference a data-modifying statement makes, the way
+    /// [`Self::of_select`] collects a query's.
+    ///
+    /// A `WHERE`, a `SET` right-hand side, a `USING`/`FROM` item, an `ON
+    /// CONFLICT` action and a `RETURNING` list are all resolved against the
+    /// statement's own target, so a system column written in any of them
+    /// reaches that target's hidden column and has to be collected here. Before
+    /// this existed only a `SELECT` established refs, and a `ctid` written in a
+    /// `DELETE`'s `WHERE` was 42703 — which skipped the `DELETE` and left every
+    /// row it was meant to remove in place.
+    ///
+    /// A data-modifying `WITH` entry is deliberately not descended into. It
+    /// executes as its own statement and derives its own refs there; the outer
+    /// statement sees it only as a relation of its `RETURNING` output, exactly
+    /// as [`Self::add_query`] treats a `WITH` list.
+    pub(crate) fn of_write(stmt: &Statement) -> Self {
+        let mut refs = Self::default();
+        refs.add_write(stmt);
         refs
     }
 
@@ -399,6 +512,224 @@ impl StatementRefs {
     /// [`wants_system_column`], the one thing that asks.
     pub(crate) const fn reads_system_column(&self) -> bool {
         self.tableoid || self.ctid
+    }
+
+    /// Every DML statement is destructured without `..`, for the reason
+    /// [`Self::add_select`] is: a clause added later must stop the build rather
+    /// than be skipped, and the cost of overlooking one here is a system column
+    /// the target does not carry where something reads it.
+    fn add_write(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::Insert {
+                table: _,
+                columns: _,
+                source,
+                with,
+                on_conflict,
+                returning,
+            } => {
+                match source {
+                    InsertSource::Values(rows) => {
+                        for expr in rows.iter().flatten() {
+                            self.add_expr(expr);
+                        }
+                    }
+                    InsertSource::Query(query) => self.add_query(query),
+                    InsertSource::DefaultValues => {}
+                }
+                self.add_with(with.as_ref());
+                if let Some(on_conflict) = on_conflict {
+                    self.add_on_conflict(on_conflict);
+                }
+                self.add_returning(returning.as_ref());
+            }
+            Statement::Update {
+                table: _,
+                only: _,
+                with,
+                alias: _,
+                assignments,
+                from,
+                filter,
+                returning,
+            } => {
+                self.add_with(with.as_ref());
+                for assignment in assignments {
+                    self.add_assignment(assignment);
+                }
+                for item in from {
+                    self.add_table_expr(item);
+                }
+                if let Some(expr) = filter {
+                    self.add_expr(expr);
+                }
+                self.add_returning(returning.as_ref());
+            }
+            Statement::Delete {
+                table: _,
+                only: _,
+                with,
+                alias: _,
+                using,
+                filter,
+                returning,
+            } => {
+                self.add_with(with.as_ref());
+                for item in using {
+                    self.add_table_expr(item);
+                }
+                if let Some(expr) = filter {
+                    self.add_expr(expr);
+                }
+                self.add_returning(returning.as_ref());
+            }
+            Statement::Merge {
+                table: _,
+                with,
+                alias: _,
+                source,
+                on,
+                clauses,
+                returning,
+            } => {
+                self.add_with(with.as_ref());
+                match source {
+                    MergeSource::Table { name: _, alias: _ } => {}
+                    MergeSource::Query {
+                        query,
+                        alias: _,
+                        columns: _,
+                    } => self.add_query(query),
+                }
+                self.add_expr(on);
+                for MergeWhen {
+                    kind: _,
+                    condition,
+                    action,
+                } in clauses
+                {
+                    if let Some(expr) = condition {
+                        self.add_expr(expr);
+                    }
+                    match action {
+                        MergeAction::Update(assignments) => {
+                            for assignment in assignments {
+                                self.add_assignment(assignment);
+                            }
+                        }
+                        MergeAction::Insert {
+                            columns: _,
+                            values: Some(values),
+                        } => {
+                            for expr in values {
+                                self.add_expr(expr);
+                            }
+                        }
+                        MergeAction::Insert { .. }
+                        | MergeAction::Delete
+                        | MergeAction::DoNothing => {}
+                    }
+                }
+                self.add_returning(returning.as_ref());
+            }
+            // Every other statement is either not a write or has no clause
+            // resolved against a target's row, so none of them can name a
+            // system column of one.
+            _ => {}
+        }
+    }
+
+    fn add_with(&mut self, with: Option<&WithClause>) {
+        for Cte {
+            name: _,
+            columns: _,
+            body,
+            materialized: _,
+            search: _,
+            cycle: _,
+        } in with.iter().flat_map(|with| &with.ctes)
+        {
+            match body {
+                CteBody::Query(query) => self.add_query(query),
+                // Executed as its own statement, with its own refs.
+                CteBody::Dml(_) => {}
+            }
+        }
+    }
+
+    fn add_assignment(&mut self, assignment: &Assignment) {
+        let Assignment {
+            targets: _,
+            subscripts,
+            value,
+        } = assignment;
+        for subscript in subscripts {
+            match subscript {
+                ArraySubscript::Index(expr) => self.add_expr(expr),
+                ArraySubscript::Slice { lower, upper } => {
+                    for expr in lower.iter().chain(upper) {
+                        self.add_expr(expr);
+                    }
+                }
+            }
+        }
+        match value {
+            AssignmentValue::Expr(expr) => self.add_expr(expr),
+            AssignmentValue::Row(exprs) => {
+                for expr in exprs {
+                    self.add_expr(expr);
+                }
+            }
+            AssignmentValue::Subquery(query) => self.add_query(query),
+        }
+    }
+
+    fn add_on_conflict(&mut self, on_conflict: &OnConflict) {
+        let OnConflict { target, action } = on_conflict;
+        match target {
+            OnConflictTarget::Columns {
+                columns: _,
+                index_predicate,
+            } => {
+                if let Some(expr) = index_predicate {
+                    self.add_expr(expr);
+                }
+            }
+            OnConflictTarget::None | OnConflictTarget::OnConstraint(_) => {}
+        }
+        match action {
+            OnConflictAction::DoUpdate {
+                assignments,
+                filter,
+            } => {
+                for (_, expr) in assignments {
+                    self.add_expr(expr);
+                }
+                if let Some(expr) = filter {
+                    self.add_expr(expr);
+                }
+            }
+            OnConflictAction::DoNothing => {}
+        }
+    }
+
+    fn add_returning(&mut self, returning: Option<&Returning>) {
+        for items in returning.iter().map(|r| &r.items) {
+            self.add_returning_items(items);
+        }
+    }
+
+    /// The references one `RETURNING` list makes, for the describe path, which
+    /// is handed the list and no statement around it.
+    pub(crate) fn add_returning_items(&mut self, items: &[SelectItem]) {
+        for item in items {
+            match item {
+                SelectItem::Expr { expr, alias: _ } => self.add_expr(expr),
+                // `*` and `old.*` expand to the columns themselves, and
+                // `PostgreSQL` keeps a system column out of every expansion.
+                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => {}
+            }
+        }
     }
 
     fn add_select(&mut self, select: &SelectStmt) {
@@ -1209,6 +1540,106 @@ mod tests {
         }
     }
 
+    /// Every clause of a data-modifying statement that resolves against its
+    /// target, and every clause that does not.
+    ///
+    /// The walk destructures each statement without `..` so a clause added
+    /// later stops the build; this is the other half of that guard, and the
+    /// reason the cases are one per clause rather than one per statement.
+    #[test]
+    fn write_refs_notice_a_system_column_in_every_clause_that_reads_the_target() {
+        let cases = [
+            ("DELETE FROM t", (false, false)),
+            ("UPDATE t SET a = 1", (false, false)),
+            ("INSERT INTO t VALUES (1)", (false, false)),
+            // WHERE, bare and qualified and buried in an expression.
+            ("DELETE FROM t WHERE ctid = '(0,1)'", (true, false)),
+            ("DELETE FROM t d WHERE d.ctid = '(0,1)'", (true, false)),
+            (
+                "DELETE FROM t WHERE substring(ctid::text FROM 1)::int > 0",
+                (true, false),
+            ),
+            ("UPDATE t SET a = 1 WHERE ctid > '(0,1)'", (true, false)),
+            // A subquery inside the WHERE, which is evaluated out here when it
+            // is correlated.
+            (
+                "DELETE FROM t WHERE a IN (SELECT ctid FROM p)",
+                (true, false),
+            ),
+            // USING and FROM items, and the ON of a MERGE.
+            ("DELETE FROM t USING p WHERE t.ctid = p.k", (true, false)),
+            (
+                "UPDATE t SET a = 1 FROM p WHERE t.ctid = p.k",
+                (true, false),
+            ),
+            (
+                "MERGE INTO t USING p ON t.ctid = p.k WHEN MATCHED THEN DELETE",
+                (true, false),
+            ),
+            // A SET right-hand side, subscripted or not, and a MERGE action's.
+            ("UPDATE t SET a = ctid::text", (true, false)),
+            (
+                "MERGE INTO t USING p ON t.a = p.k WHEN MATCHED THEN UPDATE SET a = ctid::text",
+                (true, false),
+            ),
+            // RETURNING, bare and through an image alias.
+            ("DELETE FROM t RETURNING ctid", (true, false)),
+            ("INSERT INTO t VALUES (1) RETURNING ctid", (true, false)),
+            ("UPDATE t SET a = 1 RETURNING old.ctid", (true, false)),
+            ("UPDATE t SET a = 1 RETURNING new.tableoid", (false, true)),
+            // An ON CONFLICT action.
+            (
+                "INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 2 WHERE t.ctid > '(0,1)'",
+                (true, false),
+            ),
+            // A wildcard expands to the relation's own columns, and
+            // `PostgreSQL` keeps a system column out of every expansion — so it
+            // asks for neither.
+            ("DELETE FROM t RETURNING *", (false, false)),
+            ("UPDATE t SET a = 1 RETURNING old.*", (false, false)),
+            // A name merely containing one is not a read of it.
+            ("DELETE FROM t WHERE ctids = 1", (false, false)),
+        ];
+        for (sql, (ctid, tableoid)) in cases {
+            let parsed = crabka_pgparser::parse(sql).expect("statement parses");
+            let [stmt] = parsed.as_slice() else {
+                panic!("{sql} is one statement");
+            };
+            let refs = StatementRefs::of_write(stmt);
+            assert!(refs.reads_ctid() == ctid, "{sql} ctid");
+            assert!(refs.reads_tableoid() == tableoid, "{sql} tableoid");
+        }
+    }
+
+    /// A data-modifying `WITH` entry runs as its own statement, so what it
+    /// spells is not what the enclosing statement asks its own target for.
+    #[test]
+    fn a_data_modifying_with_entry_does_not_lend_the_outer_target_its_refs() {
+        let sql = "WITH d AS (DELETE FROM p WHERE ctid = '(0,1)' RETURNING k) \
+                   UPDATE t SET a = 1 FROM d WHERE t.a = d.k";
+        let parsed = crabka_pgparser::parse(sql).expect("statement parses");
+        let [stmt] = parsed.as_slice() else {
+            panic!("one statement");
+        };
+        assert!(!StatementRefs::of_write(stmt).reads_ctid());
+    }
+
+    /// The bare names a write spells, which decide the liveness markers its
+    /// `FROM`/`USING` items carry. A whole-row reference is only ever reachable
+    /// through a bare name, and `RETURNING` is where a DML writes one.
+    #[test]
+    fn write_refs_collect_the_bare_names_a_returning_list_spells() {
+        let sql = "UPDATE foo SET f2 = foo_v.f2 FROM foo_v WHERE foo_v.f1 = foo.f1 \
+                   RETURNING foo_v";
+        let parsed = crabka_pgparser::parse(sql).expect("statement parses");
+        let [stmt] = parsed.as_slice() else {
+            panic!("one statement");
+        };
+        let refs = StatementRefs::of_write(stmt);
+        assert!(wants_whole_row(Some(&refs), "foo_v"));
+        assert!(!wants_whole_row(Some(&refs), "nothing_names_me"));
+    }
+
     #[test]
     fn ctid_goes_after_tableoid_and_is_a_system_column() {
         let t = tbl("t", &[("a", ColumnType::Int4)]);
@@ -1289,25 +1720,38 @@ mod tests {
         );
     }
 
-    /// The mapping is the row's storage identity split across the two fields a
-    /// `tid` has. Nothing outside this test may depend on the values.
+    /// The mapping lays the row's storage identity out as a heap would:
+    /// consecutive identities fill one block, and the next one starts the next.
+    /// Nothing outside this test may depend on the values.
     #[test]
-    fn a_row_ctid_is_its_identity_split_across_the_two_fields() {
+    fn a_row_ctid_fills_one_block_before_it_starts_the_next() {
+        let last = ROWS_PER_BLOCK;
         let cases = [
             (1, (0, 1)),
             (2, (0, 2)),
-            (65_535, (0, 65_535)),
-            (65_536, (1, 0)),
-            (65_537, (1, 1)),
-            (u64::from(u32::MAX) + 1, (65_536, 0)),
+            (
+                last,
+                (0, u16::try_from(ROWS_PER_BLOCK).expect("a block fits")),
+            ),
+            (last + 1, (1, 1)),
+            (last + 2, (1, 2)),
+            (2 * last + 1, (2, 1)),
         ];
         for (identity, (block, offset)) in cases {
             let expected = Datum::Tid(crabka_pgtypes::Tid { block, offset });
             assert!(row_ctid(identity) == expected, "{identity}");
         }
-        // Distinct up to the point the two fields stop separating identities,
-        // which is past every row count a heap can address.
+        // No identity is ever stamped `(0,0)`, the invalid item pointer, and
+        // identities stay distinct up to the point the block stops separating
+        // them — past every row count a heap can address.
+        let invalid = Datum::Tid(crabka_pgtypes::Tid {
+            block: 0,
+            offset: 0,
+        });
+        for identity in [0, 1, 2, last, last + 1] {
+            assert!(row_ctid(identity) != invalid, "{identity}");
+        }
         assert!(row_ctid(1) != row_ctid(2));
-        assert!(row_ctid(1 << 47) != row_ctid((1 << 47) + 1));
+        assert!(row_ctid(1 << 37) != row_ctid((1 << 37) + 1));
     }
 }

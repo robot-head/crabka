@@ -103,6 +103,21 @@ impl<'a> SubCtx<'a> {
         }
     }
 
+    /// [`Self::with_refs`] where the caller holds the refs as an `Option`, and
+    /// `None` means "this statement establishes none" rather than "keep
+    /// whatever was here". A DML target with no storage identity — a view —
+    /// passes `None`, and would be given system columns it cannot value if the
+    /// enclosing context's refs leaked in.
+    pub(crate) fn with_refs_opt<'b>(
+        &'b self,
+        refs: Option<&'b crate::scope::StatementRefs>,
+    ) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx { refs, ..*self }
+    }
+
     /// The same read context, with privilege and row-security decisions made
     /// as `role` instead.
     ///

@@ -943,3 +943,89 @@ async fn a_column_that_cannot_be_assigned_still_answers_no() {
             == rows(&["vagg,NO", "vexpr,YES"])
     );
 }
+
+/// **A `RETURNING` list may not read a column the view does not project.**
+///
+/// The rewrite substitutes the view's columns for the base relation's and puts
+/// the base relation underneath. A name the view never projected survives
+/// substitution untouched and then resolves against that base relation — so
+/// `UPDATE v … RETURNING hidden` handed a caller holding nothing but the view a
+/// column of a table it may not read at all, by a route no `SELECT` offers.
+///
+/// The `WHERE` clause has always been guarded. `RETURNING` was not, and every
+/// spelling of the same reference got through: bare, qualified by the view, and
+/// qualified by an `OLD`/`NEW` image alias.
+#[tokio::test]
+async fn a_returning_list_cannot_read_a_column_the_view_hides() {
+    let (engine, _kv) = engine_with(&format!(
+        "{BASE} CREATE VIEW v AS SELECT a, b FROM base_tbl;
+         CREATE ROLE viewer;
+         GRANT SELECT, INSERT, UPDATE, DELETE ON v TO viewer"
+    ))
+    .await;
+    let mut viewer = engine.connect();
+    run(&mut viewer, "SET ROLE viewer").await;
+    // `c` is the base relation's third column, which the view does not select.
+    for sql in [
+        "UPDATE v SET b = 'x' WHERE a = 1 RETURNING c",
+        "UPDATE v SET b = 'x' WHERE a = 1 RETURNING v.c",
+        "UPDATE v SET b = 'x' WHERE a = 1 RETURNING old.c",
+        "UPDATE v SET b = 'x' WHERE a = 1 RETURNING new.c",
+        "UPDATE v SET b = 'x' WHERE a = 1 RETURNING c * 2",
+        "DELETE FROM v WHERE a = 1 RETURNING c",
+        "DELETE FROM v WHERE a = 1 RETURNING old.c",
+        "INSERT INTO v VALUES (9, 'r9') RETURNING c",
+    ] {
+        let error = viewer
+            .simple_query(sql)
+            .await
+            .err()
+            .map(|error| error.to_string());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains(r#"column "c" does not exist"#)),
+            "{sql} answered {error:?}"
+        );
+    }
+    // A system column of the relation underneath is reached the same way, and
+    // is closed by the same rule: the view projects no `ctid`, so no spelling
+    // of one resolves.
+    for sql in [
+        "UPDATE v SET b = 'x' WHERE a = 1 RETURNING ctid",
+        "UPDATE v SET b = 'x' WHERE a = 1 RETURNING old.ctid",
+        "DELETE FROM v WHERE a = 1 RETURNING ctid",
+    ] {
+        let error = viewer
+            .simple_query(sql)
+            .await
+            .err()
+            .map(|error| error.to_string());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains(r#"column "ctid" does not exist"#)),
+            "{sql} answered {error:?}"
+        );
+    }
+    // The view's own columns still return, through every spelling, and `*`
+    // still expands to exactly them.
+    let mut owner = engine.connect();
+    assert!(
+        query(
+            &mut owner,
+            "UPDATE v SET b = 'R1' WHERE a = 1 RETURNING *, v.a, old.b, new.b"
+        )
+        .await
+            == vec!["1,R1,1,r1,R1".to_string()]
+    );
+    // And nothing the refusals ran against was written.
+    assert!(
+        query(&mut owner, "SELECT a, b, c FROM base_tbl ORDER BY a").await
+            == vec![
+                "1,R1,10".to_string(),
+                "2,r2,20".to_string(),
+                "3,r3,30".to_string()
+            ]
+    );
+}

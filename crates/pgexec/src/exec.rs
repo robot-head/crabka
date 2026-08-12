@@ -4846,6 +4846,7 @@ async fn partitioned_insert(
                 old: None,
                 source: Vec::new(),
                 action: None,
+                identity: NO_ROW_IDENTITY,
             });
         }
         ops.push(crabka_pgkv::WriteOp::Put {
@@ -5117,6 +5118,10 @@ fn rewrite_view_write(
                     "multiple assignments to same column \"{repeated}\""
                 )));
             }
+            // Judged before substitution, on the list the user wrote: after it
+            // every reference names a base column, including the ones `*`
+            // expanded to, and there is nothing left to tell apart.
+            rewrite.reject_foreign_returning(returning.as_ref(), &qualifier, true)?;
             // An INSERT carries no alias, so its RETURNING has to name the
             // relation underneath rather than the view the user wrote.
             let returning =
@@ -5157,6 +5162,7 @@ fn rewrite_view_write(
             ..
         } => {
             check_names(&filter.iter().collect::<Vec<_>>(), from.is_empty())?;
+            rewrite.reject_foreign_returning(returning.as_ref(), &qualifier, from.is_empty())?;
             let assignments = assignments
                 .iter()
                 .map(|assignment| {
@@ -5189,6 +5195,7 @@ fn rewrite_view_write(
             ..
         } => {
             check_names(&filter.iter().collect::<Vec<_>>(), using.is_empty())?;
+            rewrite.reject_foreign_returning(returning.as_ref(), &qualifier, using.is_empty())?;
             Statement::Delete {
                 table: target,
                 only: true,
@@ -5399,6 +5406,7 @@ async fn execute_view_dml(
                         old: None,
                         source: Vec::new(),
                         action: None,
+                        identity: NO_ROW_IDENTITY,
                     });
                 }
             }
@@ -5432,7 +5440,9 @@ async fn execute_view_dml(
             };
             let target_rows =
                 build_from(&read, std::slice::from_ref(&target_expr), None, None, None)?.rows;
-            let source = DmlSource::build(write_ctx, ctes, &view, qualifier, from)?;
+            // `None`: a view's rows come out of its own query and carry no
+            // storage identity, so the target offers no system column.
+            let source = DmlSource::build(write_ctx, ctes, &view, qualifier, from, None)?;
             let bound_filter = source.bind_filter(filter.as_ref())?;
             let targets = resolve_assignments(write_ctx, ctes, &view, assignments)?;
             let spec = ReturningSpec::new(
@@ -5449,7 +5459,9 @@ async fn execute_view_dml(
             let mut returned = Vec::new();
             let mut count = 0_u64;
             for old in target_rows {
-                let Some(joined) = source.first_match(bound_filter.as_ref(), &old, ctx)? else {
+                let Some(joined) =
+                    source.first_match(bound_filter.as_ref(), &old, NO_ROW_IDENTITY, ctx)?
+                else {
                     continue;
                 };
                 let proposed = apply_assignments(&view, &targets, &source.scope, &joined, ctx)?;
@@ -5472,6 +5484,7 @@ async fn execute_view_dml(
                         result,
                         old,
                         joined[view.columns.len()..].to_vec(),
+                        NO_ROW_IDENTITY,
                     ));
                 }
             }
@@ -5504,7 +5517,8 @@ async fn execute_view_dml(
             };
             let target_rows =
                 build_from(&read, std::slice::from_ref(&target_expr), None, None, None)?.rows;
-            let source = DmlSource::build(write_ctx, ctes, &view, qualifier, using)?;
+            // `None`, for the reason the view `UPDATE` above passes it.
+            let source = DmlSource::build(write_ctx, ctes, &view, qualifier, using, None)?;
             let bound_filter = source.bind_filter(filter.as_ref())?;
             let spec = ReturningSpec::new(
                 &view,
@@ -5516,7 +5530,9 @@ async fn execute_view_dml(
             let mut returned = Vec::new();
             let mut count = 0_u64;
             for old in target_rows {
-                let Some(joined) = source.first_match(bound_filter.as_ref(), &old, ctx)? else {
+                let Some(joined) =
+                    source.first_match(bound_filter.as_ref(), &old, NO_ROW_IDENTITY, ctx)?
+                else {
                     continue;
                 };
                 let Some(result) = crate::trigger::fire_instead_row(
@@ -5538,6 +5554,7 @@ async fn execute_view_dml(
                         old: Some(result),
                         source: joined[view.columns.len()..].to_vec(),
                         action: None,
+                        identity: NO_ROW_IDENTITY,
                     });
                 }
             }
@@ -5566,6 +5583,10 @@ async fn execute_write_body(
     writes: &mut StatementWrites,
     reach: Reach,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    // What this statement asks its target to carry. Taken from the text the
+    // session wrote and not from `resolved`, because folding a subquery to the
+    // value it stands for can only remove a reference, never add one.
+    let refs = &crate::scope::StatementRefs::of_write(stmt);
     let resolved = resolve_write_subqueries(write_ctx, ctes, stmt)?;
     let stmt = &resolved;
     let resolution = write_ctx.eval_ctx.resolution();
@@ -5649,6 +5670,14 @@ async fn execute_write_body(
             }
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
             let fk_ctx = crate::fk::StatementFkContext::resolve(catalog_kv, &t)?;
+            // An `INSERT` reaches no `DmlSource`, so it builds the one thing a
+            // `DmlSource` would have given it: the target's own scope, with the
+            // system columns the statement asked for appended after it. The
+            // values go in each returned row's source block, which is where the
+            // joined paths put theirs.
+            let mut returning_scope = Scope::single(&t, &t.name.name);
+            let stamp = crate::scope::SystemColumns::of(Some(refs), &t).stamp(t.id)?;
+            stamp.extend_scope(&mut returning_scope, &t.name.name);
             let supplied = WriteContext::modified_columns(&t, &target_idx);
             let insert_check = write_ctx.row_check(
                 &t,
@@ -5752,7 +5781,14 @@ async fn execute_write_body(
                             let Some(next) = updated else { continue };
                             writes.claim_row(t.id, holder_rowid);
                             if returning.is_some() {
-                                returned_rows.push(ReturnedRow::updated(next, cur_row, Vec::new()));
+                                let mut system = Vec::new();
+                                stamp.extend_row(&mut system, holder_rowid);
+                                returned_rows.push(ReturnedRow::updated(
+                                    next,
+                                    cur_row,
+                                    system,
+                                    holder_rowid,
+                                ));
                             }
                             inserted_or_updated += 1;
                             continue;
@@ -5773,11 +5809,14 @@ async fn execute_write_body(
                     writes.fk_checks.after_insert(&fk_ctx, rowid, &full)?;
                 }
                 if returning.is_some() {
+                    let mut system = Vec::new();
+                    stamp.extend_row(&mut system, rowid);
                     returned_rows.push(ReturnedRow {
                         new: Some(full.clone()),
                         old: None,
-                        source: Vec::new(),
+                        source: system,
                         action: None,
+                        identity: rowid,
                     });
                 }
                 ops.push(crabka_pgkv::WriteOp::Put {
@@ -5797,7 +5836,13 @@ async fn execute_write_body(
                 inserted_or_updated += 1;
             }
             let tag = format!("INSERT 0 {inserted_or_updated}");
-            let spec = ReturningSpec::new(&t, &t.name.name, returning.as_ref(), None, false)?;
+            let spec = ReturningSpec::new(
+                &t,
+                &t.name.name,
+                returning.as_ref(),
+                Some(&returning_scope),
+                false,
+            )?;
             Ok((spec.outcome(tag, returned_rows, ctx)?, ops))
         }
         Statement::Update {
@@ -5815,7 +5860,7 @@ async fn execute_write_body(
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
             let fk_ctx = crate::fk::StatementFkContext::resolve(catalog_kv, &t)?;
             let qualifier = table_qualifier(&t, alias);
-            let source = DmlSource::build(write_ctx, ctes, &t, qualifier, from)?;
+            let source = DmlSource::build(write_ctx, ctes, &t, qualifier, from, Some(refs))?;
             let bound_filter = source.bind_filter(filter.as_ref())?;
             let targets = resolve_assignments(write_ctx, ctes, &t, assignments)?;
             let spec = ReturningSpec::new(
@@ -5855,7 +5900,7 @@ async fn execute_write_body(
                 //    that don't match the WHERE clause (avoids over-locking and
                 //    restores row-level write concurrency for different rows).
                 if source
-                    .first_match(bound_filter.as_ref(), &scanned_row, ctx)?
+                    .first_match(bound_filter.as_ref(), &scanned_row, rowid, ctx)?
                     .is_none()
                 {
                     continue;
@@ -5883,7 +5928,9 @@ async fn execute_write_body(
                 //    A joined UPDATE updates each target row once, using the first
                 //    source row it matches (PostgreSQL leaves the choice
                 //    unspecified when several match).
-                let Some(joined) = source.first_match(bound_filter.as_ref(), &cur_row, ctx)? else {
+                let Some(joined) =
+                    source.first_match(bound_filter.as_ref(), &cur_row, rowid, ctx)?
+                else {
                     continue; // no longer matches the WHERE clause
                 };
                 // 5. PostgreSQL modifies a given row at most once per command, so
@@ -5939,6 +5986,7 @@ async fn execute_write_body(
                         next,
                         cur_row,
                         joined[t.columns.len()..].to_vec(),
+                        rowid,
                     ));
                 }
                 n += 1;
@@ -5968,7 +6016,7 @@ async fn execute_write_body(
             )?;
             let is_truncate = writes.truncate_set.contains(&t.id);
             let qualifier = table_qualifier(&t, alias);
-            let source = DmlSource::build(write_ctx, ctes, &t, qualifier, using)?;
+            let source = DmlSource::build(write_ctx, ctes, &t, qualifier, using, Some(refs))?;
             let bound_filter = source.bind_filter(filter.as_ref())?;
             let spec = ReturningSpec::new(
                 &t,
@@ -6004,7 +6052,7 @@ async fn execute_write_body(
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause.
                 if source
-                    .first_match(bound_filter.as_ref(), &scanned_row, ctx)?
+                    .first_match(bound_filter.as_ref(), &scanned_row, rowid, ctx)?
                     .is_none()
                 {
                     continue;
@@ -6027,7 +6075,9 @@ async fn execute_write_body(
                     continue; // already deleted by a concurrent committed txn
                 };
                 // 4. Re-check filter on the (possibly re-found) current row.
-                let Some(joined) = source.first_match(bound_filter.as_ref(), &cur_row, ctx)? else {
+                let Some(joined) =
+                    source.first_match(bound_filter.as_ref(), &cur_row, rowid, ctx)?
+                else {
                     continue; // no longer matches the WHERE clause
                 };
                 // 5. A row another part of this statement already updated or
@@ -6068,6 +6118,7 @@ async fn execute_write_body(
                         old: Some(cur_row.clone()),
                         source: joined[t.columns.len()..].to_vec(),
                         action: None,
+                        identity: rowid,
                     });
                 }
                 apply_locked_row_delete(
@@ -6205,29 +6256,53 @@ fn table_qualifier<'a>(table: &'a Table, alias: &'a Option<String>) -> &'a str {
 /// whole statement. The plain (unjoined) form is the degenerate case with one
 /// empty source row, so both share one code path.
 struct DmlSource {
-    /// Target columns first, then the source relation's columns.
+    /// Target columns first, then the source relation's columns, then the
+    /// target's hidden system columns.
+    ///
+    /// The system columns go last rather than beside the target's own, which is
+    /// where every scan puts them, because `RETURNING` reads this row as two
+    /// blocks: the target's declared columns, which it replaces with the
+    /// statement's post-image, and everything after them, which it keeps. A
+    /// system column in the first block would be overwritten by the post-image
+    /// and project some other column's value — a `ctid` that silently reads as
+    /// the first column of the row.
     scope: Scope,
     rows: Vec<Vec<Datum>>,
     joined: bool,
+    /// The target's system columns and the values they take. Stamped onto each
+    /// candidate row by [`Self::first_match`], from the identity the write loop
+    /// holds — never from the row, which does not carry one.
+    stamp: crate::scope::SystemStamp,
 }
 
 impl DmlSource {
+    /// `refs` is what the statement asks the target to carry, and `None` is a
+    /// target that has no storage identity to answer with — the view-write
+    /// path, whose rows come out of the view's own query. A view is otherwise
+    /// an ordinary `Table` here, so left to
+    /// [`crate::scope::SystemColumns::of`] it would be offered a `ctid` it
+    /// cannot produce a value for.
     fn build(
         write_ctx: &WriteContext<'_>,
         ctes: &crate::cte::CteContext,
         table: &Table,
         qualifier: &str,
         from: &[crabka_pgparser::ast::TableExpr],
+        refs: Option<&crate::scope::StatementRefs>,
     ) -> Result<Self, ExecError> {
         let mut scope = Scope::single(table, qualifier);
+        let stamp = crate::scope::SystemColumns::of(refs, table).stamp(table.id)?;
         if from.is_empty() {
+            stamp.extend_scope(&mut scope, qualifier);
             return Ok(Self {
                 scope,
                 rows: vec![Vec::new()],
                 joined: false,
+                stamp,
             });
         }
-        let read = write_ctx.read_ctx(ctes);
+        let base = write_ctx.read_ctx(ctes);
+        let read = base.with_refs_opt(refs);
         // The target relation is not in the FROM/USING items' scope — SQL puts
         // it out of their reach, and `LATERAL` cannot bring it back — so a name
         // only the target supplies is that prohibition, not a missing entry.
@@ -6239,10 +6314,12 @@ impl DmlSource {
         let rel = build_from(&read, from, None, None, None)
             .map_err(|error| explain_outer_reference(error, &scope, kind))?;
         scope.columns.extend(rel.scope.columns);
+        stamp.extend_scope(&mut scope, qualifier);
         Ok(Self {
             scope,
             rows: rel.rows,
             joined: true,
+            stamp,
         })
     }
 
@@ -6267,16 +6344,24 @@ impl DmlSource {
     /// The first source row that satisfies `filter` for this target row, as the
     /// combined row expressions resolve against. `None` means the target row is
     /// not affected by the statement.
+    ///
+    /// `identity` is the target row's storage identity — its rowid — which the
+    /// system columns are derived from. It is what makes a `ctid` in a `WHERE`
+    /// name the row the statement is about to write, and not some other: the
+    /// write loop reads it from the same candidate it is holding the row of,
+    /// and passes both here together.
     fn first_match(
         &self,
         filter: Option<&crate::bind::BoundExpr>,
         target_row: &[Datum],
+        identity: u64,
         ctx: &crate::clock::EvalCtx,
     ) -> Result<Option<Vec<Datum>>, ExecError> {
         let filter = filter.map(crate::bind::BoundExpr::expr);
         for source_row in &self.rows {
             let mut combined = target_row.to_vec();
             combined.extend_from_slice(source_row);
+            self.stamp.extend_row(&mut combined, identity);
             if row_matches(filter, &self.scope, &combined, ctx)? {
                 return Ok(Some(combined));
             }
@@ -6319,9 +6404,17 @@ fn resolve_assignments<'a>(
             .targets
             .iter()
             .map(|column| {
-                table
-                    .column_index(column)
-                    .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
+                table.column_index(column).ok_or_else(|| {
+                    // A system column is not unknown, it is unassignable, and
+                    // `PostgreSQL` separates the two. A relation that declares
+                    // a column of the name — only a view may — resolves it here
+                    // and never reaches this arm.
+                    if crate::scope::is_system_column(column) {
+                        ExecError::AssignSystemColumn(column.clone())
+                    } else {
+                        ExecError::UndefinedColumn(column.clone())
+                    }
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         match &assignment.value {
@@ -6467,15 +6560,28 @@ struct ReturnedRow {
     source: Vec<Datum>,
     /// What `merge_action()` reports for this row; `None` outside `MERGE`.
     action: Option<&'static str>,
+    /// The storage identity both images describe, which their system columns
+    /// are derived from.
+    ///
+    /// One value for both, because an `UPDATE` here writes the new version
+    /// under the row's existing rowid: the row keeps its `ctid`, so
+    /// `RETURNING old.ctid, new.ctid` answers the same value twice.
+    /// `PostgreSQL`'s update writes a new heap tuple and answers two — see
+    /// [`crate::scope::row_ctid`], which says why nothing may depend on either.
+    ///
+    /// [`NO_ROW_IDENTITY`] where the write path has none to give, which is
+    /// every path whose target stores no row of its own.
+    identity: u64,
 }
 
 impl ReturnedRow {
-    fn updated(new: Vec<Datum>, old: Vec<Datum>, source: Vec<Datum>) -> Self {
+    fn updated(new: Vec<Datum>, old: Vec<Datum>, source: Vec<Datum>, identity: u64) -> Self {
         Self {
             new: Some(new),
             old: Some(old),
             source,
             action: None,
+            identity,
         }
     }
 }
@@ -6499,6 +6605,13 @@ struct ReturningSpec {
     new_offset: usize,
     /// `MERGE` appends one `merge_action()` column after the image blocks.
     merge: bool,
+    /// The system columns each `OLD`/`NEW` image carries, which
+    /// [`Self::outcome`] appends to the image rows the write path hands back.
+    ///
+    /// The same columns the target's own block carries, because `old.ctid` and
+    /// a bare `ctid` name the same thing here: one row, read through two
+    /// spellings.
+    images: crate::scope::SystemStamp,
     /// The target relation, kept only when it has a `VIRTUAL` generated column.
     /// The post-image a write hands back carries the NULL placeholder that goes
     /// to storage, so `RETURNING` has to produce the value the next reader would
@@ -6529,6 +6642,7 @@ impl ReturningSpec {
                 old_offset: 0,
                 new_offset: 0,
                 merge,
+                images: crate::scope::SystemColumns::default().stamp(table.id)?,
                 target: None,
                 active: false,
             });
@@ -6572,10 +6686,14 @@ impl ReturningSpec {
             (!taken("new") && returning.old_alias.as_deref() != Some("new"))
                 .then(|| "new".to_string())
         });
+        // The images carry exactly the system columns the visible target block
+        // does, read off the scope the caller built rather than re-derived, so
+        // an image can never offer a column the row has no value for.
+        let images = system_columns_of(&scope, qualifier).stamp(table.id)?;
         let old_offset = scope.width();
-        scope.columns.extend(image_bindings(table, "old"));
+        scope.columns.extend(image_bindings(table, "old", &images));
         let new_offset = scope.width();
-        scope.columns.extend(image_bindings(table, "new"));
+        scope.columns.extend(image_bindings(table, "new", &images));
         if merge {
             scope.columns.push(ColumnBinding {
                 exposure: Exposure::Output,
@@ -6663,6 +6781,7 @@ impl ReturningSpec {
             old_offset,
             new_offset,
             merge,
+            images,
             target: has_virtual_generated(table).then(|| Box::new(table.clone())),
             active: true,
         })
@@ -6686,15 +6805,25 @@ impl ReturningSpec {
                         expand_virtual_generated_row(target, image, ctx)?;
                     }
                 }
-                let nulls = vec![Datum::Null; width];
                 // The visible target columns show the post-image, or the
-                // pre-image for a DELETE, which is what PostgreSQL projects.
+                // pre-image for a DELETE, which is what PostgreSQL projects —
+                // and only the relation's DECLARED columns. The visible block's
+                // own system columns arrive in `source`, where the write paths
+                // put them, so the images must still be the width they were
+                // written at when this copy is taken.
                 let mut out = row
                     .new
                     .clone()
                     .or_else(|| row.old.clone())
-                    .unwrap_or_else(|| nulls.clone());
+                    .unwrap_or_else(|| vec![Datum::Null; width - self.images.width()]);
                 out.extend(row.source);
+                // Each image then takes its own copy of the system columns, so
+                // `old.ctid` reads whether or not the visible block asked for a
+                // bare `ctid` as well.
+                for image in [&mut row.old, &mut row.new].into_iter().flatten() {
+                    self.images.extend_row(image, row.identity);
+                }
+                let nulls = vec![Datum::Null; width];
                 out.extend(row.old.unwrap_or_else(|| nulls.clone()));
                 out.extend(row.new.unwrap_or(nulls));
                 if self.merge {
@@ -6703,7 +6832,8 @@ impl ReturningSpec {
                 Ok(out)
             })
             .collect::<Result<_, ExecError>>()?;
-        let (fields, out_exprs, tys) = resolve_projection(&self.items, &self.scope)?;
+        let (mut fields, out_exprs, tys) = resolve_projection(&self.items, &self.scope)?;
+        show_image_bindings_by_their_column_names(&mut fields);
         let projected = project_rows(&out_exprs, &self.scope, &combined, ctx)?;
         let scope = Scope {
             columns: fields
@@ -6731,17 +6861,71 @@ fn image_binding_name(image: &str, column: &str) -> String {
     format!("{IMAGE_BINDING_PREFIX}{image}.{column}")
 }
 
-fn image_bindings(table: &Table, image: &str) -> Vec<ColumnBinding> {
+/// Rename any output field that derived its name from an image binding to the
+/// column that binding names.
+///
+/// A bare `old.v` has its output name pinned from the spelling the user wrote,
+/// but anything built around one does not: `RETURNING old.tableoid::regclass`
+/// derives its name from the expression the rewrite left behind, so the header
+/// read `\u{1}old.tableoid` — an internal name, with a control character in it,
+/// on the wire. `PostgreSQL` names that column `tableoid`, which is what the
+/// binding was made from.
+fn show_image_bindings_by_their_column_names(fields: &mut [FieldDescription]) {
+    for field in fields {
+        if let Some(rest) = field.name.strip_prefix(IMAGE_BINDING_PREFIX) {
+            field.name = rest
+                .split_once('.')
+                .map_or_else(|| rest.to_string(), |(_, column)| column.to_string());
+        }
+    }
+}
+
+/// The bindings one `OLD`/`NEW` image contributes: the relation's declared
+/// columns, then the system columns `system` says the image carries.
+///
+/// The system bindings keep [`Exposure::Output`], unlike the visible block's:
+/// nothing expands an image binding by name — `old.*` goes through
+/// [`image_wildcard`], which lists the declared columns itself — so the
+/// exposure has no expansion to be hidden from, and marking them otherwise
+/// would only make `old.ctid` unreachable.
+fn image_bindings(
+    table: &Table,
+    image: &str,
+    system: &crate::scope::SystemStamp,
+) -> Vec<ColumnBinding> {
+    let mut scope = Scope::empty();
+    system.extend_scope(&mut scope, image);
     table
         .columns
         .iter()
-        .map(|c| ColumnBinding {
+        .map(|c| (c.name.clone(), c.ty))
+        .chain(scope.columns.into_iter().map(|c| (c.name, c.ty)))
+        .map(|(name, ty)| ColumnBinding {
             exposure: Exposure::Output,
             qualifier: None,
-            name: image_binding_name(image, &c.name),
-            ty: c.ty,
+            name: image_binding_name(image, &name),
+            ty,
         })
         .collect()
+}
+
+/// The system columns `scope`'s block for `qualifier` carries.
+///
+/// Read back off the scope rather than re-derived from the statement, so the
+/// two can never disagree: the caller that built the scope already decided
+/// which columns the rows under it hold.
+fn system_columns_of(scope: &Scope, qualifier: &str) -> crate::scope::SystemColumns {
+    let has = |name: &str| {
+        scope.columns.iter().any(|c| {
+            c.exposure == Exposure::SystemColumn
+                && c.qualifier.as_deref() == Some(qualifier)
+                && c.name == name
+        })
+    };
+    crate::scope::SystemColumns {
+        tableoid: has(crate::scope::TABLEOID_COLUMN),
+        ctid: has(crate::scope::CTID_COLUMN),
+    }
 }
 
 fn image_wildcard(table: &Table, image: &str) -> Vec<SelectItem> {
@@ -6800,11 +6984,19 @@ fn rewrite_image_refs(expr: &Expr, aliases: &ImageAliases<'_>) -> Expr {
             match image {
                 // An image reference to a column the target does not have keeps
                 // its readable spelling, so resolution reports 42703 against
-                // `old.nope` rather than the internal binding name.
-                Some(image) if aliases.table.column_index(name).is_some() => Expr::Column {
-                    table: None,
-                    name: image_binding_name(image, name),
-                },
+                // `old.nope` rather than the internal binding name. A system
+                // column is not among the target's declared columns and is
+                // still an image column, so it is admitted by name — and left
+                // to resolve, or not, against the bindings the image laid down.
+                Some(image)
+                    if aliases.table.column_index(name).is_some()
+                        || crate::scope::is_system_column(name) =>
+                {
+                    Expr::Column {
+                        table: None,
+                        name: image_binding_name(image, name),
+                    }
+                }
                 Some(_) => Expr::Column {
                     table: None,
                     name: format!("{qualifier}.{name}"),
@@ -7143,6 +7335,7 @@ async fn execute_merge(
                 old: None,
                 source: source_row.clone(),
                 action: Some("INSERT"),
+                identity: NO_ROW_IDENTITY,
             });
         }
     }
@@ -7362,6 +7555,7 @@ async fn apply_merge_row_action(
                 old: Some(cur_row),
                 source,
                 action: Some("UPDATE"),
+                identity: NO_ROW_IDENTITY,
             }))
         }
         MergeAction::Delete => {
@@ -7421,6 +7615,7 @@ async fn apply_merge_row_action(
                 old: Some(cur_row),
                 source,
                 action: Some("DELETE"),
+                identity: NO_ROW_IDENTITY,
             }))
         }
         MergeAction::DoNothing | MergeAction::Insert { .. } => Ok(None),
@@ -15862,20 +16057,14 @@ fn scan_stored_relation(
         return partitioned_scan(read_ctx, t, qualifier, permit);
     }
     let mut scope = Scope::single(t, qualifier);
-    // The hidden columns this scan carries, decided once for the scope and for
-    // every row of it together.
-    let system = crate::scope::SystemColumns::of(read_ctx.refs, t);
-    // The oid this relation stamps on every row it yields, when the statement
-    // spells `tableoid` and nothing otherwise. Taken once, before the rows: it
-    // is a catalog fact about the relation, not about any row of it. `ctid` is
-    // the opposite — a fact about the row — so it is read off each row where
-    // that row is decoded, in `scanned_rows`.
-    let stamp = system
-        .tableoid
-        .then(|| crate::catalog_rel::table_relation_oid(t.id))
-        .transpose()?
-        .map(Datum::Int4);
-    system.extend_scope(&mut scope, qualifier);
+    // The hidden columns this scan carries and the values they take, decided
+    // once for the scope and for every row of it together. The relation's oid
+    // is resolved here, before the rows: it is a catalog fact about the
+    // relation, not about any row of it. `ctid` is the opposite — a fact about
+    // the row — so it is read off each row where that row is decoded, in
+    // `scanned_rows`.
+    let stamp = crate::scope::SystemColumns::of(read_ctx.refs, t).stamp(t.id)?;
+    stamp.extend_scope(&mut scope, qualifier);
     // SP40: a foreign table reads through the registered scanner, not the local
     // MVCC version store. `build_from` materializes BEFORE WHERE, so this scan
     // runs even for `WHERE false` — there is no skip path.
@@ -15904,7 +16093,7 @@ fn scan_stored_relation(
         return Ok(crate::rls::RawScan::of_relation(
             t,
             scope,
-            stamped(rows, stamp.as_ref()),
+            stamped(rows, &stamp),
         ));
     }
     let default_scan_plan = crate::plan_dist::DistributedScanPlan::default();
@@ -15930,7 +16119,7 @@ fn scan_stored_relation(
     if let Some(unrestricted) = crate::rls::UnrestrictedTable::from_decision(permit, &decision, t)
         && let Some(rows) = try_scan_with_local_index(read_ctx, unrestricted, distributed_plan)?
     {
-        let rows = scanned_rows(read_ctx, t, rows, system, stamp.as_ref())?;
+        let rows = scanned_rows(read_ctx, t, rows, &stamp)?;
         return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
     }
     let scan_request = ScanRequest {
@@ -15977,7 +16166,7 @@ fn scan_stored_relation(
         }
         Err(error) => return Err(error),
     };
-    let rows = scanned_rows(read_ctx, t, rows, system, stamp.as_ref())?;
+    let rows = scanned_rows(read_ctx, t, rows, &stamp)?;
     Ok(crate::rls::RawScan::of_relation(t, scope, rows))
 }
 
@@ -15994,8 +16183,7 @@ fn scanned_rows(
     read_ctx: &crate::subquery::SubCtx<'_>,
     t: &Table,
     scanned: Vec<ScannedRow>,
-    system: crate::scope::SystemColumns,
-    stamp: Option<&Datum>,
+    stamp: &crate::scope::SystemStamp,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows: Vec<Vec<Datum>> = Vec::with_capacity(scanned.len());
     let mut identities: Vec<u64> = Vec::with_capacity(scanned.len());
@@ -16006,30 +16194,34 @@ fn scanned_rows(
     resolve_scanned_regclass(read_ctx.catalog_kv, t, &mut rows)?;
     expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
     for (row, identity) in rows.iter_mut().zip(identities) {
-        if let Some(oid) = stamp {
-            row.push(oid.clone());
-        }
-        if system.ctid {
-            row.push(crate::scope::row_ctid(identity));
-        }
+        stamp.extend_row(row, identity);
     }
     Ok(rows)
 }
 
-/// `rows`, each extended by `stamp` when the scan carries one.
+/// `rows`, each extended by the columns `stamp` carries.
 ///
 /// The foreign path's half of [`scanned_rows`], for rows a remote system
-/// returned with no identity attached — which is why no `ctid` is appended
-/// here, and why [`crate::scope::SystemColumns::of`] carries none for a foreign
-/// table.
-fn stamped(mut rows: Vec<Vec<Datum>>, stamp: Option<&Datum>) -> Vec<Vec<Datum>> {
-    if let Some(oid) = stamp {
-        for row in &mut rows {
-            row.push(oid.clone());
-        }
+/// returned with no identity attached — which is why the identity passed here
+/// is a placeholder no row is stamped with, and why
+/// [`crate::scope::SystemColumns::of`] carries no `ctid` for a foreign table.
+fn stamped(mut rows: Vec<Vec<Datum>>, stamp: &crate::scope::SystemStamp) -> Vec<Vec<Datum>> {
+    for row in &mut rows {
+        stamp.extend_row(row, NO_ROW_IDENTITY);
     }
     rows
 }
+
+/// The identity a relation that stores no row of its own passes to
+/// [`crate::scope::SystemStamp::extend_row`].
+///
+/// It is never read: such a relation is refused a `ctid` by
+/// [`crate::scope::SystemColumns::of`], which is the one column the identity
+/// feeds. Zero rather than any other number because it is the identity
+/// [`crate::scope::row_ctid`] documents as never handed out, so a value derived
+/// from it would be visibly the invalid item pointer rather than a plausible
+/// row.
+const NO_ROW_IDENTITY: u64 = 0;
 
 /// An ordinal no row has, which [`permuted_row`] reads as NULL.
 const NO_SUCH_COLUMN: usize = usize::MAX;
@@ -23512,8 +23704,26 @@ pub(crate) fn describe_returning(
     // The range-table entry a DML statement adds is aliased to the relation's
     // BARE name, never its schema-qualified spelling: `INSERT INTO s.t …
     // RETURNING t.c` binds in PostgreSQL, and `s.t.c` does not even parse there.
-    let spec = ReturningSpec::new(&table, &table.name.name, Some(returning), None, merge)?;
-    let (fields, _exprs, _tys) = resolve_projection(&spec.items, &spec.scope)?;
+    //
+    // The system columns come off the `RETURNING` list alone, which is the only
+    // clause this path is given. That is enough: describing a statement means
+    // naming the columns it will project, and only what the list spells is
+    // projected.
+    let mut refs = crate::scope::StatementRefs::default();
+    refs.add_returning_items(&returning.items);
+    let mut scope = Scope::single(&table, &table.name.name);
+    crate::scope::SystemColumns::of(Some(&refs), &table)
+        .stamp(table.id)?
+        .extend_scope(&mut scope, &table.name.name);
+    let spec = ReturningSpec::new(
+        &table,
+        &table.name.name,
+        Some(returning),
+        Some(&scope),
+        merge,
+    )?;
+    let (mut fields, _exprs, _tys) = resolve_projection(&spec.items, &spec.scope)?;
+    show_image_bindings_by_their_column_names(&mut fields);
     Ok(fields)
 }
 
