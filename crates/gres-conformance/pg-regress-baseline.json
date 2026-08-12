@@ -78,12 +78,6 @@
       "hunks": 9,
       "sha256": "eee15fc0f920965f67e91aeb67aeff43e019662e5c564be1b24d91d29355f1d7"
     },
-    "char": {
-      "changed_lines": 36,
-      "expected": "char.out",
-      "hunks": 2,
-      "sha256": "6a94abcd9aae9018ec08cedd192fa9fda19da30f8ac45547b8181491f620b2c7"
-    },
     "cluster": {
       "changed_lines": 101,
       "expected": "cluster.out",
@@ -1135,7 +1129,7 @@
       "sha256": "c0f90338e27ec100f860eb0891f6f32fdb6155e1f7d302e4890c2b5adfca1068"
     }
   },
-  "passed": 42,
+  "passed": 43,
   "postgres_tag": "REL_18_4",
   "schedule": [
     "test_setup",
