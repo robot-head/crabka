@@ -10976,6 +10976,8 @@ impl ParamBinder<'_> {
                         }
                     }
                 } else if let crabka_pgparser::ast::InsertSource::Query(query) = source {
+                    let target_types = self.insert_target_types(&name, columns.as_ref())?;
+                    self.bind_untyped_query_params(query, &target_types)?;
                     self.bind_query_expr(query)?;
                 }
                 if on_conflict.is_some() || returning.is_some() {
@@ -11155,6 +11157,58 @@ impl ParamBinder<'_> {
         }
         if let Some(filter) = filter {
             self.bind_expr_with_scope(filter, Some(ColumnType::Bool), &scope)?;
+        }
+        Ok(())
+    }
+
+    /// Give a bare, undeclared `$n` in an `INSERT`'s feeding query the target
+    /// column's type.
+    ///
+    /// `transformInsertStmt` takes a target entry that is a `Const` **or** a
+    /// `Param` whose type is `unknown` and types it by the column it will land
+    /// in. The `Const` half is handled downstream by
+    /// `exec::unknown_literal_columns`, which can look at the statement after
+    /// binding because a written literal is still an `Expr::StringLiteral`
+    /// there. The parameter half cannot wait: binding is what turns `$1` into a
+    /// `Const`, and `bound_param_expr` falls back to `text` when the client
+    /// declared no type and no expected type reached it -- after which nothing
+    /// can tell an undeclared parameter from one the client called `text`.
+    ///
+    /// Only an *undeclared* parameter is retyped. A client that said `text` has
+    /// said what it means, and `text` into a `point` column stays 42804, which
+    /// is what `PostgreSQL` answers for both spellings.
+    ///
+    /// Deliberately narrow: only a bare `$n` at the top level of a plain
+    /// `SELECT`'s projection. A set operation has to agree on its own column
+    /// types before the target is considered, and an expression *containing* a
+    /// parameter is no longer an `unknown` for this rule.
+    fn bind_untyped_query_params(
+        &self,
+        query: &mut crabka_pgparser::ast::QueryExpr,
+        target_types: &[ColumnType],
+    ) -> Result<(), PgError> {
+        use crabka_pgparser::ast::{QueryBody, SelectItem, SetExpr};
+        let SetExpr::Query(QueryBody::Select(select)) = &mut query.body else {
+            return Ok(());
+        };
+        for (idx, item) in select.projection.iter_mut().enumerate() {
+            let SelectItem::Expr { expr, .. } = item else {
+                continue;
+            };
+            let Expr::Param(number) = expr else {
+                continue;
+            };
+            let index = param_index(*number)?;
+            if self
+                .params
+                .get(index)
+                .is_none_or(|param| param.type_oid.is_some())
+            {
+                continue;
+            }
+            if let Some(ty) = target_types.get(idx).copied() {
+                self.bind_expr(expr, Some(ty))?;
+            }
         }
         Ok(())
     }
