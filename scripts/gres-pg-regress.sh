@@ -441,6 +441,23 @@ main() {
         return 2
     fi
 
+    # A full disk does not fail this run, it corrupts it. psql writes each
+    # result file incrementally and a lost write is silent: the run still
+    # reports ok/not ok for all 231 files, infrastructure-failures.txt stays
+    # empty, and the server log records nothing. What lands is a result file
+    # missing a block from its middle, which reads as a regression in whatever
+    # was being tested. One such run cost a certification and nearly a bad
+    # ratchet. A serial run plus its isolated tree needs roughly 8 GiB, so
+    # refuse to start under 20 GiB rather than produce an artifact that passes
+    # every integrity check and is wrong.
+    local free_kib required_kib=$((20 * 1024 * 1024))
+    free_kib=$(df -Pk "${ROOT_DIR}" | awk 'NR == 2 { print $4 }')
+    if [[ -n "$free_kib" ]] && ((free_kib < required_kib)); then
+        printf 'error: %s GiB free under %s, need 20 GiB: a lost write corrupts a run silently\n' \
+            "$((free_kib / 1024 / 1024))" "$ROOT_DIR" >&2
+        return 1
+    fi
+
     local artifact_root="${GRES_PG_REGRESS_ARTIFACT_DIR:-${ROOT_DIR}/target/pg-regress-runs/$(date -u +%Y%m%dT%H%M%SZ)-$$-${subject}}"
     if [[ -e "$artifact_root" ]]; then
         echo "error: artifact directory already exists: ${artifact_root}" >&2
