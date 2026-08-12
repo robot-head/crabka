@@ -2440,6 +2440,7 @@ jobs:
                         sasl.mechanism=SCRAM-SHA-256
                         sasl.jaas.config=$(cat /etc/crabka/alice/sasl.jaas.config)
                         acks=all
+                        enable.idempotence=false
                         INNER
                         echo "$expected" | \
                           /opt/kafka/bin/kafka-console-producer.sh \
