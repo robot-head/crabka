@@ -24,6 +24,7 @@ use crabka_pgwire::{
     error::{PgError, sqlstate},
 };
 use crabka_units::convert::TimeExt as _;
+use futures::future::join_all;
 use tokio::sync::{Mutex, RwLock};
 use tracing::Instrument as _;
 
@@ -3302,8 +3303,8 @@ struct GatewayPortal {
 /// - [`Self::Open`] covers plain per-range tables. Each write enlists its range
 ///   with `touch_write_range`, which flips `escalated` the moment a *second*
 ///   distinct range joins. `commit_transaction` then settles through the
-///   **global-xid** protocol: `commit_global_transaction`, one `prepare_on_range`
-///   per participant, then the decision. The trace shows `pg.commit_global` and
+///   **global-xid** protocol: `commit_global_transaction`, parallel participant
+///   prepares, then the decision. The trace shows `pg.commit_global` and
 ///   `pg.prepare`.
 /// - [`Self::Timestamp`] covers hash-sharded tables, where one statement's rows
 ///   already straddle ranges. `execute_timestamp_scatter` runs the
@@ -3349,6 +3350,85 @@ struct StatementRoute {
 struct PreparedParticipantRelease {
     range_id: RangeId,
     global_xid: u64,
+}
+
+/// A participant session temporarily removed from the gateway maps so its
+/// independent prepare or release can be polled alongside other participants.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing would allocate on every participant prepare and release"
+)]
+enum ParticipantSession {
+    Local(crabka_pgexec::SqlSession),
+    Remote(RemoteRangeSession),
+}
+
+impl ParticipantSession {
+    async fn prepare(&mut self, range_id: RangeId, global_xid: u64) -> Result<u64, PgError> {
+        let span = telemetry::prepare_span(range_id, global_xid, matches!(self, Self::Local(_)));
+        let result = async {
+            match self {
+                Self::Local(session) => session
+                    .prepare_global_participant(global_xid)
+                    .await
+                    .map_err(ExecError::into_pg),
+                Self::Remote(session) => session.prepare_global(global_xid).await,
+            }
+        }
+        .instrument(span.clone())
+        .await;
+        record_pg_result(&span, &result);
+        result
+    }
+
+    async fn release(
+        &mut self,
+        global_xid: u64,
+        commit: bool,
+        retries: u32,
+        backoff: std::time::Duration,
+    ) -> Result<(), PgError> {
+        for attempt in 0..=retries {
+            let result = match self {
+                Self::Local(session) => if commit {
+                    session.release_global_participant_commit(global_xid).await
+                } else {
+                    session.release_global_participant_abort(global_xid).await
+                }
+                .map_err(ExecError::into_pg),
+                Self::Remote(session) => session.release_global(global_xid, commit).await,
+            };
+            match result {
+                Err(error) if error.code == "55000" && attempt < retries => {
+                    tokio::time::sleep(backoff).await;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("release retry loop always returns")
+    }
+}
+
+/// Restores detached participant sessions even when their async work is canceled.
+struct ParticipantSessions<'a> {
+    sessions: &'a mut BTreeMap<RangeId, crabka_pgexec::SqlSession>,
+    remote_sessions: &'a mut BTreeMap<RangeId, RemoteRangeSession>,
+    participants: Vec<(RangeId, ParticipantSession)>,
+}
+
+impl Drop for ParticipantSessions<'_> {
+    fn drop(&mut self) {
+        for (range_id, session) in std::mem::take(&mut self.participants) {
+            match session {
+                ParticipantSession::Local(session) => {
+                    assert!(self.sessions.insert(range_id, session).is_none());
+                }
+                ParticipantSession::Remote(session) => {
+                    assert!(self.remote_sessions.insert(range_id, session).is_none());
+                }
+            }
+        }
+    }
 }
 
 struct RoutedDmlFences {
@@ -3779,90 +3859,80 @@ impl GatewaySession {
         }
     }
 
-    async fn prepare_on_range(
+    async fn take_participant_sessions(
         &mut self,
-        range_id: RangeId,
-        global_xid: u64,
-    ) -> Result<u64, PgError> {
-        let span =
-            telemetry::prepare_span(range_id, global_xid, self.sessions.contains_key(&range_id));
-        let result = async {
-            if let Some(session) = self.sessions.get_mut(&range_id) {
-                session
-                    .prepare_global_participant(global_xid)
-                    .await
-                    .map_err(ExecError::into_pg)
-            } else {
+        range_ids: &[RangeId],
+    ) -> Result<ParticipantSessions<'_>, PgError> {
+        // Open any missing remote sessions before removing a local session, so
+        // an open failure cannot strand a session outside its owning map.
+        for range_id in range_ids.iter().copied() {
+            if !self.sessions.contains_key(&range_id) {
                 self.ensure_remote_session(range_id).await?;
-                self.remote_sessions
-                    .get_mut(&range_id)
-                    .expect("remote session inserted")
-                    .prepare_global(global_xid)
-                    .await
             }
         }
-        .instrument(span.clone())
-        .await;
-        record_pg_result(&span, &result);
-        result
+
+        let participants = range_ids
+            .iter()
+            .copied()
+            .map(|range_id| {
+                if let Some(session) = self.sessions.remove(&range_id) {
+                    (range_id, ParticipantSession::Local(session))
+                } else {
+                    let session = self
+                        .remote_sessions
+                        .remove(&range_id)
+                        .expect("remote session inserted");
+                    (range_id, ParticipantSession::Remote(session))
+                }
+            })
+            .collect();
+        Ok(ParticipantSessions {
+            sessions: &mut self.sessions,
+            remote_sessions: &mut self.remote_sessions,
+            participants,
+        })
     }
 
-    async fn release_on_range(
+    async fn prepare_participants(
         &mut self,
-        range_id: RangeId,
+        range_ids: &[RangeId],
         global_xid: u64,
-        commit: bool,
-    ) -> Result<(), PgError> {
-        // A release validates the durable decision against the participant's
-        // LOCAL range-0 replica, which follows range 0's log at a polling
-        // cadence — so a release arriving right behind its own decision can
-        // transiently read the decision as still in doubt (55000) until the
-        // replica applies it. Retrying here turns that lag into a short wait
-        // instead of failing a transaction whose decision is already durable;
-        // any other error (and lag beyond the deadline) surfaces unchanged
-        // and leaves the commit-recovery path to resolve it.
+    ) -> Result<Vec<Result<u64, PgError>>, PgError> {
+        let mut participants = self.take_participant_sessions(range_ids).await?;
+        let results = join_all(
+            participants
+                .participants
+                .iter_mut()
+                .map(|(range_id, participant)| participant.prepare(*range_id, global_xid)),
+        )
+        .await;
+        Ok(results)
+    }
+
+    async fn release_participants(
+        &mut self,
+        prepared: &[PreparedParticipantRelease],
+        decision: TransactionDecision,
+    ) -> Result<Vec<Result<(), PgError>>, PgError> {
+        let range_ids: Vec<_> = prepared
+            .iter()
+            .map(|participant| participant.range_id)
+            .collect();
+        let commit = decision == TransactionDecision::Commit;
         let retries = self.inner.runtime_policy.decision_release_lag_retries.get();
         let backoff = self
             .inner
             .runtime_policy
             .decision_release_retry_backoff
             .to_std();
-        let mut attempt = 0;
-        loop {
-            let result = self
-                .release_on_range_once(range_id, global_xid, commit)
-                .await;
-            match result {
-                Err(error) if error.code == "55000" && attempt < retries => {
-                    attempt += 1;
-                    tokio::time::sleep(backoff).await;
-                }
-                result => return result,
-            }
-        }
-    }
-
-    async fn release_on_range_once(
-        &mut self,
-        range_id: RangeId,
-        global_xid: u64,
-        commit: bool,
-    ) -> Result<(), PgError> {
-        if let Some(session) = self.sessions.get_mut(&range_id) {
-            if commit {
-                session.release_global_participant_commit(global_xid).await
-            } else {
-                session.release_global_participant_abort(global_xid).await
-            }
-            .map_err(ExecError::into_pg)
-        } else {
-            self.ensure_remote_session(range_id).await?;
-            let session = self
-                .remote_sessions
-                .get_mut(&range_id)
-                .expect("remote session inserted");
-            session.release_global(global_xid, commit).await
-        }
+        let mut participants = self.take_participant_sessions(&range_ids).await?;
+        let results = join_all(participants.participants.iter_mut().zip(prepared).map(
+            |((_, participant), prepared)| {
+                participant.release(prepared.global_xid, commit, retries, backoff)
+            },
+        ))
+        .await;
+        Ok(results)
     }
 
     async fn parse_inner(
@@ -4563,10 +4633,13 @@ impl GatewaySession {
     ) -> Result<(), GlobalCommitError> {
         let global_xid = self.begin_global_transaction(&touched).await?;
         telemetry::record_global_xid(&tracing::Span::current(), global_xid);
+        let prepare_results = self.prepare_participants(&touched, global_xid).await?;
         let mut prepared = Vec::with_capacity(touched.len());
+        let mut prepare_error = None;
+        let mut adopted_existing = false;
 
-        for range_id in touched.iter().copied() {
-            match self.prepare_on_range(range_id, global_xid).await {
+        for (range_id, result) in touched.iter().copied().zip(prepare_results) {
+            match result {
                 Ok(effective_global_xid) => {
                     self.inner
                         .coordinator
@@ -4577,38 +4650,26 @@ impl GatewaySession {
                         range_id,
                         global_xid: effective_global_xid,
                     });
-                    if effective_global_xid != global_xid {
-                        self.abort_global_transaction(global_xid, &prepared, &touched)
-                            .await
-                            .map_err(|error| GlobalCommitError {
-                                error,
-                                recovery: Some(GlobalCommitRecovery {
-                                    global_xid,
-                                    prepared: prepared.clone(),
-                                    decision: None,
-                                }),
-                            })?;
-                        return Err(PgError::error(
-                            sqlstate::FEATURE_NOT_SUPPORTED,
-                            "global participant adopted an existing in-doubt transaction",
-                        )
-                        .into());
-                    }
+                    adopted_existing |= effective_global_xid != global_xid;
                 }
-                Err(error) => {
-                    self.abort_global_transaction(global_xid, &prepared, &touched)
-                        .await
-                        .map_err(|abort_error| GlobalCommitError {
-                            error: abort_error,
-                            recovery: Some(GlobalCommitRecovery {
-                                global_xid,
-                                prepared: prepared.clone(),
-                                decision: None,
-                            }),
-                        })?;
-                    return Err(error.into());
-                }
+                Err(error) if prepare_error.is_none() => prepare_error = Some(error),
+                Err(_) => {}
             }
+        }
+
+        if let Some(error) = prepare_error {
+            self.abort_global_transaction(global_xid, &prepared, &touched)
+                .await?;
+            return Err(error.into());
+        }
+        if adopted_existing {
+            self.abort_global_transaction(global_xid, &prepared, &touched)
+                .await?;
+            return Err(PgError::error(
+                sqlstate::FEATURE_NOT_SUPPORTED,
+                "global participant adopted an existing in-doubt transaction",
+            )
+            .into());
         }
 
         if self.take_commit_fault_for_testing(GatewayCommitFault::BeforeDecisionAfterPrepare) {
@@ -4725,11 +4786,7 @@ impl GatewaySession {
     ) -> Result<(), GlobalCommitError> {
         let Some(decision) = recovery.decision else {
             self.abort_global_transaction(recovery.global_xid, &recovery.prepared, touched)
-                .await
-                .map_err(|error| GlobalCommitError {
-                    error,
-                    recovery: Some(recovery.clone()),
-                })?;
+                .await?;
             return Ok(());
         };
         self.release_prepared_participants_recoverably(
@@ -4762,24 +4819,24 @@ impl GatewaySession {
         prepared: &[PreparedParticipantRelease],
         decision: TransactionDecision,
     ) -> Result<(), GlobalCommitError> {
-        for (index, participant) in prepared.iter().copied().enumerate() {
-            let result = self
-                .release_on_range(
-                    participant.range_id,
-                    participant.global_xid,
-                    decision == TransactionDecision::Commit,
-                )
-                .await;
-            if let Err(error) = result {
-                return Err(GlobalCommitError {
-                    error,
-                    recovery: Some(GlobalCommitRecovery {
-                        global_xid,
-                        prepared: prepared[index..].to_vec(),
-                        decision: Some(decision),
-                    }),
-                });
-            }
+        let results = self.release_participants(prepared, decision).await?;
+        let failed: Vec<_> = prepared
+            .iter()
+            .copied()
+            .zip(results)
+            .filter_map(|(participant, result)| result.err().map(|error| (participant, error)))
+            .collect();
+        if !failed.is_empty() {
+            let recovery_prepared = failed.iter().map(|(participant, _)| *participant).collect();
+            let (_, error) = failed.into_iter().next().expect("failed is non-empty");
+            return Err(GlobalCommitError {
+                error,
+                recovery: Some(GlobalCommitRecovery {
+                    global_xid,
+                    prepared: recovery_prepared,
+                    decision: Some(decision),
+                }),
+            });
         }
         Ok(())
     }
@@ -4789,18 +4846,31 @@ impl GatewaySession {
         global_xid: u64,
         prepared: &[PreparedParticipantRelease],
         touched: &[RangeId],
-    ) -> Result<(), PgError> {
+    ) -> Result<(), GlobalCommitError> {
+        let unresolved = || GlobalCommitRecovery {
+            global_xid,
+            prepared: prepared.to_vec(),
+            decision: None,
+        };
         let effective_decision = self
             .record_global_decision(global_xid, TransactionDecision::Abort)
-            .await?;
+            .await
+            .map_err(|error| GlobalCommitError {
+                error,
+                recovery: Some(unresolved()),
+            })?;
         for participant_global_xid in prepared.iter().map(|participant| participant.global_xid) {
             if participant_global_xid == global_xid {
                 continue;
             }
             self.record_range0_global_decision(participant_global_xid, effective_decision)
-                .await?;
+                .await
+                .map_err(|error| GlobalCommitError {
+                    error,
+                    recovery: Some(unresolved()),
+                })?;
         }
-        self.release_prepared_participants(prepared, effective_decision)
+        self.release_prepared_participants_recoverably(global_xid, prepared, effective_decision)
             .await?;
         if effective_decision == TransactionDecision::Commit {
             return Ok(());
@@ -4812,7 +4882,9 @@ impl GatewaySession {
             {
                 continue;
             }
-            self.simple_on_range(range_id, "ROLLBACK").await?;
+            self.simple_on_range(range_id, "ROLLBACK")
+                .await
+                .map_err(GlobalCommitError::from)?;
         }
         Ok(())
     }
@@ -4881,22 +4953,6 @@ impl GatewaySession {
                 .record_global_decision(global_xid, status)
                 .await
         }
-    }
-
-    async fn release_prepared_participants(
-        &mut self,
-        prepared: &[PreparedParticipantRelease],
-        decision: TransactionDecision,
-    ) -> Result<(), PgError> {
-        for participant in prepared.iter().copied() {
-            self.release_on_range(
-                participant.range_id,
-                participant.global_xid,
-                decision == TransactionDecision::Commit,
-            )
-            .await?;
-        }
-        Ok(())
     }
 
     async fn execute_ddl(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
@@ -7662,6 +7718,112 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn canceled_participant_work_restores_detached_sessions() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("tenant_canceled_participants").expect("tenant"),
+            "0,100,200",
+        )
+        .expect("config");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let mut session = gateway.connect();
+        let range_ids = [RangeId::new(1), RangeId::new(2)];
+        let before = session.sessions.keys().copied().collect::<Vec<_>>();
+
+        let canceled = tokio::time::timeout(std::time::Duration::from_millis(1), async {
+            let participants = session
+                .take_participant_sessions(&range_ids)
+                .await
+                .expect("detach participants");
+            assert!(participants.participants.len() == range_ids.len());
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        assert!(canceled.is_err());
+        assert_eq!(session.sessions.keys().copied().collect::<Vec<_>>(), before);
+    }
+
+    #[tokio::test]
+    async fn abort_recovery_keeps_only_failed_parallel_releases() {
+        let policy = crate::RangeRuntimePolicy {
+            decision_release_lag_retries: crate::PositiveU32::new(1).expect("one retry"),
+            decision_release_retry_backoff: crabka_units::millis(1),
+            ..crate::RangeRuntimePolicy::default()
+        };
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("tenant_partial_abort_release").expect("tenant"),
+            "0,100,200",
+        )
+        .expect("config")
+        .with_runtime_policy(policy);
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let mut session = gateway.connect();
+        session
+            .simple_query("CREATE TABLE t150 (id int4); CREATE TABLE t250 (id int4)")
+            .await
+            .expect("create");
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("INSERT INTO t150 VALUES (1)")
+            .await
+            .expect("first participant");
+        session
+            .simple_query("INSERT INTO t250 VALUES (2)")
+            .await
+            .expect("second participant");
+        let GatewayTransaction::Open { touched, .. } = &session.transaction else {
+            panic!("transaction is open")
+        };
+        let touched = touched.clone();
+        let global_xid = session
+            .begin_global_transaction(&touched)
+            .await
+            .expect("begin global transaction");
+        let prepare_results = session
+            .prepare_participants(&touched, global_xid)
+            .await
+            .expect("prepare participants");
+        let mut prepared = Vec::with_capacity(touched.len());
+        for (range_id, result) in touched.iter().copied().zip(prepare_results) {
+            let participant_global_xid = result.expect("prepare participant");
+            session
+                .inner
+                .coordinator
+                .prepare(global_xid, range_id)
+                .await
+                .expect("record prepare");
+            prepared.push(PreparedParticipantRelease {
+                range_id,
+                global_xid: participant_global_xid,
+            });
+        }
+        let decision = session
+            .record_global_decision(global_xid, TransactionDecision::Abort)
+            .await
+            .expect("record abort");
+        let first_release = session
+            .release_participants(&prepared[..1], decision)
+            .await
+            .expect("release first participant");
+        assert!(first_release.into_iter().all(|result| result.is_ok()));
+
+        let error = session
+            .abort_global_transaction(global_xid, &prepared, &touched)
+            .await
+            .expect_err("already released participant fails");
+
+        assert!(error.error.code == "55000");
+        assert_eq!(
+            error.recovery,
+            Some(GlobalCommitRecovery {
+                global_xid,
+                prepared: vec![prepared[0]],
+                decision: Some(TransactionDecision::Abort),
+            })
+        );
     }
 
     #[test]
