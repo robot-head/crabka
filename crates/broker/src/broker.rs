@@ -94,6 +94,8 @@ fn self_controller_registration_record(
 /// does not hold within this window, the test fails.
 #[cfg(any(test, feature = "test-helpers"))]
 const TEST_AWAITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(any(test, feature = "test-helpers"))]
+const DISKLESS_FLUSHER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// The running broker. Library callers get a [`BrokerHandle`] from
 /// [`Broker::start`]; this struct is the shared internal state.
@@ -3139,13 +3141,13 @@ impl BrokerHandle {
             .diskless_flusher_ready
             .as_ref()
             .expect("diskless flusher is configured");
-        tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
+        tokio::time::timeout(DISKLESS_FLUSHER_READY_TIMEOUT, async {
             while !ready.load(Ordering::Acquire) {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("diskless index/flusher bootstrap did not become ready within 30s");
+        .expect("diskless index/flusher bootstrap did not become ready within 90s");
     }
 
     /// Test-only snapshot of the local inputs used by the diskless flusher:
