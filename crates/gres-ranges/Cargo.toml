@@ -20,19 +20,19 @@ workspace = true
 [dependencies]
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
-crabka-gres-control = { version = "0.3.9", path = "../gres-control" }
+crabka-gres-control = { version = "0.4.0", path = "../gres-control" }
 crabka-security = { path = "../security" }
-crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
-crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
-crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
-crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
-crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
-crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
-crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+crabka-pgcatalog = { version = "0.4.0", path = "../pgcatalog" }
+crabka-pgexec = { version = "0.4.0", path = "../pgexec" }
+crabka-pgkv = { version = "0.4.0", path = "../pgkv" }
+crabka-pgmvcc = { version = "0.4.0", path = "../pgmvcc" }
+crabka-pgparser = { version = "0.4.0", path = "../pgparser" }
+crabka-pgtypes = { version = "0.4.0", path = "../pgtypes" }
+crabka-pgwire = { version = "0.4.0", path = "../pgwire" }
 # W3C trace-context propagation across the range RPC hop. Deliberately *not*
 # `crabka-telemetry`, which pulls in axum, tonic and the OTLP exporter that a
 # transport crate has no business linking.
-crabka-trace-context = { version = "0.3.9", path = "../trace-context" }
+crabka-trace-context = { version = "0.4.0", path = "../trace-context" }
 crabka-units = { workspace = true }
 derive_more = { workspace = true, features = ["display", "from", "into", "from_str"] }
 serde = { workspace = true, features = ["derive"] }

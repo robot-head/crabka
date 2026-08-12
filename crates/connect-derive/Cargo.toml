@@ -27,7 +27,7 @@ syn = { workspace = true }
 # Dev-only path dependency. Keep the crates.io requirement on the released
 # minor line so `cargo publish` can package this crate before crabka-connect is
 # published at the same workspace version.
-crabka-connect = { version = "0.3", path = "../connect", default-features = false }
+crabka-connect = { version = "0.4", path = "../connect", default-features = false }
 datatest-stable = { workspace = true }
 trybuild = { workspace = true }
 

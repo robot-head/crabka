@@ -26,13 +26,13 @@ scenarios = ["crabka-kraft-core/sim"]
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-kraft-core = { version = "0.3.8", path = "../kraft-core" }
-crabka-ids = { version = "0.3.8", path = "../ids" }
-crabka-metadata = { version = "0.3.8", path = "../metadata" }
-crabka-log = { version = "0.3.9", path = "../log" }
-crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
-crabka-verified = { version = "0.3.8", path = "../verified" }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-kraft-core = { version = "0.4.0", path = "../kraft-core" }
+crabka-ids = { version = "0.4.0", path = "../ids" }
+crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-log = { version = "0.4.0", path = "../log" }
+crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-verified = { version = "0.4.0", path = "../verified" }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
 crabka-units = { workspace = true }
 refined_type = { workspace = true }
 async-trait = { workspace = true }

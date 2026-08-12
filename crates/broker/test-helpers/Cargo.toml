@@ -11,4 +11,4 @@ publish = false
 workspace = true
 
 [dependencies]
-crabka-broker = { version = "0.3.8", path = "..", features = ["test-helpers"] }
+crabka-broker = { version = "0.4.0", path = "..", features = ["test-helpers"] }

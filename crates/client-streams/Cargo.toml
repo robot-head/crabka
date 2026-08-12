@@ -17,13 +17,13 @@ categories = ["api-bindings", "network-programming"]
 workspace = true
 
 [dependencies]
-crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
+crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
 # Schema-registry serdes (Avro/Protobuf/JSON) are a first-class, always-on part
 # of the streams client — no feature gate.
-crabka-schema-serde = { version = "0.3.9", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
-crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
-crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
+crabka-schema-serde = { version = "0.4.0", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-client-consumer = { version = "0.4.0", path = "../client-consumer" }
+crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
 crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bon = { workspace = true }
@@ -76,12 +76,12 @@ required-features = ["polars", "arrow"]
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
-crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
+crabka-broker = { version = "0.4.0", path = "../broker", features = ["test-helpers"] }
 # Dev-only path dependency. Keep the crates.io requirement on the released
 # minor line so `cargo publish` can package this crate even when release-plz
 # publishes dev-dependency-only workspace crates later in the same run.
-crabka-schema-registry = { version = "0.3", path = "../schema-registry" }
-crabka-client-admin = { version = "0.3", path = "../client-admin" }
+crabka-schema-registry = { version = "0.4.0", path = "../schema-registry" }
+crabka-client-admin = { version = "0.4", path = "../client-admin" }
 hex = { workspace = true }
 mutants = { workspace = true }
 prost = { workspace = true }

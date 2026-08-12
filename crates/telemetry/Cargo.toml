@@ -25,8 +25,8 @@ heap-profiling = ["dep:jemalloc_pprof"]
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
-crabka-trace-context = { version = "0.3.9", path = "../trace-context" }
+crabka-logfmt = { version = "0.4.0", path = "../logfmt" }
+crabka-trace-context = { version = "0.4.0", path = "../trace-context" }
 crabka-units = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 refined_type = { workspace = true }

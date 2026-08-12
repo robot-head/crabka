@@ -27,6 +27,13 @@ observability services.
 Crabka is **beta**, pre-1.0 software. The workspace version is in
 [Cargo.toml](Cargo.toml).
 
+The **0.4.0 milestone** ships metadata downgrade and client rebootstrap,
+durable transaction recovery, diskless WAL failover, tiered offset reads,
+CloudEvents and queue semantics in the gateway, operator lifecycle work, and
+shared conformance coverage for five application SDKs. The finite outcomes for
+this milestone are closed; [UNFINISHED_WORK.md](UNFINISHED_WORK.md) records the
+remaining directional horizons and known limits.
+
 The project is still greenfield infrastructure. There are no production users,
 and Crabka does not promise on-disk compatibility across versions yet. Use
 Crabka for evaluation, development, interoperability tests, and non-critical

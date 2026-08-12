@@ -21,10 +21,10 @@ default = []
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
-crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
-crabka-compression = { version = "0.3.9", path = "../compression" }
+crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-client-consumer = { version = "0.4.0", path = "../client-consumer" }
+crabka-compression = { version = "0.4.0", path = "../compression" }
 crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bon = { workspace = true }
@@ -40,8 +40,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 # `mock` exposes MockBroker so the ClientTransport adapter can be tested against
 # an in-process broker (no JVM).
-crabka-client-core = { version = "0.3", path = "../client-core", features = ["mock"] }
-crabka-security = { version = "0.3", path = "../security" }
+crabka-client-core = { version = "0.4", path = "../client-core", features = ["mock"] }
+crabka-security = { version = "0.4", path = "../security" }
 mutants = { workspace = true }
 stateright = { workspace = true }
 tempfile = { workspace = true }
