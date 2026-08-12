@@ -13885,6 +13885,7 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
     // can create one.
     let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
     let error = attach_reg_cast_literal_position(sql, error);
+    let error = crate::temporal_arith::attach_operator_position(sql, error);
     let error = attach_query_analysis_position(sql, stmt, error);
     attach_undefined_function_position(
         sql,
@@ -15139,9 +15140,15 @@ impl Session for SqlSession {
                 // single-relation select are overwhelmingly ones PostgreSQL
                 // does not report at all, and a caret on an error PostgreSQL
                 // never raises is two more lines of divergence, not fewer.
+                //
+                // The date/time operator family is the one exception, and for
+                // the same measured reason: crabka raises none of those that
+                // PostgreSQL does not, so its caret costs nothing here. See
+                // [`crate::temporal_arith::attach_operator_position`].
                 self.finish_statement(stmt, result.map(|()| QueryResult::Empty))
                     .await
-                    .map_err(ExecError::into_pg)?;
+                    .map_err(ExecError::into_pg)
+                    .map_err(|error| crate::temporal_arith::attach_operator_position(sql, error))?;
                 continue;
             }
             let result = self

@@ -317,6 +317,7 @@ fn plan_call(
         ));
     }
     let plain = FuncCall {
+        sql_syntax: false,
         name: call.name.clone(),
         distinct: false,
         args: call.args.clone(),
@@ -898,6 +899,7 @@ fn split(expr: &Expr, leaves: &mut Vec<Expr>) -> Result<Expr, ExecError> {
                 lowered.push(split(arg, leaves)?);
             }
             Expr::Func(FuncCall {
+                sql_syntax: call.sql_syntax,
                 name: call.name.clone(),
                 distinct: call.distinct,
                 args: FuncArgs::Exprs(lowered),

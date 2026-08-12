@@ -3452,6 +3452,7 @@ mod tests {
 
     fn func(name: &str, args: Vec<Expr>) -> FuncCall {
         FuncCall {
+            sql_syntax: false,
             name: name.to_string(),
             distinct: false,
             args: FuncArgs::Exprs(args),

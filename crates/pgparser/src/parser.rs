@@ -1285,13 +1285,22 @@ impl Parser {
             self.bump(); // time
             self.bump(); // zone
             let zone = self.expr(11)?;
-            lhs = Expr::Func(crate::ast::FuncCall {
-                name: "timezone".into(),
-                distinct: false,
-                args: crate::ast::FuncArgs::Exprs(vec![zone, lhs]),
-                order_by: Vec::new(),
-                filter: None,
-            });
+            lhs = timezone_call(vec![zone, lhs]);
+            return Ok((lhs, true));
+        }
+        // SP37: `x AT LOCAL` — the same postfix operator with the *session's*
+        // zone, which PostgreSQL lowers onto the one-argument `timezone(x)`
+        // rather than onto a `current_setting('TimeZone')` argument. That
+        // matters beyond spelling: `pg_get_viewdef` prints a stored view back
+        // as `(x AT LOCAL)`, so a view that expanded the setting at parse time
+        // would read back as something the user never wrote. `LOCAL` is a
+        // keyword (`SET LOCAL` needs it), so only `at` takes the lookahead.
+        if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("at"))
+            && *self.peek2() == Token::Keyword(Keyword::Local)
+        {
+            self.bump(); // at
+            self.bump(); // local
+            lhs = timezone_call(vec![lhs]);
             return Ok((lhs, true));
         }
         Ok((lhs, false))
@@ -1518,6 +1527,7 @@ impl Parser {
             Token::Keyword(Keyword::CurrentUser) => {
                 self.bump();
                 Ok(Expr::Func(crate::ast::FuncCall {
+                    sql_syntax: false,
                     name: "current_user".into(),
                     distinct: false,
                     args: crate::ast::FuncArgs::Exprs(vec![]),
@@ -1594,6 +1604,7 @@ impl Parser {
                 ) && *self.peek() != Token::LParen
                 {
                     return Ok(Expr::Func(crate::ast::FuncCall {
+                        sql_syntax: false,
                         name: lower,
                         distinct: false,
                         args: crate::ast::FuncArgs::Exprs(vec![]),
@@ -1928,6 +1939,7 @@ impl Parser {
             // A non-aggregate call cannot have one, which the executor rejects
             // once it knows whether the name is an aggregate.
             return Ok(Expr::Func(FuncCall {
+                sql_syntax: false,
                 name,
                 distinct,
                 args,
@@ -2353,6 +2365,7 @@ impl Parser {
         let _ = self.opt_returning_type()?;
         self.expect(&Token::RParen)?;
         Ok(Expr::Func(FuncCall {
+            sql_syntax: false,
             name: if name == "json_objectagg" {
                 "jsonb_object_agg".into()
             } else {
@@ -2593,6 +2606,7 @@ impl Parser {
         let source = self.expr(0)?;
         self.expect(&Token::RParen)?;
         Ok(Expr::Func(FuncCall {
+            sql_syntax: false,
             name: "extract".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral(field), source]),
@@ -2966,6 +2980,7 @@ impl Parser {
     /// onto.
     fn call(name: &str, args: Vec<Expr>) -> Expr {
         Expr::Func(crate::ast::FuncCall {
+            sql_syntax: false,
             name: name.into(),
             distinct: false,
             args: crate::ast::FuncArgs::Exprs(args),
@@ -14765,6 +14780,20 @@ impl Parser {
     }
 }
 
+/// The `timezone` call `AT TIME ZONE` and `AT LOCAL` both lower onto, marked as
+/// written in SQL's own grammar so the rule deparser prints the grammar back
+/// rather than the call.
+fn timezone_call(args: Vec<Expr>) -> Expr {
+    Expr::Func(crate::ast::FuncCall {
+        sql_syntax: true,
+        name: "timezone".into(),
+        distinct: false,
+        args: crate::ast::FuncArgs::Exprs(args),
+        order_by: Vec::new(),
+        filter: None,
+    })
+}
+
 /// `PostgreSQL`'s 42601 for comparing two row constructors of different widths
 /// (`ROW(1,2) = ROW(1,2,3)`, `(1,2) IN ((1,2,3))`), reported at parse time as
 /// `PostgreSQL` does. A row compared against a non-row is left alone: that is a
@@ -16784,6 +16813,7 @@ mod tests {
         for (sql, name) in [("left('abc', 2)", "left"), ("right('abc', 2)", "right")] {
             match parse_expr_for_test(sql).expect("parse fn") {
                 Expr::Func(FuncCall {
+                    sql_syntax: false,
                     name: n,
                     args: FuncArgs::Exprs(a),
                     ..
@@ -17310,6 +17340,7 @@ mod tests {
             assert2::assert!(
                 expr(name)
                     == Expr::Func(FuncCall {
+                        sql_syntax: false,
                         name: name.into(),
                         distinct: false,
                         args: FuncArgs::Exprs(vec![]),
@@ -17323,6 +17354,7 @@ mod tests {
         assert2::assert!(
             expr("now()")
                 == Expr::Func(FuncCall {
+                    sql_syntax: false,
                     name: "now".into(),
                     distinct: false,
                     args: FuncArgs::Exprs(vec![]),
@@ -17809,6 +17841,7 @@ mod tests {
             s.projection[1],
             SelectItem::Expr {
                 expr: Expr::Func(FuncCall {
+                    sql_syntax: false,
                     ref name,
                     distinct: false,
                     args: FuncArgs::Star,
@@ -17838,6 +17871,7 @@ mod tests {
             SelectItem::Expr {
                 expr:
                     Expr::Func(FuncCall {
+                        sql_syntax: false,
                         name,
                         distinct,
                         args,
@@ -20125,6 +20159,35 @@ mod tests {
         let e = parse_expr_for_test("ts AT TIME ZONE 'UTC' = ts2").expect("attz");
         assert!(matches!(
             e,
+            Expr::Binary {
+                op: crate::ast::BinaryOp::Eq,
+                ..
+            }
+        ));
+    }
+
+    /// `AT LOCAL` is the one-argument `timezone` overload, marked as written in
+    /// SQL's grammar. It binds like `AT TIME ZONE`, so a comparison around it
+    /// groups the conversion first, and the marker is what lets the rule
+    /// deparser tell it from a `timezone(ts)` the user wrote as a call.
+    #[test]
+    fn parses_at_local_as_a_marked_one_argument_timezone_call() {
+        use assert2::assert;
+
+        use crate::ast::{Expr, FuncArgs};
+
+        let Expr::Func(call) = parse_expr_for_test("ts AT LOCAL").expect("at local") else {
+            panic!("AT LOCAL must lower onto a function call");
+        };
+        assert!(call.name == "timezone");
+        assert!(call.sql_syntax);
+        assert!(matches!(&call.args, FuncArgs::Exprs(args) if args.len() == 1));
+
+        let plain = parse_expr_for_test("timezone(ts)").expect("call");
+        assert!(matches!(plain, Expr::Func(call) if !call.sql_syntax));
+
+        assert!(matches!(
+            parse_expr_for_test("ts AT LOCAL = ts2").expect("compared"),
             Expr::Binary {
                 op: crate::ast::BinaryOp::Eq,
                 ..

@@ -299,6 +299,7 @@ pub(crate) fn is_scalar(name: &str) -> bool {
 /// not.
 pub(crate) fn niladic_keyword_call(name: &str) -> Option<FuncCall> {
     matches!(name, "current_schema").then(|| FuncCall {
+        sql_syntax: false,
         name: name.to_string(),
         distinct: false,
         args: FuncArgs::Exprs(Vec::new()),

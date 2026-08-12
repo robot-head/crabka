@@ -2569,6 +2569,7 @@ fn finish_regr(func: AggFunc, n: f64, sx: f64, sxx: f64, sy: f64, syy: f64, sxy:
 /// last-wins duplicate keys.
 fn build_jsonb(builder: &str, args: Vec<Datum>, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let call = FuncCall {
+        sql_syntax: false,
         name: builder.to_string(),
         distinct: false,
         args: FuncArgs::Exprs(

@@ -713,6 +713,7 @@ mod tests {
     fn eval(name: &str, args: Vec<(Expr, Datum)>) -> Result<Datum, ExecError> {
         let (exprs, values): (Vec<Expr>, Vec<Datum>) = args.into_iter().unzip();
         let fc = FuncCall {
+            sql_syntax: false,
             name: name.to_string(),
             distinct: false,
             args: FuncArgs::Exprs(exprs),

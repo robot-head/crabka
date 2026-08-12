@@ -376,6 +376,7 @@ pub(crate) fn resolve_expr_skipping(
         },
         Expr::Func(fc) => {
             let call = FuncCall {
+                sql_syntax: fc.sql_syntax,
                 name: fc.name.clone(),
                 distinct: fc.distinct,
                 args: match &fc.args {
@@ -790,6 +791,7 @@ fn resolve_types_in_call(
     ctes: &crate::cte::CteContext,
 ) -> Result<Expr, ExecError> {
     let call = FuncCall {
+        sql_syntax: fc.sql_syntax,
         name: fc.name.clone(),
         distinct: fc.distinct,
         args: match &fc.args {

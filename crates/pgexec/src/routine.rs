@@ -2347,6 +2347,7 @@ fn substitute(binding: &Binding, expr: &Expr) -> Result<Expr, ExecError> {
             right: boxed(right)?,
         },
         Expr::Func(call) => Expr::Func(FuncCall {
+            sql_syntax: call.sql_syntax,
             name: call.name.clone(),
             distinct: call.distinct,
             args: match &call.args {
@@ -4544,6 +4545,7 @@ mod tests {
     fn a_sql_body_inlines_into_the_callers_expression() {
         let kv = seeded();
         let call = FuncCall {
+            sql_syntax: false,
             name: "add2".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![
@@ -4580,6 +4582,7 @@ mod tests {
         )
         .expect("definition");
         let call = FuncCall {
+            sql_syntax: false,
             name: "named".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("4".into())]),
@@ -4606,6 +4609,7 @@ mod tests {
     fn a_name_that_is_not_a_routine_inlines_to_nothing() {
         let kv = seeded();
         let call = FuncCall {
+            sql_syntax: false,
             name: "upper".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral("x".into())]),
@@ -4626,6 +4630,7 @@ mod tests {
         .expect("C helper definition");
         let catalog: Arc<dyn Kv> = kv;
         let call = Expr::Func(FuncCall {
+            sql_syntax: false,
             name: "binary_coercible".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![
@@ -4656,6 +4661,7 @@ mod tests {
         .expect("C helper definition");
         let catalog: Arc<dyn Kv> = kv;
         let call = Expr::Func(FuncCall {
+            sql_syntax: false,
             name: "md5".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral("value".into())]),
@@ -4713,6 +4719,7 @@ mod tests {
         values: Vec<Datum>,
     ) -> Result<Datum, ExecError> {
         let call = FuncCall {
+            sql_syntax: false,
             name: name.into(),
             distinct: false,
             args: FuncArgs::Exprs(
@@ -4906,6 +4913,7 @@ mod tests {
             ty: ColumnType::Text,
         };
         let call = Expr::Func(FuncCall {
+            sql_syntax: false,
             name: "binary_coercible".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![text("a"), text("b")]),
@@ -5040,6 +5048,7 @@ mod tests {
         let kv = MemKv::default();
         define(&kv, "CREATE PROCEDURE p(x int) LANGUAGE sql AS 'SELECT 1'").expect("procedure");
         let call = FuncCall {
+            sql_syntax: false,
             name: "p".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("1".into())]),

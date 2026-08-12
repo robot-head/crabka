@@ -116,6 +116,7 @@ mod string_fn;
 mod subquery;
 mod sysid_fn;
 pub mod telemetry;
+mod temporal_arith;
 mod text_search_catalog;
 mod text_search_fn;
 pub mod timestamp_txn;

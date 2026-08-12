@@ -756,6 +756,7 @@ fn transition_is_strict(kv: &dyn Kv, name: &str) -> bool {
 /// otherwise, which is what routes a `plpgsql` body through the scalar runtime.
 fn compile_call(kv: &dyn Kv, name: &str, args: &[Expr], scope: &Scope) -> Result<Expr, ExecError> {
     let call = FuncCall {
+        sql_syntax: false,
         name: name.to_string(),
         distinct: false,
         args: FuncArgs::Exprs(args.to_vec()),

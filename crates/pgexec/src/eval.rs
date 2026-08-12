@@ -4313,8 +4313,21 @@ fn infer_binary_type(
                 return json_fn::json_operator_result_type(JsonOp::Delete, lt, rt)
                     .ok_or_else(|| undefined_operator("-", lt, rt));
             }
-            // SP37: a temporal operand resolves via PG's date/time arithmetic
-            // matrix first; a non-temporal pair falls through to the numeric tower.
+            // SP37: a temporal operand selects a `pg_operator` row the way
+            // `oper()` does — by implicit cast, then by preference — so the
+            // answer is a row, a 42883 or a 42725, all three derived from the
+            // catalog rather than asserted. An `unknown` literal beside a
+            // temporal value is excluded: it carries no type to match rows
+            // with, and PostgreSQL resolves that case by a separate
+            // category-guessing heuristic that this does not model.
+            if !is_unknown_literal(left)
+                && !is_unknown_literal(right)
+                && let Some(resolved) = crate::temporal_arith::resolve(op, lt, rt)
+            {
+                return resolved.map(|signature| signature.result);
+            }
+            // The matrix still answers the `unknown`-literal pairs the resolver
+            // above stands back from.
             if let Some(ty) = datetime_result_type(op, lt, rt) {
                 return Ok(ty);
             }

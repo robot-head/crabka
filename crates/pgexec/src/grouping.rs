@@ -855,12 +855,14 @@ pub(crate) fn rewrite(
         },
         Expr::Func(call) if !into_aggregates && is_aggregate_call(call) => Expr::Func(call.clone()),
         Expr::Func(FuncCall {
+            sql_syntax,
             name,
             distinct,
             args,
             order_by,
             filter,
         }) => Expr::Func(FuncCall {
+            sql_syntax: *sql_syntax,
             name: name.clone(),
             distinct: *distinct,
             args: match args {

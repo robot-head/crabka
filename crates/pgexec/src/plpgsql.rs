@@ -3103,6 +3103,7 @@ fn rewrite_expr_with(
             right: boxed(right)?,
         },
         Expr::Func(call) => Expr::Func(crabka_pgparser::ast::FuncCall {
+            sql_syntax: call.sql_syntax,
             name: call.name.clone(),
             distinct: call.distinct,
             args: match &call.args {

@@ -761,6 +761,7 @@ mod tests {
             is_visible(Catalog::Relation, &oid, &session).expect("visible") == Datum::Bool(false)
         );
         let call = crabka_pgparser::ast::FuncCall {
+            sql_syntax: false,
             name: "pg_relation_is_publishable".into(),
             distinct: false,
             args: crabka_pgparser::ast::FuncArgs::Exprs(vec![

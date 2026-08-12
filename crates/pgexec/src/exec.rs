@@ -7014,6 +7014,7 @@ fn rewrite_image_refs(expr: &Expr, aliases: &ImageAliases<'_>) -> Expr {
             right: recurse(right),
         },
         Expr::Func(fc) => Expr::Func(crabka_pgparser::ast::FuncCall {
+            sql_syntax: fc.sql_syntax,
             name: fc.name.clone(),
             distinct: fc.distinct,
             args: match &fc.args {
@@ -13888,6 +13889,7 @@ fn initplan_marker(index: usize, lhs: Option<Expr>) -> Expr {
     let mut args = vec![Expr::IntLiteral(index.to_string())];
     args.extend(lhs);
     Expr::Func(FuncCall {
+        sql_syntax: false,
         name: INITPLAN_MARKER.into(),
         distinct: false,
         args: FuncArgs::Exprs(args),
@@ -13898,6 +13900,7 @@ fn initplan_marker(index: usize, lhs: Option<Expr>) -> Expr {
 
 fn initplan_parts(expr: &Expr) -> Option<(usize, Option<&Expr>)> {
     let Expr::Func(FuncCall {
+        sql_syntax: false,
         name,
         distinct: false,
         args: FuncArgs::Exprs(args),
@@ -13921,6 +13924,7 @@ fn initplan_parts(expr: &Expr) -> Option<(usize, Option<&Expr>)> {
 
 fn scalar_lookup_marker(index: usize, key: Expr) -> Expr {
     Expr::Func(FuncCall {
+        sql_syntax: false,
         name: SCALAR_LOOKUP_MARKER.into(),
         distinct: false,
         args: FuncArgs::Exprs(vec![Expr::IntLiteral(index.to_string()), key]),
@@ -13931,6 +13935,7 @@ fn scalar_lookup_marker(index: usize, key: Expr) -> Expr {
 
 fn scalar_lookup_parts(expr: &Expr) -> Option<(usize, &Expr)> {
     let Expr::Func(FuncCall {
+        sql_syntax: false,
         name,
         distinct: false,
         args: FuncArgs::Exprs(args),
@@ -23573,6 +23578,7 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::NUMERIC => ColumnType::Numeric(None),
         crabka_pgtypes::oids::DATE => ColumnType::Date,
         crabka_pgtypes::oids::TIME => ColumnType::Time,
+        crabka_pgtypes::oids::TIMETZ => ColumnType::Timetz,
         crabka_pgtypes::oids::TIMESTAMP => ColumnType::Timestamp,
         crabka_pgtypes::oids::TIMESTAMPTZ => ColumnType::Timestamptz,
         crabka_pgtypes::oids::INTERVAL => ColumnType::Interval,

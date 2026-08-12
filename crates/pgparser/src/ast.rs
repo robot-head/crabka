@@ -3937,6 +3937,18 @@ pub struct FuncCall {
     /// path that cannot honour it refuses and never drops it without a
     /// message.
     pub filter: Option<Box<Expr>>,
+    /// `pg_proc`'s `funcformat = COERCE_SQL_SYNTAX`: the call was written in
+    /// SQL's own grammar rather than as `name(args)`.
+    ///
+    /// `PostgreSQL` lowers several keyword spellings onto ordinary functions
+    /// and remembers which spelling it read, because the rule deparser prints
+    /// the grammar back: `x AT TIME ZONE z` and `x AT LOCAL` both become a
+    /// `timezone` call, and `pg_get_viewdef` reprints them as `(x AT TIME ZONE
+    /// z)` and `(x AT LOCAL)` while an explicitly written `timezone(z, x)` or
+    /// `timezone(x)` stays a call. Nothing about the arguments separates the
+    /// two — `timezone(f1)` and `f1 AT LOCAL` are the same one-argument call —
+    /// so the spelling has to be carried.
+    pub sql_syntax: bool,
 }
 
 /// SP27: a function call's argument list. `Star` is the `f(*)` form (only

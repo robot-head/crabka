@@ -909,6 +909,17 @@ fn undefined_function_hint(message: &str) -> Option<&'static str> {
     None
 }
 
+/// `PostgreSQL` attaches a standing HINT to the 42725 it raises when operator
+/// resolution kept more than one candidate, and words it for an *operator*
+/// rather than for a function. Like [`undefined_function_hint`] it is attached
+/// once here so that the message and its HINT cannot drift apart, and only for
+/// a message in PostgreSQL's own shape.
+fn ambiguous_operator_hint(message: &str) -> Option<&'static str> {
+    message.starts_with("operator is not unique: ").then_some(
+        "Could not choose a best candidate operator. You might need to add explicit type casts.",
+    )
+}
+
 impl ExecError {
     pub fn into_pg(self) -> PgError {
         match self {
@@ -1363,7 +1374,14 @@ impl ExecError {
                 "42P17",
                 format!("infinite recursion detected in policy for relation \"{relation}\""),
             ),
-            ExecError::FunctionError { sqlstate, message } => PgError::error(sqlstate, message),
+            ExecError::FunctionError { sqlstate, message } => {
+                let hint = ambiguous_operator_hint(&message);
+                let rendered = PgError::error(sqlstate, message);
+                match hint {
+                    Some(hint) => rendered.with_hint(hint),
+                    None => rendered,
+                }
+            }
             ExecError::SqlJson(error) => {
                 let mut rendered = PgError::error(error.sqlstate, error.message);
                 if let Some(detail) = error.detail {

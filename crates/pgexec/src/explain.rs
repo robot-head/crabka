@@ -391,6 +391,41 @@ fn deparse_bare(expr: &Expr) -> String {
     deparse_bare_with(expr, true)
 }
 
+/// A call rendered the ordinary way, as `name(args)` with the modifiers that
+/// change which rows an aggregate folds.
+///
+/// `viewdef::func_text` renders the same envelope for `pg_get_viewdef`, against
+/// the same oracle. The two are deliberately separate today — that module's
+/// version also rewrites the XML constructors and the SQL value functions,
+/// neither of which belongs in a plan line — but they must not drift: this
+/// function dropping all three modifiers while its sibling printed them is
+/// exactly the bug this comment exists to stop recurring.
+fn deparse_plain_call(call: &crabka_pgparser::ast::FuncCall, qualify: bool) -> String {
+    let args = match &call.args {
+        FuncArgs::Star => "*".to_string(),
+        FuncArgs::Exprs(args) => args
+            .iter()
+            .map(|arg| deparse_bare_with(arg, qualify))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let order_by = if call.order_by.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", sort_key_with(&call.order_by, qualify))
+    };
+    // `get_agg_expr` adds no parentheses of its own around the predicate; the
+    // operator node it holds brings whatever it needs.
+    let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
+        format!(" FILTER (WHERE {})", deparse_with(predicate, qualify))
+    });
+    format!(
+        "{}({}{args}{order_by}){filter}",
+        call.name,
+        if call.distinct { "DISTINCT " } else { "" }
+    )
+}
+
 fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
     match expr {
         // A SQL/JSON expression deparses as its function name plus the operands
@@ -436,31 +471,31 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
         // must not drift: this arm dropping all three modifiers while its
         // sibling printed them is exactly the bug this comment exists to stop
         // recurring.
-        Expr::Func(call) => {
-            let args = match &call.args {
-                FuncArgs::Star => "*".to_string(),
-                FuncArgs::Exprs(args) => args
-                    .iter()
-                    .map(|arg| deparse_bare_with(arg, qualify))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+        // `AT TIME ZONE` and `AT LOCAL` reach the planner as `timezone` calls
+        // that remember their spelling, and `ruleutils.c` prints the spelling
+        // back in a plan line exactly as it does in a view definition. An
+        // operator operand keeps its own parentheses under the construct.
+        Expr::Func(call) if call.sql_syntax && call.name == "timezone" => {
+            let operand = |expr: &Expr| match expr {
+                Expr::Binary { .. } | Expr::Unary { .. } => {
+                    format!("({})", deparse_bare_with(expr, qualify))
+                }
+                other => deparse_bare_with(other, qualify),
             };
-            let order_by = if call.order_by.is_empty() {
-                String::new()
-            } else {
-                format!(" ORDER BY {}", sort_key_with(&call.order_by, qualify))
-            };
-            // `get_agg_expr` adds no parentheses of its own around the
-            // predicate; the operator node it holds brings whatever it needs.
-            let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
-                format!(" FILTER (WHERE {})", deparse_with(predicate, qualify))
-            });
-            format!(
-                "{}({}{args}{order_by}){filter}",
-                call.name,
-                if call.distinct { "DISTINCT " } else { "" }
-            )
+            match &call.args {
+                FuncArgs::Exprs(args) => match args.as_slice() {
+                    // Note the reversed argument order: `timezone` takes the
+                    // zone first.
+                    [zone, value] => {
+                        format!("({} AT TIME ZONE {})", operand(value), operand(zone))
+                    }
+                    [value] => format!("({} AT LOCAL)", operand(value)),
+                    _ => deparse_plain_call(call, qualify),
+                },
+                FuncArgs::Star => deparse_plain_call(call, qualify),
+            }
         }
+        Expr::Func(call) => deparse_plain_call(call, qualify),
         Expr::Cast { expr, ty } => format!("{}::{}", deparse_bare_with(expr, qualify), ty.name()),
         Expr::Unary { op, expr } => match op {
             UnaryOp::Neg => format!("-{}", deparse_bare_with(expr, qualify)),

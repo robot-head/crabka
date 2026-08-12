@@ -1330,6 +1330,11 @@ const SQL_VALUE_FUNCTIONS: [(&str, &str); 7] = [
 ];
 
 fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
+    if call.sql_syntax
+        && let Some(text) = sql_syntax_text(call, ctx)
+    {
+        return text;
+    }
     if let FuncArgs::Exprs(args) = &call.args
         && let Some(text) = xml_construct_text(&call.name, args, ColumnType::Text, ctx)
     {
@@ -1368,6 +1373,44 @@ fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
         call.name,
         if call.distinct { "DISTINCT " } else { "" }
     )
+}
+
+/// `ruleutils.c`'s `get_func_sql_syntax`: a call the grammar produced from a
+/// keyword spelling is printed back as that spelling, not as a call.
+///
+/// The parentheses are unconditional — `get_func_sql_syntax` writes them itself
+/// rather than through `get_rule_expr_paren`, so `(f1 AT LOCAL)` keeps them in
+/// pretty mode where an operator expression would lose them.
+///
+/// A call the user really wrote as `timezone(f1)` carries no
+/// [`FuncCall::sql_syntax`] and so never reaches here — which is the whole
+/// point, because it is the identical one-argument call.
+fn sql_syntax_text(call: &FuncCall, ctx: Ctx<'_>) -> Option<String> {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return None;
+    };
+    // `isSimpleNode` gives an operator expression its own parentheses under a
+    // `COERCE_SQL_SYNTAX` parent even in pretty mode, so `(d + i) AT TIME ZONE
+    // z` does not read back as `d + (i AT TIME ZONE z)`. Every other node kind
+    // is simple and stays bare.
+    let operand = |expr: &Expr| {
+        let text = operand_text(expr, ctx);
+        if ctx.pretty && matches!(expr, Expr::Binary { .. } | Expr::Unary { .. }) {
+            format!("({text})")
+        } else {
+            text
+        }
+    };
+    match (call.name.as_str(), args.as_slice()) {
+        // Note the reversed argument order: `timezone` takes the zone first.
+        ("timezone", [zone, value]) => Some(format!(
+            "({} AT TIME ZONE {})",
+            operand(value),
+            operand(zone)
+        )),
+        ("timezone", [value]) => Some(format!("({} AT LOCAL)", operand(value))),
+        _ => None,
+    }
 }
 
 /// `XMLPARSE`, `XMLSERIALIZE` and `XMLCONCAT` reach the executor as ordinary
@@ -1585,6 +1628,37 @@ mod tests {
                 &["b"][..],
                 " SELECT DISTINCT b\n   FROM t\n  WHERE (a = ANY (ARRAY[1, 2, 3]));",
                 " SELECT DISTINCT b\n   FROM t\n  WHERE a = ANY (ARRAY[1, 2, 3]);",
+            ),
+            // `AT TIME ZONE` and `AT LOCAL` are `timezone` calls that print
+            // their grammar back, parentheses and all, in both modes.
+            (
+                "SELECT a AT TIME ZONE 'UTC' AS z FROM t",
+                &["z"][..],
+                " SELECT (a AT TIME ZONE 'UTC'::text) AS z\n   FROM t;",
+                " SELECT (a AT TIME ZONE 'UTC'::text) AS z\n   FROM t;",
+            ),
+            (
+                "SELECT a AT LOCAL AS z FROM t",
+                &["z"][..],
+                " SELECT (a AT LOCAL) AS z\n   FROM t;",
+                " SELECT (a AT LOCAL) AS z\n   FROM t;",
+            ),
+            // The identical one-argument call written as a call stays one:
+            // nothing about the arguments tells the two apart.
+            (
+                "SELECT timezone(a) AS z FROM t",
+                &["z"][..],
+                " SELECT timezone(a) AS z\n   FROM t;",
+                " SELECT timezone(a) AS z\n   FROM t;",
+            ),
+            // An operator operand keeps its own parentheses under the SQL
+            // syntax even in pretty mode, so the value it converts is the sum
+            // rather than the right-hand term.
+            (
+                "SELECT (a + b) AT LOCAL AS z FROM t",
+                &["z"][..],
+                " SELECT ((a + b) AT LOCAL) AS z\n   FROM t;",
+                " SELECT ((a + b) AT LOCAL) AS z\n   FROM t;",
             ),
         ];
         for (definition, columns, plain, pretty) in cases {

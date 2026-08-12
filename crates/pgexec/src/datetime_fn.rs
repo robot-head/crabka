@@ -165,10 +165,11 @@ pub(crate) fn datetime_func_result_type(
             require_arity(fc, n == 1 || n == 2)?;
             ColumnType::Interval
         }
-        // timezone(zone, value): timestamp → timestamptz, timestamptz → timestamp.
+        // timezone(zone, value) and the one-argument `AT LOCAL` overload alike:
+        // timestamp → timestamptz, timestamptz → timestamp, timetz → timetz.
         DtFunc::Timezone => {
-            require_arity(fc, n == 2)?;
-            match crate::eval::infer_type(&args[1], scope)? {
+            require_arity(fc, n == 1 || n == 2)?;
+            match crate::eval::infer_type(&args[n - 1], scope)? {
                 ColumnType::Timestamp => ColumnType::Timestamptz,
                 ColumnType::Timestamptz => ColumnType::Timestamp,
                 other => other,
@@ -345,13 +346,30 @@ pub(crate) fn eval_datetime(
         }
         // ---- timezone (AT TIME ZONE) ----
         DtFunc::Timezone => {
-            require_arity(fc, args.len() == 2)?;
-            let zone_d = eval_child(&args[0])?; // zone FIRST (parser lowering)
-            let value = eval_child(&args[1])?;
-            if zone_d.is_null() || value.is_null() {
+            require_arity(fc, (1..=2).contains(&args.len()))?;
+            // `x AT LOCAL` is the one-argument overload — `timetz_at_local` and
+            // its two `timestamp` siblings — which converts against the
+            // *session's* zone. It is a distinct `pg_proc` entry rather than
+            // sugar for `AT TIME ZONE current_setting('TimeZone')`, which is
+            // why the session zone is read here instead of being planted as an
+            // argument at parse time.
+            let [zone, value] = match args {
+                [value] => [None, Some(eval_child(value)?)],
+                // Zone FIRST: that is the argument order `AT TIME ZONE` lowers
+                // to, and `pg_proc` declares.
+                [zone, value] => [Some(eval_child(zone)?), Some(eval_child(value)?)],
+                _ => unreachable!("arity checked above"),
+            };
+            let Some(value) = value else {
+                unreachable!("arity checked above")
+            };
+            if zone.as_ref().is_some_and(Datum::is_null) || value.is_null() {
                 return Ok(Datum::Null);
             }
-            let tz = zone_arg(&zone_d)?;
+            let tz = match &zone {
+                Some(zone) => zone_arg(zone)?,
+                None => ctx.time_zone.clone(),
+            };
             timezone_convert(&tz, &value)
         }
         DtFunc::IsFinite => {
@@ -489,6 +507,12 @@ fn literal_field(e: &Expr) -> Result<String, ExecError> {
 fn zone_arg(d: &Datum) -> Result<TimeZone, ExecError> {
     let name = match d {
         Datum::Text(s) => s.as_str(),
+        // `AT TIME ZONE INTERVAL '-08:00'` names a fixed offset rather than a
+        // zone — `timestamp_izone` and its `timestamptz`/`timetz` siblings.
+        // Months and days have no fixed length in seconds, so an interval that
+        // carries either names no offset at all and PostgreSQL refuses it
+        // rather than picking one.
+        Datum::Interval(interval) => return interval_zone(*interval),
         other => return Err(type_error("timezone", other)),
     };
     if name.eq_ignore_ascii_case("utc") {
@@ -496,6 +520,37 @@ fn zone_arg(d: &Datum) -> Result<TimeZone, ExecError> {
     }
     crabka_pgtypes::datetime::resolve_time_zone(name)
         .ok_or_else(|| ExecError::UnknownTimeZone(name.to_string()))
+}
+
+/// The fixed zone an `interval` names as a `timezone()` argument.
+///
+/// `PostgreSQL` reads the interval's microseconds as a signed offset *east*
+/// (`timestamp_izone` shifts by `zone->time`, and `timetz_izone` stores its
+/// negation because a `TimeTzADT` counts west), so one conversion serves all
+/// three value types. Months and days are refused rather than approximated:
+/// neither is a fixed number of seconds, so an interval carrying one names no
+/// offset at all.
+fn interval_zone(interval: crabka_pgtypes::datetime::Interval) -> Result<TimeZone, ExecError> {
+    let spelled = || crate::func::text_render(&Datum::Interval(interval), &TimeZone::UTC);
+    // 22023 with PostgreSQL's own sentence, not the `SET`-shaped one
+    // [`invalid_param`] wraps a parameter name in.
+    let refuse = |reason: &str| {
+        ExecError::InvalidParameterValueMessage(format!(
+            "interval time zone \"{}\" {reason}",
+            spelled()
+        ))
+    };
+    if interval.is_infinite() {
+        return Err(refuse("must be finite"));
+    }
+    if interval.months != 0 || interval.days != 0 {
+        return Err(refuse("must not include months or days"));
+    }
+    let seconds = i32::try_from(interval.micros / 1_000_000)
+        .ok()
+        .and_then(|seconds| jiff::tz::Offset::from_seconds(seconds).ok())
+        .ok_or_else(|| invalid_param("time zone displacement out of range"))?;
+    Ok(TimeZone::fixed(seconds))
 }
 
 /// `1` for a `+infinity` temporal Datum, `-1` for `-infinity`, `0` for a finite
