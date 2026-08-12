@@ -190,8 +190,7 @@ fn find_operator(
             }
             continue;
         }
-        let stored =
-            crabka_pgcatalog::get_user_operator(kv, &schema, &name.symbol, left, right)?;
+        let stored = crabka_pgcatalog::get_user_operator(kv, &schema, &name.symbol, left, right)?;
         if let Some(stored) = stored {
             return Ok(Some(Resolved {
                 oid: stored.oid,
@@ -276,9 +275,10 @@ fn lookup_function(
                 && row.get(2) == Some(&Datum::Int4(namespace))
                 && argument_oids(row).as_deref() == Some(&wanted[..])
         });
-        if let (Some(Datum::Int4(oid)), Some(Datum::Int4(result))) =
-            (found.and_then(|row| row.first()), found.and_then(|row| row.get(18)))
-        {
+        if let (Some(Datum::Int4(oid)), Some(Datum::Int4(result))) = (
+            found.and_then(|row| row.first()),
+            found.and_then(|row| row.get(18)),
+        ) {
             return Ok((oid.unsigned_abs(), result.unsigned_abs()));
         }
     }
@@ -418,10 +418,11 @@ pub(crate) fn create(
     };
     let mut ops = vec![cursor];
     ops.extend(crabka_pgcatalog::put_user_operator_ops(&operator));
-    ops.extend(back_links(kv, oid, &[
-        (Link::Commutator, commutator),
-        (Link::Negator, negator),
-    ])?);
+    ops.extend(back_links(
+        kv,
+        oid,
+        &[(Link::Commutator, commutator), (Link::Negator, negator)],
+    )?);
     Ok((
         QueryResult::Command {
             tag: "CREATE OPERATOR".into(),
@@ -573,7 +574,10 @@ fn back_links(
                 kind.word(),
             )));
         };
-        let slot = match edited.iter().position(|operator| operator.oid == target.oid) {
+        let slot = match edited
+            .iter()
+            .position(|operator| operator.oid == target.oid)
+        {
             Some(index) => &mut edited[index],
             None => {
                 edited.push(stored.clone());
@@ -630,7 +634,9 @@ fn validate_parameters(
     }
     if result_type_oid != BOOL_TYPE_OID {
         if stmt.negator.is_some() {
-            return Err(invalid_definition("only boolean operators can have negators"));
+            return Err(invalid_definition(
+                "only boolean operators can have negators",
+            ));
         }
         if stmt.restrict.is_some() {
             return Err(invalid_definition(
@@ -765,8 +771,8 @@ pub(crate) fn drop_operators(
     // `OperatorUpd(…, isDelete = true)`: no surviving row may name an oid that
     // pg_operator no longer holds.
     for operator in &mut surviving {
-        let stale = dropped.contains(&operator.commutator_oid)
-            || dropped.contains(&operator.negator_oid);
+        let stale =
+            dropped.contains(&operator.commutator_oid) || dropped.contains(&operator.negator_oid);
         if !stale {
             continue;
         }
