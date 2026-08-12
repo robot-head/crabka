@@ -84,7 +84,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/crabka-remote-storage/0.3.9")]
+#![doc(html_root_url = "https://docs.rs/crabka-remote-storage/0.4.0")]
 
 mod cache;
 pub mod dump;

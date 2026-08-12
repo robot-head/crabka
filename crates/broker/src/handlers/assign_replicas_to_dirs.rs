@@ -423,11 +423,15 @@ mod tests {
         let topic_uuid = uuid::Uuid::from_u128(0xBB);
         broker
             .controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level: crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL - 1,
+            })])
+            .await
+            .expect("seed downgraded metadata version");
+        broker
+            .controller
             .submit_change(vec![
-                MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
-                    name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
-                    level: crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL - 1,
-                }),
                 MetadataRecord::V1Topic(TopicRecord {
                     name: "t".into(),
                     topic_id: topic_uuid,

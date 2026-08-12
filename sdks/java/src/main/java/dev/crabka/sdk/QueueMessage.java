@@ -7,13 +7,12 @@ public record QueueMessage(String messageId, String topic, int partition, long o
     public QueueMessage {
         Objects.requireNonNull(messageId, "messageId");
         Objects.requireNonNull(topic, "topic");
-        Objects.requireNonNull(value, "value");
-        value = value.clone();
+        value = value == null ? null : value.clone();
         headers = List.copyOf(Objects.requireNonNull(headers, "headers"));
     }
 
     @Override
     public byte[] value() {
-        return value.clone();
+        return value == null ? null : value.clone();
     }
 }

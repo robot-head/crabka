@@ -120,7 +120,7 @@ impl<'a> DescribeClusterResponse<'a> {
                 for it in &self.brokers {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

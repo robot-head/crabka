@@ -361,8 +361,8 @@ pub struct QueueMessage {
     pub partition: i32,
     /// Record offset.
     pub offset: i64,
-    /// Record value.
-    pub value: Bytes,
+    /// Record value, or `None` for a Kafka tombstone.
+    pub value: Option<Bytes>,
     /// Headers in delivery order.
     pub headers: Vec<(String, Option<Bytes>)>,
     /// Gateway delivery count.
@@ -383,7 +383,7 @@ impl From<pb::QueuedMessage> for QueueMessage {
             topic: value.topic,
             partition: value.partition,
             offset: value.offset,
-            value: Bytes::from(value.value),
+            value: value.value.map(Bytes::from),
             headers: value
                 .headers
                 .into_iter()
@@ -610,7 +610,7 @@ fn queue_message_from_mock(message: MockMessage, delivery_count: i32) -> QueueMe
         topic: message.topic,
         partition: message.partition,
         offset: message.offset,
-        value: message.value,
+        value: Some(message.value),
         headers: message.headers,
         delivery_count,
     }
@@ -738,7 +738,21 @@ mod tests {
 
         assert_eq!(acquired.session_id, "mock-queue-session-1");
         assert_eq!(acquired.messages.len(), 1);
-        assert_eq!(acquired.messages[0].value, Bytes::from_static(b"job"));
+        assert_eq!(acquired.messages[0].value, Some(Bytes::from_static(b"job")));
+    }
+
+    #[test]
+    fn queue_messages_distinguish_tombstones_from_empty_values() {
+        let message = |value| {
+            QueueMessage::from(pb::QueuedMessage {
+                topic: "work".into(),
+                value,
+                ..pb::QueuedMessage::default()
+            })
+        };
+
+        assert2::assert!(message(None).value == None);
+        assert2::assert!(message(Some(Vec::new())).value == Some(Bytes::new()));
     }
 
     #[tokio::test]

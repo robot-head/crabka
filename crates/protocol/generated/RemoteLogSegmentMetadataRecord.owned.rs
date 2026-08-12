@@ -92,7 +92,7 @@ impl RemoteLogSegmentMetadataRecord {
                 for it in &self.segment_leader_epochs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

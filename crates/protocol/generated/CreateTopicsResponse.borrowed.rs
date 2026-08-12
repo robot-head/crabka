@@ -64,7 +64,7 @@ impl Encode for CreateTopicsResponse<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -236,7 +236,7 @@ impl<'a> CreatableTopicResult<'a> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }

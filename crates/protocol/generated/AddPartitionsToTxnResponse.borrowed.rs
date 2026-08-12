@@ -66,7 +66,7 @@ impl Encode for AddPartitionsToTxnResponse<'_> {
                 for it in &self.results_by_transaction {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if (0..=3).contains(&version) {
             {
@@ -78,7 +78,7 @@ impl Encode for AddPartitionsToTxnResponse<'_> {
                 for it in &self.results_by_topic_v3_and_below {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -227,7 +227,7 @@ impl Encode for AddPartitionsToTxnResult<'_> {
                 for it in &self.topic_results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -933,10 +933,7 @@ fn partition_to_kraft(
         isr: cast(&p.isr, "partition isr")?,
         removing_replicas: cast(&p.removing_replicas, "partition removing_replicas")?,
         adding_replicas: cast(&p.adding_replicas, "partition adding_replicas")?,
-        leader: i32::try_from(p.leader.0).map_err(|_| TranslateError::Invalid {
-            field: "partition leader",
-            detail: format!("leader {} exceeds i32", p.leader),
-        })?,
+        leader: partition_leader_to_wire(p.leader, "partition leader")?,
         // Wire boundary: KRaft's KPartitionRecord carries leader epoch as a raw
         // int32, so unwrap the LeaderEpoch newtype here.
         leader_epoch: p.leader_epoch.get(),
@@ -1277,7 +1274,7 @@ fn partition_from_kraft(
     Ok(PartitionRecord {
         topic,
         partition: p.partition_id,
-        leader: node_id_from_wire(p.leader, "partition leader")?,
+        leader: partition_leader_from_wire(p.leader, "partition leader")?,
         replicas: nodes(&p.replicas, "partition replica")?,
         isr: nodes(&p.isr, "partition ISR member")?,
         // Wire boundary: wrap the raw int32 leader epoch decoded off KRaft.
@@ -1337,7 +1334,7 @@ fn partition_change_from_kraft(
         partition.adding_replicas = nodes(adding, "partition change adding replica")?;
     }
     if change.leader != -2 {
-        partition.leader = node_id_from_wire(change.leader, "partition change leader")?;
+        partition.leader = partition_leader_from_wire(change.leader, "partition change leader")?;
         partition.leader_epoch =
             LeaderEpoch(partition.leader_epoch.get().checked_add(1).ok_or_else(|| {
                 TranslateError::Invalid {
@@ -1368,6 +1365,23 @@ fn partition_change_from_kraft(
                 detail: "partition epoch overflow".into(),
             })?;
     Ok(partition)
+}
+
+fn partition_leader_to_wire(leader: NodeId, field: &'static str) -> Result<i32, TranslateError> {
+    if leader == NodeId(0) {
+        return Ok(-1);
+    }
+    i32::try_from(leader.0).map_err(|_| TranslateError::Invalid {
+        field,
+        detail: format!("leader {leader} exceeds i32"),
+    })
+}
+
+fn partition_leader_from_wire(value: i32, field: &'static str) -> Result<NodeId, TranslateError> {
+    if value == -1 {
+        return Ok(NodeId(0));
+    }
+    node_id_from_wire(value, field)
 }
 
 fn node_id_from_wire(value: i32, field: &'static str) -> Result<NodeId, TranslateError> {
@@ -1782,9 +1796,77 @@ mod tests {
     }
 
     #[test]
-    fn negative_wire_partition_node_id_is_rejected() {
+    fn wire_partition_no_leader_sentinel_round_trips() {
         let mut image = img();
         let topic_id = uuid::Uuid::from_u128(100);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "leaderless-test".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        let record = KraftMetadataRecord::Partition(KPartitionRecord {
+            topic_id: to_kuuid(topic_id),
+            partition_id: 0,
+            leader: -1,
+            ..Default::default()
+        });
+
+        let decoded = from_kraft(&record, &image).unwrap();
+        let MetadataRecord::V1Partition(decoded) = decoded else {
+            panic!("expected partition")
+        };
+        assert2::assert!(decoded.leader == NodeId(0));
+
+        let encoded = to_kraft(&MetadataRecord::V1Partition(decoded), &image).unwrap();
+        let KraftMetadataRecord::Partition(encoded) = encoded else {
+            panic!("expected partition")
+        };
+        assert2::assert!(encoded.leader == -1);
+    }
+
+    #[test]
+    fn wire_partition_change_no_leader_updates_epochs() {
+        let mut image = img();
+        let topic_id = uuid::Uuid::from_u128(101);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "leaderless-change-test".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "leaderless-change-test".into(),
+            partition: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(7),
+            partition_epoch: 11,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+        }));
+        let change = KraftMetadataRecord::PartitionChange(KPartitionChangeRecord {
+            topic_id: to_kuuid(topic_id),
+            partition_id: 0,
+            leader: -1,
+            ..Default::default()
+        });
+
+        let decoded = from_kraft(&change, &image).unwrap();
+        let MetadataRecord::V1Partition(decoded) = decoded else {
+            panic!("expected partition")
+        };
+        assert2::assert!(decoded.leader == NodeId(0));
+        assert2::assert!(decoded.leader_epoch == LeaderEpoch(8));
+        assert2::assert!(decoded.partition_epoch == 12);
+    }
+
+    #[test]
+    fn negative_wire_partition_replica_is_rejected() {
+        let mut image = img();
+        let topic_id = uuid::Uuid::from_u128(102);
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: "negative-node-test".into(),
             topic_id,
@@ -1795,6 +1877,7 @@ mod tests {
             topic_id: to_kuuid(topic_id),
             partition_id: 0,
             leader: -1,
+            replicas: vec![-1],
             ..Default::default()
         });
 

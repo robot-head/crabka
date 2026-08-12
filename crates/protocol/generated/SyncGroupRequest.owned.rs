@@ -86,7 +86,7 @@ impl Encode for SyncGroupRequest {
                 for it in &self.assignments {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

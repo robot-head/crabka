@@ -213,6 +213,33 @@ impl Client {
         conn.send(req).await
     }
 
+    /// Send a request only when the bootstrap broker and client share a
+    /// version at or above `min_version`.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::IncompatibleVersion`] before dispatch when the
+    /// shared range is below `min_version`. Other errors match [`send`](Self::send).
+    pub async fn send_at_least<R: ProtocolRequest>(
+        &self,
+        req: R,
+        min_version: i16,
+    ) -> Result<R::Response, ClientError> {
+        let conn = self.pool.bootstrap_connection().await?;
+        let (broker_min, broker_max) = conn.advertised_api_range(R::API_KEY).unwrap_or((0, 0));
+        let client_min = R::MIN_VERSION.max(min_version);
+        let chosen = R::MAX_VERSION.min(broker_max);
+        if chosen < client_min || chosen < broker_min {
+            return Err(ClientError::IncompatibleVersion {
+                api_key: R::API_KEY,
+                broker_min,
+                broker_max,
+                client_min,
+                client_max: R::MAX_VERSION,
+            });
+        }
+        conn.send(req).await
+    }
+
     /// Send a request to the bootstrap broker without registering a pending
     /// response. Intended for protocol operations such as Produce `acks=0`.
     ///

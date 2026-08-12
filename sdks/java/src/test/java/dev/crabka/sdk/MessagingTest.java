@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -60,6 +61,19 @@ final class MessagingTest {
         assertTrue(stream.hasNext());
         assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), stream.next().value());
         assertFalse(stream.hasNext());
+    }
+
+    @Test
+    void publishReturnsBeforeTheTransportWorkCompletes() {
+        CrabkaClient client = CrabkaClient.builder().endpoint("mock://gateway").build();
+        CompletableFuture<RecordResult> publish;
+
+        synchronized (client.mockStore()) {
+            publish = client.messaging().publish(Record.of("async", new byte[0]));
+            assertFalse(publish.isDone());
+        }
+
+        assertEquals(new RecordResult(0, 0, false), publish.join());
     }
 
     @Test

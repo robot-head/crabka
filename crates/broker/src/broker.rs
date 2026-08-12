@@ -2384,6 +2384,7 @@ pub struct BrokerHandle {
     /// Retained so shutdown can join it before the Tokio runtime drops.
     diskless_task: Option<JoinHandle<()>>,
     /// Instance-scoped readiness for this broker's index projection/flusher.
+    #[cfg_attr(not(any(test, feature = "test-helpers")), allow(dead_code))]
     diskless_flusher_ready: Option<Arc<AtomicBool>>,
     /// Shared broker state, including the registries that own background task
     /// handles.

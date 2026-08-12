@@ -551,7 +551,7 @@ const uint32_t TableStruct_crabka_2fgateway_2fv1_2fgateway_2eproto::offsets[] PR
   ~0u,
   ~0u,
   0,
-  ~0u,
+  1,
   ~0u,
   ~0u,
   ~0u,
@@ -720,59 +720,59 @@ const char descriptor_table_protodef_crabka_2fgateway_2fv1_2fgateway_2eproto[] P
   "s\022!\n\014max_messages\030\003 \001(\rR\013maxMessages\022\027\n\007"
   "wait_ms\030\004 \001(\rR\006waitMs\022\035\n\nsession_id\030\005 \001("
   "\tR\tsessionId\022(\n\020lock_duration_ms\030\006 \001(\004R\016"
-  "lockDurationMs\"\217\002\n\rQueuedMessage\022\024\n\005topi"
+  "lockDurationMs\"\236\002\n\rQueuedMessage\022\024\n\005topi"
   "c\030\001 \001(\tR\005topic\022\034\n\tpartition\030\002 \001(\005R\tparti"
   "tion\022\026\n\006offset\030\003 \001(\003R\006offset\022\025\n\003key\030\004 \001("
-  "\014H\000R\003key\210\001\001\022\024\n\005value\030\005 \001(\014R\005value\0223\n\007hea"
-  "ders\030\006 \003(\0132\031.crabka.gateway.v1.HeaderR\007h"
-  "eaders\022!\n\014timestamp_ms\030\007 \001(\003R\013timestampM"
-  "s\022%\n\016delivery_count\030\010 \001(\005R\rdeliveryCount"
-  "B\006\n\004_key\"s\n\024QueueAcquireResponse\022\035\n\nsess"
-  "ion_id\030\001 \001(\tR\tsessionId\022<\n\010messages\030\002 \003("
-  "\0132 .crabka.gateway.v1.QueuedMessageR\010mes"
-  "sages\"\220\001\n\rQueueAckEntry\022\024\n\005topic\030\001 \001(\tR\005"
-  "topic\022\034\n\tpartition\030\002 \001(\005R\tpartition\022\026\n\006o"
-  "ffset\030\003 \001(\003R\006offset\0223\n\004type\030\004 \001(\0162\037.crab"
-  "ka.gateway.v1.QueueAckTypeR\004type\"t\n\027Queu"
-  "eAcknowledgeRequest\022\035\n\nsession_id\030\001 \001(\tR"
-  "\tsessionId\022:\n\007entries\030\002 \003(\0132 .crabka.gat"
-  "eway.v1.QueueAckEntryR\007entries\"\213\001\n\016Queue"
-  "AckResult\0226\n\005entry\030\001 \001(\0132 .crabka.gatewa"
-  "y.v1.QueueAckEntryR\005entry\0227\n\005error\030\002 \001(\013"
-  "2\034.crabka.gateway.v1.ErrorInfoH\000R\005error\210"
-  "\001\001B\010\n\006_error\"W\n\030QueueAcknowledgeResponse"
-  "\022;\n\007results\030\001 \003(\0132!.crabka.gateway.v1.Qu"
-  "eueAckResultR\007results\"n\n\021QueueRenewReque"
-  "st\022\035\n\nsession_id\030\001 \001(\tR\tsessionId\022:\n\007ent"
-  "ries\030\002 \003(\0132 .crabka.gateway.v1.QueueAckE"
-  "ntryR\007entries\"Q\n\022QueueRenewResponse\022;\n\007r"
-  "esults\030\001 \003(\0132!.crabka.gateway.v1.QueueAc"
-  "kResultR\007results*4\n\004Acks\022\014\n\010ACKS_ALL\020\000\022\017"
-  "\n\013ACKS_LEADER\020\001\022\r\n\tACKS_NONE\020\002*O\n\014Schema"
-  "Format\022\035\n\031SCHEMA_FORMAT_UNSPECIFIED\020\000\022\010\n"
-  "\004AVRO\020\001\022\010\n\004JSON\020\002\022\014\n\010PROTOBUF\020\003*S\n\014Queue"
-  "AckType\022\036\n\032QUEUE_ACK_TYPE_UNSPECIFIED\020\000\022"
-  "\n\n\006ACCEPT\020\001\022\013\n\007RELEASE\020\002\022\n\n\006REJECT\020\0032\231\004\n"
-  "\007Gateway\022G\n\004Send\022\036.crabka.gateway.v1.Sen"
-  "dRequest\032\037.crabka.gateway.v1.SendRespons"
-  "e\022L\n\nSendStream\022\036.crabka.gateway.v1.Send"
-  "Request\032\032.crabka.gateway.v1.SendAck(\0010\001\022"
-  "N\n\tSubscribe\022!.crabka.gateway.v1.Subscri"
-  "beFrame\032\032.crabka.gateway.v1.Inbound(\0010\001\022"
-  "_\n\014QueueAcquire\022&.crabka.gateway.v1.Queu"
-  "eAcquireRequest\032\'.crabka.gateway.v1.Queu"
-  "eAcquireResponse\022k\n\020QueueAcknowledge\022*.c"
-  "rabka.gateway.v1.QueueAcknowledgeRequest"
-  "\032+.crabka.gateway.v1.QueueAcknowledgeRes"
-  "ponse\022Y\n\nQueueRenew\022$.crabka.gateway.v1."
-  "QueueRenewRequest\032%.crabka.gateway.v1.Qu"
-  "eueRenewResponseBFZDgithub.com/robot-hea"
-  "d/crabka/sdks/go/gen/crabka/gateway/v1;g"
-  "atewayv1b\006proto3"
+  "\014H\000R\003key\210\001\001\022\031\n\005value\030\005 \001(\014H\001R\005value\210\001\001\0223"
+  "\n\007headers\030\006 \003(\0132\031.crabka.gateway.v1.Head"
+  "erR\007headers\022!\n\014timestamp_ms\030\007 \001(\003R\013times"
+  "tampMs\022%\n\016delivery_count\030\010 \001(\005R\rdelivery"
+  "CountB\006\n\004_keyB\010\n\006_value\"s\n\024QueueAcquireR"
+  "esponse\022\035\n\nsession_id\030\001 \001(\tR\tsessionId\022<"
+  "\n\010messages\030\002 \003(\0132 .crabka.gateway.v1.Que"
+  "uedMessageR\010messages\"\220\001\n\rQueueAckEntry\022\024"
+  "\n\005topic\030\001 \001(\tR\005topic\022\034\n\tpartition\030\002 \001(\005R"
+  "\tpartition\022\026\n\006offset\030\003 \001(\003R\006offset\0223\n\004ty"
+  "pe\030\004 \001(\0162\037.crabka.gateway.v1.QueueAckTyp"
+  "eR\004type\"t\n\027QueueAcknowledgeRequest\022\035\n\nse"
+  "ssion_id\030\001 \001(\tR\tsessionId\022:\n\007entries\030\002 \003"
+  "(\0132 .crabka.gateway.v1.QueueAckEntryR\007en"
+  "tries\"\213\001\n\016QueueAckResult\0226\n\005entry\030\001 \001(\0132"
+  " .crabka.gateway.v1.QueueAckEntryR\005entry"
+  "\0227\n\005error\030\002 \001(\0132\034.crabka.gateway.v1.Erro"
+  "rInfoH\000R\005error\210\001\001B\010\n\006_error\"W\n\030QueueAckn"
+  "owledgeResponse\022;\n\007results\030\001 \003(\0132!.crabk"
+  "a.gateway.v1.QueueAckResultR\007results\"n\n\021"
+  "QueueRenewRequest\022\035\n\nsession_id\030\001 \001(\tR\ts"
+  "essionId\022:\n\007entries\030\002 \003(\0132 .crabka.gatew"
+  "ay.v1.QueueAckEntryR\007entries\"Q\n\022QueueRen"
+  "ewResponse\022;\n\007results\030\001 \003(\0132!.crabka.gat"
+  "eway.v1.QueueAckResultR\007results*4\n\004Acks\022"
+  "\014\n\010ACKS_ALL\020\000\022\017\n\013ACKS_LEADER\020\001\022\r\n\tACKS_N"
+  "ONE\020\002*O\n\014SchemaFormat\022\035\n\031SCHEMA_FORMAT_U"
+  "NSPECIFIED\020\000\022\010\n\004AVRO\020\001\022\010\n\004JSON\020\002\022\014\n\010PROT"
+  "OBUF\020\003*S\n\014QueueAckType\022\036\n\032QUEUE_ACK_TYPE"
+  "_UNSPECIFIED\020\000\022\n\n\006ACCEPT\020\001\022\013\n\007RELEASE\020\002\022"
+  "\n\n\006REJECT\020\0032\231\004\n\007Gateway\022G\n\004Send\022\036.crabka"
+  ".gateway.v1.SendRequest\032\037.crabka.gateway"
+  ".v1.SendResponse\022L\n\nSendStream\022\036.crabka."
+  "gateway.v1.SendRequest\032\032.crabka.gateway."
+  "v1.SendAck(\0010\001\022N\n\tSubscribe\022!.crabka.gat"
+  "eway.v1.SubscribeFrame\032\032.crabka.gateway."
+  "v1.Inbound(\0010\001\022_\n\014QueueAcquire\022&.crabka."
+  "gateway.v1.QueueAcquireRequest\032\'.crabka."
+  "gateway.v1.QueueAcquireResponse\022k\n\020Queue"
+  "Acknowledge\022*.crabka.gateway.v1.QueueAck"
+  "nowledgeRequest\032+.crabka.gateway.v1.Queu"
+  "eAcknowledgeResponse\022Y\n\nQueueRenew\022$.cra"
+  "bka.gateway.v1.QueueRenewRequest\032%.crabk"
+  "a.gateway.v1.QueueRenewResponseBFZDgithu"
+  "b.com/robot-head/crabka/sdks/go/gen/crab"
+  "ka/gateway/v1;gatewayv1b\006proto3"
   ;
 static ::_pbi::once_flag descriptor_table_crabka_2fgateway_2fv1_2fgateway_2eproto_once;
 const ::_pbi::DescriptorTable descriptor_table_crabka_2fgateway_2fv1_2fgateway_2eproto = {
-    false, false, 4136, descriptor_table_protodef_crabka_2fgateway_2fv1_2fgateway_2eproto,
+    false, false, 4151, descriptor_table_protodef_crabka_2fgateway_2fv1_2fgateway_2eproto,
     "crabka/gateway/v1/gateway.proto",
     &descriptor_table_crabka_2fgateway_2fv1_2fgateway_2eproto_once, nullptr, 0, 22,
     schemas, file_default_instances, TableStruct_crabka_2fgateway_2fv1_2fgateway_2eproto::offsets,
@@ -5092,6 +5092,9 @@ class QueuedMessage::_Internal {
   static void set_has_key(HasBits* has_bits) {
     (*has_bits)[0] |= 1u;
   }
+  static void set_has_value(HasBits* has_bits) {
+    (*has_bits)[0] |= 2u;
+  }
 };
 
 QueuedMessage::QueuedMessage(::PROTOBUF_NAMESPACE_ID::Arena* arena,
@@ -5136,7 +5139,7 @@ QueuedMessage::QueuedMessage(const QueuedMessage& from)
   #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
     _impl_.value_.Set("", GetArenaForAllocation());
   #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
-  if (!from._internal_value().empty()) {
+  if (from._internal_has_value()) {
     _this->_impl_.value_.Set(from._internal_value(), 
       _this->GetArenaForAllocation());
   }
@@ -5206,10 +5209,14 @@ void QueuedMessage::Clear() {
   _impl_.headers_.Clear();
   _impl_.topic_.ClearToEmpty();
   cached_has_bits = _impl_._has_bits_[0];
-  if (cached_has_bits & 0x00000001u) {
-    _impl_.key_.ClearNonDefaultToEmpty();
+  if (cached_has_bits & 0x00000003u) {
+    if (cached_has_bits & 0x00000001u) {
+      _impl_.key_.ClearNonDefaultToEmpty();
+    }
+    if (cached_has_bits & 0x00000002u) {
+      _impl_.value_.ClearNonDefaultToEmpty();
+    }
   }
-  _impl_.value_.ClearToEmpty();
   ::memset(&_impl_.offset_, 0, static_cast<size_t>(
       reinterpret_cast<char*>(&_impl_.timestamp_ms_) -
       reinterpret_cast<char*>(&_impl_.offset_)) + sizeof(_impl_.timestamp_ms_));
@@ -5259,7 +5266,7 @@ const char* QueuedMessage::_InternalParse(const char* ptr, ::_pbi::ParseContext*
         } else
           goto handle_unusual;
         continue;
-      // bytes value = 5 [json_name = "value"];
+      // optional bytes value = 5 [json_name = "value"];
       case 5:
         if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 42)) {
           auto str = _internal_mutable_value();
@@ -5355,8 +5362,8 @@ uint8_t* QueuedMessage::_InternalSerialize(
         4, this->_internal_key(), target);
   }
 
-  // bytes value = 5 [json_name = "value"];
-  if (!this->_internal_value().empty()) {
+  // optional bytes value = 5 [json_name = "value"];
+  if (_internal_has_value()) {
     target = stream->WriteBytesMaybeAliased(
         5, this->_internal_value(), target);
   }
@@ -5411,21 +5418,23 @@ size_t QueuedMessage::ByteSizeLong() const {
         this->_internal_topic());
   }
 
-  // optional bytes key = 4 [json_name = "key"];
   cached_has_bits = _impl_._has_bits_[0];
-  if (cached_has_bits & 0x00000001u) {
-    total_size += 1 +
-      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::BytesSize(
-        this->_internal_key());
-  }
+  if (cached_has_bits & 0x00000003u) {
+    // optional bytes key = 4 [json_name = "key"];
+    if (cached_has_bits & 0x00000001u) {
+      total_size += 1 +
+        ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::BytesSize(
+          this->_internal_key());
+    }
 
-  // bytes value = 5 [json_name = "value"];
-  if (!this->_internal_value().empty()) {
-    total_size += 1 +
-      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::BytesSize(
-        this->_internal_value());
-  }
+    // optional bytes value = 5 [json_name = "value"];
+    if (cached_has_bits & 0x00000002u) {
+      total_size += 1 +
+        ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::BytesSize(
+          this->_internal_value());
+    }
 
+  }
   // int64 offset = 3 [json_name = "offset"];
   if (this->_internal_offset() != 0) {
     total_size += ::_pbi::WireFormatLite::Int64SizePlusOne(this->_internal_offset());
@@ -5468,11 +5477,14 @@ void QueuedMessage::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::
   if (!from._internal_topic().empty()) {
     _this->_internal_set_topic(from._internal_topic());
   }
-  if (from._internal_has_key()) {
-    _this->_internal_set_key(from._internal_key());
-  }
-  if (!from._internal_value().empty()) {
-    _this->_internal_set_value(from._internal_value());
+  cached_has_bits = from._impl_._has_bits_[0];
+  if (cached_has_bits & 0x00000003u) {
+    if (cached_has_bits & 0x00000001u) {
+      _this->_internal_set_key(from._internal_key());
+    }
+    if (cached_has_bits & 0x00000002u) {
+      _this->_internal_set_value(from._internal_value());
+    }
   }
   if (from._internal_offset() != 0) {
     _this->_internal_set_offset(from._internal_offset());

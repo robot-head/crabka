@@ -51,7 +51,7 @@ impl Encode for VotersRecord<'_> {
                 for it in &self.voters {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -160,7 +160,7 @@ impl Encode for Voter<'_> {
                 for it in &self.endpoints {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             self.k_raft_version_feature.encode(buf, version)?;

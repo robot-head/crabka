@@ -2,6 +2,7 @@ package dev.crabka.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -12,6 +13,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import okhttp3.MediaType;
@@ -64,6 +66,35 @@ final class QueuesTest {
         assertEquals(acquired.sessionId(), redelivered.sessionId());
         assertEquals("queue:0:0", redelivered.messages().get(0).messageId());
         assertEquals(2, redelivered.messages().get(0).deliveryCount());
+    }
+
+    @Test
+    void queueOperationsReturnBeforeTheTransportWorkCompletes() {
+        CrabkaClient client = CrabkaClient.builder().endpoint("mock://gateway").build();
+        client.messaging().publish(Record.of("queue", bytes("job"))).join();
+        CompletableFuture<QueueAcquireResult> acquire;
+
+        synchronized (client.mockStore()) {
+            acquire = client.queues().acquire("queue", "workers", 1, Duration.ofSeconds(30));
+            assertFalse(acquire.isDone());
+        }
+        QueueAcquireResult acquired = acquire.join();
+
+        CompletableFuture<QueueBatchResult> renew;
+        synchronized (client.mockStore()) {
+            renew = client.queues().renew(
+                    acquired.sessionId(), List.of(new QueueRenewEntry(acquired.messages().get(0).messageId())));
+            assertFalse(renew.isDone());
+        }
+        renew.join();
+
+        CompletableFuture<QueueBatchResult> acknowledge;
+        synchronized (client.mockStore()) {
+            acknowledge = client.queues().acknowledge(acquired.sessionId(), List.of(
+                    new QueueAckEntry(acquired.messages().get(0).messageId(), QueueAckType.ACCEPT)));
+            assertFalse(acknowledge.isDone());
+        }
+        acknowledge.join();
     }
 
     @Test
@@ -187,6 +218,19 @@ final class QueuesTest {
     }
 
     @Test
+    void liveQueuePayloadsDistinguishTombstonesFromEmptyValues() {
+        OkHttpClient httpClient = new OkHttpClient.Builder()
+                .addInterceptor(chain -> gatewayResponse(queuePayloadPresenceResponse()))
+                .build();
+        LiveGatewayTransport transport = new LiveGatewayTransport(URI.create("http://gateway.test"), "", httpClient);
+
+        QueueAcquireResult acquired = transport.queueAcquire("queue", "workers", 2, 30_000, "actual-session");
+
+        assertNull(acquired.messages().get(0).value());
+        assertArrayEquals(new byte[0], acquired.messages().get(1).value());
+    }
+
+    @Test
     void liveQueueEntryErrorsPreserveGatewayErrorInfo() {
         OkHttpClient httpClient = new OkHttpClient.Builder()
                 .addInterceptor(chain -> gatewayResponse(queueBatchErrorResponse(
@@ -249,6 +293,24 @@ final class QueuesTest {
         return GatewayOuterClass.QueueAcquireResponse.newBuilder()
                 .setSessionId("actual-session")
                 .addMessages(message)
+                .build()
+                .toByteArray();
+    }
+
+    private static byte[] queuePayloadPresenceResponse() {
+        GatewayOuterClass.QueuedMessage tombstone = GatewayOuterClass.QueuedMessage.newBuilder()
+                .setTopic("queue")
+                .setOffset(1)
+                .build();
+        GatewayOuterClass.QueuedMessage empty = GatewayOuterClass.QueuedMessage.newBuilder()
+                .setTopic("queue")
+                .setOffset(2)
+                .setValue(ByteString.EMPTY)
+                .build();
+        return GatewayOuterClass.QueueAcquireResponse.newBuilder()
+                .setSessionId("actual-session")
+                .addMessages(tombstone)
+                .addMessages(empty)
                 .build()
                 .toByteArray();
     }

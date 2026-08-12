@@ -306,7 +306,7 @@ fn queued_message(record: ShareConsumerRecord) -> pb::QueuedMessage {
         partition: record.partition,
         offset: record.offset,
         key: record.key.map(|key| key.to_vec()),
-        value: record.value.map_or_else(Vec::new, |value| value.to_vec()),
+        value: record.value.map(|value| value.to_vec()),
         headers: record
             .headers
             .into_iter()
@@ -617,7 +617,7 @@ mod tests {
         assert2::assert!(
             (message.value, message.delivery_count, message.headers)
                 == (
-                    Vec::new(),
+                    None,
                     3,
                     vec![
                         pb::Header {
@@ -631,6 +631,18 @@ mod tests {
                     ],
                 )
         );
+
+        let empty = queued_message(ShareConsumerRecord {
+            topic: "jobs".to_string(),
+            partition: 2,
+            offset: 8,
+            timestamp: 12,
+            key: None,
+            value: Some(bytes::Bytes::new()),
+            headers: Vec::new(),
+            delivery_count: 1,
+        });
+        assert2::assert!(empty.value == Some(Vec::new()));
     }
 
     #[test]

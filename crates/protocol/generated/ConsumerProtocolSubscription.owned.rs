@@ -59,7 +59,7 @@ impl Encode for ConsumerProtocolSubscription {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             if flex {
@@ -74,7 +74,7 @@ impl Encode for ConsumerProtocolSubscription {
                 for it in &self.owned_partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 2 {
             put_i32(buf, self.generation_id);
@@ -239,7 +239,7 @@ impl Encode for TopicPartition {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         Ok(())
     }

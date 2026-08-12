@@ -16,6 +16,8 @@ use crate::{
     pb,
 };
 
+const SUBSCRIPTION_CHANNEL_CAPACITY: usize = 32;
+
 /// Messaging module client.
 #[derive(Debug, Clone)]
 pub struct MessagingClient {
@@ -123,7 +125,6 @@ impl MessagingClient {
         if !self.client.is_mock() {
             return self.subscribe_live(topics, group, gateway_filter);
         }
-        let (tx, rx) = mpsc::unbounded_channel();
         let messages = self
             .client
             .inner
@@ -132,6 +133,7 @@ impl MessagingClient {
             .map_err(|_| CrabkaError::ServerError("mock state lock poisoned".into()))?
             .messages
             .clone();
+        let (tx, rx) = mpsc::channel(messages.len().max(1));
         for message in messages {
             if !topics.iter().any(|topic| topic == &message.topic) {
                 continue;
@@ -146,7 +148,7 @@ impl MessagingClient {
                 value: message.value,
                 headers: message.headers.into_iter().collect(),
             };
-            if tx.send(Ok(inbound)).is_err() {
+            if tx.try_send(Ok(inbound)).is_err() {
                 break;
             }
         }
@@ -219,7 +221,7 @@ impl MessagingClient {
             })),
         };
         let connect = self.client.inner.connect.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(SUBSCRIPTION_CHANNEL_CAPACITY);
         tokio::spawn(async move {
             let mut inbound = match connect
                 .streaming::<_, pb::Inbound>("/crabka.gateway.v1.Gateway/Subscribe", &request)
@@ -227,13 +229,13 @@ impl MessagingClient {
             {
                 Ok(inbound) => inbound,
                 Err(error) => {
-                    let _ = tx.send(Err(CrabkaError::from(error)));
+                    let _ = tx.send(Err(CrabkaError::from(error))).await;
                     return;
                 }
             };
             while let Some(message) = inbound.recv().await {
                 let mapped = message.map(inbound_from_pb).map_err(CrabkaError::from);
-                if tx.send(mapped).is_err() {
+                if tx.send(mapped).await.is_err() {
                     return;
                 }
             }
@@ -350,7 +352,7 @@ pub struct Inbound {
 /// Subscription stream.
 #[derive(Debug)]
 pub struct MessageStream {
-    rx: mpsc::UnboundedReceiver<Result<Inbound, CrabkaError>>,
+    rx: mpsc::Receiver<Result<Inbound, CrabkaError>>,
 }
 
 impl Stream for MessageStream {
@@ -553,6 +555,30 @@ mod tests {
         assert_eq!(msg.offset, 1);
         assert_eq!(msg.value.as_ref(), br#"{"kind":"keep"}"#);
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn subscription_inbox_applies_backpressure_at_capacity() {
+        let (tx, rx) = mpsc::channel(SUBSCRIPTION_CHANNEL_CAPACITY);
+        let message = Inbound {
+            topic: "orders".into(),
+            partition: 0,
+            offset: 0,
+            value: Bytes::new(),
+            headers: Vec::new(),
+        };
+        for _ in 0..SUBSCRIPTION_CHANNEL_CAPACITY {
+            tx.try_send(Ok(message.clone())).expect("inbox has room");
+        }
+        assert2::assert!(matches!(
+            tx.try_send(Ok(message.clone())),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+
+        let mut stream = MessageStream { rx };
+        assert2::assert!(stream.next().await.is_some());
+        tx.try_send(Ok(message))
+            .expect("draining one item restores one slot");
     }
 
     #[test]

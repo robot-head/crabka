@@ -282,6 +282,18 @@ impl ControllerLivenessState {
             .collect()
     }
 
+    /// Snapshot brokers that are known to be unavailable for new replica
+    /// assignments. Unknown brokers are deliberately omitted: immediately
+    /// after a controller election, registrations may be visible before the
+    /// liveness registry has been seeded.
+    pub(crate) async fn unavailable_snapshot(&self) -> HashSet<u64> {
+        let map = self.brokers.lock().await;
+        map.iter()
+            .filter(|(_, entry)| entry.state == BrokerLivenessState::Dead || entry.fenced)
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
     /// Seed the liveness registry with the given broker ids as `Alive` with
     /// `last_heartbeat = now`. The broker calls this when it becomes the raft
     /// leader. Live peers then get a full timeout window to redirect their
@@ -355,6 +367,21 @@ mod tests {
         assert!(liveness.apply_fencing(3, true, true).await);
         assert!(!liveness.is_alive(3).await);
         assert!(!liveness.alive_snapshot().await.contains(&3));
+        assert!(liveness.unavailable_snapshot().await.contains(&3));
+    }
+
+    #[tokio::test]
+    async fn unavailable_snapshot_includes_dead_but_not_unknown_brokers() {
+        let clock = TestClock::new();
+        let liveness =
+            ControllerLivenessState::with_clock(Duration::from_millis(10), clock.clock());
+        liveness.record_heartbeat(2).await;
+        clock.advance(Duration::from_millis(11));
+        let _ = liveness.tick().await;
+
+        let unavailable = liveness.unavailable_snapshot().await;
+        assert!(unavailable.contains(&2));
+        assert!(!unavailable.contains(&99));
     }
 
     #[tokio::test]

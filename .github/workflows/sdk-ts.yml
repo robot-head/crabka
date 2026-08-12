@@ -32,7 +32,7 @@ jobs:
           go-version: '1.23.x'
       - name: Generate SDK stubs
         run: |
-          go run github.com/bufbuild/buf/cmd/buf@latest generate
+          go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
           git diff --exit-code -- buf.gen.yaml sdks/ts/gen
       - name: Install dependencies
         run: npm ci

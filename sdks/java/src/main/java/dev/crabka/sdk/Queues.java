@@ -20,31 +20,19 @@ public final class Queues {
 
     public CompletableFuture<QueueAcquireResult> acquireWithSession(
             String topic, String group, int max, Duration lockDuration, String sessionId) {
-        try {
-            return CompletableFuture.completedFuture(acquireSync(topic, group, max, lockDuration, sessionId));
-        } catch (CrabkaException error) {
-            return failedFuture(error);
-        }
+        return CompletableFuture.supplyAsync(() -> acquireSync(topic, group, max, lockDuration, sessionId));
     }
 
     public CompletableFuture<QueueBatchResult> acknowledge(String sessionId, List<QueueAckEntry> entries) {
-        try {
-            return CompletableFuture.completedFuture(acknowledgeSync(sessionId, entries));
-        } catch (CrabkaException error) {
-            return failedFuture(error);
-        }
+        return CompletableFuture.supplyAsync(() -> acknowledgeSync(sessionId, entries));
     }
 
     public CompletableFuture<QueueBatchResult> renew(String sessionId, List<QueueRenewEntry> entries) {
-        try {
-            return CompletableFuture.completedFuture(renewSync(sessionId, entries));
-        } catch (CrabkaException error) {
-            return failedFuture(error);
-        }
+        return CompletableFuture.supplyAsync(() -> renewSync(sessionId, entries));
     }
 
     public CompletableFuture<Void> ack(String messageId) {
-        return failedFuture(new UnimplementedException("queues", "gateway-sharegroup-rpc"));
+        return CompletableFuture.failedFuture(new UnimplementedException("queues", "gateway-sharegroup-rpc"));
     }
 
     private QueueAcquireResult acquireSync(
@@ -92,11 +80,5 @@ public final class Queues {
         if (sessionId == null || sessionId.isBlank()) {
             throw new InvalidArgumentException("queue session_id is required");
         }
-    }
-
-    private static <T> CompletableFuture<T> failedFuture(Throwable error) {
-        CompletableFuture<T> future = new CompletableFuture<>();
-        future.completeExceptionally(error);
-        return future;
     }
 }

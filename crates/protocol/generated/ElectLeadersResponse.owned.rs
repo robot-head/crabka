@@ -50,7 +50,7 @@ impl Encode for ElectLeadersResponse {
                 for it in &self.replica_election_results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -158,7 +158,7 @@ impl Encode for ReplicaElectionResult {
                 for it in &self.partition_result {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -59,7 +59,7 @@ impl Encode for ShareGroupDescribeResponse<'_> {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -242,7 +242,7 @@ impl<'a> DescribedGroup<'a> {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -599,7 +599,7 @@ impl Encode for Member<'_> {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             self.assignment.encode(buf, version)?;

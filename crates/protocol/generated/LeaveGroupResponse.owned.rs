@@ -46,7 +46,7 @@ impl Encode for LeaveGroupResponse {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

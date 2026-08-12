@@ -42,7 +42,7 @@ impl Encode for AlterUserScramCredentialsRequest {
                 for it in &self.deletions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -50,7 +50,7 @@ impl Encode for AlterUserScramCredentialsRequest {
                 for it in &self.upsertions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

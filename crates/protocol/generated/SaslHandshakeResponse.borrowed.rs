@@ -59,7 +59,7 @@ impl Encode for SaslHandshakeResponse<'_> {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         Ok(())
     }

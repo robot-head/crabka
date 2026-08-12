@@ -26,6 +26,7 @@ impl EnvelopeResponse<'_> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::envelope_response::EnvelopeResponse {
         crate::owned::envelope_response::EnvelopeResponse {
             response_data: (self.response_data).map(Bytes::copy_from_slice),

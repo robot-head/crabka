@@ -59,7 +59,7 @@ impl Encode for OffsetDeleteRequest<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -166,7 +166,7 @@ impl Encode for OffsetDeleteRequestTopic<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

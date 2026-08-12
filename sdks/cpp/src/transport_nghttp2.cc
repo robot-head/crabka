@@ -564,7 +564,7 @@ QueueMessage decode_queued_message(std::string_view bytes) {
       message.offset = static_cast<std::int64_t>(read_varint(reader));
     } else if (field == 5 && wire_type == 2) {
       const auto value = read_length_delimited(reader);
-      message.value.assign(value.begin(), value.end());
+      message.value = std::vector<std::uint8_t>(value.begin(), value.end());
     } else if (field == 6 && wire_type == 2) {
       auto headers = decode_headers(read_length_delimited(reader));
       message.headers.insert(message.headers.end(), std::make_move_iterator(headers.begin()),

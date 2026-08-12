@@ -54,7 +54,7 @@ impl Encode for ListPartitionReassignmentsResponse {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -174,7 +174,7 @@ impl Encode for OngoingTopicReassignment {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -271,7 +271,7 @@ impl Encode for OngoingPartitionReassignment {
                 for it in &self.replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -279,7 +279,7 @@ impl Encode for OngoingPartitionReassignment {
                 for it in &self.adding_replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -287,7 +287,7 @@ impl Encode for OngoingPartitionReassignment {
                 for it in &self.removing_replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -50,7 +50,7 @@ impl Encode for RegisterControllerRecord {
                 for it in &self.end_points {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -58,7 +58,7 @@ impl Encode for RegisterControllerRecord {
                 for it in &self.features {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

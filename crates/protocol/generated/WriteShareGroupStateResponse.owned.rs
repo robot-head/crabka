@@ -37,7 +37,7 @@ impl Encode for WriteShareGroupStateResponse {
                 for it in &self.results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -121,7 +121,7 @@ impl Encode for WriteStateResult {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

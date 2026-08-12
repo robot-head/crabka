@@ -31,7 +31,7 @@ jobs:
         run: rustup toolchain install nightly --profile minimal --component rustfmt
       - name: Generate Go gateway stubs
         run: |
-          go run github.com/bufbuild/buf/cmd/buf@latest generate
+          go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
           git diff --exit-code -- buf.gen.yaml sdks/go/gen
       - name: Validate Go SDK live harness artifacts (no Docker start)
         run: |

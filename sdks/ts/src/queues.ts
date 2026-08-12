@@ -31,7 +31,7 @@ export type QueueMessage = {
   topic: string;
   partition: number;
   offset: bigint;
-  value: Uint8Array;
+  value?: Uint8Array;
   headers: Header[];
   deliveryCount: number;
 };

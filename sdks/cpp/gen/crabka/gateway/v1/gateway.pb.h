@@ -3168,7 +3168,11 @@ class QueuedMessage final :
   std::string* _internal_mutable_key();
   public:
 
-  // bytes value = 5 [json_name = "value"];
+  // optional bytes value = 5 [json_name = "value"];
+  bool has_value() const;
+  private:
+  bool _internal_has_value() const;
+  public:
   void clear_value();
   const std::string& value() const;
   template <typename ArgT0 = const std::string&, typename... ArgT>
@@ -6957,9 +6961,17 @@ inline void QueuedMessage::set_allocated_key(std::string* key) {
   // @@protoc_insertion_point(field_set_allocated:crabka.gateway.v1.QueuedMessage.key)
 }
 
-// bytes value = 5 [json_name = "value"];
+// optional bytes value = 5 [json_name = "value"];
+inline bool QueuedMessage::_internal_has_value() const {
+  bool value = (_impl_._has_bits_[0] & 0x00000002u) != 0;
+  return value;
+}
+inline bool QueuedMessage::has_value() const {
+  return _internal_has_value();
+}
 inline void QueuedMessage::clear_value() {
   _impl_.value_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000002u;
 }
 inline const std::string& QueuedMessage::value() const {
   // @@protoc_insertion_point(field_get:crabka.gateway.v1.QueuedMessage.value)
@@ -6968,7 +6980,7 @@ inline const std::string& QueuedMessage::value() const {
 template <typename ArgT0, typename... ArgT>
 inline PROTOBUF_ALWAYS_INLINE
 void QueuedMessage::set_value(ArgT0&& arg0, ArgT... args) {
- 
+ _impl_._has_bits_[0] |= 0x00000002u;
  _impl_.value_.SetBytes(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
   // @@protoc_insertion_point(field_set:crabka.gateway.v1.QueuedMessage.value)
 }
@@ -6981,22 +6993,32 @@ inline const std::string& QueuedMessage::_internal_value() const {
   return _impl_.value_.Get();
 }
 inline void QueuedMessage::_internal_set_value(const std::string& value) {
-  
+  _impl_._has_bits_[0] |= 0x00000002u;
   _impl_.value_.Set(value, GetArenaForAllocation());
 }
 inline std::string* QueuedMessage::_internal_mutable_value() {
-  
+  _impl_._has_bits_[0] |= 0x00000002u;
   return _impl_.value_.Mutable(GetArenaForAllocation());
 }
 inline std::string* QueuedMessage::release_value() {
   // @@protoc_insertion_point(field_release:crabka.gateway.v1.QueuedMessage.value)
-  return _impl_.value_.Release();
+  if (!_internal_has_value()) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000002u;
+  auto* p = _impl_.value_.Release();
+#ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (_impl_.value_.IsDefault()) {
+    _impl_.value_.Set("", GetArenaForAllocation());
+  }
+#endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  return p;
 }
 inline void QueuedMessage::set_allocated_value(std::string* value) {
   if (value != nullptr) {
-    
+    _impl_._has_bits_[0] |= 0x00000002u;
   } else {
-    
+    _impl_._has_bits_[0] &= ~0x00000002u;
   }
   _impl_.value_.SetAllocated(value, GetArenaForAllocation());
 #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING

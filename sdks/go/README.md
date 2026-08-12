@@ -28,7 +28,7 @@ Bearer tokens configured with `WithBearerToken` are for dev/test only. The curre
 Regenerate gateway stubs from the repository root with:
 
 ```sh
-go run github.com/bufbuild/buf/cmd/buf@latest generate
+go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
 ```
 
 Build and run the adapter used by the Rust conformance runner with:

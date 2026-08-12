@@ -5064,6 +5064,10 @@ public final class GatewayOuterClass {
     com.google.protobuf.ByteString getValue();
   }
   /**
+   * <pre>
+   * Kafka headers are ordered, may repeat a key, and may carry a null value.
+   * </pre>
+   *
    * Protobuf type {@code crabka.gateway.v1.Header}
    */
   public static final class Header extends
@@ -5334,6 +5338,10 @@ public final class GatewayOuterClass {
       return builder;
     }
     /**
+     * <pre>
+     * Kafka headers are ordered, may repeat a key, and may carry a null value.
+     * </pre>
+     *
      * Protobuf type {@code crabka.gateway.v1.Header}
      */
     public static final class Builder extends
@@ -8937,16 +8945,11 @@ public final class GatewayOuterClass {
   }
   /**
    * <pre>
-   * An Ack confirms delivery of the identified record.
-   *
-   * With SubscribeStart.auto_commit=false, topic/partition/offset are required
-   * and drive explicit per-partition commits: the server commits the acknowledged
-   * contiguous offset frontier for that topic partition, using Kafka's next offset
-   * value (`offset + 1`).
-   *
-   * With SubscribeStart.auto_commit=true, records are committed from the current
-   * consumer position after each non-empty poll. Ack frames are optional; when
-   * sent, their topic/partition/offset fields do not select a per-offset commit.
+   * In explicit mode (`SubscribeStart.auto_commit = false`), `offset` is the
+   * delivered record offset being acknowledged. The gateway advances a
+   * contiguous per-topic-partition frontier and commits frontier + 1, so an ack
+   * above a gap cannot skip an unacknowledged record. Ack frames are ignored when
+   * `auto_commit` is true.
    * </pre>
    *
    * Protobuf type {@code crabka.gateway.v1.SubscribeAck}
@@ -9228,16 +9231,11 @@ public final class GatewayOuterClass {
     }
     /**
      * <pre>
-     * An Ack confirms delivery of the identified record.
-     *
-     * With SubscribeStart.auto_commit=false, topic/partition/offset are required
-     * and drive explicit per-partition commits: the server commits the acknowledged
-     * contiguous offset frontier for that topic partition, using Kafka's next offset
-     * value (`offset + 1`).
-     *
-     * With SubscribeStart.auto_commit=true, records are committed from the current
-     * consumer position after each non-empty poll. Ack frames are optional; when
-     * sent, their topic/partition/offset fields do not select a per-offset commit.
+     * In explicit mode (`SubscribeStart.auto_commit = false`), `offset` is the
+     * delivered record offset being acknowledged. The gateway advances a
+     * contiguous per-topic-partition frontier and commits frontier + 1, so an ack
+     * above a gap cannot skip an unacknowledged record. Ack frames are ignored when
+     * `auto_commit` is true.
      * </pre>
      *
      * Protobuf type {@code crabka.gateway.v1.SubscribeAck}
@@ -12323,6 +12321,11 @@ public final class GatewayOuterClass {
     long getLockDurationMs();
   }
   /**
+   * <pre>
+   * Acquire work from a KIP-932 share group. Leave `session_id` empty on the
+   * first call; subsequent calls reuse the returned `session_id`.
+   * </pre>
+   *
    * Protobuf type {@code crabka.gateway.v1.QueueAcquireRequest}
    */
   public static final class QueueAcquireRequest extends
@@ -12729,6 +12732,11 @@ public final class GatewayOuterClass {
       return builder;
     }
     /**
+     * <pre>
+     * Acquire work from a KIP-932 share group. Leave `session_id` empty on the
+     * first call; subsequent calls reuse the returned `session_id`.
+     * </pre>
+     *
      * Protobuf type {@code crabka.gateway.v1.QueueAcquireRequest}
      */
     public static final class Builder extends
@@ -13380,7 +13388,12 @@ public final class GatewayOuterClass {
     com.google.protobuf.ByteString getKey();
 
     /**
-     * <code>bytes value = 5 [json_name = "value"];</code>
+     * <code>optional bytes value = 5 [json_name = "value"];</code>
+     * @return Whether the value field is set.
+     */
+    boolean hasValue();
+    /**
+     * <code>optional bytes value = 5 [json_name = "value"];</code>
      * @return The value.
      */
     com.google.protobuf.ByteString getValue();
@@ -13546,7 +13559,15 @@ public final class GatewayOuterClass {
     public static final int VALUE_FIELD_NUMBER = 5;
     private com.google.protobuf.ByteString value_ = com.google.protobuf.ByteString.EMPTY;
     /**
-     * <code>bytes value = 5 [json_name = "value"];</code>
+     * <code>optional bytes value = 5 [json_name = "value"];</code>
+     * @return Whether the value field is set.
+     */
+    @java.lang.Override
+    public boolean hasValue() {
+      return ((bitField0_ & 0x00000002) != 0);
+    }
+    /**
+     * <code>optional bytes value = 5 [json_name = "value"];</code>
      * @return The value.
      */
     @java.lang.Override
@@ -13643,7 +13664,7 @@ public final class GatewayOuterClass {
       if (((bitField0_ & 0x00000001) != 0)) {
         output.writeBytes(4, key_);
       }
-      if (!value_.isEmpty()) {
+      if (((bitField0_ & 0x00000002) != 0)) {
         output.writeBytes(5, value_);
       }
       for (int i = 0; i < headers_.size(); i++) {
@@ -13679,7 +13700,7 @@ public final class GatewayOuterClass {
         size += com.google.protobuf.CodedOutputStream
           .computeBytesSize(4, key_);
       }
-      if (!value_.isEmpty()) {
+      if (((bitField0_ & 0x00000002) != 0)) {
         size += com.google.protobuf.CodedOutputStream
           .computeBytesSize(5, value_);
       }
@@ -13721,8 +13742,11 @@ public final class GatewayOuterClass {
         if (!getKey()
             .equals(other.getKey())) return false;
       }
-      if (!getValue()
-          .equals(other.getValue())) return false;
+      if (hasValue() != other.hasValue()) return false;
+      if (hasValue()) {
+        if (!getValue()
+            .equals(other.getValue())) return false;
+      }
       if (!getHeadersList()
           .equals(other.getHeadersList())) return false;
       if (getTimestampMs()
@@ -13751,8 +13775,10 @@ public final class GatewayOuterClass {
         hash = (37 * hash) + KEY_FIELD_NUMBER;
         hash = (53 * hash) + getKey().hashCode();
       }
-      hash = (37 * hash) + VALUE_FIELD_NUMBER;
-      hash = (53 * hash) + getValue().hashCode();
+      if (hasValue()) {
+        hash = (37 * hash) + VALUE_FIELD_NUMBER;
+        hash = (53 * hash) + getValue().hashCode();
+      }
       if (getHeadersCount() > 0) {
         hash = (37 * hash) + HEADERS_FIELD_NUMBER;
         hash = (53 * hash) + getHeadersList().hashCode();
@@ -13969,6 +13995,7 @@ public final class GatewayOuterClass {
         }
         if (((from_bitField0_ & 0x00000010) != 0)) {
           result.value_ = value_;
+          to_bitField0_ |= 0x00000002;
         }
         if (((from_bitField0_ & 0x00000040) != 0)) {
           result.timestampMs_ = timestampMs_;
@@ -14005,7 +14032,7 @@ public final class GatewayOuterClass {
         if (other.hasKey()) {
           setKey(other.getKey());
         }
-        if (!other.getValue().isEmpty()) {
+        if (other.hasValue()) {
           setValue(other.getValue());
         }
         if (headersBuilder_ == null) {
@@ -14309,7 +14336,15 @@ public final class GatewayOuterClass {
 
       private com.google.protobuf.ByteString value_ = com.google.protobuf.ByteString.EMPTY;
       /**
-       * <code>bytes value = 5 [json_name = "value"];</code>
+       * <code>optional bytes value = 5 [json_name = "value"];</code>
+       * @return Whether the value field is set.
+       */
+      @java.lang.Override
+      public boolean hasValue() {
+        return ((bitField0_ & 0x00000010) != 0);
+      }
+      /**
+       * <code>optional bytes value = 5 [json_name = "value"];</code>
        * @return The value.
        */
       @java.lang.Override
@@ -14317,7 +14352,7 @@ public final class GatewayOuterClass {
         return value_;
       }
       /**
-       * <code>bytes value = 5 [json_name = "value"];</code>
+       * <code>optional bytes value = 5 [json_name = "value"];</code>
        * @param value The value to set.
        * @return This builder for chaining.
        */
@@ -14329,7 +14364,7 @@ public final class GatewayOuterClass {
         return this;
       }
       /**
-       * <code>bytes value = 5 [json_name = "value"];</code>
+       * <code>optional bytes value = 5 [json_name = "value"];</code>
        * @return This builder for chaining.
        */
       public Builder clearValue() {
@@ -20540,55 +20575,55 @@ public final class GatewayOuterClass {
       "s\022!\n\014max_messages\030\003 \001(\rR\013maxMessages\022\027\n\007" +
       "wait_ms\030\004 \001(\rR\006waitMs\022\035\n\nsession_id\030\005 \001(" +
       "\tR\tsessionId\022(\n\020lock_duration_ms\030\006 \001(\004R\016" +
-      "lockDurationMs\"\217\002\n\rQueuedMessage\022\024\n\005topi" +
+      "lockDurationMs\"\236\002\n\rQueuedMessage\022\024\n\005topi" +
       "c\030\001 \001(\tR\005topic\022\034\n\tpartition\030\002 \001(\005R\tparti" +
       "tion\022\026\n\006offset\030\003 \001(\003R\006offset\022\025\n\003key\030\004 \001(" +
-      "\014H\000R\003key\210\001\001\022\024\n\005value\030\005 \001(\014R\005value\0223\n\007hea" +
-      "ders\030\006 \003(\0132\031.crabka.gateway.v1.HeaderR\007h" +
-      "eaders\022!\n\014timestamp_ms\030\007 \001(\003R\013timestampM" +
-      "s\022%\n\016delivery_count\030\010 \001(\005R\rdeliveryCount" +
-      "B\006\n\004_key\"s\n\024QueueAcquireResponse\022\035\n\nsess" +
-      "ion_id\030\001 \001(\tR\tsessionId\022<\n\010messages\030\002 \003(" +
-      "\0132 .crabka.gateway.v1.QueuedMessageR\010mes" +
-      "sages\"\220\001\n\rQueueAckEntry\022\024\n\005topic\030\001 \001(\tR\005" +
-      "topic\022\034\n\tpartition\030\002 \001(\005R\tpartition\022\026\n\006o" +
-      "ffset\030\003 \001(\003R\006offset\0223\n\004type\030\004 \001(\0162\037.crab" +
-      "ka.gateway.v1.QueueAckTypeR\004type\"t\n\027Queu" +
-      "eAcknowledgeRequest\022\035\n\nsession_id\030\001 \001(\tR" +
-      "\tsessionId\022:\n\007entries\030\002 \003(\0132 .crabka.gat" +
-      "eway.v1.QueueAckEntryR\007entries\"\213\001\n\016Queue" +
-      "AckResult\0226\n\005entry\030\001 \001(\0132 .crabka.gatewa" +
-      "y.v1.QueueAckEntryR\005entry\0227\n\005error\030\002 \001(\013" +
-      "2\034.crabka.gateway.v1.ErrorInfoH\000R\005error\210" +
-      "\001\001B\010\n\006_error\"W\n\030QueueAcknowledgeResponse" +
-      "\022;\n\007results\030\001 \003(\0132!.crabka.gateway.v1.Qu" +
-      "eueAckResultR\007results\"n\n\021QueueRenewReque" +
-      "st\022\035\n\nsession_id\030\001 \001(\tR\tsessionId\022:\n\007ent" +
-      "ries\030\002 \003(\0132 .crabka.gateway.v1.QueueAckE" +
-      "ntryR\007entries\"Q\n\022QueueRenewResponse\022;\n\007r" +
-      "esults\030\001 \003(\0132!.crabka.gateway.v1.QueueAc" +
-      "kResultR\007results*4\n\004Acks\022\014\n\010ACKS_ALL\020\000\022\017" +
-      "\n\013ACKS_LEADER\020\001\022\r\n\tACKS_NONE\020\002*O\n\014Schema" +
-      "Format\022\035\n\031SCHEMA_FORMAT_UNSPECIFIED\020\000\022\010\n" +
-      "\004AVRO\020\001\022\010\n\004JSON\020\002\022\014\n\010PROTOBUF\020\003*S\n\014Queue" +
-      "AckType\022\036\n\032QUEUE_ACK_TYPE_UNSPECIFIED\020\000\022" +
-      "\n\n\006ACCEPT\020\001\022\013\n\007RELEASE\020\002\022\n\n\006REJECT\020\0032\231\004\n" +
-      "\007Gateway\022G\n\004Send\022\036.crabka.gateway.v1.Sen" +
-      "dRequest\032\037.crabka.gateway.v1.SendRespons" +
-      "e\022L\n\nSendStream\022\036.crabka.gateway.v1.Send" +
-      "Request\032\032.crabka.gateway.v1.SendAck(\0010\001\022" +
-      "N\n\tSubscribe\022!.crabka.gateway.v1.Subscri" +
-      "beFrame\032\032.crabka.gateway.v1.Inbound(\0010\001\022" +
-      "_\n\014QueueAcquire\022&.crabka.gateway.v1.Queu" +
-      "eAcquireRequest\032\'.crabka.gateway.v1.Queu" +
-      "eAcquireResponse\022k\n\020QueueAcknowledge\022*.c" +
-      "rabka.gateway.v1.QueueAcknowledgeRequest" +
-      "\032+.crabka.gateway.v1.QueueAcknowledgeRes" +
-      "ponse\022Y\n\nQueueRenew\022$.crabka.gateway.v1." +
-      "QueueRenewRequest\032%.crabka.gateway.v1.Qu" +
-      "eueRenewResponseBFZDgithub.com/robot-hea" +
-      "d/crabka/sdks/go/gen/crabka/gateway/v1;g" +
-      "atewayv1b\006proto3"
+      "\014H\000R\003key\210\001\001\022\031\n\005value\030\005 \001(\014H\001R\005value\210\001\001\0223" +
+      "\n\007headers\030\006 \003(\0132\031.crabka.gateway.v1.Head" +
+      "erR\007headers\022!\n\014timestamp_ms\030\007 \001(\003R\013times" +
+      "tampMs\022%\n\016delivery_count\030\010 \001(\005R\rdelivery" +
+      "CountB\006\n\004_keyB\010\n\006_value\"s\n\024QueueAcquireR" +
+      "esponse\022\035\n\nsession_id\030\001 \001(\tR\tsessionId\022<" +
+      "\n\010messages\030\002 \003(\0132 .crabka.gateway.v1.Que" +
+      "uedMessageR\010messages\"\220\001\n\rQueueAckEntry\022\024" +
+      "\n\005topic\030\001 \001(\tR\005topic\022\034\n\tpartition\030\002 \001(\005R" +
+      "\tpartition\022\026\n\006offset\030\003 \001(\003R\006offset\0223\n\004ty" +
+      "pe\030\004 \001(\0162\037.crabka.gateway.v1.QueueAckTyp" +
+      "eR\004type\"t\n\027QueueAcknowledgeRequest\022\035\n\nse" +
+      "ssion_id\030\001 \001(\tR\tsessionId\022:\n\007entries\030\002 \003" +
+      "(\0132 .crabka.gateway.v1.QueueAckEntryR\007en" +
+      "tries\"\213\001\n\016QueueAckResult\0226\n\005entry\030\001 \001(\0132" +
+      " .crabka.gateway.v1.QueueAckEntryR\005entry" +
+      "\0227\n\005error\030\002 \001(\0132\034.crabka.gateway.v1.Erro" +
+      "rInfoH\000R\005error\210\001\001B\010\n\006_error\"W\n\030QueueAckn" +
+      "owledgeResponse\022;\n\007results\030\001 \003(\0132!.crabk" +
+      "a.gateway.v1.QueueAckResultR\007results\"n\n\021" +
+      "QueueRenewRequest\022\035\n\nsession_id\030\001 \001(\tR\ts" +
+      "essionId\022:\n\007entries\030\002 \003(\0132 .crabka.gatew" +
+      "ay.v1.QueueAckEntryR\007entries\"Q\n\022QueueRen" +
+      "ewResponse\022;\n\007results\030\001 \003(\0132!.crabka.gat" +
+      "eway.v1.QueueAckResultR\007results*4\n\004Acks\022" +
+      "\014\n\010ACKS_ALL\020\000\022\017\n\013ACKS_LEADER\020\001\022\r\n\tACKS_N" +
+      "ONE\020\002*O\n\014SchemaFormat\022\035\n\031SCHEMA_FORMAT_U" +
+      "NSPECIFIED\020\000\022\010\n\004AVRO\020\001\022\010\n\004JSON\020\002\022\014\n\010PROT" +
+      "OBUF\020\003*S\n\014QueueAckType\022\036\n\032QUEUE_ACK_TYPE" +
+      "_UNSPECIFIED\020\000\022\n\n\006ACCEPT\020\001\022\013\n\007RELEASE\020\002\022" +
+      "\n\n\006REJECT\020\0032\231\004\n\007Gateway\022G\n\004Send\022\036.crabka" +
+      ".gateway.v1.SendRequest\032\037.crabka.gateway" +
+      ".v1.SendResponse\022L\n\nSendStream\022\036.crabka." +
+      "gateway.v1.SendRequest\032\032.crabka.gateway." +
+      "v1.SendAck(\0010\001\022N\n\tSubscribe\022!.crabka.gat" +
+      "eway.v1.SubscribeFrame\032\032.crabka.gateway." +
+      "v1.Inbound(\0010\001\022_\n\014QueueAcquire\022&.crabka." +
+      "gateway.v1.QueueAcquireRequest\032\'.crabka." +
+      "gateway.v1.QueueAcquireResponse\022k\n\020Queue" +
+      "Acknowledge\022*.crabka.gateway.v1.QueueAck" +
+      "nowledgeRequest\032+.crabka.gateway.v1.Queu" +
+      "eAcknowledgeResponse\022Y\n\nQueueRenew\022$.cra" +
+      "bka.gateway.v1.QueueRenewRequest\032%.crabk" +
+      "a.gateway.v1.QueueRenewResponseBFZDgithu" +
+      "b.com/robot-head/crabka/sdks/go/gen/crab" +
+      "ka/gateway/v1;gatewayv1b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,

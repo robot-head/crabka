@@ -941,7 +941,7 @@
 //! materializes a table into a versioned key-value store. The store records
 //! out-of-order records as historical versions and keeps the latest version
 //! intact. `get_as_of` gives point-in-time reads.
-#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.9")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.4.0")]
 
 pub mod columnar;
 pub mod dsl;

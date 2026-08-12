@@ -10,6 +10,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
+const STREAM_CHANNEL_CAPACITY: usize = 32;
+
 /// Connect envelope codec.
 pub mod envelope {
     use super::{Bytes, BytesMut, ConnectClientError, EndStream, TrailerBody};
@@ -193,7 +195,7 @@ impl ConnectClient {
         &self,
         path: &str,
         request: &Req,
-    ) -> Result<mpsc::UnboundedReceiver<Result<Resp, ConnectClientError>>, ConnectClientError>
+    ) -> Result<mpsc::Receiver<Result<Resp, ConnectClientError>>, ConnectClientError>
     where
         Req: prost::Message,
         Resp: prost::Message + Default + Send + 'static,
@@ -228,7 +230,7 @@ impl ConnectClient {
             return Err(response_error(status.as_u16(), &body));
         }
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
         tokio::spawn(read_streaming_response::<Resp>(response.into_body(), tx));
         Ok(rx)
     }
@@ -270,7 +272,7 @@ fn response_error(status: u16, body: &[u8]) -> ConnectClientError {
 
 async fn read_streaming_response<Resp>(
     mut body: hyper::body::Incoming,
-    tx: mpsc::UnboundedSender<Result<Resp, ConnectClientError>>,
+    tx: mpsc::Sender<Result<Resp, ConnectClientError>>,
 ) where
     Resp: prost::Message + Default,
 {
@@ -279,7 +281,7 @@ async fn read_streaming_response<Resp>(
         let frame = match frame {
             Ok(frame) => frame,
             Err(error) => {
-                let _ = tx.send(Err(error.into()));
+                let _ = tx.send(Err(error.into())).await;
                 return;
             }
         };
@@ -292,7 +294,7 @@ async fn read_streaming_response<Resp>(
             let Some((frame, consumed)) = (match decoded {
                 Ok(frame) => frame,
                 Err(error) => {
-                    let _ = tx.send(Err(error));
+                    let _ = tx.send(Err(error)).await;
                     return;
                 }
             }) else {
@@ -302,18 +304,23 @@ async fn read_streaming_response<Resp>(
             match frame {
                 envelope::Frame::Message(message) => {
                     let decoded = Resp::decode(message).map_err(ConnectClientError::from);
-                    if tx.send(decoded).is_err() {
+                    if tx.send(decoded).await.is_err() {
                         return;
                     }
                 }
                 envelope::Frame::EndStream(end) => {
                     if let Some(error) = end.error {
-                        let _ = tx.send(Err(error.into()));
+                        let _ = tx.send(Err(error.into())).await;
                     }
                     return;
                 }
             }
         }
+    }
+    if !buffer.is_empty() {
+        let _ = tx
+            .send(Err(ConnectClientError::PartialFrame { needed: 1 }))
+            .await;
     }
 }
 
@@ -391,7 +398,7 @@ mod tests {
     use hyper_util::rt::{TokioExecutor, TokioIo};
 
     use super::{
-        ConnectClient, ConnectClientError,
+        ConnectClient, ConnectClientError, STREAM_CHANNEL_CAPACITY,
         envelope::{self, Frame},
         response_error,
     };
@@ -499,5 +506,28 @@ mod tests {
 
         assert2::assert!(let CrabkaError::NotFound(message) = CrabkaError::from(error));
         assert_eq!(message, "missing");
+    }
+
+    #[tokio::test]
+    async fn streaming_receiver_is_bounded_and_truncated_frames_are_errors() {
+        for body in [
+            Bytes::from_static(&[0x00, 0x00]),
+            Bytes::from_static(&[0x00, 0x00, 0x00, 0x00, 0x04, 0x01, 0x02]),
+        ] {
+            let (endpoint, server) = serve_once(StatusCode::OK, body).await;
+            let mut responses = ConnectClient::new(endpoint, None)
+                .streaming::<_, Empty>("/test.Service/Streaming", &Empty {})
+                .await
+                .expect("HTTP streaming response opens");
+
+            assert_eq!(responses.max_capacity(), STREAM_CHANNEL_CAPACITY);
+            let error = tokio::time::timeout(Duration::from_secs(2), responses.recv())
+                .await
+                .expect("stream response arrives")
+                .expect("truncated stream emits an error")
+                .expect_err("truncated stream must not complete cleanly");
+            assert2::assert!(matches!(error, ConnectClientError::PartialFrame { .. }));
+            server.abort();
+        }
     }
 }

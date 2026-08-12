@@ -177,7 +177,7 @@ final class LiveGatewayTransport {
                 message.getTopic(),
                 message.getPartition(),
                 message.getOffset(),
-                message.getValue().toByteArray(),
+                message.hasValue() ? message.getValue().toByteArray() : null,
                 message.getHeadersList().stream().map(LiveGatewayTransport::fromGatewayHeader).toList(),
                 message.getDeliveryCount());
     }

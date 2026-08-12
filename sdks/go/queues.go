@@ -223,7 +223,7 @@ func acquireMockQueueMessage(message *mockMessage, group string, sessionID strin
 	delivery.state = mockQueueMessageAcquired
 	delivery.sessionID = sessionID
 	delivery.deliveryCount++
-	return QueueMessage{MessageID: queueMessageID(message.record.Topic, message.partition, message.offset), Topic: message.record.Topic, Partition: message.partition, Offset: message.offset, Value: append([]byte(nil), message.record.Value...), Headers: cloneHeaders(message.record.Headers), DeliveryCount: delivery.deliveryCount}
+	return QueueMessage{MessageID: queueMessageID(message.record.Topic, message.partition, message.offset), Topic: message.record.Topic, Partition: message.partition, Offset: message.offset, Value: cloneNullableBytes(message.record.Value), Headers: cloneHeaders(message.record.Headers), DeliveryCount: delivery.deliveryCount}
 }
 
 func (s *mockStore) acknowledgeQueueMessages(sessionID string, entries []QueueAckEntry) (QueueBatchResult, error) {
@@ -359,7 +359,7 @@ func fromProtoQueueAcquire(response *gw.QueueAcquireResponse) QueueAcquireResult
 }
 
 func fromProtoQueuedMessage(message *gw.QueuedMessage) QueueMessage {
-	return QueueMessage{MessageID: queueMessageID(message.Topic, message.Partition, message.Offset), Topic: message.Topic, Partition: message.Partition, Offset: message.Offset, Value: append([]byte(nil), message.Value...), Headers: fromProtoHeaders(message.Headers), DeliveryCount: message.DeliveryCount}
+	return QueueMessage{MessageID: queueMessageID(message.Topic, message.Partition, message.Offset), Topic: message.Topic, Partition: message.Partition, Offset: message.Offset, Value: cloneNullableBytes(message.Value), Headers: fromProtoHeaders(message.Headers), DeliveryCount: message.DeliveryCount}
 }
 
 func fromProtoHeaders(headers []*gw.Header) []Header {

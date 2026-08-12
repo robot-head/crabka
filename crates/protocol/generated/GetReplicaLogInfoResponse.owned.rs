@@ -45,7 +45,7 @@ impl Encode for GetReplicaLogInfoResponse {
                 for it in &self.topic_partition_log_info_list {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -140,7 +140,7 @@ impl Encode for TopicPartitionLogInfo {
                 for it in &self.partition_log_info {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

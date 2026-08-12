@@ -62,7 +62,7 @@ impl Encode for DescribeConfigsResponse<'_> {
                 for it in &self.results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -194,7 +194,7 @@ impl Encode for DescribeConfigsResult<'_> {
                 for it in &self.configs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -401,7 +401,7 @@ impl<'a> DescribeConfigsResourceResult<'a> {
                 for it in &self.synonyms {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

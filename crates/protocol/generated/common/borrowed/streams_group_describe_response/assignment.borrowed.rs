@@ -43,7 +43,7 @@ impl Encode for Assignment<'_> {
                 for it in &self.active_tasks {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -51,7 +51,7 @@ impl Encode for Assignment<'_> {
                 for it in &self.standby_tasks {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -59,7 +59,7 @@ impl Encode for Assignment<'_> {
                 for it in &self.warmup_tasks {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

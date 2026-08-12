@@ -75,6 +75,25 @@ describe("queues", () => {
     await queues.acknowledge("session", [{ messageId: `large:0:${offset}`, ackType: "accept" }]);
   });
 
+  test("live queue payloads distinguish tombstones from empty values", async () => {
+    const gateway = {
+      async queueAcquire() {
+        return {
+          sessionId: "session",
+          messages: [
+            { topic: "queue", partition: 0, offset: 0n, headers: [], deliveryCount: 1 },
+            { topic: "queue", partition: 0, offset: 1n, value: new Uint8Array(), headers: [], deliveryCount: 1 },
+          ],
+        };
+      },
+    } as unknown as NonNullable<Parameters<typeof createQueuesModule>[0]["gateway"]>;
+    const queues = createQueuesModule({ endpoint: "http://gateway", gateway });
+
+    const acquired = await queues.acquire("queue", { group: "workers", sessionId: "session" });
+    expect(acquired.messages[0]?.value).toBeUndefined();
+    expect(acquired.messages[1]?.value).toEqual(new Uint8Array());
+  });
+
   test("mock acquire validates group and lock duration", async () => {
     const client = createClient({ endpoint: "mock://gateway" });
 

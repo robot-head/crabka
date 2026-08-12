@@ -64,7 +64,7 @@ impl Encode for DescribeTopicPartitionsRequest<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.response_partition_limit);

@@ -46,7 +46,7 @@ impl Encode for DescribeGroupsResponse {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -208,7 +208,7 @@ impl DescribedGroup {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

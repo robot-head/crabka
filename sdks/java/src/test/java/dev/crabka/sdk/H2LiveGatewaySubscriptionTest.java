@@ -1,15 +1,19 @@
 package dev.crabka.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 final class H2LiveGatewaySubscriptionTest {
@@ -94,6 +98,77 @@ final class H2LiveGatewaySubscriptionTest {
 
         assertTrue(streamClosed.await(1, TimeUnit.SECONDS));
         assertNull(subscription.nextOrNull(Duration.ofMillis(100)));
+    }
+
+    @Test
+    void slowSubscriberBackpressuresTheGatewayReader() throws Exception {
+        AtomicInteger reads = new AtomicInteger();
+        CountDownLatch inboxFull = new CountDownLatch(1);
+        CountDownLatch resumed = new CountDownLatch(1);
+        H2LiveGatewaySubscription.StreamOpener opener = (uri, bearerToken, resources) -> new IdleGatewayStream() {
+            @Override
+            public String takeStatus() {
+                return "200";
+            }
+
+            @Override
+            public Inbound readNextInbound() {
+                int read = reads.incrementAndGet();
+                if (read == H2LiveGatewaySubscription.INBOX_CAPACITY + 1) {
+                    inboxFull.countDown();
+                }
+                if (read == H2LiveGatewaySubscription.INBOX_CAPACITY + 2) {
+                    resumed.countDown();
+                }
+                return new Inbound("topic", 0, read, new byte[0], List.of());
+            }
+        };
+        H2LiveGatewaySubscription subscription = new H2LiveGatewaySubscription(SUBSCRIBE_URI, "", START_FRAME, opener);
+
+        assertTrue(inboxFull.await(1, TimeUnit.SECONDS));
+        assertEquals(H2LiveGatewaySubscription.INBOX_CAPACITY + 1, reads.get());
+        subscription.nextOrNull(Duration.ofSeconds(1));
+        assertTrue(resumed.await(1, TimeUnit.SECONDS));
+
+        subscription.close();
+    }
+
+    @Test
+    void unexpectedEofIsATransportError() {
+        H2LiveGatewaySubscription.StreamOpener opener = (uri, bearerToken, resources) -> new IdleGatewayStream() {
+            @Override
+            public String takeStatus() {
+                return "200";
+            }
+
+            @Override
+            public Inbound readNextInbound() throws IOException {
+                throw new EOFException("stream ended mid-frame");
+            }
+        };
+        H2LiveGatewaySubscription subscription = new H2LiveGatewaySubscription(SUBSCRIBE_URI, "", START_FRAME, opener);
+
+        TransportException error = assertThrows(
+                TransportException.class, () -> subscription.nextOrNull(Duration.ofSeconds(1)));
+        assertTrue(error.getMessage().contains("stream ended mid-frame"));
+    }
+
+    @Test
+    void explicitEndStreamCompletesCleanly() {
+        H2LiveGatewaySubscription.StreamOpener opener = (uri, bearerToken, resources) -> new IdleGatewayStream() {
+            @Override
+            public String takeStatus() {
+                return "200";
+            }
+
+            @Override
+            public Inbound readNextInbound() throws IOException {
+                throw LiveGatewaySubscription.endStream(new byte[0]);
+            }
+        };
+        H2LiveGatewaySubscription subscription = new H2LiveGatewaySubscription(SUBSCRIBE_URI, "", START_FRAME, opener);
+
+        assertNull(subscription.nextOrNull(Duration.ofSeconds(1)));
     }
 
     private static void awaitLatch(CountDownLatch latch) throws IOException {

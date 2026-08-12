@@ -69,7 +69,7 @@ impl PartitionRecord {
                 for it in &self.replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -79,7 +79,7 @@ impl PartitionRecord {
                 for it in &self.isr {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -89,7 +89,7 @@ impl PartitionRecord {
                 for it in &self.removing_replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -99,7 +99,7 @@ impl PartitionRecord {
                 for it in &self.adding_replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
@@ -124,7 +124,7 @@ impl PartitionRecord {
                 for it in &self.directories {
                     crate::primitives::uuid::put_uuid(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {

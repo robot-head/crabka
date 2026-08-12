@@ -66,7 +66,7 @@ impl Encode for FetchSnapshotResponse<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -255,7 +255,7 @@ impl Encode for TopicSnapshot<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -394,7 +394,7 @@ impl Encode for PartitionSnapshot<'_> {
                 } else {
                     let () = put_bytes(buf, &__rb_buf);
                 }
-            }
+            };
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();

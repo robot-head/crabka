@@ -128,7 +128,7 @@ impl JoinGroupResponse {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

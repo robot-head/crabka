@@ -141,7 +141,9 @@ Object queue_acquire_response(const crabka::QueueAcquireResult& result,
         {"offset", safe_integer_value(message.offset, "offset")},
         {"partition", number_value(static_cast<double>(message.partition))},
         {"topic", string_value(message.topic)},
-        {"value_b64", string_value(crabka::base64_encode(message.value))},
+        {"value_b64", message.value.has_value()
+                          ? string_value(crabka::base64_encode(*message.value))
+                          : null_value()},
     }));
   }
   return ok(Object{{"messages", array_value(std::move(messages))},

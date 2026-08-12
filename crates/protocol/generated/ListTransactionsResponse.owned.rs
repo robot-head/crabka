@@ -54,7 +54,7 @@ impl Encode for ListTransactionsResponse {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -62,7 +62,7 @@ impl Encode for ListTransactionsResponse {
                 for it in &self.transaction_states {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -220,9 +220,16 @@ func queueAcquireResponse(result crabka.QueueAcquireResult, err error) any {
 	}
 	messages := make([]map[string]any, 0, len(result.Messages))
 	for _, message := range result.Messages {
-		messages = append(messages, map[string]any{"message_id": message.MessageID, "topic": message.Topic, "partition": message.Partition, "offset": message.Offset, "value_b64": base64.StdEncoding.EncodeToString(message.Value), "headers": encodeHeaders(message.Headers), "delivery_count": message.DeliveryCount})
+		messages = append(messages, map[string]any{"message_id": message.MessageID, "topic": message.Topic, "partition": message.Partition, "offset": message.Offset, "value_b64": encodeNullableBytes(message.Value), "headers": encodeHeaders(message.Headers), "delivery_count": message.DeliveryCount})
 	}
 	return ok(map[string]any{"session_id": result.SessionID, "messages": messages})
+}
+
+func encodeNullableBytes(value []byte) any {
+	if value == nil {
+		return nil
+	}
+	return base64.StdEncoding.EncodeToString(value)
 }
 
 func queueBatchResponse(result crabka.QueueBatchResult, err error) any {

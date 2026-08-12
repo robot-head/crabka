@@ -127,6 +127,9 @@ tracing = "0.1"
 # support); diverges on lookahead/lookbehind which aren't in the KIP-848
 # operator-readable subset.
 regex = "1"
+# KIP-664's ListTransactions filter accepts the full java.util.regex Pattern
+# grammar (including lookaround and backreferences).
+java_regex = "0.1"
 rust-stemmers = "1"
 memmap2 = "0.9"
 testcontainers = "0.28"

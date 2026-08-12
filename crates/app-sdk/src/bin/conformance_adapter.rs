@@ -211,7 +211,7 @@ impl Adapter {
                                 "topic": message.topic,
                                 "partition": message.partition,
                                 "offset": message.offset,
-                                "value_b64": STANDARD.encode(message.value),
+                                "value_b64": message.value.map(|value| STANDARD.encode(value)),
                                 "headers": encode_headers(message.headers),
                                 "delivery_count": message.delivery_count,
                             })).collect::<Vec<_>>(),

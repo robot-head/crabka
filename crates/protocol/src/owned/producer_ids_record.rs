@@ -3,7 +3,6 @@ include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/generated/ProducerIdsRecord.owned.rs"
 ));
-
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -11,21 +10,29 @@ mod tests {
 
     use super::*;
     use crate::{Decode, Encode};
-
-    fn roundtrip(msg: &ProducerIdsRecord, version: i16) {
-        let mut bytes = BytesMut::new();
-        msg.encode(&mut bytes, version).unwrap();
-        let mut input = &bytes[..];
-        let decoded = ProducerIdsRecord::decode(&mut input, version).unwrap();
-        assert!(input.is_empty());
-        assert!(decoded == *msg);
+    fn roundtrip(msg: &ProducerIdsRecord, v: i16) {
+        let mut buf = BytesMut::new();
+        msg.encode(&mut buf, v).unwrap();
+        assert!(msg.encoded_len(v) == buf.len());
+        let bytes = buf.freeze();
+        let mut cur = &bytes[..];
+        let decoded = ProducerIdsRecord::decode(&mut cur, v).unwrap();
+        assert!(cur.is_empty());
+        let mut reencoded = BytesMut::new();
+        decoded.encode(&mut reencoded, v).unwrap();
+        assert!(&reencoded[..] == &bytes[..]);
+        let _ = default_json(v);
     }
-
     #[test]
-    fn all_versions_roundtrip() {
-        for version in MIN_VERSION..=MAX_VERSION {
-            roundtrip(&ProducerIdsRecord::default(), version);
-            roundtrip(&ProducerIdsRecord::populated(version), version);
+    fn default_roundtrips_all_versions() {
+        for v in MIN_VERSION..=MAX_VERSION {
+            roundtrip(&ProducerIdsRecord::default(), v);
+        }
+    }
+    #[test]
+    fn populated_roundtrips_all_versions() {
+        for v in MIN_VERSION..=MAX_VERSION {
+            roundtrip(&ProducerIdsRecord::populated(v), v);
         }
     }
 }

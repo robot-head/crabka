@@ -91,7 +91,7 @@ impl Encode for OffsetFetchRequest<'_> {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 7 {
             put_bool(buf, self.require_stable);
@@ -268,7 +268,7 @@ impl Encode for OffsetFetchRequestTopic<'_> {
                 for it in &self.partition_indexes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -409,7 +409,7 @@ impl Encode for OffsetFetchRequestGroup<'_> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -558,7 +558,7 @@ impl Encode for OffsetFetchRequestTopics<'_> {
                 for it in &self.partition_indexes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -91,7 +91,7 @@ impl Encode for AddRaftVoterRequest<'_> {
                 for it in &self.listeners {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 1 {
             put_bool(buf, self.ack_when_committed);

@@ -130,6 +130,10 @@ impl AdminClient {
         replication_factor: i32,
         timeout: Time,
     ) -> Result<TopicReplicationStatus, AdminError> {
+        // Replica selection depends on the controller's authoritative
+        // heartbeat registry. Connect to the active controller before reading
+        // Metadata so dead-but-still-registered brokers are not candidates.
+        self.refresh_controller_connection().await?;
         let first = self
             .reconcile_topic_replication_factor_once(topic, replication_factor, timeout)
             .await;
@@ -341,8 +345,15 @@ impl AdminClient {
             return self.conn.rebootstrap().await;
         }
         let md_resp = self.conn.send(build_metadata(&[])).await?;
-        let controller_addr =
-            controller_endpoint(&md_resp).ok_or(AdminError::NotControllerExhausted)?;
+        let Some(controller_addr) = controller_endpoint(&md_resp) else {
+            // In-process/test brokers can advertise port 0 while the
+            // bootstrap address still contains the actual bound port. Reuse
+            // that known-good address instead of attempting `host:0`.
+            if controller_requires_bootstrap_fallback(&md_resp) {
+                return self.conn.rebootstrap().await;
+            }
+            return Err(AdminError::NotControllerExhausted);
+        };
         self.reconnect(&controller_addr).await
     }
 
@@ -700,8 +711,16 @@ fn controller_endpoint(
     let id = resp.controller_id;
     resp.brokers
         .iter()
-        .find(|b| b.node_id == id)
+        .find(|b| b.node_id == id && !b.host.is_empty() && b.port > 0)
         .map(|b| format!("{}:{}", b.host, b.port))
+}
+
+fn controller_requires_bootstrap_fallback(
+    resp: &<MetadataRequest as crabka_protocol::ProtocolRequest>::Response,
+) -> bool {
+    resp.brokers
+        .iter()
+        .any(|broker| broker.node_id == resp.controller_id && broker.port <= 0)
 }
 
 fn proto_uuid_to_opt(u: ProtoUuid) -> Option<Uuid> {
@@ -1069,6 +1088,24 @@ mod tests {
             ..Default::default()
         };
         assert2::assert!(controller_endpoint(&resp).is_none());
+    }
+
+    #[test]
+    fn controller_endpoint_rejects_non_dialable_ephemeral_port() {
+        use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseBroker};
+        let resp = MetadataResponse {
+            controller_id: 1,
+            brokers: vec![MetadataResponseBroker {
+                node_id: 1,
+                host: "127.0.0.1".into(),
+                port: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert2::assert!(controller_endpoint(&resp).is_none());
+        assert2::assert!(controller_requires_bootstrap_fallback(&resp));
     }
 
     // ── parse_metadata ─────────────────────────────────────────────────

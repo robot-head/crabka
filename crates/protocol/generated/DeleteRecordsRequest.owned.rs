@@ -38,7 +38,7 @@ impl Encode for DeleteRecordsRequest {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.timeout_ms);
@@ -135,7 +135,7 @@ impl Encode for DeleteRecordsTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

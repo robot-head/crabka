@@ -82,7 +82,7 @@ struct QueueMessage {
   std::string topic;
   std::int32_t partition = 0;
   std::int64_t offset = 0;
-  std::vector<std::uint8_t> value;
+  std::optional<std::vector<std::uint8_t>> value;
   std::vector<Header> headers;
   std::int32_t delivery_count = 0;
 };

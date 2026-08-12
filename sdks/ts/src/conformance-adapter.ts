@@ -152,7 +152,7 @@ class Adapter {
         topic: message.topic,
         partition: message.partition,
         offset: contractSafeOffset(message.offset),
-        value_b64: Buffer.from(message.value).toString("base64"),
+        value_b64: message.value === undefined ? null : Buffer.from(message.value).toString("base64"),
         headers: encodeHeaders(message.headers),
         delivery_count: message.deliveryCount,
       })),

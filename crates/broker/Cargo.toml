@@ -71,6 +71,7 @@ tokio-metrics = { workspace = true }
 toml = { workspace = true }
 dashmap = { workspace = true }
 regex = { workspace = true }
+java_regex = { workspace = true }
 refined_type = { workspace = true }
 tracing = { workspace = true }
 rustix = { workspace = true }

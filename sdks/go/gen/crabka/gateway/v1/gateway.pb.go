@@ -536,6 +536,7 @@ func (x *ErrorInfo) GetRetriable() bool {
 	return false
 }
 
+// Kafka headers are ordered, may repeat a key, and may carry a null value.
 type Header struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -814,16 +815,11 @@ func (x *SubscribeStart) GetFilter() string {
 	return ""
 }
 
-// An Ack confirms delivery of the identified record.
-//
-// With SubscribeStart.auto_commit=false, topic/partition/offset are required
-// and drive explicit per-partition commits: the server commits the acknowledged
-// contiguous offset frontier for that topic partition, using Kafka's next offset
-// value (`offset + 1`).
-//
-// With SubscribeStart.auto_commit=true, records are committed from the current
-// consumer position after each non-empty poll. Ack frames are optional; when
-// sent, their topic/partition/offset fields do not select a per-offset commit.
+// In explicit mode (`SubscribeStart.auto_commit = false`), `offset` is the
+// delivered record offset being acknowledged. The gateway advances a
+// contiguous per-topic-partition frontier and commits frontier + 1, so an ack
+// above a gap cannot skip an unacknowledged record. Ack frames are ignored when
+// `auto_commit` is true.
 type SubscribeAck struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
@@ -1077,6 +1073,8 @@ func (x *Inbound) GetSchema() *SchemaSelector {
 	return nil
 }
 
+// Acquire work from a KIP-932 share group. Leave `session_id` empty on the
+// first call; subsequent calls reuse the returned `session_id`.
 type QueueAcquireRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	GroupId        string                 `protobuf:"bytes,1,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
@@ -1167,7 +1165,7 @@ type QueuedMessage struct {
 	Partition     int32                  `protobuf:"varint,2,opt,name=partition,proto3" json:"partition,omitempty"`
 	Offset        int64                  `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	Key           []byte                 `protobuf:"bytes,4,opt,name=key,proto3,oneof" json:"key,omitempty"`
-	Value         []byte                 `protobuf:"bytes,5,opt,name=value,proto3" json:"value,omitempty"`
+	Value         []byte                 `protobuf:"bytes,5,opt,name=value,proto3,oneof" json:"value,omitempty"`
 	Headers       []*Header              `protobuf:"bytes,6,rep,name=headers,proto3" json:"headers,omitempty"`
 	TimestampMs   int64                  `protobuf:"varint,7,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
 	DeliveryCount int32                  `protobuf:"varint,8,opt,name=delivery_count,json=deliveryCount,proto3" json:"delivery_count,omitempty"`
@@ -1712,17 +1710,18 @@ const file_crabka_gateway_v1_gateway_proto_rawDesc = "" +
 	"\await_ms\x18\x04 \x01(\rR\x06waitMs\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x05 \x01(\tR\tsessionId\x12(\n" +
-	"\x10lock_duration_ms\x18\x06 \x01(\x04R\x0elockDurationMs\"\x8f\x02\n" +
+	"\x10lock_duration_ms\x18\x06 \x01(\x04R\x0elockDurationMs\"\x9e\x02\n" +
 	"\rQueuedMessage\x12\x14\n" +
 	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x1c\n" +
 	"\tpartition\x18\x02 \x01(\x05R\tpartition\x12\x16\n" +
 	"\x06offset\x18\x03 \x01(\x03R\x06offset\x12\x15\n" +
-	"\x03key\x18\x04 \x01(\fH\x00R\x03key\x88\x01\x01\x12\x14\n" +
-	"\x05value\x18\x05 \x01(\fR\x05value\x123\n" +
+	"\x03key\x18\x04 \x01(\fH\x00R\x03key\x88\x01\x01\x12\x19\n" +
+	"\x05value\x18\x05 \x01(\fH\x01R\x05value\x88\x01\x01\x123\n" +
 	"\aheaders\x18\x06 \x03(\v2\x19.crabka.gateway.v1.HeaderR\aheaders\x12!\n" +
 	"\ftimestamp_ms\x18\a \x01(\x03R\vtimestampMs\x12%\n" +
 	"\x0edelivery_count\x18\b \x01(\x05R\rdeliveryCountB\x06\n" +
-	"\x04_key\"s\n" +
+	"\x04_keyB\b\n" +
+	"\x06_value\"s\n" +
 	"\x14QueueAcquireResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12<\n" +

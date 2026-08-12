@@ -71,7 +71,7 @@ impl Encode for ListPartitionReassignmentsRequest<'_> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -191,7 +191,7 @@ impl Encode for ListPartitionReassignmentsTopics<'_> {
                 for it in &self.partition_indexes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

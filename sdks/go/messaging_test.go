@@ -112,6 +112,18 @@ func TestMockQueueAcquireAcknowledgeAndRenew(t *testing.T) {
 	}
 }
 
+func TestQueuedMessagePayloadPresence(t *testing.T) {
+	tombstone := fromProtoQueuedMessage(&gw.QueuedMessage{Topic: "queue"})
+	empty := fromProtoQueuedMessage(&gw.QueuedMessage{Topic: "queue", Value: []byte{}})
+
+	if tombstone.Value != nil {
+		t.Fatalf("tombstone value = %#v, want nil", tombstone.Value)
+	}
+	if empty.Value == nil || len(empty.Value) != 0 {
+		t.Fatalf("empty value = %#v, want present empty bytes", empty.Value)
+	}
+}
+
 func TestQueueValidationErrors(t *testing.T) {
 	client := New("mock://gateway", nil)
 	_, err := client.Queues().Acquire(context.Background(), "queue", "", 1, 30_000)
@@ -412,7 +424,7 @@ func headersEqual(left []Header, right []Header) bool {
 }
 
 func queueMessagesEqual(left QueueMessage, right QueueMessage) bool {
-	return left.MessageID == right.MessageID && left.Topic == right.Topic && left.Partition == right.Partition && left.Offset == right.Offset && string(left.Value) == string(right.Value) && headersEqual(left.Headers, right.Headers) && left.DeliveryCount == right.DeliveryCount
+	return left.MessageID == right.MessageID && left.Topic == right.Topic && left.Partition == right.Partition && left.Offset == right.Offset && string(left.Value) == string(right.Value) && (left.Value == nil) == (right.Value == nil) && headersEqual(left.Headers, right.Headers) && left.DeliveryCount == right.DeliveryCount
 }
 
 func assertQueueResults(t *testing.T, actual []QueueResult, expected []QueueResult) {

@@ -159,6 +159,15 @@ int main() {
   assert(queue_acquire_response.messages[0].headers[0].value == bytes("x"));
   assert(queue_acquire_response.messages[0].delivery_count == 1);
 
+  const auto queue_payload_presence = crabka::live_transport_queue_acquire_response_for_test(
+      {0x0a, 0x08, 'p', 'r', 'e', 's', 'e', 'n', 'c', 'e',
+       0x12, 0x03, 0x0a, 0x01, 't',
+       0x12, 0x07, 0x0a, 0x01, 't', 0x18, 0x01, 0x2a, 0x00});
+  assert(queue_payload_presence.messages.size() == 2);
+  assert(!queue_payload_presence.messages[0].value.has_value());
+  assert(queue_payload_presence.messages[1].value.has_value());
+  assert(queue_payload_presence.messages[1].value->empty());
+
   const std::vector<crabka::QueueAckEntry> mixed_entries{
       {.message_id = "t:0:0", .ack_type = crabka::QueueAckType::Accept},
       {.message_id = "missing:0:0", .ack_type = crabka::QueueAckType::Accept}};

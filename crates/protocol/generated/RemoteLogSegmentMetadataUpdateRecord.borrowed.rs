@@ -32,6 +32,7 @@ impl RemoteLogSegmentMetadataUpdateRecord<'_> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remote_log_segment_metadata_update_record::RemoteLogSegmentMetadataUpdateRecord

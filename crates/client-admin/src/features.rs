@@ -42,6 +42,7 @@ fn metadata_update_request(
         feature_updates: vec![FeatureUpdateKey {
             feature: METADATA_VERSION_FEATURE.into(),
             max_version_level: level,
+            allow_downgrade: safe_downgrade,
             upgrade_type: if safe_downgrade {
                 SAFE_DOWNGRADE
             } else {
@@ -97,6 +98,9 @@ impl AdminClient {
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+    use crabka_protocol::{Decode, Encode};
+
     use super::*;
 
     #[test]
@@ -105,8 +109,20 @@ mod tests {
         let update = &request.feature_updates[0];
 
         assert2::assert!(request.timeout_ms == 30_000);
+        assert2::assert!(update.allow_downgrade);
         assert2::assert!(update.upgrade_type == 2);
         assert2::assert!(update.max_version_level == 15);
+    }
+
+    #[test]
+    fn metadata_safe_downgrade_survives_v0_encoding() {
+        let request = metadata_update_request(15, true, crabka_units::secs(30));
+        let mut bytes = BytesMut::new();
+        request.encode(&mut bytes, 0).unwrap();
+
+        let mut encoded = bytes.freeze();
+        let decoded = UpdateFeaturesRequest::decode(&mut encoded, 0).unwrap();
+        assert2::assert!(decoded.feature_updates[0].allow_downgrade);
     }
 
     #[test]

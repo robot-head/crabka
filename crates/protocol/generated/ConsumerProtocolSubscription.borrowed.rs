@@ -47,6 +47,7 @@ impl ConsumerProtocolSubscription<'_> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_protocol_subscription::ConsumerProtocolSubscription {
@@ -84,7 +85,7 @@ impl Encode for ConsumerProtocolSubscription<'_> {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             if flex {
@@ -99,7 +100,7 @@ impl Encode for ConsumerProtocolSubscription<'_> {
                 for it in &self.owned_partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 2 {
             put_i32(buf, self.generation_id);
@@ -289,7 +290,7 @@ impl Encode for TopicPartition<'_> {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         Ok(())
     }

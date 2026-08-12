@@ -15,17 +15,13 @@ public final class Messaging {
     }
 
     public CompletableFuture<RecordResult> publish(Record record) {
-        try {
-            return CompletableFuture.completedFuture(publishSync(record));
-        } catch (CrabkaException error) {
-            return failedFuture(error);
-        }
+        return CompletableFuture.supplyAsync(() -> publishSync(record));
     }
 
     public CompletableFuture<RecordResult> publishEvent(String topic, CloudEvent event) {
         Objects.requireNonNull(event, "event");
         if (event.id().isBlank()) {
-            return failedFuture(new InvalidArgumentException("CloudEvent id is required"));
+            return CompletableFuture.failedFuture(new InvalidArgumentException("CloudEvent id is required"));
         }
         return publish(new Record(topic, event.data(), cloudEventHeaders(event)));
     }
@@ -70,11 +66,5 @@ public final class Messaging {
 
     private static Header textHeader(String name, String value) {
         return new Header(name, value.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static <T> CompletableFuture<T> failedFuture(Throwable error) {
-        CompletableFuture<T> future = new CompletableFuture<>();
-        future.completeExceptionally(error);
-        return future;
     }
 }

@@ -67,7 +67,7 @@ impl Encode for ClientQuotaRecord<'_> {
                 for it in &self.entity {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             if flex {

@@ -26,7 +26,7 @@ use crabka_protocol::{
         list_transactions_response::{ListTransactionsResponse, TransactionState},
     },
 };
-use regex::Regex;
+use java_regex::{PatternSyntaxError, Regex};
 
 use crate::{
     authorizer::{AuthorizationRequest, AuthorizationResult},
@@ -71,11 +71,13 @@ fn matches_duration_filter(start_ms: i64, now_ms: i64, duration_filter: i64) -> 
 }
 
 /// Java's `Matcher.matches()` requires the pattern to match the complete
-/// transactional id. Anchor the Rust regex to preserve that behavior.
-fn compile_transactional_id_pattern(pattern: Option<&str>) -> Result<Option<Regex>, regex::Error> {
+/// transactional id.
+fn compile_transactional_id_pattern(
+    pattern: Option<&str>,
+) -> Result<Option<Regex>, PatternSyntaxError> {
     pattern
         .filter(|pattern| !pattern.is_empty())
-        .map(|pattern| Regex::new(&format!(r"\A(?:{pattern})\z")))
+        .map(Regex::new)
         .transpose()
 }
 
@@ -165,7 +167,7 @@ pub(crate) async fn handle(
         // to `None`, while a non-empty pattern is a full-string match.
         if transactional_id_pattern
             .as_ref()
-            .is_some_and(|pattern| !pattern.is_match(&entry.transactional_id))
+            .is_some_and(|pattern| !pattern.matches(&entry.transactional_id))
         {
             continue;
         }
@@ -264,12 +266,24 @@ mod tests {
             let compiled = compile_transactional_id_pattern(pattern).expect("valid pattern");
             let matches = compiled
                 .as_ref()
-                .is_none_or(|pattern| pattern.is_match(transactional_id));
+                .is_none_or(|pattern| pattern.matches(transactional_id));
             assert!(
                 matches == expected,
                 "{pattern:?} against {transactional_id}"
             );
         }
+        assert!(
+            compile_transactional_id_pattern(Some("(?=txn-).*"))
+                .unwrap()
+                .unwrap()
+                .matches("txn-alpha")
+        );
+        assert!(
+            compile_transactional_id_pattern(Some(r"(txn)-\1"))
+                .unwrap()
+                .unwrap()
+                .matches("txn-txn")
+        );
         assert!(compile_transactional_id_pattern(Some("(unclosed")).is_err());
     }
 

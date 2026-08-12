@@ -146,7 +146,7 @@ message QueuedMessage {
   int32 partition = 2;
   int64 offset = 3;
   optional bytes key = 4;
-  bytes value = 5;
+  optional bytes value = 5;
   repeated Header headers = 6;
   int64 timestamp_ms = 7;
   int32 delivery_count = 8;

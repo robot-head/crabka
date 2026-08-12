@@ -11,7 +11,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import okhttp3.Headers;
@@ -26,12 +27,14 @@ import okio.Okio;
 final class H2LiveGatewaySubscription implements LiveSubscription {
     private static final StreamItem END = new StreamItem(null, null, true);
     private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
+    static final int INBOX_CAPACITY = 32;
 
     private final URI uri;
     private final String bearerToken;
     private final byte[] startFrame;
     private final StreamOpener streamOpener;
-    private final BlockingQueue<StreamItem> inbox = new LinkedBlockingQueue<>();
+    private final BlockingQueue<StreamItem> inbox = new ArrayBlockingQueue<>(INBOX_CAPACITY + 1);
+    private final Semaphore inboxSlots = new Semaphore(INBOX_CAPACITY);
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Object closeLock = new Object();
     private final List<ResourceCloser> resourceClosers = new ArrayList<>();
@@ -54,6 +57,12 @@ final class H2LiveGatewaySubscription implements LiveSubscription {
         start();
     }
 
+    private void start() {
+        Thread reader = new Thread(this::readFromGateway, "crabka-live-subscribe");
+        reader.setDaemon(true);
+        reader.start();
+    }
+
     @Override
     public Inbound nextOrNull() {
         return awaitNext(0, null);
@@ -69,14 +78,9 @@ final class H2LiveGatewaySubscription implements LiveSubscription {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        closeResources();
         inbox.offer(END);
-    }
-
-    private void start() {
-        Thread reader = new Thread(this::readFromGateway, "crabka-live-subscribe");
-        reader.setDaemon(true);
-        reader.start();
+        inboxSlots.release();
+        closeResources();
     }
 
     private Inbound awaitNext(long timeout, TimeUnit unit) {
@@ -87,6 +91,9 @@ final class H2LiveGatewaySubscription implements LiveSubscription {
             StreamItem item = unit == null ? inbox.take() : inbox.poll(timeout, unit);
             if (item == null || item.end()) {
                 return null;
+            }
+            if (item.inbound() != null) {
+                inboxSlots.release();
             }
             if (item.error() != null) {
                 throw item.error();
@@ -111,8 +118,13 @@ final class H2LiveGatewaySubscription implements LiveSubscription {
             throwIfClosed();
             readInboundFrames(openedStream);
             sendEnd();
-        } catch (EOFException done) {
+        } catch (LiveGatewaySubscription.EndStreamException done) {
             sendEnd();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            if (!closed.get()) {
+                sendError(new TransportException("Subscribe stream reader interrupted", error));
+            }
         } catch (CrabkaException error) {
             sendError(error);
         } catch (IOException error) {
@@ -237,7 +249,7 @@ final class H2LiveGatewaySubscription implements LiveSubscription {
         }
     }
 
-    private void readInboundFrames(GatewayStream openedStream) throws IOException {
+    private void readInboundFrames(GatewayStream openedStream) throws IOException, InterruptedException {
         while (!closed.get()) {
             sendInbound(openedStream.readNextInbound());
         }
@@ -264,10 +276,13 @@ final class H2LiveGatewaySubscription implements LiveSubscription {
         }
     }
 
-    private void sendInbound(Inbound inbound) {
-        if (!closed.get()) {
-            inbox.offer(new StreamItem(inbound, null, false));
+    private void sendInbound(Inbound inbound) throws InterruptedException {
+        inboxSlots.acquire();
+        if (closed.get()) {
+            inboxSlots.release();
+            return;
         }
+        inbox.put(new StreamItem(inbound, null, false));
     }
 
     private void sendError(CrabkaException error) {

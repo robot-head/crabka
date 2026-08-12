@@ -1,6 +1,5 @@
-//! `Metadata` (`api_key=3`). It returns all registered brokers and the
-//! partitions of the requested topics, or of all topics when `topics` is
-//! `None`.
+//! `Metadata` (`api_key=3`). It returns available brokers and the partitions
+//! of the requested topics, or of all topics when `topics` is `None`.
 //!
 //! The metadata comes from `controller.current_image()`, the
 //! quorum-replicated snapshot, and not from a local in-memory struct.
@@ -27,11 +26,7 @@ use crate::{
     handlers::authorized_operations::authorized_operations_bits,
 };
 
-// ACL preamble + asymmetric loop
-// Handler is wholly sync but we keep the
-// `async fn` shape so it mirrors the other inline-intercept handlers
-// (produce/fetch/etc) and lets future Metadata work (e.g. waiting on
-// topic creation) add `.await`s without changing the signature.
+// ACL preamble + asymmetric loop.
 #[tracing::instrument(
     name = "handle_metadata",
     level = "info",
@@ -39,7 +34,7 @@ use crate::{
     fields(api = "Metadata", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -114,15 +109,29 @@ pub(crate) fn handle(
         candidate_topics.iter().map(String::as_str),
     );
 
-    // Brokers: enumerate all registered nodes from the metadata image.
+    // The controller's heartbeat registry is the authoritative source for
+    // broker availability. Unknown entries remain eligible so a fresh
+    // controller does not briefly advertise an empty cluster before seeding
+    // the registry. Non-controller brokers do not own authoritative liveness
+    // state and therefore retain the image-only projection.
+    let is_controller = *controller.watch_leader().borrow() == Some(broker.config.node_id);
+    let unavailable = if is_controller {
+        broker.liveness.unavailable_snapshot().await
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    // Brokers: enumerate available registered nodes from the metadata image.
     // Each broker's `host:port` is projected from the endpoint matching the
     // listener this request arrived on (Kafka returns the connection
     // listener's advertised address), falling back to the inter-broker
     // endpoint when the connection listener isn't recorded on that broker.
-    let brokers: Vec<MetadataResponseBroker> = image
-        .brokers()
-        .map(|b| project_broker(b, ctx.connection_listener_name, &inter_broker_name))
-        .collect();
+    let brokers = project_available_brokers(
+        &image,
+        &unavailable,
+        ctx.connection_listener_name,
+        &inter_broker_name,
+    );
 
     let topics_out = build_topic_rows(
         broker,
@@ -361,6 +370,19 @@ pub(crate) fn pick_endpoint_host_port(
     }
 }
 
+fn project_available_brokers(
+    image: &crabka_metadata::MetadataImage,
+    unavailable: &std::collections::HashSet<u64>,
+    connection_listener_name: &str,
+    inter_broker_name: &str,
+) -> Vec<MetadataResponseBroker> {
+    image
+        .brokers()
+        .filter(|broker| !unavailable.contains(&broker.node_id.0))
+        .map(|broker| project_broker(broker, connection_listener_name, inter_broker_name))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -459,5 +481,32 @@ mod tests {
         let out = project_broker(&rec, "tls", "plain");
         assert!(out.host == "legacy-host");
         assert!(out.port == 1000);
+    }
+
+    #[test]
+    fn unavailable_brokers_are_not_advertised() {
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        for node_id in [7, 8] {
+            let mut broker = record(vec![]);
+            broker.node_id = crabka_metadata::NodeId(node_id);
+            image.apply(&crabka_metadata::MetadataRecord::V1BrokerRegistration(
+                broker,
+            ));
+        }
+
+        let projected = project_available_brokers(
+            &image,
+            &std::collections::HashSet::from([8]),
+            "plain",
+            "plain",
+        );
+
+        assert!(
+            projected
+                .iter()
+                .map(|broker| broker.node_id)
+                .collect::<Vec<_>>()
+                == vec![7]
+        );
     }
 }

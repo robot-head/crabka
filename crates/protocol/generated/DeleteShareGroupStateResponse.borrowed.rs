@@ -56,7 +56,7 @@ impl Encode for DeleteShareGroupStateResponse<'_> {
                 for it in &self.results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -156,7 +156,7 @@ impl Encode for DeleteStateResult<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

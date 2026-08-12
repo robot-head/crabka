@@ -45,7 +45,7 @@ impl Encode for ListConfigResourcesResponse {
                 for it in &self.config_resources {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

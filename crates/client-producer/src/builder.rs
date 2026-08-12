@@ -45,6 +45,7 @@ use crate::{
 const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 const NOT_COORDINATOR: i16 = 16;
+const INIT_PRODUCER_ID_2PC_MIN_VERSION: i16 = 6;
 
 /// Default producer compression.
 pub const DEFAULT_PRODUCER_COMPRESSION: Compression = Compression::None;
@@ -396,6 +397,7 @@ pub(crate) async fn init_producer_id_with_retry(
     initial_backoff: Time,
     max_backoff: Time,
 ) -> Result<InitProducerIdResponse, ProducerError> {
+    let requires_v6 = request.enable2_pc || request.keep_prepared_txn;
     let deadline = tokio::time::Instant::now()
         .checked_add(retry_timeout.to_std())
         .ok_or_else(|| {
@@ -404,9 +406,17 @@ pub(crate) async fn init_producer_id_with_retry(
     let mut backoff = initial_backoff.to_std();
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let response = tokio::time::timeout(remaining, client.send(request.clone()))
-            .await
-            .map_err(|_| ProducerError::Client(ClientError::Timeout(retry_timeout)))?;
+        let response = tokio::time::timeout(remaining, async {
+            if requires_v6 {
+                client
+                    .send_at_least(request.clone(), INIT_PRODUCER_ID_2PC_MIN_VERSION)
+                    .await
+            } else {
+                client.send(request.clone()).await
+            }
+        })
+        .await
+        .map_err(|_| ProducerError::Client(ClientError::Timeout(retry_timeout)))?;
         let last_outcome = match response {
             Ok(resp) if !is_retriable_coordinator_code(resp.error_code) => return Ok(resp),
             Ok(resp) => Ok(resp),
@@ -686,7 +696,8 @@ mod security_arg_tests {
     use crabka_protocol::{
         Encode,
         owned::{
-            api_versions_request, api_versions_response::ApiVersionsResponse,
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
             init_producer_id_request,
         },
     };
@@ -1195,6 +1206,71 @@ mod security_arg_tests {
             ProducerError::Server(COORDINATOR_LOAD_IN_PROGRESS)
         ));
         assert2::assert!(attempts.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[tokio::test]
+    async fn two_phase_init_fields_require_version_six_before_dispatch() {
+        for (name, request) in [
+            (
+                "enable 2PC",
+                InitProducerIdRequest {
+                    enable2_pc: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "keep prepared transaction",
+                InitProducerIdRequest {
+                    keep_prepared_txn: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&attempts);
+            let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+                if api_key == api_versions_request::API_KEY {
+                    return Some(encode_v0(&ApiVersionsResponse {
+                        api_keys: vec![ApiVersion {
+                            api_key: init_producer_id_request::API_KEY,
+                            min_version: 0,
+                            max_version: 5,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }));
+                }
+                if api_key == init_producer_id_request::API_KEY {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                }
+                None
+            })
+            .await;
+            let client = Client::builder()
+                .bootstrap(mock.addr.to_string())
+                .request_timeout(millis(100))
+                .build()
+                .await
+                .unwrap();
+
+            let error =
+                init_producer_id_with_retry(&client, request, millis(100), millis(1), millis(1))
+                    .await
+                    .expect_err(name);
+
+            assert2::assert!(matches!(
+                error,
+                ProducerError::Client(ClientError::IncompatibleVersion {
+                    api_key: init_producer_id_request::API_KEY,
+                    broker_min: 0,
+                    broker_max: 5,
+                    client_min: 6,
+                    client_max: 6,
+                })
+            ));
+            assert2::assert!(attempts.load(Ordering::Relaxed) == 0, "{name}");
+            mock.stop();
+        }
     }
 
     #[tokio::test]

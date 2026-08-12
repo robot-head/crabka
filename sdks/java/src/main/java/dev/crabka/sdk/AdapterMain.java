@@ -231,14 +231,18 @@ public final class AdapterMain {
 
     private static List<Map<String, Object>> encodedQueueMessages(List<QueueMessage> messages) {
         List<Map<String, Object>> encoded = new ArrayList<>();
-        messages.forEach(message -> encoded.add(Map.of(
-                "message_id", message.messageId(),
-                "topic", message.topic(),
-                "partition", message.partition(),
-                "offset", message.offset(),
-                "value_b64", encode(message.value()),
-                "headers", encodedHeaders(message.headers()),
-                "delivery_count", message.deliveryCount())));
+        messages.forEach(message -> {
+            byte[] value = message.value();
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("message_id", message.messageId());
+            entry.put("topic", message.topic());
+            entry.put("partition", message.partition());
+            entry.put("offset", message.offset());
+            entry.put("value_b64", value == null ? null : encode(value));
+            entry.put("headers", encodedHeaders(message.headers()));
+            entry.put("delivery_count", message.deliveryCount());
+            encoded.add(entry);
+        });
         return List.copyOf(encoded);
     }
 

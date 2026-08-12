@@ -69,7 +69,7 @@ final class LiveGatewaySubscription implements LiveSubscription {
                 try (response) {
                     readResponse(response);
                     sendEnd();
-                } catch (EOFException done) {
+                } catch (EndStreamException done) {
                     sendEnd();
                 } catch (CrabkaException error) {
                     sendError(error);
@@ -161,15 +161,15 @@ final class LiveGatewaySubscription implements LiveSubscription {
         }
     }
 
-    static EOFException endStream(byte[] payload) throws IOException {
+    static EndStreamException endStream(byte[] payload) throws IOException {
         if (payload.length == 0) {
-            return new EOFException("Subscribe stream ended");
+            return new EndStreamException();
         }
         JsonNode error = JSON.readTree(payload).path("error");
         if (!error.isMissingNode()) {
             throw new TransportException(error.path("message").asText("Subscribe stream ended with an error"));
         }
-        return new EOFException("Subscribe stream ended");
+        return new EndStreamException();
     }
 
     static Inbound fromGatewayInbound(GatewayOuterClass.Inbound inbound) {
@@ -187,4 +187,10 @@ final class LiveGatewaySubscription implements LiveSubscription {
     }
 
     private record StreamItem(Inbound inbound, CrabkaException error, boolean end) {}
+
+    static final class EndStreamException extends EOFException {
+        private EndStreamException() {
+            super("Subscribe stream ended");
+        }
+    }
 }

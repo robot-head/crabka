@@ -42,6 +42,7 @@ impl<'a> RemoteLogSegmentMetadataRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::remote_log_segment_metadata_record::RemoteLogSegmentMetadataRecord {
@@ -115,7 +116,7 @@ impl<'a> RemoteLogSegmentMetadataRecord<'a> {
                 for it in &self.segment_leader_epochs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
