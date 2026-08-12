@@ -14260,6 +14260,7 @@ fn blamed_literal_positions(
                     Some(stated) => {
                         rejected.expected.accepts(&stated)
                             && (rejected.indirect_ok || !encloses_function_call(tokens, index))
+                            && stated_input_function_could_have_raised(&stated, candidate)
                     }
                     None => rejected.indirect_ok && !encloses_function_call(tokens, index),
                 },
@@ -14267,6 +14268,23 @@ fn blamed_literal_positions(
             coerced.then(|| sql[..*offset].chars().count() + 1)
         })
         .collect()
+}
+
+/// Could the input function the source states next to this literal be the one
+/// that raised, or did the literal pass it and something later fail?
+///
+/// `json_in` decodes no string escape, so a `json`-stated literal that
+/// `json_in` accepts was never the thing that failed: the complaint came from
+/// an *accessor* reading the value at execution time, and `PostgreSQL` gives
+/// those no caret. `select json '{"a":"\ud83dX"}' -> 'a'` reports its DETAIL
+/// and CONTEXT with no `LINE`, while `SELECT '"\u"'::json` -- which `json_in`
+/// really does reject -- keeps one. A `jsonb`-stated literal needs no such
+/// test, because `jsonb_in` decodes and so every JSON complaint can be its own.
+///
+/// Only the JSON types can be told apart from the literal alone, so only they
+/// are tested; every other type keeps the reading it had.
+fn stated_input_function_could_have_raised(stated: &str, candidate: &str) -> bool {
+    stated != "json" || crabka_pgtypes::json::validate(candidate).is_err()
 }
 
 /// PostgreSQL's input functions run during parse analysis for a *constant*, so
