@@ -13260,6 +13260,15 @@ impl Shadow {
 /// The unqualified column names `from` supplies, or `None` when its schema
 /// cannot be described here — a FROM naming a relation that does not exist is
 /// for the ordinary read path to report, not for a name-shadowing pass.
+///
+/// Described as if the statement read every system column, because this answers
+/// what the FROM *can* supply and not what one statement asked of it. Whether a
+/// scan builds `tableoid` or `ctid` is a width optimisation; a stored relation
+/// offers both names whatever the statement spells. Describing without them
+/// left a bare `ctid` inside an uncorrelated subquery unshadowed, so the binder
+/// bound it to the enclosing row: `SELECT a FROM t WHERE ctid IN (SELECT ctid
+/// FROM s WHERE a = 2)` compared each row of `t` against its own `ctid` and
+/// matched every one of them.
 fn from_column_names(
     catalog_kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -13269,7 +13278,8 @@ fn from_column_names(
     if from.is_empty() {
         return Some(Vec::new());
     }
-    build_from_schema_with_ctes(catalog_kv, resolution, from, ctes)
+    let refs = crate::scope::StatementRefs::every_system_column();
+    build_from_schema_described(catalog_kv, resolution, from, ctes, None, Some(&refs))
         .ok()
         .map(|relation| {
             relation
@@ -15727,11 +15737,11 @@ fn partitioned_scan(
     qualifier: &str,
     permit: &crate::privilege::ReadPermit,
 ) -> Result<crate::rls::RawScan, ExecError> {
-    let tableoid = crate::scope::wants_tableoid(read_ctx.refs);
-    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier, tableoid);
+    let tree_system = crate::scope::SystemColumns::of(read_ctx.refs, parent);
+    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier, tree_system);
     for leaf in crate::partition::leaves_of(read_ctx.catalog_kv, &parent.name)? {
         let leaf_table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &leaf)?;
-        let ordinals = tree_ordinals(parent, &leaf_table, tableoid)?;
+        let ordinals = tree_ordinals(parent, &leaf_table, tree_system, read_ctx.refs)?;
         // Straight to the scan, not back through `build_table_expr`: re-entering
         // there would run each leaf through the row-security gate under the
         // LEAF's policies, and then run the whole append through it again under
@@ -15765,11 +15775,11 @@ fn inherited_scan(
         read_ctx.catalog_kv,
         &parent.name,
     )?);
-    let tableoid = crate::scope::wants_tableoid(read_ctx.refs);
-    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier, tableoid);
+    let tree_system = crate::scope::SystemColumns::of(read_ctx.refs, parent);
+    let mut tree = crate::rls::RawScan::tree_of(parent, qualifier, tree_system);
     for relation_name in relations {
         let table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &relation_name)?;
-        let ordinals = tree_ordinals(parent, &table, tableoid)?;
+        let ordinals = tree_ordinals(parent, &table, tree_system, read_ctx.refs)?;
         // See `partitioned_scan`: the child's rows are governed by the parent's
         // policies and read under the parent's permit, so they must not pass
         // through either gate on their own.
@@ -15835,16 +15845,20 @@ fn scan_stored_relation(
         return partitioned_scan(read_ctx, t, qualifier, permit);
     }
     let mut scope = Scope::single(t, qualifier);
+    // The hidden columns this scan carries, decided once for the scope and for
+    // every row of it together.
+    let system = crate::scope::SystemColumns::of(read_ctx.refs, t);
     // The oid this relation stamps on every row it yields, when the statement
     // spells `tableoid` and nothing otherwise. Taken once, before the rows: it
-    // is a catalog fact about the relation, not about any row of it.
-    let stamp = crate::scope::wants_tableoid(read_ctx.refs)
+    // is a catalog fact about the relation, not about any row of it. `ctid` is
+    // the opposite — a fact about the row — so it is read off each row where
+    // that row is decoded, in `scanned_rows`.
+    let stamp = system
+        .tableoid
         .then(|| crate::catalog_rel::table_relation_oid(t.id))
         .transpose()?
         .map(Datum::Int4);
-    if stamp.is_some() {
-        scope.push_tableoid(qualifier);
-    }
+    system.extend_scope(&mut scope, qualifier);
     // SP40: a foreign table reads through the registered scanner, not the local
     // MVCC version store. `build_from` materializes BEFORE WHERE, so this scan
     // runs even for `WHERE false` — there is no skip path.
@@ -15899,14 +15913,8 @@ fn scan_stored_relation(
     if let Some(unrestricted) = crate::rls::UnrestrictedTable::from_decision(permit, &decision, t)
         && let Some(rows) = try_scan_with_local_index(read_ctx, unrestricted, distributed_plan)?
     {
-        let mut rows: Vec<Vec<Datum>> = rows.into_iter().map(|scanned| scanned.row).collect();
-        resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
-        expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
-        return Ok(crate::rls::RawScan::of_relation(
-            t,
-            scope,
-            stamped(rows, stamp.as_ref()),
-        ));
+        let rows = scanned_rows(read_ctx, t, rows, system, stamp.as_ref())?;
+        return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
     }
     let scan_request = ScanRequest {
         local: read_ctx.kv,
@@ -15951,26 +15959,52 @@ fn scan_stored_relation(
             )?
         }
         Err(error) => return Err(error),
+    };
+    let rows = scanned_rows(read_ctx, t, rows, system, stamp.as_ref())?;
+    Ok(crate::rls::RawScan::of_relation(t, scope, rows))
+}
+
+/// `scanned` as the rows a relation yields: the `regclass` columns resolved,
+/// the `VIRTUAL` generated columns expanded, and the hidden system columns this
+/// scan carries appended.
+///
+/// It takes the [`ScannedRow`]s whole rather than a row list beside a list of
+/// identities, so the identity a row's `ctid` is derived from can only ever be
+/// that row's own. The two passes over the rows run first: both read a row by
+/// the ordinals of the relation's declared columns and would mistake a longer
+/// row for a corrupt one.
+fn scanned_rows(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    t: &Table,
+    scanned: Vec<ScannedRow>,
+    system: crate::scope::SystemColumns,
+    stamp: Option<&Datum>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows: Vec<Vec<Datum>> = Vec::with_capacity(scanned.len());
+    let mut identities: Vec<u64> = Vec::with_capacity(scanned.len());
+    for row in scanned {
+        rows.push(row.row);
+        identities.push(row.rowid);
     }
-    .into_iter()
-    .map(|scanned| scanned.row)
-    .collect();
-    let mut rows: Vec<Vec<Datum>> = rows;
-    resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
+    resolve_scanned_regclass(read_ctx.catalog_kv, t, &mut rows)?;
     expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
-    Ok(crate::rls::RawScan::of_relation(
-        t,
-        scope,
-        stamped(rows, stamp.as_ref()),
-    ))
+    for (row, identity) in rows.iter_mut().zip(identities) {
+        if let Some(oid) = stamp {
+            row.push(oid.clone());
+        }
+        if system.ctid {
+            row.push(crate::scope::row_ctid(identity));
+        }
+    }
+    Ok(rows)
 }
 
 /// `rows`, each extended by `stamp` when the scan carries one.
 ///
-/// The stamp goes on AFTER `resolve_scanned_regclass` and
-/// `expand_virtual_generated`, both of which read a row by the ordinals of the
-/// relation's declared columns and would mistake a longer row for a corrupt
-/// one.
+/// The foreign path's half of [`scanned_rows`], for rows a remote system
+/// returned with no identity attached — which is why no `ctid` is appended
+/// here, and why [`crate::scope::SystemColumns::of`] carries none for a foreign
+/// table.
 fn stamped(mut rows: Vec<Vec<Datum>>, stamp: Option<&Datum>) -> Vec<Vec<Datum>> {
     if let Some(oid) = stamp {
         for row in &mut rows {
@@ -15980,20 +16014,46 @@ fn stamped(mut rows: Vec<Vec<Datum>>, stamp: Option<&Datum>) -> Vec<Vec<Datum>> 
     rows
 }
 
-/// [`column_mapping`] for a tree scan, extended by the hidden `tableoid` when
-/// the statement asks for one.
+/// An ordinal no row has, which [`permuted_row`] reads as NULL.
+const NO_SUCH_COLUMN: usize = usize::MAX;
+
+/// [`column_mapping`] for a tree scan, extended by the hidden system columns
+/// the tree carries.
 ///
-/// `source.columns.len()` is where the child's own scan appended its stamp,
-/// whether the child was a plain relation ([`Scope::single`]) or a nested tree
-/// ([`crate::rls::RawScan::tree_of`]) — both scopes are exactly the child's
-/// declared width before the system column goes on. Reading it through the same
-/// permutation as every user column is what makes an inheritance grandchild and
-/// a sub-partitioned leaf report THEMSELVES: each level stamps its own oid, and
-/// the level above only carries it up.
-fn tree_ordinals(parent: &Table, source: &Table, tableoid: bool) -> Result<Vec<usize>, ExecError> {
+/// `source.columns.len()` is where the child's own scan appended the first of
+/// its own, whether the child was a plain relation ([`Scope::single`]) or a
+/// nested tree ([`crate::rls::RawScan::tree_of`]) — both scopes are exactly the
+/// child's declared width before a system column goes on. Reading them through
+/// the same permutation as every user column is what makes an inheritance
+/// grandchild and a sub-partitioned leaf report THEMSELVES: each level stamps
+/// its own, and the level above only carries them up. Two rows of one
+/// inheritance tree can therefore share a `ctid`, exactly as they can in
+/// `PostgreSQL`, where the pair that identifies a row across a tree is
+/// `(tableoid, ctid)`.
+///
+/// A child can carry less than the tree does — [`crate::scope::SystemColumns`]
+/// declines a relation that declares a column of its own by the name, and
+/// declines `ctid` to a foreign one — so the child's own set decides where each
+/// column is read from, and a column it does not have reads as NULL rather than
+/// as whichever value sits at that offset in its row.
+fn tree_ordinals(
+    parent: &Table,
+    source: &Table,
+    tree: crate::scope::SystemColumns,
+    refs: Option<&crate::scope::StatementRefs>,
+) -> Result<Vec<usize>, ExecError> {
+    let child = crate::scope::SystemColumns::of(refs, source);
     let mut ordinals = column_mapping(parent, source)?;
-    if tableoid {
-        ordinals.push(source.columns.len());
+    let base = source.columns.len();
+    if tree.tableoid {
+        ordinals.push(if child.tableoid { base } else { NO_SUCH_COLUMN });
+    }
+    if tree.ctid {
+        ordinals.push(if child.ctid {
+            base + usize::from(child.tableoid)
+        } else {
+            NO_SUCH_COLUMN
+        });
     }
     Ok(ordinals)
 }
@@ -16168,7 +16228,9 @@ fn build_base_table(
         });
     }
     let name = &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
-    if let Some(rel) = virtual_catalog_relation(catalog_kv, name, alias.as_deref(), ctx)? {
+    if let Some(rel) =
+        virtual_catalog_relation(catalog_kv, name, alias.as_deref(), ctx, read_ctx.refs)?
+    {
         return Ok(rel);
     }
     match crabka_pgcatalog::get_view(catalog_kv, name) {
@@ -17524,13 +17586,12 @@ fn top_k_pushdown_for_relation(
     qualifier: &str,
     s: &SelectStmt,
 ) -> Result<Option<crate::TopKSpec>, ExecError> {
-    // A statement that reads `tableoid` keeps the full scan. The pushdown below
-    // resolves the select list and ORDER BY against a bare `Scope::single`,
-    // which has no system column, so it would report the 42703 the ordinary
+    // A statement that reads a system column keeps the full scan. The pushdown
+    // below resolves the select list and ORDER BY against a bare
+    // `Scope::single`, which has none, so it would report the 42703 the ordinary
     // path is about to answer — and its `table.columns[column]` lookup indexes
-    // the DECLARED columns by a scope index, which a system column sits one
-    // past.
-    if crate::scope::wants_tableoid(read_ctx.refs) {
+    // the DECLARED columns by a scope index, which a system column sits past.
+    if crate::scope::wants_system_column(read_ctx.refs) {
         return Ok(None);
     }
     let Some(unrestricted) =
@@ -17779,11 +17840,10 @@ pub(crate) fn select_to_relation_with_ctes(
             None
         };
         // Each of the three folds the aggregate against a bare `Scope::single`,
-        // which carries no system column. A statement that reads `tableoid`
-        // takes the ordinary read path instead — the only one that builds the
-        // column — rather than reporting the 42703 that path is about to
-        // answer.
-        if !crate::scope::wants_tableoid(read_ctx.refs) {
+        // which carries no system column. A statement that reads one takes the
+        // ordinary read path instead — the only one that builds the column —
+        // rather than reporting the 42703 that path is about to answer.
+        if !crate::scope::wants_system_column(read_ctx.refs) {
             if let Some(relation) = try_execute_partial_aggregate_pushdown(read_ctx, s)? {
                 return Ok(relation);
             }
@@ -17880,15 +17940,6 @@ fn lateral_schema_item(
     LateralBinder::new(catalog_kv, resolution, ctes)
         .bind(te, outer, &nulls)
         .0
-}
-
-pub(crate) fn build_from_schema_with_ctes(
-    catalog_kv: &dyn Kv,
-    resolution: &crate::relname::ResolutionScope,
-    from: &[crabka_pgparser::ast::TableExpr],
-    ctes: &crate::cte::CteContext,
-) -> Result<Relation, ExecError> {
-    build_from_schema_described(catalog_kv, resolution, from, ctes, None, None)
 }
 
 pub(crate) fn build_from_schema_with_ctes_and_context(
@@ -18037,7 +18088,7 @@ fn build_table_expr_schema_with_ctes(
             }
             let name =
                 &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
-            if let Some(rel) = virtual_catalog_relation_schema(name, alias.as_deref()) {
+            if let Some(rel) = virtual_catalog_relation_schema(name, alias.as_deref(), refs) {
                 return Ok(rel);
             }
             match crabka_pgcatalog::get_view(catalog_kv, name) {
@@ -18066,14 +18117,13 @@ fn build_table_expr_schema_with_ctes(
                 open_wrong_kind(catalog_kv, name).unwrap_or_else(|| error.into())
             })?;
             let qualifier = alias.as_deref().unwrap_or(&t.name.name);
-            // The one arm that gets the system column. A view, a CTE, a derived
-            // table, a VALUES list and a virtual catalog relation all return
-            // above without one, which is what makes `SELECT tableoid FROM v`
-            // the 42703 `PostgreSQL` raises rather than a column of nulls.
+            // A view, a CTE, a derived table and a VALUES list all return above
+            // with no system column, which is what makes `SELECT tableoid FROM
+            // v` the 42703 `PostgreSQL` raises rather than a column of nulls. A
+            // virtual catalog relation returns above WITH its `ctid`, because
+            // the engine numbers the rows it projects.
             let mut scope = Scope::single(&t, qualifier);
-            if crate::scope::wants_tableoid(refs) {
-                scope.push_tableoid(qualifier);
-            }
+            crate::scope::SystemColumns::of(refs, &t).extend_scope(&mut scope, qualifier);
             Ok(Relation {
                 scope,
                 rows: Vec::new(),
@@ -18221,32 +18271,77 @@ const TIMETZ_ARRAY_OID: i32 = 1270;
 /// `pg_type.oid` of `_int2vector`, which is in that same position.
 const INT2VECTOR_ARRAY_OID: i32 = 1006;
 
+/// One of the relations the engine synthesises, with its rows.
+///
+/// A synthesised relation is stored nowhere, so it has no rowid to derive a
+/// `ctid` from — but `PostgreSQL` answers `ctid` over `pg_operator` and
+/// `pg_class` the same as over any other relation, because there they *are*
+/// heap tables. What stands in for the storage identity here is the row's
+/// one-based ordinal in the projection: the projection is a pure function of
+/// the catalog it reads, so the ordinal is unique within the relation and the
+/// same for as long as the catalog is, which is the whole of what a `ctid`
+/// promises. No `tableoid`, which stays the 42703 it was: this slice changed
+/// the judgement for `ctid` only.
 fn virtual_catalog_relation(
     catalog_kv: &dyn Kv,
     name: &crabka_pgcatalog::RelationName,
     alias: Option<&str>,
     ctx: &crate::clock::EvalCtx,
+    refs: Option<&crate::scope::StatementRefs>,
 ) -> Result<Option<Relation>, ExecError> {
     let Some(table) = virtual_table(&virtual_lookup_key(name)) else {
         return Ok(None);
     };
+    let described = virtual_catalog_table(table);
+    let (scope, system) = virtual_catalog_scope(&described, name, alias, refs);
     let rows = virtual_catalog_rows(catalog_kv, table, ctx)?;
-    Ok(Some(Relation {
-        scope: Scope::single(&virtual_catalog_table(table), alias.unwrap_or(&name.name)),
-        rows,
-    }))
+    let rows = if system.ctid {
+        rows.into_iter()
+            .zip(1u64..)
+            .map(|(mut row, ordinal)| {
+                row.push(crate::scope::row_ctid(ordinal));
+                row
+            })
+            .collect()
+    } else {
+        rows
+    };
+    Ok(Some(Relation { scope, rows }))
 }
 
 fn virtual_catalog_relation_schema(
     name: &crabka_pgcatalog::RelationName,
     alias: Option<&str>,
+    refs: Option<&crate::scope::StatementRefs>,
 ) -> Option<Relation> {
-    let key = virtual_lookup_key(name);
-    let table = virtual_table(&key)?;
+    let described = virtual_catalog_table(virtual_table(&virtual_lookup_key(name))?);
+    let (scope, _) = virtual_catalog_scope(&described, name, alias, refs);
     Some(Relation {
-        scope: Scope::single(&virtual_catalog_table(table), alias.unwrap_or(&name.name)),
+        scope,
         rows: Vec::new(),
     })
+}
+
+/// A synthesised relation's scope, and the system columns it carries.
+///
+/// Shared by the path that then fills in the rows and the schema-only path that
+/// does not, so the two cannot describe the same relation differently.
+fn virtual_catalog_scope(
+    described: &Table,
+    name: &crabka_pgcatalog::RelationName,
+    alias: Option<&str>,
+    refs: Option<&crate::scope::StatementRefs>,
+) -> (Scope, crate::scope::SystemColumns) {
+    let qualifier = alias.unwrap_or(&name.name);
+    let mut scope = Scope::single(described, qualifier);
+    // `ctid` only: `tableoid` over a synthesised relation stays the 42703 it
+    // was, because this slice changed the judgement for `ctid` alone.
+    let system = crate::scope::SystemColumns {
+        tableoid: false,
+        ctid: crate::scope::SystemColumns::of(refs, described).ctid,
+    };
+    system.extend_scope(&mut scope, qualifier);
+    (scope, system)
 }
 
 /// The ordinary local relation a single-item `FROM` names, or `None` when it is

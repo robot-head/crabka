@@ -56,27 +56,70 @@ pub(crate) enum Exposure {
     /// side it can null-extend. Its qualifier is [`LIVE_QUALIFIER`] and its name
     /// is the qualifier it marks; see [`Scope::live_marker`].
     LiveMarker,
-    /// A stored relation's [`TABLEOID_COLUMN`]: the oid of the relation the row
-    /// itself came from, which over an inheritance or partition tree is the
-    /// LEAF's and not the parent's.
+    /// One of the system columns the engine answers — [`TABLEOID_COLUMN`] or
+    /// [`CTID_COLUMN`].
     ///
-    /// It carries the relation's own qualifier, so `a.tableoid` and — when no
-    /// other relation in scope offers the name — a bare `tableoid` both reach
-    /// it. Everything that enumerates a relation's columns skips it, which is
-    /// how `PostgreSQL` hides a system column: `SELECT *`, `SELECT a.*`, a
+    /// It carries the relation's own qualifier, so `a.ctid` and — when no other
+    /// relation in scope offers the name — a bare `ctid` both reach it.
+    /// Everything that enumerates a relation's columns skips it, which is how
+    /// `PostgreSQL` hides a system column: `SELECT *`, `SELECT a.*`, a
     /// whole-row `SELECT a`, `pg_attribute`-driven `\d`, and
     /// `information_schema.columns` all show only the user columns.
     SystemColumn,
 }
 
-/// The one system column the engine answers.
+/// The oid of the relation the row itself came from, which over an inheritance
+/// or partition tree is the LEAF's and not the parent's.
 ///
-/// `PostgreSQL` has six (`tableoid`, `cmax`, `xmax`, `cmin`, `xmin`, `ctid`, at
-/// `attnum` -6 through -1). The other five describe a heap tuple's physical
-/// placement and its MVCC header, neither of which a KV row space has to
-/// reproduce; `tableoid` is the one whose answer is a catalog fact the engine
-/// already holds.
+/// `PostgreSQL` has six system columns (`tableoid`, `cmax`, `xmax`, `cmin`,
+/// `xmin`, `ctid`, at `attnum` -6 through -1). This is the one whose answer is
+/// a catalog fact the engine already holds.
 pub(crate) const TABLEOID_COLUMN: &str = "tableoid";
+
+/// An identifier for where the row is stored, which is what `ctid` *means*.
+///
+/// The four system columns still missing (`cmin`, `cmax`, `xmin`, `xmax`)
+/// report a heap tuple's MVCC header, which a KV row space keeps in a shape
+/// nothing here can render as one. `ctid` looked like the same kind of gap —
+/// `PostgreSQL` answers it with a block number and a slot inside that block,
+/// and there is no heap here to have either. What makes it answerable anyway is
+/// that a `ctid` is not a promise about a layout: an `UPDATE` moves the row and
+/// `CLUSTER` renumbers every row in the relation, so no portable statement can
+/// depend on a particular value. What is left of the contract is "an identifier
+/// for this row's storage", and the engine does hold one — see [`row_ctid`].
+pub(crate) const CTID_COLUMN: &str = "ctid";
+
+/// The `ctid` of the row whose storage identity is `identity`.
+///
+/// The identity is the row's rowid for a stored relation, and the row's
+/// one-based ordinal in the projection for a relation the engine synthesises,
+/// which has no other storage to name.
+///
+/// A rowid is the key every version of one row hangs under, so it outlives an
+/// `UPDATE`: the new version is written beside the old one under the same key,
+/// and the row keeps its `ctid`. `PostgreSQL`'s moves, because there the update
+/// writes a new tuple somewhere else in the heap. `CLUSTER` reassigns rowids in
+/// index order, which is the one event that moves a `ctid` in both. Nothing may
+/// depend on either behaviour — `PostgreSQL` documents a `ctid` as valid only
+/// until the row is updated or the table is rewritten, so a statement that
+/// survives one of those was already outside the contract.
+///
+/// The 64-bit identity is split across the two fields a `tid` has, high half
+/// into the block and low half into the offset. Two rows of one relation
+/// therefore differ, up to 2^48 rows, which is past the point `PostgreSQL`'s
+/// own `ItemPointer` stops being able to address them: a 4-billion-block heap
+/// of 8 kB pages holds about 1.2e12 tuples. Identity 0 is never handed out —
+/// rowids and ordinals both start at 1 — so no row is ever stamped `(0,0)`, the
+/// value `PostgreSQL` reserves for an invalid item pointer.
+pub(crate) fn row_ctid(identity: u64) -> Datum {
+    Datum::Tid(crabka_pgtypes::Tid {
+        // Saturating rather than wrapping: past 2^48 rows in one relation the
+        // low half no longer separates them whatever the high half does, and a
+        // pinned block is at least monotone with the identity.
+        block: u32::try_from(identity >> 16).unwrap_or(u32::MAX),
+        offset: u16::try_from(identity & u64::from(u16::MAX)).unwrap_or(u16::MAX),
+    })
+}
 
 impl ColumnBinding {
     /// Is this column hidden from `*`?
@@ -165,10 +208,11 @@ pub(crate) const LIVE_QUALIFIER: &str = "$live";
 ///   a marker only when a relation of the same query happens to share the name,
 ///   and a marker nothing reads is merely the width this type exists to avoid —
 ///   never a wrong answer.
-/// * `tableoid` is whether the statement spells that name at all, qualified or
-///   not, which decides whether a stored-relation scan stamps each row with the
-///   relation it came from. Unlike a marker, this one is read through
-///   `a.tableoid` as often as bare, so it cannot be narrowed to a qualifier.
+/// * `tableoid` and `ctid` are whether the statement spells either name at all,
+///   qualified or not, which decides whether a scan stamps each row with the
+///   relation it came from and with its own storage identity. Unlike a marker,
+///   these are read through `a.tableoid` as often as bare, so neither can be
+///   narrowed to a qualifier.
 ///
 /// Deliberately not narrowed to "names that fail to resolve": which names those
 /// are depends on the scope, and the scope is what the read path is in the
@@ -177,6 +221,7 @@ pub(crate) const LIVE_QUALIFIER: &str = "$live";
 pub(crate) struct StatementRefs {
     names: std::collections::HashSet<String>,
     tableoid: bool,
+    ctid: bool,
 }
 
 /// Must a join carry a liveness marker for `qualifier`?
@@ -200,6 +245,73 @@ pub(crate) fn wants_tableoid(refs: Option<&StatementRefs>) -> bool {
     refs.is_some_and(StatementRefs::reads_tableoid)
 }
 
+/// Must a scan stamp each row with its own storage identity? The same rule
+/// [`wants_tableoid`] states, for [`CTID_COLUMN`].
+pub(crate) fn wants_ctid(refs: Option<&StatementRefs>) -> bool {
+    refs.is_some_and(StatementRefs::reads_ctid)
+}
+
+/// Must a read path that builds no system column at all decline the statement?
+///
+/// The fast paths resolve a select list against a bare [`Scope::single`], which
+/// carries neither system column, so a statement that spells either has to take
+/// the ordinary read path rather than report the 42703 that path is about to
+/// answer. They ask this one question instead of both, so a third system column
+/// cannot be added without every one of them getting it.
+pub(crate) fn wants_system_column(refs: Option<&StatementRefs>) -> bool {
+    refs.is_some_and(StatementRefs::reads_system_column)
+}
+
+/// The hidden system columns one scan of one relation appends to every row it
+/// yields, in the order [`Scope::push_tableoid`] and [`Scope::push_ctid`] put
+/// them in.
+///
+/// One value decides the scope and the row together. A scan that pushed the
+/// column but stamped no value, or the reverse, would hand the layers above it
+/// a row whose width disagrees with its schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SystemColumns {
+    pub(crate) tableoid: bool,
+    pub(crate) ctid: bool,
+}
+
+impl SystemColumns {
+    /// What a scan of `table` carries for the statement `refs` describes.
+    ///
+    /// Two relations get less than the statement asked for.
+    ///
+    /// A relation that declares a column of its own by either name gets neither
+    /// of them. `PostgreSQL` rejects `CREATE TABLE t (ctid int)` outright —
+    /// "column name \"ctid\" conflicts with a system column name" — so the
+    /// clash cannot arise there; this engine accepts the declaration, and a
+    /// scope holding both bindings would answer 42702 for a name that reads the
+    /// user's own column today.
+    ///
+    /// A foreign table gets no `ctid`. Its rows come back from a remote system
+    /// through [`crate::foreign::ForeignScanner::scan`], which hands over bare
+    /// `Datum`s and no storage identity to derive one from, so the name stays
+    /// the 42703 it is now rather than becoming a counter over whatever order
+    /// that scan happened to return.
+    pub(crate) fn of(refs: Option<&StatementRefs>, table: &Table) -> Self {
+        Self {
+            tableoid: wants_tableoid(refs) && table.column_index(TABLEOID_COLUMN).is_none(),
+            ctid: wants_ctid(refs)
+                && table.column_index(CTID_COLUMN).is_none()
+                && table.foreign.is_none(),
+        }
+    }
+
+    /// Append these columns to `scope`, qualified by `qualifier`.
+    pub(crate) fn extend_scope(self, scope: &mut Scope, qualifier: &str) {
+        if self.tableoid {
+            scope.push_tableoid(qualifier);
+        }
+        if self.ctid {
+            scope.push_ctid(qualifier);
+        }
+    }
+}
+
 impl StatementRefs {
     /// Every unqualified name `select` spells, in it and in every query nested
     /// inside it.
@@ -215,6 +327,21 @@ impl StatementRefs {
         refs
     }
 
+    /// The references of a statement that reads every system column.
+    ///
+    /// For the one caller that needs to know which names a FROM *can* supply
+    /// rather than which ones a particular statement asked of it: whether a
+    /// scan builds the column is a width optimisation, and a stored relation
+    /// offers both names whatever the statement spells. See
+    /// [`crate::exec::from_column_names`].
+    pub(crate) fn every_system_column() -> Self {
+        Self {
+            names: std::collections::HashSet::new(),
+            tableoid: true,
+            ctid: true,
+        }
+    }
+
     /// Does the statement spell [`TABLEOID_COLUMN`], qualified or bare?
     ///
     /// A read path that cannot build the column has to decline the whole
@@ -224,6 +351,18 @@ impl StatementRefs {
     /// against a scope with no system column in it.
     pub(crate) const fn reads_tableoid(&self) -> bool {
         self.tableoid
+    }
+
+    /// Does the statement spell [`CTID_COLUMN`], qualified or bare? Asked for
+    /// the reason [`Self::reads_tableoid`] is, at the scan that stamps it.
+    pub(crate) const fn reads_ctid(&self) -> bool {
+        self.ctid
+    }
+
+    /// Does the statement spell either system column? See
+    /// [`wants_system_column`], the one thing that asks.
+    pub(crate) const fn reads_system_column(&self) -> bool {
+        self.tableoid || self.ctid
     }
 
     fn add_select(&mut self, select: &SelectStmt) {
@@ -431,6 +570,7 @@ impl StatementRefs {
             // Qualified or not: `a.tableoid` is the spelling an inheritance
             // query uses most, and it reaches the same hidden column.
             self.tableoid |= name == TABLEOID_COLUMN;
+            self.ctid |= name == CTID_COLUMN;
         }
         for child in crate::exec::expr_children(expr) {
             self.add_expr(child);
@@ -494,10 +634,25 @@ impl Scope {
     /// `t.tableoid = pg_class.oid` is a comparison of two `Int4`s rather than of
     /// two types the engine has no operator for.
     pub fn push_tableoid(&mut self, qualifier: &str) {
+        self.push_system_column(qualifier, TABLEOID_COLUMN, ColumnType::Int4);
+    }
+
+    /// Append the hidden [`CTID_COLUMN`] for `qualifier`, after any
+    /// [`Scope::push_tableoid`] and at the end of the row.
+    ///
+    /// The order of the two is the order every scan appends their values in,
+    /// and it is fixed here so a scan cannot pick a different one.
+    /// [`ColumnType::Tid`] is what `PostgreSQL` gives the column, and the type
+    /// the `tid` literals a statement compares it against already parse as.
+    pub fn push_ctid(&mut self, qualifier: &str) {
+        self.push_system_column(qualifier, CTID_COLUMN, ColumnType::Tid);
+    }
+
+    fn push_system_column(&mut self, qualifier: &str, name: &str, ty: ColumnType) {
         self.columns.push(ColumnBinding {
             qualifier: Some(qualifier.to_string()),
-            name: TABLEOID_COLUMN.to_string(),
-            ty: ColumnType::Int4,
+            name: name.to_string(),
+            ty,
             exposure: Exposure::SystemColumn,
         });
     }
@@ -983,5 +1138,140 @@ mod tests {
             let refs = StatementRefs::of_select(&select);
             assert!(refs.reads_tableoid() == expected, "{sql}");
         }
+    }
+
+    #[test]
+    fn statement_refs_notice_every_spelling_of_ctid() {
+        let cases = [
+            ("SELECT 1 FROM t", (false, false)),
+            ("SELECT ctid FROM t", (true, true)),
+            ("SELECT t.ctid FROM t", (true, true)),
+            ("SELECT min(ctid) FROM t", (true, true)),
+            ("SELECT 1 FROM t WHERE ctid = '(0,1)'", (true, true)),
+            (
+                "SELECT 1 FROM t WHERE a IN (SELECT ctid FROM p)",
+                (true, true),
+            ),
+            ("SELECT 1 FROM t ORDER BY ctid", (true, true)),
+            // Only the other one, and a name merely containing it.
+            ("SELECT tableoid FROM t", (false, true)),
+            ("SELECT ctids FROM t", (false, false)),
+        ];
+        for (sql, (ctid, system)) in cases {
+            let parsed = crabka_pgparser::parse(sql).expect("statement parses");
+            let [crabka_pgparser::ast::Statement::Query(query)] = parsed.as_slice() else {
+                panic!("{sql} is one query");
+            };
+            let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
+                panic!("{sql} is a plain select");
+            };
+            let mut select = (**select).clone();
+            select.order_by.clone_from(&query.order_by);
+            let refs = StatementRefs::of_select(&select);
+            assert!(refs.reads_ctid() == ctid, "{sql}");
+            assert!(refs.reads_system_column() == system, "{sql}");
+        }
+    }
+
+    #[test]
+    fn ctid_goes_after_tableoid_and_is_a_system_column() {
+        let t = tbl("t", &[("a", ColumnType::Int4)]);
+        let mut s = Scope::single(&t, "t");
+        SystemColumns {
+            tableoid: true,
+            ctid: true,
+        }
+        .extend_scope(&mut s, "t");
+        let expected = Scope {
+            columns: vec![
+                binding("t", "a", ColumnType::Int4),
+                ColumnBinding {
+                    qualifier: Some("t".to_string()),
+                    name: "tableoid".to_string(),
+                    ty: ColumnType::Int4,
+                    exposure: Exposure::SystemColumn,
+                },
+                ColumnBinding {
+                    qualifier: Some("t".to_string()),
+                    name: "ctid".to_string(),
+                    ty: ColumnType::Tid,
+                    exposure: Exposure::SystemColumn,
+                },
+            ],
+        };
+        assert!(s == expected);
+        // Reachable both ways, and hidden from every expansion of the relation.
+        assert!(s.resolve(None, "ctid") == Ok(2));
+        assert!(s.resolve(Some("t"), "ctid") == Ok(2));
+        assert!(s.whole_row("t") == Some(vec![0]));
+        assert!(s.columns[2].is_join_input() == true);
+    }
+
+    /// `PostgreSQL` refuses `CREATE TABLE t (ctid int)`; this engine accepts
+    /// it, and a scope carrying the user's column and the system one would
+    /// answer 42702 for a name that reads the user's column today.
+    #[test]
+    fn a_relation_declaring_the_name_itself_gets_no_system_column() {
+        let refs = StatementRefs::every_system_column();
+        let cases = [
+            (
+                tbl("plain", &[("a", ColumnType::Int4)]),
+                SystemColumns {
+                    tableoid: true,
+                    ctid: true,
+                },
+            ),
+            (
+                tbl("shadowed", &[("ctid", ColumnType::Int4)]),
+                SystemColumns {
+                    tableoid: true,
+                    ctid: false,
+                },
+            ),
+            (
+                tbl(
+                    "both",
+                    &[("ctid", ColumnType::Int4), ("tableoid", ColumnType::Int4)],
+                ),
+                SystemColumns {
+                    tableoid: false,
+                    ctid: false,
+                },
+            ),
+        ];
+        for (table, expected) in cases {
+            assert!(
+                SystemColumns::of(Some(&refs), &table) == expected,
+                "{}",
+                table.name
+            );
+        }
+        // Nothing is carried for a statement that spells neither.
+        assert!(
+            SystemColumns::of(None, &tbl("plain", &[("a", ColumnType::Int4)]))
+                == SystemColumns::default()
+        );
+    }
+
+    /// The mapping is the row's storage identity split across the two fields a
+    /// `tid` has. Nothing outside this test may depend on the values.
+    #[test]
+    fn a_row_ctid_is_its_identity_split_across_the_two_fields() {
+        let cases = [
+            (1, (0, 1)),
+            (2, (0, 2)),
+            (65_535, (0, 65_535)),
+            (65_536, (1, 0)),
+            (65_537, (1, 1)),
+            (u64::from(u32::MAX) + 1, (65_536, 0)),
+        ];
+        for (identity, (block, offset)) in cases {
+            let expected = Datum::Tid(crabka_pgtypes::Tid { block, offset });
+            assert!(row_ctid(identity) == expected, "{identity}");
+        }
+        // Distinct up to the point the two fields stop separating identities,
+        // which is past every row count a heap can address.
+        assert!(row_ctid(1) != row_ctid(2));
+        assert!(row_ctid(1 << 47) != row_ctid((1 << 47) + 1));
     }
 }

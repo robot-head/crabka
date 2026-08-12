@@ -13333,15 +13333,15 @@ impl SqlSession {
             // A set-returning function in the select list turns one source row
             // into many, which this one-row-in-one-row-out cursor cannot do.
             || crate::srf::projection_contains_srf(&select.projection)
-            // `tableoid` is a hidden column the scan below does not build: this
-            // cursor resolves the select list against a bare `Scope::single`,
-            // and only `run_select` stamps the relation's oid onto each row.
-            // Streaming it answered 42703 for a column the same query without
-            // the fast path resolves — the identical class of divergence the
-            // matview, partitioned-parent and inheritance-parent declines above
-            // exist to prevent. Tested last: it walks the statement, and every
-            // cheaper shape test has already had its say.
-            || crate::scope::StatementRefs::of_select(&select).reads_tableoid()
+            // A system column is one the scan below does not build: this cursor
+            // resolves the select list against a bare `Scope::single`, and only
+            // `run_select` stamps the relation's oid and each row's identity
+            // onto it. Streaming it answered 42703 for a column the same query
+            // without the fast path resolves — the identical class of
+            // divergence the matview, partitioned-parent and inheritance-parent
+            // declines above exist to prevent. Tested last: it walks the
+            // statement, and every cheaper shape test has already had its say.
+            || crate::scope::StatementRefs::of_select(&select).reads_system_column()
         {
             return None;
         }
