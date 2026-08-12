@@ -290,15 +290,11 @@ pub(crate) async fn execute_scalar_function(
         routine_oid: routine.oid,
     };
     match interpreter.exec_block(&block).await? {
-        Flow::Return(value) => Ok(value),
-        Flow::Next if interpreter.output_slot.is_some() => Ok(interpreter.output_value()),
-        Flow::Next => Err(ExecError::FunctionError {
-            sqlstate: "2F005",
-            message: format!(
-                "control reached end of function {} without RETURN",
-                routine.identity()
-            ),
-        }),
+        Flow::Return(value) => scalar_function_result(routine, Some(value)),
+        Flow::Next if interpreter.output_slot.is_some() => {
+            scalar_function_result(routine, Some(interpreter.output_value()))
+        }
+        Flow::Next => scalar_function_result(routine, None),
         Flow::LoopControl { .. } => Err(ExecError::Syntax(
             "EXIT or CONTINUE cannot be used outside a loop".into(),
         )),
@@ -476,19 +472,35 @@ pub(crate) fn eval_scalar_function(
         context: format!("PL/pgSQL function {}", routine.identity()),
     };
     match interpreter.exec_block(&block)? {
-        ScalarFlow::Return(value) => Ok(value),
-        ScalarFlow::Next if interpreter.output_slot.is_some() => Ok(interpreter.output_value()),
-        ScalarFlow::Next => Err(ExecError::FunctionError {
-            sqlstate: "2F005",
-            message: format!(
-                "control reached end of function {} without RETURN",
-                routine.identity()
-            ),
-        }),
+        ScalarFlow::Return(value) => scalar_function_result(routine, Some(value)),
+        ScalarFlow::Next if interpreter.output_slot.is_some() => {
+            scalar_function_result(routine, Some(interpreter.output_value()))
+        }
+        ScalarFlow::Next => scalar_function_result(routine, None),
         ScalarFlow::LoopControl { .. } => Err(ExecError::Syntax(
             "EXIT or CONTINUE cannot be used outside a loop".into(),
         )),
     }
+}
+
+/// Fold a scalar body's exit into the function's answer. `returned` is `None`
+/// when control fell off the end of the body.
+///
+/// A `RETURNS void` function is allowed to fall off the end: PostgreSQL's
+/// PL/pgSQL compiler appends the missing `RETURN` to a void body rather than
+/// leaving the runtime to complain. Its answer is the void value however the
+/// body left, because a bare `RETURN;` carries nothing to answer with.
+fn scalar_function_result(routine: &Routine, returned: Option<Datum>) -> Result<Datum, ExecError> {
+    if crate::routine::declared_returns_void(routine) {
+        return Ok(crate::routine::void_result_value());
+    }
+    returned.ok_or_else(|| ExecError::FunctionError {
+        sqlstate: "2F005",
+        message: format!(
+            "control reached end of function {} without RETURN",
+            routine.identity()
+        ),
+    })
 }
 
 /// Whether a scalar body needs the owning SQL session rather than the pure

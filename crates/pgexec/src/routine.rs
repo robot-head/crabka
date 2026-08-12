@@ -1824,7 +1824,7 @@ pub(crate) fn plpgsql_declared_call_type(
     if routine.language == "plpgsql" {
         validate_plpgsql_scalar(&routine)?;
     }
-    resolved_scalar_result_type(&routine, &given)
+    called_scalar_result_type(&routine, &given)
         .ok_or_else(|| {
             ExecError::Unsupported(format!(
                 "function {} has no scalar result type",
@@ -1876,7 +1876,7 @@ pub(crate) fn plpgsql_scalar_result_type(
             if routine.language == "plpgsql" {
                 validate_plpgsql_scalar(&routine)?;
             }
-            resolved_scalar_result_type(&routine, &given).ok_or_else(|| {
+            called_scalar_result_type(&routine, &given).ok_or_else(|| {
                 ExecError::Unsupported(format!(
                     "function {} has no scalar result type",
                     routine.identity()
@@ -2033,9 +2033,8 @@ pub(crate) fn eval_plpgsql_scalar_with(
             } else {
                 crate::plpgsql::eval_scalar_function(&routine, &values, ctx)?
             };
-            match resolved_scalar_result_type(&routine, &given) {
+            match called_scalar_result_type(&routine, &given) {
                 Some(ty) => crate::plpgsql::cast_value(&value, ty, ctx),
-                None if declared_returns_void(&routine) => Ok(Datum::Null),
                 None => Ok(value),
             }
         })();
@@ -2632,6 +2631,32 @@ fn strict_guard(args: &[Expr], body: Expr) -> Expr {
 /// Does the routine return `void`?
 pub(crate) fn declared_returns_void(routine: &Routine) -> bool {
     matches!(&routine.result, RoutineResult::Type { ty, setof: false } if ty.is_void())
+}
+
+/// The column type a `RETURNS void` call answers with.
+///
+/// Crabka models no `void` column type, so the built-in void functions --
+/// `setseed` and `pg_notify` -- already answer an empty `text`. A PL/pgSQL
+/// `RETURNS void` function answers the same way, which is what PostgreSQL
+/// prints for its own void: a blank, *non-null* value, so `\pset null` leaves
+/// it blank rather than showing the null marker.
+pub(crate) const VOID_RESULT_TYPE: ColumnType = ColumnType::Text;
+
+/// The value a `RETURNS void` PL/pgSQL call answers with.
+pub(crate) fn void_result_value() -> Datum {
+    Datum::Text(String::new())
+}
+
+/// The result type a *call site* sees, including `RETURNS void`.
+///
+/// [`resolved_scalar_result_type`] answers what the routine's declaration
+/// models, and `void` is modelled by nothing; this answers what the column the
+/// caller reads is made of.
+fn called_scalar_result_type(routine: &Routine, given: &[ArgType]) -> Option<ColumnType> {
+    if declared_returns_void(routine) {
+        return Some(VOID_RESULT_TYPE);
+    }
+    resolved_scalar_result_type(routine, given)
 }
 
 /// The scalar type a routine's result carries, when Gres models it.
