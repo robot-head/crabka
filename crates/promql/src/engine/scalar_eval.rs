@@ -1,4 +1,6 @@
 #[cfg(feature = "experimental-functions")]
+use num_traits::ToPrimitive as _;
+#[cfg(feature = "experimental-functions")]
 use promql_parser::parser::AggregateExpr;
 use promql_parser::parser::Call;
 #[cfg(any(test, feature = "experimental-functions"))]
@@ -170,7 +172,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
         Ok(QueryResult::Scalar {
             ts_ms: time_ms,
-            value: helper.value_ms() as f64 / 1000.0,
+            value: helper.value_ms().to_f64().unwrap_or(f64::MAX) / 1000.0,
         })
     }
 

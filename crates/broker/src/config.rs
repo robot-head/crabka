@@ -662,6 +662,8 @@ pub struct BrokerConfig {
     /// Binaries populate it from their parsed runtime configuration. The
     /// broker does not read it from the environment at startup.
     pub client_metrics_otlp_endpoint: Option<String>,
+    /// Transport used by the KIP-714 client-metrics forwarder.
+    pub client_metrics_otlp_protocol: crabka_telemetry::OtlpProtocol,
 
     /// KIP-227: maximum number of incremental-fetch sessions kept in the
     /// per-broker cache. Each session tracks the (topic, partition) set a
@@ -1215,6 +1217,7 @@ impl BrokerConfig {
             metrics_listen_addr: None,
             profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             client_metrics_otlp_endpoint: None,
+            client_metrics_otlp_protocol: crabka_telemetry::OtlpProtocol::Grpc,
             // Disable the disk scanner by default in tests so the
             // background task doesn't tick during short-lived fixtures.
             // Integration tests enable this explicitly when needed.
@@ -2199,6 +2202,7 @@ impl Default for BrokerConfig {
             metrics_listen_addr: None,
             profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             client_metrics_otlp_endpoint: None,
+            client_metrics_otlp_protocol: crabka_telemetry::OtlpProtocol::Grpc,
             partition_disk_scan_interval: secs(60),
             max_incremental_fetch_session_cache_slots:
                 DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,

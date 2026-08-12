@@ -258,6 +258,28 @@ impl TraceIndex {
         Self::load_with_max_bytes(store, key, max_bytes).await
     }
 
+    /// Loads the newest snapshot, returning an empty index only when neither a
+    /// versioned snapshot nor the legacy index object exists.
+    ///
+    /// # Errors
+    /// Returns an error when listing or reading object storage fails, or when
+    /// persisted metadata is malformed.
+    pub async fn load_latest_snapshot_or_empty_with_max_bytes(
+        store: &Arc<dyn ObjectStore>,
+        key: &str,
+        max_bytes: ByteSize,
+    ) -> Result<Self> {
+        if let Some(path) = latest_index_snapshot_path(store, key).await? {
+            return Self::load_path_with_max_bytes(store, &path, max_bytes).await;
+        }
+        let path = Path::from(key);
+        match store.head(&path).await {
+            Ok(_) => Self::load_path_with_max_bytes(store, &path, max_bytes).await,
+            Err(object_store::Error::NotFound { .. }) => Ok(Self::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     #[instrument(level = "debug", skip_all, fields(path = %path), err)]
     async fn load_path_with_max_bytes(
         store: &Arc<dyn ObjectStore>,
@@ -578,6 +600,36 @@ mod tests {
         let loaded = TraceIndex::load(&store, "index/traces.json").await.unwrap();
         let got = loaded.candidate_blocks_for_trace("t", &tid(1), 0, 1_000);
         assert2::assert!(got == vec!["b1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn missing_latest_snapshot_is_empty_but_corruption_is_an_error() {
+        use object_store::{ObjectStore, PutPayload, memory::InMemory, path::Path};
+
+        let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+        let empty = TraceIndex::load_latest_snapshot_or_empty_with_max_bytes(
+            &store,
+            "index/traces.json",
+            crate::DEFAULT_INDEX_SNAPSHOT_MAX,
+        )
+        .await
+        .unwrap();
+        assert2::assert!(empty.trace_blocks("tenant-a").is_empty());
+
+        store
+            .put(
+                &Path::from("index/traces.json"),
+                PutPayload::from(b"not-json".to_vec()),
+            )
+            .await
+            .unwrap();
+        let corrupted = TraceIndex::load_latest_snapshot_or_empty_with_max_bytes(
+            &store,
+            "index/traces.json",
+            crate::DEFAULT_INDEX_SNAPSHOT_MAX,
+        )
+        .await;
+        assert2::assert!(matches!(corrupted, Err(BlockStoreError::Serde(_))));
     }
 
     #[tokio::test]

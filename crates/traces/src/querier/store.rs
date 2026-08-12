@@ -28,9 +28,9 @@ use crabka_traceql::{
     COL_LINK_SPAN_ID, COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
     COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
     COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, EVENT_ATTR_PREFIX,
-    EventRef, LINK_ATTR_PREFIX, LinkRef, MatchCmp, MatchScope, MatchValue, ScanJob, ScanOptions,
-    ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError,
-    TypedValue, span_schema,
+    EventRef, INSTRUMENTATION_ATTR_PREFIX, LINK_ATTR_PREFIX, LinkRef, MatchCmp, MatchScope,
+    MatchValue, ScanJob, ScanOptions, ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore,
+    TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
 };
 use crabka_units::{
     ByteSize, Time,
@@ -317,7 +317,9 @@ impl SpanStore for CrabkaSpanStore {
         let cold_index_tags = trace_index.tag_names(tenant, start_ns, end_ns);
         let needs_scoped_cold_scan = matches!(
             scope,
-            None | Some(TagScope::Resource | TagScope::Event | TagScope::Link)
+            None | Some(
+                TagScope::Resource | TagScope::Event | TagScope::Link | TagScope::Instrumentation,
+            )
         );
         if has_cold_blocks && !cold_index_tags.is_empty() && needs_scoped_cold_scan {
             let cold_scoped = self
@@ -332,6 +334,12 @@ impl SpanStore for CrabkaSpanStore {
             merge_dynamic_scope(&mut by_scope, scope, TagScope::Span, cold_scoped.span);
             merge_dynamic_scope(&mut by_scope, scope, TagScope::Event, cold_scoped.event);
             merge_dynamic_scope(&mut by_scope, scope, TagScope::Link, cold_scoped.link);
+            merge_dynamic_scope(
+                &mut by_scope,
+                scope,
+                TagScope::Instrumentation,
+                cold_scoped.instrumentation,
+            );
         } else if matches!(scope, None | Some(TagScope::Span)) {
             let (_, tags) = by_scope
                 .entry("span")
@@ -382,7 +390,10 @@ impl SpanStore for CrabkaSpanStore {
         end_ns: i64,
     ) -> Result<Vec<TypedValue>, TraceqlError> {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
-        let index_tag = unscoped_attribute_tag(tag);
+        let index_tag = tag.strip_prefix("instrumentation.").map_or_else(
+            || unscoped_attribute_tag(tag).to_string(),
+            |tag| format!("{INSTRUMENTATION_ATTR_PREFIX}{tag}"),
+        );
         if is_nested_intrinsic_tag(tag) {
             return self
                 .nested_intrinsic_tag_values(tenant, tag, start_ns, end_ns)
@@ -394,7 +405,7 @@ impl SpanStore for CrabkaSpanStore {
             return intrinsic_values_from_batches(tag, &batches);
         }
         let mut values = self
-            .cold_attribute_tag_values(tenant, tag, index_tag, start_ns, end_ns)
+            .cold_attribute_tag_values(tenant, tag, &index_tag, start_ns, end_ns)
             .await?;
         if let Some(live) = &self.live {
             values.extend(
@@ -417,6 +428,7 @@ struct ColdAttributeTagNames {
     span: BTreeSet<String>,
     event: BTreeSet<String>,
     link: BTreeSet<String>,
+    instrumentation: BTreeSet<String>,
 }
 
 fn attr_typed_value_parts(value: &AttrValue) -> (String, String) {
@@ -517,6 +529,8 @@ fn collect_attribute_tag_names(
         for (key, _) in attr_values_with_resource(batch, row, true)? {
             if let Some(key) = key.strip_prefix(RESOURCE_ATTR_PREFIX) {
                 names.resource.insert(key.to_string());
+            } else if let Some(key) = key.strip_prefix(INSTRUMENTATION_ATTR_PREFIX) {
+                names.instrumentation.insert(key.to_string());
             } else {
                 names.span.insert(key);
             }
@@ -547,7 +561,15 @@ fn collect_attribute_tag_values(
                 || key == index_tag
                 || key
                     .strip_prefix(RESOURCE_ATTR_PREFIX)
-                    .is_some_and(|key| key == index_tag || key == tag);
+                    .is_some_and(|key| key == index_tag || key == tag)
+                || key
+                    .strip_prefix(INSTRUMENTATION_ATTR_PREFIX)
+                    .is_some_and(|key| {
+                        key == tag
+                            || tag
+                                .strip_prefix("instrumentation.")
+                                .is_some_and(|tag| key == tag)
+                    });
             if matches {
                 values.insert(attr_typed_value_parts(&value));
             }
@@ -893,7 +915,13 @@ fn instrumentation_matches(
             matcher.op,
             &matcher.value,
         ),
-        _ => nil_matches(matcher.op, &matcher.value),
+        _ => batch_attr_matches(
+            batch,
+            row,
+            &format!("{INSTRUMENTATION_ATTR_PREFIX}{}", matcher.key),
+            matcher.op,
+            &matcher.value,
+        )?,
     })
 }
 
@@ -1399,12 +1427,20 @@ fn add_span_attr_columns(
         let (lookup_key, include_resource) = match matcher.scope {
             MatchScope::Span | MatchScope::Both => (matcher.key.clone(), false),
             MatchScope::Resource => (format!("{RESOURCE_ATTR_PREFIX}{}", matcher.key), true),
+            MatchScope::Instrumentation => (
+                format!("{INSTRUMENTATION_ATTR_PREFIX}{}", matcher.key),
+                false,
+            ),
             _ => continue,
         };
         if matcher.key == "service.name" {
             continue; // grouped via the promoted COL_ROOT_SERVICE_NAME column
         }
-        let column_name = format!("{ATTR_PREFIX}{}", matcher.key);
+        let column_name = if matcher.scope == MatchScope::Instrumentation {
+            format!("{ATTR_PREFIX}{INSTRUMENTATION_ATTR_PREFIX}{}", matcher.key)
+        } else {
+            format!("{ATTR_PREFIX}{}", matcher.key)
+        };
         if !wanted.iter().any(|(name, _, _)| name == &column_name) {
             wanted.push((column_name, lookup_key, include_resource));
         }

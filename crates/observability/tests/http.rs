@@ -1624,7 +1624,7 @@ async fn role_operations_routes_match_existing_behavior() {
             &format!("{name} /config"),
         );
         assert!(
-            text_body(response).await == "target: all\n",
+            text_body(response).await == format!("target: {name}\n"),
             "{name} /config body"
         );
 
@@ -1639,7 +1639,7 @@ async fn role_operations_routes_match_existing_behavior() {
             &format!("{name} /config?mode=defaults"),
         );
         assert!(
-            text_body(response).await == "target: all\nauth_enabled: true\n",
+            text_body(response).await == format!("target: {name}\nauth_enabled: true\n"),
             "{name} /config?mode=defaults body"
         );
 
@@ -4700,7 +4700,7 @@ async fn status_config_endpoint_returns_loki_yaml_placeholder() {
     assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
-    assert!(body.contains("target: all"));
+    assert!(body.contains("target: querier"));
 }
 
 #[tokio::test]
@@ -4739,7 +4739,7 @@ async fn status_config_defaults_mode_returns_loki_defaults_lines() {
 
     assert!(response.status() == StatusCode::OK);
     let body = text_body(response).await;
-    assert!(body.contains("target: all\n"));
+    assert!(body.contains("target: querier\n"));
     assert!(body.contains("auth_enabled: true\n"));
 }
 
@@ -5080,7 +5080,11 @@ async fn compactor_router_exposes_loki_status_and_ring_endpoints() {
         .await
         .unwrap();
     assert!(config_response.status() == StatusCode::OK);
-    assert!(text_body(config_response).await.contains("target: all"));
+    assert!(
+        text_body(config_response)
+            .await
+            .contains("target: compactor")
+    );
 
     let ring_response = app
         .oneshot(

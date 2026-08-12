@@ -2061,6 +2061,7 @@ rules:
                 ("job".to_string(), "api".to_string()),
             ]),
             active_since_ms: Some(120_000),
+            keep_firing_until_ms: Some(180_000),
         };
         let alert_record = super::RulerStateWalRecord::Alert(alert);
         let alert_encoded = alert_record.encode().unwrap();
@@ -2118,6 +2119,7 @@ rules:
                     "InstanceDown".to_string(),
                 )]),
                 active_since_ms: Some(120_000),
+                keep_firing_until_ms: Some(180_000),
             });
         let records = vec![
             super::WalHeadConsumerRecord {

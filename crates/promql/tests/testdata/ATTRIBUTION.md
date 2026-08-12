@@ -1,7 +1,7 @@
 # Vendored Prometheus PromQL conformance tests
 
-These `.test` files are a **subset** of Prometheus's PromQL test corpus, copied
-verbatim (cases using Slice-3 features removed where noted) from:
+These `.test` files are a **curated subset** of Prometheus's PromQL test corpus,
+copied from:
 
 - Upstream: https://github.com/prometheus/prometheus
 - Path: `promql/promqltest/testdata/*.test`
@@ -17,7 +17,10 @@ verbatim (cases using Slice-3 features removed where noted) from:
 
 Prometheus is licensed under the Apache License 2.0. The full license text is in
 the upstream `LICENSE` file. These files retain their original copyright; they are
-used here with final whitespace normalized and otherwise unmodified except for the
-removal of test cases exercising features not yet implemented in `crabka-promql`
-(tracked for Slice 3), including delayed `__name__` dropping through
-`label_replace`/`label_join` and aggregation in `name_label_dropping.test`.
+used here with final whitespace normalized.
+
+The conformance gate covers every case checked into this directory; it does not
+claim coverage of every upstream case. Large upstream files are intentionally
+vendored only in part. `name_label_dropping.test` omits the v3.8.1 cases for
+delayed `__name__` removal through range functions, label rewrites, and nested
+aggregations because that query-engine feature is not implemented here.

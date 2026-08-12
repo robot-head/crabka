@@ -26,6 +26,10 @@ impl Readiness {
         self.0.store(true, Ordering::SeqCst);
     }
 
+    pub fn set_not_ready(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.0.load(Ordering::SeqCst)

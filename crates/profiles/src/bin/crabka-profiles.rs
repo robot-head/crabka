@@ -20,12 +20,12 @@ use crabka_profiles::{
     blockbuilder::BlockBuilderConfig,
     cold_store::ColdProfileStore,
     compactor::{DownsamplePolicy, compact_once_with_policy},
-    distributor::{DistributorState, KafkaSink, serve},
+    distributor::{DistributorState, KafkaSink, serve_supervised},
     hot_store::{RetentionConfig, WalTailProfileStore},
     ingest::{RelabelConfig, TenantLimitConfig},
     limits::{Limits, OverridesProvider},
     metrics::ServiceMetrics,
-    query::{QuerierState, serve as serve_querier},
+    query::{QuerierState, serve_supervised as serve_querier},
     query_frontend::FrontendConfig,
 };
 use crabka_telemetry::OtlpConfig;
@@ -38,6 +38,7 @@ use crabka_units::{
 #[cfg(test)]
 use crabka_units::{mebibytes, secs};
 use object_store::{ObjectStore, path::Path as ObjectPath};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -419,17 +420,23 @@ fn spawn_profile_index_refresh(
     index_key: String,
     max_bytes: ByteSize,
     interval: Time,
+    shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval.to_std());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tick.tick().await;
-            if let Ok(index) =
-                ProfileIndex::load_latest_snapshot_with_max_bytes(&store, &index_key, max_bytes)
-                    .await
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                _ = tick.tick() => {}
+            }
+            match ProfileIndex::load_latest_snapshot_with_max_bytes(&store, &index_key, max_bytes)
+                .await
             {
-                cold.replace_index(Arc::new(index));
+                Ok(index) => cold.replace_index(Arc::new(index)),
+                Err(error) => {
+                    tracing::warn!(%error, %index_key, "profile index refresh failed; retaining last good index");
+                }
             }
         }
     });
@@ -439,9 +446,7 @@ fn spawn_profile_index_refresh(
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let (client_dispatch_queue_capacity, client_frame_max) = client_resource_policy(&cli);
-    let debuginfod_config = debuginfod_config(&cli)?;
-    let _telemetry = crabka_telemetry::init(
+    let telemetry = crabka_telemetry::init(
         OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
             "crabka-profiles",
@@ -452,224 +457,240 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "info",
         "crabka-profiles",
     )?;
+    let result = run(cli).await;
+    telemetry.shutdown();
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (client_dispatch_queue_capacity, client_frame_max) = client_resource_policy(&cli);
+    let debuginfod_config = debuginfod_config(&cli)?;
     let metrics = ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin_with_config(
+    let admin = crabka_telemetry::profiling::spawn_admin_with_config(
         cli.admin_listen_addr,
         crabka_profiles::metrics::metrics_router(metrics.registry.clone()),
         cli.profiling.clone(),
     )
     .await?;
 
-    match cli.target {
-        Target::Distributor => {
-            let limits = load_tenant_limits_config(cli.tenant_limits_config.as_deref())?;
-            let profile_overrides = load_profiles_limits_overrides_config(
-                cli.profiles_limits_overrides_config.as_deref(),
-            )?;
-            let producer = Producer::builder()
-                .bootstrap(&cli.bootstrap)
-                .dispatch_queue_capacity(client_dispatch_queue_capacity.get())
-                .frame_max(client_frame_max.size())
-                .build()
-                .await?;
-            let state = Arc::new(DistributorState {
-                sink: Arc::new(KafkaSink::with_topic(Arc::new(producer), cli.wal_topic)),
-                limits,
-                profile_overrides,
-                active_series: Mutex::default(),
-                ingestion_buckets: Mutex::default(),
-                relabel: Vec::<RelabelConfig>::new(),
-                max_decompressed: cli.distributor_request_max,
-                max_tracked_tenants: cli.distributor_max_tracked_tenants,
-                legacy_decode_limits: crabka_profiles::ingest::LegacyDecodeLimits {
-                    max_nodes: cli.legacy_max_nodes,
-                    max_path_bytes: cli.legacy_max_path_bytes,
-                    max_trie_depth: cli.legacy_max_trie_depth,
-                },
-                metrics: metrics.clone(),
-            });
-            let shutdown = async {
-                let _ = tokio::signal::ctrl_c().await;
-            };
-            let bound = serve(cli.listen, state, shutdown).await?;
-            tracing::info!(%bound, "profiles distributor listening");
-            let _ = tokio::signal::ctrl_c().await;
-        }
-        Target::BlockBuilder => {
-            let configured = build_object_store(&cli.object_store_url)
-                .map_err(|e| format!("object store: {e}"))?;
-            let index_key = configured.object_key(&cli.index_object_key);
-            let mut config =
-                BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
-            config.client_dispatch_queue_capacity = client_dispatch_queue_capacity;
-            config.client_frame_max = client_frame_max;
-            config.wal_topic = cli.wal_topic;
-            config.group_id = cli.block_builder_group_id;
-            config.index_key = index_key;
-            config.wal_fetch_max = cli.wal_fetch_max;
-            config.wal_fetch_partition_max = cli.wal_fetch_partition_max;
-            config.flush_records = cli.block_builder_flush_records;
-            config.flush_max_age = cli.block_builder_flush_max_age;
-            config.poll_timeout = cli.wal_poll_timeout;
-            config.index_snapshot_max = cli.index_snapshot_max;
-            config.index_snapshot_retain = cli.index_snapshot_retain;
-            crabka_profiles::blockbuilder::run_with_config(config).await?;
-        }
-        Target::Querier => {
-            let overrides = load_profiles_limits_overrides_config(
-                cli.profiles_limits_overrides_config.as_deref(),
-            )?;
-            let configured = build_object_store(&cli.object_store_url)
-                .map_err(|e| format!("object store: {e}"))?;
-            let index_key = configured.object_key(&cli.index_object_key);
-            let index = ProfileIndex::load_latest_snapshot_with_max_bytes(
-                &configured.store,
-                &index_key,
-                cli.index_snapshot_max,
-            )
-            .await
-            .unwrap_or_else(|_| ProfileIndex::new());
-            let refresh_store = Arc::clone(&configured.store);
-            let cold = Arc::new(ColdProfileStore::new_with_debuginfod_config(
-                configured.store,
-                Arc::new(index),
-                cli.debuginfod_urls.clone(),
-                debuginfod_config,
-            )?);
-            spawn_profile_index_refresh(
-                Arc::clone(&cold),
-                refresh_store,
-                index_key.clone(),
-                cli.index_snapshot_max,
-                cli.index_refresh_interval,
-            );
-            let hot = WalTailProfileStore::with_retention(RetentionConfig {
-                max_age: cli.hot_store_max_age,
-                max_records: cli.hot_store_max_records,
-            });
-            spawn_wal_tail(
-                &cli,
-                hot.clone(),
-                client_dispatch_queue_capacity,
-                client_frame_max,
-            );
-            let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
-            let state = Arc::new(
-                QuerierState::new_with_overrides(union, overrides)
-                    .with_heatmap_policy(cli.heatmap_value_buckets, cli.heatmap_time_buckets_max)
-                    .with_metrics(metrics.clone()),
-            );
-            let shutdown = async {
-                let _ = tokio::signal::ctrl_c().await;
-            };
-            let bound = serve_querier(cli.listen, state, shutdown).await?;
-            tracing::info!(%bound, "profiles querier listening");
-            let _ = tokio::signal::ctrl_c().await;
-        }
-        Target::QueryFrontend => {
-            let overrides = load_profiles_limits_overrides_config(
-                cli.profiles_limits_overrides_config.as_deref(),
-            )?;
-            let configured = build_object_store(&cli.object_store_url)
-                .map_err(|e| format!("object store: {e}"))?;
-            let index_key = configured.object_key(&cli.index_object_key);
-            let index = ProfileIndex::load_latest_snapshot_with_max_bytes(
-                &configured.store,
-                &index_key,
-                cli.index_snapshot_max,
-            )
-            .await
-            .unwrap_or_else(|_| ProfileIndex::new());
-            let refresh_store = Arc::clone(&configured.store);
-            let cold = Arc::new(ColdProfileStore::new_with_debuginfod_config(
-                configured.store,
-                Arc::new(index),
-                cli.debuginfod_urls.clone(),
-                debuginfod_config,
-            )?);
-            spawn_profile_index_refresh(
-                Arc::clone(&cold),
-                refresh_store,
-                index_key.clone(),
-                cli.index_snapshot_max,
-                cli.index_refresh_interval,
-            );
-            let hot = WalTailProfileStore::with_retention(RetentionConfig {
-                max_age: cli.hot_store_max_age,
-                max_records: cli.hot_store_max_records,
-            });
-            spawn_wal_tail(
-                &cli,
-                hot.clone(),
-                client_dispatch_queue_capacity,
-                client_frame_max,
-            );
-            let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
-            let state = Arc::new(
-                QuerierState::new_frontend_with_overrides(
-                    union,
-                    FrontendConfig {
-                        shard_width: cli.query_frontend_shard_width,
+    let role = async move {
+        match cli.target {
+            Target::Distributor => {
+                let limits = load_tenant_limits_config(cli.tenant_limits_config.as_deref())?;
+                let profile_overrides = load_profiles_limits_overrides_config(
+                    cli.profiles_limits_overrides_config.as_deref(),
+                )?;
+                let producer = Producer::builder()
+                    .bootstrap(&cli.bootstrap)
+                    .dispatch_queue_capacity(client_dispatch_queue_capacity.get())
+                    .frame_max(client_frame_max.size())
+                    .build()
+                    .await?;
+                let state = Arc::new(DistributorState {
+                    sink: Arc::new(KafkaSink::with_topic(Arc::new(producer), cli.wal_topic)),
+                    limits,
+                    profile_overrides,
+                    active_series: Mutex::default(),
+                    ingestion_buckets: Mutex::default(),
+                    relabel: Vec::<RelabelConfig>::new(),
+                    max_decompressed: cli.distributor_request_max,
+                    max_tracked_tenants: cli.distributor_max_tracked_tenants,
+                    legacy_decode_limits: crabka_profiles::ingest::LegacyDecodeLimits {
+                        max_nodes: cli.legacy_max_nodes,
+                        max_path_bytes: cli.legacy_max_path_bytes,
+                        max_trie_depth: cli.legacy_max_trie_depth,
                     },
-                    overrides,
-                )
-                .with_heatmap_policy(cli.heatmap_value_buckets, cli.heatmap_time_buckets_max)
-                .with_metrics(metrics.clone()),
-            );
-            let shutdown = async {
-                let _ = tokio::signal::ctrl_c().await;
-            };
-            let bound = serve_querier(cli.listen, state, shutdown).await?;
-            tracing::info!(
-                %bound,
-                shard_width = %cli.query_frontend_shard_width.human(),
-                "profiles query-frontend listening"
-            );
-            let _ = tokio::signal::ctrl_c().await;
-        }
-        Target::Symbolizer => {
-            crabka_profiles::symbolizer::run_with_config(cli.debuginfod_urls, debuginfod_config)
-                .await?;
-        }
-        Target::Compactor => {
-            let configured = build_object_store(&cli.object_store_url)
-                .map_err(|e| format!("object store: {e}"))?;
-            let index_key = configured.object_key(&cli.index_object_key);
-            let mut index = ProfileIndex::load_latest_snapshot_with_max_bytes(
-                &configured.store,
-                &index_key,
-                cli.index_snapshot_max,
-            )
-            .await
-            .unwrap_or_else(|_| ProfileIndex::new());
-            let downsample =
-                cli.compactor_downsample_resolution
-                    .map(|resolution| DownsamplePolicy {
-                        resolution_ns: resolution.nanos_i64(),
-                    });
-            let metas = compact_once_with_policy(
-                &configured.store,
-                &mut index,
-                cli.compactor_max_blocks_per_job,
-                downsample,
-            )
-            .await?;
-            index
-                .save_latest_snapshot_with_retain(
+                    metrics: metrics.clone(),
+                });
+                let shutdown = role_shutdown_token();
+                let bound = serve_supervised(cli.listen, state, shutdown.clone()).await?;
+                tracing::info!(%bound, "profiles distributor listening");
+                shutdown.cancelled().await;
+            }
+            Target::BlockBuilder => {
+                let configured = build_object_store(&cli.object_store_url)
+                    .map_err(|e| format!("object store: {e}"))?;
+                let index_key = configured.object_key(&cli.index_object_key);
+                let mut config =
+                    BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
+                config.client_dispatch_queue_capacity = client_dispatch_queue_capacity;
+                config.client_frame_max = client_frame_max;
+                config.wal_topic = cli.wal_topic;
+                config.group_id = cli.block_builder_group_id;
+                config.index_key = index_key;
+                config.wal_fetch_max = cli.wal_fetch_max;
+                config.wal_fetch_partition_max = cli.wal_fetch_partition_max;
+                config.flush_records = cli.block_builder_flush_records;
+                config.flush_max_age = cli.block_builder_flush_max_age;
+                config.poll_timeout = cli.wal_poll_timeout;
+                config.index_snapshot_max = cli.index_snapshot_max;
+                config.index_snapshot_retain = cli.index_snapshot_retain;
+                crabka_profiles::blockbuilder::run_with_config(config).await?;
+            }
+            Target::Querier => {
+                let shutdown = role_shutdown_token();
+                let overrides = load_profiles_limits_overrides_config(
+                    cli.profiles_limits_overrides_config.as_deref(),
+                )?;
+                let configured = build_object_store(&cli.object_store_url)
+                    .map_err(|e| format!("object store: {e}"))?;
+                let index_key = configured.object_key(&cli.index_object_key);
+                let index = ProfileIndex::load_latest_snapshot_or_empty_with_max_bytes(
                     &configured.store,
                     &index_key,
-                    cli.index_snapshot_retain,
+                    cli.index_snapshot_max,
                 )
                 .await?;
-            tracing::info!(
-                compacted_blocks = metas.len(),
-                downsample_resolution = ?cli.compactor_downsample_resolution,
-                "profiles compactor finished one pass"
-            );
+                let refresh_store = Arc::clone(&configured.store);
+                let cold = Arc::new(ColdProfileStore::new_with_debuginfod_config(
+                    configured.store,
+                    Arc::new(index),
+                    cli.debuginfod_urls.clone(),
+                    debuginfod_config,
+                )?);
+                spawn_profile_index_refresh(
+                    Arc::clone(&cold),
+                    refresh_store,
+                    index_key.clone(),
+                    cli.index_snapshot_max,
+                    cli.index_refresh_interval,
+                    shutdown.clone(),
+                );
+                let hot = WalTailProfileStore::with_retention(RetentionConfig {
+                    max_age: cli.hot_store_max_age,
+                    max_records: cli.hot_store_max_records,
+                });
+                spawn_wal_tail(
+                    &cli,
+                    hot.clone(),
+                    client_dispatch_queue_capacity,
+                    client_frame_max,
+                    shutdown.clone(),
+                );
+                let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
+                let state = Arc::new(
+                    QuerierState::new_with_overrides(union, overrides)
+                        .with_heatmap_policy(
+                            cli.heatmap_value_buckets,
+                            cli.heatmap_time_buckets_max,
+                        )
+                        .with_metrics(metrics.clone()),
+                );
+                let bound = serve_querier(cli.listen, state, shutdown.clone()).await?;
+                tracing::info!(%bound, "profiles querier listening");
+                shutdown.cancelled().await;
+            }
+            Target::QueryFrontend => {
+                let shutdown = role_shutdown_token();
+                let overrides = load_profiles_limits_overrides_config(
+                    cli.profiles_limits_overrides_config.as_deref(),
+                )?;
+                let configured = build_object_store(&cli.object_store_url)
+                    .map_err(|e| format!("object store: {e}"))?;
+                let index_key = configured.object_key(&cli.index_object_key);
+                let index = ProfileIndex::load_latest_snapshot_or_empty_with_max_bytes(
+                    &configured.store,
+                    &index_key,
+                    cli.index_snapshot_max,
+                )
+                .await?;
+                let refresh_store = Arc::clone(&configured.store);
+                let cold = Arc::new(ColdProfileStore::new_with_debuginfod_config(
+                    configured.store,
+                    Arc::new(index),
+                    cli.debuginfod_urls.clone(),
+                    debuginfod_config,
+                )?);
+                spawn_profile_index_refresh(
+                    Arc::clone(&cold),
+                    refresh_store,
+                    index_key.clone(),
+                    cli.index_snapshot_max,
+                    cli.index_refresh_interval,
+                    shutdown.clone(),
+                );
+                let hot = WalTailProfileStore::with_retention(RetentionConfig {
+                    max_age: cli.hot_store_max_age,
+                    max_records: cli.hot_store_max_records,
+                });
+                spawn_wal_tail(
+                    &cli,
+                    hot.clone(),
+                    client_dispatch_queue_capacity,
+                    client_frame_max,
+                    shutdown.clone(),
+                );
+                let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
+                let state = Arc::new(
+                    QuerierState::new_frontend_with_overrides(
+                        union,
+                        FrontendConfig {
+                            shard_width: cli.query_frontend_shard_width,
+                        },
+                        overrides,
+                    )
+                    .with_heatmap_policy(cli.heatmap_value_buckets, cli.heatmap_time_buckets_max)
+                    .with_metrics(metrics.clone()),
+                );
+                let bound = serve_querier(cli.listen, state, shutdown.clone()).await?;
+                tracing::info!(
+                    %bound,
+                    shard_width = %cli.query_frontend_shard_width.human(),
+                    "profiles query-frontend listening"
+                );
+                shutdown.cancelled().await;
+            }
+            Target::Symbolizer => {
+                crabka_profiles::symbolizer::run_with_config(
+                    cli.debuginfod_urls,
+                    debuginfod_config,
+                )
+                .await?;
+            }
+            Target::Compactor => {
+                let configured = build_object_store(&cli.object_store_url)
+                    .map_err(|e| format!("object store: {e}"))?;
+                let index_key = configured.object_key(&cli.index_object_key);
+                let mut index = ProfileIndex::load_latest_snapshot_or_empty_with_max_bytes(
+                    &configured.store,
+                    &index_key,
+                    cli.index_snapshot_max,
+                )
+                .await?;
+                let downsample =
+                    cli.compactor_downsample_resolution
+                        .map(|resolution| DownsamplePolicy {
+                            resolution_ns: resolution.nanos_i64(),
+                        });
+                let metas = compact_once_with_policy(
+                    &configured.store,
+                    &mut index,
+                    cli.compactor_max_blocks_per_job,
+                    downsample,
+                )
+                .await?;
+                index
+                    .save_latest_snapshot_with_retain(
+                        &configured.store,
+                        &index_key,
+                        cli.index_snapshot_retain,
+                    )
+                    .await?;
+                tracing::info!(
+                    compacted_blocks = metas.len(),
+                    downsample_resolution = ?cli.compactor_downsample_resolution,
+                    "profiles compactor finished one pass"
+                );
+            }
         }
-    }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
 
-    Ok(())
+    tokio::select! {
+        result = role => result,
+        result = crabka_telemetry::profiling::await_admin_exit(admin) => Ok(result?),
+    }
 }
 
 fn load_tenant_limits_config(
@@ -697,6 +718,7 @@ fn spawn_wal_tail(
     hot: WalTailProfileStore,
     client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     client_frame_max: crabka_client_core::ClientFrameMax,
+    shutdown: CancellationToken,
 ) {
     let bootstrap = cli.bootstrap.clone();
     let group_id = cli.query_wal_tail_group_id.clone();
@@ -714,9 +736,20 @@ fn spawn_wal_tail(
         )
         .await
         {
-            tracing::warn!(%err, "profiles hot WAL-tail stopped");
+            tracing::error!(%err, "profiles hot WAL-tail stopped");
+            shutdown.cancel();
         }
     });
+}
+
+fn role_shutdown_token() -> CancellationToken {
+    let token = CancellationToken::new();
+    let signal = token.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        signal.cancel();
+    });
+    token
 }
 
 #[cfg(test)]

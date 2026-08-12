@@ -2,6 +2,8 @@ use std::{cmp::Ordering, collections::BTreeMap};
 
 use crabka_blockstore::Labels;
 use crabka_metrics::NativeHistogram;
+#[cfg(feature = "experimental-functions")]
+use num_traits::ToPrimitive as _;
 #[cfg(test)]
 use promql_parser::parser::token::{
     T_AVG, T_COUNT, T_GROUP, T_MAX, T_MIN, T_STDDEV, T_STDVAR, T_SUM,
@@ -233,8 +235,37 @@ pub(super) fn apply_limitk_aggregate(
 
 #[cfg(feature = "experimental-functions")]
 fn limit_ratio_includes_sample(ratio: f64, labels: &Labels) -> bool {
-    let sample_offset = labels.fingerprint() as f64 / u64::MAX as f64;
-    (ratio >= 0.0 && sample_offset < ratio) || (ratio < 0.0 && sample_offset >= 1.0 + ratio)
+    let sample_offset = prometheus_labels_hash(labels).to_f64().unwrap_or(f64::MAX)
+        / u64::MAX.to_f64().unwrap_or(f64::MAX);
+    if ratio == 0.0 {
+        false
+    } else if ratio.is_sign_positive() {
+        sample_offset < ratio
+    } else {
+        sample_offset >= 1.0 + ratio
+    }
+}
+
+/// Hashes labels exactly like Prometheus' `labels.Labels.Hash`.
+///
+/// Crabka's persisted series fingerprint deliberately uses a different,
+/// length-prefixed encoding. `PromQL`'s `limit_ratio`, however, is externally
+/// observable and must use Prometheus' xxHash64 over sorted
+/// `name\xffvalue\xff` pairs.
+#[cfg(feature = "experimental-functions")]
+fn prometheus_labels_hash(labels: &Labels) -> u64 {
+    let capacity = labels
+        .iter()
+        .map(|(name, value)| name.len() + value.len() + 2)
+        .sum();
+    let mut bytes = Vec::with_capacity(capacity);
+    for (name, value) in labels.iter() {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0xff);
+        bytes.extend_from_slice(value.as_bytes());
+        bytes.push(0xff);
+    }
+    xxhash_rust::xxh64::xxh64(&bytes, 0)
 }
 
 /// Shared experimental `limit_ratio(ratio, v)` core over an already-evaluated
@@ -610,5 +641,23 @@ impl AggregateState {
         // Welford `M2 / n` (the running `var_aux` already accumulates the sum of
         // squared deviations from the running mean), Kahan-corrected.
         (self.var_aux + self.var_aux_comp) / self.count_f64
+    }
+}
+
+#[cfg(all(test, feature = "experimental-functions"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limit_ratio_uses_a_strict_positive_hash_threshold() {
+        let mut labels = Labels::new();
+        labels.insert("__name__", "requests_total");
+        labels.insert("instance", "api-1");
+        let offset = prometheus_labels_hash(&labels).to_f64().unwrap() / u64::MAX.to_f64().unwrap();
+
+        assert!(!limit_ratio_includes_sample(offset, &labels));
+        assert!(limit_ratio_includes_sample(offset.next_up(), &labels));
+        assert!(!limit_ratio_includes_sample(0.0, &labels));
+        assert!(!limit_ratio_includes_sample(-0.0, &labels));
     }
 }

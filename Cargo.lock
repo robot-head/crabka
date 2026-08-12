@@ -2423,6 +2423,7 @@ dependencies = [
  "dashmap",
  "exponential-backoff",
  "futures-util",
+ "hex",
  "java_regex",
  "jsonpath-rust",
  "ktls",
@@ -2462,6 +2463,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "toml",
+ "tonic",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -3745,6 +3747,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tikv-jemallocator",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -3785,6 +3788,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "xxhash-rust",
 ]
 
 [[package]]

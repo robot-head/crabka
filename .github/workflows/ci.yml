@@ -1675,14 +1675,14 @@ jobs:
           key: metrics-conformance
       - uses: taiki-e/install-action@nextest
       - name: PromQL conformance gate
-        run: cargo nextest run -p crabka-promql --profile ci --test conformance
+        run: cargo nextest run -p crabka-promql --profile ci --features experimental-functions --test conformance_report
       - name: Upload conformance report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: promql-conformance-report
           path: target/promql-conformance-report.txt
-          if-no-files-found: warn
+          if-no-files-found: error
 
   # Real-Prometheus byte/semantic differential gate (Docker). The PromQL/metrics
   # wire-format compat constraint (Prometheus/Mimir exactness, incl. NaN/±Inf and

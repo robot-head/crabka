@@ -2175,13 +2175,16 @@ fn trace_by_id_response_protobuf(
 }
 
 type OtlpTracesData = opentelemetry_proto::tonic::trace::v1::TracesData;
+type InstrumentationKey = (String, String, Vec<(String, AttrValue)>);
+type InstrumentationGroups<'a> = Vec<(InstrumentationKey, Vec<&'a SpanRef>)>;
 
 fn otlp_scope_spans(trace_id: [u8; 16], input_spans: Vec<&SpanRef>) -> Vec<OtlpScopeSpans> {
-    let mut groups: Vec<((String, String), Vec<&SpanRef>)> = Vec::new();
+    let mut groups: InstrumentationGroups<'_> = Vec::new();
     for span in input_spans {
         let key = (
             span.instrumentation_name.clone(),
             span.instrumentation_version.clone(),
+            instrumentation_attributes(span),
         );
         if let Some((_, spans)) = groups.iter_mut().find(|(existing, _)| existing == &key) {
             spans.push(span);
@@ -2192,12 +2195,15 @@ fn otlp_scope_spans(trace_id: [u8; 16], input_spans: Vec<&SpanRef>) -> Vec<OtlpS
 
     groups
         .into_iter()
-        .map(|((name, version), spans)| OtlpScopeSpans {
-            scope: (!name.is_empty() || !version.is_empty()).then_some(InstrumentationScope {
-                name,
-                version,
-                ..InstrumentationScope::default()
-            }),
+        .map(|((name, version, attributes), spans)| OtlpScopeSpans {
+            scope: (!name.is_empty() || !version.is_empty() || !attributes.is_empty()).then_some(
+                InstrumentationScope {
+                    name,
+                    version,
+                    attributes: otlp_attrs(&attributes),
+                    ..InstrumentationScope::default()
+                },
+            ),
             spans: spans
                 .into_iter()
                 .map(|span| otlp_span(trace_id, span))
@@ -2219,7 +2225,7 @@ fn otlp_span(trace_id: [u8; 16], span: &SpanRef) -> OtlpSpan {
         kind: span.kind,
         start_time_unix_nano: span.start_time_unix_nano,
         end_time_unix_nano: span_end_unix_nano(span),
-        attributes: otlp_attrs(&span.attributes),
+        attributes: otlp_attrs(&span_attributes(span)),
         events: span
             .events
             .iter()
@@ -2295,11 +2301,12 @@ fn otlp_value(value: &AttrValue) -> OtlpAnyValue {
 }
 
 fn scope_spans_json(trace_id: [u8; 16], input_spans: Vec<&SpanRef>) -> Value {
-    let mut groups: Vec<((String, String), Vec<&SpanRef>)> = Vec::new();
+    let mut groups: InstrumentationGroups<'_> = Vec::new();
     for span in input_spans {
         let key = (
             span.instrumentation_name.clone(),
             span.instrumentation_version.clone(),
+            instrumentation_attributes(span),
         );
         if let Some((_, spans)) = groups.iter_mut().find(|(existing, _)| existing == &key) {
             spans.push(span);
@@ -2311,9 +2318,9 @@ fn scope_spans_json(trace_id: [u8; 16], input_spans: Vec<&SpanRef>) -> Value {
     Value::Array(
         groups
             .into_iter()
-            .map(|((name, version), spans)| {
+            .map(|((name, version, attributes), spans)| {
                 json!({
-                    "scope": instrumentation_scope_json(&name, &version),
+                    "scope": instrumentation_scope_json(&name, &version, &attributes),
                     "spans": spans
                         .into_iter()
                         .map(|span| trace_span_json(trace_id, span))
@@ -2324,13 +2331,20 @@ fn scope_spans_json(trace_id: [u8; 16], input_spans: Vec<&SpanRef>) -> Value {
     )
 }
 
-fn instrumentation_scope_json(name: &str, version: &str) -> Value {
+fn instrumentation_scope_json(
+    name: &str,
+    version: &str,
+    attributes: &[(String, AttrValue)],
+) -> Value {
     let mut scope = Map::new();
     if !name.is_empty() {
         scope.insert("name".into(), json!(name));
     }
     if !version.is_empty() {
         scope.insert("version".into(), json!(version));
+    }
+    if !attributes.is_empty() {
+        scope.insert("attributes".into(), attrs_json(attributes));
     }
     Value::Object(scope)
 }
@@ -2358,7 +2372,7 @@ fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
         "status".into(),
         span_status_json(span.status_code, &span.status_message),
     );
-    obj.insert("attributes".into(), attrs_json(&span.attributes));
+    obj.insert("attributes".into(), attrs_json(&span_attributes(span)));
     if !span.events.is_empty() {
         obj.insert("events".into(), events_json(span));
     }
@@ -2366,6 +2380,24 @@ fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
         obj.insert("links".into(), links_json(&span.links));
     }
     Value::Object(obj)
+}
+
+fn instrumentation_attributes(span: &SpanRef) -> Vec<(String, AttrValue)> {
+    span.attributes
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix(crabka_traceql::INSTRUMENTATION_ATTR_PREFIX)
+                .map(|key| (key.to_string(), value.clone()))
+        })
+        .collect()
+}
+
+fn span_attributes(span: &SpanRef) -> Vec<(String, AttrValue)> {
+    span.attributes
+        .iter()
+        .filter(|(key, _)| !key.starts_with(crabka_traceql::INSTRUMENTATION_ATTR_PREFIX))
+        .cloned()
+        .collect()
 }
 
 fn events_json(span: &SpanRef) -> Value {

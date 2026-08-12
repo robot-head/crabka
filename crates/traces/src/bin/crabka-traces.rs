@@ -547,7 +547,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _telemetry = crabka_telemetry::init(
+    let telemetry = crabka_telemetry::init(
         OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
             "crabka-traces",
@@ -558,32 +558,44 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "info",
         "crabka-traces",
     )?;
-    let metrics = ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin_with_config(
-        cli.admin_listen_addr,
-        crabka_traces::metrics::metrics_router(metrics.registry.clone()),
-        cli.profiling.clone(),
-    )
-    .await?;
+    let result = async {
+        let metrics = ServiceMetrics::new();
+        let admin = crabka_telemetry::profiling::spawn_admin_with_config(
+            cli.admin_listen_addr,
+            crabka_traces::metrics::metrics_router(metrics.registry.clone()),
+            cli.profiling.clone(),
+        )
+        .await?;
 
-    let shutdown = CancellationToken::new();
-    let shutdown_task = shutdown.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            shutdown_task.cancel();
+        let shutdown = CancellationToken::new();
+        let shutdown_task = shutdown.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                shutdown_task.cancel();
+            }
+        });
+
+        let role = async {
+            match cli.target {
+                Target::Distributor => run_distributor(cli, metrics, shutdown).await?,
+                Target::BlockBuilder => run_block_builder(cli, metrics, shutdown).await?,
+                Target::LiveStore => run_live_store(cli, shutdown).await?,
+                Target::Querier => run_querier(cli, metrics, shutdown).await?,
+                Target::QueryFrontend => run_query_frontend(cli, shutdown).await?,
+                Target::Compactor => run_compactor(cli).await?,
+                Target::MetricsGenerator => run_metrics_generator(cli, shutdown).await?,
+            }
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        };
+        tokio::select! {
+            result = role => result?,
+            result = crabka_telemetry::profiling::await_admin_exit(admin) => result?,
         }
-    });
-
-    match cli.target {
-        Target::Distributor => run_distributor(cli, metrics, shutdown).await?,
-        Target::BlockBuilder => run_block_builder(cli, metrics, shutdown).await?,
-        Target::LiveStore => run_live_store(cli, shutdown).await?,
-        Target::Querier => run_querier(cli, metrics, shutdown).await?,
-        Target::QueryFrontend => run_query_frontend(cli, shutdown).await?,
-        Target::Compactor => run_compactor(cli).await?,
-        Target::MetricsGenerator => run_metrics_generator(cli, shutdown).await?,
+        Ok(())
     }
-    Ok(())
+    .await;
+    telemetry.shutdown();
+    result
 }
 
 async fn run_distributor(
@@ -620,13 +632,16 @@ async fn run_distributor(
     let jaeger_http_addr: SocketAddr = cli.jaeger_http_listen.parse()?;
     let zipkin_addr: SocketAddr = cli.zipkin_listen.parse()?;
     let grpc_shutdown = shutdown.clone();
+    let grpc_failure = shutdown.clone();
     let grpc_state = Arc::clone(&state);
     tokio::spawn(async move {
         if let Err(err) = distributor::serve_otlp_grpc(grpc_addr, grpc_state, grpc_shutdown).await {
-            tracing::warn!(error = %err, "traces distributor OTLP/gRPC server error");
+            tracing::error!(error = %err, "traces distributor OTLP/gRPC server stopped");
+            grpc_failure.cancel();
         }
     });
     let jaeger_grpc_shutdown = shutdown.clone();
+    let jaeger_grpc_failure = shutdown.clone();
     let jaeger_grpc_state = Arc::clone(&state);
     tokio::spawn(async move {
         if let Err(err) = distributor::serve_jaeger_grpc(
@@ -636,7 +651,8 @@ async fn run_distributor(
         )
         .await
         {
-            tracing::warn!(error = %err, "traces distributor Jaeger gRPC server error");
+            tracing::error!(error = %err, "traces distributor Jaeger gRPC server stopped");
+            jaeger_grpc_failure.cancel();
         }
     });
     let jaeger_compact_bound = distributor::serve_jaeger_compact_udp(
@@ -681,13 +697,12 @@ async fn run_block_builder(
     let writer = BlockWriter::new(configured.store.clone());
     let object_key_prefix = configured.prefix.to_string();
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let initial_index = TraceIndex::load_latest_snapshot_with_max_bytes(
+    let initial_index = TraceIndex::load_latest_snapshot_or_empty_with_max_bytes(
         &configured.store,
         &trace_index_key,
         cli.index_snapshot_max,
     )
-    .await
-    .unwrap_or_else(|_| TraceIndex::new());
+    .await?;
     let index = Arc::new(Mutex::new(initial_index));
     blockbuilder::run(
         consumer,
@@ -729,9 +744,11 @@ async fn run_live_store(
     let store = Arc::new(RwLock::new(LiveStore::new(cli.retention.nanos_i64())));
     let router = build_live_store_router(&cli, Arc::clone(&store))?;
     let live_shutdown = shutdown.clone();
+    let live_failure = shutdown.clone();
     tokio::spawn(async move {
         if let Err(err) = livestore::run(consumer, store, live_shutdown).await {
-            tracing::warn!(error = %err, "traces live-store consumer error");
+            tracing::error!(error = %err, "traces live-store consumer stopped");
+            live_failure.cancel();
         }
     });
 
@@ -769,9 +786,11 @@ async fn run_querier(
         )
         .await?;
         let live_shutdown = shutdown.clone();
+        let live_failure = shutdown.clone();
         tokio::spawn(async move {
             if let Err(err) = livestore::run(consumer, live_store, live_shutdown).await {
-                tracing::warn!(error = %err, "traces querier embedded live-store error");
+                tracing::error!(error = %err, "traces querier embedded live-store stopped");
+                live_failure.cancel();
             }
         });
     }
@@ -789,12 +808,15 @@ async fn run_querier(
             tokio::select! {
                 () = refresh_shutdown.cancelled() => break,
                 _ = tick.tick() => {
-                    if let Ok(idx) = TraceIndex::load_latest_snapshot_with_max_bytes(
+                    match TraceIndex::load_latest_snapshot_with_max_bytes(
                         &refresh_store,
                         &trace_index_key,
                         index_snapshot_max,
                     ).await {
-                        refresh_index.store(Arc::new(idx));
+                        Ok(index) => refresh_index.store(Arc::new(index)),
+                        Err(error) => {
+                            tracing::warn!(%error, %trace_index_key, "trace index refresh failed; retaining last good index");
+                        }
                     }
                 }
             }
@@ -829,13 +851,12 @@ async fn build_querier_router_with_live(
 > {
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let initial = TraceIndex::load_latest_snapshot_with_max_bytes(
+    let initial = TraceIndex::load_latest_snapshot_or_empty_with_max_bytes(
         &configured.store,
         &trace_index_key,
         cli.index_snapshot_max,
     )
-    .await
-    .unwrap_or_else(|_| TraceIndex::new());
+    .await?;
     let trace_index: SharedTraceIndex = Arc::new(ArcSwap::from_pointee(initial));
     let blocks = Arc::new(BlockStore::new_with_block_read_max(
         Arc::clone(&configured.store),
@@ -1109,18 +1130,15 @@ async fn build_trace_index_catalog(
     }
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let trace_index = TraceIndex::load_latest_snapshot_with_max_bytes(
+    let trace_index = TraceIndex::load_latest_snapshot_or_empty_with_max_bytes(
         &configured.store,
         &trace_index_key,
         cli.index_snapshot_max,
     )
-    .await
-    .unwrap_or_else(|_| TraceIndex::new());
+    .await?;
     let blocks =
         BlockStore::new_with_block_read_max(configured.store, configured.root, cli.block_read_max);
-    Ok(TraceIndexCatalog::from_trace_index(&blocks, &trace_index)
-        .await
-        .unwrap_or_else(|_| TraceIndexCatalog::new(std::collections::BTreeMap::new())))
+    Ok(TraceIndexCatalog::from_trace_index(&blocks, &trace_index).await?)
 }
 
 /// Parse `--querier-url` into the bare `host:port` addresses the
@@ -1169,13 +1187,12 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
     let configured = build_object_store(&cli)?;
     let writer = BlockWriter::new(configured.store.clone());
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let mut index = TraceIndex::load_latest_snapshot_with_max_bytes(
+    let mut index = TraceIndex::load_latest_snapshot_or_empty_with_max_bytes(
         &configured.store,
         &trace_index_key,
         cli.index_snapshot_max,
     )
-    .await
-    .unwrap_or_else(|_| TraceIndex::new());
+    .await?;
     compact_index_window_with_max_bytes(
         configured.store.clone(),
         &writer,

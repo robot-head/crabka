@@ -93,7 +93,9 @@ jobs:
         with:
           key: traces-differential
       - name: Run traces differential-vs-Tempo + Grafana suites (Docker)
-        run: cargo test -p crabka-traces --test tempo_differential -- --ignored --nocapture
+        run: |
+          cargo test -p crabka-traces --test tempo_differential -- --ignored --nocapture
+          cargo test -p crabka-traces --test grafana_e2e -- --ignored --nocapture
       - name: Create issue on failure
         if: ${{ failure() && github.event_name != 'pull_request' }}
         uses: actions/github-script@v9
@@ -103,6 +105,68 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `traces-differential failed on ${context.sha.slice(0,7)}`,
+              body: `See workflow run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['nightly-fail'],
+            });
+
+  profiles-differential:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: profiles-differential
+      - name: Run profiles differential-vs-Pyroscope + Grafana suites (Docker)
+        run: cargo test -p crabka-profiles --test pyroscope_differential -- --ignored --nocapture
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `profiles-differential failed on ${context.sha.slice(0,7)}`,
+              body: `See workflow run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['nightly-fail'],
+            });
+
+  logs-compatibility:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: logs-compatibility
+      - name: Run Loki API and Grafana-query compatibility suites
+        run: cargo test -p crabka-observability --tests
+      - name: Validate Grafana provisioning assets
+        run: |
+          ruby -e 'require "yaml"; Dir["demo/observability/grafana/provisioning/**/*.yaml"].each { |path| YAML.load_file(path) }'
+          ruby -e 'require "json"; Dir["demo/observability/grafana/provisioning/**/*.json"].each { |path| JSON.parse(File.read(path)) }'
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `logs-compatibility failed on ${context.sha.slice(0,7)}`,
               body: `See workflow run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               labels: ['nightly-fail'],
             });

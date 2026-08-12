@@ -620,12 +620,14 @@ for: 5m
                     rule_id: "InstanceUp\nup > 0".to_string(),
                     labels: alert_labels.clone(),
                     active_since_ms: Some(60_000),
+                    keep_firing_until_ms: None,
                 },
                 super::RulerAlertStateRecord {
                     tenant: "tenant-a".to_string(),
                     rule_id: "InstanceUp\nup > 0".to_string(),
                     labels: alert_labels,
                     active_since_ms: None,
+                    keep_firing_until_ms: None,
                 },
             ]
     );
@@ -652,6 +654,7 @@ for: 5m
         rule_id: "InstanceUp\nup > 0".to_string(),
         labels: alert_labels.clone(),
         active_since_ms: Some(60_000),
+        keep_firing_until_ms: None,
     });
 
     let mut store = InMemoryMetricStore::new();
@@ -674,6 +677,7 @@ for: 5m
         rule_id: "InstanceUp\nup > 0".to_string(),
         labels: alert_labels,
         active_since_ms: None,
+        keep_firing_until_ms: None,
     });
     let sink = RecordingAlertmanagerSink::default();
     let pending = super::evaluate_and_dispatch_alerting_rule_with_state(
@@ -949,18 +953,33 @@ keep_firing_for: 5m
     let store = Arc::new(store);
     let engine = PromqlEngine::new(store, EngineOpts::default());
     let mut state = super::RulerAlertState::default();
+    let state_sink = RecordingRulerStateSink::default();
 
     // t=0: fires; keep-firing deadline armed at 0 + 5m = 300_000.
     let sink0 = RecordingAlertmanagerSink::default();
-    let fired = super::evaluate_and_dispatch_alerting_rule_with_state(
-        &engine, &sink0, &mut state, "tenant-a", &rule, 0,
+    let fired = super::evaluate_and_persist_alerting_rule_with_state(
+        &engine,
+        &sink0,
+        &state_sink,
+        &mut state,
+        "tenant-a",
+        &rule,
+        0,
     )
     .await
     .expect("initial firing");
     assert2::assert!(fired == 1);
     assert2::assert!(sink0.alerts()[0].ends_at_ms == None);
+    let records = state_sink.alert_records();
+    assert2::assert!(records.len() == 1);
+    assert2::assert!(records[0].keep_firing_until_ms == Some(300_000));
 
-    // t=120s: series gone but within keep_firing_for; still firing, no EndsAt.
+    // Simulate a process restart by rebuilding only from the durable record.
+    state = super::RulerAlertState::default();
+    state.apply_record(records[0].clone());
+
+    // t=120s after restart: series gone but within keep_firing_for; still
+    // firing, no EndsAt.
     let sink1 = RecordingAlertmanagerSink::default();
     let kept = super::evaluate_and_dispatch_alerting_rule_with_state(
         &engine, &sink1, &mut state, "tenant-a", &rule, 120_000,
@@ -1233,6 +1252,7 @@ rules:
                     ("job".to_string(), "api".to_string()),
                 ]),
                 active_since_ms: Some(120_000),
+                keep_firing_until_ms: Some(120_000),
             }]
     );
 }

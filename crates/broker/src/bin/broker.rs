@@ -946,6 +946,7 @@ impl Args {
         node_id: u64,
         metrics_listen_addr: Option<SocketAddr>,
         client_metrics_otlp_endpoint: Option<String>,
+        client_metrics_otlp_protocol: crabka_broker::telemetry::OtlpProtocol,
     ) -> BrokerConfig {
         BrokerConfig {
             broker_id: self.broker_id,
@@ -971,6 +972,7 @@ impl Args {
             metrics_listen_addr,
             profiling: self.profiling.clone(),
             client_metrics_otlp_endpoint,
+            client_metrics_otlp_protocol,
             delegation_token_secret_key: self
                 .delegation_token_secret_key
                 .take()
@@ -1048,6 +1050,11 @@ async fn broker_main() -> Result<(), Box<dyn std::error::Error>> {
         "crabka-broker",
     )?;
     let client_metrics_otlp_endpoint = otlp.as_ref().map(|cfg| cfg.endpoint.clone());
+    let client_metrics_otlp_protocol = otlp
+        .as_ref()
+        .map_or(crabka_broker::telemetry::OtlpProtocol::Grpc, |cfg| {
+            cfg.protocol
+        });
     let telemetry = crabka_broker::telemetry::init(
         otlp,
         "crabka_broker=info,crabka_log=info,info",
@@ -1103,6 +1110,7 @@ async fn broker_main() -> Result<(), Box<dyn std::error::Error>> {
         node_id,
         metrics_listen_addr,
         client_metrics_otlp_endpoint,
+        client_metrics_otlp_protocol,
     );
     if let Some(roles) = roles {
         config.roles = roles;

@@ -21,7 +21,11 @@ use uuid::Uuid;
 
 use crate::{
     broker::Broker,
-    client_metrics::{manager::PushDecision, otlp, prometheus_sink::DataPoint},
+    client_metrics::{
+        manager::PushDecision,
+        otlp,
+        prometheus_sink::{DataPoint, PointValue},
+    },
     codes,
     error::BrokerError,
     handlers::context::TelemetryContext,
@@ -131,7 +135,10 @@ fn flatten_for_prometheus(
     instance: &str,
     client_id: &str,
 ) -> Vec<DataPoint> {
-    use opentelemetry_proto::tonic::metrics::v1::{metric::Data, number_data_point::Value};
+    use opentelemetry_proto::tonic::{
+        common::v1::{AnyValue, KeyValue, any_value::Value as AnyValueKind},
+        metrics::v1::{metric::Data, number_data_point::Value},
+    };
     let mut out = Vec::new();
     let num = |v: &Value| -> f64 {
         match v {
@@ -141,6 +148,33 @@ fn flatten_for_prometheus(
                 .parse()
                 .expect("every i64 has a finite f64 representation"),
         }
+    };
+    let attribute_value = |value: &AnyValue| -> Option<String> {
+        match value.value.as_ref()? {
+            AnyValueKind::StringValue(value) => Some(value.clone()),
+            AnyValueKind::BoolValue(value) => Some(value.to_string()),
+            AnyValueKind::IntValue(value) => Some(value.to_string()),
+            AnyValueKind::DoubleValue(value) => Some(value.to_string()),
+            AnyValueKind::BytesValue(value) => Some(hex::encode(value)),
+            AnyValueKind::ArrayValue(_)
+            | AnyValueKind::KvlistValue(_)
+            | AnyValueKind::StringValueStrindex(_) => None,
+        }
+    };
+    let attributes = |sets: &[&[KeyValue]]| {
+        let mut labels = sets
+            .iter()
+            .flat_map(|set| set.iter())
+            .filter_map(|attribute| {
+                Some((
+                    sanitize_prometheus_label(&attribute.key),
+                    attribute_value(attribute.value.as_ref()?)?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        labels.sort();
+        labels.dedup_by(|left, right| left.0 == right.0);
+        labels
     };
     for rm in &md.resource_metrics {
         for sm in &rm.scope_metrics {
@@ -153,7 +187,14 @@ fn flatten_for_prometheus(
                                     metric: m.name.clone(),
                                     client_instance_id: instance.to_string(),
                                     client_id: client_id.to_string(),
-                                    value: num(v),
+                                    attributes: attributes(&[
+                                        rm.resource
+                                            .as_ref()
+                                            .map_or(&[], |r| r.attributes.as_slice()),
+                                        sm.scope.as_ref().map_or(&[], |s| s.attributes.as_slice()),
+                                        dp.attributes.as_slice(),
+                                    ]),
+                                    value: PointValue::Gauge(num(v)),
                                 });
                             }
                         }
@@ -165,31 +206,50 @@ fn flatten_for_prometheus(
                                     metric: m.name.clone(),
                                     client_instance_id: instance.to_string(),
                                     client_id: client_id.to_string(),
-                                    value: num(v),
+                                    attributes: attributes(&[
+                                        rm.resource
+                                            .as_ref()
+                                            .map_or(&[], |r| r.attributes.as_slice()),
+                                        sm.scope.as_ref().map_or(&[], |s| s.attributes.as_slice()),
+                                        dp.attributes.as_slice(),
+                                    ]),
+                                    value: if s.is_monotonic {
+                                        PointValue::Counter(num(v))
+                                    } else {
+                                        PointValue::Gauge(num(v))
+                                    },
                                 });
                             }
                         }
                     }
                     Some(Data::Histogram(h)) => {
                         for dp in &h.data_points {
+                            let mut buckets = dp
+                                .explicit_bounds
+                                .iter()
+                                .copied()
+                                .zip(dp.bucket_counts.iter().copied())
+                                .collect::<Vec<_>>();
+                            if let Some(infinite) = dp.bucket_counts.get(dp.explicit_bounds.len()) {
+                                buckets.push((f64::MAX, *infinite));
+                            }
                             out.push(DataPoint {
-                                metric: format!("{}_count", m.name),
+                                metric: m.name.clone(),
                                 client_instance_id: instance.to_string(),
                                 client_id: client_id.to_string(),
-                                value: dp
-                                    .count
-                                    .to_string()
-                                    .parse()
-                                    .expect("every u64 has a finite f64 representation"),
+                                attributes: attributes(&[
+                                    rm.resource
+                                        .as_ref()
+                                        .map_or(&[], |r| r.attributes.as_slice()),
+                                    sm.scope.as_ref().map_or(&[], |s| s.attributes.as_slice()),
+                                    dp.attributes.as_slice(),
+                                ]),
+                                value: PointValue::Histogram {
+                                    count: dp.count,
+                                    sum: dp.sum.unwrap_or_default(),
+                                    buckets,
+                                },
                             });
-                            if let Some(sum) = dp.sum {
-                                out.push(DataPoint {
-                                    metric: format!("{}_sum", m.name),
-                                    client_instance_id: instance.to_string(),
-                                    client_id: client_id.to_string(),
-                                    value: sum,
-                                });
-                            }
                         }
                     }
                     _ => {}
@@ -198,6 +258,23 @@ fn flatten_for_prometheus(
         }
     }
     out
+}
+
+fn sanitize_prometheus_label(label: &str) -> String {
+    let mut sanitized = label
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.starts_with(|character: char| character.is_ascii_digit()) {
+        sanitized.insert(0, '_');
+    }
+    sanitized
 }
 
 #[cfg(test)]
@@ -404,6 +481,7 @@ mod tests {
                 name: "requests.total".into(),
                 data: Some(metric::Data::Sum(Sum {
                     data_points: vec![number_point(number_data_point::Value::AsInt(42))],
+                    is_monotonic: true,
                     ..Default::default()
                 })),
                 ..Default::default()
@@ -424,24 +502,23 @@ mod tests {
 
         let points = flatten_for_prometheus(&md, "instance-1", "client-a");
 
-        assert!(points.len() == 4, "{points:?}");
+        assert!(points.len() == 3, "{points:?}");
         check!(
             points[0].client_instance_id.as_str() == "instance-1",
             "{points:?}"
         );
         check!(points[0].client_id.as_str() == "client-a", "{points:?}");
-        let cases = [
-            (0usize, "cpu.utilization", 0.75f64),
-            (1, "requests.total", 42.0),
-            (2, "latency.ms_count", 3.0),
-            (3, "latency.ms_sum", 9.5),
-        ];
-        for (idx, metric, value) in cases {
-            assert!(points[idx].metric == metric, "point {idx}: {points:?}");
-            assert!(
-                (points[idx].value - value).abs() < f64::EPSILON,
-                "point {idx}: {points:?}"
-            );
-        }
+        assert!(points[0].metric == "cpu.utilization", "{points:?}");
+        assert!(
+            matches!(points[0].value, PointValue::Gauge(value) if (value - 0.75).abs() < f64::EPSILON)
+        );
+        assert!(points[1].metric == "requests.total", "{points:?}");
+        assert!(
+            matches!(points[1].value, PointValue::Counter(value) if (value - 42.0).abs() < f64::EPSILON)
+        );
+        assert!(points[2].metric == "latency.ms", "{points:?}");
+        assert!(
+            matches!(points[2].value, PointValue::Histogram { count: 3, sum, .. } if (sum - 9.5).abs() < f64::EPSILON)
+        );
     }
 }
