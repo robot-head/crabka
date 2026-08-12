@@ -35,9 +35,9 @@ futures-util = { workspace = true }
 refined_type = { workspace = true }
 
 [dev-dependencies]
-crabka-broker = { version = "0.4.0", path = "../broker", features = ["test-helpers"] }
-crabka-client-producer = { version = "0.4", path = "../client-producer" }
-crabka-security = { version = "0.4", path = "../security" }
+crabka-broker = { path = "../broker", features = ["test-helpers"] }
+crabka-client-producer = { path = "../client-producer" }
+crabka-security = { path = "../security" }
 mutants = { workspace = true }
 stateright = { workspace = true }
 tempfile = { workspace = true }
