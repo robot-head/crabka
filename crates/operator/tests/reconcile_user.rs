@@ -542,8 +542,10 @@ async fn deletes_orphan_acls() {
     let fake_for_assert = fake.clone();
     ctx.insert_admin_client_for_test(CLUSTER, fake).await;
 
-    // Spec declares zero ACLs.
-    let ku = ku_with_finalizer(USER, vec![]);
+    // An explicit empty authorization block asks the operator to remove all
+    // managed ACLs. An absent block leaves broker ACLs untouched.
+    let mut ku = ku_with_finalizer(USER, vec![]);
+    ku.spec.authorization = Some(Authorization::Simple(SimpleAuthorization { acls: vec![] }));
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();

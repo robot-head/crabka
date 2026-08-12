@@ -156,6 +156,13 @@ pub(crate) struct MaterializePartitionConfig<'a> {
 }
 
 pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> Result<(), String> {
+    materialize_partition_with_replication_target(config, None)
+}
+
+fn materialize_partition_with_replication_target(
+    config: MaterializePartitionConfig<'_>,
+    initial_target: Option<crate::partition::ReplicationTarget>,
+) -> Result<(), String> {
     let MaterializePartitionConfig {
         partitions,
         topic,
@@ -217,7 +224,7 @@ pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> R
             .parent()
             .expect("placed partition dir always has a parent log.dir")
             .to_path_buf();
-        crate::broker::try_spawn_partition_with_sequencer(crate::broker::PartitionSpawnConfig {
+        let spawn = crate::broker::PartitionSpawnConfig {
             topic: topic.to_string(),
             topic_id,
             partition_id: PartitionIndex(partition),
@@ -233,7 +240,13 @@ pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> R
             hot_tail,
             wal_shards,
             sequencer,
-        })
+        };
+        match initial_target {
+            Some(target) => {
+                crate::broker::try_spawn_partition_with_replication_target(spawn, target)
+            }
+            None => crate::broker::try_spawn_partition_with_sequencer(spawn),
+        }
         .map_err(|e| format!("spawn partition: {e}"))
     })
 }
@@ -1152,28 +1165,43 @@ impl ReplicatorSupervisor {
         partition: i32,
     ) -> Result<(), String> {
         let diskless = crate::broker::diskless_topic_config(image.topic_config(topic));
-        materialize_partition(MaterializePartitionConfig {
-            partitions: &self.partitions,
-            topic,
-            topic_id: image.topic(topic).map(|topic| topic.topic_id),
-            partition,
-            log_dirs: &self.log_dirs,
-            log_config: &self.log_config,
-            log_dir_status: &self.log_dir_status,
-            producer_state: &self.producer_state,
-            producer_id_expiration: self.producer_id_expiration,
-            max_produce_group: self.max_produce_group,
-            partition_writer_queue_depth: self.partition_writer_queue_depth,
-            diskless_wal_local_replica_count: self.diskless_wal_local_replica_count,
-            diskless,
-            hot_tail: Some(self.hot_tail.clone()),
-            wal_shards: Some(self.wal_shards.clone()),
-            sequencer: diskless.then(|| {
-                Arc::new(crate::wal::ControllerSequencer::new(
-                    self.controller.clone(),
-                )) as Arc<dyn crate::wal::OffsetSequencer>
-            }),
-        })
+        let topic_id = image.topic(topic).map(|topic| topic.topic_id);
+        let initial_target = if diskless {
+            None
+        } else {
+            image
+                .partition(topic, partition)
+                .map(|record| crate::partition::ReplicationTarget {
+                    topic_id,
+                    leader_node_id: record.leader,
+                    leader_epoch: record.leader_epoch,
+                })
+        };
+        materialize_partition_with_replication_target(
+            MaterializePartitionConfig {
+                partitions: &self.partitions,
+                topic,
+                topic_id,
+                partition,
+                log_dirs: &self.log_dirs,
+                log_config: &self.log_config,
+                log_dir_status: &self.log_dir_status,
+                producer_state: &self.producer_state,
+                producer_id_expiration: self.producer_id_expiration,
+                max_produce_group: self.max_produce_group,
+                partition_writer_queue_depth: self.partition_writer_queue_depth,
+                diskless_wal_local_replica_count: self.diskless_wal_local_replica_count,
+                diskless,
+                hot_tail: Some(self.hot_tail.clone()),
+                wal_shards: Some(self.wal_shards.clone()),
+                sequencer: diskless.then(|| {
+                    Arc::new(crate::wal::ControllerSequencer::new(
+                        self.controller.clone(),
+                    )) as Arc<dyn crate::wal::OffsetSequencer>
+                }),
+            },
+            initial_target,
+        )
     }
 
     pub(crate) async fn run(self) {
@@ -2529,6 +2557,81 @@ mod tests {
             .unwrap();
 
         assert!(partitions.contains("t", PartitionIndex(0)));
+    }
+
+    #[tokio::test]
+    async fn non_diskless_materialization_installs_target_before_registry_visibility() {
+        let topic_id = Uuid::new_v4();
+        let img = image_with(&[
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id,
+                partitions: 1,
+                replication_factor: 1,
+            }),
+            partition_record("t", 0, NodeId(2), vec![NodeId(2)], 7),
+        ]);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
+
+        supervisor
+            .materialize_local_partition(&img, "t", 0)
+            .expect("materialize");
+
+        let partition = partitions
+            .get("t", PartitionIndex(0))
+            .expect("registry-visible partition");
+        let expected = crate::partition::ReplicationTarget {
+            topic_id: Some(topic_id),
+            leader_node_id: NodeId(2),
+            leader_epoch: crabka_metadata::LeaderEpoch(7),
+        };
+        assert!(*partition.replication_target.read().await == expected);
+        assert!(partition.current_leader.load(Ordering::Acquire) == 2);
+        assert!(partition.current_leader_epoch.load(Ordering::Acquire) == 7);
+        assert!(
+            partition.replica_state.lock().await.current_leader_epoch == crabka_ids::LeaderEpoch(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn diskless_materialization_keeps_leader_unpublished_until_hydration() {
+        let topic_id = Uuid::new_v4();
+        let img = image_with(&[
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "diskless".into(),
+                topic_id,
+                partitions: 1,
+                replication_factor: 1,
+            }),
+            partition_record("diskless", 0, NodeId(2), vec![NodeId(2)], 7),
+            MetadataRecord::V1TopicConfig(crabka_metadata::TopicConfigRecord {
+                topic: "diskless".into(),
+                overrides: std::collections::BTreeMap::from([(
+                    "crabka.diskless".into(),
+                    "true".into(),
+                )]),
+            }),
+        ]);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
+
+        supervisor
+            .materialize_local_partition(&img, "diskless", 0)
+            .expect("materialize");
+
+        let partition = partitions
+            .get("diskless", PartitionIndex(0))
+            .expect("registry-visible partition");
+        assert!(partition.diskless);
+        assert!(
+            *partition.replication_target.read().await
+                == crate::partition::ReplicationTarget {
+                    topic_id: Some(topic_id),
+                    leader_node_id: NodeId(0),
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
+                }
+        );
+        assert!(partition.current_leader.load(Ordering::Acquire) == 0);
+        assert!(partition.current_leader_epoch.load(Ordering::Acquire) == 0);
     }
 
     #[tokio::test]

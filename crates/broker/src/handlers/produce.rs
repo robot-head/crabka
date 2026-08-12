@@ -579,16 +579,21 @@ async fn process_partition(
     // Diskless promotion takes the write side before hydrating and rebuilding
     // producer state, so it cannot publish a half-adopted prefix or race an
     // idempotent retry already admitted here.
-    let _transition = part.lock_produce_transition().await;
-    if part.diskless {
-        let record = image.partition(topic_name, idx).expect("gate checked");
-        if !diskless_role_ready(&part, record) {
+    let transition = part.lock_produce_transition().await;
+    let record = image.partition(topic_name, idx).expect("gate checked");
+    let topic_id = image.topic(topic_name).map(|topic| topic.topic_id);
+    if !replication_target_matches_image(&transition, topic_id, record)
+        || (part.diskless && !diskless_role_ready(&part, record))
+    {
+        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+        out.current_leader = current_leader_hint(record);
+        return Ok(out);
+    }
+    if !part.diskless {
+        let replica_state = part.replica_state.lock().await;
+        if !replica_state_matches_image(&replica_state, record) {
             out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
-            out.current_leader = LeaderIdAndEpoch {
-                leader_id: i32::try_from(record.leader.0).unwrap_or(NO_LEADER_ID),
-                leader_epoch: record.leader_epoch.0,
-                ..Default::default()
-            };
+            out.current_leader = current_leader_hint(record);
             return Ok(out);
         }
     }
@@ -657,6 +662,33 @@ fn diskless_role_ready(
             .current_leader_epoch
             .load(std::sync::atomic::Ordering::Acquire)
             == record.leader_epoch.0
+}
+
+fn replication_target_matches_image(
+    target: &crate::partition::ReplicationTarget,
+    topic_id: Option<uuid::Uuid>,
+    record: &crabka_metadata::PartitionRecord,
+) -> bool {
+    target.topic_id == topic_id
+        && target.leader_node_id == record.leader
+        && target.leader_epoch == record.leader_epoch
+}
+
+fn replica_state_matches_image(
+    state: &crate::replica_state::ReplicaState,
+    record: &crabka_metadata::PartitionRecord,
+) -> bool {
+    state.current_leader_epoch == crabka_ids::LeaderEpoch(record.leader_epoch.0)
+        && state.isr.len() == record.isr.len()
+        && record.isr.iter().all(|node| state.isr.contains(node))
+}
+
+fn current_leader_hint(record: &crabka_metadata::PartitionRecord) -> LeaderIdAndEpoch {
+    LeaderIdAndEpoch {
+        leader_id: i32::try_from(record.leader.0).unwrap_or(NO_LEADER_ID),
+        leader_epoch: record.leader_epoch.0,
+        ..Default::default()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1522,7 +1554,8 @@ mod tests {
         FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionInput, PartitionPayload,
         PartitionServices, PreparedSource, build_topic_error_response, decode_owned_batch,
         diskless_role_ready, prepare_batch, process_partition, produce_bytes_by_qos_tier,
-        resolve_topic_compression, topic_min_insync_replicas,
+        replica_state_matches_image, replication_target_matches_image, resolve_topic_compression,
+        topic_min_insync_replicas,
     };
 
     fn image_with_topic(topic: &str, isr: &[u64]) -> MetadataImage {
@@ -1546,6 +1579,55 @@ mod tests {
             partition_epoch: 0,
         }));
         img
+    }
+
+    #[test]
+    fn replication_target_must_match_the_complete_image_identity() {
+        let image = image_with_topic("orders", &[1, 2]);
+        let record = image.partition("orders", 0).expect("partition");
+        let current = crate::partition::ReplicationTarget {
+            topic_id: Some(Uuid::nil()),
+            leader_node_id: record.leader,
+            leader_epoch: record.leader_epoch,
+        };
+        assert!(replication_target_matches_image(
+            &current,
+            Some(Uuid::nil()),
+            record
+        ));
+
+        assert!(!replication_target_matches_image(
+            &crate::partition::ReplicationTarget {
+                leader_epoch: crabka_metadata::LeaderEpoch(record.leader_epoch.0 + 1),
+                ..current
+            },
+            Some(Uuid::nil()),
+            record
+        ));
+        assert!(!replication_target_matches_image(
+            &current,
+            Some(Uuid::new_v4()),
+            record
+        ));
+    }
+
+    #[test]
+    fn replica_state_must_install_the_image_epoch_and_exact_isr() {
+        let image = image_with_topic("orders", &[1, 2]);
+        let record = image.partition("orders", 0).expect("partition");
+        let mut state = crate::replica_state::ReplicaState::new();
+        assert!(!replica_state_matches_image(&state, record));
+
+        state.install_isr(
+            &record.isr,
+            &record.replicas,
+            record.leader,
+            std::time::Instant::now(),
+        );
+        assert!(replica_state_matches_image(&state, record));
+
+        state.current_leader_epoch = crabka_ids::LeaderEpoch(record.leader_epoch.0 + 1);
+        assert!(!replica_state_matches_image(&state, record));
     }
 
     #[tokio::test]
@@ -2157,6 +2239,11 @@ mod tests {
             Arc::clone(&producer_state),
             false,
         );
+        let record = image.partition("orders", 0).expect("partition");
+        part.install_replication_target(Some(Uuid::nil()), record.leader.0, record.leader_epoch.0)
+            .await;
+        part.install_isr(&record.isr, &record.replicas, record.leader)
+            .await;
         // Push LEO to 3 so the HW can be clamped to 2 (one below the target).
         {
             let mut batch = RecordBatch {

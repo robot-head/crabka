@@ -717,26 +717,50 @@ async fn recover_storage_and_groups(
                     .rebuild_from_log(&topic, PartitionIndex(partition_id), &log)
                     .await?;
             }
-            let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
-                topic: topic.clone(),
-                topic_id: startup_image.topic(&topic).map(|topic| topic.topic_id),
-                partition_id: PartitionIndex(partition_id),
-                log_dir: owning_dir,
-                log,
-                log_dir_status: log_dir_status.clone(),
-                producer_state: Arc::clone(&producer_state),
-                producer_id_expiration: config.producer_id_expiration,
-                max_produce_group: config.max_produce_group,
-                partition_writer_queue_depth: config.partition_writer_queue_depth,
-                diskless_wal_local_replica_count: config.diskless_wal_local_replica_count,
-                diskless,
-                hot_tail: Some(Arc::clone(&diskless_runtime.hot_tail)),
-                wal_shards: Some(Arc::clone(&diskless_runtime.wal_shards)),
-                sequencer: diskless.then(|| {
-                    Arc::new(crate::wal::ControllerSequencer::new(Arc::clone(controller)))
-                        as Arc<dyn crate::wal::OffsetSequencer>
-                }),
-            })?;
+            let topic_id = startup_image.topic(&topic).map(|topic| topic.topic_id);
+            let initial_target = if diskless {
+                crate::partition::ReplicationTarget {
+                    topic_id,
+                    leader_node_id: crabka_raft::NodeId(0),
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
+                }
+            } else {
+                startup_image.partition(&topic, partition_id).map_or(
+                    crate::partition::ReplicationTarget {
+                        topic_id,
+                        leader_node_id: crabka_raft::NodeId(0),
+                        leader_epoch: crabka_metadata::LeaderEpoch(0),
+                    },
+                    |record| crate::partition::ReplicationTarget {
+                        topic_id,
+                        leader_node_id: record.leader,
+                        leader_epoch: record.leader_epoch,
+                    },
+                )
+            };
+            let partition = try_spawn_partition_with_replication_target(
+                PartitionSpawnConfig {
+                    topic: topic.clone(),
+                    topic_id,
+                    partition_id: PartitionIndex(partition_id),
+                    log_dir: owning_dir,
+                    log,
+                    log_dir_status: log_dir_status.clone(),
+                    producer_state: Arc::clone(&producer_state),
+                    producer_id_expiration: config.producer_id_expiration,
+                    max_produce_group: config.max_produce_group,
+                    partition_writer_queue_depth: config.partition_writer_queue_depth,
+                    diskless_wal_local_replica_count: config.diskless_wal_local_replica_count,
+                    diskless,
+                    hot_tail: Some(Arc::clone(&diskless_runtime.hot_tail)),
+                    wal_shards: Some(Arc::clone(&diskless_runtime.wal_shards)),
+                    sequencer: diskless.then(|| {
+                        Arc::new(crate::wal::ControllerSequencer::new(Arc::clone(controller)))
+                            as Arc<dyn crate::wal::OffsetSequencer>
+                    }),
+                },
+                initial_target,
+            )?;
             partitions.insert(topic, PartitionIndex(partition_id), partition);
         }
     }
@@ -4788,37 +4812,27 @@ pub(crate) fn spawn_partition_with_replication_target(
     diskless: bool,
 ) -> Arc<Partition> {
     let broker_config = BrokerConfig::default();
-    let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
-        topic,
-        topic_id: replication_target.topic_id,
-        partition_id,
-        log_dir,
-        log,
-        log_dir_status,
-        producer_state,
-        producer_id_expiration: broker_config.producer_id_expiration,
-        max_produce_group: broker_config.max_produce_group,
-        partition_writer_queue_depth: broker_config.partition_writer_queue_depth,
-        diskless_wal_local_replica_count: broker_config.diskless_wal_local_replica_count,
-        diskless,
-        hot_tail: None,
-        wal_shards: None,
-        sequencer: None,
-    })
-    .expect("spawn partition");
-    partition.current_leader.store(
-        replication_target.leader_node_id.0,
-        std::sync::atomic::Ordering::Release,
-    );
-    partition.current_leader_epoch.store(
-        replication_target.leader_epoch.0,
-        std::sync::atomic::Ordering::Release,
-    );
-    *partition
-        .replication_target
-        .try_write()
-        .expect("new partition target is uncontended") = replication_target;
-    partition
+    try_spawn_partition_with_replication_target(
+        PartitionSpawnConfig {
+            topic,
+            topic_id: replication_target.topic_id,
+            partition_id,
+            log_dir,
+            log,
+            log_dir_status,
+            producer_state,
+            producer_id_expiration: broker_config.producer_id_expiration,
+            max_produce_group: broker_config.max_produce_group,
+            partition_writer_queue_depth: broker_config.partition_writer_queue_depth,
+            diskless_wal_local_replica_count: broker_config.diskless_wal_local_replica_count,
+            diskless,
+            hot_tail: None,
+            wal_shards: None,
+            sequencer: None,
+        },
+        replication_target,
+    )
+    .expect("spawn partition")
 }
 
 pub(crate) struct PartitionSpawnConfig {
@@ -4842,6 +4856,19 @@ pub(crate) struct PartitionSpawnConfig {
 pub(crate) fn try_spawn_partition_with_sequencer(
     config: PartitionSpawnConfig,
 ) -> Result<Arc<Partition>, BrokerError> {
+    let initial_target = crate::partition::ReplicationTarget {
+        topic_id: config.topic_id,
+        leader_node_id: crabka_raft::NodeId(0),
+        leader_epoch: crabka_metadata::LeaderEpoch(0),
+    };
+    try_spawn_partition_with_replication_target(config, initial_target)
+}
+
+pub(crate) fn try_spawn_partition_with_replication_target(
+    config: PartitionSpawnConfig,
+    initial_target: crate::partition::ReplicationTarget,
+) -> Result<Arc<Partition>, BrokerError> {
+    debug_assert_eq!(config.topic_id, initial_target.topic_id);
     let PartitionSpawnConfig {
         topic,
         topic_id,
@@ -4872,15 +4899,20 @@ pub(crate) fn try_spawn_partition_with_sequencer(
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(partition_writer_queue_depth);
     let notify = Arc::new(tokio::sync::Notify::new());
     let mut initial_replica_state = crate::replica_state::ReplicaState::new();
+    initial_replica_state.current_leader_epoch =
+        crabka_ids::LeaderEpoch(initial_target.leader_epoch.0);
     if let Some(durable_watermark) = recovered_durable_watermark {
         initial_replica_state.recompute_hw_for_wal_durable(durable_watermark);
     }
     let initial_wal_watermark = initial_replica_state.hw;
     let replica_state = Arc::new(tokio::sync::Mutex::new(initial_replica_state));
     let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
-    let current_leader = Arc::new(AtomicU64::new(0));
-    let current_leader_epoch = Arc::new(AtomicI32::new(0));
+    let current_leader = Arc::new(AtomicU64::new(initial_target.leader_node_id.0));
+    let current_leader_epoch = Arc::new(AtomicI32::new(initial_target.leader_epoch.0));
     let replication_target = crate::partition::initial_replication_target(topic_id);
+    *replication_target
+        .try_write()
+        .expect("new partition target is uncontended") = initial_target;
     let log_dir = Arc::new(arc_swap::ArcSwap::from_pointee(log_dir));
     let writer_future = crate::partition_writer::run_with_sequencer(
         (topic.clone(), partition_id),

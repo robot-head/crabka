@@ -2642,12 +2642,6 @@ mod tests {
                 "EndTransaction",
             ),
             (
-                KraftMetadataRecord::RegisterController(
-                    crabka_protocol::owned::register_controller_record::RegisterControllerRecord::default(),
-                ),
-                "RegisterController",
-            ),
-            (
                 KraftMetadataRecord::RemoveAccessControlEntry(
                     RemoveAccessControlEntryRecord::default(),
                 ),

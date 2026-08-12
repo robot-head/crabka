@@ -58,6 +58,7 @@ pub struct InjectedErrors {
     pub describe_configs: Option<InjectableError>,
     pub incremental_alter_configs: Option<InjectableError>,
     pub metadata: Option<InjectableError>,
+    pub create_acls: Option<InjectableError>,
 }
 
 /// A single recorded admin call. Tests assert against the captured
@@ -288,6 +289,19 @@ impl FakeAdminClient {
                 name,
                 message,
             });
+    }
+
+    pub fn inject_create_acls_broker_error(
+        &self,
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    ) {
+        self.injected.lock().unwrap().create_acls = Some(InjectableError::Broker {
+            code,
+            name,
+            message,
+        });
     }
 }
 
@@ -834,6 +848,40 @@ impl AdminClientLike for FakeAdminClient {
             .lock()
             .unwrap()
             .push(RecordedCall::CreateAcls(creations.to_vec()));
+        if let Some(injected) = self.injected.lock().unwrap().create_acls.clone() {
+            match injected {
+                InjectableError::Transport => return Err(transport_error()),
+                InjectableError::Broker {
+                    code,
+                    name,
+                    message,
+                } => {
+                    return Ok(creations
+                        .iter()
+                        .map(|_| CreateAclOutcome {
+                            error: Some(KafkaError {
+                                code,
+                                name,
+                                message: message.clone(),
+                            }),
+                        })
+                        .collect());
+                }
+                InjectableError::BrokerToplevel {
+                    api,
+                    code,
+                    name,
+                    message,
+                } => {
+                    return Err(AdminError::Broker {
+                        api,
+                        code,
+                        name,
+                        message,
+                    });
+                }
+            }
+        }
         let mut store = self.acls.lock().unwrap();
         let mut out = Vec::with_capacity(creations.len());
         for e in creations {

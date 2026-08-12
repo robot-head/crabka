@@ -357,15 +357,25 @@ async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no
 }
 
 /// 5. A minimal `tls-external` user with no authorization and no quotas
-///    still reaches `Ready=True`. The admin mock sees an empty
-///    `DescribeAcls` and no `CreateAcls` or quota calls.
+///    still reaches `Ready=True` without touching broker ACLs or quotas.
 #[tokio::test]
 async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_ready_true() {
     let state = MockState::new(external_rules());
     let client = mock_client(&state, NS);
     let ctx = Arc::new(fixture_ctx(client, NS));
 
-    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake = FakeAdminClient::new();
+    let existing_acl = AclEntry {
+        resource_type: ResourceType::Topic,
+        resource_name: "operator-unmanaged".into(),
+        pattern_type: PatternType::Literal,
+        principal: "User:alice".into(),
+        host: "*".into(),
+        operation: AclOperation::Read,
+        permission_type: PermissionType::Allow,
+    };
+    fake.acls.lock().unwrap().insert(existing_acl.clone());
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
     let fake_for_assert = fake.clone();
     ctx.insert_admin_client_for_test(CLUSTER, fake).await;
 
@@ -374,10 +384,10 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
 
     let calls = fake_for_assert.lock().await.calls();
     check!(
-        calls
+        !calls
             .iter()
             .any(|c| matches!(c, RecordedCall::DescribeAcls(_))),
-        "DescribeAcls expected even when spec declares no ACLs: {calls:?}",
+        "authorization=None must skip ACL reconciliation: {calls:?}",
     );
     check!(
         !calls
@@ -396,6 +406,11 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
             .iter()
             .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. })),
         "no AlterUserQuotas expected when spec.quotas is None: {calls:?}",
+    );
+    let retained = fake_for_assert.lock().await.acls.lock().unwrap().clone();
+    check!(
+        retained.contains(&existing_acl),
+        "authorization=None must retain pre-existing broker ACLs: {retained:?}",
     );
 
     // Final status PATCH must land Ready=True.
