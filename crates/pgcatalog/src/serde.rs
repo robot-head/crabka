@@ -146,6 +146,11 @@ mod datum_tag {
     /// `xml` — followed by the document text (u32 length + bytes), stored and
     /// returned verbatim, exactly as [`JSON`] is. Append-only — no version bump.
     pub const XML: u8 = 22;
+    /// A `"char"` value, stored as the byte itself. Not [`TEXT`]: the escaped
+    /// `\ooo` spelling is the type's text form, not its value, and the high
+    /// half of its range has no text form that is valid UTF-8. Append-only —
+    /// no version bump.
+    pub const INTERNAL_CHAR: u8 = 23;
 }
 
 mod type_tag {
@@ -271,6 +276,9 @@ mod type_tag {
     pub const XML: u8 = 57;
     /// `PostgreSQL` `polygon`. Append-only — no version bump.
     pub const POLYGON: u8 = 58;
+    /// `PostgreSQL` `"char"`, the one-byte type — not [`BPCHAR`], which is
+    /// `character(n)`. Append-only — no version bump.
+    pub const INTERNAL_CHAR: u8 = 59;
 }
 
 #[derive(Debug)]
@@ -369,6 +377,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::MacAddr => out.push(type_tag::MACADDR),
         ColumnType::MacAddr8 => out.push(type_tag::MACADDR8),
         ColumnType::Money => out.push(type_tag::MONEY),
+        ColumnType::InternalChar => out.push(type_tag::INTERNAL_CHAR),
         ColumnType::Oid => out.push(type_tag::OID),
         ColumnType::Xid => out.push(type_tag::XID),
         ColumnType::Xid8 => out.push(type_tag::XID8),
@@ -511,6 +520,7 @@ fn read_type_with(
         type_tag::MACADDR => ColumnType::MacAddr,
         type_tag::MACADDR8 => ColumnType::MacAddr8,
         type_tag::MONEY => ColumnType::Money,
+        type_tag::INTERNAL_CHAR => ColumnType::InternalChar,
         type_tag::OID => ColumnType::Oid,
         type_tag::XID => ColumnType::Xid,
         type_tag::XID8 => ColumnType::Xid8,
@@ -719,6 +729,10 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::MONEY);
             out.extend_from_slice(&value.to_be_bytes());
         }
+        Datum::InternalChar(value) => {
+            out.push(datum_tag::INTERNAL_CHAR);
+            out.push(*value);
+        }
         // The row encoder keeps the bit count and the `varying` flag, so a
         // `bit`/`bit varying` default round-trips through it.
         Datum::BitString(_) => {
@@ -864,6 +878,7 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 .try_into()
                 .map_err(|_| KvError::CorruptRow("invalid money default".into()))?,
         )),
+        datum_tag::INTERNAL_CHAR => Datum::InternalChar(take_u8(cur)?),
         datum_tag::BITSTRING => {
             let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
             if values.len() != 1 || !matches!(values.first(), Some(Datum::BitString(_))) {

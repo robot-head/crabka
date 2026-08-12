@@ -654,6 +654,11 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // `network_cmp`: one comparison for `inet` and `cidr` alike, so a
         // `cidr` and an `inet` naming the same address compare equal.
         (Datum::Money(x), Datum::Money(y)) => x.cmp(y),
+        // `charlt` and friends cast to `uint8` first, so `'\377'::"char"` is
+        // the largest value of the type and not the smallest. The integer
+        // conversions go the other way and read the byte signed; `char.c` says
+        // "You wanted consistency?" about exactly this.
+        (Datum::InternalChar(x), Datum::InternalChar(y)) => x.cmp(y),
         // `bitcmp` and `varbitcmp` are the same routine, so a `bit` and a
         // `bit varying` holding the same bits compare equal.
         (Datum::BitString(x), Datum::BitString(y)) => x.cmp(y),

@@ -123,6 +123,13 @@ mod tag {
     /// bytes and its meaning, and a decoder that predates this tag rejects it
     /// as an unknown field tag rather than reading it as something else.
     pub const OIDVECTOR: u8 = 45;
+    /// `PostgreSQL` `"char"` (`[46][byte]`). Its own tag rather than [`TEXT`]'s
+    /// because the two are different SQL types and only the tag says which was
+    /// stored: read back through [`TEXT`] a stored `"char"` would become the
+    /// escaped `\ooo` spelling rather than the byte, and the high half of the
+    /// type's range is not valid UTF-8 to store as text in the first place.
+    /// Append-only — no version bump.
+    pub const INTERNAL_CHAR: u8 = 46;
 }
 
 /// Encodes one row in the current storage format.
@@ -305,6 +312,10 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 encode_network(d, out);
             }
             Datum::Money(value) => encode_money(*value, out),
+            Datum::InternalChar(value) => {
+                out.push(tag::INTERNAL_CHAR);
+                out.push(*value);
+            }
             Datum::Oid(_)
             | Datum::Xid(_)
             | Datum::Cid(_)
@@ -754,6 +765,7 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
         tag::MONEY => Datum::Money(i64::from_be_bytes(
             take_n(cur, 8)?.try_into().expect("eight bytes make an i64"),
         )),
+        tag::INTERNAL_CHAR => Datum::InternalChar(take_u8(cur)?),
         tag::BITSTRING => {
             let varying = take_u8(cur)? != 0;
             let len =

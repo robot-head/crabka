@@ -19985,6 +19985,11 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::MacAddr8(_)
         | Datum::BitString(_)
         | Datum::Money(_)
+        // `pg_get_expr` prints a `"char"` default as `'r'::"char"` — the
+        // escaped text form, quoted and cast, exactly like the rest of this
+        // group. `quoted_type_name` needs no arm of its own for it: the type's
+        // name already carries the double quotes.
+        | Datum::InternalChar(_)
         | Datum::Oid(_)
         | Datum::Xid(_)
         | Datum::Xid8(_)
@@ -20206,6 +20211,9 @@ fn attribute_storage(ty: ColumnType) -> &'static str {
         | C::Interval
         | C::Uuid
         | C::Money
+        // One byte, pass-by-value: `pg_type.typstorage` for OID 18 is `p`,
+        // where `character(n)` two arms down is `x`.
+        | C::InternalChar
         | C::Oid
         | C::Xid
         | C::Xid8
@@ -21525,6 +21533,18 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             elem: 0,
             array: 0,
         },
+        // `"char"` is not in the string category with its neighbours: it is
+        // `typcategory` Z, the internal-use category, because it is one byte
+        // rather than a string. Its `typarray` resolves even though `ElemType`
+        // has no variant for it, the position `timetz` and `money` are in.
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::CHAR as i32,
+            name: "char",
+            len: 1,
+            category: "Z",
+            elem: 0,
+            array: crabka_pgtypes::oids::CHARARRAY as i32,
+        },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::VARCHAR as i32,
             name: "varchar",
@@ -21909,6 +21929,14 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 len: -1,
                 category: "A",
                 elem: crabka_pgtypes::oids::TIMETZ as i32,
+                array: 0,
+            },
+            BuiltinTypeRow {
+                oid: crabka_pgtypes::oids::CHARARRAY as i32,
+                name: "_char",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::CHAR as i32,
                 array: 0,
             },
             BuiltinTypeRow {
@@ -23527,6 +23555,7 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::TEXT => ColumnType::Text,
         crabka_pgtypes::oids::VARCHAR => ColumnType::Varchar(None),
         crabka_pgtypes::oids::BPCHAR => ColumnType::Char(None),
+        crabka_pgtypes::oids::CHAR => ColumnType::InternalChar,
         crabka_pgtypes::oids::FLOAT4 => ColumnType::Float4,
         crabka_pgtypes::oids::FLOAT8 => ColumnType::Float8,
         // All seven geometric types. Before the geometric operators landed,

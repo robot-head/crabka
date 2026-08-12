@@ -1578,6 +1578,25 @@ fn coerce_untyped_literal_operands(
                 _ => None,
             };
         }
+        // A `"char"` counterpart resolves the literal to `"char"`, which is how
+        // `relkind = 'r'` compares two bytes rather than reporting that a
+        // one-byte type and `text` have no comparison. `||` is deliberately
+        // absent: `PostgreSQL`'s only candidate there is `anynonarray || text`,
+        // so `c || 'y'` concatenates the byte's *text* and the literal stays a
+        // `text`.
+        if matches!(other, Datum::InternalChar(_)) {
+            return match op {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(ColumnType::InternalChar),
+                _ => None,
+            };
+        }
         // A bit-string counterpart resolves the literal to a bit string, which
         // is how `b = '1010'` compares two `bit`s and `v || '01'` concatenates.
         if let Datum::BitString(bits) = other {

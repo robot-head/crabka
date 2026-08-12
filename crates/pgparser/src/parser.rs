@@ -579,14 +579,25 @@ impl Parser {
     /// "type … does not exist" message, in every context that names a type.
     fn parse_type_name(&mut self) -> Result<crabka_pgtypes::ColumnType, ParseError> {
         let type_pos = self.peek_pos();
+        let mut word_pos = type_pos;
         let mut type_word = self.expect_ident()?;
         let type_schema = if *self.peek() == Token::Dot {
             self.bump();
+            word_pos = self.peek_pos();
             let schema = std::mem::replace(&mut type_word, self.expect_ident()?);
             Some(schema)
         } else {
             None
         };
+        // A type name in double quotes is an ordinary identifier looked up by
+        // `pg_type.typname`, not one of the grammar's type keywords, and for
+        // `char` the two name different types:
+        // [`crabka_pgtypes::ColumnType::from_quoted_builtin_sql_name`] holds
+        // the whole of that divergence. The lexer folds both spellings into one
+        // `Ident`, so the source byte is what tells them apart.
+        let quoted_builtin = (self.source.as_bytes().get(word_pos) == Some(&b'"'))
+            .then(|| crabka_pgtypes::ColumnType::from_quoted_builtin_sql_name(&type_word))
+            .flatten();
         if type_word.eq_ignore_ascii_case("double")
             && matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("precision"))
         {
@@ -643,14 +654,17 @@ impl Parser {
         // reaches the user-type registry as two identity parts so a quoted dot
         // in either identifier is never mistaken for qualification.
         let ty = match type_schema.as_deref() {
-            Some("pg_catalog") => crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word),
+            Some("pg_catalog") => quoted_builtin
+                .or_else(|| crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word)),
             Some(schema) => crabka_pgtypes::usertype::column_type_for_name_in(schema, &type_word),
             None => self.type_schemas.as_ref().map_or_else(
-                || crabka_pgtypes::ColumnType::from_sql_name(&type_word),
+                || quoted_builtin.or_else(|| crabka_pgtypes::ColumnType::from_sql_name(&type_word)),
                 |schemas| {
                     schemas.iter().find_map(|schema| {
                         if schema == "pg_catalog" {
-                            crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word)
+                            quoted_builtin.or_else(|| {
+                                crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word)
+                            })
                         } else {
                             crabka_pgtypes::usertype::column_type_for_name_in(schema, &type_word)
                         }

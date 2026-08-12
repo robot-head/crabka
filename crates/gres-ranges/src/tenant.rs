@@ -7376,6 +7376,10 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         Datum::Int8(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Text(value) => Some(value.as_bytes().to_vec()),
         Datum::Bytea(value) => Some(value.clone()),
+        // `"char"` is one byte, and the byte is the value — not its escaped
+        // `\ooo` text form, which two different bytes could never share but
+        // which would hash four bytes for one.
+        Datum::InternalChar(value) => Some(vec![*value]),
         Datum::Null
         | Datum::Int2(_)
         | Datum::Float4(_)

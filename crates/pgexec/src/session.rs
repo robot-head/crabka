@@ -12545,6 +12545,11 @@ fn decode_binary_value(
             .map(Datum::Money)
             .map_err(ExecError::from)
             .map_err(ExecError::into_pg),
+        // `charrecv`: one byte, taken with no encoding conversion at all.
+        ColumnType::InternalChar => {
+            let [byte] = binary_array(value)?;
+            Ok(Datum::InternalChar(byte))
+        }
         // `bit_recv` / `varbit_recv`: an int32 bit count, then the packed
         // bytes, whose count the receiver checks against it.
         ColumnType::Bit(_) | ColumnType::VarBit(_) => {

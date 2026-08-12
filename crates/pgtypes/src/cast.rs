@@ -147,6 +147,14 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         (Int4 | ColumnType::Int8 | ColumnType::Numeric(_), ColumnType::Money)
         | (ColumnType::Money, ColumnType::Numeric(_)) => true,
         (ColumnType::Money, _) | (_, ColumnType::Money) => from.is_string() || to.is_string(),
+        // `pg_cast` gives `"char"` eight entries: to and from each of `text`,
+        // `bpchar` and `varchar` (the string rule below), and to and from
+        // `int4` explicitly. Nothing else — `'a'::"char"::float8` is 42846, and
+        // this arm is what keeps the numeric fall-through from granting it.
+        (ColumnType::InternalChar, Int4) | (Int4, ColumnType::InternalChar) => true,
+        (ColumnType::InternalChar, _) | (_, ColumnType::InternalChar) => {
+            from.is_string() || to.is_string()
+        }
         // Everything else in the bit family converts only through its text
         // form, so it must not fall into the numeric rules further down.
         (ColumnType::Bit(_) | ColumnType::VarBit(_), _)
@@ -298,6 +306,11 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // one without an explicit cast.
         (ColumnType::Int4 | ColumnType::Int8 | ColumnType::Numeric(_), ColumnType::Money)
         | (ColumnType::Money, ColumnType::Numeric(_)) => true,
+        // `"char"` is the one type outside the string family whose casts to and
+        // from it are `'i'`/`'a'` rather than explicit, so `INSERT`ing a `text`
+        // value into a `"char"` column converts, and takes its first byte. Its
+        // `int4` pair stays explicit-only.
+        (ColumnType::InternalChar, t) | (t, ColumnType::InternalChar) if t.is_string() => true,
         // `pg_cast` marks every bit-family conversion `'i'`, so storing a
         // `bit varying` in a `bit(n)` column needs no explicit cast — what it
         // does need is the length to match, which the coercion enforces.
@@ -546,6 +559,22 @@ pub fn cast_in(
         }
         (Datum::Int4(n), ColumnType::Money) => crate::money::from_int4(*n).map(Datum::Money),
         (Datum::Int8(n), ColumnType::Money) => crate::money::from_int8(*n).map(Datum::Money),
+        // `"char"`. The string directions run `charin`/`charout`, which the
+        // three `→ text` arms below already reach through the value's own text
+        // encoding: `char.c` notes that `char(text)` and `text(char)` differ
+        // from the I/O pair only in *how* they reach the empty string, and both
+        // pairs map it to `0x00` and back. `char → bpchar` is the one place
+        // upstream diverges — `char_bpchar` copies the byte raw, so `\377`
+        // becomes a `bpchar` no encoding can validate — and crabka keeps the
+        // escaped form there rather than build an invalid string.
+        (Datum::InternalChar(c), ColumnType::InternalChar) => Ok(Datum::InternalChar(*c)),
+        (Datum::Text(s), ColumnType::InternalChar) => {
+            Ok(Datum::InternalChar(crate::internal_char::parse(s)))
+        }
+        (Datum::InternalChar(c), Int4) => Ok(Datum::Int4(crate::internal_char::to_int4(*c))),
+        (Datum::Int4(n), ColumnType::InternalChar) => {
+            crate::internal_char::from_int4(*n).map(Datum::InternalChar)
+        }
         // `bit()` / `varbit()` — the length coercions, which under an explicit
         // cast zero-pad or truncate rather than rejecting a mismatch. A target
         // with no modifier only relabels, which is `pg_cast`'s binary coercion

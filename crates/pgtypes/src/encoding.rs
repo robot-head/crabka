@@ -230,6 +230,9 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         // `cash_out`, which renders through `lc_monetary` — `C` here, so
         // `$1,234.56`.
         Datum::Money(value) => crate::money::to_text(*value).into_bytes(),
+        // `charout`: the byte itself below 0x80, `\ooo` above it, and the
+        // empty string for NUL.
+        Datum::InternalChar(value) => crate::internal_char::to_text(*value).into_bytes(),
         // `bit_out` / `varbit_out` are the same routine: one character per bit.
         Datum::BitString(value) => value.to_text().into_bytes(),
         // `inet_out` / `cidr_out`: the value's own `is_cidr` picks which.
@@ -550,6 +553,10 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::TsQuery(query) => query.to_string().into_bytes(),
         // `cash_send`: a big-endian int64.
         Datum::Money(value) => crate::money::to_binary(*value),
+        // `charsend`: the one byte, with no encoding conversion — `char.c`
+        // calls that dubious and keeps it, because the type is often a 1-byte
+        // binary field rather than a character.
+        Datum::InternalChar(value) => vec![*value],
         // `bit_send` / `varbit_send`: the bit count, then the packed bytes.
         Datum::BitString(value) => value.to_binary(),
         // `inet_send` / `cidr_send`: family, netmask, is_cidr, length, address.

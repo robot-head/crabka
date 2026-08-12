@@ -87,6 +87,13 @@ pub mod oids {
     pub const REGCOLLATION: u32 = 4191;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
+    /// PostgreSQL `"char"` — the ad-hoc one-byte type, written in double
+    /// quotes. It is NOT [`BPCHAR`]: `char`/`character` without quotes is
+    /// `character(1)`, a varlena holding one *character*, while this holds one
+    /// *byte* and is what the catalogs use for their single-letter codes.
+    pub const CHAR: u32 = 18;
+    /// `"char"[]`.
+    pub const CHARARRAY: u32 = 1002;
     /// PostgreSQL `real`: single-precision IEEE-754 (`f32`).
     pub const FLOAT4: u32 = 700;
     /// SP30: `double precision` (IEEE-754 f64).
@@ -348,8 +355,10 @@ impl ElemType {
             ColumnType::Numeric(_) => ElemType::Numeric,
             ColumnType::Date => ElemType::Date,
             ColumnType::Time => ElemType::Time,
-            // `timetz` has no array type in crabka yet.
-            ColumnType::Timetz => return None,
+            // `timetz` and `"char"` have no array type in crabka yet. Their
+            // `pg_type.typarray` still resolves, so a driver walking the
+            // scalar → array link finds the row upstream has.
+            ColumnType::Timetz | ColumnType::InternalChar => return None,
             ColumnType::Timestamp => ElemType::Timestamp,
             ColumnType::Timestamptz => ElemType::Timestamptz,
             ColumnType::Interval => ElemType::Interval,
@@ -702,6 +711,14 @@ pub enum ColumnType {
     Text,
     Varchar(Option<u16>),
     Char(Option<u16>),
+    /// PostgreSQL `"char"` (OID 18) — the ad-hoc single-**byte** type, spelled
+    /// with the double quotes and unrelated to [`Char`](Self::Char), the
+    /// blank-padded `character(n)`. `typlen` is 1 and the value is one byte, so
+    /// the type stores no string at all: `charin` reads the first byte of its
+    /// input, and a `\ooo` octal escape names one byte directly. It is the type
+    /// PostgreSQL's own catalogs give their single-letter codes
+    /// (`pg_class.relkind`, `pg_type.typtype`).
+    InternalChar,
     /// PostgreSQL `real` (OID 700): an IEEE-754 `f32`.
     Float4,
     /// SP30: PostgreSQL `double precision` (an IEEE-754 `f64`).
@@ -913,6 +930,24 @@ impl ColumnType {
             .or_else(|| crate::usertype::column_type_for_name(name))
     }
 
+    /// The built-in whose **quoted** spelling names a different type from its
+    /// unquoted one, or `None` for every other name.
+    ///
+    /// `PostgreSQL`'s grammar reaches `character(1)` only through the unquoted
+    /// keywords `char` and `character`; a name in double quotes is an ordinary
+    /// identifier looked up in `pg_type` by `typname`, and `typname = 'char'`
+    /// is OID 18, the one-byte type. So `'a'::char` is a `bpchar` and
+    /// `'a'::"char"` is not, and `SELECT '\101'::"char"` is `A` because
+    /// `charin` decodes the octal escape that `bpcharin` keeps as a backslash.
+    ///
+    /// Only `char` is listed. The rest of the quoted-versus-unquoted split —
+    /// that `"integer"` and `"bigint"` are not type names at all, since neither
+    /// is a `typname` — is a separate divergence and not this function's.
+    #[must_use]
+    pub fn from_quoted_builtin_sql_name(name: &str) -> Option<Self> {
+        (name == "char").then_some(ColumnType::InternalChar)
+    }
+
     /// Resolve only a built-in SQL type name. Session-aware parsers use this
     /// while walking `pg_catalog` in search-path order, then consult exact user
     /// type identities for every other visible schema.
@@ -1071,6 +1106,7 @@ impl ColumnType {
             ColumnType::Text => oids::TEXT,
             ColumnType::Varchar(_) => oids::VARCHAR,
             ColumnType::Char(_) => oids::BPCHAR,
+            ColumnType::InternalChar => oids::CHAR,
             ColumnType::Float4 => oids::FLOAT4,
             ColumnType::Float8 => oids::FLOAT8,
             ColumnType::Point => oids::POINT,
@@ -1140,6 +1176,10 @@ impl ColumnType {
             ColumnType::Text => "text",
             ColumnType::Varchar(_) => "character varying",
             ColumnType::Char(_) => "character",
+            // `format_type` special-cases OID 18 and prints the quotes, because
+            // `char` unquoted is a different type. Every diagnostic that names
+            // this type therefore carries them: `"char" out of range`.
+            ColumnType::InternalChar => "\"char\"",
             ColumnType::Float4 => "real",
             ColumnType::Float8 => "double precision",
             ColumnType::Point => "point",
@@ -1207,6 +1247,9 @@ impl ColumnType {
             ColumnType::Int8 => 8,
             ColumnType::Int4 => 4,
             ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_) => -1,
+            // The whole point of `"char"`: one byte, pass-by-value, no varlena
+            // header. `character(1)` above is -1.
+            ColumnType::InternalChar => 1,
             ColumnType::Float4 => 4,
             ColumnType::Float8 => 8,
             ColumnType::Point => 16,
@@ -1344,6 +1387,11 @@ pub enum Datum {
     Int4(i32),
     Int8(i64),
     Text(String),
+    /// PostgreSQL `"char"` — one byte, held raw. The escaped `\ooo` spelling is
+    /// only the *text* form ([`crate::internal_char`]); a value that has been
+    /// read in is the byte itself, which is why `'\377'::"char"` compares above
+    /// `'a'::"char"` instead of below it, where the backslash would put it.
+    InternalChar(u8),
     /// PostgreSQL `jsonpath`, stored as its canonical text representation.
     JsonPath(String),
     /// PostgreSQL `real` — single-precision float. Grouping equality and hashing
@@ -1850,6 +1898,7 @@ impl PartialEq for Datum {
             // `inet` naming the same address are one value — which is what
             // PostgreSQL's shared `network_cmp` gives `'x'::cidr = 'x'::inet`.
             (Datum::Money(a), Datum::Money(b)) => a == b,
+            (Datum::InternalChar(a), Datum::InternalChar(b)) => a == b,
             // `BitString`'s own `PartialEq` ignores `varying`, so a `bit` and a
             // `bit varying` holding the same bits are one value.
             (Datum::BitString(a), Datum::BitString(b)) => a == b,
@@ -1940,6 +1989,7 @@ impl std::hash::Hash for Datum {
             Datum::TsVector(v) => v.hash(state),
             Datum::TsQuery(q) => q.hash(state),
             Datum::Money(value) => value.hash(state),
+            Datum::InternalChar(value) => value.hash(state),
             Datum::BitString(value) => value.hash(state),
             Datum::Inet(value) => value.hash(state),
             Datum::MacAddr(value) => value.hash(state),
@@ -2005,6 +2055,7 @@ impl Datum {
             Datum::TsVector(_) => Some(ColumnType::TsVector),
             Datum::TsQuery(_) => Some(ColumnType::TsQuery),
             Datum::Money(_) => Some(ColumnType::Money),
+            Datum::InternalChar(_) => Some(ColumnType::InternalChar),
             // A runtime bit string carries no typmod; what it does carry is
             // which of the two SQL types produced it.
             Datum::BitString(value) => Some(if value.varying {

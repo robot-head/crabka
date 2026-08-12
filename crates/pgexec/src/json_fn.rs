@@ -2097,6 +2097,10 @@ pub(crate) fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError
         | Datum::Cid(_)
         | Datum::Tid(_)
         | Datum::PgLsn(_)
+        // `"char"` is `typcategory` Z, so `to_jsonb` gives it the same
+        // treatment: the output function's text as a JSON string, which for a
+        // high-bit byte is the escaped `\ooo` form.
+        | Datum::InternalChar(_)
         | Datum::Bytea(_) => JsonbValue::String(datum_text(d, ctx)),
     })
 }
