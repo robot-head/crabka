@@ -5546,8 +5546,10 @@ mod tests {
             .await
             .unwrap();
         }
-        let leader = *ctrl.watch_leader().borrow();
-        assert2::assert!(leader == Some(NodeId(2)));
+        // `inject_event` only enqueues the heartbeat. Query through the same
+        // command queue so the final heartbeat is processed before asserting.
+        let state = ctrl.quorum_state().await.unwrap();
+        assert2::assert!(state.leader_id == Some(NodeId(2)));
         ctrl.shutdown().await;
     }
 
