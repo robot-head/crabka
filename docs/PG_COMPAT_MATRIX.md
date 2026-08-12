@@ -13,45 +13,60 @@ tools/check-pg-compat-matrix.sh
 
 ## Current G-1/G-2 baseline
 
-The implemented rows reflect the current parser/executor surface. The
-authoritative PostgreSQL 18.4 core-schedule score is 32 / 231 exact in serial
-under the runner's explicit 20 MiB blocking-query memory policy, leaving 199
-failures across 122859 changed lines and 4951 hunks. Both PostgreSQL
-self-checks pass 231 / 231, Gres completes all 231 files with a successful
-postflight probe and an empty infrastructure report. Parallel mode has not been
-re-measured since the type-input wave; its last certified figure was 22 / 231 at
-177530 changed lines / 4608 hunks.
+The authoritative PostgreSQL 18.4 core-schedule score is **44 / 231 exact in
+serial**, under the runner's explicit 20 MiB blocking-query memory policy,
+leaving 187 failures across **117,554 changed lines**. Both PostgreSQL
+self-checks pass 231 / 231, Gres completes all 231 files, and the
+infrastructure report is empty. The checked-in floor in
+[`pg-regress-baseline.json`](../crates/gres-conformance/pg-regress-baseline.json)
+is ratcheted to that figure and the CI gate refuses any advance that leaves a
+file longer than recorded.
 
-These waves add `int4`, `int2`, `roleattributes`, `lseg`, `line` and `circle`
-to the exact set (`+6` files, `-6374` changed lines) with zero newly failing files, by
-implementing PostgreSQL's real integer input grammar — `0x`/`0o`/`0b` bases and
-`_` separators — its exact out-of-range messages for every integer and float
-width, general source positions for type-input errors, the optional `TABLE`
-object-type keyword in `GRANT`/`REVOKE`, the `TABLE t` derived-table form, the
-`int2vector`, `lseg`, `line` and `circle` types, and `ALTER ROLE` with persisted role attributes. Four files gain 22 lines between them
-because a caret is now correctly attached to errors Gres should not raise at
-all; those disappear with the underlying rejections. The checked-in floor has
-been ratcheted from 6 / 231 to 28 / 231 against this certification. The ratchet
-tool refuses the advance on its own, because 48 fingerprints carry more changed
-lines than the seeded floor did and 16 differ at the same size; the advance was
-taken deliberately after establishing that no file regressed from exact to
-failing, and that 42 of the 48 already carried at least their current line count
-in the first serial measurement of this programme. A weaker engine aborts a test
-sooner and so emits a smaller diff, which is why the seeded floor reads lower on
-`join` (7969 against 18061) and `cluster` (333 against 5302) while being worse
-overall.
+Parallel mode has not been re-measured since the type-input wave; its last
+certified figure was 22 / 231 at 177,530 changed lines.
 
-The complete artifact certifies the focused `boolean` and `varchar` gains.
-`sanity_check` remains a 5-line / 1-hunk failure after preceding schedule state
-despite being exact in isolation, so its order-sensitive catalog residual is
-still open. The prior serial measurement whose parallel run stopped at 92 /
-231 remains non-certifying. Replay exposed a CPU-bound two-branch OR nested
-loop rather than a lock cycle; bounded candidate union and direct INNER/LEFT
-`count(*)` folding now make the isolated upstream query return `19000` in 0.30
-seconds and reduce the complete serial `join` file from 294.320 seconds to
-9.532. The full parallel schedule now completes, but an earlier three-branch
-OR count in `join` still exceeds the memory budget and the 296.989-second
-serial lateral `subselect` workload remains the cohort's performance root.
+### What the remaining 117,554 lines are
+
+Classified per changed line, not per file — a file is not "an EXPLAIN problem"
+because one hunk of it prints a plan:
+
+```text
+data / other output                73,012   66.4%
+EXPLAIN / plan text                15,448   14.1%
+other ERROR: line                   7,287    6.6%
+missing object or function          5,745    5.2%
+DETAIL / HINT / LINE / CONTEXT      4,531    4.1%
+syntax error                        2,957    2.7%
+deliberate: refused by design         904    0.8%
+```
+
+**Only 0.8% of the gap is refused by design.** That is the honest answer to
+"how much of this is a design difference": almost none of it. The rows that
+say so out loud — `database lifecycle is managed by tenant provisioning`,
+partial indexes, foreign-data wrappers — total 904 lines.
+
+EXPLAIN is the largest genuinely hard bucket at 14.1%. Gres does not have
+PostgreSQL's planner, so exact plan text is not a target; the reachable part is
+the deparse of expressions *inside* plan output, which is ordinary
+`ruleutils.c` fidelity and has already returned lines in `pg_lsn` and
+`partition_prune`.
+
+The 66% "data / other output" bucket is the one to be careful about. Most of it
+is not a wrong value: it is expected rows *absent* because an earlier statement
+in the same file failed, so the rows were never produced. Those lines are
+recovered by fixing the earlier failure, which is why single defects in this
+corpus routinely return hundreds of lines — `ctid` on the write path returned
+663 in `tidrangescan` alone — and why per-file line counts are a poor guide to
+per-defect cost.
+
+### Method
+
+Do not estimate a file's cost by reading its diff. Certify on the full serial
+schedule from an isolated tree, compare against the committed baseline, and
+inspect every `same-count-different` file before ratcheting: that
+classification exists because a file can change character without changing
+length, and it has repeatedly turned out to be a statement getting *further*
+rather than a regression.
 
 Within one active catalog, user-type registry publication is derived from the
 committed catalog delta, after event-trigger acceptance, for TYPE/DOMAIN DDL,
