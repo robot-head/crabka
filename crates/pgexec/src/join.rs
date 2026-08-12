@@ -960,6 +960,12 @@ impl LeftKeyValues {
 /// composite types do not: `array_cmp` ignores the element type, so `int4[]`
 /// `{1}` and `int8[]` `{1}` compare Equal while `Eq` calls them different — and
 /// `interval` compares by a canonical estimate. Those keys keep the nested loop.
+///
+/// `tid` is here because `ctid` became joinable. Its `compare` is the derived
+/// `Ord` over `(block, offset)` and there is one representation of a value, so
+/// `Eq` holds exactly when `compare` says Equal and `Hash` follows `Eq`.
+/// Without it `… t1 JOIN t2 ON t1.ctid = t2.ctid` is a nested loop, which
+/// `tidscan`'s two `tenk1` self-joins turn into 200 million comparisons.
 pub(crate) fn hashes_like_it_compares(sample: &Datum) -> bool {
     matches!(
         sample,
@@ -976,6 +982,7 @@ pub(crate) fn hashes_like_it_compares(sample: &Datum) -> bool {
             | Datum::Time(_)
             | Datum::Timestamp(_)
             | Datum::Timestamptz(_)
+            | Datum::Tid(_)
     )
 }
 
@@ -2288,6 +2295,39 @@ mod tests {
         .expect("join")
         .rows;
         assert2::assert!(joined.len() == 80);
+    }
+
+    /// A `tid` key is indexed rather than looped. `ctid` became joinable with
+    /// the system column, and `… ON t1.ctid = t2.ctid` over two ten-thousand-row
+    /// relations is a hundred million comparisons without this.
+    #[test]
+    fn a_tid_key_is_hash_indexed() {
+        let tids: Vec<Datum> = (1..=64u16)
+            .map(|offset| Datum::Tid(crabka_pgtypes::Tid { block: 0, offset }))
+            .collect();
+        let side = |qualifier: &str| Relation {
+            scope: Scope {
+                columns: vec![ColumnBinding {
+                    exposure: Exposure::Output,
+                    qualifier: Some(qualifier.into()),
+                    name: "k".into(),
+                    ty: ColumnType::Tid,
+                }],
+            },
+            rows: tids.iter().map(|tid| vec![tid.clone()]).collect(),
+        };
+        let (left, right) = (side("a"), side("b"));
+        assert2::assert!(EquiIndex::build(&left, &right, &[(0, 0)]).is_some());
+        let joined = join_relations(
+            left,
+            right,
+            JoinKind::Inner,
+            &on_eq("a", "k", "b", "k"),
+            &tctx(),
+        )
+        .expect("join")
+        .rows;
+        assert2::assert!(joined.len() == tids.len());
     }
 
     #[test]
