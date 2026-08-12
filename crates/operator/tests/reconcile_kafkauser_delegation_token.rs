@@ -19,9 +19,14 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use assert2::{assert, check};
+use crabka_client_admin::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
 use crabka_operator::{
     controller::user::reconcile,
-    crd::{Authentication, DelegationTokenAuth, KafkaUser, KafkaUserSpec},
+    crd::{
+        AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule,
+        Authentication, DelegationTokenAuth, KafkaUser, KafkaUserAuthorization as Authorization,
+        KafkaUserQuotas, KafkaUserSimpleAuthorization as SimpleAuthorization, KafkaUserSpec,
+    },
 };
 use http::Method;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
@@ -123,7 +128,8 @@ fn ku_delegation_token(name: &str, auth: DelegationTokenAuth) -> KafkaUser {
 }
 
 /// FIFO mock rules for one happy-path reconcile of a delegation-token user:
-/// Kafka GET, then Secret PATCH, then status PATCH.
+/// Kafka GET, pending status, Secret PATCH, token identity status, then final
+/// access status.
 fn happy_path_rules() -> Vec<MockRule> {
     vec![
         MockRule {
@@ -141,20 +147,35 @@ fn happy_path_rules() -> Vec<MockRule> {
             path_substr: format!("/kafkausers/{USER}/status"),
             response: json_response(200, &user_body(USER, NS)),
         },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
     ]
 }
 
 // ─── Test 1: first reconcile mints token + writes Secret + status ───────
 
 /// Spec §3.2: a fresh delegation-token user with no existing token gives
-/// `Describe → Create → Secret apply → status patch`. The Secret carries the
+/// `Describe → pending → Create → Secret apply → status patch`. The Secret carries the
 /// four KIP-48 keys. The status carries the token id and expiry, plus the
 /// `Ready=True` and `TokenIssued=True` conditions.
 #[tokio::test]
 async fn delegation_token_user_reconcile_creates_secret_and_status() {
     let state = MockState::new(happy_path_rules());
     let client = mock_client(&state, NS);
-    let ctx = Arc::new(fixture_ctx(client, NS));
+    let mut ctx = fixture_ctx(client, NS);
+    let config = Arc::get_mut(&mut ctx.config).expect("fixture owns operator config");
+    config.delegation_token_min_requeue = crabka_units::days(1);
+    config.delegation_token_max_requeue = crabka_units::days(1);
+    config.controller_drift_requeue = crabka_units::millis(1_234);
+    let ctx = Arc::new(ctx);
 
     let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     let fake_for_assert = fake.clone();
@@ -168,7 +189,12 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
             renew_before_expiry: None,
         },
     );
-    reconcile(Arc::new(ku), ctx).await.unwrap();
+    let action = reconcile(Arc::new(ku), ctx).await.unwrap();
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234)),
+        "access drift polling must bound a distant token-renewal deadline",
+    );
 
     // ── Admin-call shape ────────────────────────────────────────────
     let calls = fake_for_assert.lock().await.calls();
@@ -218,18 +244,28 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         );
     }
 
-    // ── Status PATCH body: token fields + conditions ───────────────
-    let status_patch = observed
+    // ── Status PATCHes: pending, token identity, access-complete Ready
+    let status_patches: Vec<_> = observed
         .iter()
-        .rev()
-        .find(|r| {
+        .filter(|r| {
             r.method() == Method::PATCH
                 && r.uri()
                     .to_string()
                     .contains(&format!("/kafkausers/{USER}/status"))
         })
-        .expect("status PATCH must have been observed");
-    let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
+        .collect();
+    assert!(status_patches.len() == 3);
+    let pending_body: serde_json::Value = serde_json::from_slice(status_patches[0].body()).unwrap();
+    assert!(
+        pending_body["status"]["conditions"]
+            .as_array()
+            .expect("pending conditions")
+            .iter()
+            .any(|condition| condition["type"] == "Ready"
+                && condition["status"] == "False"
+                && condition["reason"] == "TokenPending")
+    );
+    let body: serde_json::Value = serde_json::from_slice(status_patches[1].body()).unwrap();
     let status = &body["status"];
     assert!(
         status["delegationTokenId"].is_string(),
@@ -247,19 +283,252 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         .expect("delegationTokenMaxTimestampMs is i64");
     assert!(max_ts >= expiry, "max_ts ({max_ts}) >= expiry ({expiry})");
 
-    let conds = status["conditions"].as_array().expect("conditions array");
     assert!(
-        conds
+        status["conditions"]
+            .as_array()
+            .expect("identity pending conditions")
+            .iter()
+            .any(|condition| condition["type"] == "Ready"
+                && condition["status"] == "False"
+                && condition["reason"] == "TokenPending")
+    );
+    let final_body: serde_json::Value = serde_json::from_slice(status_patches[2].body()).unwrap();
+    let final_conditions = final_body["status"]["conditions"]
+        .as_array()
+        .expect("final conditions array");
+    assert!(
+        final_conditions
             .iter()
             .any(|c| c["type"] == "Ready" && c["status"] == "True" && c["reason"] == "TokenReady"),
-        "missing Ready=True/TokenReady, got: {conds:?}",
+        "Ready must publish only after access sync: {final_conditions:?}",
     );
     assert!(
-        conds.iter().any(|c| c["type"] == "TokenIssued"
+        final_conditions.iter().any(|c| c["type"] == "TokenIssued"
             && c["status"] == "True"
-            && c["reason"] == "Issued"),
-        "missing TokenIssued=True/Issued, got: {conds:?}",
+            && c["reason"] == "Issued")
     );
+    assert!(final_body["status"]["observedGeneration"] == 1);
+}
+
+#[tokio::test]
+async fn delegation_token_user_reconciles_acls_without_replacing_token_status_or_action() {
+    let state = MockState::new(happy_path_rules());
+    let client = mock_client(&state, NS);
+    let mut ctx = fixture_ctx(client, NS);
+    let config = Arc::get_mut(&mut ctx.config).expect("fixture owns operator config");
+    config.delegation_token_min_requeue = crabka_units::millis(2_345);
+    config.delegation_token_max_requeue = crabka_units::millis(2_345);
+    let ctx = Arc::new(ctx);
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let mut ku = ku_delegation_token(USER, DelegationTokenAuth::default());
+    ku.spec.authorization = Some(Authorization::Simple(SimpleAuthorization {
+        acls: vec![AclRule {
+            resource: AclResource {
+                kind: AclResourceKind::Topic,
+                name: "delegation-token-test".into(),
+                pattern_type: AclPatternType::Literal,
+            },
+            operations: vec![AclOp::Describe, AclOp::Write],
+            host: "*".into(),
+            permission: AclPermission::Allow,
+        }],
+    }));
+    ku.spec.quotas = Some(KafkaUserQuotas {
+        producer_byte_rate: Some(1_024),
+        ..Default::default()
+    });
+
+    let action = reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(2_345)),
+        "ACL reconciliation must preserve the token's expiry-driven action",
+    );
+    let calls = fake_for_assert.lock().await.calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            RecordedCall::DescribeAcls(filter)
+                if filter.principal.as_deref() == Some("User:alice")
+        )),
+        "expected DescribeAcls for User:alice, got {calls:?}",
+    );
+    let created = calls
+        .iter()
+        .find_map(|call| match call {
+            RecordedCall::CreateAcls(entries) => Some(entries.clone()),
+            _ => None,
+        })
+        .expect("CreateAcls must have been issued");
+    assert!(
+        created
+            == vec![
+                AclEntry {
+                    resource_type: ResourceType::Topic,
+                    resource_name: "delegation-token-test".into(),
+                    pattern_type: PatternType::Literal,
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: AclOperation::Write,
+                    permission_type: PermissionType::Allow,
+                },
+                AclEntry {
+                    resource_type: ResourceType::Topic,
+                    resource_name: "delegation-token-test".into(),
+                    pattern_type: PatternType::Literal,
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: AclOperation::Describe,
+                    permission_type: PermissionType::Allow,
+                },
+            ],
+        "the requested topic ACLs must be created for the token owner",
+    );
+
+    let observed = state.take_observed();
+    let status_patches: Vec<_> = observed
+        .iter()
+        .filter(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/kafkausers/{USER}/status"))
+        })
+        .collect();
+    assert!(
+        status_patches.len() == 3,
+        "expected pending, identity, and final access status patches"
+    );
+    let pending_body: serde_json::Value = serde_json::from_slice(status_patches[0].body()).unwrap();
+    let conditions = pending_body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array");
+    assert!(conditions[0]["status"] == "False");
+    assert!(conditions[0]["reason"] == "TokenPending");
+    let token_body: serde_json::Value = serde_json::from_slice(status_patches[1].body()).unwrap();
+    assert!(
+        token_body["status"]["conditions"]
+            .as_array()
+            .expect("identity pending conditions")
+            .iter()
+            .any(|condition| condition["type"] == "Ready" && condition["status"] == "False")
+    );
+    let access_body: serde_json::Value = serde_json::from_slice(status_patches[2].body()).unwrap();
+    assert!(access_body["status"]["observedGeneration"] == 1);
+    assert!(access_body["status"]["quotasInSync"] == true);
+    let final_conditions = access_body["status"]["conditions"]
+        .as_array()
+        .expect("final conditions array");
+    assert!(final_conditions[0]["status"] == "True");
+    assert!(final_conditions[0]["reason"] == "TokenReady");
+    assert!(
+        final_conditions
+            .iter()
+            .any(|condition| condition["type"] == "TokenIssued"),
+        "final access status must retain token-specific conditions",
+    );
+}
+
+#[tokio::test]
+async fn delegation_token_user_acl_failure_never_publishes_ready_or_observed_generation() {
+    let state = MockState::new(happy_path_rules());
+    let client = mock_client(&state, NS);
+    let mut ctx = fixture_ctx(client, NS);
+    let config = Arc::get_mut(&mut ctx.config).expect("fixture owns operator config");
+    config.delegation_token_min_requeue = crabka_units::millis(2_000);
+    config.delegation_token_max_requeue = crabka_units::millis(2_000);
+    config.controller_error_requeue = crabka_units::millis(15_000);
+    let ctx = Arc::new(ctx);
+
+    let fake_admin = FakeAdminClient::new();
+    fake_admin.inject_create_acls_broker_error(
+        29,
+        "TOPIC_AUTHORIZATION_FAILED",
+        Some("injected ACL failure".into()),
+    );
+    let fake = Arc::new(tokio::sync::Mutex::new(fake_admin));
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let mut ku = ku_delegation_token(USER, DelegationTokenAuth::default());
+    ku.spec.authorization = Some(Authorization::Simple(SimpleAuthorization {
+        acls: vec![AclRule {
+            resource: AclResource {
+                kind: AclResourceKind::Topic,
+                name: "delegation-token-test".into(),
+                pattern_type: AclPatternType::Literal,
+            },
+            operations: vec![AclOp::Write],
+            host: "*".into(),
+            permission: AclPermission::Allow,
+        }],
+    }));
+
+    let action = reconcile(Arc::new(ku), ctx).await.unwrap();
+    assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(2)),
+        "access failure must not defer an earlier token deadline",
+    );
+
+    let observed = state.take_observed();
+    let status_patches: Vec<serde_json::Value> = observed
+        .iter()
+        .filter(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/kafkausers/{USER}/status"))
+        })
+        .map(|request| serde_json::from_slice(request.body()).unwrap())
+        .collect();
+    assert!(status_patches.len() == 3);
+    assert!(
+        [&status_patches[0], &status_patches[1], &status_patches[2]]
+            .iter()
+            .all(|body| {
+                body["status"]["conditions"]
+                    .as_array()
+                    .expect("conditions array")
+                    .iter()
+                    .all(|condition| condition["type"] != "Ready" || condition["status"] == "False")
+            })
+    );
+
+    let failure_status = status_patches[2]["status"]
+        .as_object()
+        .expect("failure status object");
+    assert!(
+        failure_status.len() == 1 && failure_status.contains_key("conditions"),
+        "failure patch must retain token identity by changing conditions only: {failure_status:?}",
+    );
+    let conditions = failure_status["conditions"]
+        .as_array()
+        .expect("failure conditions array");
+    assert!(
+        conditions
+            .iter()
+            .any(|condition| condition["type"] == "Ready"
+                && condition["status"] == "False"
+                && condition["reason"] == "BrokerError")
+    );
+    assert!(
+        conditions
+            .iter()
+            .any(|condition| condition["type"] == "TokenIssued" && condition["status"] == "True")
+    );
+    assert!(
+        conditions
+            .iter()
+            .any(|condition| condition["type"] == "TokenExpiring"),
+        "access failure must retain token-specific conditions",
+    );
+    assert!(failure_status.get("observedGeneration").is_none());
 }
 
 // ─── Test 2: renewal fires when remaining lifetime ≤ threshold ──────────
@@ -296,13 +565,13 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
     let observed_first = state.take_observed();
     let status_first = observed_first
         .iter()
-        .rev()
-        .find(|r| {
+        .filter(|r| {
             r.method() == Method::PATCH
                 && r.uri()
                     .to_string()
                     .contains(&format!("/kafkausers/{USER}/status"))
         })
+        .nth(1)
         .expect("status PATCH from pass 1");
     let body: serde_json::Value = serde_json::from_slice(status_first.body()).unwrap();
     let first_expiry = body["status"]["delegationTokenExpiryTimestampMs"]
@@ -326,13 +595,13 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
     let observed_second = state.take_observed();
     let status_second = observed_second
         .iter()
-        .rev()
-        .find(|r| {
+        .filter(|r| {
             r.method() == Method::PATCH
                 && r.uri()
                     .to_string()
                     .contains(&format!("/kafkausers/{USER}/status"))
         })
+        .nth(1)
         .expect("status PATCH from pass 2");
     let body: serde_json::Value = serde_json::from_slice(status_second.body()).unwrap();
     let second_expiry = body["status"]["delegationTokenExpiryTimestampMs"]

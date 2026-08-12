@@ -51,27 +51,27 @@ impl Encode for OffsetCommitRequest {
                 let () = put_compact_string(buf, &self.group_id);
             } else {
                 let () = put_string(buf, &self.group_id);
-            }
+            };
         }
         if version >= 1 {
-            put_i32(buf, self.generation_id_or_member_epoch)
+            put_i32(buf, self.generation_id_or_member_epoch);
         }
         if version >= 1 {
             if flex {
                 let () = put_compact_string(buf, &self.member_id);
             } else {
                 let () = put_string(buf, &self.member_id);
-            }
+            };
         }
         if version >= 7 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
                 let () = put_nullable_string(buf, self.group_instance_id.as_deref());
-            }
+            };
         }
         if (2..=4).contains(&version) {
-            put_i64(buf, self.retention_time_ms)
+            put_i64(buf, self.retention_time_ms);
         }
         if version >= 0 {
             {
@@ -79,7 +79,7 @@ impl Encode for OffsetCommitRequest {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -123,7 +123,7 @@ impl Encode for OffsetCommitRequest {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitRequest {
+impl Decode<'_> for OffsetCommitRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
@@ -202,10 +202,10 @@ impl Encode for OffsetCommitRequestTopic {
                 let () = put_compact_string(buf, &self.name);
             } else {
                 let () = put_string(buf, &self.name);
-            }
+            };
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -213,7 +213,7 @@ impl Encode for OffsetCommitRequestTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -244,7 +244,7 @@ impl Encode for OffsetCommitRequestTopic {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitRequestTopic {
+impl Decode<'_> for OffsetCommitRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();
@@ -310,20 +310,20 @@ impl Encode for OffsetCommitRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset)
+            put_i64(buf, self.committed_offset);
         }
         if version >= 6 {
-            put_i32(buf, self.committed_leader_epoch)
+            put_i32(buf, self.committed_leader_epoch);
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.committed_metadata.as_deref());
             } else {
                 let () = put_nullable_string(buf, self.committed_metadata.as_deref());
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -357,7 +357,7 @@ impl Encode for OffsetCommitRequestPartition {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitRequestPartition {
+impl Decode<'_> for OffsetCommitRequestPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();

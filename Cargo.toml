@@ -6,7 +6,7 @@ members = ["crates/*"]
 exclude = [".agents/skills/rust-skills/checks"]
 
 [workspace.package]
-version = "0.3.9"
+version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["The Crabka Authors"]
@@ -39,7 +39,7 @@ arrow = { version = "59", default-features = false, features = ["ipc"] }
 # Parquet blocks on object storage. Pinned to apache/datafusion `main` because
 # that revision tracks arrow 59 / parquet 59 / object_store 0.13.2, matching the
 # workspace pins. The latest released datafusion line is on an older arrow major.
-datafusion = { git = "https://github.com/apache/datafusion", rev = "ad1a26002b8bac436a8f20761f42713e23dc70b2", version = "54" }
+datafusion = { git = "https://github.com/apache/datafusion", rev = "0062b4b409a1c556c84746b840fd65e1cdd151c9", version = "54" }
 parquet = { version = "59", default-features = false, features = ["arrow", "async", "object_store"] }
 url = "2"
 # PromQL parser only; Crabka supplies the PromQL-to-DataFusion planner.
@@ -139,10 +139,16 @@ tracing = "0.1"
 # support); diverges on lookahead/lookbehind which aren't in the KIP-848
 # operator-readable subset.
 regex = "1"
+# KIP-664's ListTransactions filter accepts the full java.util.regex Pattern
+# grammar (including lookaround and backreferences).
+java_regex = "0.1"
 rust-stemmers = "1"
 memmap2 = "0.9"
-testcontainers = "0.27"
-testcontainers-modules = { version = "0.15", features = ["kafka"] }
+testcontainers = "0.28"
+# The latest crates.io release still requires testcontainers 0.27, whose
+# bollard-stubs version conflicts with testcontainers 0.28. Pin the upstream
+# compatibility update until the next testcontainers-modules release.
+testcontainers-modules = { git = "https://github.com/testcontainers/testcontainers-rs-modules-community", rev = "390054380a9c30a5f91051933444ae827b50398b", features = ["kafka"] }
 async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-stream = "0.1"
@@ -207,9 +213,9 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring",
 # SASL/GSSAPI (Kerberos). `network_client` lets the initiator reach the KDC;
 # `ring` keeps crypto provider choice aligned with rustls/rcgen in this workspace.
 sspi = { version = "=0.21.3", default-features = false, features = ["network_client", "ring"] }
-crabka-audit = { path = "crates/audit", version = "0.3.8" }
-crabka-security = { path = "crates/security", version = "0.3.9" }
-crabka-units = { path = "crates/units", version = "0.3.9" }
+crabka-audit = { path = "crates/audit", version = "0.4.0" }
+crabka-security = { path = "crates/security", version = "0.4.0" }
+crabka-units = { path = "crates/units", version = "0.4.0" }
 kube = { version = "4.0", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
 k8s-openapi = { version = "0.28", default-features = false, features = ["v1_32"] }
 schemars = "1.2"
@@ -254,7 +260,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Chapter Gres — vendored crabgresql engine (crabgresql@93f3d17).
 bigdecimal = "0.4"
-dashu-float = "0.5"
+dashu-float = "0.6"
 fjall = "3.1.8"
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 num-bigint = "0.5"

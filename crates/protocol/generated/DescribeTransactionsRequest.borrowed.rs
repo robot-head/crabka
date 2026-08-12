@@ -56,7 +56,7 @@ impl Encode for DescribeTransactionsRequest<'_> {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

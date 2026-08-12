@@ -1,0 +1,71 @@
+name: Go SDK
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-go-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk-go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.23.x'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.1'
+          components: clippy
+      - uses: taiki-e/install-action@nextest
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Generate Go gateway stubs
+        run: |
+          go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
+          git diff --exit-code -- buf.gen.yaml sdks/go/gen
+      - name: Validate Go SDK live harness artifacts (no Docker start)
+        run: |
+          # Default CI proves the live harness is wired to the published broker
+          # and gateway image artifacts, and validates the compose file when the
+          # runner has docker compose. The live container round-trip remains an
+          # explicit workflow_dispatch gate below because it requires pullable or
+          # locally tagged images.
+          ./tools/check-sdk-go-harness-artifacts.sh
+      - name: Verify SDK conformance harness
+        run: |
+          cargo +nightly fmt --all -- --check
+          cargo clippy -p crabka-sdk-conformance --all-targets -- -D warnings
+          cargo nextest run -p crabka-sdk-conformance
+          ./tools/check-publish-allowlist.sh
+      - name: Verify Go SDK
+        working-directory: sdks/go
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test ./...
+          go build -o bin/conformance-adapter ./cmd/conformance-adapter
+      - name: Run SDK conformance
+        run: cargo run -p crabka-sdk-conformance --bin conformance -- --adapter sdks/go/bin/conformance-adapter --vectors crates/sdk-conformance/vectors/v1
+      - name: Run live-compatible SDK conformance
+        run: cargo run -p crabka-sdk-conformance --bin conformance -- --adapter sdks/go/bin/conformance-adapter --vectors crates/sdk-conformance/vectors/v1 --live-substrate --live-compatible-only
+      - name: Go SDK compose harness smoke (explicit Docker gate)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        working-directory: sdks/go
+        run: |
+          docker compose -f testdata/docker-compose.yml up -d
+          trap 'docker compose -f testdata/docker-compose.yml down -v' EXIT
+          CRABKA_GO_INTEGRATION=1 CRABKA_GATEWAY_ENDPOINT="http://127.0.0.1:${CRABKA_GATEWAY_PORT:-9500}" go test -tags integration ./...

@@ -12,7 +12,8 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
     config::{
-        ClientResourcePolicy, NamingPolicy, PolicyConfig, ReplicatorConfig, ReplicatorRuntimePolicy,
+        ClientResourcePolicy, Delivery, NamingPolicy, PolicyConfig, ReplicatorConfig,
+        ReplicatorRuntimePolicy,
     },
     error::ReplicatorError,
     naming::Renamer,
@@ -34,6 +35,7 @@ struct RebuildSpec {
     source_alias: String,
     target_alias: String,
     naming: NamingPolicy,
+    delivery: Delivery,
     topics: Vec<String>,
     source_partition_counts: std::collections::BTreeMap<String, i32>,
     target_zones: Vec<String>,
@@ -53,6 +55,7 @@ fn make_params(spec: &RebuildSpec) -> FlowWorkerParams {
         source_alias: spec.source_alias.clone(),
         target_alias: spec.target_alias.clone(),
         naming: spec.naming,
+        delivery: spec.delivery,
         topics: spec.topics.clone(),
         source_partition_counts: spec.source_partition_counts.clone(),
         target_zones: spec.target_zones.clone(),
@@ -199,6 +202,7 @@ impl FlowSupervisor {
                 source_alias: flow.from.clone(),
                 target_alias: flow.to.clone(),
                 naming: flow.naming,
+                delivery: flow.delivery,
                 topics,
                 source_partition_counts,
                 target_zones: to.zones.clone(),

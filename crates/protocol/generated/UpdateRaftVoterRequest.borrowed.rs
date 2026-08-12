@@ -78,7 +78,7 @@ impl Encode for UpdateRaftVoterRequest<'_> {
                 for it in &self.listeners {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             self.k_raft_version_feature.encode(buf, version)?;

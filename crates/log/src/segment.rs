@@ -84,7 +84,6 @@ fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
 /// [`Segment::open_active`] opens an active segment with tail recovery.
 #[derive(Debug)]
 pub struct Segment {
-    #[allow(dead_code)] // used by later phases (Log retention, recovery).
     dir: PathBuf,
     base_offset: Offset,
     /// The `.log` data file, wrapped in `Arc`.
@@ -414,7 +413,7 @@ impl Segment {
         scan_window: ByteSize,
     ) -> Option<(Offset, i64)> {
         if self.max_timestamp == i64::MIN {
-            return None;
+            return self.scan_max_timestamp_windowed(scan_window);
         }
         let floor_rel = self.time_index.lookup(self.max_timestamp);
         let scan_from = self.base_offset + i64::from(floor_rel);
@@ -423,6 +422,39 @@ impl Segment {
         // among the batch's records), so some record's timestamp equals
         // the segment max exactly.
         self.scan_from_floor_windowed(scan_from, scan_window, |ts| ts == self.max_timestamp)
+    }
+
+    /// Recover the maximum timestamp for a sealed segment opened through the
+    /// no-scan path. Those segments intentionally keep `max_timestamp` at its
+    /// unknown sentinel, so KIP-734 `MAX_TIMESTAMP` must derive the answer
+    /// from records instead of treating the segment as empty.
+    fn scan_max_timestamp_windowed(&self, window_size: ByteSize) -> Option<(Offset, i64)> {
+        let mut cursor = self.base_offset;
+        let mut window = window_size.max(bytes(1));
+        let mut best: Option<(Offset, i64)> = None;
+        loop {
+            if cursor > self.last_offset {
+                return best;
+            }
+            let batches = self.read(cursor, window).ok()?;
+            if batches.is_empty() {
+                window *= 2.0;
+                continue;
+            }
+            for batch in &batches {
+                for record in &batch.records {
+                    let timestamp = batch.base_timestamp + record.timestamp_delta;
+                    if best.is_none_or(|(_, best_timestamp)| timestamp > best_timestamp) {
+                        best = Some((
+                            Offset(batch.base_offset + i64::from(record.offset_delta)),
+                            timestamp,
+                        ));
+                    }
+                }
+            }
+            let last = batches.last().expect("non-empty checked above");
+            cursor = Offset(last.base_offset + i64::from(last.last_offset_delta)) + 1;
+        }
     }
 
     /// Window-size-parameterized core of [`Segment::scan_from_floor`]. It is

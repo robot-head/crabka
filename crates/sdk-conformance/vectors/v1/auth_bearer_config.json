@@ -1,0 +1,19 @@
+{
+  "id": "auth_bearer_config",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "configure bearer token",
+      "command": {
+        "cmd": "configure",
+        "endpoint": "mock://gateway",
+        "bearer": "dev-token"
+      },
+      "expect": {
+        "ok": {
+          "bearer_configured": true
+        }
+      }
+    }
+  ]
+}

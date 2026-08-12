@@ -39,8 +39,8 @@ pub struct SchemaRegistrySpec {
     /// Bootstrap override for an external Kafka that the operator does
     /// not manage. When unset, the operator derives the bootstrap from the
     /// internal listener of the Kafka with the `crabka.io/cluster` label.
-    /// Secured external brokers are future work. The managed path with the
-    /// label is the secured one.
+    /// Settings in `kafka_client` secure both external and managed bootstrap
+    /// connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_servers: Option<String>,
 

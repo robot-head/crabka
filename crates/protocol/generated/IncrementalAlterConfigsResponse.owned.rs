@@ -42,7 +42,7 @@ impl Encode for IncrementalAlterConfigsResponse {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

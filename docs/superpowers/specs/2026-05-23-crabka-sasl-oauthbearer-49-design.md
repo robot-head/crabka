@@ -51,7 +51,7 @@ rotation) is deferred to slice 49b.
 |---|---|
 | Signed JWT validation via JWKS (RS256/ES256, issuer/audience, key rotation) | 49b |
 | Token re-authentication / `session_lifetime_ms` expiry (KIP-368) | 49b |
-| OAUTHBEARER for inter-broker / controller-listener outbound | future |
+| OAUTHBEARER for inter-broker / controller-listener outbound | ✅ shipped; token-file credentials are re-read on each connection |
 | `KafkaUser` OAuth + `Kafka.spec` listener OAuth config | 50 (operator) |
 
 ### Semantics for slice 49
@@ -153,8 +153,8 @@ crates/broker/src/
 ├── file_config.rs             # MODIFIED — [oauthbearer] TOML section
 ├── network/auth.rs            # MODIFIED — exchange variants + handler
 ├── network/dispatch.rs        # MODIFIED — route OAUTHBEARER
-├── network/client.rs          # MODIFIED — outbound arm (unsupported)
-├── raft_handshake.rs          # MODIFIED — inbound arm (unsupported)
+├── network/client.rs          # MODIFIED — shared outbound RFC 7628 client
+├── raft_handshake.rs          # MODIFIED — controller-listener validation
 └── handlers/describe_user_scram_credentials.rs  # MODIFIED — non-SCRAM arm
 crates/broker/tests/
 ├── auth_handlers.rs           # MODIFIED — two wire-level OAUTHBEARER cases

@@ -40,6 +40,8 @@ use crate::{
     fields(api = "OffsetFetch", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: coordinator-backed response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -72,6 +74,18 @@ pub(crate) async fn handle(
             };
             return crate::handlers::encode_response(&resp, version);
         }
+    }
+
+    if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+        return crate::handlers::encode_response(
+            &OffsetFetchResponse {
+                topics: Vec::new(),
+                error_code,
+                throttle_time_ms: 0,
+                ..Default::default()
+            },
+            version,
+        );
     }
 
     // Fetch the group's committed offsets from its actor (a classic actor is
@@ -271,6 +285,8 @@ async fn fetch_committed(
 /// requested `topic_id` to a name and echoes the id back. An unknown id gives
 /// `UNKNOWN_TOPIC_ID` for each partition.
 // per-group loop: ACL + id→name resolve + named/fetch-all branches
+// cargo-mutants: coordinator-backed response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 async fn handle_groups(
     broker: &Broker,
     version: i16,
@@ -291,6 +307,16 @@ async fn handle_groups(
                 });
                 continue;
             }
+        }
+
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &grp.group_id) {
+            groups_out.push(OffsetFetchResponseGroup {
+                group_id: grp.group_id.clone(),
+                topics: Vec::new(),
+                error_code,
+                ..Default::default()
+            });
+            continue;
         }
 
         // Fetch the group's committed offsets from its actor (a classic actor

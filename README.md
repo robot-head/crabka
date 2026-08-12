@@ -27,6 +27,13 @@ observability services.
 Crabka is **beta**, pre-1.0 software. The workspace version is in
 [Cargo.toml](Cargo.toml).
 
+The **0.4.0 milestone** ships metadata downgrade and client rebootstrap,
+durable transaction recovery, diskless WAL failover, tiered offset reads,
+CloudEvents and queue semantics in the gateway, operator lifecycle work, and
+shared conformance coverage for five application SDKs. The finite outcomes for
+this milestone are closed; [UNFINISHED_WORK.md](UNFINISHED_WORK.md) records the
+remaining directional horizons and known limits.
+
 The project is still greenfield infrastructure. There are no production users,
 and Crabka does not promise on-disk compatibility across versions yet. Use
 Crabka for evaluation, development, interoperability tests, and non-critical
@@ -70,10 +77,10 @@ implementation internals are not compatibility goals.
 | Idempotent and transactional produce / consume | Implemented |
 | Classic and next-generation consumer groups | Implemented |
 | Share groups / queues | Implemented |
-| Tiered storage | Implemented; segment-data JVM interop is still in validation |
+| Tiered storage | Implemented, including Kafka 4.0 JVM segment-layout and producer-snapshot validation |
 | TLS, SASL, delegation tokens, ACLs, and quotas | Implemented |
 | Schema Registry-compatible REST service | Implemented |
-| Kubernetes operator | Implemented; external listener surfaces continue to mature |
+| Kubernetes operator | Implemented, including Ingress and OpenShift Route listeners |
 | Rust Streams client | Partial versus the full JVM Kafka Streams library |
 | Kafka Connect-equivalent runtime | Partial; managed Postgres CDC workers, durable offsets, connector SPI, and `KafkaConnector` CRD are implemented |
 | ZooKeeper mode and ZooKeeper-to-KRaft migration | Out of scope |

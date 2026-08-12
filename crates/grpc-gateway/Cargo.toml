@@ -23,13 +23,14 @@ path = "src/bin/gateway.rs"
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-authz = { version = "0.3.8", path = "../authz" }
-crabka-ids = { version = "0.3.8", path = "../ids" }
-crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
-crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
-crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
-crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
-crabka-metadata = { version = "0.3.8", path = "../metadata" }
+crabka-authz = { version = "0.4.0", path = "../authz" }
+crabka-ids = { version = "0.4.0", path = "../ids" }
+crabka-telemetry = { version = "0.4.0", path = "../telemetry" }
+crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
+crabka-client-consumer = { version = "0.4.0", path = "../client-consumer" }
+crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
+crabka-client-streams = { version = "0.4.0", path = "../client-streams", optional = true, features = ["arrow"] }
+crabka-metadata = { version = "0.4.0", path = "../metadata" }
 crabka-units = { workspace = true }
 arc-swap = { workspace = true }
 prometheus-client = { workspace = true }
@@ -56,13 +57,13 @@ futures-util = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-crabka-security = { version = "0.3.9", path = "../security" }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-security = { version = "0.4.0", path = "../security" }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
 refined_type.workspace = true
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 tower = { workspace = true, features = ["util"] }
 hmac = { workspace = true }
 sha2 = { workspace = true }
@@ -77,18 +78,24 @@ prost-reflect = { workspace = true, features = ["serde"] }
 protox-parse = "0.9"
 url = "2"
 jsonschema = { version = "0.49", default-features = false }
+arrow = { workspace = true, optional = true }
+datafusion = { workspace = true, optional = true }
+
+[features]
+default = ["arrow"]
+arrow = ["dep:arrow", "dep:crabka-client-streams", "dep:datafusion"]
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
-crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
+crabka-broker = { version = "0.4.0", path = "../broker", features = ["test-helpers"] }
 temp-env = "0.3"
 # Raw Fetch + v2 RecordBatch decode in tests/outbound.rs to read the DLQ
 # record's `x-crabka-dlq-source` header (the group Consumer drops headers).
-crabka-client-core = { version = "0.3", path = "../client-core" }
-crabka-protocol = { version = "0.3", path = "../protocol" }
+crabka-client-core = { version = "0.4", path = "../client-core" }
+crabka-protocol = { version = "0.4", path = "../protocol" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 # `UnboundedReceiverStream` to drive the Subscribe control stream in tests/streaming.rs.

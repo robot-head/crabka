@@ -54,7 +54,7 @@ impl Encode for DeleteAclsRequest<'_> {
                 for it in &self.filters {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

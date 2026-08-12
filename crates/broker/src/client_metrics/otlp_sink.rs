@@ -69,7 +69,7 @@ impl OtlpForwarder {
         Self { tx: Some(tx) }
     }
 
-    #[allow(dead_code)] // diagnostic helper; used in tests and future health-check
+    #[cfg(test)]
     pub(crate) fn is_enabled(&self) -> bool {
         self.tx.is_some()
     }

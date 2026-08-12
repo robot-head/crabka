@@ -244,7 +244,7 @@ async fn finalizer_add_path_patches_metadata_and_requeues_immediately() {
 // ---- AdminClientLike-driven branch tests ----------------------------------
 //
 // These exercise the reconcile branches that need a live admin client:
-// happy-path create, no-op, partition increase, immutable-field rejection,
+// happy-path create, no-op, partition and replica changes,
 // config diff, and delete-with/without-preserve. The fake `AdminClientLike`
 // is pre-inserted into `ctx.admin_clients["demo"]`, so the real connect path
 // is skipped — the reconcile just locks the cached handle and dispatches
@@ -517,10 +517,10 @@ async fn partition_decrease_sets_immutable_field_changed() {
     assert!(cond["reason"] == "ImmutableFieldChanged");
 }
 
-/// `current.replication_factor=1` and spec=2 gives no mutating admin calls
-/// and status `Ready=False reason=ImmutableFieldChanged`.
+/// `current.replication_factor=1` and spec=2 submits a partition reassignment
+/// and reports the asynchronous transition explicitly.
 #[tokio::test]
-async fn replicas_change_sets_immutable_field_changed() {
+async fn replicas_change_submits_partition_reassignment() {
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));
     let client = mock_client(&state, NS);
     let ctx = Arc::new(fixture_ctx(client, NS));
@@ -543,23 +543,35 @@ async fn replicas_change_sets_immutable_field_changed() {
     reconcile(Arc::new(kt), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    for c in &calls {
-        assert!(
-            !matches!(
-                c,
-                RecordedCall::CreateTopics(_)
-                    | RecordedCall::DeleteTopics(_)
-                    | RecordedCall::CreatePartitions(_)
-                    | RecordedCall::IncrementalAlterConfigs(_)
-            ),
-            "no mutating admin calls expected when replicas change; got {c:?}",
-        );
-    }
+    let reassignment = calls
+        .iter()
+        .find_map(|call| match call {
+            RecordedCall::ReconcileTopicReplicationFactor {
+                topic,
+                replication_factor,
+                ..
+            } => Some((topic, replication_factor)),
+            _ => None,
+        })
+        .expect("replication-factor reconciliation call expected");
+    check!(reassignment.0 == TOPIC_NAME);
+    check!(*reassignment.1 == 2);
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            RecordedCall::CreateTopics(_)
+                | RecordedCall::DeleteTopics(_)
+                | RecordedCall::CreatePartitions(_)
+                | RecordedCall::IncrementalAlterConfigs(_)
+        )),
+        "replica change must use reassignment only; got {calls:?}",
+    );
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
     assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "ImmutableFieldChanged");
+    assert!(cond["reason"] == "Reassigning");
+    assert!(cond["message"] == "partition reassignment submitted");
 }
 
 /// Current overrides `{foo: 1}` and desired `{bar: 2}` gives

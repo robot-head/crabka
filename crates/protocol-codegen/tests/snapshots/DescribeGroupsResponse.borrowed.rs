@@ -35,6 +35,7 @@ impl<'a> DescribeGroupsResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_groups_response::DescribeGroupsResponse {
         crate::owned::describe_groups_response::DescribeGroupsResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -50,7 +51,7 @@ impl<'a> Encode for DescribeGroupsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -58,7 +59,7 @@ impl<'a> Encode for DescribeGroupsResponse<'a> {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -157,6 +158,7 @@ impl<'a> DescribedGroup<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_groups_response::DescribedGroup {
         crate::owned::describe_groups_response::DescribedGroup {
             error_code: (self.error_code),
@@ -172,7 +174,7 @@ impl<'a> DescribedGroup<'a> {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -181,7 +183,7 @@ impl<'a> DescribedGroup<'a> {
                 let () = put_compact_nullable_string(buf, self.error_message);
             } else {
                 let () = put_nullable_string(buf, self.error_message);
-            }
+            };
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -190,7 +192,7 @@ impl<'a> DescribedGroup<'a> {
                 let () = put_compact_string(buf, self.group_id);
             } else {
                 let () = put_string(buf, self.group_id);
-            }
+            };
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -199,7 +201,7 @@ impl<'a> DescribedGroup<'a> {
                 let () = put_compact_string(buf, self.group_state);
             } else {
                 let () = put_string(buf, self.group_state);
-            }
+            };
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -208,7 +210,7 @@ impl<'a> DescribedGroup<'a> {
                 let () = put_compact_string(buf, self.protocol_type);
             } else {
                 let () = put_string(buf, self.protocol_type);
-            }
+            };
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -217,7 +219,7 @@ impl<'a> DescribedGroup<'a> {
                 let () = put_compact_string(buf, self.protocol_data);
             } else {
                 let () = put_string(buf, self.protocol_data);
-            }
+            };
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
@@ -227,13 +229,13 @@ impl<'a> DescribedGroup<'a> {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i32(buf, self.authorized_operations)
+            put_i32(buf, self.authorized_operations);
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
@@ -297,7 +299,7 @@ impl<'a> DescribedGroup<'a> {
         }
         Ok(())
     }
-    fn decode_tagged_fields(out: &mut Self, buf: &mut &'a [u8], version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_tagged_fields(out: &mut Self, buf: &mut &'a [u8], _version: i16, flex: bool) -> Result<(), ProtocolError> {
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
@@ -431,6 +433,7 @@ impl<'a> DescribedGroupMember<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_groups_response::DescribedGroupMember {
         crate::owned::describe_groups_response::DescribedGroupMember {
             member_id: (self.member_id).to_string(),
@@ -451,42 +454,42 @@ impl<'a> Encode for DescribedGroupMember<'a> {
                 let () = put_compact_string(buf, self.member_id);
             } else {
                 let () = put_string(buf, self.member_id);
-            }
+            };
         }
         if version >= 4 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.group_instance_id);
             } else {
                 let () = put_nullable_string(buf, self.group_instance_id);
-            }
+            };
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_string(buf, self.client_id);
             } else {
                 let () = put_string(buf, self.client_id);
-            }
+            };
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_string(buf, self.client_host);
             } else {
                 let () = put_string(buf, self.client_host);
-            }
+            };
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_bytes(buf, self.member_metadata);
             } else {
                 let () = put_bytes(buf, self.member_metadata);
-            }
+            };
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_bytes(buf, self.member_assignment);
             } else {
                 let () = put_bytes(buf, self.member_assignment);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

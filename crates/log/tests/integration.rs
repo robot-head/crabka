@@ -2,19 +2,18 @@
 //!
 //! These tests carry `#[ignore]`, so `cargo test` does not pull Docker by
 //! default. Run them with `--include-ignored` or `--ignored`.
-//!
-//! The companion scenario `jvm_consumes_rust_written_log_dir` is deferred. See
-//! `crates/log/tests/KNOWN_ISSUES.md`.
-
 use std::{
     path::Path,
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use bytes::Bytes;
 use crabka_log::{Log, LogConfig};
+use crabka_protocol::records::{Record, RecordBatch};
 use crabka_units::prelude::gibibytes;
 use tempfile::tempdir;
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{ImageExt, core::Mount, runners::AsyncRunner};
 use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
 
 const TOPIC: &str = "crabka-log-itest";
@@ -147,4 +146,112 @@ async fn read_jvm_produced_log_dir() {
     assert2::assert!(!out.batches.is_empty());
     let total_records: usize = out.batches.iter().map(|b| b.records.len()).sum();
     assert2::assert!(total_records >= 3);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn jvm_consumes_rust_written_log_dir() {
+    let host_tmp = tempdir().expect("tempdir");
+    let host_data = host_tmp
+        .path()
+        .to_str()
+        .expect("temporary path must be UTF-8");
+    let kafka = Kafka::default()
+        // The broker and the test process have different host UIDs. Root is
+        // limited to this disposable container and can reopen both sets of
+        // files after the restart.
+        .with_user("root")
+        .with_mount(Mount::bind_mount(host_data, "/var/lib/kafka/data"))
+        .start()
+        .await
+        .expect("start kafka container");
+    let container_id = kafka.id().to_string();
+    let bootstrap = "localhost:9092";
+
+    docker_exec(
+        &container_id,
+        &[
+            "kafka-topics",
+            "--create",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            bootstrap,
+        ],
+    );
+    docker_exec(
+        &container_id,
+        &["chmod", "-R", "a+rwX", "/var/lib/kafka/data"],
+    );
+    kafka
+        .stop_with_timeout(Some(30))
+        .await
+        .expect("stop kafka container");
+
+    let timestamp = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_millis(),
+    )
+    .expect("timestamp must fit i64");
+    let mut batch = RecordBatch {
+        base_timestamp: timestamp,
+        max_timestamp: timestamp + 2,
+        last_offset_delta: 2,
+        records: (0..3)
+            .map(|offset_delta| Record {
+                timestamp_delta: i64::from(offset_delta),
+                offset_delta,
+                key: Some(Bytes::from(format!("k{}", offset_delta + 1))),
+                value: Some(Bytes::from(format!("v{}", offset_delta + 1))),
+                ..Record::default()
+            })
+            .collect(),
+        ..RecordBatch::default()
+    };
+    let partition_dir = host_tmp.path().join(format!("{TOPIC}-0"));
+    let mut log = Log::open(
+        partition_dir,
+        LogConfig {
+            flush_on_append: true,
+            ..LogConfig::default()
+        },
+    )
+    .expect("open JVM partition with crabka-log");
+    log.append(&mut batch).expect("append Rust-written batch");
+    drop(log);
+
+    kafka.start().await.expect("restart kafka container");
+    let out = docker_exec(
+        &container_id,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            bootstrap,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "3",
+            "--timeout-ms",
+            "20000",
+            "--property",
+            "print.key=true",
+            "--property",
+            "key.separator=:",
+        ],
+    );
+    assert2::assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .collect::<Vec<_>>()
+            == ["k1:v1", "k2:v2", "k3:v3"]
+    );
 }

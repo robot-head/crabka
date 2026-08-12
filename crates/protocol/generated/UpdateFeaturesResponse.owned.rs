@@ -54,7 +54,7 @@ impl Encode for UpdateFeaturesResponse {
                 for it in &self.results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

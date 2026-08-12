@@ -53,7 +53,7 @@ impl Encode for DescribeQuorumResponse {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 2 {
             {
@@ -61,7 +61,7 @@ impl Encode for DescribeQuorumResponse {
                 for it in &self.nodes {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -193,7 +193,7 @@ impl Encode for TopicData {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -329,7 +329,7 @@ impl PartitionData {
                 for it in &self.current_voters {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -345,7 +345,7 @@ impl PartitionData {
                 for it in &self.observers {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -617,7 +617,7 @@ impl Encode for Node {
                 for it in &self.listeners {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

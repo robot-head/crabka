@@ -35,15 +35,15 @@ path = "src/bin/schema-compat-check.rs"
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
-crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
-crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
-crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
-crabka-security = { version = "0.3.9", path = "../security" }
-crabka-authz = { version = "0.3.8", path = "../authz" }
-crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
-crabka-metadata = { version = "0.3.8", path = "../metadata" }
-crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
+crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
+crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-security = { version = "0.4.0", path = "../security" }
+crabka-authz = { version = "0.4.0", path = "../authz" }
+crabka-logfmt = { version = "0.4.0", path = "../logfmt" }
+crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-telemetry = { version = "0.4.0", path = "../telemetry" }
 crabka-units = { workspace = true }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
@@ -79,8 +79,8 @@ refined_type.workspace = true
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
-crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
+crabka-broker = { version = "0.4.0", path = "../broker", features = ["test-helpers"] }
+crabka-client-consumer = { version = "0.4", path = "../client-consumer" }
 datatest-stable = { workspace = true }
 ring = { workspace = true }
 tempfile.workspace = true

@@ -45,18 +45,108 @@ const UPGRADE_TYPE_UNSAFE_DOWNGRADE: i8 = 3;
 /// finalized feature rather than move it to another level.
 const DELETE_FINALIZED_LEVEL: i16 = 0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateType {
+    Upgrade,
+    SafeDowngrade,
+    UnsafeDowngrade,
+}
+
+fn update_type(version: i16, allow_downgrade: bool, upgrade_type: i8) -> Option<UpdateType> {
+    if version == 0 {
+        return Some(if allow_downgrade {
+            UpdateType::SafeDowngrade
+        } else {
+            UpdateType::Upgrade
+        });
+    }
+    match upgrade_type {
+        1 => Some(UpdateType::Upgrade),
+        UPGRADE_TYPE_SAFE_DOWNGRADE => Some(UpdateType::SafeDowngrade),
+        UPGRADE_TYPE_UNSAFE_DOWNGRADE => Some(UpdateType::UnsafeDowngrade),
+        _ => None,
+    }
+}
+
 /// KIP-584 `FeatureUpdate.UpgradeType`: 1 is UPGRADE, 2 is `SAFE_DOWNGRADE`,
 /// and 3 is `UNSAFE_DOWNGRADE`. Request v0 comes from before this field and
 /// carries the boolean `allow_downgrade` flag instead.
+#[cfg(test)]
 fn downgrade_allowed(version: i16, allow_downgrade: bool, upgrade_type: i8) -> bool {
-    if version == 0 {
-        allow_downgrade
-    } else {
-        matches!(
-            upgrade_type,
-            UPGRADE_TYPE_SAFE_DOWNGRADE | UPGRADE_TYPE_UNSAFE_DOWNGRADE
-        )
+    update_type(version, allow_downgrade, upgrade_type)
+        .is_some_and(|kind| kind != UpdateType::Upgrade)
+}
+
+fn unsupported_registered_node(
+    image: &crabka_metadata::MetadataImage,
+    feature: &str,
+    level: i16,
+) -> Option<String> {
+    for broker in image.brokers() {
+        if !broker
+            .features
+            .get(feature)
+            .is_some_and(|&(min, max)| min <= level && level <= max)
+        {
+            return Some(format!(
+                "Broker {} does not support {feature} level {level}.",
+                broker.node_id
+            ));
+        }
     }
+    for controller in image.controllers() {
+        if !controller
+            .features
+            .get(feature)
+            .is_some_and(|&(min, max)| min <= level && level <= max)
+        {
+            return Some(format!(
+                "Controller {} does not support {feature} level {level}.",
+                controller.node_id
+            ));
+        }
+    }
+    None
+}
+
+fn registered_node_without_metadata_downgrade_capability(
+    image: &crabka_metadata::MetadataImage,
+) -> Option<String> {
+    let supports_downgrade = |features: &std::collections::BTreeMap<String, (i16, i16)>| {
+        features
+            .get(crabka_metadata::metadata_version::METADATA_DOWNGRADE_CAPABILITY_FEATURE)
+            .is_some_and(|&(min, max)| {
+                min <= crabka_metadata::metadata_version::METADATA_DOWNGRADE_CAPABILITY_LEVEL
+                    && crabka_metadata::metadata_version::METADATA_DOWNGRADE_CAPABILITY_LEVEL <= max
+            })
+    };
+    for broker in image.brokers() {
+        if !supports_downgrade(&broker.features) {
+            return Some(format!(
+                "Broker {} does not support online metadata.version downgrade.",
+                broker.node_id
+            ));
+        }
+    }
+    for controller in image.controllers() {
+        if !supports_downgrade(&controller.features) {
+            return Some(format!(
+                "Controller {} does not support online metadata.version downgrade.",
+                controller.node_id
+            ));
+        }
+    }
+    None
+}
+
+fn unregistered_controller(
+    image: &crabka_metadata::MetadataImage,
+) -> Option<crabka_metadata::NodeId> {
+    image
+        .voters()
+        .iter()
+        .map(|voter| voter.id)
+        .find(|&id| image.controller(id).is_none())
 }
 
 #[tracing::instrument(
@@ -178,6 +268,7 @@ fn validate_updates(
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
     let mut records = Vec::new();
+    let mut metadata_version_record = None;
     for upd in &request.feature_updates {
         let name = upd.feature.clone();
         if !seen.insert(name.clone()) {
@@ -212,7 +303,15 @@ fn validate_updates(
             continue;
         }
         let current = image.finalized_features().get(&name).copied();
-        let allow_dg = downgrade_allowed(version, upd.allow_downgrade, upd.upgrade_type);
+        let Some(update_type) = update_type(version, upd.allow_downgrade, upd.upgrade_type) else {
+            results.push(row(
+                name,
+                codes::INVALID_UPDATE_VERSION,
+                "The controller does not support the given upgrade type.",
+            ));
+            continue;
+        };
+        let allow_dg = update_type != UpdateType::Upgrade;
 
         let (_min, max) = feat.supported_range();
         if level < 0 || level > max {
@@ -223,11 +322,82 @@ fn validate_updates(
             ));
             continue;
         }
+        if let Some(cur) = current {
+            if level < cur && !allow_dg {
+                results.push(row(
+                    name,
+                    codes::INVALID_UPDATE_VERSION,
+                    "Can not downgrade a finalized feature without setting the downgrade flag.",
+                ));
+                continue;
+            }
+            if level > cur && allow_dg {
+                results.push(row(
+                    name,
+                    codes::INVALID_UPDATE_VERSION,
+                    "Can not downgrade to a newer feature version.",
+                ));
+                continue;
+            }
+        }
+        let mut downgrade_records = Vec::new();
+        let mut projected_image = None;
+        if name == crabka_metadata::metadata_version::METADATA_VERSION_FEATURE
+            && current.is_some_and(|cur| level < cur)
+        {
+            if level < crabka_metadata::metadata_version::ONLINE_DOWNGRADE_MIN_LEVEL {
+                results.push(row(
+                    name,
+                    codes::INVALID_UPDATE_VERSION,
+                    "Online metadata.version downgrade requires 3.7-IV0 or newer.",
+                ));
+                continue;
+            }
+            if let Some(controller) = unregistered_controller(image) {
+                results.push(row(
+                    name,
+                    codes::INVALID_UPDATE_VERSION,
+                    &format!(
+                        "Controller {controller} has not registered, so its metadata.version support cannot be verified."
+                    ),
+                ));
+                continue;
+            }
+            if let Some(message) = registered_node_without_metadata_downgrade_capability(image) {
+                results.push(row(name, codes::INVALID_UPDATE_VERSION, &message));
+                continue;
+            }
+            downgrade_records = image.metadata_version_downgrade_records(level);
+            if !downgrade_records.is_empty() && update_type != UpdateType::UnsafeDowngrade {
+                results.push(row(
+                    name,
+                    codes::INVALID_UPDATE_VERSION,
+                    "Refusing a lossy metadata.version downgrade; retry with UNSAFE_DOWNGRADE to discard incompatible metadata.",
+                ));
+                continue;
+            }
+            if !downgrade_records.is_empty() {
+                let mut projected = image.clone();
+                for record in &downgrade_records {
+                    projected.apply(record);
+                }
+                projected_image = Some(projected);
+            }
+        }
+        if let Some(message) = unsupported_registered_node(image, &name, level) {
+            results.push(row(name, codes::INVALID_UPDATE_VERSION, &message));
+            continue;
+        }
         // Per-feature downgrade-safety floor (KIP-584 unsafe downgrade): a
         // finalize below the level the live image requires is rejected even
         // with the downgrade flag set. `level == 0` (delete) is handled by the
         // tombstone path below, not the floor.
-        let floor = feat.min_required_floor(image);
+        // Unsafe metadata.version downgrades validate against the image that
+        // will exist after their explicit cleanup records apply. Computing the
+        // floor from the pre-cleanup image would reject the very state removal
+        // the caller authorized.
+        let target_image = projected_image.as_ref().unwrap_or(image);
+        let floor = feat.min_required_floor(target_image);
         if level > 0 && level < floor {
             results.push(row(
                 name,
@@ -238,7 +408,7 @@ fn validate_updates(
         }
         // KIP-1022 dependencies: every dependency must already be finalized
         // at >= its required level in the target image.
-        if !dependencies_met(image, feat.dependencies(level)) {
+        if !dependencies_met(target_image, feat.dependencies(level)) {
             results.push(row(
                 name,
                 codes::INVALID_UPDATE_VERSION,
@@ -265,25 +435,24 @@ fn validate_updates(
                 ));
                 continue;
             }
-        } else if let Some(cur) = current
-            && level < cur
-            && !allow_dg
-        {
-            results.push(row(
-                name,
-                codes::INVALID_UPDATE_VERSION,
-                "Can not downgrade a finalized feature without setting the downgrade flag.",
-            ));
-            continue;
         }
 
         // Accepted.
-        records.push(MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+        let feature_record = MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: name.clone(),
             level,
-        }));
+        });
+        if name == crabka_metadata::metadata_version::METADATA_VERSION_FEATURE {
+            records.extend(downgrade_records);
+            metadata_version_record = Some(feature_record);
+        } else {
+            records.push(feature_record);
+        }
         results.push(row(name, codes::NONE, ""));
     }
+    // KIP-1155: the metadata.version record is always emitted last, after any
+    // records that remove fields unavailable at the target version.
+    records.extend(metadata_version_record);
     (results, records)
 }
 
@@ -487,6 +656,12 @@ mod tests {
     }
 
     #[test]
+    fn update_type_rejects_unknown_v1_value() {
+        assert!(update_type(1, false, 0).is_none());
+        assert!(update_type(1, false, 4).is_none());
+    }
+
+    #[test]
     fn row_sets_message_only_on_error() {
         let ok = row("metadata.version".into(), codes::NONE, "x");
         assert!(ok.feature == "metadata.version");
@@ -634,6 +809,331 @@ mod tests {
         }));
         assert!(dependencies_met(&image, &[("metadata.version", 22)]));
         assert!(!dependencies_met(&image, &[("metadata.version", 26)]));
+    }
+
+    fn image_with_directory(metadata_version: i16) -> crabka_metadata::MetadataImage {
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        let supported_features = crabka_metadata::supported_feature_ranges();
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+            level: metadata_version,
+        }));
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            crabka_metadata::BrokerRegistrationRecord {
+                node_id: crabka_metadata::NodeId(1),
+                broker_epoch: 9,
+                incarnation_id: uuid::Uuid::from_u128(1),
+                host: "broker-1".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+                log_dirs: vec![uuid::Uuid::from_u128(0xD2)],
+                features: supported_features.clone(),
+            },
+        ));
+        image.apply(&MetadataRecord::V1Partition(
+            crabka_metadata::PartitionRecord {
+                topic: "orders".into(),
+                partition: 0,
+                leader: crabka_metadata::NodeId(1),
+                replicas: vec![crabka_metadata::NodeId(1)],
+                isr: vec![crabka_metadata::NodeId(1)],
+                directories: vec![uuid::Uuid::from_u128(0xD1)],
+                ..Default::default()
+            },
+        ));
+        image
+    }
+
+    #[test]
+    fn unsafe_metadata_downgrade_cleans_lossy_fields_before_version_record() {
+        let image = image_with_directory(crate::features::METADATA_VERSION_MAX);
+        let target = crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL - 1;
+
+        let (safe_results, safe_records) = validate_updates(
+            &validate_only(vec![metadata_update(target, UPGRADE_TYPE_SAFE_DOWNGRADE)]),
+            &image,
+            VERSION,
+        );
+        assert!(safe_results[0].error_code == codes::INVALID_UPDATE_VERSION);
+        assert!(
+            safe_results[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("lossy"))
+        );
+        assert!(safe_records.is_empty());
+
+        let (unsafe_results, unsafe_records) = validate_updates(
+            &validate_only(vec![metadata_update(target, UPGRADE_TYPE_UNSAFE_DOWNGRADE)]),
+            &image,
+            VERSION,
+        );
+        assert!(unsafe_results[0].error_code == codes::NONE);
+        let expected = vec![
+            MetadataRecord::V1BrokerRegistration(crabka_metadata::BrokerRegistrationRecord {
+                node_id: crabka_metadata::NodeId(1),
+                broker_epoch: 9,
+                incarnation_id: uuid::Uuid::from_u128(1),
+                host: "broker-1".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+                log_dirs: vec![],
+                features: crabka_metadata::supported_feature_ranges(),
+            }),
+            MetadataRecord::V1PartitionDirAssignment(
+                crabka_metadata::PartitionDirAssignmentRecord {
+                    topic: "orders".into(),
+                    partition: 0,
+                    replica: crabka_metadata::NodeId(1),
+                    directory: uuid::Uuid::nil(),
+                },
+            ),
+            MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level: target,
+            }),
+        ];
+        assert!(unsafe_records == expected);
+
+        let mut projected = image;
+        for record in &unsafe_records {
+            projected.apply(record);
+        }
+        assert!(
+            projected
+                .partition("orders", 0)
+                .expect("partition")
+                .directories
+                == vec![uuid::Uuid::nil()]
+        );
+        assert!(
+            projected
+                .broker(crabka_metadata::NodeId(1))
+                .expect("broker")
+                .log_dirs
+                .is_empty()
+        );
+        assert!(projected.finalized_metadata_version() == Some(target));
+    }
+
+    #[test]
+    fn safe_metadata_downgrade_preserves_representable_directory_fields() {
+        let image = image_with_directory(crate::features::METADATA_VERSION_MAX);
+        let target = crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL;
+
+        let (results, records) = validate_updates(
+            &validate_only(vec![metadata_update(target, UPGRADE_TYPE_SAFE_DOWNGRADE)]),
+            &image,
+            VERSION,
+        );
+
+        assert!(results[0].error_code == codes::NONE);
+        assert!(
+            records
+                == vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                    name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                    level: target,
+                })]
+        );
+    }
+
+    #[test]
+    fn metadata_downgrade_rejects_registered_nodes_without_capability() {
+        let supported = std::collections::BTreeMap::from([(
+            crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+            (
+                crate::features::METADATA_VERSION_MIN,
+                crate::features::METADATA_VERSION_MAX,
+            ),
+        )]);
+        let registrations = [
+            (
+                MetadataRecord::V1BrokerRegistration(crabka_metadata::BrokerRegistrationRecord {
+                    node_id: crabka_metadata::NodeId(2),
+                    broker_epoch: 0,
+                    incarnation_id: uuid::Uuid::nil(),
+                    host: String::new(),
+                    port: 0,
+                    rack: None,
+                    log_dirs: vec![],
+                    endpoints: vec![],
+                    features: supported.clone(),
+                }),
+                "Broker 2",
+            ),
+            (
+                MetadataRecord::V1ControllerRegistration(
+                    crabka_metadata::ControllerRegistrationRecord {
+                        node_id: crabka_metadata::NodeId(3),
+                        incarnation_id: uuid::Uuid::nil(),
+                        zk_migration_ready: false,
+                        endpoints: vec![],
+                        features: supported,
+                    },
+                ),
+                "Controller 3",
+            ),
+        ];
+
+        for (registration, expected_node) in registrations {
+            let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+            image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level: crate::features::METADATA_VERSION_MAX,
+            }));
+            image.apply(&registration);
+            let (results, records) = validate_updates(
+                &validate_only(vec![metadata_update(
+                    crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL,
+                    UPGRADE_TYPE_SAFE_DOWNGRADE,
+                )]),
+                &image,
+                VERSION,
+            );
+
+            assert!(results[0].error_code == codes::INVALID_UPDATE_VERSION);
+            assert!(
+                results[0].error_message.as_deref().is_some_and(|message| {
+                    message.contains(expected_node)
+                        && message.contains("does not support online metadata.version downgrade")
+                }),
+                "{results:?}"
+            );
+            assert!(records.is_empty());
+        }
+    }
+
+    #[test]
+    fn metadata_update_checks_every_capable_registered_node_supports_target() {
+        let mut supported = crabka_metadata::supported_feature_ranges();
+        supported.insert(
+            crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+            (
+                crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL,
+                crate::features::METADATA_VERSION_MAX,
+            ),
+        );
+        let registrations = [
+            (
+                MetadataRecord::V1BrokerRegistration(crabka_metadata::BrokerRegistrationRecord {
+                    node_id: crabka_metadata::NodeId(2),
+                    broker_epoch: 0,
+                    incarnation_id: uuid::Uuid::nil(),
+                    host: String::new(),
+                    port: 0,
+                    rack: None,
+                    log_dirs: vec![],
+                    endpoints: vec![],
+                    features: supported.clone(),
+                }),
+                "Broker 2",
+            ),
+            (
+                MetadataRecord::V1ControllerRegistration(
+                    crabka_metadata::ControllerRegistrationRecord {
+                        node_id: crabka_metadata::NodeId(3),
+                        incarnation_id: uuid::Uuid::nil(),
+                        zk_migration_ready: false,
+                        endpoints: vec![],
+                        features: supported,
+                    },
+                ),
+                "Controller 3",
+            ),
+        ];
+
+        for (registration, expected_node) in registrations {
+            let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+            image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level: crate::features::METADATA_VERSION_MAX,
+            }));
+            image.apply(&registration);
+            let (results, records) = validate_updates(
+                &validate_only(vec![metadata_update(
+                    crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL - 1,
+                    UPGRADE_TYPE_SAFE_DOWNGRADE,
+                )]),
+                &image,
+                VERSION,
+            );
+
+            assert!(results[0].error_code == codes::INVALID_UPDATE_VERSION);
+            assert!(
+                results[0]
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains(expected_node)),
+                "{results:?}"
+            );
+            assert!(records.is_empty());
+        }
+    }
+
+    #[test]
+    fn metadata_downgrade_rejects_unregistered_quorum_controller() {
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+            level: crate::features::METADATA_VERSION_MAX,
+        }));
+        image.apply(&MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
+            voters: crabka_metadata::voters::VoterSet::from_voters([
+                crabka_metadata::voters::Voter {
+                    id: crabka_metadata::NodeId(3),
+                    directory_id: uuid::Uuid::from_u128(3),
+                    endpoints: vec![],
+                    kraft_version: crabka_metadata::voters::KRaftVersionRange::default(),
+                },
+            ]),
+        }));
+
+        let (results, records) = validate_updates(
+            &validate_only(vec![metadata_update(
+                crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL,
+                UPGRADE_TYPE_SAFE_DOWNGRADE,
+            )]),
+            &image,
+            VERSION,
+        );
+
+        assert!(results[0].error_code == codes::INVALID_UPDATE_VERSION);
+        assert!(
+            results[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Controller 3 has not registered")),
+            "{results:?}"
+        );
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn downgrade_type_cannot_raise_a_finalized_feature() {
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+            level: crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL,
+        }));
+        let (results, records) = validate_updates(
+            &validate_only(vec![metadata_update(
+                crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL + 1,
+                UPGRADE_TYPE_SAFE_DOWNGRADE,
+            )]),
+            &image,
+            VERSION,
+        );
+
+        assert!(results[0].error_code == codes::INVALID_UPDATE_VERSION);
+        assert!(
+            results[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("newer"))
+        );
+        assert!(records.is_empty());
     }
 
     #[tokio::test]
@@ -805,9 +1305,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_accepts_floor_level_with_safe_downgrade() {
+    async fn handle_accepts_lossless_safe_metadata_downgrade() {
         let req = validate_only(vec![metadata_update(
-            crate::features::METADATA_VERSION_MIN,
+            crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL,
             2,
         )]);
 
@@ -823,7 +1323,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_rejects_level_below_floor_with_floor_message() {
+    async fn handle_rejects_metadata_downgrade_below_online_floor() {
         let req = validate_only(vec![metadata_update(
             crate::features::METADATA_VERSION_MIN - 1,
             2,
@@ -838,13 +1338,13 @@ mod tests {
         assert_row_error(
             &resp,
             crate::features::METADATA_VERSION,
-            "below the level required",
+            "Online metadata.version downgrade",
         );
         broker_handle.shutdown().await;
     }
 
     #[tokio::test]
-    async fn handle_allows_delete_zero_when_downgrade_allowed() {
+    async fn handle_rejects_online_metadata_version_deletion() {
         let req = validate_only(vec![metadata_update(0, 2)]);
 
         let (resp, broker_handle, _dir) = Box::pin(call_with(
@@ -853,8 +1353,11 @@ mod tests {
         ))
         .await;
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        assert_row_error(
+            &resp,
+            crate::features::METADATA_VERSION,
+            "Online metadata.version downgrade",
+        );
         broker_handle.shutdown().await;
     }
 

@@ -22,8 +22,11 @@ use kube::{
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    controller::common::{FIELD_MANAGER, ReconcileError, read_pem_key},
-    crd::{KafkaUser, user::TlsAuth},
+    controller::{
+        cluster_ca::{self, WhichCa},
+        common::{FIELD_MANAGER, ReconcileError, read_pem_key},
+    },
+    crd::{Authentication, Kafka, KafkaUser, user::TlsAuth},
 };
 
 /// Default cert lifetime in days, used when `TlsAuth::validity_days` is
@@ -44,6 +47,34 @@ pub(crate) struct UserCertStatus {
     pub issued_new: bool,
 }
 
+/// Loads the active clients CA without advancing its staged rotation and then
+/// reconciles one user's TLS Secret.
+pub(crate) async fn reconcile_user_cert_secret(
+    secret_api: &Api<Secret>,
+    obj: &KafkaUser,
+    kafka: &Kafka,
+    auth: &TlsAuth,
+) -> Result<UserCertStatus, ReconcileError> {
+    let ca = cluster_ca::reconcile_ca(
+        secret_api,
+        kafka,
+        WhichCa::Clients,
+        false,
+        false,
+        false,
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+    ensure_user_cert_secret(
+        secret_api,
+        obj,
+        &ca.signing_material,
+        &ca.trust_bundle_pem,
+        auth,
+    )
+    .await
+}
+
 /// Gets the cert Secret of one user, or creates it.
 ///
 /// The function is idempotent. When the existing Secret carries a cert
@@ -54,6 +85,7 @@ pub(crate) async fn ensure_user_cert_secret(
     secret_api: &Api<Secret>,
     obj: &KafkaUser,
     ca_material: &CaMaterial,
+    ca_trust_bundle_pem: &str,
     auth: &TlsAuth,
 ) -> Result<UserCertStatus, ReconcileError> {
     let name = obj.name_any();
@@ -63,7 +95,24 @@ pub(crate) async fn ensure_user_cert_secret(
     if let Some(existing) = secret_api.get_opt(&name).await?
         && let Some(not_after) = read_user_cert_not_after(&existing)
         && !is_cert_expiring_soon(&not_after, renewal, OffsetDateTime::now_utc())
+        && read_pem_key(&existing, "user.crt")
+            .is_some_and(|cert| cert_is_signed_by(&cert, &ca_material.cert_pem))
     {
+        if read_pem_key(&existing, "ca.crt").as_deref() != Some(ca_trust_bundle_pem) {
+            let patch = Secret {
+                data: Some(
+                    [(
+                        "ca.crt".into(),
+                        ByteString(ca_trust_bundle_pem.as_bytes().to_vec()),
+                    )]
+                    .into(),
+                ),
+                ..Default::default()
+            };
+            secret_api
+                .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
         return Ok(UserCertStatus {
             not_after: format_rfc3339(not_after)?,
             issued_new: false,
@@ -74,7 +123,7 @@ pub(crate) async fn ensure_user_cert_secret(
         ca::issue_user_cert(&ca_material.cert_pem, &ca_material.key_pem, &name, validity)
             .map_err(ReconcileError::Ca)?;
 
-    let secret = render_user_cert_secret(obj, &user_cert, &ca_material.cert_pem)?;
+    let secret = render_user_cert_secret(obj, &user_cert, ca_trust_bundle_pem)?;
     let params = PatchParams {
         field_manager: Some(FIELD_MANAGER.into()),
         force: true,
@@ -87,6 +136,33 @@ pub(crate) async fn ensure_user_cert_secret(
         not_after: user_cert.not_after,
         issued_new: true,
     })
+}
+
+/// Reissues each live TLS user's certificate against the active clients CA.
+///
+/// Already-updated certificates are reused after signature verification. A
+/// retry after a partial Kubernetes failure therefore only patches the users
+/// that still carry an old-key certificate.
+pub(crate) async fn reissue_tls_user_cert_secrets(
+    secret_api: &Api<Secret>,
+    users: &[KafkaUser],
+    ca_material: &CaMaterial,
+    ca_trust_bundle_pem: &str,
+) -> Result<usize, ReconcileError> {
+    let mut issued = 0;
+    for user in users
+        .iter()
+        .filter(|user| user.meta().deletion_timestamp.is_none())
+    {
+        let Authentication::Tls(auth) = &user.spec.authentication else {
+            continue;
+        };
+        let status =
+            ensure_user_cert_secret(secret_api, user, ca_material, ca_trust_bundle_pem, auth)
+                .await?;
+        issued += usize::from(status.issued_new);
+    }
+    Ok(issued)
 }
 
 /// Composes the Kafka principal for a TLS user, which is
@@ -133,6 +209,24 @@ fn cert_not_after_from_pem(pem: &str) -> Option<OffsetDateTime> {
     let cert = p.parse_x509().ok()?;
     let ts = cert.validity().not_after.timestamp();
     OffsetDateTime::from_unix_timestamp(ts).ok()
+}
+
+fn cert_is_signed_by(cert_pem: &str, ca_cert_pem: &str) -> bool {
+    use x509_parser::pem::parse_x509_pem;
+
+    let Ok((_, cert_pem)) = parse_x509_pem(cert_pem.as_bytes()) else {
+        return false;
+    };
+    let Ok(cert) = cert_pem.parse_x509() else {
+        return false;
+    };
+    let Ok((_, ca_pem)) = parse_x509_pem(ca_cert_pem.as_bytes()) else {
+        return false;
+    };
+    let Ok(ca) = ca_pem.parse_x509() else {
+        return false;
+    };
+    cert.verify_signature(Some(ca.public_key())).is_ok()
 }
 
 fn render_user_cert_secret(
@@ -256,6 +350,24 @@ mod tests {
         ] {
             assert!(cert_not_after_from_pem(input).is_none(), "case {input:?}");
         }
+    }
+
+    #[test]
+    fn user_cert_matches_only_its_signing_ca_key() {
+        let old_ca = ca::generate_clients_ca("old", 365).expect("old CA");
+        let new_ca = ca::generate_clients_ca("new", 365).expect("new CA");
+        let user = ca::issue_user_cert(&old_ca.cert_pem, &old_ca.key_pem, "alice", 365)
+            .expect("user cert");
+
+        assert!(cert_is_signed_by(&user.cert_pem, &old_ca.cert_pem));
+        assert!(!cert_is_signed_by(&user.cert_pem, &new_ca.cert_pem));
+    }
+
+    #[test]
+    fn malformed_certificate_never_matches_ca() {
+        let ca = ca::generate_clients_ca("ca", 365).expect("CA");
+        assert!(!cert_is_signed_by("bad cert", &ca.cert_pem));
+        assert!(!cert_is_signed_by(&ca.cert_pem, "bad CA"));
     }
 
     #[test]

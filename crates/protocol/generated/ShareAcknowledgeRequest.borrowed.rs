@@ -84,7 +84,7 @@ impl Encode for ShareAcknowledgeRequest<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -233,7 +233,7 @@ impl Encode for AcknowledgeTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -340,7 +340,7 @@ impl Encode for AcknowledgePartition {
                 for it in &self.acknowledgement_batches {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -447,7 +447,7 @@ impl Encode for AcknowledgementBatch {
                 for it in &self.acknowledge_types {
                     put_i8(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

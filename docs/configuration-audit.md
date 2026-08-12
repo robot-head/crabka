@@ -84,6 +84,12 @@ defaults remain configurable even when the scanner reports the default constant.
   `SEND_ERROR_BACKOFF`, `UNKNOWN_TOPIC_RETRY_DELAY`, `EPOCH_FENCE_BACKOFF`,
   `UNEXPECTED_ERROR_BACKOFF`, `RECONNECT_INITIAL_DELAY`, and
   `RECONNECT_DELAY_CAP`; and the AddRaftVoter request timeout.
+- Diskless WAL projection: `DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL`,
+  `DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE`, `DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG`,
+  and `DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT`. Production maps these
+  defaults through the `diskless_wal_flush_interval`,
+  `diskless_wal_flush_max_size`, `diskless_wal_trim_safety_lag`, and
+  `diskless_wal_index_projection_timeout` runtime settings.
 - Coordinators: `ACTOR_MAILBOX_CAPACITY`, `SESSION_EXPIRY_TICK_INTERVAL`,
   `SHUTDOWN_ACK_TIMEOUT`, `DEFAULT_SESSION_TIMEOUT`,
   `DEFAULT_HEARTBEAT_INTERVAL`, `DEFAULT_MIN_SESSION_TIMEOUT`,
@@ -96,8 +102,7 @@ defaults remain configurable even when the scanner reports the default constant.
   `coordinator/unified/share/config.rs` and
   `coordinator/unified/streams/config.rs`; and the
   `share_session_cache_max_when_unlimited` fallback of 10,000 sessions in
-  `share_partition/manager.rs`. The Streams `enable`, `max_groups`, and
-  `max_size` fields and the 100 ms Share lock-sweeper floor are fixed
+  `share_partition/manager.rs`. The 100 ms Share lock-sweeper floor is fixed
   separately below.
 - Recovery and quota policy: `AGGRESSIVE_DEADLINE`, `BALANCED_DEADLINE`,
   `OPERATOR_RECOVERY_DEADLINE`, the maximum quota throttle delay, and
@@ -199,10 +204,6 @@ defaults remain configurable even when the scanner reports the default constant.
 - `ACKS_ALL`, accepted transaction-state arrays, share delivery-state flags,
   topology error states, and fixed collection dimensions derived from those
   protocol shapes: protocol invariants.
-- `FLUSH_INTERVAL`, `FLUSH_MAX_BYTES`, `DEFAULT_TRIM_SAFETY_LAG`, and the
-  diskless projection timeout in `diskless/flusher.rs`: staged code with no
-  production caller. Exposing them now would create no-op configuration;
-  reclassify them when production starts the flusher.
 - The heartbeat polling clamp of 500 ms through 1 s, the share lock-sweeper
   minimum of 100 ms, and fallback rebalance deadlines derived from configured
   group timeouts: algorithmic safety bounds or derived values, not independent
@@ -217,9 +218,6 @@ defaults remain configurable even when the scanner reports the default constant.
   `FALLBACK_REBALANCE_TIMEOUT_MS`, `FALLBACK_REBALANCE_TIMEOUT_MS_I32`, and
   `FALLBACK_HEARTBEAT_INTERVAL_MS`: classic coordinator conversion fallbacks
   derived from configured policy, not independent settings.
-- Streams `enable`, `max_groups`, and `max_size`: staged fields with no
-  production behavior. Exposing overrides now would create no-op
-  configuration; reclassify them when the Streams coordinator consumes them.
 - Model-checking constants, generated model inputs, and values in files matched
   by `*_model.rs`: verification inputs excluded directly by the scanner.
 
@@ -6626,29 +6624,29 @@ All 60 Gres FDW, 154 Gres and 772 operator library tests, generated-CRD parity,
 workspace all-target Clippy, nightly formatting and diff hygiene pass. The
 repository-wide hardcoded operational-value audit remains active.
 
-## Broker Diskless WAL Local Replica Policy
+## Broker diskless WAL voter policy
 
-Diskless partitions no longer assume three local durable WAL copies inside
-the quorum constructor. `BrokerConfig` and the broker runtime TOML now own a
-positive `diskless_wal_local_replica_count`, preserving three as the default.
-The broker exposes `--diskless-wal-local-replica-count`, backed by
-`CRABKA_DISKLESS_WAL_LOCAL_REPLICA_COUNT`; `Kafka.spec.broker.tuning` exposes
-the matching `disklessWalLocalReplicaCount` field. CLI and CRD inputs use the
-repository's `refined_type` positive-count boundary.
+Diskless partitions use `diskless_wal_local_replica_count` as the broker voter
+count for each WAL quorum. The legacy name remains in `BrokerConfig` and the
+runtime TOML. The default is three. The broker exposes
+`--diskless-wal-local-replica-count`, backed by
+`CRABKA_DISKLESS_WAL_LOCAL_REPLICA_COUNT`. `Kafka.spec.broker.tuning` exposes
+the matching `disklessWalLocalReplicaCount` field. CLI and CRD inputs require a
+positive count, and broker validation also requires an odd count.
 
-The resolved count reaches startup recovery, replication reconciliation,
-topic creation, partition growth and transactional first-touch, and controls
-the exact set of local replica directories and quorum voters. Existing quorum
-state still fails closed if a restart changes the voter set.
+The count reaches startup recovery, replication reconciliation, topic
+creation, partition growth, and transactional first touch. Placement selects
+that many registered brokers on distinct configured racks. An incomplete
+placement fails closed. Each voter stores and fsyncs one local follower log.
+The leader acknowledges a write only after a majority reports the offset as
+durable.
 
-The adjacent one-second in-process WAL election timeout remains fixed: the
-stored state machine is not currently driven, so exposing the value would
-create a no-op setting. The diskless flusher values remain fixed for the same
-reason recorded earlier: that staged flusher still has no production caller.
-All 1,854 broker library, 18 broker binary and 773 operator library tests,
-operator-to-broker TOML, generated-CRD parity, workspace all-target Clippy,
-nightly formatting and diff hygiene pass. The repository-wide hardcoded
-operational-value audit remains active.
+Partition metadata selects the diskless WAL leader. The WAL engine does not
+run a second election. Its restart descriptor stores only voter IDs. The broker
+uses those IDs to reject an incompatible local replica layout. It accepts and
+ignores legacy election fields. The broker starts the diskless flusher when
+remote storage is enabled and stops it during shutdown. The repository-wide
+hardcoded operational-value audit remains active.
 
 ## Repository-Wide Runtime Configuration Audit Complete
 

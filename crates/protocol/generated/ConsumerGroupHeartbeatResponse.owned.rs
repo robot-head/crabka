@@ -215,7 +215,7 @@ impl Encode for Assignment {
                 for it in &self.topic_partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

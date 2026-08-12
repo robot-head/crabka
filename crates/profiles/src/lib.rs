@@ -36,22 +36,11 @@ pub use wal::{
     WalSymbolSet, partition_key,
 };
 
-/// Placeholder so the crate has a test until real ingest modules land.
-#[must_use]
-pub fn crate_smoke() -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
-
-    #[test]
-    fn smoke() {
-        assert!(crate_smoke());
-    }
 
     #[test]
     fn status_codes_map() {

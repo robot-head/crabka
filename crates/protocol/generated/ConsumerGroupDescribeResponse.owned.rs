@@ -42,7 +42,7 @@ impl Encode for ConsumerGroupDescribeResponse {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -207,7 +207,7 @@ impl DescribedGroup {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -585,7 +585,7 @@ impl Member {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {

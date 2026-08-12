@@ -109,7 +109,7 @@ impl TxnOffsetCommitRequest {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -393,7 +393,7 @@ impl Encode for TxnOffsetCommitRequestTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

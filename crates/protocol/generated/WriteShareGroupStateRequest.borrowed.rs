@@ -61,7 +61,7 @@ impl Encode for WriteShareGroupStateRequest<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -175,7 +175,7 @@ impl Encode for WriteStateData {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -311,7 +311,7 @@ impl Encode for PartitionData {
                 for it in &self.state_batches {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config_value::{PositiveU32, positive_time};
 
+const CONTENT_TYPE_HEADER: &str = "content-type";
+const CE_HTTP_PREFIX: &str = "ce-";
+
 /// Top-level structure of the outbound webhook TOML config file.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutboundFile {
@@ -84,6 +87,10 @@ pub struct OutboundSubscription {
     /// `Authorization`.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    /// HTTP representation used for each delivery. The default preserves the
+    /// existing Crabka JSON envelope.
+    #[serde(default)]
+    pub content_mode: OutboundContentMode,
     /// When `true`, the injected codec's `decode` runs on each record value
     /// before delivery. It de-frames a Confluent-framed value to its JSON view
     /// and delivers it as `application/json`. With `RawCodec`, which has no
@@ -91,6 +98,19 @@ pub struct OutboundSubscription {
     /// delivery. Default `false`.
     #[serde(default)]
     pub decode_to_json: bool,
+}
+
+/// Outbound webhook body and header representation.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundContentMode {
+    /// Existing Crabka JSON envelope.
+    #[default]
+    Envelope,
+    /// `CloudEvents` HTTP binary binding.
+    CloudEventsBinary,
+    /// `CloudEvents` JSON structured binding.
+    CloudEventsStructured,
 }
 
 fn default_max_attempts() -> u32 {
@@ -129,6 +149,7 @@ pub struct CompiledSubscription {
     pub filter: Option<JpQuery>,
     /// Static extra headers as `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
+    pub content_mode: OutboundContentMode,
     /// Decode each record value to JSON with the injected codec before
     /// delivery. This is inert under `RawCodec`. See
     /// [`OutboundSubscription::decode_to_json`].
@@ -206,6 +227,15 @@ impl OutboundFile {
                 }
             };
 
+            if s.content_mode.is_cloudevents() {
+                reject_cloudevents_header_overrides(&ctx, &s.headers)?;
+            }
+            if s.content_mode == OutboundContentMode::CloudEventsBinary && s.decode_to_json {
+                return Err(format!(
+                    "{ctx}: decode_to_json cannot be used with cloud_events_binary"
+                ));
+            }
+
             out.push(CompiledSubscription {
                 name: s.name.clone(),
                 group_id,
@@ -223,11 +253,33 @@ impl OutboundFile {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
+                content_mode: s.content_mode,
                 decode_to_json: s.decode_to_json,
             });
         }
         Ok(out)
     }
+}
+
+impl OutboundContentMode {
+    fn is_cloudevents(self) -> bool {
+        matches!(self, Self::CloudEventsBinary | Self::CloudEventsStructured)
+    }
+}
+
+fn reject_cloudevents_header_overrides(
+    context: &str,
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    for name in headers.keys() {
+        let normalized = name.to_ascii_lowercase();
+        if normalized == CONTENT_TYPE_HEADER || normalized.starts_with(CE_HTTP_PREFIX) {
+            return Err(format!(
+                "{context}: CloudEvents content_mode reserves static header {name:?}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +329,7 @@ filter         = "json:$.type"
         assert2::assert!(sub.max_backoff == secs(30));
         assert2::assert!(sub.request_timeout == secs(10));
         assert2::assert!(sub.headers.is_empty());
+        assert2::assert!(sub.content_mode == OutboundContentMode::Envelope);
         assert2::assert!(!sub.decode_to_json);
     }
 
@@ -369,6 +422,40 @@ filter        = "json:$.type"
         let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
         let compiled = file.compile().expect("compile");
         assert2::assert!(compiled[0].filter.is_some());
+    }
+
+    #[test]
+    fn cloudevents_modes_compile_and_reject_conflicts() {
+        let valid = VALID_TOML.replace(
+            "filter         = \"json:$.type\"",
+            "content_mode = \"cloud_events_structured\"",
+        );
+        let file: OutboundFile = toml::from_str(&valid).expect("parse TOML");
+        let compiled = file.compile().expect("compile");
+        assert2::assert!(compiled[0].content_mode == OutboundContentMode::CloudEventsStructured);
+
+        for (_name, extra, needle) in [
+            (
+                "ce header",
+                "content_mode = \"cloud_events_binary\"\n[subscriptions.headers]\nCe-Id = \"bad\"",
+                "reserves static header",
+            ),
+            (
+                "content type",
+                "content_mode = \"cloud_events_structured\"\n[subscriptions.headers]\nContent-Type = \"bad\"",
+                "reserves static header",
+            ),
+            (
+                "decoded binary",
+                "content_mode = \"cloud_events_binary\"\ndecode_to_json = true",
+                "decode_to_json",
+            ),
+        ] {
+            let input = VALID_TOML.replace("filter         = \"json:$.type\"", extra);
+            let file: OutboundFile = toml::from_str(&input).expect("parse TOML");
+            let error = file.compile().expect_err("conflict must fail");
+            assert2::assert!(error.contains(needle));
+        }
     }
 
     #[test]
@@ -471,6 +558,7 @@ max_backoff       = "100ms"
             request_timeout: secs(10),
             filter: None,
             headers: std::collections::HashMap::new(),
+            content_mode: OutboundContentMode::Envelope,
             decode_to_json: false,
         };
 

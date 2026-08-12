@@ -189,15 +189,13 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Plans a top-level `Expr::Extension` onto the operator path.
-    ///
-    /// The extension is an `anchored` or `smoothed` extended selector. The
-    /// `smoothed` form reuses the interpreter's
-    /// [`Self::eval_smoothed_instant_selector`] kernel verbatim and returns it
-    /// as `Precomputed`. The `anchored` form on an instant selector raises the
-    /// same hard error that the interpreter raises. Any other extension shape,
-    /// such as a non-selector child or an unknown extension, falls back to the
-    /// interpreter, which raises the canonical "not implemented yet" error.
+    /// Plan a top-level `Expr::Extension` (an `anchored`/`smoothed` extended
+    /// selector) onto the operator path. The `smoothed` form reuses the
+    /// interpreter's [`Self::eval_smoothed_instant_selector`] kernel verbatim
+    /// (returned as `Precomputed`); the `anchored` form on an instant selector is
+    /// the same hard error the interpreter raises. Any other extension shape
+    /// (non-selector child, unknown extension) falls back to the interpreter,
+    /// which returns the canonical unsupported-expression error.
     async fn plan_extension_expr(
         &self,
         tenant: &str,

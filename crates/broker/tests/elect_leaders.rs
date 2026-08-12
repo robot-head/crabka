@@ -375,17 +375,6 @@ async fn preferred_election_via_wire_returns_success() {
 ///    alive replica in [1, 2] is broker 1, so the handler elects broker 1 as
 ///    leader and sets ISR=[1].
 /// 5. Assert per-partition `error_code` = 0 and poll until leader == 1.
-// PRE-EXISTING FLAKE (orthogonal to KIP-595; bisected to caa97e85, the 3d-1
-// tip): the test forges leader=99/ISR=[99] (both dead) then drives an UNCLEAN
-// election expecting it to elect broker 1. Forging a *dead* leader removes the
-// controller-side repair, but a deeper async race remains: broker 1's local
-// replica state lags the forged metadata — it briefly still believes it leads
-// foo-unclean-0 and its `isr_maintenance` loop proposes an AlterPartition that
-// re-expands the ISR to include a live member, racing the operator's elect →
-// ELECTION_NOT_NEEDED (81). Deterministic repro needs a test hook to quiesce
-// isr_maintenance (or a redesign); tracked as the spawned follow-up. Ignored to
-// keep the branch green (it is not a snapshot/KIP-595 regression).
-#[ignore = "pre-existing isr_maintenance vs operator-elect race (see comment) — follow-up"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unclean_election_via_wire_picks_alive_replica() {
     let _g = cluster_lock().lock().await;
@@ -393,7 +382,15 @@ async fn unclean_election_via_wire_picks_alive_replica() {
     let cluster = support::start_n_node_with_retry(3).await;
     support::wait_for_all_brokers_registered(&cluster, 3).await;
 
-    let addr = cluster[0].1.listen_addr;
+    // ElectLeaders is a controller operation. Send it to the current raft
+    // leader, whose liveness registry receives the broker heartbeats.
+    let controller_id = cluster[0].0.wait_until_controller_leader().await;
+    let addr = cluster
+        .iter()
+        .find(|(_, cfg, _)| cfg.node_id == controller_id)
+        .expect("raft leader must be one of the brokers")
+        .1
+        .listen_addr;
     // Keep named references to avoid chained index+tuple accesses that
     // confuse the Rust 1.95 borrow-checker span computation.
     let h0 = &cluster[0].0;

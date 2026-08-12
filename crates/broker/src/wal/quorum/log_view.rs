@@ -1,46 +1,43 @@
 //! `crabka-log` adapter for the sans-IO quorum core.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crabka_ids::LeaderEpoch;
 use crabka_kraft_core::{Epoch, LogView};
 use crabka_log::Log;
 
 /// A durable WAL-replica log exposed through [`LogView`].
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ShardLog {
     log: Arc<Mutex<Log>>,
 }
 
 impl ShardLog {
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn new(log: Arc<Mutex<Log>>) -> Self {
         Self { log }
     }
 
-    #[allow(dead_code)]
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Log> {
+        self.log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[must_use]
-    pub(crate) fn log(&self) -> Arc<Mutex<Log>> {
-        self.log.clone()
+    pub(crate) fn shares_log(&self, other: &Arc<Mutex<Log>>) -> bool {
+        Arc::ptr_eq(&self.log, other)
     }
 }
 
 impl LogView for ShardLog {
     fn end_offset(&self) -> i64 {
-        self.log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .log_end_offset()
-            .0
+        self.lock().log_end_offset().0
     }
 
     fn last_epoch(&self) -> Epoch {
         let latest = self
-            .log
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .epoch_checkpoint()
             .latest_epoch()
             .unwrap_or(LeaderEpoch(0));
@@ -49,10 +46,7 @@ impl LogView for ShardLog {
 
     fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
         let epoch = LeaderEpoch(i32::try_from(epoch).ok()?);
-        let log = self
-            .log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let log = self.lock();
         match log
             .epoch_checkpoint()
             .end_offset_for_epoch(epoch, log.log_end_offset())

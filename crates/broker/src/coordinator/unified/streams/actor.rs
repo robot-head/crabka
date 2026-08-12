@@ -212,12 +212,14 @@ impl ActorState {
 
 async fn actor_loop(
     group_id: String,
-    config: Arc<StreamsGroupConfig>,
+    default_config: Arc<StreamsGroupConfig>,
     offsets_log: Arc<dyn OffsetsLog>,
     metadata_source: Option<Arc<dyn MetadataSource>>,
     coordinator: Arc<super::super::GroupCoordinator>,
     mut rx: mpsc::Receiver<StreamsGroupActorMessage>,
 ) {
+    let mut config = resolve_group_config(&default_config, metadata_source.as_ref(), &group_id);
+    let mut metadata_rx = metadata_source.as_ref().map(|source| source.watch_image());
     let mut actor = ActorState::new(group_id);
     let mut tick = tokio::time::interval(config.heartbeat_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -234,7 +236,7 @@ async fn actor_loop(
                             metadata_source.as_ref(),
                             &coordinator,
                             &request,
-                            ClientContext {
+                            super::super::ClientIdentity {
                                 id: &client_id,
                                 host: &client_host,
                             },
@@ -291,13 +293,83 @@ async fn actor_loop(
                     break;
                 }
             }
+            image = wait_for_metadata_change(&mut metadata_rx) => {
+                let Some(image) = image else {
+                    metadata_rx = None;
+                    continue;
+                };
+                let next = resolve_group_config_from_image(
+                    &default_config,
+                    &image,
+                    &actor.state.group_id,
+                );
+                if next != config {
+                    config = next;
+                    tick = tokio::time::interval(config.heartbeat_interval);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    actor.state.dirty = true;
+                    reconcile(&mut actor, &config, metadata_source.as_ref()).await;
+                    let pending = snapshot_pending_after_change(&actor, &[]);
+                    if flush_pending(
+                        &actor,
+                        pending,
+                        &*offsets_log,
+                        &coordinator,
+                        chrono_now_ms(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
         }
     }
 }
 
-/// Evicts members that stayed silent past the session timeout, reconciles, and
-/// persists the resulting tombstones. Returns `Err` if the log write fails,
-/// and the actor then exits.
+fn resolve_group_config(
+    defaults: &StreamsGroupConfig,
+    metadata_source: Option<&Arc<dyn MetadataSource>>,
+    group_id: &str,
+) -> StreamsGroupConfig {
+    metadata_source.map_or_else(
+        || defaults.clone(),
+        |source| resolve_group_config_from_image(defaults, &source.current_image(), group_id),
+    )
+}
+
+fn resolve_group_config_from_image(
+    defaults: &StreamsGroupConfig,
+    image: &crabka_metadata::MetadataImage,
+    group_id: &str,
+) -> StreamsGroupConfig {
+    let Some(overrides) = image.group_config(group_id) else {
+        return defaults.clone();
+    };
+    match defaults.with_group_overrides(overrides) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(group_id, %error, "ignoring invalid persisted streams group config");
+            defaults.clone()
+        }
+    }
+}
+
+async fn wait_for_metadata_change(
+    rx: &mut Option<tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>>>,
+) -> Option<Arc<crabka_metadata::MetadataImage>> {
+    match rx {
+        Some(rx) => {
+            rx.changed().await.ok()?;
+            Some(rx.borrow_and_update().clone())
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Evict members silent past the session timeout, reconcile, and persist the
+/// resulting tombstones. Returns `Err` if the log write fails (the actor exits).
 async fn handle_session_tick(
     actor: &mut ActorState,
     config: &StreamsGroupConfig,
@@ -323,12 +395,6 @@ async fn handle_session_tick(
     flush_pending(actor, pending, offsets_log, coordinator, now_ms).await
 }
 
-#[derive(Clone, Copy)]
-struct ClientContext<'a> {
-    id: &'a str,
-    host: &'a str,
-}
-
 async fn handle_heartbeat(
     actor: &mut ActorState,
     config: &StreamsGroupConfig,
@@ -336,9 +402,9 @@ async fn handle_heartbeat(
     metadata_source: Option<&Arc<dyn MetadataSource>>,
     coordinator: &super::super::GroupCoordinator,
     req: &StreamsGroupHeartbeatRequest,
-    client: ClientContext<'_>,
+    client: super::super::ClientIdentity<'_>,
 ) -> Result<StreamsGroupHeartbeatResponse, crate::error::BrokerError> {
-    let ClientContext {
+    let super::super::ClientIdentity {
         id: client_id,
         host: client_host,
     } = client;
@@ -363,6 +429,9 @@ async fn handle_heartbeat(
     // KIP-1071 mirrors KIP-848: epoch 0 from an unknown member is a first
     // join. The client may supply its own id; an empty id mints a server UUID.
     if req.member_epoch == 0 && !actor.state.members.contains_key(&req.member_id) {
+        if actor.state.members.len() >= config.max_size {
+            return Ok(error_resp(codes::GROUP_MAX_SIZE_REACHED, config));
+        }
         let new_member_id = first_join_member_id(&req.member_id);
         let m = build_member(&new_member_id, req, client_id, client_host, now);
         actor.state.add_or_update_member(m);
@@ -392,7 +461,7 @@ async fn handle_heartbeat(
     };
 
     // ─── Steady state ────────────────────────────────────────────
-    let mut changed = update_member_steady_state(actor, req, now);
+    let mut changed = update_member_steady_state(actor, req, client_id, client_host, now);
     // Topology handling: newer epoch is accepted, older is flagged STALE.
     if let Some(topo) = &req.topology {
         let cur_topo_epoch = actor.state.topology_epoch;
@@ -433,6 +502,8 @@ async fn handle_heartbeat(
 fn update_member_steady_state(
     actor: &mut ActorState,
     req: &StreamsGroupHeartbeatRequest,
+    client_id: &str,
+    client_host: &str,
     now: Instant,
 ) -> bool {
     let Some(m) = actor.state.members.get_mut(&req.member_id) else {
@@ -440,6 +511,15 @@ fn update_member_steady_state(
     };
     m.last_seen = now;
     let mut changed = false;
+
+    if m.client_id != client_id {
+        m.client_id = client_id.to_string();
+        changed = true;
+    }
+    if m.client_host != client_host {
+        m.client_host = client_host.to_string();
+        changed = true;
+    }
 
     if let Some(active) = &req.active_tasks {
         let map = task_ids_to_map(active);
@@ -1016,7 +1096,7 @@ async fn flush_pending(
         return Ok(());
     }
     let batch = pending.into_batch(&actor.state.group_id, now_ms);
-    offsets_log.append(batch).await?;
+    offsets_log.append(&actor.state.group_id, batch).await?;
     coordinator.update_streams_cache(&actor.state.group_id, snapshot_seed(actor));
     Ok(())
 }
@@ -1112,6 +1192,29 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
+
+    #[test]
+    fn persisted_group_config_overrides_actor_defaults() {
+        use crate::coordinator::unified::streams::config::KEY_NUM_STANDBY_REPLICAS;
+
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&crabka_metadata::MetadataRecord::V1GroupConfig(
+            crabka_metadata::GroupConfigRecord {
+                group_id: "streams-app".into(),
+                configs: std::collections::BTreeMap::from([(
+                    KEY_NUM_STANDBY_REPLICAS.into(),
+                    "1".into(),
+                )]),
+            },
+        ));
+        let config =
+            resolve_group_config_from_image(&StreamsGroupConfig::default(), &image, "streams-app");
+        assert!(config.num_standby_replicas == 1);
+
+        let unaffected =
+            resolve_group_config_from_image(&StreamsGroupConfig::default(), &image, "other-app");
+        assert!(unaffected == StreamsGroupConfig::default());
+    }
     use crate::coordinator::unified::{
         GroupCoordinator, actor::MetadataProvider, config::NextGenConfig,
         offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
@@ -1211,6 +1314,39 @@ mod tests {
         .await;
         assert!(resp.error_code == codes::NONE);
         assert!(resp.member_epoch == epoch);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn member_limit_rejects_only_new_members() {
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let metadata: Arc<dyn MetadataProvider> = Arc::new(EmptyMetadata);
+        let coord = Arc::new(GroupCoordinator::new(
+            NextGenConfig::default(),
+            ShareGroupConfig::default(),
+            metadata,
+            log,
+            StreamsGroupConfig {
+                max_size: 1,
+                ..StreamsGroupConfig::default()
+            },
+        ));
+        let handle = coord.get_or_create_streams("g");
+        let request = |member_id: &str, member_epoch| StreamsGroupHeartbeatRequest {
+            group_id: "g".into(),
+            member_id: member_id.into(),
+            member_epoch,
+            ..Default::default()
+        };
+
+        let joined = heartbeat(&handle, request("m1", 0)).await;
+        check!(joined.error_code == codes::NONE);
+
+        let rejected = heartbeat(&handle, request("m2", 0)).await;
+        check!(rejected.error_code == codes::GROUP_MAX_SIZE_REACHED);
+
+        let existing = heartbeat(&handle, request("m1", joined.member_epoch)).await;
+        check!(existing.error_code == codes::NONE);
+        check!(existing.member_epoch == joined.member_epoch);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

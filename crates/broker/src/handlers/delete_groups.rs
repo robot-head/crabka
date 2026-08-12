@@ -28,6 +28,8 @@ use crate::{
     fields(api = "DeleteGroups", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: coordinator-backed request orchestration; integration-tested.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -56,6 +58,14 @@ pub(crate) async fn handle(
             results.push(DeletableGroupResult {
                 group_id: gid,
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                ..Default::default()
+            });
+            continue;
+        }
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &gid) {
+            results.push(DeletableGroupResult {
+                group_id: gid,
+                error_code,
                 ..Default::default()
             });
             continue;

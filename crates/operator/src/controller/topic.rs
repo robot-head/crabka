@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use crabka_client_admin::{
     AdminClientLike, CreatePartitionsOp, CreateTopicSpec, IncrementalAlterOp,
+    TopicReplicationStatus,
 };
 use futures::StreamExt as _;
 use kube::{
@@ -249,6 +250,87 @@ async fn prepare_topic(
     })
 }
 
+async fn reconcile_replication_factor(
+    admin: &mut dyn AdminClientLike,
+    ctx: &Context,
+    cluster: &str,
+    obj: &KafkaTopic,
+    topic_name: &str,
+    topic_id: Option<String>,
+) -> Result<Option<Action>, ReconcileError> {
+    let result = admin
+        .reconcile_topic_replication_factor(
+            topic_name,
+            obj.spec.replicas,
+            ctx.config.topic_mutation_timeout,
+        )
+        .await;
+    let status = match result {
+        Ok(TopicReplicationStatus::InSync) => return Ok(None),
+        Ok(status) => status,
+        Err(crabka_client_admin::AdminError::Broker {
+            api,
+            code,
+            name: error_name,
+            message,
+        }) => {
+            let topic_api: Api<KafkaTopic> = Api::namespaced(
+                ctx.client.clone(),
+                &obj.namespace().unwrap_or_else(|| "default".into()),
+            );
+            patch_status(
+                &topic_api,
+                &obj.name_any(),
+                obj,
+                (
+                    "False",
+                    "BrokerError",
+                    &format!(
+                        "{api}: {error_name} ({code}){}",
+                        message
+                            .as_deref()
+                            .map(|detail| format!(": {detail}"))
+                            .unwrap_or_default()
+                    ),
+                ),
+                topic_id,
+                false,
+            )
+            .await?;
+            return Ok(Some(common::requeue(ctx.config.controller_error_requeue)));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "topic replication-factor reconciliation failed");
+            if matches!(error, crabka_client_admin::AdminError::Transport(_)) {
+                ctx.drop_admin_client(cluster).await;
+            }
+            return Ok(Some(common::requeue(ctx.config.controller_error_requeue)));
+        }
+    };
+
+    let message = if status == TopicReplicationStatus::ReassignmentInProgress {
+        "partition reassignment in progress"
+    } else {
+        "partition reassignment submitted"
+    };
+    let topic_api: Api<KafkaTopic> = Api::namespaced(
+        ctx.client.clone(),
+        &obj.namespace().unwrap_or_else(|| "default".into()),
+    );
+    patch_status(
+        &topic_api,
+        &obj.name_any(),
+        obj,
+        ("False", "Reassigning", message),
+        topic_id,
+        false,
+    )
+    .await?;
+    Ok(Some(common::requeue(
+        ctx.config.controller_dependency_requeue,
+    )))
+}
+
 // linear pipeline; extraction hurts more than helps
 async fn reconcile_inner(
     obj: Arc<KafkaTopic>,
@@ -310,23 +392,6 @@ async fn reconcile_inner(
             .await
         }
         Some(cur) => {
-            // Immutable fields
-            if cur.replication_factor != obj.spec.replicas {
-                patch_status(
-                    &topic_api,
-                    &name,
-                    &obj,
-                    (
-                        "False",
-                        "ImmutableFieldChanged",
-                        "spec.replicas change requires partition reassignment",
-                    ),
-                    cur.topic_id.map(|u| u.to_string()),
-                    false,
-                )
-                .await?;
-                return Ok(common::requeue(ctx.config.controller_invalid_requeue));
-            }
             if cur.partition_count > obj.spec.partitions {
                 patch_status(
                     &topic_api,
@@ -386,6 +451,19 @@ async fn reconcile_inner(
                         return Ok(common::requeue(ctx.config.controller_error_requeue));
                     }
                 }
+            }
+
+            if let Some(action) = reconcile_replication_factor(
+                &mut *admin,
+                &ctx,
+                &cluster,
+                &obj,
+                &topic_name,
+                cur.topic_id.map(|id| id.to_string()),
+            )
+            .await?
+            {
+                return Ok(action);
             }
 
             // Config diff

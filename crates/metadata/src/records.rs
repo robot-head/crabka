@@ -58,9 +58,8 @@ pub struct PartitionRecord {
 /// sets ONLY the slot of the reporting replica in
 /// `PartitionRecord.directories` and never touches leader, isr, replicas,
 /// adding, or removing. It therefore cannot clobber a concurrent reassignment
-/// or ISR change. On the `KRaft` log it rides a Crabka-private carrier through
-/// `to_kraft`, so it decodes back to this same delta and applies as a one-slot
-/// merge, never as a full-record replace.
+/// or ISR change. On the `KRaft` log it is encoded as Kafka's standard
+/// `PartitionChangeRecord` with only the directories field set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionDirAssignmentRecord {
     pub topic: String,
@@ -76,8 +75,7 @@ pub struct PartitionDirAssignmentRecord {
 ///
 /// Applied as a delta, never a full-record replace, so sequential advances on
 /// the committed metadata log yield a gap-free, strictly-monotonic, unique
-/// offset sequence. On the `KRaft` log it rides a Crabka-private carrier like
-/// [`PartitionDirAssignmentRecord`], so it decodes back to this same delta.
+/// offset sequence. On the `KRaft` log it still uses a Crabka-private carrier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionOffsetAdvanceRecord {
     pub topic: String,
@@ -125,6 +123,30 @@ pub struct BrokerRegistrationRecord {
     /// field was added; populated from
     /// `BrokerConfig::effective_listeners()` for self-registration.
     pub endpoints: Vec<BrokerEndpoint>,
+    /// KIP-858 stable IDs for the broker's online log directories.
+    /// Empty at metadata versions before `3.7-IV2` and in legacy snapshots.
+    #[serde(default)]
+    pub log_dirs: Vec<uuid::Uuid>,
+    /// KIP-584 feature ranges advertised by this broker at registration.
+    /// Empty only for legacy Crabka snapshots written before the ranges were
+    /// retained in the image.
+    #[serde(default)]
+    pub features: std::collections::BTreeMap<String, (i16, i16)>,
+}
+
+/// KIP-919 controller registration persisted in the metadata log.
+///
+/// Static controller voters still register their current process incarnation,
+/// listener endpoints, and supported feature ranges.  Keeping that state in
+/// the image lets every controller replay the same registration and gives JVM
+/// peers the `RegisterControllerRecord` they expect in a mixed quorum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerRegistrationRecord {
+    pub node_id: NodeId,
+    pub incarnation_id: Uuid,
+    pub zk_migration_ready: bool,
+    pub endpoints: Vec<BrokerEndpoint>,
+    pub features: std::collections::BTreeMap<String, (i16, i16)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +178,10 @@ pub struct TopicConfigRecord {
 }
 
 /// Per-broker configuration key/value pair. `Some(value)` = set; `None` = delete.
+///
+/// Kafka names the cluster-wide broker-default resource with an empty string.
+/// [`DEFAULT_BROKER_CONFIG_NODE_ID`] represents that resource internally; the
+/// `KRaft` translator maps it back to the empty resource name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerConfigRecord {
     pub node_id: NodeId,
@@ -163,6 +189,11 @@ pub struct BrokerConfigRecord {
     /// `Some(value)` = set; `None` = delete.
     pub config_value: Option<String>,
 }
+
+/// Internal identity for Kafka's cluster-wide default broker-config resource.
+/// Broker IDs are non-negative signed 32-bit integers on the Kafka wire, so
+/// this value cannot collide with a real broker.
+pub const DEFAULT_BROKER_CONFIG_NODE_ID: NodeId = NodeId(u64::MAX);
 
 /// KIP-714 client-metrics subscription config. Authoritative target
 /// state: each `V1ClientMetricsConfig` fully replaces the previous
@@ -172,6 +203,14 @@ pub struct BrokerConfigRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientMetricsConfigRecord {
     pub name: String,
+    pub configs: std::collections::BTreeMap<String, String>,
+}
+
+/// KIP-1071 dynamic configuration for one group resource. Each record is the
+/// authoritative override map for `group_id`; an empty map clears the resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupConfigRecord {
+    pub group_id: String,
     pub configs: std::collections::BTreeMap<String, String>,
 }
 
@@ -187,6 +226,15 @@ pub struct ClientQuotaRecord {
     pub entity: Vec<QuotaEntity>,
     pub config_key: String,
     pub config_value: Option<f64>,
+}
+
+/// Durable controller state for cluster-wide producer-ID block allocation.
+/// `next_producer_id` is the first ID not covered by any committed block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProducerIdsRecord {
+    pub broker_id: NodeId,
+    pub broker_epoch: i64,
+    pub next_producer_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +341,7 @@ pub enum MetadataRecord {
     V1DeleteAccessControlEntry(crate::AclEntryFilter),
     V1BrokerConfig(BrokerConfigRecord),
     V1ClientQuota(ClientQuotaRecord),
+    V1ProducerIds(ProducerIdsRecord),
     V1DelegationToken(DelegationTokenRecord),
     V1DeleteDelegationToken(DeleteDelegationTokenRecord),
     V1UnregisterBroker(UnregisterBrokerRecord),
@@ -310,6 +359,10 @@ pub enum MetadataRecord {
     /// Diskless offset-sequencer delta (see [`PartitionOffsetAdvanceRecord`]).
     /// Applied as an increment to the partition's committed next-offset.
     V1PartitionOffsetAdvance(PartitionOffsetAdvanceRecord),
+    /// KIP-1071 dynamic GROUP resource configuration.
+    V1GroupConfig(GroupConfigRecord),
+    /// KIP-919 controller registration.
+    V1ControllerRegistration(ControllerRegistrationRecord),
 }
 
 #[cfg(test)]
@@ -330,6 +383,45 @@ mod tests {
         let r = MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "metadata.version".into(),
             level: 1,
+        });
+        assert2::assert!(round_trip(&r) == r);
+    }
+
+    #[test]
+    fn group_config_round_trip() {
+        let r = MetadataRecord::V1GroupConfig(GroupConfigRecord {
+            group_id: "streams-app".into(),
+            configs: std::collections::BTreeMap::from([(
+                "streams.num.standby.replicas".into(),
+                "1".into(),
+            )]),
+        });
+        assert2::assert!(round_trip(&r) == r);
+    }
+
+    #[test]
+    fn controller_registration_round_trip() {
+        let r = MetadataRecord::V1ControllerRegistration(ControllerRegistrationRecord {
+            node_id: NodeId(3),
+            incarnation_id: Uuid::from_u128(7),
+            zk_migration_ready: false,
+            endpoints: vec![BrokerEndpoint {
+                name: "CONTROLLER".into(),
+                host: "controller-3".into(),
+                port: 9093,
+                protocol: crabka_security::ListenerProtocol::Plaintext,
+            }],
+            features: std::collections::BTreeMap::from([("metadata.version".into(), (7, 25))]),
+        });
+        assert2::assert!(round_trip(&r) == r);
+    }
+
+    #[test]
+    fn producer_ids_round_trip() {
+        let r = MetadataRecord::V1ProducerIds(ProducerIdsRecord {
+            broker_id: NodeId(3),
+            broker_epoch: 9,
+            next_producer_id: 2_000,
         });
         assert2::assert!(round_trip(&r) == r);
     }
@@ -388,7 +480,9 @@ mod tests {
             host: "192.168.1.10".into(),
             port: 9092,
             rack: Some("us-east-1a".into()),
+            log_dirs: vec![],
             endpoints: vec![],
+            features: std::collections::BTreeMap::new(),
         });
         assert2::assert!(round_trip(&r) == r);
     }
@@ -402,12 +496,14 @@ mod tests {
             host: "h".into(),
             port: 9092,
             rack: None,
+            log_dirs: vec![],
             endpoints: vec![BrokerEndpoint {
                 name: "EXTERNAL".into(),
                 host: "ext.example.com".into(),
                 port: 9092,
                 protocol: crabka_security::ListenerProtocol::SaslSsl,
             }],
+            features: std::collections::BTreeMap::new(),
         });
         assert2::assert!(round_trip(&r) == r);
     }

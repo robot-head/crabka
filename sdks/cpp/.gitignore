@@ -1,0 +1,6 @@
+build/
+build-asan/
+build-tsan/
+build-verify/
+build-require-deps/
+cmake-build-check/

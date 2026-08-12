@@ -63,7 +63,7 @@ impl Encode for ReadShareGroupStateSummaryRequest<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -179,7 +179,7 @@ impl Encode for ReadStateSummaryData {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -1,17 +1,15 @@
 //! Session-window aggregation processors: JVM session-merge with a selectable
 //! emit strategy (KIP-825).
 //!
-//! On each record the processor finds all sessions within the inactivity gap. It
-//! merges those sessions and the record into one `[minStart, maxEnd]` session,
-//! removes the merged-away sessions, and stores the new merged session.
-//!
-//! Under the default `on_window_update` strategy the processor forwards one
-//! tombstone per merged-away session, plus a `Change::update` for the new
-//! session. Under `on_window_close`, which is emit-final, the processor
-//! suppresses those per-update forwards. A close-scan instead forwards each
-//! session whose `end <= window_close_time` exactly once, where
-//! `window_close_time` is `stream_time - grace`. The scan advances
-//! `last_emitted_close`, which prevents re-emission.
+//! On each record the processor finds all sessions within the inactivity gap,
+//! merges them (and the record) into one `[minStart, maxEnd]` session, drops the
+//! record if that merged session is past its grace period, then replaces the
+//! merged-away sessions. Under the default
+//! `on_window_update` strategy it forwards a tombstone per merged-away session and
+//! a `Change::update` for the new session. Under `on_window_close` (emit-final)
+//! those per-update forwards are suppressed; instead a close-scan forwards each
+//! session whose `end <= window_close_time` (= `stream_time - grace`) exactly
+//! once, advancing `last_emitted_close` to prevent re-emission.
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -30,6 +28,10 @@ use crate::{
 
 /// Variance-neutral marker for multi-param processor structs.
 type Marker<T> = PhantomData<fn() -> T>;
+
+fn session_is_closed(session_end: i64, window_close_time: i64) -> bool {
+    session_end < window_close_time
+}
 
 /// General session aggregation (`count` / `aggregate`). `init` seeds the
 /// accumulator, `agg` folds the new record, `merger` combines two session
@@ -83,7 +85,7 @@ where
         let ts = r.timestamp;
         let gap = self.gap.millis_i64();
         self.stream_time = self.stream_time.max(ts);
-        let window_close_time = self.stream_time - self.grace.millis_i64();
+        let window_close_time = self.stream_time.saturating_sub(self.grace.millis_i64());
         // Stash the source record context so a cached store stamps it on staged
         // writes (`write_ctx` clones, not takes — persists across removes + put).
         let rc = ctx.record_context().clone();
@@ -93,7 +95,9 @@ where
             let store = ctx
                 .get_session_store::<K, VA>(&self.store_name)
                 .expect("session store not found");
-            store.find_sessions(&key, ts - gap, ts + gap).await
+            store
+                .find_sessions(&key, ts.saturating_sub(gap), ts.saturating_add(gap))
+                .await
         };
 
         // 2. merge: fold candidate aggregates via the merger, then the record.
@@ -104,6 +108,9 @@ where
             acc = (self.merger)(&key, acc, v.clone());
             new_start = new_start.min(*s);
             new_end = new_end.max(*e);
+        }
+        if session_is_closed(new_end, window_close_time) {
+            return;
         }
         acc = (self.agg)(&key, &r.value, acc);
 
@@ -170,10 +177,9 @@ where
     A: Fn(&K, &V, VA) -> VA + Send + 'static,
     M: Fn(&K, VA, VA) -> VA + Send + 'static,
 {
-    /// Emit-final close-scan. It forwards every session whose
-    /// `end <= window_close_time` and `end > last_emitted_close` as a
-    /// `Change::update(None, value)`. It then advances the watermark, which
-    /// suppresses re-emission.
+    /// Emit-final close-scan: forward every session whose `end < window_close_time`
+    /// and `end > last_emitted_close` as a `Change::update(None, value)`, then advance
+    /// the watermark to suppress re-emission.
     async fn emit_closed_sessions(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
@@ -186,7 +192,9 @@ where
             // Strict close (JVM): a session finalizes once stream-time moves PAST
             // its end (`end < window_close_time`), so with grace 0 a session is not
             // emitted at its own stream-time. `find_closed_sessions(arg)` is `end<=arg`.
-            store.find_closed_sessions(window_close_time - 1).await
+            store
+                .find_closed_sessions(window_close_time.saturating_sub(1))
+                .await
         };
         due.retain(|(_, _, end, _)| *end >= self.last_emitted_close);
         due.sort_by_key(|(_, start, end, _)| (*end, *start));
@@ -246,7 +254,7 @@ where
         let ts = r.timestamp;
         let gap = self.gap.millis_i64();
         self.stream_time = self.stream_time.max(ts);
-        let window_close_time = self.stream_time - self.grace.millis_i64();
+        let window_close_time = self.stream_time.saturating_sub(self.grace.millis_i64());
         // Stash the source record context for cached writes (see aggregate proc).
         let rc = ctx.record_context().clone();
 
@@ -254,7 +262,9 @@ where
             let store = ctx
                 .get_session_store::<K, V>(&self.store_name)
                 .expect("session store not found");
-            store.find_sessions(&key, ts - gap, ts + gap).await
+            store
+                .find_sessions(&key, ts.saturating_sub(gap), ts.saturating_add(gap))
+                .await
         };
 
         let mut new_start = ts;
@@ -267,6 +277,9 @@ where
             });
             new_start = new_start.min(*s);
             new_end = new_end.max(*e);
+        }
+        if session_is_closed(new_end, window_close_time) {
+            return;
         }
         let acc: V = match acc {
             None => r.value.clone(),
@@ -330,10 +343,9 @@ where
     V: std::any::Any + Send + Sync + Clone,
     R: Fn(&V, &V) -> V + Send + 'static,
 {
-    /// Emit-final close-scan. It forwards every session whose
-    /// `end <= window_close_time` and `end > last_emitted_close` as a
-    /// `Change::update(None, value)`. It then advances the watermark, which
-    /// suppresses re-emission.
+    /// Emit-final close-scan: forward every session whose `end < window_close_time`
+    /// and `end > last_emitted_close` as a `Change::update(None, value)`, then advance
+    /// the watermark to suppress re-emission.
     async fn emit_closed_sessions(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
@@ -346,7 +358,9 @@ where
             // Strict close (JVM): a session finalizes once stream-time moves PAST
             // its end (`end < window_close_time`), so with grace 0 a session is not
             // emitted at its own stream-time. `find_closed_sessions(arg)` is `end<=arg`.
-            store.find_closed_sessions(window_close_time - 1).await
+            store
+                .find_closed_sessions(window_close_time.saturating_sub(1))
+                .await
         };
         due.retain(|(_, _, end, _)| *end >= self.last_emitted_close);
         due.sort_by_key(|(_, start, end, _)| (*end, *start));
@@ -388,6 +402,90 @@ mod tests {
             "app-s-changelog".into(),
         )));
         stores
+    }
+
+    #[test]
+    fn session_close_boundary_is_strict() {
+        assert2::check!(!session_is_closed(10, 10));
+        assert2::check!(session_is_closed(9, 10));
+    }
+
+    #[tokio::test]
+    async fn late_record_does_not_reopen_a_closed_session() {
+        let mut stores = registry();
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+        let mut proc = KStreamSessionAggregateProcessor {
+            store_name: "s".into(),
+            gap: millis(10),
+            init: || 0i64,
+            agg: |_k: &String, _v: &String, a: i64| a + 1,
+            merger: |_k: &String, a: i64, b: i64| a + b,
+            emit: crate::dsl::emit::EmitStrategy::on_window_update(),
+            grace: millis(10),
+            stream_time: i64::MIN,
+            last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
+            _pd: PhantomData::<fn() -> (String, String, i64)>,
+        };
+
+        for ts in [0, 1_000] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut schedules = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut schedules,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx =
+                ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut dispatch);
+            proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
+                .await;
+        }
+        buffer.clear();
+
+        {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut schedules = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut schedules,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx =
+                ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut dispatch);
+            proc.process(&mut ctx, Record::new(Some("a".into()), "late".into(), 4))
+                .await;
+        }
+        assert2::check!(buffer.is_empty());
+
+        let sessions = stores
+            .get_session::<String, i64>("s")
+            .unwrap()
+            .find_sessions(&"a".to_string(), 0, 1_000)
+            .await;
+        assert2::check!(sessions == vec![(0, 0, 1), (1_000, 1_000, 1)]);
     }
 
     #[tokio::test]

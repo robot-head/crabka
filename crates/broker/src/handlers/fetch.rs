@@ -161,6 +161,13 @@ pub(crate) async fn handle(
         read_committed,
     } = preparation;
 
+    if version >= crate::wal::quorum::wire::KIP_595_FETCH_VERSION
+        && denied_topics.is_empty()
+        && let Some(response) = broker.wal_shards.route_fetch_request(&req)
+    {
+        return Ok((response?, version));
+    }
+
     let plan_context = PendingPlanContext {
         broker,
         image: &image,
@@ -1621,6 +1628,7 @@ fn consume_consumer_quota(
     Time::from_secs_f64(delay_secs).min(maximum)
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn should_use_sendfile(total_bytes: usize, has_regions: bool, minimum_bytes: usize) -> bool {
     total_bytes >= minimum_bytes && has_regions
 }
@@ -1689,8 +1697,115 @@ pub(crate) fn encode_fetch_response(
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, net::SocketAddr, sync::Mutex};
+
     use assert2::assert;
+    use bytes::{Bytes, BytesMut};
+    use crabka_ids::PartitionIndex;
+    use crabka_log::{Log, LogConfig, Offset};
+    use crabka_protocol::{
+        Encode as _,
+        records::{Record, RecordBatch, RecordsPayload},
+    };
+    use crabka_security::{AuthMethod, Principal};
     use crabka_units::{Time, convert::TimeExt, millis};
+
+    use crate::{
+        broker::Broker,
+        handlers::RequestContext,
+        wal::quorum::{
+            engine::WalShardEngine,
+            registry::ShardId,
+            wire::{KIP_595_FETCH_VERSION, QuorumGroup, fetch_request},
+        },
+    };
+
+    #[tokio::test]
+    async fn handle_routes_discriminated_wal_fetch_on_broker_listener() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let broker_handle = Broker::start(crate::config::BrokerConfig::for_tests(
+            dir.path().to_path_buf(),
+        ))
+        .await
+        .expect("start broker");
+        let broker = broker_handle.broker_arc_for_test();
+        let source = std::sync::Arc::new(Mutex::new(
+            Log::open(dir.path().join("wal-source"), LogConfig::default()).expect("open log"),
+        ));
+        let mut batch = RecordBatch {
+            records: vec![Record {
+                attributes: 0,
+                offset_delta: 0,
+                timestamp_delta: 0,
+                key: None,
+                value: Some(Bytes::from_static(b"wal")),
+                headers: vec![],
+            }],
+            ..Default::default()
+        };
+        source
+            .lock()
+            .expect("log")
+            .append_at(&mut batch, Offset(0))
+            .expect("append");
+        source.lock().expect("log").sync().expect("sync");
+        let topic_id = uuid::Uuid::from_u128(0xD15C);
+        let local_node_id = broker.config.node_id;
+        broker.wal_shards.insert(
+            ShardId {
+                topic_id,
+                partition: PartitionIndex(0),
+            },
+            std::sync::Arc::new(WalShardEngine::for_logs(BTreeMap::from([(
+                crabka_raft::NodeId(1),
+                source,
+            )]))),
+        );
+        broker
+            .wal_shards
+            .replace_placements(&std::collections::HashMap::from([(
+                ShardId {
+                    topic_id,
+                    partition: PartitionIndex(0),
+                },
+                vec![local_node_id],
+            )]));
+        let principal = Principal {
+            name: "broker-2".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer = SocketAddr::from(([127, 0, 0, 1], 9092));
+        let context = RequestContext::new(&principal, &peer, "wal-fetch", "test", false, "");
+
+        for version in [KIP_595_FETCH_VERSION, 18] {
+            let request = fetch_request(
+                QuorumGroup::diskless_wal(topic_id, PartitionIndex(0)),
+                local_node_id,
+                0,
+                0,
+                crabka_units::mebibytes(1),
+            );
+            let mut encoded = BytesMut::new();
+            request
+                .encode(&mut encoded, version)
+                .expect("encode WAL fetch");
+            let (response, response_version) =
+                super::handle(&broker, version, 1, &encoded, &context)
+                    .await
+                    .expect("route WAL fetch");
+
+            assert!(response_version == version);
+            let partition = &response.responses[0].partitions[0];
+            assert!(partition.high_watermark == 1);
+            assert!(matches!(
+                partition.records,
+                Some(RecordsPayload::Raw(ref records)) if !records.is_empty()
+            ));
+        }
+        broker_handle.shutdown().await;
+    }
+
     #[test]
     fn consume_consumer_quota_tuple_match_overage_throttles() {
         use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};

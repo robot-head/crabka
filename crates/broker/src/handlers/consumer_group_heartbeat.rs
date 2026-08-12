@@ -55,6 +55,10 @@ pub(crate) async fn handle(
             );
         }
 
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(&error(error_code), version);
+        }
+
         // KIP-848 / KIP-584: the next-gen protocol is gated on a finalized
         // group.version >= 1. Below that — including UNFINALIZED, which means
         // disabled — reject so the client falls back to the classic protocol.
@@ -77,7 +81,8 @@ pub(crate) async fn handle(
             .tx
             .send(GroupActorMessage::Heartbeat {
                 request: req,
-                client_host: String::new(),
+                client_id: ctx.client_id.to_owned(),
+                client_host: ctx.client_host(),
                 reply: tx,
             })
             .await
@@ -259,6 +264,75 @@ mod tests {
             resp.error_code == codes::GROUP_AUTHORIZATION_FAILED,
             "{resp:?}"
         );
+
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_persists_request_client_identity() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        broker
+            .controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::group_version::GROUP_VERSION_FEATURE.into(),
+                level: 1,
+            })])
+            .await
+            .expect("finalize group.version");
+        let principal = anonymous_principal();
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let ctx = test_context(&principal, &peer);
+
+        let bytes = handle(&broker, VERSION, 5, &request("identity-group"), &ctx)
+            .await
+            .expect("ConsumerGroupHeartbeat handler");
+        assert!(decode_response(&bytes).error_code == 0);
+
+        let actor = broker
+            .group_coordinator
+            .get_or_create_group("identity-group", GroupKindTag::Consumer);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(GroupActorMessage::Describe { reply: tx })
+            .await
+            .expect("describe consumer group");
+        let view = rx.await.expect("consumer group view");
+
+        assert!(view.members.len() == 1);
+        assert!(view.members[0].client_id == "consumer-group-heartbeat-test");
+        assert!(view.members[0].client_host == "/127.0.0.1");
+
+        let member_id = view.members[0].member_id.clone();
+        let member_epoch = view.members[0].member_epoch;
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 2], 9093));
+        let ctx = crate::test_support::request_context(&principal, &peer, "consumer-client-b");
+        let req = ConsumerGroupHeartbeatRequest {
+            group_id: "identity-group".into(),
+            member_id,
+            member_epoch,
+            rebalance_timeout_ms: 30_000,
+            subscribed_topic_names: Some(vec!["topic-a".into()]),
+            ..Default::default()
+        };
+        let req = crate::test_support::encode_request(&req, VERSION);
+
+        let bytes = handle(&broker, VERSION, 6, &req, &ctx)
+            .await
+            .expect("ConsumerGroupHeartbeat identity refresh");
+        assert!(decode_response(&bytes).error_code == 0);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(GroupActorMessage::Describe { reply: tx })
+            .await
+            .expect("describe refreshed consumer group");
+        let view = rx.await.expect("refreshed consumer group view");
+        assert!(view.members[0].client_id == "consumer-client-b");
+        assert!(view.members[0].client_host == "/127.0.0.2");
 
         broker_handle.shutdown().await;
     }

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use assert2::{assert, check};
 use bytes::Bytes;
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::Client;
 use crabka_client_producer::{Producer, ProducerRecord};
@@ -243,6 +243,64 @@ async fn idempotent_retry_reappends_after_truncation_instead_of_stalling() {
         retry.is_ok(),
         "idempotent retry after truncation must re-append (not dedup-stall); got {retry:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_backed_restart_recovers_idempotent_producer_state() {
+    let dir = TempDir::new().unwrap();
+    let log_dir = dir.path().to_path_buf();
+
+    let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    create_topic(&broker, &bootstrap, "restart-dedup", 1).await;
+    let first = produce_batch(
+        &bootstrap,
+        "restart-dedup",
+        idempotent_batch(42, 0, &["a"]),
+        -1,
+        5_000,
+    )
+    .await
+    .expect("initial idempotent produce");
+    assert!(first == 0);
+    broker.shutdown().await;
+
+    let mut config = BrokerConfig::for_tests(log_dir);
+    config.bootstrap_mode = BootstrapMode::Rejoin;
+    let broker = Broker::start(config).await.unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    broker
+        .wait_until_local_partition_leader(
+            "restart-dedup",
+            0,
+            crabka_broker::NodeId(broker.node_id()),
+        )
+        .await;
+
+    let duplicate = produce_batch(
+        &bootstrap,
+        "restart-dedup",
+        idempotent_batch(42, 0, &["a"]),
+        -1,
+        5_000,
+    )
+    .await
+    .expect("idempotent retry after restart");
+    assert!(duplicate == 0, "retry must resolve to the original offset");
+
+    let next = produce_batch(
+        &bootstrap,
+        "restart-dedup",
+        idempotent_batch(42, 1, &["b"]),
+        -1,
+        5_000,
+    )
+    .await
+    .expect("next sequence after restart");
+    assert!(next == 1);
+    broker.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

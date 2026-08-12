@@ -53,7 +53,7 @@ impl Encode for DescribeLogDirsRequest<'_> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -160,7 +160,7 @@ impl Encode for DescribableLogDirTopic<'_> {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

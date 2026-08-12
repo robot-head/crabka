@@ -74,18 +74,11 @@ pub(crate) struct Accumulator {
 }
 
 /// Result of [`Accumulator::try_append`].
-#[allow(dead_code)] // `BatchFull` is reserved for future backpressure paths.
-pub(crate) enum AppendResult {
-    Appended {
-        receiver: oneshot::Receiver<Result<RecordMetadata, ProducerError>>,
-        /// The accumulator created a new current batch, and therefore a new
-        /// linger deadline. This is also true when the previous current batch
-        /// rolled into `ready`.
-        wakes_sender: bool,
-    },
-    /// The accumulator's `batch.size` is full, but a new batch can start. The
-    /// caller, which is the sender wakeup, must seal and rotate.
-    BatchFull,
+pub(crate) struct AppendResult {
+    pub receiver: oneshot::Receiver<Result<RecordMetadata, ProducerError>>,
+    /// A new current batch (and therefore a new linger deadline) was created.
+    /// This is also true when the previous current batch rolled into `ready`.
+    pub wakes_sender: bool,
 }
 
 impl Accumulator {
@@ -148,7 +141,7 @@ impl Accumulator {
             ack: tx,
         });
         batch.size_bytes += record_size;
-        AppendResult::Appended {
+        AppendResult {
             receiver: rx,
             wakes_sender: need_new_batch,
         }

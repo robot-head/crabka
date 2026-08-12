@@ -2,21 +2,28 @@
 
 use crabka_metadata::{BrokerRegistrationRecord, NodeId};
 
-/// Selects the WAL voters. It spreads them across racks when the metadata
-/// carries rack information.
-#[allow(dead_code)]
+/// Selects the WAL voters from distinct configured racks. An incomplete
+/// result makes the caller fail closed instead of weakening the AZ-loss
+/// durability guarantee.
 pub(crate) fn select_voters(
     brokers: impl IntoIterator<Item = BrokerRegistrationRecord>,
     local_node: NodeId,
     voters: usize,
 ) -> Vec<NodeId> {
+    if voters == 0 {
+        return Vec::new();
+    }
     let mut brokers = brokers.into_iter().collect::<Vec<_>>();
     brokers.sort_by_key(|broker| broker.node_id.0);
 
     let mut selected = Vec::with_capacity(voters);
-    if brokers.iter().any(|broker| broker.node_id == local_node) {
-        selected.push(local_node);
-    }
+    let Some(local) = brokers
+        .iter()
+        .find(|broker| broker.node_id == local_node && broker.rack.is_some())
+    else {
+        return selected;
+    };
+    selected.push(local.node_id);
 
     let rack_distinct = rack_distinct_candidates(&brokers, &selected)
         .map(|broker| broker.node_id)
@@ -26,15 +33,6 @@ pub(crate) fn select_voters(
             return selected;
         }
         selected.push(node_id);
-    }
-
-    for broker in brokers {
-        if selected.len() == voters {
-            break;
-        }
-        if !selected.contains(&broker.node_id) {
-            selected.push(broker.node_id);
-        }
     }
 
     selected
@@ -92,14 +90,32 @@ mod tests {
     }
 
     #[test]
-    fn placement_falls_back_to_same_rack_when_needed() {
+    fn placement_refuses_to_weaken_the_rack_failure_budget() {
         let selected = select_voters(
             [broker(1, Some("a")), broker(2, Some("a")), broker(3, None)],
             NodeId(1),
             3,
         );
 
-        assert_eq!(selected, vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert_eq!(selected, vec![NodeId(1)]);
+    }
+
+    #[test]
+    fn placement_does_not_invent_an_unregistered_local_voter() {
+        let selected = select_voters([broker(2, Some("a")), broker(3, Some("b"))], NodeId(1), 2);
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn placement_requires_a_rack_for_the_leader() {
+        let selected = select_voters(
+            [broker(1, None), broker(2, Some("a")), broker(3, Some("b"))],
+            NodeId(1),
+            3,
+        );
+
+        assert!(selected.is_empty());
     }
 
     fn broker(id: u64, rack: Option<&str>) -> BrokerRegistrationRecord {
@@ -110,12 +126,14 @@ mod tests {
             host: format!("broker-{id}"),
             port: 9092,
             rack: rack.map(str::to_string),
+            log_dirs: vec![],
             endpoints: vec![BrokerEndpoint {
                 name: "INTERNAL".into(),
                 host: format!("broker-{id}"),
                 port: 19092,
                 protocol: ListenerProtocol::Plaintext,
             }],
+            features: std::collections::BTreeMap::new(),
         }
     }
 }

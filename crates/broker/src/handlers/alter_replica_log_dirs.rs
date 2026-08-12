@@ -53,6 +53,7 @@ pub(crate) fn handle(
     let move_policy = future_log::MovePolicy {
         retry_backoff: broker.config.future_log_move_retry_backoff,
         read_chunk: broker.config.future_log_move_read_chunk,
+        throttle: broker.throttle_state.alter_log_dirs.clone(),
     };
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
@@ -75,12 +76,21 @@ pub(crate) fn handle(
                         &log_config,
                         (&topic.name, crabka_ids::PartitionIndex(partition_index)),
                         &target_path,
-                        move_policy,
-                    ) {
+                        move_policy.clone(),
+                    )
+                    .await
+                    {
                         Ok(()) => codes::NONE,
                         Err(MoveError::LogDirNotFound) => codes::LOG_DIR_NOT_FOUND,
                         Err(MoveError::ReplicaNotAvailable) => codes::REPLICA_NOT_AVAILABLE,
-                        Err(MoveError::AlreadyMoving | MoveError::Storage(_)) => {
+                        Err(MoveError::Storage(error)) => {
+                            tracing::warn!(
+                                topic = %topic.name,
+                                partition = partition_index,
+                                target = %target_path.display(),
+                                error = %error,
+                                "replica log-dir move failed"
+                            );
                             codes::KAFKA_STORAGE_ERROR
                         }
                     };

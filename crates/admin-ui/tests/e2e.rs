@@ -17,7 +17,7 @@ async fn login_page_renders() -> Result<(), Box<dyn std::error::Error>> {
     let page = browser.new_page().await?;
 
     page.goto(&format!("{base_url}/login"), None).await?;
-    let title = page.locator("text=Sign in to Crabka").await;
+    let title = page.locator("text=Sign in to Crabka");
 
     assert!(title.count().await? >= 1);
 

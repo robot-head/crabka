@@ -8,13 +8,13 @@ use crabka_metadata::MetadataImage;
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_FEATURE as METADATA_VERSION;
 // Re-exported for `ApiVersions` tests / range-bound assertions; consumed only
 // from `#[cfg(test)]` modules, so the non-test lib target sees them as unused.
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MAX;
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MIN;
 /// The `share.version` feature name (KIP-932). Only the `#[cfg(test)]`
 /// module that asserts share.version is advertised uses it.
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use crabka_metadata::metadata_version::SHARE_VERSION_FEATURE as SHARE_VERSION;
 /// The `streams.version` feature name (KIP-1071). It gates
 /// `StreamsGroupHeartbeat` and `StreamsGroupDescribe`. Those handlers read it
@@ -48,7 +48,7 @@ pub(crate) fn supported_features() -> Vec<SupportedFeature> {
 /// Look up a supported feature by name. It pairs with `supported_features` as
 /// the module's feature-surface API. The `UpdateFeatures` handler resolves the
 /// registry feature directly, so the non-test lib target sees this as unused.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
     crabka_metadata::feature(name).map(|f| {
         let (min_version, max_version) = f.supported_range();
@@ -117,6 +117,10 @@ mod tests {
         };
         assert!(lookup(METADATA_VERSION) == Some(expected));
         assert!(lookup("not.a.feature").is_none());
+        assert!(
+            lookup(crabka_metadata::metadata_version::METADATA_DOWNGRADE_CAPABILITY_FEATURE)
+                .is_none()
+        );
     }
 
     #[test]

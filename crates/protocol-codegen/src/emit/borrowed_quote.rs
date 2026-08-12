@@ -66,6 +66,12 @@ fn tagged_should_encode(f: &FieldSpec) -> TokenStream {
 
 fn tagged_should_encode_from_default(f: &FieldSpec) -> TokenStream {
     let default = tagged_is_default_cond(f);
+    if let Some(option) = default.strip_suffix(".is_none()") {
+        return parse_expr(&format!("{option}.is_some()"));
+    }
+    if let Some((value, expected)) = default.split_once(" == ") {
+        return parse_expr(&format!("{value} != {expected}"));
+    }
     if let Some(positive) = default.strip_prefix('!') {
         parse_expr(positive)
     } else {
@@ -325,6 +331,7 @@ fn struct_block(
             /// # Panics
             ///
             /// Panics if a records field contains an invalid encoded record batch.
+            #[must_use]
             pub fn to_owned(&self) -> #owned_target {
                 #owned_target {
                     #to_owned_assigns
@@ -513,7 +520,7 @@ fn split_encode_body(
         } else {
             helpers.push(quote! {
                 fn #helper<B: BufMut>(&self, buf: &mut B, version: i16, #flex: bool) {
-                    #body
+                    #body;
                 }
             });
             calls.push(quote!(self.#helper(buf, version, flex);));
@@ -577,7 +584,7 @@ fn encode_one(f: &FieldSpec) -> TokenStream {
             parse_expr(&encode_call(&f.field_type, &expr, is_nullable(f))),
         )
     };
-    quote!(if #cond { #inner })
+    quote!(if #cond { #inner; })
 }
 
 /// Tagged string and bytes fields stored owned use the owned-flavor codec,
@@ -692,8 +699,11 @@ fn split_decode_body(
 ) -> (TokenStream, TokenStream) {
     let mut helpers = Vec::new();
     let mut calls = Vec::new();
-    let helper_lifetime = if has_lt { quote!('a) } else { quote!('de) };
-    let helper_generics = if has_lt { quote!() } else { quote!(<'de>) };
+    let helper_buf = if has_lt {
+        quote!(&mut &'a [u8])
+    } else {
+        quote!(&mut &[u8])
+    };
     for (index, field) in fields.iter().filter(|field| !is_tagged(field)).enumerate() {
         let helper = format_ident!("decode_field_{index}");
         let body = decode_one(ctx, field);
@@ -703,9 +713,9 @@ fn split_decode_body(
             quote!(_flex)
         };
         helpers.push(quote! {
-            fn #helper #helper_generics(
+            fn #helper(
                 out: &mut Self,
-                buf: &mut &#helper_lifetime [u8],
+                buf: #helper_buf,
                 version: i16,
                 #flex: bool,
             ) -> Result<(), ProtocolError> {
@@ -718,11 +728,16 @@ fn split_decode_body(
     if has_flex {
         let helper = format_ident!("decode_tagged_fields");
         let body = decode_tagged_block(ctx, fields);
+        let version = if body.to_string().contains("version") {
+            quote!(version)
+        } else {
+            quote!(_version)
+        };
         helpers.push(quote! {
-            fn #helper #helper_generics(
+            fn #helper(
                 out: &mut Self,
-                buf: &mut &#helper_lifetime [u8],
-                version: i16,
+                buf: #helper_buf,
+                #version: i16,
                 flex: bool,
             ) -> Result<(), ProtocolError> {
                 #body

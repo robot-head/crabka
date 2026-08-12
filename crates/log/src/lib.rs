@@ -58,7 +58,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/crabka-log/0.3.9")]
+#![doc(html_root_url = "https://docs.rs/crabka-log/0.4.0")]
 
 /// Emit the wrapped items only on platforms with a usable file-to-socket
 /// `sendfile(2)` for the zero-copy fetch path.
@@ -96,6 +96,7 @@ mod index;
 mod leader_epoch_checkpoint;
 mod log;
 mod name;
+mod producer_snapshot;
 mod recovery;
 mod retention;
 mod segment;
@@ -113,6 +114,7 @@ sendfile_cfg! {
     pub use log::RawReadDesc;
 }
 pub use log::{CompactionContext, Log, RawRead, ReadOutput, SegmentExport, VerbatimBatch};
+pub use producer_snapshot::ProducerSnapshotEntry;
 sendfile_cfg! {
     pub use segment::RawSegmentDesc;
 }

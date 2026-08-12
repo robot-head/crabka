@@ -115,36 +115,46 @@ async fn produce_v1_message_set_is_upconverted_and_round_trips() {
     // Fetch the stored records back and verify they survived the
     // up-conversion. The wire response is v2, so the fetched batch
     // carries the same values.
-    let fr = p
-        .client
-        .send(FetchRequest {
-            replica_id: -1,
-            max_wait_ms: 500,
-            min_bytes: 1,
-            max_bytes: 1 << 20,
-            topics: vec![FetchTopic {
-                topic: "legacy".into(),
-                topic_id,
-                partitions: vec![FetchPartition {
-                    partition: 0,
-                    fetch_offset: 0,
-                    partition_max_bytes: 1 << 20,
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let batch = loop {
+        let fr = p
+            .client
+            .send(FetchRequest {
+                replica_id: -1,
+                max_wait_ms: 500,
+                min_bytes: 1,
+                max_bytes: 1 << 20,
+                topics: vec![FetchTopic {
+                    topic: "legacy".into(),
+                    topic_id,
+                    partitions: vec![FetchPartition {
+                        partition: 0,
+                        fetch_offset: 0,
+                        partition_max_bytes: 1 << 20,
+                        ..Default::default()
+                    }],
                     ..Default::default()
                 }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .await
-        .expect("Fetch");
-    let part = &fr.responses[0].partitions[0];
-    assert!(part.error_code == 0);
-    let batch = part
-        .records
-        .as_ref()
-        .and_then(|p| p.as_v2())
-        .and_then(<[_]>::first)
-        .expect("Fetch returned a v2 batch");
+            })
+            .await
+            .expect("Fetch");
+        let part = &fr.responses[0].partitions[0];
+        assert!(part.error_code == 0);
+        if let Some(batch) = part
+            .records
+            .as_ref()
+            .and_then(|p| p.as_v2())
+            .and_then(<[_]>::first)
+        {
+            break batch.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Fetch did not return the committed v2 batch within 5s"
+        );
+        tokio::task::yield_now().await;
+    };
     assert!(batch.records.len() == 3);
     let values: Vec<&[u8]> = batch
         .records

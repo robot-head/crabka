@@ -147,14 +147,9 @@ impl OffsetCommitValue {
     }
 }
 
-// The k2 `GroupMetadata` *write* codec (`encode_key`/`encode_value`) and the
-// `current_state_timestamp_ms` field are wire-faithful but not yet exercised
-// in production: classic group membership is in-memory and only committed
-// offsets (k0/k1) are persisted today. Bootstrap *decodes* k2 records, and the
-// migration code writes them on conversion. Retained per the
-// B1 merge; allow until those slices wire the write path.
+// Migration downgrades and normal classic group transitions write this
+// wire-faithful k2 value. Bootstrap replay decodes the latest snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct GroupMetadataValue {
     pub protocol_type: String,
     pub generation: i32,
@@ -176,7 +171,6 @@ pub struct MemberMetadata {
     pub assignment: Bytes,
 }
 
-#[allow(dead_code)] // k2 write codec; see GroupMetadataValue note above.
 impl GroupMetadataValue {
     /// Encodes a `GroupMetadata` key, version 2.
     #[must_use]

@@ -52,6 +52,11 @@ pub(crate) fn to_client_creds(c: &InterBrokerCredentials) -> crabka_client_core:
             service_name: service_name.clone(),
             kdc_url: kdc_url.clone(),
         },
+        InterBrokerCredentials::OAuthBearer { token_path } => {
+            crabka_client_core::SaslCredentials::OAuthBearer {
+                token_path: token_path.clone(),
+            }
+        }
     }
 }
 
@@ -304,7 +309,10 @@ impl crabka_raft::OutboundDialer for InterBrokerDialer {
 
 #[cfg(test)]
 mod tests {
-    use super::InterBrokerClient;
+    use std::path::PathBuf;
+
+    use super::{InterBrokerClient, to_client_creds};
+    use crate::config::InterBrokerCredentials;
 
     #[test]
     fn process_policy_overrides_call_site_defaults() {
@@ -318,5 +326,20 @@ mod tests {
         client.apply_resource_policy(&mut options);
         assert2::assert!(options.dispatch_queue_capacity.get() == 7);
         assert2::assert!(options.frame_max.size() == crabka_units::kibibytes(32));
+    }
+
+    #[test]
+    fn oauthbearer_credentials_preserve_rotation_path() {
+        let token_path = PathBuf::from("/run/secrets/crabka/inter-broker-token");
+        let credentials = to_client_creds(&InterBrokerCredentials::OAuthBearer {
+            token_path: token_path.clone(),
+        });
+        let crabka_client_core::SaslCredentials::OAuthBearer {
+            token_path: actual_path,
+        } = credentials
+        else {
+            panic!("expected OAUTHBEARER client credentials");
+        };
+        assert2::assert!(actual_path == token_path);
     }
 }

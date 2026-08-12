@@ -8,10 +8,9 @@
 //! epoch machine ([`ConsumerState`]). The unified coordinator and the
 //! persistence path can therefore hold either one behind a single type.
 //!
-//! A group keeps one type for its whole lifetime. The actor chooses the `kind`
-//! when it spawns, and never changes it. The container keeps the
-//! protocol-specific state machines behind one surface for the coordinator and
-//! persistence code.
+//! The actor can change the live kind during KIP-848 upgrade and downgrade.
+//! The container keeps both protocol-specific state machines behind one surface
+//! so the coordinator and persistence code always use the live state.
 
 // The state machines are reused verbatim, relocated under `unified/`. These
 // aliases give the unified surface its types without renaming the moved code

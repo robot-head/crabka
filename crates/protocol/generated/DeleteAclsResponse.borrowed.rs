@@ -60,7 +60,7 @@ impl Encode for DeleteAclsResponse<'_> {
                 for it in &self.filter_results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -180,7 +180,7 @@ impl Encode for DeleteAclsFilterResult<'_> {
                 for it in &self.matching_acls {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

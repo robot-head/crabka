@@ -46,7 +46,7 @@ impl Encode for VoteResponse {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -205,7 +205,7 @@ impl Encode for TopicData {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

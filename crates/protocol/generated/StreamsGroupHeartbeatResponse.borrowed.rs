@@ -130,7 +130,7 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -149,7 +149,7 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -168,7 +168,7 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -187,7 +187,7 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -211,7 +211,7 @@ impl<'a> StreamsGroupHeartbeatResponse<'a> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -713,7 +713,7 @@ impl Encode for EndpointToPartitions<'_> {
                 for it in &self.active_partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -721,7 +721,7 @@ impl Encode for EndpointToPartitions<'_> {
                 for it in &self.standby_partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

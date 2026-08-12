@@ -16,4 +16,4 @@ path = "src/main.rs"
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-ids = { version = "0.3.8", path = "../ids" }
+crabka-ids = { version = "0.4.0", path = "../ids" }

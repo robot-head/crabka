@@ -20,6 +20,7 @@
 //! ACL gate.
 
 use std::{
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -67,6 +68,10 @@ struct PendingPartition {
     /// allowed the topic, that is when an acquire pass should run. A `None` row
     /// already has a complete `out`, because it is an error row.
     leadable: bool,
+    /// Whether this partition remains in the effective session subscription.
+    /// A forgotten or final-request row can still carry acknowledgements, but
+    /// must not acquire more records.
+    fetchable: bool,
     /// Acknowledgement batches piggybacked on this fetch. The handler applies
     /// them before the acquire pass.
     ack_batches: Vec<AckBatch>,
@@ -93,10 +98,11 @@ pub(crate) async fn handle(
     let cfg = broker.config.share_group.clone();
     let lock_timeout_ms = acquisition_timeout_ms(&cfg);
 
-    let (group, member) = match validate_request(broker, &req, &cfg) {
-        Ok(identity) => identity,
-        Err(code) => return encode_error_response(version, code, lock_timeout_ms),
-    };
+    if !cfg.enable {
+        return encode_error_response(version, codes::UNSUPPORTED_VERSION, lock_timeout_ms);
+    }
+    let group = req.group_id.clone().unwrap_or_default();
+    let member = req.member_id.clone().unwrap_or_default();
 
     // Best-effort membership check: if the group has a live share actor, the
     // member must be present in its describe view. When no actor exists yet
@@ -110,12 +116,69 @@ pub(crate) async fn handle(
     let mgr = broker.share_partition_leaders.clone();
     let image = broker.controller.current_image();
 
-    // Resolve every requested partition into a PendingPartition: ACL gate,
-    // leadership check, and the piggybacked ack batches.
-    let mut pending: Vec<PendingPartition> = Vec::new();
+    let mut requested = HashSet::new();
+    let mut requested_order = Vec::new();
+    let mut request_rows: HashMap<(uuid::Uuid, i32), FetchPartition> = HashMap::new();
+    let (has_acknowledgements, final_has_additions) = fetch_session_flags(&req);
     for topic in &req.topics {
         let topic_id = uuid::Uuid::from_bytes(topic.topic_id.0);
+        for partition in &topic.partitions {
+            let key = (topic_id, partition.partition_index);
+            if requested.insert(key) {
+                requested_order.push(key);
+            }
+            request_rows.insert(key, partition.clone());
+        }
+    }
+    let forgotten: HashSet<(uuid::Uuid, i32)> = req
+        .forgotten_topics_data
+        .iter()
+        .flat_map(|topic| {
+            let topic_id = uuid::Uuid::from_bytes(topic.topic_id.0);
+            topic
+                .partitions
+                .iter()
+                .copied()
+                .map(move |partition| (topic_id, partition))
+        })
+        .collect();
+    let session = match mgr.update_fetch_session(
+        &group,
+        &member,
+        ctx.connection_id,
+        req.share_session_epoch,
+        &requested,
+        &forgotten,
+        has_acknowledgements,
+        final_has_additions,
+    ) {
+        Ok(session) => session,
+        Err(code) => return encode_error_response(version, code, lock_timeout_ms),
+    };
+    let (release_before_acquire, release_after_acquire) =
+        session_release_phases(session.final_request);
+    if release_before_acquire {
+        mgr.release_session_partitions(&group, &member, &session.released)
+            .await;
+    }
+
+    let mut effective_order = requested_order;
+    let mut cached_only: Vec<_> = session
+        .partitions
+        .iter()
+        .copied()
+        .filter(|partition| !requested.contains(partition))
+        .collect();
+    cached_only.sort_unstable();
+    effective_order.extend(cached_only);
+
+    // Resolve the complete effective session subscription plus request-only
+    // acknowledgement rows into pending partitions.
+    let mut pending: Vec<PendingPartition> = Vec::new();
+    for (topic_id, partition_index) in effective_order {
         let topic_name = mgr.topic_name_for(topic_id);
+        let request_row = request_rows.get(&(topic_id, partition_index));
+        let fetchable = session.partitions.contains(&(topic_id, partition_index));
 
         // Per-topic `Read` ACL — mirrors `fetch::handle`'s authorize call.
         let denied = match topic_name.as_deref() {
@@ -136,61 +199,55 @@ pub(crate) async fn handle(
             None => true,
         };
 
-        for fp in &topic.partitions {
-            let mut out = PartitionData {
-                partition_index: fp.partition_index,
-                ..Default::default()
+        let mut out = partition_response(partition_index);
+        let ack_batches = request_row.map_or_else(Vec::new, collect_ack_batches);
+        let partition_max_bytes = request_row.map_or(0, |row| row.partition_max_bytes);
+
+        if denied {
+            out.error_code = if topic_name.is_some() {
+                codes::TOPIC_AUTHORIZATION_FAILED
+            } else {
+                codes::UNKNOWN_TOPIC_OR_PARTITION
             };
-            let ack_batches = collect_ack_batches(fp);
-
-            if denied {
-                out.error_code = if topic_name.is_some() {
-                    codes::TOPIC_AUTHORIZATION_FAILED
-                } else {
-                    codes::UNKNOWN_TOPIC_OR_PARTITION
-                };
-                pending.push(PendingPartition {
-                    topic_id,
-                    topic_name: topic_name.clone(),
-                    partition_index: fp.partition_index,
-                    partition_max_bytes: fp.partition_max_bytes,
-                    leadable: false,
-                    ack_batches,
-                    out,
-                });
-                continue;
-            }
-
-            if !mgr.topic_leader_is_self(topic_id, fp.partition_index) {
-                let (leader_id, leader_epoch) = mgr.current_leader_of(topic_id, fp.partition_index);
-                out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
-                out.current_leader = LeaderIdAndEpoch {
-                    leader_id,
-                    leader_epoch,
-                    ..Default::default()
-                };
-                pending.push(PendingPartition {
-                    topic_id,
-                    topic_name: topic_name.clone(),
-                    partition_index: fp.partition_index,
-                    partition_max_bytes: fp.partition_max_bytes,
-                    leadable: false,
-                    ack_batches,
-                    out,
-                });
-                continue;
-            }
-
             pending.push(PendingPartition {
                 topic_id,
-                topic_name: topic_name.clone(),
-                partition_index: fp.partition_index,
-                partition_max_bytes: fp.partition_max_bytes,
-                leadable: true,
+                topic_name,
+                partition_index,
+                partition_max_bytes,
+                leadable: false,
+                fetchable,
                 ack_batches,
                 out,
             });
+            continue;
         }
+
+        if !mgr.topic_leader_is_self(topic_id, partition_index) {
+            let (leader_id, leader_epoch) = mgr.current_leader_of(topic_id, partition_index);
+            out = not_leader_response(partition_index, leader_id, leader_epoch);
+            pending.push(PendingPartition {
+                topic_id,
+                topic_name,
+                partition_index,
+                partition_max_bytes,
+                leadable: false,
+                fetchable,
+                ack_batches,
+                out,
+            });
+            continue;
+        }
+
+        pending.push(PendingPartition {
+            topic_id,
+            topic_name,
+            partition_index,
+            partition_max_bytes,
+            leadable: true,
+            fetchable,
+            ack_batches,
+            out,
+        });
     }
 
     let acquire = AcquireContext {
@@ -204,7 +261,17 @@ pub(crate) async fn handle(
         config: &cfg,
     };
 
-    acquire_records(&acquire, &mut pending, req.max_wait_ms).await?;
+    let max_wait_ms = if session.final_request {
+        0
+    } else {
+        req.max_wait_ms
+    };
+    let acquire_result = acquire_records(&acquire, &mut pending, max_wait_ms).await;
+    if release_after_acquire {
+        mgr.release_session_partitions(&group, &member, &session.released)
+            .await;
+    }
+    acquire_result?;
 
     // Group pending rows back into per-topic responses, preserving first-seen
     // topic order.
@@ -242,22 +309,42 @@ async fn acquire_records(
     Ok(())
 }
 
-fn validate_request(
-    broker: &Broker,
-    request: &ShareFetchRequest,
-    config: &crate::coordinator::unified::share::config::ShareGroupConfig,
-) -> Result<(String, String), i16> {
-    if !config.enable {
-        return Err(codes::UNSUPPORTED_VERSION);
+fn fetch_session_flags(req: &ShareFetchRequest) -> (bool, bool) {
+    let has_acknowledgements = req
+        .topics
+        .iter()
+        .flat_map(|topic| &topic.partitions)
+        .any(|partition| !partition.acknowledgement_batches.is_empty());
+    let has_additions = req
+        .topics
+        .iter()
+        .flat_map(|topic| &topic.partitions)
+        .any(|partition| partition.acknowledgement_batches.is_empty());
+    (has_acknowledgements, has_additions)
+}
+
+fn session_release_phases(final_request: bool) -> (bool, bool) {
+    (!final_request, final_request)
+}
+
+fn partition_response(partition_index: i32) -> PartitionData {
+    PartitionData {
+        partition_index,
+        ..Default::default()
     }
-    let group = request.group_id.clone().unwrap_or_default();
-    let member = request.member_id.clone().unwrap_or_default();
-    broker.share_partition_leaders.validate_session(
-        &group,
-        &member,
-        request.share_session_epoch,
-    )?;
-    Ok((group, member))
+}
+
+fn not_leader_response(partition_index: i32, leader_id: i32, leader_epoch: i32) -> PartitionData {
+    PartitionData {
+        partition_index,
+        error_code: codes::NOT_LEADER_OR_FOLLOWER,
+        current_leader: LeaderIdAndEpoch {
+            leader_id,
+            leader_epoch,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn acquisition_timeout_ms(
@@ -384,6 +471,12 @@ async fn acquire_pass(
             p.out.acknowledge_error_code = ack_err;
         }
 
+        if !p.fetchable {
+            mgr.persist_if_dirty(group, p.topic_id, p.partition_index, &mut st)
+                .await;
+            continue;
+        }
+
         // Expire stale locks, materialize freshly produced records, acquire.
         st.expire_locks(now);
         let part = p.topic_name.as_deref().and_then(|name| {
@@ -408,13 +501,13 @@ async fn acquire_pass(
         } else {
             hwm
         };
-        // Archive aborted (committed-range) records. The LSO
-        // clamp above already guarantees no OPEN-transaction records are
-        // surfaced; aborted-but-stable records still get acquired because
-        // `AbortedTxn` carries only `producer_id + start_offset`, not the
-        // aborted region's end offset, so precise per-offset archival needs
-        // the control-batch markers.
         st.materialize(upper, cfg.max_inflight_records);
+        // Transaction markers occupy log offsets but are broker metadata, not
+        // user records. Archive them before acquisition so their encoded
+        // coordinator epoch can never appear in a ShareFetch response.
+        for (first, last) in control_batch_ranges(&part, st.start_offset, st.end_offset).await? {
+            st.archive_internal(first, last);
+        }
         let remaining_records = remaining_record_budget(max_records, total);
         let acquired = if remaining_records > 0 {
             st.acquire(
@@ -558,33 +651,94 @@ async fn read_acquired_bytes(
     }
 }
 
+/// Returns the control-batch offset ranges in `[start, end)`.
+///
+/// Share acquisition state is offset-based and therefore materializes log
+/// control markers along with data unless the handler explicitly archives
+/// them. The decoded log read keeps this classification out of the raw-byte
+/// response path.
+async fn control_batch_ranges(
+    part: &crate::partition::Partition,
+    start: Offset,
+    end: Offset,
+) -> Result<Vec<(Offset, Offset)>, BrokerError> {
+    if end <= start {
+        return Ok(Vec::new());
+    }
+    let log = part.log.clone();
+    let join = tokio::task::spawn_blocking(move || {
+        let log = log.lock().expect("log mutex poisoned");
+        let read = log.read(start, ByteSize::from_bytes(u64::MAX))?;
+        Ok::<_, crabka_log::LogError>(
+            read.batches
+                .into_iter()
+                .filter(|batch| batch.attributes.is_control_batch())
+                .filter_map(|batch| {
+                    let first = Offset(batch.base_offset).max(start);
+                    let last =
+                        Offset(batch.base_offset + i64::from(batch.last_offset_delta)).min(end - 1);
+                    (first <= last).then_some((first, last))
+                })
+                .collect(),
+        )
+    });
+    match join.await {
+        Ok(result) => result.map_err(BrokerError::from),
+        Err(join_err) => Err(BrokerError::Io(std::io::Error::other(format!(
+            "share-fetch control scan panicked: {join_err}"
+        )))),
+    }
+}
+
 /// Parks on the append and HW-advance notifies of the partitions that this
 /// broker can lead, under a single timeout. It mirrors the wait construction
 /// in `fetch::long_poll_then_reread`.
-async fn long_poll(broker: &Broker, pending: &[PendingPartition], max_wait_ms: i32) {
-    let mut notifies: Vec<Arc<Notify>> = Vec::new();
-    for p in pending {
-        if !p.leadable {
-            continue;
-        }
-        if let Some(part) = p.topic_name.as_deref().and_then(|name| {
-            broker
-                .partitions
-                .get(name, crabka_ids::PartitionIndex(p.partition_index))
-        }) {
-            notifies.push(part.append_notify.clone());
-            notifies.push(part.hw_advance_notify.clone());
-        }
-    }
-    if notifies.is_empty() {
-        return;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LongPollOutcome {
+    NoPartitions,
+    Notified,
+    TimedOut,
+}
+
+async fn long_poll(
+    broker: &Broker,
+    pending: &[PendingPartition],
+    max_wait_ms: i32,
+) -> LongPollOutcome {
+    let notifies = pending
+        .iter()
+        .filter(|partition| partition.leadable)
+        .filter(|partition| partition.fetchable)
+        .filter_map(|partition| {
+            partition.topic_name.as_deref().and_then(|name| {
+                broker
+                    .partitions
+                    .get(name, crabka_ids::PartitionIndex(partition.partition_index))
+            })
+        })
+        .flat_map(|partition| {
+            [
+                partition.append_notify.clone(),
+                partition.hw_advance_notify.clone(),
+            ]
+        })
+        .collect();
+    let max_wait = Duration::from_millis(u64::from(u32::try_from(max_wait_ms).unwrap_or(0)));
+    wait_for_notifications(notifies, max_wait).await
+}
+
+async fn wait_for_notifications(notifies: Vec<Arc<Notify>>, max_wait: Duration) -> LongPollOutcome {
+    let Some(_) = notifies.first() else {
+        return LongPollOutcome::NoPartitions;
+    };
     let waits: Vec<WaitFut> = notifies
         .into_iter()
         .map(|n| Box::pin(async move { n.notified().await }) as WaitFut)
         .collect();
-    let max_wait = Duration::from_millis(u64::from(u32::try_from(max_wait_ms).unwrap_or(0)));
-    let _ = tokio::time::timeout(max_wait, futures_util::future::select_all(waits)).await;
+    match tokio::time::timeout(max_wait, futures_util::future::select_all(waits)).await {
+        Ok(_) => LongPollOutcome::Notified,
+        Err(_) => LongPollOutcome::TimedOut,
+    }
 }
 
 /// Groups the resolved pending partitions back into per-topic response
@@ -633,7 +787,10 @@ mod tests {
     use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
-        owned::{share_fetch_request::AcknowledgementBatch, share_fetch_response},
+        owned::{
+            share_fetch_request::{AcknowledgementBatch, FetchTopic},
+            share_fetch_response,
+        },
         primitives::uuid::Uuid as ProtoUuid,
     };
 
@@ -692,6 +849,70 @@ mod tests {
     }
 
     #[test]
+    fn fetch_session_flags_distinguish_additions_and_acknowledgements() {
+        let request = |partitions| ShareFetchRequest {
+            topics: vec![FetchTopic {
+                partitions,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let addition = FetchPartition {
+            partition_index: 1,
+            ..Default::default()
+        };
+        let acknowledgement = FetchPartition {
+            partition_index: 2,
+            acknowledgement_batches: vec![AcknowledgementBatch::default()],
+            ..Default::default()
+        };
+
+        assert!(fetch_session_flags(&ShareFetchRequest::default()) == (false, false));
+        assert!(fetch_session_flags(&request(vec![addition.clone()])) == (false, true));
+        assert!(fetch_session_flags(&request(vec![acknowledgement.clone()])) == (true, false));
+        assert!(fetch_session_flags(&request(vec![addition, acknowledgement])) == (true, true));
+    }
+
+    #[test]
+    fn session_release_surrounds_acquisition_at_the_required_phase() {
+        assert!(session_release_phases(false) == (true, false));
+        assert!(session_release_phases(true) == (false, true));
+    }
+
+    #[test]
+    fn partition_response_helpers_preserve_routing_fields() {
+        let ordinary = partition_response(7);
+        assert!(ordinary.partition_index == 7);
+        assert!(ordinary.error_code == codes::NONE);
+
+        let redirected = not_leader_response(7, 2, 9);
+        assert!(redirected.partition_index == 7);
+        assert!(redirected.error_code == codes::NOT_LEADER_OR_FOLLOWER);
+        assert!(redirected.current_leader.leader_id == 2);
+        assert!(redirected.current_leader.leader_epoch == 9);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn notification_wait_reports_empty_wakeup_and_timeout() {
+        assert!(
+            wait_for_notifications(Vec::new(), Duration::from_secs(1)).await
+                == LongPollOutcome::NoPartitions
+        );
+
+        let notified = Arc::new(Notify::new());
+        notified.notify_one();
+        assert!(
+            wait_for_notifications(vec![notified], Duration::from_secs(1)).await
+                == LongPollOutcome::Notified
+        );
+
+        assert!(
+            wait_for_notifications(vec![Arc::new(Notify::new())], Duration::from_secs(1)).await
+                == LongPollOutcome::TimedOut
+        );
+    }
+
+    #[test]
     fn remaining_record_budget_is_request_wide_and_saturating() {
         assert_eq!(remaining_record_budget(500, 300), 200);
         assert_eq!(remaining_record_budget(500, 500), 0);
@@ -709,6 +930,7 @@ mod tests {
                 partition_index: 0,
                 partition_max_bytes: 0,
                 leadable: false,
+                fetchable: false,
                 ack_batches: Vec::new(),
                 out: PartitionData {
                     partition_index: 0,
@@ -734,6 +956,7 @@ mod tests {
                 partition_index: 3,
                 partition_max_bytes: 0,
                 leadable: false,
+                fetchable: false,
                 ack_batches: Vec::new(),
                 out: PartitionData {
                     partition_index: 3,
@@ -752,6 +975,7 @@ mod tests {
                 partition_index: 1,
                 partition_max_bytes: 0,
                 leadable: false,
+                fetchable: false,
                 ack_batches: Vec::new(),
                 out: PartitionData {
                     partition_index: 1,

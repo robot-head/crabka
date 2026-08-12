@@ -7,8 +7,8 @@
 //!
 //! The stamp is an additional internal coordinate, a packed
 //! `TimestampSource` reading, stored beside the wire-exact `.log`. Nothing
-//! ever touches the `.log` bytes. The stampindex is derived state, and a
-//! rescan of the log can rebuild it. It never leaves the broker on any
+//! ever touches the `.log` bytes. The stampindex is internal metadata that is
+//! retained and truncated with its segment. It never leaves the broker on any
 //! client-facing API. This mirrors the `.txnindex` sidecar pattern.
 
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
@@ -99,12 +99,9 @@ impl StampIndex {
 
     /// Append one stamped-range entry.
     ///
-    /// # Precondition
-    /// Callers append entries in nondecreasing offset order. Each new
-    /// entry's `base_offset` is at least the previous entry's `base_offset`.
-    /// Stamps follow partition offset order before they reach this method, so
-    /// within a partition the stamp order never contradicts the offset
-    /// order.
+    /// Entries need not arrive in offset order. Transactional ranges are
+    /// added when their commit marker lands, and two interleaved transactions
+    /// can commit in either order. Ranges themselves must not overlap.
     #[instrument(
         level = "debug",
         skip(self),
@@ -114,6 +111,27 @@ impl StampIndex {
     /// # Errors
     /// Returns an error when appending to or syncing the file fails.
     pub fn append(&mut self, entry: StampEntry) -> Result<(), LogError> {
+        if entry.last_offset < entry.base_offset {
+            return Err(LogError::InvalidArgument(format!(
+                "stamp range {}..={} is inverted",
+                entry.base_offset, entry.last_offset
+            )));
+        }
+        if let Some(existing) = self.entries.iter().find(|existing| {
+            existing.base_offset <= entry.last_offset && entry.base_offset <= existing.last_offset
+        }) {
+            if *existing == entry {
+                return Ok(());
+            }
+            return Err(LogError::Corrupt(format!(
+                "stamp range {}..={} overlaps existing range {}..={} in {}",
+                entry.base_offset,
+                entry.last_offset,
+                existing.base_offset,
+                existing.last_offset,
+                self.path.display()
+            )));
+        }
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
@@ -128,6 +146,91 @@ impl StampIndex {
         f.sync_data().map_err(LogError::Io)?;
         self.entries.push(entry);
         Ok(())
+    }
+
+    /// Insert a committed transactional range or replace the same exact
+    /// range. Replacement upgrades append-time entries written by older
+    /// brokers to the marker-time commit stamp.
+    ///
+    /// # Errors
+    /// Returns an error for a partial overlap or when rewriting the sidecar
+    /// fails.
+    pub fn upsert(&mut self, entry: StampEntry) -> Result<(), LogError> {
+        if let Some(position) = self.entries.iter().position(|existing| {
+            existing.base_offset == entry.base_offset && existing.last_offset == entry.last_offset
+        }) {
+            if self.entries[position] != entry {
+                let mut entries = self.entries.clone();
+                entries[position] = entry;
+                self.rewrite(&entries)?;
+                self.entries = entries;
+            }
+            return Ok(());
+        }
+        self.append(entry)
+    }
+
+    /// Remove entries that cover offsets at or after `offset` and rewrite the
+    /// sidecar. Log truncation calls this after truncating the segment bytes.
+    ///
+    /// # Errors
+    /// Returns an error when rewriting or syncing the sidecar fails.
+    pub fn truncate_from(&mut self, offset: Offset) -> Result<(), LogError> {
+        let entries: Vec<_> = self
+            .entries
+            .iter()
+            .copied()
+            .filter(|entry| entry.last_offset < offset)
+            .collect();
+        if entries.len() == self.entries.len() {
+            return Ok(());
+        }
+        self.rewrite(&entries)?;
+        self.entries = entries;
+        Ok(())
+    }
+
+    /// Remove exact ranges, if present. Startup uses this to hide
+    /// append-time transactional entries created by older brokers while the
+    /// transaction is still open.
+    ///
+    /// # Errors
+    /// Returns an error when rewriting or syncing the sidecar fails.
+    pub fn remove_ranges(&mut self, ranges: &[(Offset, Offset)]) -> Result<(), LogError> {
+        let entries: Vec<_> = self
+            .entries
+            .iter()
+            .copied()
+            .filter(|entry| {
+                !ranges
+                    .iter()
+                    .any(|range| range.0 == entry.base_offset && range.1 == entry.last_offset)
+            })
+            .collect();
+        if entries.len() == self.entries.len() {
+            return Ok(());
+        }
+        self.rewrite(&entries)?;
+        self.entries = entries;
+        Ok(())
+    }
+
+    fn rewrite(&self, entries: &[StampEntry]) -> Result<(), LogError> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+            .map_err(LogError::Io)?;
+        for entry in entries {
+            let raw = StampEntryRaw {
+                base_offset: I64::new(entry.base_offset.0),
+                last_offset: I64::new(entry.last_offset.0),
+                stamp: U64::new(entry.stamp),
+            };
+            file.write_all(raw.as_bytes()).map_err(LogError::Io)?;
+        }
+        file.sync_data().map_err(LogError::Io)
     }
 
     #[must_use]
@@ -243,5 +346,142 @@ mod tests {
         // Offsets in the gap and past the end are uncovered.
         assert2::assert!(idx.stamp_for_offset(Offset(5)) == None);
         assert2::assert!(idx.stamp_for_offset(Offset(15)) == None);
+    }
+
+    #[test]
+    fn append_rejects_overlapping_ranges_but_accepts_exact_retry() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("00.stampindex");
+        let mut idx = StampIndex::open(path).unwrap();
+        let entry = StampEntry {
+            base_offset: Offset(5),
+            last_offset: Offset(7),
+            stamp: 100,
+        };
+        idx.append(entry).unwrap();
+        idx.append(entry).unwrap();
+        assert2::assert!(idx.entries() == [entry]);
+
+        let error = idx
+            .append(StampEntry {
+                base_offset: Offset(7),
+                last_offset: Offset(9),
+                stamp: 200,
+            })
+            .unwrap_err();
+        assert2::assert!(let LogError::Corrupt(_) = error);
+
+        let error = idx
+            .append(StampEntry {
+                base_offset: Offset(10),
+                last_offset: Offset(9),
+                stamp: 300,
+            })
+            .unwrap_err();
+        assert2::assert!(let LogError::InvalidArgument(_) = error);
+    }
+
+    #[test]
+    fn upsert_replaces_only_an_exact_range() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("00.stampindex");
+        let mut idx = StampIndex::open(path.clone()).unwrap();
+        idx.append(StampEntry {
+            base_offset: Offset(5),
+            last_offset: Offset(7),
+            stamp: 100,
+        })
+        .unwrap();
+
+        idx.upsert(StampEntry {
+            base_offset: Offset(5),
+            last_offset: Offset(7),
+            stamp: 200,
+        })
+        .unwrap();
+        assert2::assert!(idx.stamp_for_offset(Offset(6)) == Some(200));
+        assert2::assert!(StampIndex::open(path).unwrap().entries() == idx.entries());
+
+        for (base, last) in [(5, 8), (4, 7)] {
+            let error = idx
+                .upsert(StampEntry {
+                    base_offset: Offset(base),
+                    last_offset: Offset(last),
+                    stamp: 300,
+                })
+                .unwrap_err();
+            assert2::assert!(let LogError::Corrupt(_) = error);
+        }
+    }
+
+    #[test]
+    fn truncate_from_removes_tail_entries_on_disk() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("00.stampindex");
+        let mut idx = StampIndex::open(path.clone()).unwrap();
+        for entry in [
+            StampEntry {
+                base_offset: Offset(0),
+                last_offset: Offset(2),
+                stamp: 100,
+            },
+            StampEntry {
+                base_offset: Offset(3),
+                last_offset: Offset(6),
+                stamp: 103,
+            },
+            StampEntry {
+                base_offset: Offset(10),
+                last_offset: Offset(12),
+                stamp: 110,
+            },
+        ] {
+            idx.append(entry).unwrap();
+        }
+
+        idx.truncate_from(Offset(6)).unwrap();
+        assert2::assert!(
+            StampIndex::open(path).unwrap().entries()
+                == [StampEntry {
+                    base_offset: Offset(0),
+                    last_offset: Offset(2),
+                    stamp: 100,
+                }]
+        );
+    }
+
+    #[test]
+    fn remove_ranges_requires_both_exact_boundaries() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("00.stampindex");
+        let mut idx = StampIndex::open(path.clone()).unwrap();
+        for entry in [
+            StampEntry {
+                base_offset: Offset(0),
+                last_offset: Offset(1),
+                stamp: 10,
+            },
+            StampEntry {
+                base_offset: Offset(2),
+                last_offset: Offset(3),
+                stamp: 20,
+            },
+        ] {
+            idx.append(entry).unwrap();
+        }
+
+        idx.remove_ranges(&[(Offset(0), Offset(9)), (Offset(9), Offset(3))])
+            .unwrap();
+        assert2::assert!(idx.entries().len() == 2);
+        idx.remove_ranges(&[(Offset(2), Offset(3))]).unwrap();
+
+        assert2::assert!(
+            StampIndex::open(path).unwrap().entries()
+                == [StampEntry {
+                    base_offset: Offset(0),
+                    last_offset: Offset(1),
+                    stamp: 10,
+                }]
+        );
     }
 }

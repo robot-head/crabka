@@ -194,9 +194,23 @@ spec:
                   delegationTokenMaxLifetime:
                     nullable: true
                     type: string
+                  disklessWalFlushInterval:
+                    nullable: true
+                    type: string
+                  disklessWalFlushMaxSize:
+                    nullable: true
+                    type: string
+                  disklessWalIndexProjectionTimeout:
+                    nullable: true
+                    type: string
                   disklessWalLocalReplicaCount:
                     format: uint
                     minimum: 1.0
+                    nullable: true
+                    type: integer
+                  disklessWalTrimSafetyLag:
+                    format: int64
+                    minimum: 0.0
                     nullable: true
                     type: integer
                   futureLogMoveReadChunk:
@@ -406,6 +420,11 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  shareGroupMaxSize:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   shareGroupRecordLockDuration:
                     nullable: true
                     type: string
@@ -451,9 +470,17 @@ spec:
                   streamsGroupAssignor:
                     nullable: true
                     type: string
+                  streamsGroupEnable:
+                    nullable: true
+                    type: boolean
                   streamsGroupHeartbeatInterval:
                     nullable: true
                     type: string
+                  streamsGroupMaxSize:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   streamsGroupNumStandbyReplicas:
                     format: int32
                     minimum: 0.0
@@ -1110,9 +1137,11 @@ spec:
                   `KRaft` metadata version, the runtime analog of
                   `inter.broker.protocol.version`. When unset, it tracks the
                   `major.minor` of `kafkaVersion`. When set, it pins the metadata version
-                  for the safe two-step upgrade. The operator validates it against
-                  `kafkaVersion` and the finalized `status.metadataVersion`. An invalid
-                  value surfaces `KafkaVersionValid=False` and blocks the roll.
+                  for a two-step upgrade or an online downgrade. The operator validates
+                  it against `kafkaVersion`; changes on an existing cluster are finalized
+                  through `UpdateFeatures`, with safe-downgrade semantics for a lower
+                  target. Rejections surface `KafkaVersionValid=False` and leave
+                  `status.metadataVersion` unchanged.
                 nullable: true
                 type: string
               metricsConfig:
@@ -1726,9 +1755,8 @@ spec:
                 type: array
               metadataVersion:
                 description: |-
-                  The operator-finalized metadata version. It advances only when the
-                  version validation passes. It drives the downgrade-window check on the
-                  next reconcile.
+                  The operator-finalized metadata version. On an existing cluster it
+                  advances only after `UpdateFeatures` accepts the requested level.
                 nullable: true
                 type: string
               readyReplicas:

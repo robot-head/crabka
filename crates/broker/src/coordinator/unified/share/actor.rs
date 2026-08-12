@@ -57,6 +57,7 @@ use crate::{
 pub enum ShareGroupActorMessage {
     Heartbeat {
         request: ShareGroupHeartbeatRequest,
+        client_id: String,
         client_host: String,
         reply: oneshot::Sender<ShareGroupHeartbeatResponse>,
     },
@@ -193,7 +194,7 @@ async fn actor_loop(
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
                 match msg {
-                    ShareGroupActorMessage::Heartbeat { request, client_host, reply } => {
+                    ShareGroupActorMessage::Heartbeat { request, client_id, client_host, reply } => {
                         match handle_heartbeat(
                             &mut state,
                             &config,
@@ -201,7 +202,10 @@ async fn actor_loop(
                             &*offsets_log,
                             &coordinator,
                             &request,
-                            &client_host,
+                            super::super::ClientIdentity {
+                                id: &client_id,
+                                host: &client_host,
+                            },
                         )
                         .await
                         {
@@ -323,7 +327,7 @@ async fn handle_heartbeat(
     offsets_log: &dyn OffsetsLog,
     coordinator: &super::super::GroupCoordinator,
     req: &ShareGroupHeartbeatRequest,
-    client_host: &str,
+    client: super::super::ClientIdentity<'_>,
 ) -> Result<ShareGroupHeartbeatResponse, crate::error::BrokerError> {
     let now = Instant::now();
     let now_ms = chrono_now_ms();
@@ -339,8 +343,11 @@ async fn handle_heartbeat(
     // as a first-join, adopting the client-supplied id; an empty id is
     // tolerated by minting a server-side UUID.
     if req.member_epoch == 0 && !state.members.contains_key(&req.member_id) {
+        if state.members.len() >= config.max_size {
+            return Ok(error_resp(codes::GROUP_MAX_SIZE_REACHED, config));
+        }
         let new_member_id = first_join_member_id(&req.member_id);
-        let m = build_member(&new_member_id, req, client_host, now);
+        let m = build_member(&new_member_id, req, client, now);
         state.add_or_update_member(m);
         reconcile(state, metadata);
         state.advance_member_epoch(&new_member_id);
@@ -360,7 +367,7 @@ async fn handle_heartbeat(
     };
 
     // ─── Steady-state: update subscription / last_seen ───────────
-    let changed = update_member_state(state, metadata, req, now, cur_epoch);
+    let changed = update_member_state(state, metadata, req, client, now, cur_epoch);
     if changed {
         let pending = snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id));
         flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
@@ -506,18 +513,27 @@ fn update_member_state(
     state: &mut ShareGroupState,
     metadata: &dyn MetadataProvider,
     req: &ShareGroupHeartbeatRequest,
+    client: super::super::ClientIdentity<'_>,
     now: Instant,
     cur_epoch: i32,
 ) -> bool {
-    let mut subscription_changed = false;
+    let mut member_metadata_changed = false;
     if let Some(m) = state.members.get_mut(&req.member_id) {
         m.last_seen = now;
+        if m.client_id != client.id {
+            m.client_id = client.id.to_string();
+            member_metadata_changed = true;
+        }
+        if m.client_host != client.host {
+            m.client_host = client.host.to_string();
+            member_metadata_changed = true;
+        }
         if let Some(ref names) = req.subscribed_topic_names {
             let set: HashSet<String> = names.iter().cloned().collect();
             if set != m.subscribed_topic_names {
                 m.subscribed_topic_names = set;
                 state.dirty = true;
-                subscription_changed = true;
+                member_metadata_changed = true;
             }
         }
     }
@@ -527,7 +543,7 @@ fn update_member_state(
     if epoch_advanced {
         state.advance_member_epoch(&req.member_id);
     }
-    subscription_changed || was_dirty || epoch_advanced
+    member_metadata_changed || was_dirty || epoch_advanced
 }
 
 /// Handle a leave-group heartbeat (`member_epoch == -1`).
@@ -602,7 +618,7 @@ fn resolve_subscribed_topic_ids(member: &ShareMemberState, input: &ReconcileInpu
 fn build_member(
     member_id: &str,
     req: &ShareGroupHeartbeatRequest,
-    host: &str,
+    client: super::super::ClientIdentity<'_>,
     now: Instant,
 ) -> ShareMemberState {
     let subs: HashSet<String> = req
@@ -611,7 +627,7 @@ fn build_member(
         .unwrap_or_default()
         .into_iter()
         .collect();
-    let mut m = ShareMemberState::joining(member_id, String::new(), host, subs);
+    let mut m = ShareMemberState::joining(member_id, client.id, client.host, subs);
     m.rack_id.clone_from(&req.rack_id);
     m.last_seen = now;
     m
@@ -959,7 +975,7 @@ async fn flush_pending(
         return Ok(());
     }
     let batch = pending.into_batch(&state.group_id, now_ms);
-    offsets_log.append(batch).await?;
+    offsets_log.append(&state.group_id, batch).await?;
     coordinator.update_share_cache(&state.group_id, snapshot_seed(state));
     Ok(())
 }
@@ -1028,6 +1044,7 @@ mod tests {
             .tx
             .send(ShareGroupActorMessage::Heartbeat {
                 request: req,
+                client_id: "client-a".into(),
                 client_host: "/127.0.0.1".into(),
                 reply: tx,
             })
@@ -1107,6 +1124,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn member_limit_rejects_only_new_members() {
+        let (metadata, _id) = metadata_with_topic("t", 1);
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let coord = Arc::new(GroupCoordinator::new(
+            NextGenConfig::default(),
+            ShareGroupConfig {
+                max_size: 1,
+                ..ShareGroupConfig::default()
+            },
+            metadata,
+            log,
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+        let handle = coord.get_or_create_share("g");
+        let request = |member_id: &str, member_epoch| ShareGroupHeartbeatRequest {
+            group_id: "g".into(),
+            member_id: member_id.into(),
+            member_epoch,
+            subscribed_topic_names: Some(vec!["t".into()]),
+            ..Default::default()
+        };
+
+        let joined = heartbeat(&handle, request("m1", 0)).await;
+        check!(joined.error_code == codes::NONE);
+
+        let rejected = heartbeat(&handle, request("m2", 0)).await;
+        check!(rejected.error_code == codes::GROUP_MAX_SIZE_REACHED);
+
+        let existing = heartbeat(&handle, request("m1", joined.member_epoch)).await;
+        check!(existing.error_code == codes::NONE);
+        check!(existing.member_epoch == joined.member_epoch);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn leave_removes_member() {
         let (metadata, _id) = metadata_with_topic("t", 4);
         let (coord, log) = make_coordinator(metadata);
@@ -1169,7 +1220,10 @@ mod tests {
                 subscribed_topic_names: Some(vec!["t".into()]),
                 ..Default::default()
             },
-            "/127.0.0.1",
+            crate::coordinator::unified::ClientIdentity {
+                id: "client-a",
+                host: "/127.0.0.1",
+            },
             Instant::now(),
         );
         m.last_seen = Instant::now()

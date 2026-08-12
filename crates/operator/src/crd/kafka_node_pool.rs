@@ -23,13 +23,14 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaNodePoolSpec {
-    /// Roles that each node in this pool has. Only the union
-    /// `{Controller, Broker}` is supported.
+    /// Roles that each node in this pool has. The list must contain
+    /// `Controller`, `Broker`, or both, without duplicates.
+    #[schemars(length(min = 1, max = 2))]
     pub roles: Vec<NodeRole>,
 
-    /// Number of pods. Validation: it must equal 1.
+    /// Number of pods. Each ordinal gets one consecutive node id.
     #[serde(default = "default_replicas")]
-    #[schemars(range(min = 1, max = 1))]
+    #[schemars(range(min = 1))]
     pub replicas: i32,
 
     /// First node id. Pod ordinal `i` -> `node_id = nodeIdStart + i`.

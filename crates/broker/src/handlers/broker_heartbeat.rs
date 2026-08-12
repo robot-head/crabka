@@ -76,13 +76,20 @@ pub(crate) async fn handle(
             return encode_response(version, &not_controller_response());
         }
 
-        let broker_id_u64 = u64::try_from(req.broker_id).unwrap_or(0);
+        let image = controller.current_image();
+        let (broker_id_u64, is_caught_up) = match validate_registration(&image, &req) {
+            Ok(validated) => validated,
+            Err(error_code) => return encode_response(version, &error_response(error_code)),
+        };
 
         // Record the heartbeat. If it's a revival, the liveness ticker
         // will pick up the transition next cycle and the heartbeat-side
         // wakeup is a no-op; the controlled-shutdown path handles
         // explicit on-revival handling.
-        let _transition = liveness.record_heartbeat(broker_id_u64).await;
+        let _transition = liveness.record_fenced_heartbeat(broker_id_u64).await;
+        let is_fenced = liveness
+            .apply_fencing(broker_id_u64, req.want_fence, is_caught_up)
+            .await;
 
         // Track want_shut_down state and drive leader transfer.
         liveness
@@ -134,7 +141,10 @@ pub(crate) async fn handle(
             }
         }
 
-        encode_response(version, &success_response(should_shut_down))
+        encode_response(
+            version,
+            &success_response(is_caught_up, is_fenced, should_shut_down),
+        )
     }
 }
 
@@ -146,27 +156,49 @@ fn has_offline_log_dirs(req: &BrokerHeartbeatRequest) -> bool {
     !req.offline_log_dirs.is_empty()
 }
 
+fn validate_registration(
+    image: &MetadataImage,
+    req: &BrokerHeartbeatRequest,
+) -> Result<(u64, bool), i16> {
+    let broker_id = u64::try_from(req.broker_id).map_err(|_| codes::BROKER_ID_NOT_REGISTERED)?;
+    let registration = image
+        .broker(NodeId(broker_id))
+        .ok_or(codes::BROKER_ID_NOT_REGISTERED)?;
+    if req.broker_epoch != registration.broker_epoch {
+        return Err(codes::STALE_BROKER_EPOCH);
+    }
+    Ok((
+        broker_id,
+        req.current_metadata_offset >= registration.broker_epoch,
+    ))
+}
+
 fn not_controller_response() -> BrokerHeartbeatResponse {
+    error_response(codes::NOT_CONTROLLER)
+}
+
+fn error_response(error_code: i16) -> BrokerHeartbeatResponse {
     BrokerHeartbeatResponse {
-        error_code: codes::NOT_CONTROLLER,
+        error_code,
         ..Default::default()
     }
 }
 
-fn success_response(should_shut_down: bool) -> BrokerHeartbeatResponse {
+fn success_response(
+    is_caught_up: bool,
+    is_fenced: bool,
+    should_shut_down: bool,
+) -> BrokerHeartbeatResponse {
     BrokerHeartbeatResponse {
-        is_caught_up: true,
-        is_fenced: false,
+        is_caught_up,
+        is_fenced,
         should_shut_down,
         ..Default::default()
     }
 }
 
 fn denied_response_body() -> BrokerHeartbeatResponse {
-    BrokerHeartbeatResponse {
-        error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-        ..Default::default()
-    }
+    error_response(codes::CLUSTER_AUTHORIZATION_FAILED)
 }
 
 fn encode_response(version: i16, resp: &BrokerHeartbeatResponse) -> Result<Bytes, BrokerError> {
@@ -302,7 +334,7 @@ mod tests {
 
     use assert2::assert;
     use bytes::BytesMut;
-    use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord, PartitionRecord, TopicRecord};
     use crabka_protocol::{Encode, primitives::uuid::Uuid as ProtocolUuid};
     use crabka_raft::{
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
@@ -423,11 +455,15 @@ mod tests {
         Arc::new(l)
     }
 
-    fn request(offline_log_dirs: Vec<uuid::Uuid>) -> Bytes {
+    fn request(
+        broker_epoch: i64,
+        current_metadata_offset: i64,
+        offline_log_dirs: Vec<uuid::Uuid>,
+    ) -> Bytes {
         let req = BrokerHeartbeatRequest {
             broker_id: 1,
-            broker_epoch: -1,
-            current_metadata_offset: 0,
+            broker_epoch,
+            current_metadata_offset,
             want_fence: false,
             want_shut_down: false,
             offline_log_dirs: offline_log_dirs
@@ -509,7 +545,7 @@ mod tests {
             should_shut_down: true,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(success_response(true) == expected_success);
+        assert!(success_response(true, false, true) == expected_success);
 
         let expected_denied = BrokerHeartbeatResponse {
             throttle_time_ms: 0,
@@ -520,6 +556,65 @@ mod tests {
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
         assert!(denied_response_body() == expected_denied);
+    }
+
+    #[test]
+    fn registration_validation_rejects_unknown_and_stale_brokers() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: NodeId(7),
+                broker_epoch: 42,
+                incarnation_id: Uuid::nil(),
+                host: "localhost".into(),
+                port: 9092,
+                rack: None,
+                log_dirs: vec![],
+                endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
+            },
+        ));
+        let mut req = BrokerHeartbeatRequest {
+            broker_id: -1,
+            broker_epoch: 42,
+            current_metadata_offset: 42,
+            ..Default::default()
+        };
+
+        assert!(validate_registration(&image, &req) == Err(codes::BROKER_ID_NOT_REGISTERED));
+        req.broker_id = 8;
+        assert!(validate_registration(&image, &req) == Err(codes::BROKER_ID_NOT_REGISTERED));
+        req.broker_id = 7;
+        req.broker_epoch = 41;
+        assert!(validate_registration(&image, &req) == Err(codes::STALE_BROKER_EPOCH));
+    }
+
+    #[test]
+    fn registration_validation_reports_catch_up_at_registration_offset() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: NodeId(7),
+                broker_epoch: 42,
+                incarnation_id: Uuid::nil(),
+                host: "localhost".into(),
+                port: 9092,
+                rack: None,
+                log_dirs: vec![],
+                endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
+            },
+        ));
+        let mut req = BrokerHeartbeatRequest {
+            broker_id: 7,
+            broker_epoch: 42,
+            current_metadata_offset: 41,
+            ..Default::default()
+        };
+
+        assert!(validate_registration(&image, &req) == Ok((7, false)));
+        req.current_metadata_offset = 42;
+        assert!(validate_registration(&image, &req) == Ok((7, true)));
     }
 
     #[test]
@@ -736,7 +831,11 @@ mod tests {
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
         let ctx = test_context(&principal, &peer);
         let version = crabka_protocol::owned::broker_heartbeat_request::MAX_VERSION;
-        let req = request(vec![]);
+        let image = broker.controller.current_image();
+        let broker_epoch = image
+            .broker_epoch(NodeId(1))
+            .expect("broker registration should be applied");
+        let req = request(broker_epoch, broker_epoch, vec![]);
 
         let bytes = handle(&broker, version, 11, &req, &ctx)
             .await

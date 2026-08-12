@@ -10,10 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crabka_client_core::Client;
 use crabka_protocol::{
-    owned::{
-        metadata_request::MetadataRequest,
-        share_group_heartbeat_request::ShareGroupHeartbeatRequest,
-    },
+    owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest,
     primitives::uuid::Uuid as WireUuid,
 };
 use crabka_units::{
@@ -323,6 +320,10 @@ impl ShareConsumer {
         #[builder(default = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)]
         dispatch_queue_capacity: usize,
         #[builder(default = crabka_client_core::DEFAULT_CLIENT_FRAME_MAX)] frame_max: ByteSize,
+        #[builder(default)]
+        metadata_recovery_strategy: crabka_client_core::MetadataRecoveryStrategy,
+        #[builder(default = crabka_client_core::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER)]
+        metadata_recovery_rebootstrap_trigger: Time,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConsumerError> {
         if subscribe.is_empty() {
@@ -365,12 +366,19 @@ impl ShareConsumer {
                 .map_err(ConsumerError::RebalanceFailed)?;
         let frame_max = crabka_client_core::ClientFrameMax::try_from(frame_max)
             .map_err(ConsumerError::RebalanceFailed)?;
+        let metadata_recovery_rebootstrap_trigger =
+            crabka_client_core::MetadataRecoveryRebootstrapTrigger::new(
+                metadata_recovery_rebootstrap_trigger,
+            )
+            .map_err(ConsumerError::RebalanceFailed)?;
 
         let client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
             .dispatch_queue_capacity(dispatch_queue_capacity.get())
             .frame_max(frame_max.size())
+            .metadata_recovery_strategy(metadata_recovery_strategy)
+            .metadata_recovery_rebootstrap_trigger(metadata_recovery_rebootstrap_trigger.time())
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -404,7 +412,7 @@ impl ShareConsumer {
             heartbeat_interval_from_response(join.heartbeat_interval_ms, heartbeat_interval);
 
         // 2. Resolve assignment topic ids → names via Metadata.
-        let md = client.send(MetadataRequest::default()).await?;
+        let md = client.refresh_metadata().await?;
         let mut topic_names: HashMap<WireUuid, String> = HashMap::new();
         for t in &md.topics {
             if let Some(name) = &t.name {
@@ -439,6 +447,8 @@ impl ShareConsumer {
             .client_id(client_id.clone())
             .dispatch_queue_capacity(dispatch_queue_capacity.get())
             .frame_max(frame_max.size())
+            .metadata_recovery_strategy(metadata_recovery_strategy)
+            .metadata_recovery_rebootstrap_trigger(metadata_recovery_rebootstrap_trigger.time())
             .maybe_security(security.clone())
             .build()
             .await?;

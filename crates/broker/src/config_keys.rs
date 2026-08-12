@@ -1,6 +1,6 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! The broker recognizes fifteen keys. Five propagate live to `Log.config`:
+//! The broker recognizes fifteen topic keys. Five propagate live to `Log.config`:
 //! `retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`, and
 //! `compression.type`. The tiered-storage local-retention pair
 //! (`local.retention.ms`, `local.retention.bytes`) and the KIP-534
@@ -17,17 +17,15 @@
 //! validates both. One key is the KIP-841 unclean-recovery toggle,
 //! `unclean.leader.election.enable`. The controller's automatic failover
 //! path reads it on ISR-empty. One key is the KIP-966 offset-aware recovery
-//! strategy, `unclean.recovery.strategy`, which supersedes that toggle. One
-//! key is Crabka's `QoS` routing key, `qos.tier`. Producer quota enforcement
+//! strategy, `unclean.recovery.strategy`, which supersedes that toggle. Both
+//! unclean-recovery settings also accept a cluster-wide default broker config;
+//! a topic override takes precedence. One
+//! key is krabka's `QoS` routing key, `qos.tier`. Producer quota enforcement
 //! uses it to partition runtime buckets by topic tier.
 //!
 //! The broker rejects unknown keys with `INVALID_CONFIG`.
 
-// Items are `pub(crate)` for downstream handlers (Tasks 7-10); until those
-// modules land they appear unused to the compiler.
-#![allow(dead_code)]
-
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use crabka_log::LogConfig;
 use crabka_units::{
@@ -48,16 +46,16 @@ pub(crate) const MIN_INSYNC_REPLICAS: &str = "min.insync.replicas";
 /// replica as leader on ISR-empty failover. Default: `false`, which matches
 /// Apache Kafka. The partition then stays unavailable until a former ISR
 /// member returns. `true` accepts possible data loss in exchange for
-/// availability. `crate::leader_election::on_broker_dead` reads this key at
-/// runtime through [`MetadataImage::topic_config`].
+/// availability. `crate::leader_election::on_broker_dead` reads the topic
+/// override first and then the cluster-wide default broker config.
 pub(crate) const UNCLEAN_LEADER_ELECTION_ENABLE: &str = "unclean.leader.election.enable";
-/// KIP-966: per-topic unclean-recovery strategy. It supersedes
+/// KIP-966: topic-level unclean-recovery strategy. It supersedes
 /// `unclean.leader.election.enable`. At `Balanced` or `Aggressive` the
 /// controller runs offset-aware recovery: it polls surviving replicas for
 /// their log offsets and elects the most complete log. Default: `None`,
 /// which falls back to the legacy enable-flag behavior.
-/// `crate::unclean_recovery` and the failover / `ElectLeaders` paths read
-/// this key.
+/// `crate::unclean_recovery` and the failover / `ElectLeaders` paths read the
+/// topic override first and then the cluster-wide default broker config.
 pub(crate) const UNCLEAN_RECOVERY_STRATEGY: &str = "unclean.recovery.strategy";
 
 /// Resolved value of `unclean.recovery.strategy` for a topic.
@@ -66,7 +64,7 @@ pub(crate) enum RecoveryStrategy {
     /// No offset-aware recovery. Defer to `unclean.leader.election.enable`.
     None,
     /// Wait for all currently-alive replicas, then elect the most complete
-    /// log. Crabka does not track ELR.
+    /// log. krabka does not track ELR.
     Balanced,
     /// Elect the most complete log among the replicas that respond within
     /// a short deadline. This optimizes availability.
@@ -97,6 +95,13 @@ pub(crate) const DELETE_RETENTION_MS: &str = "delete.retention.ms";
 /// buckets. Unset topics resolve to [`DEFAULT_QOS_TIER`].
 pub(crate) const QOS_TIER: &str = "qos.tier";
 pub(crate) const DEFAULT_QOS_TIER: &str = "default";
+
+/// KIP-1075: server-side deadline for remote `ListOffsets` work when an older
+/// request does not carry `timeout_ms`. Kafka exposes this as a dynamic broker
+/// config and defaults it to 30 seconds.
+pub(crate) const REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS: &str =
+    "remote.list.offsets.request.timeout.ms";
+pub(crate) const DEFAULT_REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Kafka sentinel for `retention.ms` / `retention.bytes`: `-1` means
 /// unlimited retention, and is the lowest legal value.
@@ -252,20 +257,72 @@ pub(crate) fn resolve_qos_tier<'a>(
         .map_or(DEFAULT_QOS_TIER, String::as_str)
 }
 
-/// Resolve `unclean.recovery.strategy` for `topic`. The default is
-/// `RecoveryStrategy::None` when the key is unset or unparseable. The lookup
-/// is per-topic only for now, which mirrors
-/// `unclean.leader.election.enable`. A cluster default can layer in later
-/// through the same `topic_config` lookup precedence.
+fn topic_or_cluster_default<'a>(
+    image: &'a crabka_metadata::MetadataImage,
+    topic: &str,
+    key: &str,
+) -> Option<&'a str> {
+    image
+        .topic_config(topic)
+        .and_then(|configs| configs.get(key))
+        .or_else(|| image.default_broker_config()?.get(key))
+        .map(String::as_str)
+}
+
+/// Resolve `unclean.recovery.strategy` for `topic`. A topic override takes
+/// precedence over the cluster-wide default broker config. The result is
+/// [`RecoveryStrategy::None`] when neither value exists or the selected value
+/// is unparseable.
 pub(crate) fn resolve_recovery_strategy(
     image: &crabka_metadata::MetadataImage,
     topic: &str,
 ) -> RecoveryStrategy {
-    image
-        .topic_config(topic)
-        .and_then(|m| m.get(UNCLEAN_RECOVERY_STRATEGY))
-        .and_then(|v| RecoveryStrategy::parse(v))
+    topic_or_cluster_default(image, topic, UNCLEAN_RECOVERY_STRATEGY)
+        .and_then(RecoveryStrategy::parse)
         .unwrap_or(RecoveryStrategy::None)
+}
+
+/// Resolve `unclean.leader.election.enable` for `topic`. A topic override
+/// takes precedence over the cluster-wide default broker config. Missing or
+/// invalid values resolve to `false`.
+pub(crate) fn resolve_unclean_leader_election_enabled(
+    image: &crabka_metadata::MetadataImage,
+    topic: &str,
+) -> bool {
+    topic_or_cluster_default(image, topic, UNCLEAN_LEADER_ELECTION_ENABLE) == Some("true")
+}
+
+/// Parse KIP-1075's dynamic broker timeout.
+pub(crate) fn parse_remote_list_offsets_timeout(value: &str) -> Result<Duration, String> {
+    let millis = value
+        .parse::<i32>()
+        .map_err(|_| format!("{REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS} must be a positive int"))?;
+    if millis <= 0 {
+        return Err(format!(
+            "{REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS} must be in 1..={}",
+            i32::MAX
+        ));
+    }
+    Ok(Duration::from_millis(
+        u64::try_from(millis).expect("positive i32 fits u64"),
+    ))
+}
+
+/// Resolve the per-broker KIP-1075 timeout over the cluster default.
+pub(crate) fn resolve_remote_list_offsets_timeout(
+    image: &crabka_metadata::MetadataImage,
+    node_id: crabka_metadata::NodeId,
+) -> Duration {
+    image
+        .broker_config(node_id)
+        .and_then(|configs| configs.get(REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS))
+        .or_else(|| {
+            image
+                .default_broker_config()
+                .and_then(|configs| configs.get(REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS))
+        })
+        .and_then(|value| parse_remote_list_offsets_timeout(value).ok())
+        .unwrap_or(DEFAULT_REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT)
 }
 
 /// Merge `overrides` over `base` and return a fresh `LogConfig` to push
@@ -945,19 +1002,63 @@ mod tests {
     }
 
     #[test]
-    fn resolve_recovery_strategy_defaults_none_and_reads_override() {
+    fn recovery_settings_resolve_topic_over_cluster_default() {
         use std::collections::BTreeMap;
 
-        use crabka_metadata::{MetadataImage, MetadataRecord, TopicConfigRecord};
+        use crabka_metadata::{
+            BrokerConfigRecord, DEFAULT_BROKER_CONFIG_NODE_ID, MetadataImage, MetadataRecord,
+            TopicConfigRecord,
+        };
         use uuid::Uuid;
         let mut img = MetadataImage::new(Uuid::nil());
         assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::None);
+        assert!(!resolve_unclean_leader_election_enabled(&img, "t"));
+
+        for (key, value) in [
+            (UNCLEAN_RECOVERY_STRATEGY, "Balanced"),
+            (UNCLEAN_LEADER_ELECTION_ENABLE, "true"),
+        ] {
+            img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id: DEFAULT_BROKER_CONFIG_NODE_ID,
+                config_name: key.into(),
+                config_value: Some(value.into()),
+            }));
+        }
+        assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::Balanced);
+        assert!(resolve_unclean_leader_election_enabled(&img, "t"));
+
         let mut overrides = BTreeMap::new();
-        overrides.insert(UNCLEAN_RECOVERY_STRATEGY.into(), "Balanced".into());
+        overrides.insert(UNCLEAN_RECOVERY_STRATEGY.into(), "Aggressive".into());
+        overrides.insert(UNCLEAN_LEADER_ELECTION_ENABLE.into(), "false".into());
         img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
             topic: "t".into(),
             overrides,
         }));
-        assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::Balanced);
+        assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::Aggressive);
+        assert!(!resolve_unclean_leader_election_enabled(&img, "t"));
+    }
+
+    #[test]
+    fn invalid_topic_recovery_setting_does_not_expose_cluster_default() {
+        use std::collections::BTreeMap;
+
+        use crabka_metadata::{
+            BrokerConfigRecord, DEFAULT_BROKER_CONFIG_NODE_ID, MetadataImage, MetadataRecord,
+            TopicConfigRecord,
+        };
+        use uuid::Uuid;
+
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: DEFAULT_BROKER_CONFIG_NODE_ID,
+            config_name: UNCLEAN_RECOVERY_STRATEGY.into(),
+            config_value: Some("Balanced".into()),
+        }));
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides: BTreeMap::from([(UNCLEAN_RECOVERY_STRATEGY.into(), "invalid".into())]),
+        }));
+
+        assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::None);
     }
 }

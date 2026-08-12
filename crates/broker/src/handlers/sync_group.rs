@@ -56,6 +56,10 @@ pub(crate) async fn handle(
             }
         }
 
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return encode_err(version, error_code, None, None);
+        }
+
         let Some(handle) = coordinator.find(&req.group_id) else {
             return encode_err(version, codes::UNKNOWN_MEMBER_ID, None, None);
         };

@@ -46,7 +46,7 @@ impl Encode for AddPartitionsToTxnTopicResult<'_> {
                 for it in &self.results_by_partition {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

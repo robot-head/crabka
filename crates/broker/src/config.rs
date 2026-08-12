@@ -3,7 +3,7 @@
 //! Build the configuration directly for library use, or from CLI flags. The
 //! binary entry point is `bin/broker.rs`.
 
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use crabka_compression::RecordDecompressionPolicy;
 use crabka_log::LogConfig;
@@ -22,6 +22,14 @@ use crate::BrokerError;
 
 /// Default number of local durable copies in a diskless WAL quorum.
 pub const DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT: usize = 3;
+/// Default cadence of diskless WAL object-store flushes.
+pub const DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL: Time = millis(250);
+/// Default byte ceiling for one diskless WAL object-store flush.
+pub const DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE: ByteSize = mebibytes(8);
+/// Default committed-offset lag retained behind the diskless WAL trim frontier.
+pub const DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG: i64 = 1;
+/// Default wait for a published diskless WAL index record to be projected.
+pub const DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT: Time = secs(5);
 
 /// `KRaft` `process.roles`. A node is a metadata-quorum `Controller`, a data
 /// `Broker`, or both. Default is the combined set `[Controller, Broker]`.
@@ -76,6 +84,9 @@ pub enum InterBrokerCredentials {
         service_name: String,
         kdc_url: String,
     },
+    /// SASL/OAUTHBEARER. The token file is read on every new outbound
+    /// connection so credential rotation does not require a broker restart.
+    OAuthBearer { token_path: PathBuf },
 }
 
 impl InterBrokerCredentials {
@@ -86,6 +97,7 @@ impl InterBrokerCredentials {
             Self::Plain { .. } => SaslMechanism::Plain,
             Self::Scram { mechanism, .. } => *mechanism,
             Self::Gssapi { .. } => SaslMechanism::Gssapi,
+            Self::OAuthBearer { .. } => SaslMechanism::OAuthBearer,
         }
     }
 }
@@ -245,8 +257,16 @@ pub struct BrokerConfig {
     pub client_metrics_stale_push_intervals: u32,
     /// Capacity of each coordinator actor mailbox.
     pub coordinator_actor_mailbox_capacity: usize,
-    /// Number of local durable replicas in each diskless WAL quorum.
+    /// Number of broker voters in each diskless WAL quorum.
     pub diskless_wal_local_replica_count: usize,
+    /// Cadence of diskless WAL object-store flushes.
+    pub diskless_wal_flush_interval: Time,
+    /// Maximum bytes included in one diskless WAL object-store flush.
+    pub diskless_wal_flush_max_size: ByteSize,
+    /// Committed offsets retained behind the diskless WAL trim frontier.
+    pub diskless_wal_trim_safety_lag: i64,
+    /// Maximum wait for a published diskless WAL index record to be projected.
+    pub diskless_wal_index_projection_timeout: Time,
     /// Capacity of the unclean-recovery work queue.
     pub unclean_recovery_queue_capacity: usize,
     /// Maximum bytes read while recovering share state.
@@ -291,6 +311,10 @@ pub struct BrokerConfig {
     pub default_min_insync_replicas: i32,
     /// Bytes copied per future-log move read.
     pub future_log_move_read_chunk: ByteSize,
+    /// Partition count for the consumer-offsets internal topic.
+    pub offsets_topic_num_partitions: i32,
+    /// Desired replication factor for the consumer-offsets internal topic.
+    pub offsets_topic_replication_factor: i16,
     /// Partition count for the transaction-state internal topic.
     pub transaction_state_num_partitions: i32,
     /// Maximum bytes requested by each transaction-state recovery read.
@@ -333,6 +357,13 @@ pub struct BrokerConfig {
 
     /// Per-log configuration applied to every partition this broker hosts.
     pub log_config: LogConfig,
+
+    /// Optional internal timestamp source shared by every hosted partition.
+    ///
+    /// `None` is the Kafka-only default: no `.stampindex` sidecar is opened and
+    /// record bytes, offsets, LSO, and high-watermark behavior stay unchanged.
+    /// A combined SQL/Kafka runtime injects its tenant timestamp source here.
+    pub stamp_source: Option<Arc<dyn crabka_log::StampSource>>,
 
     /// Raft node id. Conventionally equal to `broker_id as NodeId`.
     pub node_id: NodeId,
@@ -1059,6 +1090,10 @@ impl BrokerConfig {
             client_metrics_stale_push_intervals: 3,
             coordinator_actor_mailbox_capacity: 64,
             diskless_wal_local_replica_count: DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT,
+            diskless_wal_flush_interval: DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL,
+            diskless_wal_flush_max_size: DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE,
+            diskless_wal_trim_safety_lag: DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG,
+            diskless_wal_index_projection_timeout: DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT,
             unclean_recovery_queue_capacity: 256,
             share_recovery_read_max: mebibytes(1),
             share_session_cache_max_when_unlimited: 10_000,
@@ -1081,6 +1116,8 @@ impl BrokerConfig {
             partition_writer_queue_depth: 64,
             default_min_insync_replicas: 1,
             future_log_move_read_chunk: mebibytes(1),
+            offsets_topic_num_partitions: 50,
+            offsets_topic_replication_factor: 3,
             transaction_state_num_partitions: 50,
             transaction_recovery_read_max: mebibytes(1),
             transaction_state_replication_factor: 3,
@@ -1093,6 +1130,7 @@ impl BrokerConfig {
             log_dir,
             extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
+            stamp_source: None,
             node_id: NodeId(1),
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],
@@ -1271,14 +1309,12 @@ impl BrokerConfig {
         }
 
         // Inter-broker listener must exist.
-        if !listeners
+        let inter_broker_listener = listeners
             .iter()
-            .any(|l| l.name == self.inter_broker_listener_name)
-        {
-            return Err(BrokerError::InvalidInterBrokerListener {
+            .find(|listener| listener.name == self.inter_broker_listener_name)
+            .ok_or_else(|| BrokerError::InvalidInterBrokerListener {
                 name: self.inter_broker_listener_name.clone(),
-            });
-        }
+            })?;
 
         // Every SASL listener requires at least one mechanism. Per-listener
         // sasl_mechanisms wins over the broker-wide default.
@@ -1324,6 +1360,7 @@ impl BrokerConfig {
                 name: "controller".into(),
             });
         }
+        self.validate_outbound_sasl(inter_broker_listener)?;
         self.validate_positive_runtime_scalars()?;
         self.validate_additional_runtime_scalars()?;
         self.record_decompression_policy()?;
@@ -1452,13 +1489,58 @@ impl BrokerConfig {
             streams.max_session_timeout,
             streams.min_heartbeat_interval,
             streams.max_heartbeat_interval,
-            None,
+            Some(streams.max_size),
         )?;
 
         if let RlmmKind::TopicBacked(config) = &self.remote_log_metadata {
             config.validate()?;
         }
         self.validate_leader_rebalance()
+    }
+
+    fn validate_outbound_sasl(&self, inter_broker: &ListenerSpec) -> Result<(), BrokerError> {
+        let Some(credentials) = self.inter_broker_credentials.as_ref() else {
+            return Ok(());
+        };
+        let mechanism = credentials.mechanism();
+
+        if inter_broker.protocol.requires_sasl() {
+            let enabled = inter_broker
+                .sasl_mechanisms
+                .as_deref()
+                .unwrap_or(&self.enabled_sasl_mechanisms);
+            if !enabled.contains(&mechanism) {
+                return Err(BrokerError::InvalidRuntimeConfig(format!(
+                    "inter-broker credential mechanism {} is not enabled on listener {}",
+                    mechanism.wire_name(),
+                    inter_broker.name
+                )));
+            }
+        }
+        if self.controller_listener_protocol.requires_sasl()
+            && !self.enabled_sasl_mechanisms.contains(&mechanism)
+        {
+            return Err(BrokerError::InvalidRuntimeConfig(format!(
+                "inter-broker credential mechanism {} is not enabled on the controller listener",
+                mechanism.wire_name()
+            )));
+        }
+        if let InterBrokerCredentials::OAuthBearer { token_path } = credentials {
+            let token = std::fs::read(token_path).map_err(|error| {
+                BrokerError::InvalidRuntimeConfig(format!(
+                    "cannot read inter-broker OAUTHBEARER token {}: {error}",
+                    token_path.display()
+                ))
+            })?;
+            let token = token.trim_ascii();
+            if token.is_empty() || token.contains(&b'\x01') {
+                return Err(BrokerError::InvalidRuntimeConfig(
+                    "inter-broker OAUTHBEARER token must be non-empty and contain no RFC 7628 separator"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Builds the validated Kafka record decompression policy.
@@ -1553,6 +1635,14 @@ impl BrokerConfig {
             ("gauge_poll_interval", self.gauge_poll_interval),
             ("isr_scan_interval", self.isr_scan_interval),
             ("cleaner_interval", self.cleaner_interval),
+            (
+                "diskless_wal_flush_interval",
+                self.diskless_wal_flush_interval,
+            ),
+            (
+                "diskless_wal_index_projection_timeout",
+                self.diskless_wal_index_projection_timeout,
+            ),
             (
                 "future_log_move_retry_backoff",
                 self.future_log_move_retry_backoff,
@@ -1778,8 +1868,22 @@ impl BrokerConfig {
                 )));
             }
         }
+        if self.diskless_wal_local_replica_count.is_multiple_of(2) {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "diskless_wal_local_replica_count must be odd".into(),
+            ));
+        }
+        if self.diskless_wal_trim_safety_lag < 0 {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "diskless_wal_trim_safety_lag must be nonnegative".into(),
+            ));
+        }
         for (name, value) in [
             ("audit_tail_read_max", self.audit_tail_read_max),
+            (
+                "diskless_wal_flush_max_size",
+                self.diskless_wal_flush_max_size,
+            ),
             ("share_recovery_read_max", self.share_recovery_read_max),
             ("socket_request_max", self.socket_request_max),
             ("sendfile_min", self.sendfile_min),
@@ -1827,6 +1931,10 @@ impl BrokerConfig {
                 self.share_coordinator.state_topic_num_partitions,
             ),
             (
+                "offsets_topic_num_partitions",
+                self.offsets_topic_num_partitions,
+            ),
+            (
                 "transaction_state_num_partitions",
                 self.transaction_state_num_partitions,
             ),
@@ -1847,6 +1955,10 @@ impl BrokerConfig {
             (
                 "share_state_replication_factor",
                 self.share_coordinator.state_topic_replication_factor,
+            ),
+            (
+                "offsets_topic_replication_factor",
+                self.offsets_topic_replication_factor,
             ),
             (
                 "transaction_state_replication_factor",
@@ -1967,6 +2079,10 @@ impl Default for BrokerConfig {
             client_metrics_stale_push_intervals: 3,
             coordinator_actor_mailbox_capacity: 64,
             diskless_wal_local_replica_count: DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT,
+            diskless_wal_flush_interval: DEFAULT_DISKLESS_WAL_FLUSH_INTERVAL,
+            diskless_wal_flush_max_size: DEFAULT_DISKLESS_WAL_FLUSH_MAX_SIZE,
+            diskless_wal_trim_safety_lag: DEFAULT_DISKLESS_WAL_TRIM_SAFETY_LAG,
+            diskless_wal_index_projection_timeout: DEFAULT_DISKLESS_WAL_INDEX_PROJECTION_TIMEOUT,
             unclean_recovery_queue_capacity: 256,
             share_recovery_read_max: mebibytes(1),
             share_session_cache_max_when_unlimited: 10_000,
@@ -1989,6 +2105,8 @@ impl Default for BrokerConfig {
             partition_writer_queue_depth: 64,
             default_min_insync_replicas: 1,
             future_log_move_read_chunk: mebibytes(1),
+            offsets_topic_num_partitions: 50,
+            offsets_topic_replication_factor: 3,
             transaction_state_num_partitions: 50,
             transaction_recovery_read_max: mebibytes(1),
             transaction_state_replication_factor: 3,
@@ -2001,6 +2119,7 @@ impl Default for BrokerConfig {
             log_dir: PathBuf::from("./crabka-data"),
             extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
+            stamp_source: None,
             node_id: NodeId(1),
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],
@@ -2422,12 +2541,21 @@ mod tests {
 
     #[test]
     fn rejects_non_positive_runtime_scalars() {
-        let cases: [RuntimeInvalidator; 19] = [
+        let cases: [RuntimeInvalidator; 22] = [
             ("startup_leader_wait_timeout", |c| {
                 c.startup_leader_wait_timeout = <Time as TimeExt>::ZERO;
             }),
             ("cleaner_interval", |c| {
                 c.cleaner_interval = <Time as TimeExt>::ZERO;
+            }),
+            ("diskless_wal_flush_interval", |c| {
+                c.diskless_wal_flush_interval = <Time as TimeExt>::ZERO;
+            }),
+            ("diskless_wal_index_projection_timeout", |c| {
+                c.diskless_wal_index_projection_timeout = <Time as TimeExt>::ZERO;
+            }),
+            ("diskless_wal_flush_max_size", |c| {
+                c.diskless_wal_flush_max_size = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("client_metrics_default_interval", |c| {
                 c.client_metrics_default_interval = <Time as TimeExt>::ZERO;
@@ -2525,6 +2653,12 @@ mod tests {
             ("diskless_wal_local_replica_count must be positive", |c| {
                 c.diskless_wal_local_replica_count = 0;
             }),
+            ("diskless_wal_local_replica_count must be odd", |c| {
+                c.diskless_wal_local_replica_count = 2;
+            }),
+            ("diskless_wal_trim_safety_lag must be nonnegative", |c| {
+                c.diskless_wal_trim_safety_lag = -1;
+            }),
             ("unclean_recovery_queue_capacity must be positive", |c| {
                 c.unclean_recovery_queue_capacity = 0;
             }),
@@ -2603,6 +2737,12 @@ mod tests {
             }),
             ("share_state_replication_factor must be positive", |c| {
                 c.share_coordinator.state_topic_replication_factor = 0;
+            }),
+            ("offsets_topic_num_partitions must be positive", |c| {
+                c.offsets_topic_num_partitions = 0;
+            }),
+            ("offsets_topic_replication_factor must be positive", |c| {
+                c.offsets_topic_replication_factor = 0;
             }),
             ("transaction_state_num_partitions must be positive", |c| {
                 c.transaction_state_num_partitions = 0;
@@ -2690,6 +2830,10 @@ mod tests {
             &config,
             "share group heartbeat interval is outside its bounds",
         );
+
+        let mut config = BrokerConfig::default();
+        config.streams_group.max_size = 0;
+        assert_invalid_runtime(&config, "streams group maximum size must be positive");
     }
 
     #[test]
@@ -3092,6 +3236,94 @@ mod tests {
             c.validate(),
             Err(BrokerError::SaslListenerNoMechanisms { .. })
         ));
+    }
+
+    #[test]
+    fn outbound_oauthbearer_credentials_validate_for_data_and_controller_listeners() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "header.payload.\n").unwrap();
+        let credentials = Some(InterBrokerCredentials::OAuthBearer { token_path });
+        let data_listener = ListenerSpec {
+            name: "OAUTH".into(),
+            bind_addr: "127.0.0.1:9094".parse().unwrap(),
+            advertised: "broker:9094".into(),
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls_config: None,
+            sasl_mechanisms: Some(vec![SaslMechanism::OAuthBearer]),
+        };
+        let data = BrokerConfig {
+            listeners: vec![data_listener],
+            inter_broker_listener_name: "OAUTH".into(),
+            inter_broker_credentials: credentials.clone(),
+            ..BrokerConfig::default()
+        };
+        assert!(data.validate().is_ok());
+
+        let controller = BrokerConfig {
+            controller_listener_protocol: ListenerProtocol::SaslPlaintext,
+            enabled_sasl_mechanisms: vec![SaslMechanism::OAuthBearer],
+            inter_broker_credentials: credentials,
+            ..BrokerConfig::default()
+        };
+        assert!(controller.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_outbound_credential_mechanism_not_enabled_on_sasl_targets() {
+        let data = BrokerConfig {
+            listeners: vec![ListenerSpec {
+                name: "INTERNAL".into(),
+                bind_addr: "127.0.0.1:9094".parse().unwrap(),
+                advertised: "broker:9094".into(),
+                protocol: ListenerProtocol::SaslPlaintext,
+                tls_config: None,
+                sasl_mechanisms: Some(vec![SaslMechanism::Plain]),
+            }],
+            inter_broker_listener_name: "INTERNAL".into(),
+            inter_broker_credentials: Some(InterBrokerCredentials::OAuthBearer {
+                token_path: "/unused/token".into(),
+            }),
+            ..BrokerConfig::default()
+        };
+        let error = data
+            .validate()
+            .expect_err("data-listener mechanism mismatch is rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("not enabled on listener INTERNAL")
+        );
+
+        let controller = BrokerConfig {
+            controller_listener_protocol: ListenerProtocol::SaslPlaintext,
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+            inter_broker_credentials: Some(InterBrokerCredentials::OAuthBearer {
+                token_path: "/unused/token".into(),
+            }),
+            ..BrokerConfig::default()
+        };
+        let error = controller
+            .validate()
+            .expect_err("controller-listener mechanism mismatch is rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("not enabled on the controller listener")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_outbound_oauthbearer_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "\n").unwrap();
+        let c = BrokerConfig {
+            inter_broker_credentials: Some(InterBrokerCredentials::OAuthBearer { token_path }),
+            ..BrokerConfig::default()
+        };
+        let error = c.validate().expect_err("empty OAuth token is rejected");
+        assert!(error.to_string().contains("token must be non-empty"));
     }
 
     #[test]

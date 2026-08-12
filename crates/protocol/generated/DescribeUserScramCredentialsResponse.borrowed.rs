@@ -74,7 +74,7 @@ impl Encode for DescribeUserScramCredentialsResponse<'_> {
                 for it in &self.results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -232,7 +232,7 @@ impl Encode for DescribeUserScramCredentialsResult<'_> {
                 for it in &self.credential_infos {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

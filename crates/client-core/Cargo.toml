@@ -21,15 +21,15 @@ default = []
 mock = []
 
 [dependencies]
-crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
-crabka-security = { version = "0.3.9", path = "../security" }
-crabka-ids = { version = "0.3.8", path = "../ids" }
+crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-security = { version = "0.4.0", path = "../security" }
+crabka-ids = { version = "0.4.0", path = "../ids" }
 crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
 dashmap = { workspace = true }
 tracing = { workspace = true }
@@ -48,6 +48,7 @@ proptest = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }

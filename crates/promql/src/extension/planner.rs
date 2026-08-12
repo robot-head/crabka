@@ -11,12 +11,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::{
+    catalog::Session,
     error::Result as DfResult,
-    execution::{
-        context::{QueryPlanner, SessionState},
-        session_state::SessionStateBuilder,
+    execution::{context::QueryPlanner, session_state::SessionStateBuilder},
+    logical_expr::{
+        LogicalPlan, UserDefinedLogicalNode, physical_planning_context::PhysicalPlanningContext,
     },
-    logical_expr::{LogicalPlan, UserDefinedLogicalNode},
     physical_plan::ExecutionPlan,
     physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner},
     prelude::SessionContext,
@@ -45,7 +45,8 @@ impl ExtensionPlanner for PromExtensionPlanner {
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
-        _session_state: &SessionState,
+        _session: &dyn Session,
+        _planning_ctx: &PhysicalPlanningContext,
     ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
         let any = node.as_any();
         if let Some(divide) = any.downcast_ref::<SeriesDivide>() {
@@ -111,12 +112,12 @@ impl QueryPlanner for PromQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        session_state: &SessionState,
+        session: &dyn Session,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let physical_planner =
             DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(PromExtensionPlanner)]);
         physical_planner
-            .create_physical_plan(logical_plan, session_state)
+            .create_physical_plan(logical_plan, session)
             .await
     }
 }

@@ -284,14 +284,12 @@ impl Default for TokenBucket {
     }
 }
 
-/// Broker-wide throttle state.
-///
-/// There are two buckets: outbound when this broker is leader, and inbound when
-/// this broker is follower.
+/// Broker-wide throttle state for replica traffic and intra-broker log moves.
 #[derive(Debug)]
 pub struct ThrottleState {
     pub leader_out: Arc<TokenBucket>,
     pub follower_in: Arc<TokenBucket>,
+    pub alter_log_dirs: Arc<TokenBucket>,
 }
 
 impl ThrottleState {
@@ -300,6 +298,7 @@ impl ThrottleState {
         Self {
             leader_out: Arc::new(TokenBucket::new()),
             follower_in: Arc::new(TokenBucket::new()),
+            alter_log_dirs: Arc::new(TokenBucket::new()),
         }
     }
 }

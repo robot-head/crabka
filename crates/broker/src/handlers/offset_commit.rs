@@ -1,8 +1,8 @@
-//! `OffsetCommit` (`api_key=8`).
-//!
-//! This handler encodes `OffsetCommitKey` and `OffsetCommitValue` records. It
-//! appends them to `__consumer_offsets-0` with the partition writer. It then
-//! updates the group's committed offsets through the group actor.
+//! `OffsetCommit` (`api_key=8`). Encodes `OffsetCommitKey` +
+//! `OffsetCommitValue` records, appends them to the group-id's
+//! `__consumer_offsets` partition
+//! via the partition writer, then updates the group's committed offsets
+//! through its actor.
 
 use std::sync::Arc;
 
@@ -26,7 +26,8 @@ use crate::{
     broker::Broker,
     codes,
     coordinator::{
-        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
+        bootstrap::OFFSETS_TOPIC,
+        partitioner::{GroupRoutingError, local_partition_for_group},
         persistence::OffsetCommitValue,
         unified::{
             actor::{GroupActorHandle, GroupActorMessage, GroupKindTag, validate_group_commit},
@@ -84,6 +85,27 @@ pub(crate) async fn handle(
         }
     }
 
+    let offsets_partition = {
+        let image = broker.controller.current_image();
+        match local_partition_for_group(&image, broker.config.node_id, &req.group_id) {
+            Ok(partition) => partition,
+            Err(GroupRoutingError::Unavailable) => {
+                return finalize(
+                    version,
+                    build_response_all(&req, codes::COORDINATOR_NOT_AVAILABLE),
+                    unknown_id_topics,
+                );
+            }
+            Err(GroupRoutingError::NotCoordinator) => {
+                return finalize(
+                    version,
+                    build_response_all(&req, codes::NOT_COORDINATOR),
+                    unknown_id_topics,
+                );
+            }
+        }
+    };
+
     let now_ms = now_ms();
     // Find the group's actor (a classic actor is created for an unknown id —
     // e.g. a "simple" consumer committing offsets without joining a group).
@@ -133,7 +155,9 @@ pub(crate) async fn handle(
         // Only proceed with allowed topics (append + update).
         let allowed_req = allowed_request(&req, &topic_decisions);
         if !allowed_req.topics.is_empty() {
-            if let Err(code) = append_batch(&allowed_req, &broker.partitions, now_ms).await {
+            if let Err(code) =
+                append_batch(&allowed_req, &broker.partitions, offsets_partition, now_ms).await
+            {
                 // If append fails, overwrite allowed topics with the error code.
                 let topics_out_err = mixed_response_topics(&req, &topic_decisions, code);
                 let resp = OffsetCommitResponse {
@@ -154,8 +178,8 @@ pub(crate) async fn handle(
         return finalize(version, resp, unknown_id_topics.clone());
     }
 
-    // 2. Append a RecordBatch into `__consumer_offsets-0`.
-    if let Err(code) = append_batch(&req, &broker.partitions, now_ms).await {
+    // 2. Append a RecordBatch into this group's offsets partition.
+    if let Err(code) = append_batch(&req, &broker.partitions, offsets_partition, now_ms).await {
         let resp = build_response_all(&req, code);
         return finalize(version, resp, unknown_id_topics.clone());
     }
@@ -298,14 +322,13 @@ async fn validate(handle: &Arc<GroupActorHandle>, req: &OffsetCommitRequest) -> 
     .await
 }
 
-/// Append a single `RecordBatch` for every (topic, partition) in `req` to the
-/// `__consumer_offsets-0` writer.
-///
-/// This function returns `Err(error_code)` if it cannot find the partition,
-/// or if it gets no answer from the writer.
+/// Append a single `RecordBatch` covering every (topic, partition) in `req`
+/// to the selected `__consumer_offsets` writer. Returns `Err(error_code)` on
+/// failure to either find the partition or hear back from the writer.
 async fn append_batch(
     req: &OffsetCommitRequest,
     partitions: &Arc<PartitionRegistry>,
+    offsets_partition: i32,
     now_ms: i64,
 ) -> Result<(), i16> {
     let mut batch = RecordBatch {
@@ -338,7 +361,7 @@ async fn append_batch(
     batch.last_offset_delta = (delta - 1).max(0);
 
     let Some(part_handle) =
-        partitions.get(OFFSETS_TOPIC, crabka_ids::PartitionIndex(OFFSETS_PARTITION))
+        partitions.get(OFFSETS_TOPIC, crabka_ids::PartitionIndex(offsets_partition))
     else {
         return Err(codes::UNKNOWN_SERVER_ERROR);
     };

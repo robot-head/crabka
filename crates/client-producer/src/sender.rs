@@ -120,14 +120,14 @@ const BOOTSTRAP_LEADER: i32 = -1;
 /// livelocks: some batch never converges, its records' ack-oneshots never
 /// resolve, and the caller hangs.
 ///
-/// True same-partition pipelining, with `> 1`, needs a client-core API that
-/// guarantees **ordered frame writes** for a partition's in-flight requests.
-/// Such an API writes 0, 1 and 2 to the wire in order, and then awaits their
-/// responses concurrently. A pipelined `Connection::send_batch`, or a
-/// write-then-await split, would do it. That work is deferred. Until it exists,
-/// one in flight per partition is the only ordering-safe option.
-/// Cross-partition pipelining is unaffected: independent partitions still send
-/// concurrently, bounded by [`SenderConfig::max_in_flight`].
+/// True same-partition pipelining (`> 1`) requires a client-core API that
+/// guarantees **ordered frame writes** for a partition's in-flight requests
+/// (write 0, 1, 2 to the wire in order, then await their responses
+/// concurrently) — e.g. a pipelined `Connection::send_batch` or a write-then-await
+/// split. Until acknowledgements carry that finer identity, one in-flight batch
+/// per partition is the required ordering policy. Cross-partition pipelining is unaffected:
+/// independent partitions still send concurrently, bounded by
+/// [`SenderConfig::max_in_flight`].
 const MAX_IN_FLIGHT_PER_PARTITION: usize = 1;
 
 // The one-slot-per-partition pipeline (a single retry slot per partition, no
@@ -149,9 +149,8 @@ pub(crate) enum DrainIntent {
     Force,
 }
 
-/// All the state the sender task needs. The builder constructs one, hands it to
-/// [`run`], and drops it.
-// accumulators map mirrors the Producer field; alias deferred.
+/// All the bits of state the sender task needs. The builder constructs
+/// one of these, hands it to [`run`], and drops it.
 pub(crate) struct SenderConfig {
     /// Broker-facing transport. Production uses a real `Client`, and tests use
     /// a deterministic in-process broker model. See [`crate::transport`].
@@ -1019,6 +1018,34 @@ async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendR
         Some(leader)
     };
 
+    if cfg.acks == Acks::Zero {
+        return match cfg.transport.send_produce_no_response(route, req).await {
+            Ok(()) => BatchSendResult {
+                pb,
+                verdict: BatchVerdict::Acked { base_offset: -1 },
+                refresh_needed: false,
+            },
+            Err(error) => {
+                if leader != BOOTSTRAP_LEADER {
+                    cfg.transport.evict_broker(leader);
+                }
+                tracing::warn!(
+                    leader,
+                    partition = pb.partition,
+                    base_sequence = pb.base_sequence,
+                    error = %error,
+                    "acks=0 produce enqueue failed; will re-route",
+                );
+                pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
+                BatchSendResult {
+                    pb,
+                    verdict: BatchVerdict::Retry,
+                    refresh_needed: true,
+                }
+            }
+        };
+    }
+
     let resp: ProduceResponse = match cfg.transport.send_produce(route, req).await {
         Ok(response) => response,
         Err(error) => {
@@ -1299,7 +1326,7 @@ fn finish_in_flight(cfg: &SenderConfig) {
 async fn txn_pid_snapshot(cfg: &SenderConfig) -> Option<(i64, i16)> {
     cfg.transactional_id.as_ref()?;
     let state = *cfg.txn_state.lock().await;
-    if state == TxnState::InTransaction {
+    if matches!(state, TxnState::InTransaction | TxnState::Preparing) {
         Some(*cfg.txn_pid_epoch.lock().await)
     } else {
         None
@@ -1718,6 +1745,13 @@ mod harness {
         ) -> Result<ProduceResponse, ClientError> {
             self.0.send_produce(leader, req).await
         }
+        async fn send_produce_no_response(
+            &self,
+            leader: Option<i32>,
+            req: ProduceRequest,
+        ) -> Result<(), ClientError> {
+            self.0.send_produce_no_response(leader, req).await
+        }
         fn evict_broker(&self, id: i32) {
             self.0.evict_broker(id);
         }
@@ -1808,6 +1842,8 @@ mod harness {
         /// refreshed after a routing/transport failure.
         refreshes: AtomicUsize,
         offsets_seen: AtomicI64,
+        /// Calls made through the dedicated one-way Produce transport path.
+        no_response_sends: AtomicUsize,
     }
 
     /// A one-shot synthesized broker response, keyed by `base_sequence`. A
@@ -1852,6 +1888,7 @@ mod harness {
                 fail_next_sends: AtomicUsize::new(0),
                 refreshes: AtomicUsize::new(0),
                 offsets_seen: AtomicI64::new(0),
+                no_response_sends: AtomicUsize::new(0),
             })
         }
 
@@ -1933,6 +1970,10 @@ mod harness {
 
         fn applied_count(self: &Arc<Self>) -> usize {
             self.applied.load(Ordering::Relaxed)
+        }
+
+        fn no_response_count(self: &Arc<Self>) -> usize {
+            self.no_response_sends.load(Ordering::Relaxed)
         }
 
         /// Apply one single-partition, single-batch `ProduceRequest` to the
@@ -2110,6 +2151,15 @@ mod harness {
             Ok(self.apply(&req))
         }
 
+        async fn send_produce_no_response(
+            &self,
+            leader: Option<i32>,
+            req: ProduceRequest,
+        ) -> Result<(), ClientError> {
+            self.no_response_sends.fetch_add(1, Ordering::Relaxed);
+            self.send_produce(leader, req).await.map(drop)
+        }
+
         fn evict_broker(&self, broker_id: i32) {
             self.evicted.lock().unwrap().push(broker_id);
         }
@@ -2175,6 +2225,24 @@ mod harness {
         retries: i32,
         routing_retry_budget: Time,
     ) -> Harness {
+        spawn_sender_with_acks(
+            transport,
+            max_in_flight,
+            linger,
+            retries,
+            routing_retry_budget,
+            Acks::All,
+        )
+    }
+
+    fn spawn_sender_with_acks(
+        transport: Arc<MockTransport>,
+        max_in_flight: usize,
+        linger: Time,
+        retries: i32,
+        routing_retry_budget: Time,
+        acks: Acks,
+    ) -> Harness {
         let accumulators: AccumulatorMap = Arc::new(DashMap::new());
         let next_seq: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
         let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(64);
@@ -2195,7 +2263,7 @@ mod harness {
             transport: Box::new(ArcTransport(transport.clone())),
             producer_id: 1,
             producer_epoch: 0,
-            acks: Acks::All,
+            acks,
             compression: Compression::None,
             linger,
             request_timeout_ms: 5_000,
@@ -2260,11 +2328,8 @@ mod harness {
         let mut rxs = Vec::with_capacity(n);
         for _ in 0..n {
             let mut a = acc.lock().await;
-            let rx =
-                match a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0, None) {
-                    crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-                    crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-                };
+            let crate::accumulator::AppendResult { receiver: rx, .. } =
+                a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0, None);
             // Seal so each record becomes its own ready batch with a distinct
             // base_sequence — maximizing same-partition pipelining pressure.
             a.seal_current();
@@ -2308,16 +2373,8 @@ mod harness {
         {
             let mut a = acc.lock().await;
             for _ in 0..n {
-                let rx = match a.try_append(
-                    None,
-                    Some(bytes::Bytes::from_static(b"x")),
-                    vec![],
-                    0,
-                    None,
-                ) {
-                    crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-                    crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-                };
+                let crate::accumulator::AppendResult { receiver: rx, .. } =
+                    a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0, None);
                 rxs.push(rx);
             }
         }
@@ -2340,16 +2397,13 @@ mod harness {
         let mut receivers = Vec::with_capacity(n);
         let mut accumulator = accumulator.lock().await;
         for _ in 0..n {
-            let receiver = match accumulator.try_append(
+            let crate::accumulator::AppendResult { receiver, .. } = accumulator.try_append(
                 None,
                 Some(bytes::Bytes::from_static(b"x")),
                 vec![],
                 0,
                 None,
-            ) {
-                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-            };
+            );
             accumulator.seal_current();
             receivers.push(receiver);
         }
@@ -2401,42 +2455,40 @@ mod harness {
             .insert(("t".to_owned(), 0), Arc::clone(&rollover));
         let (ready_rx, current_rx) = {
             let mut accumulator = rollover.lock().await;
-            let ready = match accumulator.try_append(
+            let crate::accumulator::AppendResult {
+                receiver: ready, ..
+            } = accumulator.try_append(
                 None,
                 Some(bytes::Bytes::from_static(b"a")),
                 vec![],
                 0,
                 None,
-            ) {
-                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-            };
-            let current = match accumulator.try_append(
+            );
+            let crate::accumulator::AppendResult {
+                receiver: current, ..
+            } = accumulator.try_append(
                 None,
                 Some(bytes::Bytes::from_static(b"b")),
                 vec![],
                 0,
                 None,
-            ) {
-                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-            };
+            );
             (ready, current)
         };
 
         let unrelated = Arc::new(Mutex::new(Accumulator::new(1024)));
         h.accumulators
             .insert(("t".to_owned(), 1), Arc::clone(&unrelated));
-        let unrelated_rx = match unrelated.lock().await.try_append(
+        let crate::accumulator::AppendResult {
+            receiver: unrelated_rx,
+            ..
+        } = unrelated.lock().await.try_append(
             None,
             Some(bytes::Bytes::from_static(b"young")),
             vec![],
             0,
             None,
-        ) {
-            crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-            crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-        };
+        );
 
         h.wake_tx
             .send(DrainIntent::Ready)
@@ -2986,14 +3038,39 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// Mechanism proof. Several same-partition requests issued CONCURRENTLY,
-    /// as the old `send_batches` did through `join_all`, against the
-    /// staggered-reorder broker, make the broker apply them
-    /// higher-`base_sequence`-first. Every request except the lowest then draws
-    /// `OUT_OF_ORDER_SEQUENCE_NUMBER`. That is the gap-and-resend trigger the
-    /// fix removes, because the fix never issues more than one same-partition
-    /// request at a time. This is a pure transport-level check with no sender
-    /// loop, so it isolates the reorder mechanism.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acks_zero_uses_one_way_transport_and_returns_unknown_offset() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with_acks(
+            transport.clone(),
+            1,
+            millis(1),
+            i32::MAX,
+            secs(30),
+            Acks::Zero,
+        );
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        let metadata = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("record resolves")
+            .expect("sender remains")
+            .expect("enqueue succeeds");
+
+        check!(metadata.offset == -1);
+        check!(transport.no_response_count() == 1);
+        check!(transport.applied_count() == 1);
+
+        shutdown(h).await;
+    }
+
+    /// Mechanism proof: issuing several same-partition requests CONCURRENTLY (as
+    /// the old `send_batches` did via `join_all`) against the staggered-reorder
+    /// broker makes the broker apply them higher-`base_sequence`-first, so every
+    /// request except the lowest draws `OUT_OF_ORDER_SEQUENCE_NUMBER`. This is
+    /// the gap-and-resend trigger the fix eliminates by never issuing more than
+    /// one same-partition request at a time. (Pure transport-level check; no
+    /// sender loop — it isolates the reorder mechanism.)
     ///
     /// The test uses paused virtual time, so the staggered sleeps order the
     /// arrivals deterministically and do not rely on the OS scheduler.
@@ -3519,27 +3596,27 @@ mod harness {
             .clone();
         let (ready_receiver, current_receiver) = {
             let mut accumulator = accumulator.lock().await;
-            let ready_receiver = match accumulator.try_append(
+            let crate::accumulator::AppendResult {
+                receiver: ready_receiver,
+                ..
+            } = accumulator.try_append(
                 None,
                 Some(bytes::Bytes::from_static(b"old-ready")),
                 vec![],
                 0,
                 Some(0),
-            ) {
-                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-            };
+            );
             accumulator.seal_current();
-            let current_receiver = match accumulator.try_append(
+            let crate::accumulator::AppendResult {
+                receiver: current_receiver,
+                ..
+            } = accumulator.try_append(
                 None,
                 Some(bytes::Bytes::from_static(b"old-current")),
                 vec![],
                 0,
                 Some(0),
-            ) {
-                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-            };
+            );
             (ready_receiver, current_receiver)
         };
 
@@ -3580,16 +3657,14 @@ mod harness {
         let accumulator = Arc::new(Mutex::new(Accumulator::new(1024)));
         h.accumulators
             .insert(("t".to_string(), 0), Arc::clone(&accumulator));
-        let rx = match accumulator.lock().await.try_append(
-            None,
-            Some(bytes::Bytes::from_static(b"old")),
-            vec![],
-            0,
-            Some(0),
-        ) {
-            crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-            crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-        };
+        let crate::accumulator::AppendResult { receiver: rx, .. } =
+            accumulator.lock().await.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"old")),
+                vec![],
+                0,
+                Some(0),
+            );
 
         h.recovery_required.store(true, Ordering::Release);
         h.recovery_generation.store(1, Ordering::Release);
@@ -3625,16 +3700,14 @@ mod harness {
         let accumulator = Arc::new(Mutex::new(Accumulator::new(1024)));
         h.accumulators
             .insert(("t".to_string(), 0), Arc::clone(&accumulator));
-        let rx = match accumulator.lock().await.try_append(
-            None,
-            Some(bytes::Bytes::from_static(b"old")),
-            vec![],
-            0,
-            Some(0),
-        ) {
-            crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
-            crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-        };
+        let crate::accumulator::AppendResult { receiver: rx, .. } =
+            accumulator.lock().await.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"old")),
+                vec![],
+                0,
+                Some(0),
+            );
 
         let initial_send = transport.send_started.notified();
         h.wake_tx

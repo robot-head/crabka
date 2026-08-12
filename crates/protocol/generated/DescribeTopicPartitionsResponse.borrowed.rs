@@ -64,7 +64,7 @@ impl Encode for DescribeTopicPartitionsResponse<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             match &self.next_cursor {
@@ -236,7 +236,7 @@ impl Encode for DescribeTopicPartitionsResponseTopic<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.topic_authorized_operations);
@@ -432,7 +432,7 @@ impl DescribeTopicPartitionsResponsePartition {
                 for it in &self.replica_nodes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -442,7 +442,7 @@ impl DescribeTopicPartitionsResponsePartition {
                 for it in &self.isr_nodes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -455,7 +455,7 @@ impl DescribeTopicPartitionsResponsePartition {
                         put_i32(buf, *it);
                     }
                 }
-            }
+            };
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -468,7 +468,7 @@ impl DescribeTopicPartitionsResponsePartition {
                         put_i32(buf, *it);
                     }
                 }
-            }
+            };
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -478,7 +478,7 @@ impl DescribeTopicPartitionsResponsePartition {
                 for it in &self.offline_replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {

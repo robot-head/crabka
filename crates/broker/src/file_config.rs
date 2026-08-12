@@ -204,8 +204,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub gssapi: Option<FileGssapiConfig>,
 
-    /// Credentials this broker uses to authenticate *to* peer brokers
-    /// (inter-broker initiate path). Only the `gssapi` variant is supported.
+    /// Credentials this broker uses to authenticate *to* peer brokers and
+    /// controller listeners (inter-broker initiate path).
     #[serde(default)]
     pub inter_broker_credentials: Option<FileInterBrokerCredentials>,
 
@@ -383,6 +383,16 @@ pub struct RuntimeFileConfig {
     pub client_metrics_otlp_queue_capacity: Option<usize>,
     pub coordinator_actor_mailbox_capacity: Option<usize>,
     pub diskless_wal_local_replica_count: Option<usize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub diskless_wal_flush_interval: Option<Time>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub diskless_wal_flush_max_size: Option<ByteSize>,
+    pub diskless_wal_trim_safety_lag: Option<i64>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub diskless_wal_index_projection_timeout: Option<Time>,
     pub unclean_recovery_queue_capacity: Option<usize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
@@ -445,6 +455,8 @@ pub struct RuntimeFileConfig {
     pub future_log_move_read_chunk: Option<ByteSize>,
     pub share_state_num_partitions: Option<i32>,
     pub share_state_replication_factor: Option<i16>,
+    pub offsets_topic_num_partitions: Option<i32>,
+    pub offsets_topic_replication_factor: Option<i16>,
     pub transaction_state_num_partitions: Option<i32>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
@@ -528,18 +540,24 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub share_group_heartbeat_interval: Option<Time>,
+    pub share_group_max_size: Option<usize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub share_group_record_lock_duration: Option<Time>,
     pub share_group_max_delivery_attempts: Option<i16>,
     pub share_group_max_inflight_records: Option<i32>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub share_group_backlog_poll_interval: Option<Time>,
     pub share_group_isolation_level: Option<String>,
+    pub streams_group_enable: Option<bool>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub streams_group_session_timeout: Option<Time>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub streams_group_heartbeat_interval: Option<Time>,
+    pub streams_group_max_size: Option<usize>,
     pub streams_internal_topic_replication_factor: Option<i16>,
     pub streams_group_num_standby_replicas: Option<i32>,
     pub streams_group_num_warmup_replicas: Option<i32>,
@@ -1033,8 +1051,8 @@ pub struct FileGssapiConfig {
 }
 
 /// TOML shape of `[inter_broker_credentials]`. A `type` discriminator
-/// selects the variant; only `gssapi` is implemented (PLAIN/SCRAM
-/// inter-broker over TOML is intentionally not exposed).
+/// selects the variant. PLAIN/SCRAM inter-broker over TOML remain
+/// intentionally unexposed.
 #[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum FileInterBrokerCredentials {
@@ -1044,6 +1062,12 @@ pub enum FileInterBrokerCredentials {
         #[serde(default)]
         service_name: Option<String>,
         kdc_url: String,
+    },
+    #[serde(rename = "oauth-bearer")]
+    OAuthBearer {
+        /// File containing the bearer token. A trailing newline is ignored.
+        /// The token itself never appears in the parsed config's `Debug` form.
+        token_path: std::path::PathBuf,
     },
 }
 
@@ -1710,18 +1734,36 @@ fn apply_config_tail(
             max_time_skew,
         });
     }
-    if let Some(FileInterBrokerCredentials::Gssapi {
-        keytab_path,
-        client_principal,
-        service_name,
-        kdc_url,
-    }) = tail.inter_broker_credentials
-    {
-        cfg.inter_broker_credentials = Some(crate::config::InterBrokerCredentials::Gssapi {
-            keytab_path,
-            client_principal,
-            service_name: service_name.unwrap_or_else(|| DEFAULT_KERBEROS_SERVICE_NAME.to_owned()),
-            kdc_url,
+    if let Some(credentials) = tail.inter_broker_credentials {
+        cfg.inter_broker_credentials = Some(match credentials {
+            FileInterBrokerCredentials::Gssapi {
+                keytab_path,
+                client_principal,
+                service_name,
+                kdc_url,
+            } => crate::config::InterBrokerCredentials::Gssapi {
+                keytab_path,
+                client_principal,
+                service_name: service_name
+                    .unwrap_or_else(|| DEFAULT_KERBEROS_SERVICE_NAME.to_owned()),
+                kdc_url,
+            },
+            FileInterBrokerCredentials::OAuthBearer { token_path } => {
+                let token = std::fs::read(&token_path).map_err(|error| {
+                    FileConfigError::InvalidConfig(format!(
+                        "cannot read inter-broker OAUTHBEARER token {}: {error}",
+                        token_path.display()
+                    ))
+                })?;
+                let token = token.trim_ascii();
+                if token.is_empty() || token.contains(&b'\x01') {
+                    return Err(FileConfigError::InvalidConfig(
+                        "inter-broker OAUTHBEARER token must be non-empty and contain no RFC 7628 separator"
+                            .into(),
+                    ));
+                }
+                crate::config::InterBrokerCredentials::OAuthBearer { token_path }
+            }
         });
     }
     if !tail.controller_quorum_voters.is_empty() {
@@ -2341,6 +2383,30 @@ impl RuntimeFileConfig {
             diskless_wal_local_replica_count,
             cfg.diskless_wal_local_replica_count
         );
+        set_runtime_time_millis!(
+            runtime,
+            diskless_wal_flush_interval,
+            cfg.diskless_wal_flush_interval
+        );
+        set_runtime_size_bytes!(
+            runtime,
+            diskless_wal_flush_max_size,
+            cfg.diskless_wal_flush_max_size,
+            whole_bytes_usize
+        );
+        if let Some(value) = runtime.diskless_wal_trim_safety_lag {
+            if value.is_negative() {
+                return Err(FileConfigError::InvalidConfig(
+                    "diskless_wal_trim_safety_lag must be nonnegative".into(),
+                ));
+            }
+            cfg.diskless_wal_trim_safety_lag = value;
+        }
+        set_runtime_time_millis!(
+            runtime,
+            diskless_wal_index_projection_timeout,
+            cfg.diskless_wal_index_projection_timeout
+        );
         set_runtime_usize!(
             runtime,
             unclean_recovery_queue_capacity,
@@ -2484,6 +2550,15 @@ impl RuntimeFileConfig {
         if let Some(value) = runtime.share_state_replication_factor {
             cfg.share_coordinator.state_topic_replication_factor =
                 positive_i16("share_state_replication_factor", value)?;
+        }
+        set_runtime_i32!(
+            runtime,
+            offsets_topic_num_partitions,
+            cfg.offsets_topic_num_partitions
+        );
+        if let Some(value) = runtime.offsets_topic_replication_factor {
+            cfg.offsets_topic_replication_factor =
+                positive_i16("offsets_topic_replication_factor", value)?;
         }
         set_runtime_i32!(
             runtime,
@@ -2649,6 +2724,7 @@ impl RuntimeFileConfig {
             share_group_heartbeat_interval,
             cfg.share_group.heartbeat_interval
         );
+        set_runtime_usize!(runtime, share_group_max_size, cfg.share_group.max_size);
         set_runtime_duration!(
             runtime,
             share_group_record_lock_duration,
@@ -2662,6 +2738,11 @@ impl RuntimeFileConfig {
             runtime,
             share_group_max_inflight_records,
             cfg.share_group.max_inflight_records
+        );
+        set_runtime_duration!(
+            runtime,
+            share_group_backlog_poll_interval,
+            cfg.share_group.backlog_poll_interval
         );
         if let Some(value) = runtime.share_group_isolation_level.take() {
             use crate::coordinator::unified::share::config::ShareIsolationLevel;
@@ -2685,6 +2766,7 @@ impl RuntimeFileConfig {
         cfg: &mut crate::config::BrokerConfig,
     ) -> Result<(), FileConfigError> {
         let runtime = self;
+        set_runtime_plain!(runtime, streams_group_enable, cfg.streams_group.enable);
         set_runtime_duration!(
             runtime,
             streams_group_session_timeout,
@@ -2695,6 +2777,7 @@ impl RuntimeFileConfig {
             streams_group_heartbeat_interval,
             cfg.streams_group.heartbeat_interval
         );
+        set_runtime_usize!(runtime, streams_group_max_size, cfg.streams_group.max_size);
         if let Some(value) = runtime.streams_internal_topic_replication_factor {
             cfg.streams_group.internal_topic_replication_factor =
                 positive_i16("streams_internal_topic_replication_factor", value)?;
@@ -4747,6 +4830,54 @@ kdc_url = "tcp://kdc:88"
     }
 
     #[test]
+    fn apply_to_inter_broker_credentials_oauthbearer_reads_redacted_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "header.payload.\n").unwrap();
+        let src = format!(
+            r#"
+[inter_broker_credentials]
+type = "oauth-bearer"
+token_path = {}
+"#,
+            toml::Value::String(token_path.to_string_lossy().into_owned())
+        );
+        let file: FileConfig = toml::from_str(&src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+
+        let Some(crate::config::InterBrokerCredentials::OAuthBearer {
+            token_path: actual_path,
+        }) = cfg.inter_broker_credentials
+        else {
+            panic!("expected OAuthBearer credentials");
+        };
+        assert!(actual_path == token_path);
+        assert!(!format!("{actual_path:?}").contains("header.payload"));
+    }
+
+    #[test]
+    fn apply_to_inter_broker_credentials_oauthbearer_rejects_empty_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "\n").unwrap();
+        let src = format!(
+            r#"
+[inter_broker_credentials]
+type = "oauth-bearer"
+token_path = {}
+"#,
+            toml::Value::String(token_path.to_string_lossy().into_owned())
+        );
+        let file: FileConfig = toml::from_str(&src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        let error = file
+            .apply_to(&mut cfg)
+            .expect_err("empty bearer token is rejected");
+        assert!(error.to_string().contains("token must be non-empty"));
+    }
+
+    #[test]
     fn file_config_schema_generates() {
         let schema = schemars::schema_for!(FileConfig);
         let value = serde_json::to_value(&schema).expect("schema serializes");
@@ -4874,10 +5005,18 @@ opa_http_timeout = "2500ms"
 replication_fetch_max = "2MiB"
 replication_fetch_max_wait = "750ms"
 replication_fetch_min = "2B"
+diskless_wal_flush_interval = "125ms"
+diskless_wal_flush_max_size = "4MiB"
+diskless_wal_trim_safety_lag = 0
+diskless_wal_index_projection_timeout = "3s"
 controller_heartbeat_interval = "500ms"
 controller_fetch_miss_limit = 7
 metadata_raft_command_queue_capacity = 512
 metadata_raft_fetch_max = "4MiB"
+share_group_max_size = 17
+share_group_backlog_poll_interval = "250ms"
+streams_group_enable = false
+streams_group_max_size = 19
 "#,
         )
         .expect("parse runtime config");
@@ -4907,6 +5046,37 @@ metadata_raft_fetch_max = "4MiB"
         assert!(cfg.controller_fetch_miss_limit.get() == 7);
         assert!(cfg.metadata_raft_command_queue_capacity.get() == 512);
         assert!(cfg.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
+        assert!(cfg.diskless_wal_flush_interval == millis(125));
+        assert!(cfg.diskless_wal_flush_max_size == mebibytes(4));
+        assert!(cfg.diskless_wal_trim_safety_lag == 0);
+        assert!(cfg.diskless_wal_index_projection_timeout == secs(3));
+        assert!(cfg.share_group.max_size == 17);
+        assert!(cfg.share_group.backlog_poll_interval == std::time::Duration::from_millis(250));
+        assert!(!cfg.streams_group.enable);
+        assert!(cfg.streams_group.max_size == 19);
+    }
+
+    #[test]
+    fn runtime_file_config_rejects_negative_diskless_wal_trim_lag() {
+        let file: FileConfig = toml::from_str("[runtime]\ndiskless_wal_trim_safety_lag = -1\n")
+            .expect("parse runtime config");
+        let error = file
+            .apply_to(&mut crate::config::BrokerConfig::default())
+            .expect_err("reject negative trim lag");
+
+        assert!(error.to_string().contains("diskless_wal_trim_safety_lag"));
+    }
+
+    #[test]
+    fn runtime_file_config_accepts_positive_diskless_wal_trim_lag() {
+        let file: FileConfig = toml::from_str("[runtime]\ndiskless_wal_trim_safety_lag = 7\n")
+            .expect("parse runtime config");
+        let mut config = crate::config::BrokerConfig::default();
+
+        file.apply_to(&mut config)
+            .expect("accept positive trim lag");
+
+        assert!(config.diskless_wal_trim_safety_lag == 7);
     }
 
     /// Every time and byte-size runtime key must survive the round trip

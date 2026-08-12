@@ -26,12 +26,31 @@ use crate::partition::Partition;
 #[derive(Debug, Default)]
 pub(crate) struct PartitionRegistry {
     inner: DashMap<String, DashMap<PartitionIndex, Arc<Partition>>>,
+    stamp_source: Option<Arc<dyn crabka_log::StampSource>>,
 }
 
 impl PartitionRegistry {
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Build a registry whose partitions share one internal timestamp source.
+    #[must_use]
+    pub(crate) fn with_stamp_source(
+        stamp_source: Option<Arc<dyn crabka_log::StampSource>>,
+    ) -> Self {
+        Self {
+            inner: DashMap::new(),
+            stamp_source,
+        }
+    }
+
+    /// Return the source to install on a newly opened partition log.
+    #[must_use]
+    pub(crate) fn stamp_source(&self) -> Option<Arc<dyn crabka_log::StampSource>> {
+        self.stamp_source.as_ref().map(Arc::clone)
     }
 
     /// Allocation-free lookup. It returns a cheap `Arc` clone of the

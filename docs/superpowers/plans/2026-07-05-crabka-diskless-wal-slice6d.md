@@ -74,7 +74,7 @@ Replace the single-leader-gated `ClientAppend` (`:172`, emits only when `leaders
 
 - [ ] **Step 2: Run + commit**
 
-Run: `cargo test -p crabka-raft <linearizability test>` → PASS (tiny config: 2 voters, 2 appends, per `kraft_model.rs` bounds).
+Run: `cargo test -p crabka-raft --test kraft_model two_voters_append_via_linearizable -- --nocapture` → PASS (complete tiny config: 2 voters, 2 exchangeable appenders, 2 appends, 230,591 unique / 938,679 generated / depth 32).
 
 ```bash
 git add crates/raft/tests/model/mod.rs
@@ -98,11 +98,23 @@ Fault injectors matching the model actions, on a **seeded** schedule (no `Math.r
 
 - [ ] **Step 3: Checker (implement)**
 
-After the fault schedule: assert **every acked offset in the ledger is still consumable** (no-acked-loss); feed the produce/consume history into the `LinearizabilityTester`/`KraftLogSpec` (serializability); run the **JVM byte-exact differential** leg (reuse the `jvm_*` differential oracle), comparing only acked/consumable records (benign crash gaps excluded).
+After the fault schedule: use public `crabka-client-core` direct partition Fetch (not a classic consumer group whose coordinator may have been killed) to assert **every acked offset in the ledger is still consumable**; feed the acknowledged invocation/return history into `LinearizabilityTester`/`KafkaLogSpec`; run the Dockerized JVM console consumer against that same partition for a byte-exact comparison.
 
 - [ ] **Step 4: Run + commit**
 
-Run: `cargo test -p crabka-integration-tests diskless_jepsen` → PASS (no acked-loss under every fault).
+The live gate requires `ulimit -n 65536`; a 1024-FD soft limit can fail the three-broker runtime with `EMFILE` before the nemesis fires.
+
+Run:
+
+```bash
+ulimit -n 65536
+CARGO_INCREMENTAL=0 cargo test -p crabka-integration-tests \
+  --test diskless_jepsen \
+  three_broker_fault_schedule_preserves_the_acked_ledger \
+  -- --ignored --nocapture
+```
+
+Observed PASS witness (2026-08-12): 8 `acks=all` records; 2 object PUT errors; exact WAL shard erased on node 3; controller 3→2; partition leader 3→1; Rust ledger exact; PUT retry materialized a WAL object; JVM bytes exact.
 
 ```bash
 git add crates/integration-tests/tests/diskless_jepsen.rs
@@ -136,7 +148,7 @@ git commit -m "feat(verified): handoff-monotonicity lemma for the WAL-durability
 **Files:**
 - Modify: CI config (the three legs as required checks).
 
-- [ ] **Step 1:** Wire the three legs as **required** CI checks: the re-composed stateright model, the Creusot replay (incl. the 6c kernel + the handoff lemma), and the diskless Jepsen harness. Document "diskless does not ship until these are green."
+- [x] **Step 1:** Wire the three legs as **required** CI checks: the re-composed stateright model, the Creusot replay (incl. the 6c kernel + the handoff lemma), and the diskless Jepsen harness. The named live gate raises `nofile` to 65,536 before nextest. Document "diskless does not ship until these are green."
 - [ ] **Step 2:** `cargo +nightly fmt --check` — no diff.
 - [ ] **Step 3:** `cargo clippy --workspace --all-targets -- -D warnings` — no warnings.
 - [ ] **Step 4:** `cargo nextest run -p crabka-broker -p crabka-raft -p crabka-integration-tests` + `cargo creusot` — PASS across all three legs.

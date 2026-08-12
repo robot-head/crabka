@@ -58,7 +58,7 @@ impl Encode for ProduceRequest {
                 for it in &self.topic_data {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -181,7 +181,7 @@ impl Encode for TopicProduceData {
                 for it in &self.partition_data {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

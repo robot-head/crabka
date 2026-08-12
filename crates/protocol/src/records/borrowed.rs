@@ -163,22 +163,70 @@ pub struct ValidatedBatch<'a> {
     /// Total on-disk and wire length of this batch in bytes, which is
     /// `12 + batch_length`, that is the header plus the body.
     pub total_len: usize,
+    raw_body: &'a [u8],
 }
 
-/// Validates exactly one v2 record batch at the start of `buf`.
+impl ValidatedBatch<'_> {
+    /// Validates that the body contains exactly the number of structurally
+    /// valid records declared by the batch header.
+    ///
+    /// Uncompressed records are parsed directly from the input slice. A
+    /// compressed body is decompressed once under `policy`, parsed, and then
+    /// discarded; the original compressed bytes remain available to callers
+    /// for verbatim append.
+    ///
+    /// # Errors
+    ///
+    /// Returns a records or compression error when the body is malformed,
+    /// exceeds the decompression policy, contains fewer records than declared,
+    /// or has trailing bytes after the declared records.
+    pub fn validate_records(&self, policy: RecordDecompressionPolicy) -> Result<(), RecordsError> {
+        let count = self.header.records_count.get();
+        if count < 0 {
+            return Err(RecordsError::RecordParse(format!(
+                "negative records_count {count}"
+            )));
+        }
+
+        let codec = Attributes(self.header.attributes.get()).compression();
+        let decompressed = if codec == crabka_compression::CompressionType::None {
+            None
+        } else {
+            Some(crabka_compression::decompress(
+                codec,
+                self.raw_body,
+                policy.output_limit(ByteSize::from_bytes(self.raw_body.len() as u64)),
+            )?)
+        };
+        let mut remaining = decompressed.as_deref().unwrap_or(self.raw_body);
+        for i in 0..count {
+            parse_one_record(&mut remaining)
+                .map_err(|error| RecordsError::RecordParse(format!("record[{i}]: {error}")))?;
+        }
+        if !remaining.is_empty() {
+            return Err(RecordsError::RecordParse(format!(
+                "trailing bytes after records (left={})",
+                remaining.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Validates the header, declared length, and CRC of one v2 record batch at
+/// the start of `buf`.
 ///
 /// This function materializes no records and decompresses no body.
 ///
-/// This is the produce passthrough fast path. It reinterprets the fixed header
-/// in place, zero-copy, checks `magic == 2`, and verifies the producer's CRC
-/// over `header[21..61] ++ raw_body`, which is the compressed body bytes
-/// exactly as stored. It parses nothing in the body and decompresses nothing,
-/// so the cost is one CRC pass over bytes that are already in cache, with no
-/// allocation.
+/// This is the first stage of the produce passthrough fast path. It
+/// reinterprets the fixed header in place, zero-copy, checks `magic == 2`, and
+/// verifies the producer's CRC over `header[21..61] ++ raw_body`, which is the
+/// compressed body bytes exactly as stored. Call
+/// [`ValidatedBatch::validate_records`] before accepting producer input.
 ///
-/// Returns the validated header, which the caller needs for offset stamping
-/// and for idempotent and transactional gating, and the batch's total byte
-/// length, which lets the caller slice out the verbatim bytes.
+/// Returns the CRC-validated header, which the caller needs for offset
+/// stamping and for idempotent and transactional gating, and the batch's total
+/// byte length, which lets the caller slice out the verbatim bytes.
 ///
 /// # Errors
 ///
@@ -218,6 +266,7 @@ pub fn validate_one_v2_batch(buf: &[u8]) -> Result<ValidatedBatch<'_>, RecordsEr
     Ok(ValidatedBatch {
         header: hdr,
         total_len: HEADER_LEN + body_len,
+        raw_body,
     })
 }
 
@@ -542,6 +591,12 @@ mod tests {
         buf.to_vec()
     }
 
+    fn refresh_batch_crc(encoded: &mut [u8]) {
+        let coverage_start = crate::records::CRC_COVERAGE_START;
+        let crc = crc32c(&encoded[coverage_start..]);
+        encoded[coverage_start - 4..coverage_start].copy_from_slice(&crc.to_be_bytes());
+    }
+
     #[test]
     fn borrowed_roundtrip_cases() {
         for (_case, codec) in [
@@ -660,6 +715,91 @@ mod tests {
                 v.header.magic,
             ) == (encoded.len(), 7, 3, 99, 1, 5, 1_234, 2)
         );
+        assert2::assert!(
+            v.validate_records(RecordDecompressionPolicy::default())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validated_batch_rejects_crc_valid_malformed_record_body() {
+        let owned = super::super::owned::RecordBatch {
+            records: vec![super::super::owned::Record {
+                value: Some(Bytes::from_static(b"value")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut encoded = encode_owned_then_borrow(&owned);
+        encoded[HEADER_LEN] = 0; // zero-length first record body
+        refresh_batch_crc(&mut encoded);
+
+        let validated = validate_one_v2_batch(&encoded).expect("CRC-valid header");
+        let error = validated
+            .validate_records(RecordDecompressionPolicy::default())
+            .unwrap_err();
+        assert2::assert!(matches!(error, RecordsError::RecordParse(_)));
+    }
+
+    #[test]
+    fn validated_batch_rejects_trailing_body_bytes() {
+        let owned = super::super::owned::RecordBatch {
+            records: vec![super::super::owned::Record::default()],
+            ..Default::default()
+        };
+        let mut encoded = encode_owned_then_borrow(&owned);
+        let batch_length = i32::from_be_bytes(encoded[8..12].try_into().unwrap());
+        encoded[8..12].copy_from_slice(&(batch_length + 1).to_be_bytes());
+        encoded.push(0);
+        refresh_batch_crc(&mut encoded);
+
+        let validated = validate_one_v2_batch(&encoded).expect("CRC-valid header");
+        let error = validated
+            .validate_records(RecordDecompressionPolicy::default())
+            .unwrap_err();
+        assert2::assert!(
+            matches!(error, RecordsError::RecordParse(message) if message.contains("trailing bytes"))
+        );
+    }
+
+    #[test]
+    fn validated_batch_applies_decompression_policy() {
+        let owned = super::super::owned::RecordBatch {
+            attributes: Attributes::default().with_compression(CompressionType::Lz4),
+            records: vec![super::super::owned::Record {
+                value: Some(Bytes::from(vec![b'x'; 4096])),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let encoded = encode_owned_then_borrow(&owned);
+        let validated = validate_one_v2_batch(&encoded).unwrap();
+        let policy = RecordDecompressionPolicy::new(fraction(1.0), bytes(1), bytes(32)).unwrap();
+
+        assert2::assert!(matches!(
+            validated.validate_records(policy),
+            Err(RecordsError::Compression(CompressionError::TooLarge {
+                limit: 32
+            }))
+        ));
+    }
+
+    #[test]
+    fn validated_batch_distinguishes_zero_and_negative_record_counts() {
+        let mut encoded = encode_owned_then_borrow(&super::super::owned::RecordBatch::default());
+        let zero = validate_one_v2_batch(&encoded).unwrap();
+        assert2::assert!(
+            zero.validate_records(RecordDecompressionPolicy::default())
+                .is_ok()
+        );
+
+        encoded[57..61].copy_from_slice(&(-1i32).to_be_bytes());
+        refresh_batch_crc(&mut encoded);
+        let negative = validate_one_v2_batch(&encoded).unwrap();
+        assert2::assert!(matches!(
+            negative.validate_records(RecordDecompressionPolicy::default()),
+            Err(RecordsError::RecordParse(message)) if message.contains("negative records_count")
+        ));
     }
 
     #[test]

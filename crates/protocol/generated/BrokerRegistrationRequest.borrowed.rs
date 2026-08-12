@@ -101,7 +101,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
                 for it in &self.listeners {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -117,7 +117,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
                 for it in &self.features {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -142,7 +142,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
                 for it in &self.log_dirs {
                     crate::primitives::uuid::put_uuid(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {

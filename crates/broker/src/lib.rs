@@ -117,7 +117,7 @@
 //! `acks=all` produces survive arbitrary single-broker failures with
 //! no data loss and no zombie writes.
 
-#![doc(html_root_url = "https://docs.rs/crabka-broker/0.3.9")]
+#![doc(html_root_url = "https://docs.rs/crabka-broker/0.4.0")]
 
 /// Emit the wrapped item(s) only on platforms with a usable file→socket
 /// `sendfile(2)` for the zero-copy fetch path: Linux, the Apple targets, and
@@ -169,6 +169,7 @@ pub mod codes;
 pub mod config;
 pub(crate) mod config_keys;
 pub mod config_value;
+mod controller_admin;
 pub mod coordinator;
 /// Compositional end-to-end data-path verification model (produce → replicate →
 /// commit → fetch across clean and unclean failover). It wraps the real

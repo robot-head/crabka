@@ -21,6 +21,7 @@ spec:
   databaseUrl:
     name: orders-postgres
     key: url
+  schemaRegistryUrl: http://schema-registry.streaming.svc:8081
   slot: orders_crabka
   publication: crabka_connect
   schema: public

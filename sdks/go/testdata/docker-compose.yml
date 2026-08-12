@@ -1,0 +1,28 @@
+services:
+  broker:
+    image: ${CRABKA_BROKER_IMAGE:-ghcr.io/robot-head/crabka-broker:edge}
+    command: run
+    ports:
+      - "${CRABKA_BROKER_PORT:-9092}:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9092"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+
+  gateway:
+    image: ${CRABKA_GATEWAY_IMAGE:-ghcr.io/robot-head/crabka-gateway:edge}
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      CRABKA_BOOTSTRAP_SERVERS: broker:9092
+      CRABKA_GATEWAY_LISTEN_ADDR: 0.0.0.0:9500
+      CRABKA_GATEWAY_ADVERTISED_ADDR: gateway:9500
+    ports:
+      - "${CRABKA_GATEWAY_PORT:-9500}:9500"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9500"]
+      interval: 1s
+      timeout: 1s
+      retries: 60

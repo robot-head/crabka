@@ -17,6 +17,7 @@ use crate::{
         kgrouped::mint_store_name,
         ktable::KTable,
         names,
+        windowed_kgrouped::windowed_suppress_factory,
         windows::{TimeWindowedSerde, TimeWindows, Windowed},
     },
     processor::serde::Serde,
@@ -53,12 +54,7 @@ where
     K: Any + Send + Sync + Clone,
     VOut: Any + Send + Sync + Clone,
 {
-    /// Time-windowed terminal aggregation into a `KTable<Windowed<K>, VOut>`.
-    ///
-    /// The returned table carries no suppress factory, so a `.suppress(...)` call
-    /// on it fails at topology-build time. Suppress on a windowed cogroup output
-    /// is a deferred follow-up. The emit semantics are emit-on-update across the
-    /// whole cogroup surface, per the KIP-150 slice scope.
+    /// Time-windowed terminal aggregation → `KTable<Windowed<K>, VOut>`.
     pub fn aggregate_explicit<KS, VS, I>(
         self,
         init: I,
@@ -71,6 +67,11 @@ where
     {
         let materialized = materialized.into();
         let store_name = mint_store_name(&self.builder, &materialized, names::AGGREGATE_STORE);
+        let suppress_factory = windowed_suppress_factory::<K, VOut, KS, VS>(
+            materialized.key_serde.clone(),
+            materialized.value_serde.clone(),
+            self.windows,
+        );
         let Materialized {
             key_serde,
             value_serde,
@@ -116,6 +117,7 @@ where
             value_serde,
         )
         .with_window_grace(Some(self.windows.grace))
+        .with_suppress_factory(Some(suppress_factory))
     }
 }
 
@@ -125,7 +127,7 @@ mod caching_tests {
     use crabka_units::prelude::*;
 
     use crate::{
-        I64Serde, Materialized, Produced, StringSerde, TimeWindows,
+        BufferConfig, I64Serde, Materialized, Produced, StringSerde, Suppressed, TimeWindows,
         dsl::{StreamsBuilder, windows::TimeWindowedSerde},
         store::backend::StoreBackend,
     };
@@ -144,6 +146,7 @@ mod caching_tests {
             || 0i64,
             Materialized::with(StringSerde, I64Serde).as_store("cg"),
         )
+        .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
         .to_stream()
         .to_explicit(
             "out",

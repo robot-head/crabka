@@ -44,7 +44,7 @@ impl Encode for OffsetDeleteResponse {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -136,7 +136,7 @@ impl Encode for OffsetDeleteResponseTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

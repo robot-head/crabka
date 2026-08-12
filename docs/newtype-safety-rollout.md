@@ -4,7 +4,11 @@ Tracking document for applying the [Newtypes for Domain Values](style_guides/cod
 
 ## Status
 
-Crate-local fixes are being applied in verified batches — each brought to a green `cargo clippy --workspace --all-targets -- -D warnings` and passing tests before the next. **Done so far:** throttle, audit, bench-driver, connect, logql (batch 1, + downstream adaptations in connect-postgres, replicator, observability); cli, grpc-gateway, metrics-service, profiles, traces (batch 2); schema-registry, operator, traceql, promql (batch 3, + a metrics-service bridge); connect-postgres, replicator (batch 4). The cross-crate core identifiers below remain a staged program.
+The bounded rollout is complete. Four crate-local batches landed first, followed
+by the six shared core identifiers and their verified wire-facing adoption. The
+survey groupings below are retained as decision history; they are not an
+unchecked implementation list. Candidates without a concrete conversion and
+byte-compatibility gate need a new scoped design before they become work.
 
 **Observed at the batch boundary:** promql and metrics-service each grew their own crate-local `Offset`/`PartitionIndex`, and they meet at `apply_wal_record_at`, forcing a `.0.into()` bridge through the raw primitive. That friction is the concrete argument for treating `Offset`/`PartitionIndex` (and the other core ids) as a *single* shared type owned by one crate rather than duplicating them.
 
@@ -25,7 +29,14 @@ The full protocol **differential suite passes against the JVM oracle** (675 test
 - **`raft`** ✅ — fully converted at the `KraftLog` facade + controller (~150 sites). The pure consensus core `crabka-kraft-core` stays `i64` (model-checked, WASM-buildable); raft wraps at that boundary and at the KIP-595 wire/snapshot boundaries. Proven by 153 unit + 28 integration/**stateright model-check** tests.
 - **`broker`** ✅ — fully converted for **both** `Offset` (~45 seam + ~250 internal sites) and `PartitionIndex` (~400 sites): the `(partition, offset)` coordinate is now type-safe through partition state, the data-path handlers, replication, txn, share, and the coordinators. Wire/metadata fields, the `<topic>-<partition>` dir-name format, the hash partitioners, and the public/test-facing `BrokerHandle` API stay `i32`/`i64` (so byte shape and the 13 reverse-deps are untouched). Proven by 1277 unit + 24 end-to-end (produce/fetch/compaction/describe-topic-partitions) tests.
 
-**The `(partition, offset)` coordinate is complete through the wire-facing core** (log, raft, broker). Remaining follow-ups: extend `Offset`/`PartitionIndex` into the storage/records consumers (remote-storage(+topic), blockstore, replicator internals, client-consumer/admin), and the other core ids (`BrokerId`/`NodeId` rank 3, `LeaderEpoch`, `ProducerId`, `ApiKey`). `crabka-kraft-core` and `crabka-protocol`'s `RecordBatch` stay raw as the model-check / wire boundary. Byte-exactness is checked by each crate's on-disk/consensus tests plus the **JVM differential oracle** (`tools/oracle`, JDK 17, `JAVA_HOME`) and Docker/testcontainers — noting a differential run rewrites the tracked corpus fixtures (`crates/protocol/tests/corpus/`), which must be restored, not committed.
+**The `(partition, offset)` coordinate and all six shared core identifiers are
+complete through their declared wire-facing boundaries.**
+`crabka-kraft-core` and `crabka-protocol`'s `RecordBatch` intentionally stay raw
+at the model-check and generated-wire boundaries. Byte-exactness is checked by
+each crate's on-disk/consensus tests plus the **JVM differential oracle**
+(`tools/oracle`, JDK 17, `JAVA_HOME`) and Docker/testcontainers — noting a
+differential run rewrites the tracked corpus fixtures
+(`crates/protocol/tests/corpus/`), which must be restored, not committed.
 
 ---
 
@@ -51,7 +62,11 @@ Grouped into batches with non-overlapping file sets so each batch runs in parall
 ### Batch 2 — observability stores
 `blockstore`, `traces`, `traceql`, `profiles`, `promql`, `metrics`, `metrics-service`, `observability` — mostly `UnixNano`/`Offset`/timestamp pairs in store and query layers; several wrap serde/WAL structs and need `#[serde(transparent)]`.
 
-### Batch 3 — services & remaining crate-local
+### Historical survey candidates — not an open batch
+
+This list records the original survey population. Later shared-type work,
+explicit boundary decisions, and per-crate designs supersede it; a crate name
+here alone does not constitute unfinished work.
 `replicator` (offset-translation math — real correctness value), `rebalancer` (movement/proposal, convert at protobuf edge), `operator` (CRD status counts/versions, `#[serde(transparent)]`), `grpc-gateway`, `schema-registry` (`SchemaId` vs `SchemaVersion`), `remote-storage`(+`-topic`), `client-streams` (windowing/store — the densest single crate), `client-consumer`/`-core`/`-producer`/`-admin`, `security`, `kraft-core` (Raft offset trio), `cli` (`ClusterId`/`DirectoryId`), `kafka-tap`, and the crate-local subset of `broker` (`SessionId`) and `protocol` (`produce_passthrough` `TopicIndex`/`PartitionIndex`).
 
 ## Cross-crate core identifiers (staged program)

@@ -40,7 +40,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
 
     let source = PostgresWalSource::connect(config.postgres_source())
         .await
-        .context("connect PostgreSQL source")?;
+        .context("start PostgreSQL source")?;
     let sink =
         KafkaSink::start_with_config(client.clone(), config.topic_prefix.clone(), metrics.clone())
             .await

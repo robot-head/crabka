@@ -78,7 +78,7 @@ impl Encode for DescribeClientQuotasResponse<'_> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -213,7 +213,7 @@ impl Encode for EntryData<'_> {
                 for it in &self.entity {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -221,7 +221,7 @@ impl Encode for EntryData<'_> {
                 for it in &self.values {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

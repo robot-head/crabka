@@ -26,6 +26,4 @@ pub(crate) mod two_pc;
 #[path = "two_pc_model.rs"]
 mod two_pc_model;
 pub(crate) mod util;
-// TxnVersion + resolver are retained for transaction-version negotiation.
-#[allow(dead_code)]
 pub(crate) mod version;

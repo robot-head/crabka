@@ -35,7 +35,6 @@ use crabka_protocol::{
         join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
         join_group_response::JoinGroupResponse,
         leave_group_request::{LeaveGroupRequest, MemberIdentity},
-        metadata_request::MetadataRequest,
         offset_commit_request::OffsetCommitRequest,
         sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
         sync_group_response::SyncGroupResponse,
@@ -463,7 +462,7 @@ fn subscription_metadata_refresh_due(last_check: tokio::time::Instant, interval:
 async fn subscribed_partition_counts(
     state: &CoordinatorState,
 ) -> Result<HashMap<String, i32>, ConsumerError> {
-    let md = state.client.send(MetadataRequest::default()).await?;
+    let md = state.client.refresh_metadata().await?;
     let mut counts = HashMap::new();
     for t in &md.topics {
         let Some(name) = &t.name else { continue };
@@ -1225,7 +1224,7 @@ async fn compute_leader_assignment(
             topic_partitions: HashMap::new(),
         });
     }
-    let metadata = state.client.send(MetadataRequest::default()).await?;
+    let metadata = state.client.refresh_metadata().await?;
     let mut topic_partitions = HashMap::new();
     let mut resolved_ids = HashMap::new();
     for topic in &metadata.topics {

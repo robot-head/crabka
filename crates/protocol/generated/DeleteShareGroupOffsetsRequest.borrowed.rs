@@ -61,7 +61,7 @@ impl Encode for DeleteShareGroupOffsetsRequest<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

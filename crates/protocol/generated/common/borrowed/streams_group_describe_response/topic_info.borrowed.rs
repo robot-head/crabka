@@ -57,7 +57,7 @@ impl Encode for TopicInfo<'_> {
                 for it in &self.topic_configs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -1,14 +1,11 @@
 //! [`LocalTieredStorage`] is a filesystem-backed reference
 //! [`RemoteStorageManager`]. It mirrors Kafka's test fixture of the same
-//! name. It stores each segment's data and indexes under a per-segment
-//! directory below a configurable root path. It is useful for tests and
-//! single-node setups. Production deployments use an object-store-backed
-//! implementation behind the same trait.
+//! name. It uses the same partition directories and segment filenames as
+//! Kafka 4.0, so a JVM `LocalTieredStorage` can read files copied by Crabka.
+//! It is useful for tests and single-node setups. Production deployments use
+//! an object-store-backed implementation behind the same trait.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
 
 use tracing::instrument;
 
@@ -24,13 +21,13 @@ use crate::{
 /// On-disk layout, per segment:
 ///
 /// ```text
-/// <root>/<topic_id>_<partition>/<segment_uuid>/
-///     log
-///     offset_index
-///     time_index
-///     producer_snapshot
-///     leader_epoch
-///     txn_index        (only when the segment has a transaction index)
+/// <root>/<topic>-<partition>-<topic_id_base64>/
+///     <base_offset>-<segment_id_base64>.log
+///     <base_offset>-<segment_id_base64>.index
+///     <base_offset>-<segment_id_base64>.timeindex
+///     <base_offset>-<segment_id_base64>.snapshot
+///     <base_offset>-<segment_id_base64>.leader_epoch_checkpoint
+///     <base_offset>-<segment_id_base64>.txnindex  (when present)
 /// ```
 #[derive(Debug, Clone)]
 pub struct LocalTieredStorage {
@@ -40,25 +37,55 @@ pub struct LocalTieredStorage {
 impl LocalTieredStorage {
     /// Constructs a store rooted at `root`. The store creates the directory
     /// on the first copy.
+    ///
+    /// Kafka's JVM implementation appends `kafka-tiered-storage` to its
+    /// configured parent directory. To share a tier with it, pass
+    /// `<remote.log.storage.local.dir>/kafka-tiered-storage` here.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    /// The directory that holds all of one segment's files.
-    fn segment_dir(&self, metadata: &RemoteLogSegmentMetadata) -> PathBuf {
-        let id = metadata.remote_log_segment_id();
-        let tp = &id.topic_id_partition;
+    /// The directory that holds every remote segment for one partition.
+    fn partition_dir(&self, metadata: &RemoteLogSegmentMetadata) -> PathBuf {
         self.root
-            .join(format!("{}_{}", tp.topic_id, tp.partition))
+            .join(crate::storage_manager::partition_dir_name(metadata))
+    }
+
+    fn segment_path(&self, metadata: &RemoteLogSegmentMetadata, suffix: &str) -> PathBuf {
+        self.partition_dir(metadata)
+            .join(crate::storage_manager::segment_file_name(metadata, suffix))
+    }
+
+    fn log_path(&self, metadata: &RemoteLogSegmentMetadata) -> PathBuf {
+        self.segment_path(metadata, ".log")
+    }
+
+    fn index_path(&self, metadata: &RemoteLogSegmentMetadata, index_type: IndexType) -> PathBuf {
+        self.segment_path(metadata, index_type.suffix())
+    }
+
+    /// Crabka 0.3.8 and earlier stored one directory per segment. Keep reads
+    /// and deletes compatible while all new copies use Kafka's flat layout.
+    fn legacy_segment_dir(&self, metadata: &RemoteLogSegmentMetadata) -> PathBuf {
+        let id = metadata.remote_log_segment_id();
+        self.root
+            .join(format!(
+                "{}_{}",
+                id.topic_id_partition.topic_id, id.topic_id_partition.partition
+            ))
             .join(id.id.to_string())
     }
 
-    fn log_path(dir: &Path) -> PathBuf {
-        dir.join("log")
+    fn legacy_log_path(&self, metadata: &RemoteLogSegmentMetadata) -> PathBuf {
+        self.legacy_segment_dir(metadata).join("log")
     }
 
-    fn index_path(dir: &Path, index_type: IndexType) -> PathBuf {
+    fn legacy_index_path(
+        &self,
+        metadata: &RemoteLogSegmentMetadata,
+        index_type: IndexType,
+    ) -> PathBuf {
         let name = match index_type {
             IndexType::Offset => "offset_index",
             IndexType::Timestamp => "time_index",
@@ -66,7 +93,7 @@ impl LocalTieredStorage {
             IndexType::LeaderEpoch => "leader_epoch",
             IndexType::Transaction => "txn_index",
         };
-        dir.join(name)
+        self.legacy_segment_dir(metadata).join(name)
     }
 }
 
@@ -87,30 +114,30 @@ impl RemoteStorageManager for LocalTieredStorage {
         metadata: &RemoteLogSegmentMetadata,
         data: &LogSegmentData,
     ) -> Result<Option<CustomMetadata>, RemoteStorageError> {
-        let dir = self.segment_dir(metadata);
+        let dir = self.partition_dir(metadata);
         fs::create_dir_all(&dir)?;
 
-        fs::copy(&data.log_segment, Self::log_path(&dir))?;
+        fs::copy(&data.log_segment, self.log_path(metadata))?;
         fs::copy(
             &data.offset_index,
-            Self::index_path(&dir, IndexType::Offset),
+            self.index_path(metadata, IndexType::Offset),
         )?;
         fs::copy(
             &data.time_index,
-            Self::index_path(&dir, IndexType::Timestamp),
+            self.index_path(metadata, IndexType::Timestamp),
         )?;
         if let Some(snapshot) = &data.producer_snapshot_index {
             fs::copy(
                 snapshot,
-                Self::index_path(&dir, IndexType::ProducerSnapshot),
+                self.index_path(metadata, IndexType::ProducerSnapshot),
             )?;
         }
         fs::write(
-            Self::index_path(&dir, IndexType::LeaderEpoch),
+            self.index_path(metadata, IndexType::LeaderEpoch),
             &data.leader_epoch_index,
         )?;
         if let Some(txn) = &data.transaction_index {
-            fs::copy(txn, Self::index_path(&dir, IndexType::Transaction))?;
+            fs::copy(txn, self.index_path(metadata, IndexType::Transaction))?;
         }
         // A local store needs no opaque key echoed back.
         Ok(None)
@@ -134,8 +161,12 @@ impl RemoteStorageManager for LocalTieredStorage {
         start_position: u32,
         end_position: Option<u32>,
     ) -> Result<Vec<u8>, RemoteStorageError> {
-        let dir = self.segment_dir(metadata);
-        let path = Self::log_path(&dir);
+        let path = self.log_path(metadata);
+        let path = if path.exists() {
+            path
+        } else {
+            self.legacy_log_path(metadata)
+        };
         if !path.exists() {
             return Err(RemoteStorageError::SegmentNotFound(
                 metadata.remote_log_segment_id().clone(),
@@ -181,8 +212,12 @@ impl RemoteStorageManager for LocalTieredStorage {
         metadata: &RemoteLogSegmentMetadata,
         index_type: IndexType,
     ) -> Result<Vec<u8>, RemoteStorageError> {
-        let dir = self.segment_dir(metadata);
-        let path = Self::index_path(&dir, index_type);
+        let path = self.index_path(metadata, index_type);
+        let path = if path.exists() {
+            path
+        } else {
+            self.legacy_index_path(metadata, index_type)
+        };
         if !path.exists() {
             return Err(RemoteStorageError::SegmentNotFound(
                 metadata.remote_log_segment_id().clone(),
@@ -204,19 +239,32 @@ impl RemoteStorageManager for LocalTieredStorage {
         &self,
         metadata: &RemoteLogSegmentMetadata,
     ) -> Result<(), RemoteStorageError> {
-        let dir = self.segment_dir(metadata);
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(()),
-            // Idempotent: deleting an absent segment succeeds.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(RemoteStorageError::Io(e)),
+        for path in [
+            self.log_path(metadata),
+            self.index_path(metadata, IndexType::Offset),
+            self.index_path(metadata, IndexType::Timestamp),
+            self.index_path(metadata, IndexType::ProducerSnapshot),
+            self.index_path(metadata, IndexType::LeaderEpoch),
+            self.index_path(metadata, IndexType::Transaction),
+        ] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(RemoteStorageError::Io(error)),
+            }
         }
+        match fs::remove_dir_all(self.legacy_segment_dir(metadata)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RemoteStorageError::Io(error)),
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, io::Write};
+    use std::{collections::BTreeMap, io::Write, path::Path};
 
     use assert2::{assert, check};
     use bytes::Bytes;
@@ -338,6 +386,51 @@ mod tests {
                 "{index_type:?}"
             );
         }
+    }
+
+    #[test]
+    fn copied_files_use_kafka_local_tiered_storage_layout() {
+        let remote = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let rsm = LocalTieredStorage::new(remote.path());
+        let md = metadata(10);
+        rsm.copy_log_segment_data(&md, &sample_data(src.path(), true))
+            .unwrap();
+
+        let partition = remote.path().join("orders-0-AAAAAAAAAAAAAAAAAAAAAQ");
+        for suffix in [
+            ".log",
+            ".index",
+            ".timeindex",
+            ".snapshot",
+            ".leader_epoch_checkpoint",
+            ".txnindex",
+        ] {
+            check!(
+                partition
+                    .join(format!(
+                        "00000000000000000000-AAAAAAAAAAAAAAAAAAAACg{suffix}"
+                    ))
+                    .is_file(),
+                "missing Kafka layout artifact {suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_and_deletes_pre_kafka_layout_segments() {
+        let remote = tempfile::tempdir().unwrap();
+        let rsm = LocalTieredStorage::new(remote.path());
+        let md = metadata(10);
+        let legacy = rsm.legacy_segment_dir(&md);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("log"), b"legacy-log").unwrap();
+        fs::write(legacy.join("producer_snapshot"), b"legacy-snapshot").unwrap();
+
+        check!(rsm.fetch_log_segment(&md, 0, None).unwrap() == b"legacy-log");
+        check!(rsm.fetch_index(&md, IndexType::ProducerSnapshot).unwrap() == b"legacy-snapshot");
+        rsm.delete_log_segment_data(&md).unwrap();
+        check!(!legacy.exists());
     }
 
     #[test]

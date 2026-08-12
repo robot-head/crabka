@@ -36,10 +36,10 @@ impl Encode for DescribeGroupsRequest {
                         let () = put_string(buf, &*it);
                     };
                 }
-            }
+            };
         }
         if version >= 3 {
-            put_bool(buf, self.include_authorized_operations)
+            put_bool(buf, self.include_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -67,7 +67,7 @@ impl Encode for DescribeGroupsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeGroupsRequest {
+impl Decode<'_> for DescribeGroupsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });

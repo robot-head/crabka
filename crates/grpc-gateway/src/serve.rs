@@ -1,16 +1,20 @@
 //! Listener serving.
 //!
-//! The plaintext path runs through `axum::serve`. The rustls path runs through
-//! a manual accept loop that hands each `TlsStream` to hyper and injects the
-//! mTLS peer principal, the cert subject DN, into the request extensions. The
-//! TLS material is hot-reloadable through `DynamicServerConfig`.
+//! The plaintext path accepts HTTP/1.1 and HTTP/2 prior knowledge (h2c) on the
+//! same port. The rustls path runs through a manual accept loop that hands each
+//! `TlsStream` to hyper and injects the mTLS peer principal, the cert subject
+//! DN, into request extensions. TLS material is hot-reloadable through
+//! `DynamicServerConfig`.
 
 use std::{sync::Arc, time::Duration};
 
 use axum::Router;
 use crabka_security::{AuthMethod, DynamicServerConfig, Principal, TlsConfig};
 use crabka_units::prelude::*;
-use hyper_util::rt::TokioIo;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
+};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -21,8 +25,7 @@ use tower::ServiceExt;
 /// Otherwise it serves plaintext. It returns when `shutdown` is cancelled.
 ///
 /// # Errors
-/// Propagates the `std::io` error from `axum::serve` on the plaintext path, or
-/// from the accept loop on the TLS path.
+/// Propagates an I/O error from the listener accept loop.
 pub async fn serve(
     listener: TcpListener,
     app: Router,
@@ -30,13 +33,47 @@ pub async fn serve(
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
     match tls {
-        None => {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move { shutdown.cancelled().await })
-                .await
-        }
+        None => serve_plaintext(listener, app, shutdown).await,
         Some(dynamic) => serve_tls(listener, app, dynamic, shutdown).await,
     }
+}
+
+async fn serve_plaintext(
+    listener: TcpListener,
+    app: Router,
+    shutdown: CancellationToken,
+) -> std::io::Result<()> {
+    loop {
+        let (tcp, peer) = tokio::select! {
+            () = shutdown.cancelled() => break,
+            result = listener.accept() => match result {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "tcp accept failed");
+                    continue;
+                }
+            },
+        };
+        let app = app.clone();
+        tokio::spawn(async move {
+            let service = hyper::service::service_fn(
+                move |mut request: hyper::Request<hyper::body::Incoming>| {
+                    let app = app.clone();
+                    async move {
+                        request.extensions_mut().insert(peer);
+                        app.oneshot(request).await
+                    }
+                },
+            );
+            if let Err(error) = auto::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tcp), service)
+                .await
+            {
+                tracing::debug!(%error, "plaintext connection error");
+            }
+        });
+    }
+    Ok(())
 }
 
 async fn serve_tls(

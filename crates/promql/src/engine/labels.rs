@@ -25,8 +25,8 @@ pub(super) fn record_metric_name(names: &mut BTreeMap<String, String>, key: &str
 pub(super) fn float_sample_value(sample: &InstantSample) -> Result<f64> {
     match sample.value {
         SampleValue::Float(value) => Ok(value),
-        SampleValue::Histogram(_) => Err(PromqlError::Unsupported(
-            "binary operations over histograms are not implemented yet".to_string(),
+        SampleValue::Histogram(_) => Err(PromqlError::Plan(
+            "this evaluation path requires a float sample".to_string(),
         )),
     }
 }

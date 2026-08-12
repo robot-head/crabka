@@ -47,7 +47,7 @@ impl Encode for EndQuorumEpochRequest {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 1 {
             {
@@ -55,7 +55,7 @@ impl Encode for EndQuorumEpochRequest {
                 for it in &self.leader_endpoints {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -183,7 +183,7 @@ impl Encode for TopicData {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -291,7 +291,7 @@ impl Encode for PartitionData {
                 for it in &self.preferred_successors {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 1 {
             {
@@ -303,7 +303,7 @@ impl Encode for PartitionData {
                 for it in &self.preferred_candidates {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -21,6 +21,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + ?Sized> DuplexStream for T {}
 /// Authenticated controller-listener connection plus request-level grants.
 pub struct RaftConnection {
     pub stream: Box<dyn DuplexStream>,
+    /// Authenticated Kafka principal. `None` represents a PLAINTEXT or
+    /// one-way TLS connection with the normal `ANONYMOUS` identity.
+    pub principal: Option<crabka_security::Principal>,
+    /// Whether SCRAM authenticated with a delegation token rather than a
+    /// regular credential.
+    pub authenticated_via_token: bool,
     /// Whether the principal may alter cluster membership.
     pub cluster_alter_authorized: bool,
 }

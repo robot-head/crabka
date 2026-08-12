@@ -53,7 +53,7 @@ impl Encode for LeaveGroupRequest {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

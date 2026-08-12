@@ -19,7 +19,7 @@ categories = ["database-implementations"]
 workspace = true
 
 [dependencies]
-crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-blockstore = { path = "../blockstore", version = "0.4.0" }
 crabka-units = { workspace = true }
 arrow = { workspace = true }
 datafusion = { workspace = true }

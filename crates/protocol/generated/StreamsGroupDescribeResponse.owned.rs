@@ -42,7 +42,7 @@ impl Encode for StreamsGroupDescribeResponse {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -217,7 +217,7 @@ impl DescribedGroup {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -511,7 +511,7 @@ impl Encode for Topology {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -617,7 +617,7 @@ impl Encode for Subtopology {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -633,7 +633,7 @@ impl Encode for Subtopology {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -645,7 +645,7 @@ impl Encode for Subtopology {
                 for it in &self.state_changelog_topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -657,7 +657,7 @@ impl Encode for Subtopology {
                 for it in &self.repartition_source_topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -958,7 +958,7 @@ impl Member {
                 for it in &self.client_tags {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -974,7 +974,7 @@ impl Member {
                 for it in &self.task_offsets {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -990,7 +990,7 @@ impl Member {
                 for it in &self.task_end_offsets {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

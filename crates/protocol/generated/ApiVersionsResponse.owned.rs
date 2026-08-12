@@ -64,7 +64,7 @@ impl Encode for ApiVersionsResponse {
                 for it in &self.api_keys {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 1 {
             put_i32(buf, self.throttle_time_ms);

@@ -66,6 +66,7 @@ invented to pad a one-row-per-integer table.
 | KIP-794 | Strictly-uniform sticky partitioner (client) | README |
 | KIP-890 | Transactions server-side defense (`transaction.version=2`) | feature-pins note (byte-verified) |
 | KIP-915 | Txn/group coordinator record flexible-version downgrade foundation | txn log v1, feature-pins note |
+| KIP-939 | Two-phase-commit participation (`prepareTransaction`, recovery completion, and Admin force termination) | broker 2PC model + native producer/Admin APIs + `transactions_2pc_client` live recovery test |
 | KIP-1228 | Transaction version on `WriteTxnMarkers` | README |
 
 ### Consumer groups & queues
@@ -96,11 +97,11 @@ invented to pad a one-row-per-integer table.
 | KIP-112 | Handle disk failure for JBOD | kip-112 spec |
 | KIP-113 | Replica movement between log dirs (`AlterReplicaLogDirs`) | README |
 | KIP-204 | `DeleteRecords` via the Admin client | README |
-| KIP-405 | Tiered storage (topic-backed RLMM default; copy/read/retention; RLMM snapshots; metadata byte-exact with JVM) | specs 48a–48r — *segment-data interop partial, see [§2](#2-partially-implemented--what-is-left)* |
+| KIP-405 | Tiered storage (topic-backed RLMM default; copy/read/retention; RLMM snapshots; metadata, segment layout, and producer snapshots validated against Kafka 4.0 JVM) | specs 48a–48r + `jvm_tiered_storage` |
 | KIP-534 | Log retention with delete-horizon (tombstone retention) | kip534 spec |
-| KIP-1005 | `ListOffsets` last-tiered offset | schema v9 |
-| KIP-1023 | `ListOffsets` earliest-pending-upload offset | schema v11 |
-| KIP-1075 | Async remote `ListOffsets` | schema v10 |
+| KIP-1005 | `ListOffsets` last-tiered offset | v9 handler semantics + remote-storage tests |
+| KIP-1023 | `ListOffsets` earliest-pending-upload offset | v11 handler semantics + upload-pending tests |
+| KIP-1075 | Async remote `ListOffsets` | v10 delayed remote lookup, timeout/parallelism config, and handler tests |
 
 ### Replication & availability
 
@@ -121,6 +122,7 @@ invented to pad a one-row-per-integer table.
 | KIP-858 | JBOD in KRaft (`PartitionRecord.Directories`) | partition record v1 |
 | KIP-966 | Eligible leader replicas / offset-aware unclean recovery; `DescribeTopicPartitions` | kip966 spec |
 | KIP-996 | Pre-vote | kip-996 spec |
+| KIP-1102 | Native-client re-bootstrap on stale metadata | core, producer, and Admin recovery tests (timeout, error 129, all-known-node exhaustion, and retired seed) |
 
 ### KRaft metadata quorum
 
@@ -133,7 +135,7 @@ invented to pad a one-row-per-integer table.
 | KIP-631 | Quorum-based controller (metadata records, RPCs) | kip631 spec |
 | KIP-836 | `DescribeQuorum` voter-lag timestamps | schema v1 |
 | KIP-853 | Dynamic KRaft voters (Add/Remove/UpdateRaftVoter) | deterministic Raft model + snapshot recovery + operator lifecycle tests; Kafka 4.3.1 `kafka-features` and `kafka-metadata-quorum` oracle |
-| KIP-919 | AdminClient ↔ controller routing (`DescribeCluster` `EndpointType`; controller registration; `UnregisterBroker`) | schema `DescribeCluster` v1; api_key 64 |
+| KIP-919 | AdminClient ↔ controller routing (`bootstrap.controllers`; controller Admin RPCs; endpoint-type validation; controller registration; `UnregisterBroker`) | controller-bootstrap integration tests (supported routing + client-side error 115 preflight) + controller handler registry + schema `DescribeCluster` v1 |
 | KIP-1022 | Formatting & updating features (`crabka format --feature`) | JVM `kafka-features` validated |
 | KIP-1073 | `IncludeFencedBrokers` / `IsFenced` in `DescribeCluster` | schema v2 |
 
@@ -168,7 +170,7 @@ invented to pad a one-row-per-integer table.
 | KIP-84 | SASL/SCRAM | README |
 | KIP-140 | ACL admin APIs (Create / Delete / Describe) | README |
 | KIP-152 | SASL authentication-failure diagnostics | README |
-| KIP-255 | SASL/OAUTHBEARER | README |
+| KIP-255 | SASL/OAUTHBEARER, including inter-broker/controller outbound | README + `client-core/sasl` + `broker/raft_handshake` |
 | KIP-290 | Prefixed ACLs | README |
 | KIP-368 | Periodic SASL re-authentication | spec 49e |
 | KIP-504 | New Java authorizer API (semantics) | README |
@@ -186,6 +188,13 @@ invented to pad a one-row-per-integer table.
 | KIP-546 | Client-quota admin APIs | README |
 | KIP-599 | Controller mutation quotas | slice 16c |
 | KIP-612 | IP / connection-creation-rate quotas | slice 16b |
+
+### Operator and Schema Registry compatibility
+
+| Area | Implemented surface | Grounding |
+|------|---------------------|-----------|
+| External listeners | Internal, NodePort, LoadBalancer, Ingress, and OpenShift Route listener reconciliation | operator listener reconciliation tests |
+| Secured external Schema Registry bootstrap | External broker bootstrap with the configured TLS and SASL security material | Schema Registry CRD/controller tests |
 
 ### Observability & streams DSL/runtime (in the Rust Streams client)
 
@@ -217,22 +226,26 @@ invented to pad a one-row-per-integer table.
 
 | KIP / area | Done | What's left for full parity |
 |------------|------|-----------------------------|
-| **KIP-778** — KRaft-to-KRaft upgrades | `metadata.version` level model (7–25), runtime enforcement, bootstrap/format, operator ordered roll + MV bump | Full online **`metadata.version` downgrade** (lossy record-level downgrade) semantics, and JVM-validated mixed-version rolling up/down-grade orchestration. |
-| **KIP-939** — 2PC participation | `InitProducerId` v6 `enable2Pc` fully wired: cluster gate (`transaction.two.phase.commit.enable`) + `TWO_PHASE_COMMIT` ACL, 2PC transactions persisted with the no-timeout sentinel and **never** auto-aborted by the idle-transaction reaper (the reaper itself is new; KIP-98 timeout). `keepPreparedTxn` returns `UNSUPPORTED_VERSION` (matches Kafka, where it is still unstable). Safety proven by an exhaustive `stateright` model (`txn::two_pc_model`). | Prepared-txn **retention/recovery** flow (`keepPreparedTxn` → `OngoingTxnProducerId/Epoch`) once Kafka stabilises it; remote-led abort-marker fan-out from the reaper. |
-| **KIP-1071** — streams rebalance protocol | **Broker side fully done**: `StreamsGroupHeartbeat` / `StreamsGroupDescribe`, topology ingestion, internal repartition/changelog topic creation, active/standby/warmup assignment with changelog catch-up, `__consumer_offsets` persistence, `streams.version` gate. Rust client DSL/runtime/state-stores/joins/windows/suppress/IQv2/EOS are broad. | (a) `crabka-client-streams` is **not** a full JVM Kafka Streams library replacement; (b) **live classic↔streams group migration is not wired**. |
-| **KIP-405** — tiered storage *segment-data* interop | `__remote_log_metadata` records byte-exact with JVM `RemoteLogMetadataSerde`; copy/read/retention; RLMM snapshots | Shared `RemoteStorageManager` object layout + **producer-snapshot upload** not yet validated against JVM `LocalTieredStorageManager`, so segment-level mixing in a mixed JVM+Crabka cluster is not claimed. |
-| Operator — Ingress / Route listeners | Internal / NodePort / LoadBalancer listeners done | Ingress / Route external-listener types only partially wired. |
+| **KIP-778 / proposed KIP-1155** — KRaft upgrades and metadata-version downgrades | `metadata.version` level model (7–25), runtime enforcement, bootstrap/format, operator ordered roll + MV bump; Crabka-native safe/unsafe record-loss projection; all-node downgrade-capability and target-range checks; mandatory lower-version snapshot reload + log-prefix prune on every quorum node, with fail-closed retry and restart rediscovery; pre-KIP-1155 Kafka 4.0 nodes are rejected without changing cluster state | Successful mixed-JVM rolling software downgrade awaits an upstream Kafka release that assigns and advertises KIP-1155's promised capability metadata version. Kafka 4.0 correctly cannot be treated as downgrade-capable. Operator Admin RPCs over secured internal listeners still need TLS/SASL credential loading. |
+| **KIP-1071** — streams rebalance protocol | **Broker side fully done**: `StreamsGroupHeartbeat` / `StreamsGroupDescribe`, topology ingestion, internal repartition/changelog topic creation, active/standby/warmup assignment with changelog catch-up, `__consumer_offsets` persistence, `streams.version` gate. Rust client DSL/runtime/state-stores/joins/windows/suppress/IQv2/EOS are broad. Kafka supports only offline classic→streams migration. | Future accepted protocol revisions are tracked as bounded items; replacing the full JVM Kafka Streams library is outside this matrix's compatibility contract. |
+| **Geo-replication** | The native replicator runs selective topic flows, loop prevention, residency routing, offset-sync/checkpoint/heartbeat records, transactional output plus checkpoint recovery, and restart-safe supervision. | Schema-aware transforms/routing, secured standalone clients, an operator CRD, and the explicitly deferred audit/erasure/key-residency surfaces remain future slices. |
 
 ---
 
 ## 3. In scope but not yet implemented (❌)
 
-| KIP / area | Note |
-|------------|------|
-| KIP-899 — AdminClient `--bootstrap-controller` (talk directly to controller quorum) | `DescribeCluster` `endpoint_type=CONTROLLERS` now projects the KRaft voter set (KIP-919 — done). Still pending: the controller listener serving the admin RPC surface, and the client-side `--bootstrap-controller` dial path. |
-| KIP-1102 — client re-bootstrap on stale metadata | Native-client robustness item; not implemented. |
-| Full JVM **Kafka Streams library** KIPs (e.g. KIP-258, 300, 307, 572, 761, 862, 865, 925, 1106, …) | Covered only insofar as `crabka-client-streams`' DSL needs them; full Streams-library parity is an open frontier. |
-| KIP-1150 — diskless / "Inkless" topics | Not in any GA Kafka release; out of near-term parity scope but in scope long-term. |
+No finite repository-local KIP outcome is currently classified here. New work
+belongs in this section only when it has a bounded behavior and acceptance gate.
+
+### Tracked horizons (not ❌ implementation commitments)
+
+- `crabka-client-streams` is a Kafka Streams-inspired Rust API. Full drop-in JVM
+  Kafka Streams library parity has no bounded feature list or acceptance gate;
+  only separately scoped client features are implementation commitments.
+- [KIP-1150](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1150%3A%2BDiskless%2BTopics)
+  is an accepted umbrella proposal that deliberately defines no code, public
+  interface, documentation, or test changes. Its concrete follow-up KIPs are
+  evaluated separately rather than treating KIP-1150 itself as unfinished code.
 
 ---
 
@@ -242,7 +255,6 @@ invented to pad a one-row-per-integer table.
 |---------------|--------|
 | KIP-866 + all ZooKeeper-mode / ZK→KRaft migration KIPs (incl. KIP-590 controller forwarding) | **Crabka is KRaft-only.** Explicit non-goal (`CLAUDE.md`, `KNOWN_ISSUES.md`, README ⛔). Greenfield, no production users, no migration burden. |
 | Kafka **Connect** framework + connectors + EOS source + REST/offsets APIs (KIP-26, 145, 158, 208, 215, 238, 298, 305, 558, 610, 611, 618, 745, 875, 980, …) | Crabka provides its own Rust connector SPI, a managed Postgres CDC worker with durable Kafka-backed offsets, and a `KafkaConnector` operator CRD. JVM plugin loading, the distributed Connect worker protocol, the Connect REST API, multi-task execution, initial snapshots, and exactly-once source delivery remain out of scope for this first managed vertical slice. |
-| **MirrorMaker 2** / geo-replication (KIP-382, 545, 716, 984, …) | MirrorMaker equivalent not implemented (`KafkaMirrorMaker` CRD ❌). |
 | **Kafka Bridge** (HTTP) | Superseded in Crabka by the native gRPC / Connect-RPC + HTTP gateway; `KafkaBridge` CRD ❌. |
 | JVM-**client-library-internal** KIPs (e.g. KIP-235/302 DNS bootstrap, KIP-266 consumer block fix, KIP-289 default `group.id`, KIP-421 dynamic client config, KIP-580 client exponential backoff, KIP-91 producer `delivery.timeout.ms`) | Not applicable to a broker. Where relevant, equivalent behavior lives in Crabka's native Rust clients rather than as a tracked broker KIP. |
 
@@ -250,13 +262,10 @@ invented to pad a one-row-per-integer table.
 
 ## 5. Wire-level note
 
-Several KIPs in §1 are present as **byte-exact codec support** in
-`crates/protocol/schemas/*.json` — every request/response version negotiates and
-round-trips against the JVM — even where the broker *handler* semantics lag the
-wire. Notable cases where schema support is ahead of full behavior: parts of
-the tiered `ListOffsets` variants (KIP-1005 / 1023 / 1075).
-Those are flagged in §2/§3 rather than claimed as full feature parity on the
-strength of schema presence alone.
+Several KIPs in §1 include **byte-exact codec support** generated from
+`crates/protocol/schemas/*.json`. Schema presence alone is not treated as full
+feature parity: entries that require broker behavior are listed as complete
+only when their handler semantics and behavioral tests are present as well.
 
 ---
 
@@ -282,8 +291,9 @@ left untouched as historical record.
 Kafka has ~1300 KIP *numbers*. This matrix does **not** invent a row per integer,
 because a large share are unassigned/never-used, discarded/withdrawn/rejected,
 folded into another KIP, or JVM-client / Connect / Streams-library-internal with
-no broker or wire surface. Those are covered categorically in §3 (Streams-library
-frontier) and §4 (out-of-scope ecosystems and client-library internals). Every
+no broker or wire surface. Those are covered categorically in §3 (tracked
+Streams-library boundary) and §4 (out-of-scope ecosystems and client-library
+internals). Every
 KIP that defines Crabka's actual compatibility contract — protocol, storage,
 replication, KRaft, security, authorization, quotas, queues, and the streams
 *protocol* — is enumerated in §1–§3 and grounded in the repo.

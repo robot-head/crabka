@@ -67,7 +67,7 @@ impl Encode for OffsetFetchResponse<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if (2..=7).contains(&version) {
             put_i16(buf, self.error_code);
@@ -78,7 +78,7 @@ impl Encode for OffsetFetchResponse<'_> {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -218,7 +218,7 @@ impl Encode for OffsetFetchResponseTopic<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -481,7 +481,7 @@ impl Encode for OffsetFetchResponseGroup<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 8 {
             put_i16(buf, self.error_code);
@@ -610,7 +610,7 @@ impl Encode for OffsetFetchResponseTopics<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

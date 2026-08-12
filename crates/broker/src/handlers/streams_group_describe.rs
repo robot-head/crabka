@@ -2,11 +2,8 @@
 //! `DescribedGroup` per requested `group_id`, rendered from the streams actor's
 //! `Describe` view.
 //!
-//! It mirrors the KIP-848 consumer-group describe handler
-//! ([`super::consumer_group_describe`]). It is a plain 4-arg handler, NOT
-//! inline intercepted, and it gates on the same `streams.version` feature and
-//! `streams_group` config as the heartbeat. This handler does not apply the
-//! per-group DESCRIBE ACL. Topic-level and feature gates still run normally.
+//! Mirrors the KIP-848 consumer-group describe handler and applies a
+//! per-group `Describe` ACL before consulting the streams actor.
 
 use std::collections::BTreeMap;
 
@@ -23,7 +20,6 @@ use crabka_protocol::{
         },
     },
 };
-use futures_util::future::BoxFuture;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -37,79 +33,100 @@ use crate::{
 /// serves the KIP-1071 streams RPCs, heartbeat and describe.
 const STREAMS_VERSION_MIN_LEVEL: i16 = 1;
 
-pub(crate) fn handle(
+// cargo-mutants: streams-coordinator response projection; integration-tested.
+#[cfg_attr(test, mutants::skip)]
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    ctx: &crate::handlers::RequestContext<'_>,
+) -> Result<Bytes, BrokerError> {
     let streams_enabled = broker.config.streams_group.enable;
     let image = broker.controller.current_image();
     let ng = broker.group_coordinator.clone();
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
-        let req = StreamsGroupDescribeRequest::decode(&mut cur, version)?;
+    let mut cur: &[u8] = req_bytes;
+    let req = StreamsGroupDescribeRequest::decode(&mut cur, version)?;
 
-        // KIP-1071: same gate as the heartbeat — finalized streams.version >= 1
-        // AND the config kill-switch. If disabled, each requested group gets a
-        // GROUP_ID_NOT_FOUND error row (the protocol does not serve here).
-        let enabled = crate::features::feature_enabled(
+    // KIP-1071: same gate as the heartbeat — finalized streams.version >= 1
+    // AND the config kill-switch. If disabled, each requested group gets a
+    // GROUP_ID_NOT_FOUND error row (the protocol does not serve here).
+    let enabled = crate::features::feature_enabled(
+        &image,
+        crate::features::STREAMS_VERSION,
+        STREAMS_VERSION_MIN_LEVEL,
+    ) && streams_enabled;
+
+    let mut groups: Vec<DescribedGroup> = Vec::with_capacity(req.group_ids.len());
+    for gid in &req.group_ids {
+        if crate::handlers::acl_denied(
+            broker.config.authorizer.as_ref(),
             &image,
-            crate::features::STREAMS_VERSION,
-            STREAMS_VERSION_MIN_LEVEL,
-        ) && streams_enabled;
-
-        let mut groups: Vec<DescribedGroup> = Vec::with_capacity(req.group_ids.len());
-        for gid in &req.group_ids {
-            if !enabled {
-                groups.push(DescribedGroup {
-                    group_id: gid.clone(),
-                    error_code: codes::UNSUPPORTED_VERSION,
-                    ..Default::default()
-                });
-                continue;
-            }
-            // Per-group DESCRIBE ACL gate (Group resource) is not applied by
-            // this plain 4-arg handler.
-            let Some(handle) = ng.find_streams(gid) else {
-                groups.push(DescribedGroup {
-                    group_id: gid.clone(),
-                    error_code: codes::GROUP_ID_NOT_FOUND,
-                    ..Default::default()
-                });
-                continue;
-            };
-            let (tx, rx) = oneshot::channel();
-            if handle
-                .tx
-                .send(StreamsGroupActorMessage::Describe { reply: tx })
-                .await
-                .is_err()
-            {
-                groups.push(DescribedGroup {
-                    group_id: gid.clone(),
-                    error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
-                    ..Default::default()
-                });
-                continue;
-            }
-            match rx.await {
-                Ok(view) => groups.push(render_group(view)),
-                Err(_) => groups.push(DescribedGroup {
-                    group_id: gid.clone(),
-                    error_code: codes::UNKNOWN_SERVER_ERROR,
-                    ..Default::default()
-                }),
-            }
+            ctx,
+            crabka_metadata::ResourceType::Group,
+            gid,
+            crabka_metadata::AclOperation::Describe,
+        ) {
+            groups.push(DescribedGroup {
+                group_id: gid.clone(),
+                error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                ..Default::default()
+            });
+            continue;
         }
-
-        let resp = StreamsGroupDescribeResponse {
-            groups,
-            ..Default::default()
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, gid) {
+            groups.push(DescribedGroup {
+                group_id: gid.clone(),
+                error_code,
+                ..Default::default()
+            });
+            continue;
+        }
+        if !enabled {
+            groups.push(DescribedGroup {
+                group_id: gid.clone(),
+                error_code: codes::UNSUPPORTED_VERSION,
+                ..Default::default()
+            });
+            continue;
+        }
+        let Some(handle) = ng.find_streams(gid) else {
+            groups.push(DescribedGroup {
+                group_id: gid.clone(),
+                error_code: codes::GROUP_ID_NOT_FOUND,
+                ..Default::default()
+            });
+            continue;
         };
-        crate::handlers::encode_response(&resp, version)
-    })
+        let (tx, rx) = oneshot::channel();
+        if handle
+            .tx
+            .send(StreamsGroupActorMessage::Describe { reply: tx })
+            .await
+            .is_err()
+        {
+            groups.push(DescribedGroup {
+                group_id: gid.clone(),
+                error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                ..Default::default()
+            });
+            continue;
+        }
+        match rx.await {
+            Ok(view) => groups.push(render_group(view)),
+            Err(_) => groups.push(DescribedGroup {
+                group_id: gid.clone(),
+                error_code: codes::UNKNOWN_SERVER_ERROR,
+                ..Default::default()
+            }),
+        }
+    }
+
+    let resp = StreamsGroupDescribeResponse {
+        groups,
+        ..Default::default()
+    };
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Map a [`StreamsDescribeView`] into a wire `DescribedGroup`.
@@ -285,7 +302,10 @@ mod tests {
     async fn describe(broker: &Broker, group_ids: &[&str]) -> StreamsGroupDescribeResponse {
         let version = response_mod::MAX_VERSION;
         let req_bytes = encode_request(&request(group_ids));
-        let resp = handle(broker, version, 1, &req_bytes)
+        let principal = crate::test_support::principal("admin");
+        let peer = crate::test_support::peer();
+        let ctx = crate::test_support::request_context(&principal, &peer, "admin-client");
+        let resp = handle(broker, version, 1, &req_bytes, &ctx)
             .await
             .expect("handle describe");
         decode_response(&resp)

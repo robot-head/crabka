@@ -64,7 +64,7 @@ impl GetTelemetrySubscriptionsResponse {
                 for it in &self.accepted_compression_types {
                     put_i8(buf, *it);
                 }
-            }
+            };
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
@@ -93,7 +93,7 @@ impl GetTelemetrySubscriptionsResponse {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
     }
     fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {

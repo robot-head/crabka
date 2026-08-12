@@ -877,7 +877,7 @@ pub(crate) fn encoded_len_expr(schema_type: &str, expr: &str, nullable: bool) ->
             if nullable {
                 return format!(
                     "{{ let opt: Option<&Vec<_>> = ({expr}).as_ref(); \
-                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); \
+                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex); \
                      let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); \
                      prefix + body }}",
                 );
@@ -896,7 +896,7 @@ pub(crate) fn encoded_len_expr(schema_type: &str, expr: &str, nullable: bool) ->
             if nullable {
                 return format!(
                     "{{ let opt: Option<&Vec<_>> = ({expr}).as_ref(); \
-                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); \
+                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex); \
                      let body: usize = opt.map_or(0, |v| v.iter().map(|{closure_arg}| {inner}).sum()); \
                      prefix + body }}",
                 );

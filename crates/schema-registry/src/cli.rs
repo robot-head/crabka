@@ -75,12 +75,24 @@ pub struct SecurityCliInput {
     pub acl_refresh: Option<Time>,
     /// Kafka client protocol: `PLAINTEXT` | `SSL` | `SASL_PLAINTEXT` | `SASL_SSL`.
     pub kafka_security_protocol: String,
-    /// SASL mechanism: `PLAIN` | `SCRAM-SHA-256` | `SCRAM-SHA-512`.
+    /// SASL mechanism: `PLAIN` | `SCRAM-SHA-256` | `SCRAM-SHA-512` | `GSSAPI`.
     pub kafka_sasl_mechanism: String,
     /// SASL username (PLAIN / SCRAM).
     pub kafka_sasl_username: Option<String>,
     /// SASL password (PLAIN / SCRAM).
     pub kafka_sasl_password: Option<String>,
+    /// GSSAPI keytab containing the client principal's long-term key.
+    pub kafka_sasl_keytab_path: Option<PathBuf>,
+    /// GSSAPI Kerberos client principal.
+    pub kafka_sasl_client_principal: Option<String>,
+    /// GSSAPI target broker service name. `None` defaults to `kafka`.
+    pub kafka_sasl_service_name: Option<String>,
+    /// Host component of the broker SASL service principal. This is required
+    /// when DNS resolves the bootstrap name to an address that is not present in
+    /// the broker's Kerberos principal.
+    pub kafka_sasl_host: Option<String>,
+    /// GSSAPI KDC endpoint, for example `tcp://kdc:88`.
+    pub kafka_sasl_kdc_url: Option<String>,
     /// CA(s) (PEM) trusted for the broker's server cert (SSL / `SASL_SSL`).
     pub kafka_tls_ca: Option<PathBuf>,
     /// TLS SNI / server name for the broker connection (SSL / `SASL_SSL`).
@@ -130,8 +142,8 @@ impl std::ops::Deref for SecurityOutput {
 ///
 /// Returns an error for an invalid `bearer`/`tls_client_auth`/
 /// `kafka_security_protocol`/`kafka_sasl_mechanism` value, a `tls_cert` set
-/// without `tls_key` (or vice versa), or a `SASL_*` protocol missing its SASL
-/// username/password.
+/// without `tls_key` (or vice versa), or a `SASL_*` protocol missing the
+/// credentials required by its selected mechanism.
 pub fn build_security(input: &SecurityCliInput) -> anyhow::Result<SecurityOutput> {
     let (bearer, jwks_handle) = build_bearer(input)?;
     Ok(SecurityOutput {
@@ -270,9 +282,9 @@ fn build_authz(input: &SecurityCliInput) -> Option<AuthzConfig> {
 }
 
 /// Build SR → broker [`ClientSecurity`] from `kafka_*`. `PLAINTEXT` gives
-/// `None`, which is plaintext and the pre-security default. PLAIN, SCRAM, and
-/// TLS-CA are covered. The config struct supports GSSAPI and client-cert mTLS
-/// to the broker, but the CLI does not expose them yet.
+/// `None`, which is plaintext and the pre-security default. PLAIN, SCRAM,
+/// GSSAPI, and TLS-CA are covered. Client-cert mTLS to the broker is not
+/// exposed by this CLI.
 fn build_client_security(input: &SecurityCliInput) -> anyhow::Result<Option<ClientSecurity>> {
     let protocol = match input.kafka_security_protocol.to_ascii_uppercase().as_str() {
         "PLAINTEXT" => return Ok(None),
@@ -308,36 +320,55 @@ fn build_client_security(input: &SecurityCliInput) -> anyhow::Result<Option<Clie
         protocol,
         tls,
         sasl,
-        sasl_host: None,
+        sasl_host: input.kafka_sasl_host.clone(),
     }))
 }
 
 /// Build the SASL credential set for a `SASL_*` broker protocol.
 fn build_sasl(input: &SecurityCliInput) -> anyhow::Result<SaslCredentials> {
-    let username = input
-        .kafka_sasl_username
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--kafka-sasl-username required for SASL_* protocols"))?;
-    let password = input
-        .kafka_sasl_password
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--kafka-sasl-password required for SASL_* protocols"))?;
     match input.kafka_sasl_mechanism.to_ascii_uppercase().as_str() {
-        "PLAIN" => Ok(SaslCredentials::Plain { username, password }),
-        "SCRAM-SHA-256" => Ok(SaslCredentials::Scram {
-            mechanism: SaslMechanism::ScramSha256,
-            username,
-            password,
+        "GSSAPI" => Ok(SaslCredentials::Gssapi {
+            keytab_path: input
+                .kafka_sasl_keytab_path
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--kafka-sasl-keytab-path required for GSSAPI"))?,
+            client_principal: input.kafka_sasl_client_principal.clone().ok_or_else(|| {
+                anyhow::anyhow!("--kafka-sasl-client-principal required for GSSAPI")
+            })?,
+            service_name: input
+                .kafka_sasl_service_name
+                .clone()
+                .unwrap_or_else(|| "kafka".to_owned()),
+            kdc_url: input
+                .kafka_sasl_kdc_url
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--kafka-sasl-kdc-url required for GSSAPI"))?,
         }),
-        "SCRAM-SHA-512" => Ok(SaslCredentials::Scram {
-            mechanism: SaslMechanism::ScramSha512,
-            username,
-            password,
-        }),
-        other => anyhow::bail!(
-            "invalid --kafka-sasl-mechanism: {other} (want PLAIN|SCRAM-SHA-256|SCRAM-SHA-512); \
-             GSSAPI is not yet CLI-exposed"
-        ),
+        mechanism => {
+            let username = input.kafka_sasl_username.clone().ok_or_else(|| {
+                anyhow::anyhow!("--kafka-sasl-username required for SASL_* protocols")
+            })?;
+            let password = input.kafka_sasl_password.clone().ok_or_else(|| {
+                anyhow::anyhow!("--kafka-sasl-password required for SASL_* protocols")
+            })?;
+            match mechanism {
+                "PLAIN" => Ok(SaslCredentials::Plain { username, password }),
+                "SCRAM-SHA-256" => Ok(SaslCredentials::Scram {
+                    mechanism: SaslMechanism::ScramSha256,
+                    username,
+                    password,
+                }),
+                "SCRAM-SHA-512" => Ok(SaslCredentials::Scram {
+                    mechanism: SaslMechanism::ScramSha512,
+                    username,
+                    password,
+                }),
+                other => anyhow::bail!(
+                    "invalid --kafka-sasl-mechanism: {other} \
+                     (want PLAIN|SCRAM-SHA-256|SCRAM-SHA-512|GSSAPI)"
+                ),
+            }
+        }
     }
 }
 
@@ -701,6 +732,79 @@ mod tests {
     }
 
     #[test]
+    fn client_gssapi_maps_runtime_credentials_without_username_or_password() {
+        let s = sec(&SecurityCliInput {
+            kafka_security_protocol: "SASL_PLAINTEXT".to_string(),
+            kafka_sasl_mechanism: "GSSAPI".to_string(),
+            kafka_sasl_keytab_path: Some(PathBuf::from("/etc/schema-registry/client.keytab")),
+            kafka_sasl_client_principal: Some("schema-registry@EXAMPLE.COM".to_string()),
+            kafka_sasl_host: Some("broker.internal".to_string()),
+            kafka_sasl_kdc_url: Some("tcp://kdc.example.com:88".to_string()),
+            ..input()
+        });
+        let client = s.client.unwrap();
+        assert2::assert!(client.sasl_host.as_deref() == Some("broker.internal"));
+        let credentials = client.sasl.unwrap();
+        match credentials {
+            SaslCredentials::Gssapi {
+                keytab_path,
+                client_principal,
+                service_name,
+                kdc_url,
+            } => {
+                assert2::assert!(
+                    (keytab_path, client_principal, service_name, kdc_url,)
+                        == (
+                            PathBuf::from("/etc/schema-registry/client.keytab"),
+                            "schema-registry@EXAMPLE.COM".to_string(),
+                            "kafka".to_string(),
+                            "tcp://kdc.example.com:88".to_string(),
+                        )
+                );
+            }
+            other => panic!("expected GSSAPI, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_gssapi_requires_credential_fields() {
+        let valid = SecurityCliInput {
+            kafka_security_protocol: "SASL_PLAINTEXT".to_string(),
+            kafka_sasl_mechanism: "GSSAPI".to_string(),
+            kafka_sasl_keytab_path: Some(PathBuf::from("/client.keytab")),
+            kafka_sasl_client_principal: Some("schema-registry@EXAMPLE.COM".to_string()),
+            kafka_sasl_kdc_url: Some("tcp://kdc:88".to_string()),
+            ..input()
+        };
+        for (field, bad) in [
+            (
+                "--kafka-sasl-keytab-path",
+                SecurityCliInput {
+                    kafka_sasl_keytab_path: None,
+                    ..valid.clone()
+                },
+            ),
+            (
+                "--kafka-sasl-client-principal",
+                SecurityCliInput {
+                    kafka_sasl_client_principal: None,
+                    ..valid.clone()
+                },
+            ),
+            (
+                "--kafka-sasl-kdc-url",
+                SecurityCliInput {
+                    kafka_sasl_kdc_url: None,
+                    ..valid.clone()
+                },
+            ),
+        ] {
+            let error = build_security(&bad).unwrap_err().to_string();
+            assert2::assert!(error.contains(field));
+        }
+    }
+
+    #[test]
     fn invalid_client_security_cases() {
         for (_name, protocol, mechanism, username, password) in [
             (
@@ -721,7 +825,7 @@ mod tests {
             (
                 "bad_mechanism",
                 "SASL_PLAINTEXT",
-                "GSSAPI",
+                "DIGEST-MD5",
                 Some("u"),
                 Some("p"),
             ),

@@ -22,7 +22,10 @@ use std::{
 
 use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig, Offset};
-use crabka_units::{ByteSize, Time, convert::TimeExt as _};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use dashmap::DashMap;
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -43,7 +46,6 @@ use crate::{
 /// move's state through the registry. The writer task consumes them
 /// indirectly through the `SwapFutureLog` message, which Rust's dead-code
 /// pass cannot see through.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct FutureLogState {
     /// Parent `log.dir` that the move targets. It is one of the broker's
@@ -57,12 +59,11 @@ pub struct FutureLogState {
     /// `SwapFutureLog` writer message so all three hold the same
     /// `Arc<Mutex<Log>>`.
     pub future_log: Arc<Mutex<Log>>,
-    /// The swap cancels this to unwind the replicator task. A follow-up
-    /// `AlterReplicaLogDirs` that cancels an in-progress move would also
-    /// cancel it. That path is not implemented yet.
+    /// Cancelled by the swap or by a follow-up `AlterReplicaLogDirs` that
+    /// redirects an in-progress move.
     pub cancel: CancellationToken,
-    /// Kept alive so the replicator task is reaped when the entry is
-    /// removed from the registry.
+    /// Retained so cancellation and broker shutdown can abort and await the
+    /// replicator task.
     pub task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -77,15 +78,10 @@ pub enum MoveError {
     LogDirNotFound,
     /// The named partition is not hosted on this broker.
     ReplicaNotAvailable,
-    /// A different move is already in flight for this partition with
-    /// a different target. This matches Kafka. A second alter takes
-    /// effect only after the first move completes or is cancelled.
-    AlreadyMoving,
-    /// `crabka_log::Log::open` or `mkdir` failed during the staging of the
-    /// future log. The variant holds the inner error for tracing and future
-    /// use. The handler maps every storage failure to `KAFKA_STORAGE_ERROR`
-    /// on the wire.
-    Storage(#[allow(dead_code)] BrokerError),
+    /// `crabka_log::Log::open` or `mkdir` failed while staging the future log.
+    /// The handler logs the inner error, then maps every storage failure to
+    /// `KAFKA_STORAGE_ERROR` on the wire.
+    Storage(BrokerError),
 }
 
 impl From<BrokerError> for MoveError {
@@ -106,20 +102,21 @@ impl From<std::io::Error> for MoveError {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct MovePolicy {
     pub retry_backoff: Time,
     pub read_chunk: ByteSize,
+    pub throttle: Arc<crate::throttle::TokenBucket>,
 }
 
 /// Start a move of `(topic, partition)` to `target_log_dir`, or confirm an
 /// identical move as a no-op. Returns immediately after it spawns the
 /// replicator task, so the `AlterReplicaLogDirs` handler can then ack success.
 ///
-/// The call is idempotent. If a move with the same target is already in
-/// flight, it returns `Ok(())` and spawns no second task. A move with a
-/// *different* target returns `Err(MoveError::AlreadyMoving)`.
-pub(crate) fn start_move(
+/// Idempotency: if a move with the same target is already in flight,
+/// returns `Ok(())` without spawning a second task. If its target differs,
+/// the old task and future log are removed before the replacement starts.
+pub(crate) async fn start_move(
     partitions: &Arc<PartitionRegistry>,
     future_logs: &Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     all_log_dirs: &[PathBuf],
@@ -146,25 +143,27 @@ pub(crate) fn start_move(
         .get(topic, partition)
         .ok_or(MoveError::ReplicaNotAvailable)?;
 
-    // (3) Already in the target dir? No-op success.
+    // (3) Already moving? Keep a same-target request idempotent. Kafka stops
+    //     and removes a future replica when a later request changes its
+    //     destination, including when the new destination is the current dir.
+    if let Some(existing) = future_logs.get(&key).map(|e| e.value().clone()) {
+        if canonicalize_or_self(&existing.target_log_dir) == canonicalize_or_self(&target_log_dir) {
+            return Ok(());
+        }
+        cancel_move(future_logs, &key, existing).await?;
+    }
+
+    // (4) Already in the target dir? No-op success. This check must follow
+    //     cancellation so redirecting a move back to its source stops it.
     let current_log_dir = part.log_dir.load_full();
     if canonicalize_or_self(&current_log_dir) == canonicalize_or_self(&target_log_dir) {
         return Ok(());
     }
 
-    // (4) Already moving? Idempotent for same target, conflict for
-    //     different target.
-    if let Some(existing) = future_logs.get(&key).map(|e| e.value().clone()) {
-        if canonicalize_or_self(&existing.target_log_dir) == canonicalize_or_self(&target_log_dir) {
-            return Ok(());
-        }
-        return Err(MoveError::AlreadyMoving);
-    }
-
     // (5) Open the future log at <target>/<topic>-<partition>-future.
     let future_path = log_dir::future_partition_dir(&target_log_dir, topic, partition.get());
     std::fs::create_dir_all(&future_path)?;
-    let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
+    let future_log = open_future_log(partitions, &future_path, log_config)?;
 
     spawn_move(MoveTask {
         partitions: partitions.clone(),
@@ -180,10 +179,80 @@ pub(crate) fn start_move(
     Ok(())
 }
 
-/// Recover an interrupted move that broker startup discovered on disk. Such a
-/// move is a `<topic>-<partition>-future` directory in a configured log.dir
-/// whose corresponding partition exists. This function re-opens the future log
-/// and re-spawns the replicator, which starts at whatever offset the
+async fn cancel_move(
+    future_logs: &Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
+    key: &(String, PartitionIndex),
+    existing: Arc<FutureLogState>,
+) -> Result<(), MoveError> {
+    existing.cancel.cancel();
+    let task = existing
+        .task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
+    future_logs.remove_if(key, |_, state| Arc::ptr_eq(state, &existing));
+    let future_path = existing.future_path.clone();
+    drop(existing);
+    if future_path.exists() {
+        std::fs::remove_dir_all(&future_path)?;
+    }
+    Ok(())
+}
+
+fn take_move_tasks(
+    future_logs: &DashMap<(String, PartitionIndex), Arc<FutureLogState>>,
+) -> Vec<JoinHandle<()>> {
+    let states: Vec<_> = future_logs
+        .iter()
+        .map(|entry| Arc::clone(entry.value()))
+        .collect();
+    future_logs.clear();
+    for state in &states {
+        state.cancel.cancel();
+    }
+    states
+        .into_iter()
+        .filter_map(|state| {
+            state
+                .task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        })
+        .collect()
+}
+
+/// Cancel and await every in-progress log-directory move. Broker shutdown
+/// calls this after it has stopped accepting requests and before it stops the
+/// partition writers that the move tasks use.
+pub(crate) async fn shutdown_moves(
+    future_logs: &DashMap<(String, PartitionIndex), Arc<FutureLogState>>,
+) {
+    let tasks = take_move_tasks(future_logs);
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
+}
+
+/// Best-effort synchronous counterpart used when a
+/// [`crate::broker::BrokerHandle`] is dropped without an awaited shutdown.
+pub(crate) fn abort_moves(future_logs: &DashMap<(String, PartitionIndex), Arc<FutureLogState>>) {
+    for task in take_move_tasks(future_logs) {
+        task.abort();
+    }
+}
+
+/// Recover an interrupted move discovered on disk at broker startup
+/// (a `<topic>-<partition>-future` directory in a configured log.dir
+/// whose corresponding partition exists). Re-opens the future log
+/// and re-spawns the replicator, picking up at whatever offset the
 /// future log already holds.
 pub(crate) fn resume_move(
     partitions: &Arc<PartitionRegistry>,
@@ -198,7 +267,7 @@ pub(crate) fn resume_move(
         .get(topic, partition)
         .ok_or(MoveError::ReplicaNotAvailable)?;
     let future_path = log_dir::future_partition_dir(target_log_dir, topic, partition.get());
-    let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
+    let future_log = open_future_log(partitions, &future_path, log_config)?;
     spawn_move(MoveTask {
         partitions: partitions.clone(),
         future_logs: future_logs.clone(),
@@ -211,6 +280,18 @@ pub(crate) fn resume_move(
         policy,
     });
     Ok(())
+}
+
+fn open_future_log(
+    partitions: &PartitionRegistry,
+    path: &Path,
+    log_config: &LogConfig,
+) -> Result<Arc<Mutex<Log>>, MoveError> {
+    let mut log = Log::open(path, log_config.clone())?;
+    if let Some(stamp_source) = partitions.stamp_source() {
+        log.set_stamp_source(stamp_source)?;
+    }
+    Ok(Arc::new(Mutex::new(log)))
 }
 
 /// Shared by [`start_move`] and [`resume_move`]. It builds the
@@ -294,9 +375,9 @@ async fn replicator_loop(task: ReplicatorTask) {
         if cancel.is_cancelled() {
             break;
         }
-        // Read whatever is missing from the future log up to the
-        // source's current LEO.
-        let advance = match catch_up(&part, &future_log, policy.read_chunk) {
+        // Read whatever is missing from the future log up to the source's
+        // current LEO, bounded by the broker-wide log-directory copy budget.
+        let advance = match catch_up(&part, &future_log, policy.read_chunk, &policy.throttle) {
             Ok(v) => v,
             Err(e) => {
                 warn!(
@@ -310,6 +391,13 @@ async fn replicator_loop(task: ReplicatorTask) {
                 }
             }
         };
+
+        if advance.throttled {
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(policy.retry_backoff.to_std()) => continue,
+            }
+        }
 
         if !advance.caught_up {
             // Make forward progress, then immediately re-check. We
@@ -376,54 +464,94 @@ async fn replicator_loop(task: ReplicatorTask) {
 /// nothing AND `future.LEO >= source.LEO`.
 struct CatchUpProgress {
     caught_up: bool,
+    throttled: bool,
 }
 
 fn catch_up(
     part: &Arc<Partition>,
     future_log: &Arc<Mutex<Log>>,
     read_chunk: ByteSize,
+    throttle: &crate::throttle::TokenBucket,
 ) -> Result<CatchUpProgress, BrokerError> {
-    // Snapshot offsets cheaply; the partition log mutex is dropped
-    // immediately after each helper.
-    let current_leo = part.log_end_offset();
+    // Snapshot both source bounds under one lock so a retention update cannot
+    // produce an internally inconsistent start/end pair.
+    let (current_start, current_leo) = {
+        let current = part
+            .log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (current.log_start_offset(), current.log_end_offset())
+    };
     // Recover the guard if a panic elsewhere poisoned the mutex rather
     // than killing this (discarded-JoinHandle) replicator task.
     let future_leo = future_log
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .log_end_offset();
-    if future_leo >= current_leo {
-        return Ok(CatchUpProgress { caught_up: true });
+    if future_leo >= current_leo && future_leo >= current_start {
+        return Ok(CatchUpProgress {
+            caught_up: true,
+            throttled: false,
+        });
     }
 
-    // Pull the next chunk of batches from the source.
+    let granted = throttle.try_consume(read_chunk.bytes_u64());
+    if granted == 0 {
+        return Ok(CatchUpProgress {
+            caught_up: false,
+            throttled: true,
+        });
+    }
+
+    // Retention may advance the source start beyond the future log. Read from
+    // the new logical start; the returned first batch can begin below it when
+    // the start falls inside a batch, so reset to that physical base and restore
+    // the logical start after appending.
+    let reset_for_retention = future_leo < current_start;
+    let fetch_offset = if reset_for_retention {
+        current_start
+    } else {
+        future_leo
+    };
     let read = {
         let log = part
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        log.read(future_leo, read_chunk)?
+        log.read(fetch_offset, ByteSize::from_bytes(granted))?
     };
     if read.batches.is_empty() {
-        // Source advanced its log_start past `future_leo` (retention
-        // or trim). Treat as caught up for this iteration; on the
-        // next pass `future_leo` will equal `current_leo` and we'll
-        // swap. Realistically the future log would need to be reset
-        // — KIP-113 doesn't specify this corner; we treat it as a
-        // soft no-op.
-        return Ok(CatchUpProgress { caught_up: true });
+        if reset_for_retention {
+            future_log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .reset_to(current_start)?;
+        }
+        return Ok(CatchUpProgress {
+            caught_up: true,
+            throttled: false,
+        });
     }
 
     let mut future = future_log
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if reset_for_retention {
+        future.reset_to(read.start_offset)?;
+    }
     for mut batch in read.batches {
         let base = batch.base_offset;
         future
             .append_at(&mut batch, Offset(base))
             .map_err(BrokerError::from)?;
     }
-    Ok(CatchUpProgress { caught_up: false })
+    if reset_for_retention {
+        future.set_log_start_offset(current_start)?;
+    }
+    Ok(CatchUpProgress {
+        caught_up: false,
+        throttled: false,
+    })
 }
 
 /// Canonicalize a path for equality comparisons. It falls back to the
@@ -436,7 +564,10 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
+    };
 
     use assert2::assert;
     use crabka_units::{kibibytes, mebibytes, millis};
@@ -444,10 +575,20 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug)]
+    struct TestStampSource(AtomicU64);
+
+    impl crabka_log::StampSource for TestStampSource {
+        fn next_stamp(&self) -> u64 {
+            self.0.fetch_add(1, Ordering::Relaxed)
+        }
+    }
+
     fn test_policy() -> MovePolicy {
         MovePolicy {
             retry_backoff: millis(5),
             read_chunk: mebibytes(1),
+            throttle: Arc::new(crate::throttle::TokenBucket::new()),
         }
     }
 
@@ -456,14 +597,134 @@ mod tests {
         let policy = MovePolicy {
             retry_backoff: millis(7),
             read_chunk: kibibytes(4),
+            throttle: Arc::new(crate::throttle::TokenBucket::new()),
         };
 
         assert!(policy.retry_backoff == millis(7));
         assert!(policy.read_chunk == kibibytes(4));
+        assert!(policy.throttle.byte_rate() == crabka_units::bytes_per_sec(0));
     }
 
-    #[test]
-    fn move_error_log_dir_not_found_when_target_unknown() {
+    #[tokio::test]
+    async fn shutdown_moves_cancels_and_awaits_every_task() {
+        struct DropCounter(Arc<AtomicU64>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let future_log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open future log"),
+        ));
+        let future_logs = DashMap::new();
+        let started = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut cancels = Vec::new();
+
+        for partition in [PartitionIndex(0), PartitionIndex(1)] {
+            let cancel = CancellationToken::new();
+            let task_started = Arc::clone(&started);
+            let task_dropped = Arc::clone(&dropped);
+            let task = tokio::spawn(async move {
+                let _drop_counter = DropCounter(task_dropped);
+                task_started.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            });
+            future_logs.insert(
+                ("t".to_string(), partition),
+                Arc::new(FutureLogState {
+                    target_log_dir: dir.path().to_path_buf(),
+                    future_path: dir.path().to_path_buf(),
+                    future_log: Arc::clone(&future_log),
+                    cancel: cancel.clone(),
+                    task: Mutex::new(Some(task)),
+                }),
+            );
+            cancels.push(cancel);
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("move tasks start");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            shutdown_moves(&future_logs),
+        )
+        .await
+        .expect("move task shutdown completes");
+
+        assert!(future_logs.is_empty());
+        assert!(cancels.iter().all(CancellationToken::is_cancelled));
+        assert!(dropped.load(Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
+    async fn abort_moves_cancels_and_aborts_every_task() {
+        struct DropCounter(Arc<AtomicU64>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let future_log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open future log"),
+        ));
+        let future_logs = DashMap::new();
+        let started = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let cancel = CancellationToken::new();
+        let task_started = Arc::clone(&started);
+        let task_dropped = Arc::clone(&dropped);
+        let task = tokio::spawn(async move {
+            let _drop_counter = DropCounter(task_dropped);
+            task_started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        });
+        future_logs.insert(
+            ("t".to_string(), PartitionIndex(0)),
+            Arc::new(FutureLogState {
+                target_log_dir: dir.path().to_path_buf(),
+                future_path: dir.path().to_path_buf(),
+                future_log,
+                cancel: cancel.clone(),
+                task: Mutex::new(Some(task)),
+            }),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("move task starts");
+
+        abort_moves(&future_logs);
+
+        assert!(future_logs.is_empty());
+        assert!(cancel.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dropped.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted move task drops");
+    }
+
+    #[tokio::test]
+    async fn move_error_log_dir_not_found_when_target_unknown() {
         // Empty broker — no partitions, no log dirs. `start_move`
         // returns LogDirNotFound before it ever looks at the
         // partition map.
@@ -480,12 +741,13 @@ mod tests {
             bogus.path(),
             test_policy(),
         )
+        .await
         .expect_err("expected LogDirNotFound");
         assert!(matches!(err, MoveError::LogDirNotFound));
     }
 
-    #[test]
-    fn move_error_replica_not_available_when_partition_missing() {
+    #[tokio::test]
+    async fn move_error_replica_not_available_when_partition_missing() {
         let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
         let dir = tempdir().unwrap();
@@ -498,6 +760,7 @@ mod tests {
             dir.path(),
             test_policy(),
         )
+        .await
         .expect_err("expected ReplicaNotAvailable");
         assert!(matches!(err, MoveError::ReplicaNotAvailable));
     }
@@ -583,6 +846,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catch_up_resets_after_source_retention_without_dropping_batch_data() {
+        let primary = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
+        append_records(&part, 3);
+        part.log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_log_start_offset(Offset(2))
+            .expect("advance source start");
+        let future_path = log_dir::future_partition_dir(target.path(), "t", 0);
+        std::fs::create_dir_all(&future_path).unwrap();
+        let future = Arc::new(Mutex::new(
+            Log::open(&future_path, LogConfig::default()).unwrap(),
+        ));
+
+        let progress = catch_up(
+            &part,
+            &future,
+            mebibytes(1),
+            &crate::throttle::TokenBucket::new(),
+        )
+        .expect("catch up");
+        assert!(!progress.caught_up);
+        let future = future
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(future.log_start_offset() == Offset(2));
+        assert!(future.log_end_offset() == Offset(3));
+        let read = future.read(Offset(2), mebibytes(1)).expect("read future");
+        assert!(read.batches.len() == 1);
+        assert!(read.batches[0].base_offset == 0);
+    }
+
+    #[tokio::test]
+    async fn catch_up_resets_to_empty_source_frontier() {
+        let primary = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
+        part.log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reset_to(Offset(5))
+            .expect("reset source");
+        let future_path = log_dir::future_partition_dir(target.path(), "t", 0);
+        std::fs::create_dir_all(&future_path).unwrap();
+        let future = Arc::new(Mutex::new(
+            Log::open(&future_path, LogConfig::default()).unwrap(),
+        ));
+
+        let progress = catch_up(
+            &part,
+            &future,
+            mebibytes(1),
+            &crate::throttle::TokenBucket::new(),
+        )
+        .expect("catch up");
+        assert!(progress.caught_up);
+        let future = future
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(future.log_start_offset() == Offset(5));
+        assert!(future.log_end_offset() == Offset(5));
+    }
+
+    #[tokio::test]
+    async fn catch_up_waits_when_move_throttle_is_exhausted() {
+        let primary = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
+        append_records(&part, 1);
+        let future_path = log_dir::future_partition_dir(target.path(), "t", 0);
+        std::fs::create_dir_all(&future_path).unwrap();
+        let future = Arc::new(Mutex::new(
+            Log::open(&future_path, LogConfig::default()).unwrap(),
+        ));
+        let throttle = crate::throttle::TokenBucket::new();
+        throttle
+            .set_byte_rate_with_burst(crabka_units::bytes_per_sec(1024), crabka_units::bytes(0));
+
+        let progress = catch_up(&part, &future, mebibytes(1), &throttle).expect("catch up");
+
+        assert!(progress.throttled);
+        assert!(!progress.caught_up);
+        assert!(
+            future
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .log_end_offset()
+                == Offset(0)
+        );
+    }
+
+    #[tokio::test]
     async fn start_move_to_current_dir_is_noop() {
         // Asking to move a partition to the directory it already
         // lives in returns success without touching `future_logs`.
@@ -603,6 +960,7 @@ mod tests {
             primary.path(),
             test_policy(),
         )
+        .await
         .expect("noop should succeed");
         assert!(
             future_logs.is_empty(),
@@ -635,9 +993,18 @@ mod tests {
     async fn resume_move_catches_up_and_swaps_future_log() {
         let primary = tempdir().unwrap();
         let target = tempdir().unwrap();
-        let partitions = Arc::new(PartitionRegistry::new());
+        let stamp_source: Arc<dyn crabka_log::StampSource> =
+            Arc::new(TestStampSource(AtomicU64::new(100)));
+        let partitions = Arc::new(PartitionRegistry::with_stamp_source(Some(Arc::clone(
+            &stamp_source,
+        ))));
         let future_logs = Arc::new(DashMap::new());
         let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
+        part.log
+            .lock()
+            .expect("source log")
+            .set_stamp_source(stamp_source)
+            .expect("source stamp index");
         append_records(&part, 3);
         partitions.insert("t".to_string(), PartitionIndex(0), part.clone());
 
@@ -672,6 +1039,9 @@ mod tests {
         assert!(
             canonicalize_or_self(&part.log_dir.load_full()) == canonicalize_or_self(target.path())
         );
+        assert!(part.stamp_for_offset(Offset(0)) == Some(101));
+        append_records(&part, 1);
+        assert!(part.stamp_for_offset(Offset(3)) == Some(102));
     }
 
     #[tokio::test]
@@ -757,14 +1127,15 @@ mod tests {
             extra.path(),
             test_policy(),
         )
+        .await
         .expect("same-target alter must be idempotent");
         assert!(future_logs.len() == 1);
     }
 
     #[tokio::test]
-    async fn start_move_rejects_conflicting_target() {
-        // ARLD for `(t, 0)` to dir A, then again to dir B while the
-        // first move is still registered → AlreadyMoving.
+    async fn start_move_redirects_conflicting_target() {
+        // Kafka stops and removes the old future replica before it starts a
+        // replacement toward the new destination.
         let primary = tempdir().unwrap();
         let extra = tempdir().unwrap();
         let third = tempdir().unwrap();
@@ -776,7 +1147,8 @@ mod tests {
         let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
         let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
-        partitions.insert("t".to_string(), PartitionIndex(0), part);
+        append_records(&part, 3);
+        partitions.insert("t".to_string(), PartitionIndex(0), part.clone());
 
         // Plant a registry entry pointing at `extra`.
         let future_path = log_dir::future_partition_dir(extra.path(), "t", 0);
@@ -784,18 +1156,19 @@ mod tests {
         let future_log = Arc::new(Mutex::new(
             Log::open(&future_path, LogConfig::default()).unwrap(),
         ));
+        let old_cancel = CancellationToken::new();
         future_logs.insert(
             ("t".to_string(), PartitionIndex(0)),
             Arc::new(FutureLogState {
                 target_log_dir: extra.path().to_path_buf(),
-                future_path,
+                future_path: future_path.clone(),
                 future_log,
-                cancel: CancellationToken::new(),
+                cancel: old_cancel.clone(),
                 task: std::sync::Mutex::new(None),
             }),
         );
 
-        let err = start_move(
+        start_move(
             &partitions,
             &future_logs,
             &log_dirs,
@@ -804,7 +1177,24 @@ mod tests {
             third.path(),
             test_policy(),
         )
-        .expect_err("conflicting-target alter must reject");
-        assert!(matches!(err, MoveError::AlreadyMoving));
+        .await
+        .expect("conflicting-target alter must redirect");
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let moved = canonicalize_or_self(&part.log_dir.load_full())
+                    == canonicalize_or_self(third.path());
+                if moved && future_logs.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("replacement move should complete");
+
+        assert!(old_cancel.is_cancelled());
+        assert!(!future_path.exists());
+        assert!(part.log_end_offset() == 3);
     }
 }

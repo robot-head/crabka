@@ -1022,9 +1022,9 @@ fn start_oauthbearer_broker(
         name: "SASL_PLAINTEXT".to_string(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
-        // Inter-broker traffic can't speak OAUTHBEARER, so keep the
-        // controller/inter-broker path plaintext and only gate the client
-        // listener on SASL.
+        // This helper exercises only the client-listener validator. Dedicated
+        // multi-broker tests cover outbound OAUTHBEARER on the controller and
+        // inter-broker paths.
         protocol: ListenerProtocol::SaslPlaintext,
         tls_config: None,
         sasl_mechanisms: None,

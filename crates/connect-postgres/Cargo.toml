@@ -19,8 +19,8 @@ workspace = true
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-connect = { path = "../connect", version = "0.3.9" }
-crabka-schema-serde = { path = "../schema-serde", version = "0.3.9", features = ["protobuf"] }
+crabka-connect = { path = "../connect", version = "0.4.0" }
+crabka-schema-serde = { path = "../schema-serde", version = "0.4.0", features = ["protobuf"] }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 derive_more = { workspace = true }
@@ -39,3 +39,4 @@ tracing = { workspace = true }
 mockall = { workspace = true }
 mutants = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"

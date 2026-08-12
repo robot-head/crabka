@@ -1,7 +1,7 @@
-//! `FindCoordinator` (`api_key=10`). The handler supports:
-//!   - `key_type=0`, GROUP: it returns this broker as the coordinator for every
-//!     group key. This is the single-broker MVP.
-//!   - `key_type=1`, TRANSACTION: it makes sure `__transaction_state` exists,
+//! `FindCoordinator` (`api_key=10`). Supports:
+//!   - `key_type=0` (GROUP): hashes the group id to its
+//!     `__consumer_offsets` partition and returns that partition's leader.
+//!   - `key_type=1` (TRANSACTION): ensures `__transaction_state` exists,
 //!     hashes the transaction-id to a partition, resolves the leader, and
 //!     returns that broker's address.
 //!
@@ -136,7 +136,24 @@ pub(crate) async fn handle(
             authorize_keys(broker, &controller.current_image(), ctx, req.key_type, keys);
 
         let mut coordinators: Vec<Coordinator> = match req.key_type {
-            KEY_TYPE_GROUP => local_coordinators(keys, broker_id, &advertised),
+            KEY_TYPE_GROUP => {
+                let image = controller.current_image();
+                keys.into_iter()
+                    .map(|key| {
+                        let partition =
+                            crate::coordinator::partitioner::partition_for_group(&image, &key);
+                        resolve_partition_coordinator(
+                            broker,
+                            &image,
+                            crate::coordinator::bootstrap::OFFSETS_TOPIC,
+                            partition,
+                            key,
+                            &advertised,
+                            ctx,
+                        )
+                    })
+                    .collect()
+            }
             KEY_TYPE_TRANSACTION => {
                 // Ensure __transaction_state topic exists before we try to
                 // look up partitions in it.

@@ -275,7 +275,7 @@ struct Args {
         default_value = "PLAINTEXT"
     )]
     kafka_security_protocol: String,
-    /// SASL mechanism: `PLAIN` | `SCRAM-SHA-256` | `SCRAM-SHA-512`.
+    /// SASL mechanism: `PLAIN` | `SCRAM-SHA-256` | `SCRAM-SHA-512` | `GSSAPI`.
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_KAFKA_SASL_MECHANISM",
@@ -288,6 +288,27 @@ struct Args {
     /// SASL password (PLAIN / SCRAM).
     #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD")]
     kafka_sasl_password: Option<String>,
+    /// GSSAPI keytab containing the client principal's long-term key.
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_KEYTAB_PATH")]
+    kafka_sasl_keytab_path: Option<PathBuf>,
+    /// GSSAPI Kerberos client principal, for example
+    /// `schema-registry@EXAMPLE.COM`.
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_CLIENT_PRINCIPAL")]
+    kafka_sasl_client_principal: Option<String>,
+    /// GSSAPI target broker service name.
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_KAFKA_SASL_SERVICE_NAME",
+        default_value = "kafka"
+    )]
+    kafka_sasl_service_name: String,
+    /// Host component of the broker SASL service principal, for example
+    /// `broker.internal` for `kafka/broker.internal@REALM`.
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_HOST")]
+    kafka_sasl_host: Option<String>,
+    /// GSSAPI KDC endpoint, for example `tcp://kdc:88`.
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_KDC_URL")]
+    kafka_sasl_kdc_url: Option<String>,
     /// CA(s) (PEM) the client trusts for the broker's server cert (SSL /
     /// `SASL_SSL`).
     #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_TLS_CA")]
@@ -366,6 +387,7 @@ async fn main() -> anyhow::Result<()> {
 
     let store = KafkaStore::start(&cfg, shutdown.clone()).await?;
     let primary = crabka_schema_registry::election::Election::start(&cfg, shutdown.clone()).await?;
+    store.install_primary(primary.clone());
 
     // ── Authentication state ────────────────────────────────────────────────
     let basic = match &cfg.security.basic {
@@ -521,6 +543,11 @@ impl Args {
             kafka_sasl_mechanism: self.kafka_sasl_mechanism.clone(),
             kafka_sasl_username: self.kafka_sasl_username.clone(),
             kafka_sasl_password: self.kafka_sasl_password.clone(),
+            kafka_sasl_keytab_path: self.kafka_sasl_keytab_path.clone(),
+            kafka_sasl_client_principal: self.kafka_sasl_client_principal.clone(),
+            kafka_sasl_service_name: Some(self.kafka_sasl_service_name.clone()),
+            kafka_sasl_host: self.kafka_sasl_host.clone(),
+            kafka_sasl_kdc_url: self.kafka_sasl_kdc_url.clone(),
             kafka_tls_ca: self.kafka_tls_ca.clone(),
             kafka_tls_server_name: self.kafka_tls_server_name.clone(),
         }
@@ -618,16 +645,55 @@ fn build_jwks_client(ca_path: Option<&std::path::PathBuf>) -> anyhow::Result<req
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
+    use std::{
+        path::Path,
+        sync::{Mutex, OnceLock},
+    };
 
     use assert2::assert;
     use clap::Parser;
-    use crabka_schema_registry::config::RegistryRuntimeConfig;
+    use crabka_client_core::SaslCredentials;
+    use crabka_schema_registry::{cli::build_security, config::RegistryRuntimeConfig};
     use crabka_units::{bytes, prelude::*};
 
     use super::Args;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn gssapi_cli_parses_and_builds_broker_credentials() {
+        let args = Args::try_parse_from([
+            "crabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--kafka-security-protocol=SASL_PLAINTEXT",
+            "--kafka-sasl-mechanism=GSSAPI",
+            "--kafka-sasl-keytab-path=/etc/schema-registry/client.keytab",
+            "--kafka-sasl-client-principal=schema-registry@EXAMPLE.COM",
+            "--kafka-sasl-service-name=custom-kafka",
+            "--kafka-sasl-host=broker.internal",
+            "--kafka-sasl-kdc-url=tcp://kdc.example.com:88",
+        ])
+        .expect("parse GSSAPI flags");
+
+        let client = build_security(&args.security_input())
+            .expect("build GSSAPI security")
+            .config
+            .client
+            .expect("broker security");
+        assert!(matches!(
+            client.sasl,
+            Some(SaslCredentials::Gssapi {
+                keytab_path,
+                client_principal,
+                service_name,
+                kdc_url,
+            }) if keytab_path == Path::new("/etc/schema-registry/client.keytab")
+                && client_principal == "schema-registry@EXAMPLE.COM"
+                && service_name == "custom-kafka"
+                && kdc_url == "tcp://kdc.example.com:88"
+        ));
+        assert!(client.sasl_host.as_deref() == Some("broker.internal"));
+    }
 
     #[test]
     fn client_resource_policy_parses_defaults_and_overrides() {

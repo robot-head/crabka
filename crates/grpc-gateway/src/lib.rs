@@ -21,12 +21,14 @@
 //! ```
 
 pub mod authz;
+pub(crate) mod ce_translate;
 pub mod codec;
 pub mod config;
 pub mod config_value;
 pub mod consume;
 pub mod dedup;
 pub mod error;
+pub(crate) mod filter;
 pub mod forward;
 pub mod handlers;
 pub mod health;

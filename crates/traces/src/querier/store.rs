@@ -2633,11 +2633,8 @@ mod tests {
         EventRef, LinkRef, ScanJob, ScanOptions, TraceqlEngine,
     };
     use crabka_units::{convert::ByteSizeExt as _, nanos};
-    use object_store::{memory::InMemory, path::Path};
-    use parquet::{
-        arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
-        file::properties::WriterProperties,
-    };
+    use object_store::{buffered::BufWriter, memory::InMemory, path::Path};
+    use parquet::{arrow::AsyncArrowWriter, file::properties::WriterProperties};
     use url::Url;
 
     use super::*;
@@ -3630,7 +3627,7 @@ mod tests {
             .set_max_row_group_row_count(Some(1))
             .set_write_batch_size(1)
             .build();
-        let object_writer = ParquetObjectWriter::new(
+        let object_writer = BufWriter::new(
             object_store.clone(),
             Path::from("blocks/row-groups.parquet"),
         );
@@ -3715,7 +3712,7 @@ mod tests {
             vec!["GET".into()],
         )])
         .unwrap();
-        let object_writer = ParquetObjectWriter::new(
+        let object_writer = BufWriter::new(
             object_store.clone(),
             Path::from("blocks/tenant-a-row-groups.parquet"),
         );

@@ -39,8 +39,17 @@ pub(crate) trait ProduceTransport: Send + Sync {
         req: ProduceRequest,
     ) -> Result<ProduceResponse, ClientError>;
 
-    /// Drop any pooled connection to `broker_id`, so the next send reconnects.
-    /// This is a no-op for the bootstrap connection.
+    /// Enqueue Produce `acks=0`, for which the broker sends no response.
+    async fn send_produce_no_response(
+        &self,
+        leader: Option<i32>,
+        req: ProduceRequest,
+    ) -> Result<(), ClientError> {
+        self.send_produce(leader, req).await.map(drop)
+    }
+
+    /// Drop any pooled connection to `broker_id` so the next send reconnects.
+    /// No-op for the bootstrap connection.
     fn evict_broker(&self, broker_id: i32);
 
     /// Whether the transport has a dialable address for `broker_id`.
@@ -73,6 +82,17 @@ impl ProduceTransport for ClientTransport {
         match leader {
             Some(id) => self.client.broker(id).send(req).await,
             None => self.client.send(req).await,
+        }
+    }
+
+    async fn send_produce_no_response(
+        &self,
+        leader: Option<i32>,
+        req: ProduceRequest,
+    ) -> Result<(), ClientError> {
+        match leader {
+            Some(id) => self.client.broker(id).send_no_response(req).await,
+            None => self.client.send_no_response(req).await,
         }
     }
 

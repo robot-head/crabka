@@ -28,6 +28,7 @@ impl ResponseHeader {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::response_header::ResponseHeader {
         crate::owned::response_header::ResponseHeader {
             correlation_id: (self.correlation_id),
@@ -42,7 +43,7 @@ impl Encode for ResponseHeader {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.correlation_id)
+            put_i32(buf, self.correlation_id);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

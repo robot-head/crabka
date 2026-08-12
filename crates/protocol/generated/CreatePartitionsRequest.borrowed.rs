@@ -55,7 +55,7 @@ impl Encode for CreatePartitionsRequest<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.timeout_ms);
@@ -187,7 +187,7 @@ impl Encode for CreatePartitionsTopic<'_> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -305,7 +305,7 @@ impl Encode for CreatePartitionsAssignment {
                 for it in &self.broker_ids {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

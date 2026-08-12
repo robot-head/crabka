@@ -49,9 +49,8 @@ spec:
                 type: integer
               replicas:
                 default: 1
-                description: 'Number of pods. Validation: it must equal 1.'
+                description: Number of pods. Each ordinal gets one consecutive node id.
                 format: int32
-                maximum: 1.0
                 minimum: 1.0
                 type: integer
               resources:
@@ -93,13 +92,15 @@ spec:
                 type: object
               roles:
                 description: |-
-                  Roles that each node in this pool has. Only the union
-                  `{Controller, Broker}` is supported.
+                  Roles that each node in this pool has. The list must contain
+                  `Controller`, `Broker`, or both, without duplicates.
                 items:
                   enum:
                   - Controller
                   - Broker
                   type: string
+                maxItems: 2
+                minItems: 1
                 type: array
               storage:
                 description: |-

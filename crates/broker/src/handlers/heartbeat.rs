@@ -22,6 +22,8 @@ use crate::{
     fields(api = "Heartbeat", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: the generated protocol default for throttle_time_ms is zero.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -47,6 +49,17 @@ pub(crate) async fn handle(
             ) {
                 return encode_denied(version);
             }
+        }
+
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(
+                &HeartbeatResponse {
+                    error_code,
+                    throttle_time_ms: 0,
+                    ..Default::default()
+                },
+                version,
+            );
         }
 
         let error_code = match coordinator.find(&req.group_id) {

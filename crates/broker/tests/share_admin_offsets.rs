@@ -764,10 +764,8 @@ async fn describe_unknown_topic() {
     );
 }
 
-/// With `share_group.enable = false` the admin offset RPCs are not implemented.
-///
-/// `DescribeShareGroupOffsets` marks each requested group
-/// `UNSUPPORTED_VERSION`.
+/// With `share_group.enable = false`, the admin offset RPCs are unavailable:
+/// `DescribeShareGroupOffsets` marks each requested group `UNSUPPORTED_VERSION`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_offsets_rejected_when_share_disabled() {
     let _permit = broker_test_permit().await;

@@ -7,8 +7,6 @@
 //! return the encoded bytes. The bytes are ready to send after
 //! `network::dispatch` prepends the response header.
 
-#![allow(dead_code)] // handler modules are registered as each API is enabled.
-
 /// Raw wire `api_key` (i16) that selects the RPC.
 ///
 /// This is the numeric form of a [`crabka_protocol::api_key::ApiKey`] variant.
@@ -34,9 +32,7 @@ pub(crate) mod context;
 pub(crate) use context::{RequestContext, TelemetryContext};
 
 pub(crate) mod registry;
-pub(crate) use registry::DispatchRegistry;
-#[allow(unused_imports)] // Staged for later dispatch-registry handler families.
-pub(crate) use registry::{DispatchEntry, DispatchKind, PlainHandler, RequestQuotaPolicy};
+pub(crate) use registry::{DispatchEntry, DispatchKind, DispatchRegistry, RequestQuotaPolicy};
 
 pub(crate) fn encode_response<R: Encode>(
     resp: &R,
@@ -94,6 +90,25 @@ pub(crate) fn group_read_denied(
     )
 }
 
+/// Return the Kafka routing error for a group RPC sent to the wrong broker,
+/// or `None` when this broker leads the group's offsets partition.
+pub(crate) fn group_coordinator_error(
+    broker: &crate::broker::Broker,
+    group_id: &str,
+) -> Option<i16> {
+    use crate::coordinator::partitioner::{GroupRoutingError, local_partition_for_group};
+
+    match local_partition_for_group(
+        &broker.controller.current_image(),
+        broker.config.node_id,
+        group_id,
+    ) {
+        Ok(_) => None,
+        Err(GroupRoutingError::Unavailable) => Some(crate::codes::COORDINATOR_NOT_AVAILABLE),
+        Err(GroupRoutingError::NotCoordinator) => Some(crate::codes::NOT_COORDINATOR),
+    }
+}
+
 pub(crate) fn cluster_alter_denied(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &crabka_metadata::MetadataImage,
@@ -126,6 +141,7 @@ pub(crate) fn parse_advertised_host_port(addr: &str) -> (String, u16) {
 pub(crate) mod acl_wire;
 // KIP-853 dynamic-quorum reconfiguration (api_keys 80/81/82).
 pub(crate) mod add_raft_voter;
+pub(crate) mod allocate_producer_ids;
 pub(crate) mod alter_client_quotas;
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;
@@ -138,8 +154,10 @@ pub(crate) mod assign_replicas_to_dirs;
 // describe_cluster, describe_groups when the request opts in.
 pub(crate) mod authorized_operations;
 pub(crate) mod broker_heartbeat;
+pub(crate) mod broker_registration;
 pub(crate) mod consumer_group_describe;
 pub(crate) mod consumer_group_heartbeat;
+pub(crate) mod controller_registration;
 pub(crate) mod create_acls;
 pub(crate) mod create_delegation_token;
 pub(crate) mod create_partitions;
@@ -172,10 +190,8 @@ pub(crate) mod fetch_downconvert;
 pub(crate) mod fetch_snapshot;
 pub(crate) mod find_coordinator;
 pub(crate) mod get_replica_log_info;
-// KIP-714 client telemetry. Pair of no-op handlers — `get` advertises
-// "no metrics subscribed" so well-behaved clients skip `push` entirely;
-// `push` is wired defensively in case a client races the subscription
-// re-fetch.
+// KIP-714 client telemetry. `get` assigns configured subscriptions and `push`
+// validates, decodes, and exports OTLP metrics to the configured sinks.
 pub(crate) mod get_telemetry_subscriptions;
 pub(crate) mod heartbeat;
 pub(crate) mod incremental_alter_configs;
@@ -295,6 +311,7 @@ mod tests {
             principal: &principal,
             peer: &peer,
             client_id: "admin-client",
+            connection_id: "connection-a",
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };
@@ -382,6 +399,7 @@ mod tests {
             principal: &principal,
             peer: &peer,
             client_id: "client-a",
+            connection_id: "connection-a",
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };

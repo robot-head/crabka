@@ -53,6 +53,31 @@ fn commit_offsets(
         .collect()
 }
 
+fn validate_selected_offsets(
+    offsets: &HashMap<(String, i32), i64>,
+    assigned: &[(String, i32)],
+    consumed_positions: &HashMap<(String, i32), i64>,
+) -> Result<(), ConsumerError> {
+    for ((topic, partition), offset) in offsets {
+        if *offset < 0 {
+            return Err(ConsumerError::InvalidOffset(*offset));
+        }
+        let key = (topic.clone(), *partition);
+        if !assigned.contains(&key) {
+            return Err(ConsumerError::IllegalState(format!(
+                "cannot commit unassigned partition {topic}-{partition}"
+            )));
+        }
+        let consumed = consumed_positions.get(&key).copied().unwrap_or(0);
+        if *offset > consumed {
+            return Err(ConsumerError::IllegalState(format!(
+                "cannot commit offset {offset} past consumed position {consumed} for {topic}-{partition}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn snapshot_commit_topics(
     offsets: &Arc<Mutex<HashMap<(String, i32), i64>>>,
     positions: &Arc<Mutex<HashMap<(String, i32), PartitionPosition>>>,
@@ -140,6 +165,40 @@ impl Consumer {
         };
         tracing::Span::current().record("partitions", partitions);
 
+        self.commit_topics_sync(topics).await
+    }
+
+    /// Commit caller-selected next offsets for currently assigned partitions.
+    /// Unlike [`Consumer::commit_sync`], this does not commit unrelated
+    /// partitions and does not change the consumer's fetch positions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an offset is negative, targets an unassigned
+    /// partition, is ahead of the current consumed position, or the coordinator
+    /// rejects the commit.
+    pub async fn commit_offsets_sync(
+        &self,
+        offsets: HashMap<(String, i32), i64>,
+    ) -> Result<(), ConsumerError> {
+        if offsets.is_empty() {
+            return Ok(());
+        }
+        let assigned = self.assigned.lock().await.clone();
+        let consumed_positions = self.next_offsets.lock().await.clone();
+        validate_selected_offsets(&offsets, &assigned, &consumed_positions)?;
+
+        let position_epochs = self.positions.lock().await.clone();
+        let offsets = commit_offsets(offsets, &position_epochs);
+        let topic_ids = self.topic_ids.lock().await.clone();
+        let topics = build_commit_topics(offsets, &topic_ids);
+        self.commit_topics_sync(topics).await
+    }
+
+    async fn commit_topics_sync(
+        &self,
+        topics: Vec<OffsetCommitRequestTopic>,
+    ) -> Result<(), ConsumerError> {
         // OffsetCommit is a coordinator RPC: route it to the coordinator broker
         // (discovered at build time, kept current by the coordinator task), and
         // re-discover on a cold/relocating-coordinator code so a coordinator
@@ -315,6 +374,32 @@ mod tests {
         ] {
             assert2::assert!(first_commit_error(&response(errors)) == want);
         }
+    }
+
+    #[test]
+    fn selected_offset_validation_rejects_invalid_targets_and_future_offsets() {
+        let assigned = vec![("topic".to_string(), 2)];
+        let positions = HashMap::from([(("topic".to_string(), 2), 11)]);
+
+        for (offsets, expected) in [
+            (HashMap::from([(("topic".to_string(), 2), -1)]), "negative"),
+            (HashMap::from([(("other".to_string(), 2), 1)]), "unassigned"),
+            (HashMap::from([(("topic".to_string(), 2), 12)]), "future"),
+        ] {
+            check!(
+                validate_selected_offsets(&offsets, &assigned, &positions).is_err(),
+                "{expected} selected offset must fail"
+            );
+        }
+
+        check!(
+            validate_selected_offsets(
+                &HashMap::from([(("topic".to_string(), 2), 11)]),
+                &assigned,
+                &positions,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

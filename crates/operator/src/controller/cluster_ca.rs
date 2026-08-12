@@ -55,6 +55,13 @@ pub(crate) const ANN_CERT_GENERATION: &str = "crabka.io/ca-cert-generation";
 /// the *active signing key*. It increments only when the operator replaces
 /// the key.
 pub(crate) const ANN_KEY_GENERATION: &str = "crabka.io/ca-key-generation";
+/// Annotation on the clients-CA cert Secret that records the signing-key
+/// generation applied to every operator-managed `KafkaUser` TLS Secret.
+///
+/// The clients CA keeps its old trust anchor until this matches
+/// [`ANN_KEY_GENERATION`]. A failed bulk reissue is therefore retryable without
+/// invalidating the users that still carry an old-key certificate.
+pub(crate) const ANN_LEAFS_KEY_GENERATION: &str = "crabka.io/ca-leafs-key-generation";
 /// Annotation on the cert Secret that records the staged key-replacement
 /// phase.
 pub(crate) const ANN_ROTATION_PHASE: &str = "crabka.io/ca-rotation-phase";
@@ -67,6 +74,8 @@ const NEXT_CERT: &str = "ca.crt.next";
 pub const ANN_FORCE_RENEW: &str = "crabka.io/force-renew-ca";
 /// `Kafka` CR annotation: force a staged CA key replacement on the next reconcile.
 pub const ANN_FORCE_REPLACE_KEY: &str = "crabka.io/force-replace-ca-key";
+/// `Kafka` CR annotation: force a staged clients-CA key replacement.
+pub const ANN_FORCE_REPLACE_CLIENTS_KEY: &str = "crabka.io/force-replace-clients-ca-key";
 /// `Kafka` CR annotation that the `CronJob` sets.
 ///
 /// It means that a CA cert is inside `renewalDays`, so the reconciler should
@@ -199,6 +208,9 @@ pub(crate) struct CaState {
     pub pending_cert_pem: Option<String>,
     pub cert_generation: CertGeneration,
     pub key_generation: KeyGeneration,
+    /// Signing-key generation applied to all client-certificate leafs.
+    /// Cluster-CA planning ignores this field.
+    pub leafs_key_generation: Option<KeyGeneration>,
     pub phase: CaPhase,
 }
 
@@ -244,8 +256,6 @@ pub(crate) enum RefuseReason {
     /// `generateCertificateAuthority=false`. The operator never changes a
     /// BYO CA.
     Byo,
-    /// The clients CA does not support key replacement.
-    ClientsCaKeyReplace,
 }
 
 /// What the reconciler should do to a CA in this pass.
@@ -291,7 +301,9 @@ pub(crate) fn plan_ca_rotation(state: &CaState, inp: &RotationInputs) -> CaRotat
             }
         }
         CaPhase::KeyReplacePromote => {
-            if inp.rollout_converged {
+            let leafs_converged = inp.which == WhichCa::Cluster
+                || state.leafs_key_generation == Some(state.key_generation);
+            if inp.rollout_converged && leafs_converged {
                 CaRotationPlan::PruneOldTrust
             } else {
                 CaRotationPlan::NoOp
@@ -299,10 +311,7 @@ pub(crate) fn plan_ca_rotation(state: &CaState, inp: &RotationInputs) -> CaRotat
         }
         CaPhase::Idle => {
             if inp.force.replaces_key() {
-                return match inp.which {
-                    WhichCa::Cluster => CaRotationPlan::StartKeyReplace,
-                    WhichCa::Clients => CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace),
-                };
+                return CaRotationPlan::StartKeyReplace;
             }
             let signing = state.bundle.first().map_or("", String::as_str);
             let renew_due = inp.force.renews_certificate()
@@ -366,6 +375,23 @@ pub(crate) fn cert_not_after(pem: &str) -> Result<OffsetDateTime, ReconcileError
 
 /// Result of one reconcile pass over one CA, either the cluster CA or the
 /// clients CA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaLeafTransition {
+    None,
+    Reissue,
+    OldTrustPruned,
+}
+
+impl CaLeafTransition {
+    pub(crate) fn requires_reissue(self) -> bool {
+        self == Self::Reissue
+    }
+
+    pub(crate) fn pruned_old_trust(self) -> bool {
+        self == Self::OldTrustPruned
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CaReconcileOutcome {
     /// Active signing cert, which is `bundle[0]`, and the active key.
@@ -381,9 +407,10 @@ pub(crate) struct CaReconcileOutcome {
     pub key_generation: KeyGeneration,
     pub phase: CaPhase,
     pub trust_anchors: usize,
-    /// Cluster CA only. The operator must reissue every broker leaf with
-    /// the new key.
-    pub force_reissue_leafs: bool,
+    /// Leaf work caused by this reconcile pass. `Reissue` means every leaf
+    /// owned by this CA must be issued with the new key. `OldTrustPruned`
+    /// means managed trust bundles must be converged before prune completes.
+    pub leaf_transition: CaLeafTransition,
     /// `CaRotation` condition surface.
     pub rotation_in_progress: bool,
     pub rotation_reason: &'static str,
@@ -447,6 +474,8 @@ pub(crate) async fn reconcile_ca(
             pending_cert_pem: read_pem_key(k, NEXT_CERT),
             cert_generation: CertGeneration(read_generation(c, ANN_CERT_GENERATION)),
             key_generation: KeyGeneration(read_generation(k, ANN_KEY_GENERATION)),
+            leafs_key_generation: read_optional_generation(c, ANN_LEAFS_KEY_GENERATION)
+                .map(KeyGeneration),
             phase: read_phase(c),
         };
         let inp = RotationInputs {
@@ -522,7 +551,7 @@ pub(crate) async fn reconcile_ca(
         key_generation: KeyGeneration(0),
         phase: CaPhase::Idle,
         trust_anchors: 1,
-        force_reissue_leafs: false,
+        leaf_transition: CaLeafTransition::None,
         rotation_in_progress: false,
         rotation_reason: "Idle",
         rotation_message: "no rotation in progress".into(),
@@ -598,7 +627,10 @@ async fn apply_ca_rotation(
             raw_override = None;
         }
         CaRotationPlan::StartKeyReplace => {
-            let new = generate_cluster_ca(cn, whole_days(inp.validity))?;
+            let new = match which {
+                WhichCa::Cluster => generate_cluster_ca(cn, whole_days(inp.validity))?,
+                WhichCa::Clients => generate_clients_ca(cn, whole_days(inp.validity))?,
+            };
             // Old signing cert stays first (still signing with the old key); the
             // new cert is appended as trust-only.
             let mut blocks = prune_expired(&state.bundle, now);
@@ -639,21 +671,31 @@ async fn apply_ca_rotation(
                 .filter(|b| **b != new_cert)
                 .cloned()
                 .collect();
-            let mut blocks = vec![new_cert];
+            let mut blocks = vec![new_cert.clone()];
             blocks.extend(remaining);
             bundle = prune_expired(&dedup_blocks(&blocks), now);
+            let key_was_already_promoted = state.key_pem == new_key;
             key_pem = new_key.clone();
             cert_gen += CertGeneration(1);
-            key_gen += KeyGeneration(1);
+            if !key_was_already_promoted {
+                key_gen += KeyGeneration(1);
+            }
             phase = CaPhase::KeyReplacePromote;
-            force_reissue = matches!(which, WhichCa::Cluster);
-            // Promote the key + drop the staged material.
+            force_reissue = true;
+            // Promote the key but retain the staged copy until prune. If the
+            // following cert-Secret patch fails, the next reconcile can replay
+            // promotion instead of getting stuck with no staged material.
             patch_secret(
                 secret_api,
                 kafka,
                 key_name,
                 SECRET_TYPE_CA_KEY,
-                [("ca.key".to_string(), new_key)].into(),
+                [
+                    ("ca.key".to_string(), new_key.clone()),
+                    (NEXT_KEY.to_string(), new_key),
+                    (NEXT_CERT.to_string(), new_cert.clone()),
+                ]
+                .into(),
                 [(ANN_KEY_GENERATION.to_string(), key_gen.to_string())].into(),
             )
             .await?;
@@ -663,6 +705,17 @@ async fn apply_ca_rotation(
         CaRotationPlan::PruneOldTrust => {
             bundle = if state.phase == CaPhase::KeyReplacePromote {
                 // Key replacement complete: keep only the new signing cert.
+                // Removing the retained staged copy before the cert patch is
+                // retry-safe: pruning does not need it.
+                patch_secret(
+                    secret_api,
+                    kafka,
+                    key_name,
+                    SECRET_TYPE_CA_KEY,
+                    [("ca.key".to_string(), key_pem.clone())].into(),
+                    [(ANN_KEY_GENERATION.to_string(), key_gen.to_string())].into(),
+                )
+                .await?;
                 state.bundle.first().cloned().into_iter().collect()
             } else {
                 prune_expired(&state.bundle, now)
@@ -679,6 +732,12 @@ async fn apply_ca_rotation(
         .format(&Rfc3339)
         .map_err(|e| ReconcileError::CertParse(e.to_string()))?;
     let (in_progress, reason, message) = rotation_condition(plan, phase, refused);
+    if which == WhichCa::Clients
+        && phase == CaPhase::KeyReplacePromote
+        && state.leafs_key_generation != Some(key_gen)
+    {
+        force_reissue = true;
+    }
 
     Ok(CaReconcileOutcome {
         signing_material: CaMaterial {
@@ -692,7 +751,13 @@ async fn apply_ca_rotation(
         key_generation: key_gen,
         phase,
         trust_anchors: bundle.len(),
-        force_reissue_leafs: force_reissue,
+        leaf_transition: if force_reissue {
+            CaLeafTransition::Reissue
+        } else if plan == CaRotationPlan::PruneOldTrust {
+            CaLeafTransition::OldTrustPruned
+        } else {
+            CaLeafTransition::None
+        },
         rotation_in_progress: in_progress,
         rotation_reason: reason,
         rotation_message: message,
@@ -748,11 +813,6 @@ fn rotation_condition(
                 "ByoCaImmutable",
                 "forced rotation ignored: BYO CA (generateCertificateAuthority=false)".into(),
             ),
-            RefuseReason::ClientsCaKeyReplace => (
-                false,
-                "ClientsCaKeyReplaceUnsupported",
-                "clients-CA key replacement is not supported in this release".into(),
-            ),
         };
     }
     match plan {
@@ -769,7 +829,7 @@ fn rotation_condition(
         CaRotationPlan::PromoteNewKey => (
             true,
             "PromotingKey",
-            "promoting the new CA key and reissuing broker certs".into(),
+            "promoting the new CA key and reissuing leaf certificates".into(),
         ),
         CaRotationPlan::NoOp => match phase {
             CaPhase::KeyReplaceTrust => (
@@ -780,7 +840,7 @@ fn rotation_condition(
             CaPhase::KeyReplacePromote => (
                 true,
                 "PromotingKey",
-                "waiting for the new-key roll to converge".into(),
+                "waiting for the new-key roll and leaf reissue to converge".into(),
             ),
             CaPhase::Idle => (false, "Idle", "no rotation in progress".into()),
         },
@@ -838,6 +898,40 @@ fn read_generation(secret: &Secret, ann: &str) -> u64 {
         .and_then(|a| a.get(ann))
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+fn read_optional_generation(secret: &Secret, ann: &str) -> Option<u64> {
+    secret
+        .meta()
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(ann))
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+/// Records that every operator-managed client certificate uses `generation`.
+///
+/// This metadata-only merge runs after the complete user-Secret batch. If any
+/// user patch fails, the marker stays behind and the promote phase retries
+/// without pruning the old trust anchor.
+pub(crate) async fn mark_leafs_reissued(
+    secret_api: &Api<Secret>,
+    cluster: &str,
+    generation: KeyGeneration,
+) -> Result<(), ReconcileError> {
+    let name = clients_ca_cert_name(cluster);
+    secret_api
+        .patch(
+            &name,
+            &PatchParams::default(),
+            &Patch::Merge(serde_json::json!({
+                "metadata": {
+                    "annotations": { ANN_LEAFS_KEY_GENERATION: generation.to_string() }
+                }
+            })),
+        )
+        .await?;
+    Ok(())
 }
 
 /// Reads the rotation phase from the cert Secret. The result is `Idle`
@@ -1749,6 +1843,7 @@ mod rotation_tests {
             pending_cert_pem: None,
             cert_generation: CertGeneration(0),
             key_generation: KeyGeneration(0),
+            leafs_key_generation: None,
             phase,
         }
     }
@@ -1887,7 +1982,7 @@ mod rotation_tests {
     }
 
     #[test]
-    fn idle_force_replace_refused_on_clients_ca() {
+    fn idle_force_replace_starts_key_replace_on_clients_ca() {
         let s = state(
             vec![normalize_block(&ca_cert("c1-clients-ca", 365))],
             "k",
@@ -1895,9 +1990,7 @@ mod rotation_tests {
         );
         let mut inp = inputs(true, WhichCa::Clients);
         inp.force = ForceRotation::ReplaceKey;
-        assert!(
-            plan_ca_rotation(&s, &inp) == CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace)
-        );
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::StartKeyReplace);
     }
 
     #[test]
@@ -1937,6 +2030,26 @@ mod rotation_tests {
         let mut inp = inputs(true, WhichCa::Cluster);
         inp.rollout_converged = false;
         assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
+        inp.rollout_converged = true;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PruneOldTrust);
+    }
+
+    #[test]
+    fn clients_promote_keeps_old_trust_until_leafs_and_roll_converge() {
+        let mut s = state(
+            vec![normalize_block(&ca_cert("c1-clients-ca", 365))],
+            "k",
+            CaPhase::KeyReplacePromote,
+        );
+        s.key_generation = KeyGeneration(1);
+        let mut inp = inputs(true, WhichCa::Clients);
+        inp.rollout_converged = true;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
+
+        s.leafs_key_generation = Some(KeyGeneration(1));
+        inp.rollout_converged = false;
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
+
         inp.rollout_converged = true;
         assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PruneOldTrust);
     }

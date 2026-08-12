@@ -63,7 +63,7 @@ impl Encode for DescribeLogDirsResponse<'_> {
                 for it in &self.results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -209,7 +209,7 @@ impl Encode for DescribeLogDirsResult<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 4 {
             put_i64(buf, self.total_bytes);
@@ -366,7 +366,7 @@ impl Encode for DescribeLogDirsTopic<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

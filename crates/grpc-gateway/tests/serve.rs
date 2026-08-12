@@ -8,6 +8,7 @@ use crabka_grpc_gateway::{
     serve,
 };
 use crabka_units::prelude::*;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
 fn install_provider() {
@@ -42,6 +43,34 @@ async fn plaintext_serve_serves_healthz() {
     assert2::assert!(ok);
     token.cancel();
     let _ = h.await;
+}
+
+/// The polyglot SDKs use HTTP/2 prior knowledge for Connect bidi streams.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plaintext_serve_accepts_h2c_prior_knowledge() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = CancellationToken::new();
+    let app = health::router(Readiness::new());
+    let task_token = token.clone();
+    let handle = tokio::spawn(async move {
+        let _ = serve::serve(listener, app, None, task_token).await;
+    });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+        .await
+        .unwrap();
+    let mut frame = [0; 9];
+    tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut frame))
+        .await
+        .expect("server sends HTTP/2 settings")
+        .unwrap();
+    assert2::assert!(frame[3] == 0x04, "first HTTP/2 frame should be SETTINGS");
+
+    token.cancel();
+    let _ = handle.await;
 }
 
 /// Covers `serve_tls`'s handshake-failure branch. Start the server over TLS,

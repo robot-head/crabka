@@ -54,7 +54,7 @@ impl Encode for AlterShareGroupOffsetsResponse {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -181,7 +181,7 @@ impl Encode for AlterShareGroupOffsetsResponseTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -80,7 +80,7 @@ impl Encode for FetchResponse<'_> {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -285,7 +285,7 @@ impl Encode for FetchableTopicResponse<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -469,7 +469,7 @@ impl<'a> PartitionData<'a> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }

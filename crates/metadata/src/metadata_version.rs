@@ -9,6 +9,15 @@
 /// The `metadata.version` feature name (KIP-584 / KIP-778).
 pub const METADATA_VERSION_FEATURE: &str = "metadata.version";
 
+/// Crabka registration-only marker for KIP-1155 downgrade support. The KIP is
+/// still under discussion and has not assigned its promised capability
+/// `metadata.version` level, so this must not extend the canonical 7..=25
+/// metadata-version range or appear in `ApiVersions`. It is carried only in
+/// broker/controller registration feature maps; pre-KIP JVM nodes omit it.
+pub const METADATA_DOWNGRADE_CAPABILITY_FEATURE: &str = "crabka.metadata.downgrade";
+/// The only supported level of [`METADATA_DOWNGRADE_CAPABILITY_FEATURE`].
+pub const METADATA_DOWNGRADE_CAPABILITY_LEVEL: i16 = 1;
+
 /// The `share.version` feature name (KIP-932). Gates share-group membership.
 pub const SHARE_VERSION_FEATURE: &str = "share.version";
 /// KIP-853 Raft protocol and dynamic-membership feature.
@@ -36,6 +45,17 @@ pub const METADATA_VERSION_MAX: i16 = 25;
 pub const SCRAM_MIN_LEVEL: i16 = 11;
 /// Level at which `KRaft` gained delegation tokens (`3.6-IV2`).
 pub const DELEGATION_TOKEN_MIN_LEVEL: i16 = 14;
+/// Lowest level that supports controller registrations (`3.7-IV0`). Online
+/// downgrades cannot cross this boundary because the active controller needs
+/// those registrations to verify every quorum member supports the target.
+pub const ONLINE_DOWNGRADE_MIN_LEVEL: i16 = 15;
+/// Level at which partition directory assignments became part of the `KRaft`
+/// metadata records (`3.7-IV2`, KIP-858).
+pub const DIRECTORY_ASSIGNMENT_MIN_LEVEL: i16 = 17;
+/// Level at which partition records gained KIP-966 eligible-leader fields
+/// (`4.0-IV1`). Crabka does not model ELR state, but it must still select the
+/// record version Kafka readers expect at this metadata version.
+pub const ELR_MIN_LEVEL: i16 = 23;
 
 /// One `metadata.version` level: its integer feature level, canonical
 /// `X.Y-IVn` name, and short `X.Y` form.

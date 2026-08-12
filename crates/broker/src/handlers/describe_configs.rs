@@ -3,10 +3,10 @@
 //!
 //! - `resource_type=2` (TOPIC): the handler reads the per-topic override map
 //!   and emits entries with `config_source = DYNAMIC_TOPIC_CONFIG (1)`.
-//! - `resource_type=4` (BROKER): the handler parses the resource name as a
-//!   `NodeId`, reads the broker override map from
-//!   `MetadataImage::broker_config`, and emits entries with
-//!   `config_source = DYNAMIC_BROKER_CONFIG (2)`.
+//! - `resource_type=4` (BROKER): a numeric name returns the effective dynamic
+//!   per-broker and cluster-default overrides. An empty name returns the
+//!   cluster-wide defaults. Sources distinguish `DYNAMIC_BROKER_CONFIG (2)`
+//!   from `DYNAMIC_DEFAULT_BROKER_CONFIG (3)`.
 //! - Every other resource type receives an empty configs list and no error.
 //!   The JVM `AdminClient` accepts that.
 //!
@@ -42,14 +42,18 @@ use crate::{
 /// `DEFAULT_CONFIG = 5`, `DYNAMIC_BROKER_LOGGER_CONFIG = 6`.
 const CONFIG_SOURCE_DYNAMIC_TOPIC: i8 = 1;
 const CONFIG_SOURCE_DYNAMIC_BROKER: i8 = 2;
+const CONFIG_SOURCE_DYNAMIC_DEFAULT_BROKER: i8 = 3;
 /// `ConfigSource::DEFAULT_CONFIG`, for keys reported at their default.
 const CONFIG_SOURCE_DEFAULT: i8 = 5;
 /// `DescribeConfigsResponse.ConfigSource::CLIENT_METRICS_CONFIG` wire byte.
 const CONFIG_SOURCE_CLIENT_METRICS: i8 = 7;
+/// `ConfigSource::DYNAMIC_GROUP_CONFIG`.
+const CONFIG_SOURCE_DYNAMIC_GROUP: i8 = 8;
 
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
+const RESOURCE_TYPE_GROUP: i8 = 32;
 
 /// `ConfigDef.Type::UNKNOWN` wire byte. Crabka reports no typed config
 /// metadata, which matches brokers from before KIP-226's typed responses.
@@ -75,6 +79,7 @@ fn describe_one(
     image: &crabka_metadata::MetadataImage,
     r: crabka_protocol::owned::describe_configs_request::DescribeConfigsResource,
     client_metrics_default_interval_ms: i32,
+    streams_defaults: &crate::coordinator::unified::streams::config::StreamsGroupConfig,
 ) -> DescribeConfigsResult {
     let ok = |configs| DescribeConfigsResult {
         error_code: codes::NONE,
@@ -100,28 +105,55 @@ fn describe_one(
     }
 
     if r.resource_type == RESOURCE_TYPE_BROKER {
-        let Ok(node_id) = r.resource_name.parse::<u64>() else {
-            return DescribeConfigsResult {
-                error_code: codes::INVALID_REQUEST,
-                error_message: Some(format!(
-                    "resource_name `{}` is not a valid broker id",
-                    r.resource_name
-                )),
-                resource_type: r.resource_type,
-                resource_name: r.resource_name,
-                configs: Vec::new(),
-                ..Default::default()
+        let node_id = if r.resource_name.is_empty() {
+            None
+        } else {
+            let Ok(node_id) = r.resource_name.parse::<u64>() else {
+                return DescribeConfigsResult {
+                    error_code: codes::INVALID_REQUEST,
+                    error_message: Some(format!(
+                        "resource_name `{}` is not a valid broker id",
+                        r.resource_name
+                    )),
+                    resource_type: r.resource_type,
+                    resource_name: r.resource_name,
+                    configs: Vec::new(),
+                    ..Default::default()
+                };
             };
+            Some(crabka_metadata::NodeId(node_id))
         };
-        let map = image
-            .broker_config(crabka_metadata::NodeId(node_id))
-            .cloned()
-            .unwrap_or_default();
+        let defaults = image.default_broker_config();
+        let per_broker = node_id.and_then(|node_id| image.broker_config(node_id));
         let key_filter: Option<&[String]> = r.configuration_keys.as_deref();
-        let configs: Vec<DescribeConfigsResourceResult> = map
-            .iter()
-            .filter(|(k, _)| key_filter.is_none_or(|ks| ks.iter().any(|f| f == *k)))
-            .map(|(k, v)| make_entry(k, v, CONFIG_SOURCE_DYNAMIC_BROKER))
+        let mut keys = std::collections::BTreeSet::new();
+        keys.extend(
+            defaults
+                .into_iter()
+                .flat_map(std::collections::BTreeMap::keys),
+        );
+        keys.extend(
+            per_broker
+                .into_iter()
+                .flat_map(std::collections::BTreeMap::keys),
+        );
+        let configs: Vec<DescribeConfigsResourceResult> = keys
+            .into_iter()
+            .filter(|key| key_filter.is_none_or(|ks| ks.iter().any(|filter| filter == *key)))
+            .map(|key| {
+                per_broker.and_then(|configs| configs.get(key)).map_or_else(
+                    || {
+                        make_entry(
+                            key,
+                            defaults
+                                .and_then(|configs| configs.get(key))
+                                .expect("key came from broker defaults"),
+                            CONFIG_SOURCE_DYNAMIC_DEFAULT_BROKER,
+                        )
+                    },
+                    |value| make_entry(key, value, CONFIG_SOURCE_DYNAMIC_BROKER),
+                )
+            })
             .collect();
         return ok(configs);
     }
@@ -150,6 +182,31 @@ fn describe_one(
         emit(KEY_METRICS, "");
         emit(KEY_INTERVAL_MS, &default_interval);
         emit(KEY_MATCH, "");
+        return ok(configs);
+    }
+
+    if r.resource_type == RESOURCE_TYPE_GROUP {
+        let overrides = image
+            .group_config(&r.resource_name)
+            .cloned()
+            .unwrap_or_default();
+        let effective = streams_defaults
+            .with_group_overrides(&overrides)
+            .unwrap_or_else(|_| streams_defaults.clone())
+            .group_config_values();
+        let key_filter: Option<&[String]> = r.configuration_keys.as_deref();
+        let configs = effective
+            .iter()
+            .filter(|(key, _)| key_filter.is_none_or(|keys| keys.iter().any(|k| k == *key)))
+            .map(|(key, value)| {
+                let source = if overrides.contains_key(key) {
+                    CONFIG_SOURCE_DYNAMIC_GROUP
+                } else {
+                    CONFIG_SOURCE_DEFAULT
+                };
+                make_entry(key, value, source)
+            })
+            .collect();
         return ok(configs);
     }
 
@@ -184,6 +241,11 @@ fn resource_authz_failure(
             ResourceType::Cluster,
             crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             codes::CLUSTER_AUTHORIZATION_FAILED,
+        ),
+        RESOURCE_TYPE_GROUP => (
+            ResourceType::Group,
+            resource_name,
+            codes::GROUP_AUTHORIZATION_FAILED,
         ),
         _ => return None,
     };
@@ -261,6 +323,7 @@ pub(crate) fn handle(
                         &image,
                         r,
                         broker.config.client_metrics_default_interval.millis_i32(),
+                        &broker.config.streams_group,
                     )
                 }
             })
@@ -302,8 +365,6 @@ mod tests {
     fn broker_resource_name_invalid_fails_parse() {
         // Non-numeric resource_name must fail to parse as NodeId.
         assert!("not-a-number".parse::<u64>().is_err());
-        // Empty string also fails.
-        assert!("".parse::<u64>().is_err());
     }
 
     #[test]
@@ -363,6 +424,7 @@ mod tests {
                 ..Default::default()
             },
             300_000,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         );
 
         let expected = DescribeConfigsResult {
@@ -398,6 +460,7 @@ mod tests {
                 ..Default::default()
             },
             300_000,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         );
 
         let expected = DescribeConfigsResult {
@@ -463,6 +526,85 @@ mod tests {
     }
 
     #[test]
+    fn broker_describe_inherits_default_and_prefers_per_broker_override() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("1024".into()),
+        }));
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+            config_name: "follower.replication.throttled.rate".into(),
+            config_value: Some("512".into()),
+        }));
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: crabka_metadata::NodeId(1),
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("2048".into()),
+        }));
+
+        let result = super::describe_one(
+            &image,
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_BROKER,
+                resource_name: "1".into(),
+                configuration_keys: None,
+                ..Default::default()
+            },
+            300_000,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        );
+
+        assert!(
+            result.configs
+                == vec![
+                    super::make_entry(
+                        "follower.replication.throttled.rate",
+                        "512",
+                        super::CONFIG_SOURCE_DYNAMIC_DEFAULT_BROKER,
+                    ),
+                    super::make_entry(
+                        "leader.replication.throttled.rate",
+                        "2048",
+                        super::CONFIG_SOURCE_DYNAMIC_BROKER,
+                    ),
+                ]
+        );
+    }
+
+    #[test]
+    fn empty_broker_name_describes_cluster_defaults() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: crabka_metadata::DEFAULT_BROKER_CONFIG_NODE_ID,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("1024".into()),
+        }));
+
+        let result = super::describe_one(
+            &image,
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_BROKER,
+                resource_name: String::new(),
+                configuration_keys: None,
+                ..Default::default()
+            },
+            300_000,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        );
+
+        assert!(
+            result.configs
+                == vec![super::make_entry(
+                    "leader.replication.throttled.rate",
+                    "1024",
+                    super::CONFIG_SOURCE_DYNAMIC_DEFAULT_BROKER,
+                )]
+        );
+    }
+
+    #[test]
     fn client_metrics_describe_emits_defaults() {
         use crabka_metadata::{ClientMetricsConfigRecord, MetadataRecord};
         let mut img = MetadataImage::new(Uuid::nil());
@@ -480,7 +622,12 @@ mod tests {
             configuration_keys: None,
             ..Default::default()
         };
-        let res = super::describe_one(&img, r, 12_345);
+        let res = super::describe_one(
+            &img,
+            r,
+            12_345,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        );
         assert_eq!(res.error_code, crate::codes::NONE);
         let by_name: std::collections::HashMap<_, _> =
             res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -495,6 +642,49 @@ mod tests {
                 "key {key}"
             );
         }
+    }
+
+    #[test]
+    fn group_describe_merges_dynamic_overrides_with_defaults() {
+        use crabka_metadata::GroupConfigRecord;
+
+        use crate::coordinator::unified::streams::config::{
+            KEY_NUM_STANDBY_REPLICAS, KEY_SESSION_TIMEOUT_MS, StreamsGroupConfig,
+        };
+
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1GroupConfig(GroupConfigRecord {
+            group_id: "streams-app".into(),
+            configs: BTreeMap::from([(KEY_NUM_STANDBY_REPLICAS.into(), "1".into())]),
+        }));
+        let result = super::describe_one(
+            &image,
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_GROUP,
+                resource_name: "streams-app".into(),
+                configuration_keys: Some(vec![
+                    KEY_NUM_STANDBY_REPLICAS.into(),
+                    KEY_SESSION_TIMEOUT_MS.into(),
+                ]),
+                ..Default::default()
+            },
+            300_000,
+            &StreamsGroupConfig::default(),
+        );
+        let by_name: std::collections::HashMap<_, _> = result
+            .configs
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect();
+        assert!(
+            by_name[KEY_NUM_STANDBY_REPLICAS].value.as_deref() == Some("1")
+                && by_name[KEY_NUM_STANDBY_REPLICAS].config_source
+                    == super::CONFIG_SOURCE_DYNAMIC_GROUP
+        );
+        assert!(
+            by_name[KEY_SESSION_TIMEOUT_MS].value.as_deref() == Some("45000")
+                && by_name[KEY_SESSION_TIMEOUT_MS].config_source == super::CONFIG_SOURCE_DEFAULT
+        );
     }
 
     fn anon() -> crabka_security::Principal {

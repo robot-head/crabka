@@ -147,8 +147,8 @@ impl<S: MetricStore> PromqlEngine<S> {
                     .await
                     .map(QueryResult::RangeMatrix)
             }
-            other => Err(PromqlError::Unsupported(format!(
-                "range expression not implemented yet: {other}"
+            other => Err(PromqlError::Plan(format!(
+                "planner did not claim range expression: {other}"
             ))),
         }
     }

@@ -66,7 +66,7 @@ impl Encode for RequestHeader<'_> {
                 } else {
                     let () = put_nullable_string(buf, self.client_id);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

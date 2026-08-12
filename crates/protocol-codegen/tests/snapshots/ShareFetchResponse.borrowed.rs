@@ -43,6 +43,7 @@ impl<'a> ShareFetchResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::ShareFetchResponse {
         crate::owned::share_fetch_response::ShareFetchResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -62,20 +63,20 @@ impl<'a> Encode for ShareFetchResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.error_message);
             } else {
                 let () = put_nullable_string(buf, self.error_message);
-            }
+            };
         }
         if version >= 1 {
-            put_i32(buf, self.acquisition_lock_timeout_ms)
+            put_i32(buf, self.acquisition_lock_timeout_ms);
         }
         if version >= 0 {
             {
@@ -83,7 +84,7 @@ impl<'a> Encode for ShareFetchResponse<'a> {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -91,7 +92,7 @@ impl<'a> Encode for ShareFetchResponse<'a> {
                 for it in &self.node_endpoints {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -225,6 +226,7 @@ impl<'a> ShareFetchableTopicResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::ShareFetchableTopicResponse {
         crate::owned::share_fetch_response::ShareFetchableTopicResponse {
             topic_id: (self.topic_id),
@@ -237,7 +239,7 @@ impl<'a> Encode for ShareFetchableTopicResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -245,7 +247,7 @@ impl<'a> Encode for ShareFetchableTopicResponse<'a> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -341,6 +343,7 @@ impl<'a> PartitionData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::PartitionData {
         crate::owned::share_fetch_response::PartitionData {
             partition_index: (self.partition_index),
@@ -356,12 +359,12 @@ impl<'a> PartitionData<'a> {
     }
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -370,12 +373,12 @@ impl<'a> PartitionData<'a> {
                 let () = put_compact_nullable_string(buf, self.error_message);
             } else {
                 let () = put_nullable_string(buf, self.error_message);
-            }
+            };
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.acknowledge_error_code)
+            put_i16(buf, self.acknowledge_error_code);
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -384,12 +387,12 @@ impl<'a> PartitionData<'a> {
                 let () = put_compact_nullable_string(buf, self.acknowledge_error_message);
             } else {
                 let () = put_nullable_string(buf, self.acknowledge_error_message);
-            }
+            };
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
         if version >= 0 {
-            self.current_leader.encode(buf, version)?
+            self.current_leader.encode(buf, version)?;
         }
         Ok(())
     }
@@ -434,7 +437,7 @@ impl<'a> PartitionData<'a> {
                         }
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -445,7 +448,7 @@ impl<'a> PartitionData<'a> {
                 for it in &self.acquired_records {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -527,7 +530,7 @@ impl<'a> PartitionData<'a> {
         }
         Ok(())
     }
-    fn decode_tagged_fields(out: &mut Self, buf: &mut &'a [u8], version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_tagged_fields(out: &mut Self, buf: &mut &'a [u8], _version: i16, flex: bool) -> Result<(), ProtocolError> {
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
@@ -682,6 +685,7 @@ impl LeaderIdAndEpoch {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::LeaderIdAndEpoch {
         crate::owned::share_fetch_response::LeaderIdAndEpoch {
             leader_id: (self.leader_id),
@@ -694,10 +698,10 @@ impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -772,6 +776,7 @@ impl AcquiredRecords {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::AcquiredRecords {
         crate::owned::share_fetch_response::AcquiredRecords {
             first_offset: (self.first_offset),
@@ -785,13 +790,13 @@ impl Encode for AcquiredRecords {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.first_offset)
+            put_i64(buf, self.first_offset);
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset)
+            put_i64(buf, self.last_offset);
         }
         if version >= 0 {
-            put_i16(buf, self.delivery_count)
+            put_i16(buf, self.delivery_count);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -877,6 +882,7 @@ impl<'a> NodeEndpoint<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::NodeEndpoint {
         crate::owned::share_fetch_response::NodeEndpoint {
             node_id: (self.node_id),
@@ -891,24 +897,24 @@ impl<'a> Encode for NodeEndpoint<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_string(buf, self.host);
             } else {
                 let () = put_string(buf, self.host);
-            }
+            };
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.rack);
             } else {
                 let () = put_nullable_string(buf, self.rack);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -53,34 +53,37 @@ impl PostgresWalSource {
         database_name: String,
         catalog: Option<Box<dyn PgCatalog>>,
         pending: VecDeque<LogicalEvent>,
-    ) -> Result<Self, ConnectError> {
-        Ok(Self {
+        encoder: PostgresProtoEncoder,
+    ) -> Self {
+        Self {
             config,
             database_name,
             catalog,
             relation_cache: RelationCache::default(),
-            encoder: PostgresProtoEncoder::new()?,
+            encoder,
             pending,
             transaction: None,
             transaction_rows: Vec::new(),
             checkpoint: None,
             resume_lsn: None,
-        })
+        }
     }
 
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    #[cfg(test)]
     pub fn scripted(
         config: PostgresSourceConfig,
         database_name: impl Into<String>,
         events: impl IntoIterator<Item = LogicalEvent>,
     ) -> Result<Self, ConnectError> {
-        Self::build(
+        Ok(Self::build(
             config,
             database_name.into(),
             None,
             events.into_iter().collect(),
-        )
+            PostgresProtoEncoder::for_test()?,
+        ))
     }
 
     // cargo-mutants: real DB connection; not exercised under unit tests.
@@ -94,14 +97,16 @@ impl PostgresWalSource {
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn connect(config: PostgresSourceConfig) -> Result<Self, ConnectError> {
+        let encoder = PostgresProtoEncoder::from_registry(&config.schema_registry_url).await?;
         let catalog = TokioPgCatalog::connect(config.database_url.expose_secret()).await?;
         let database_name = initialize(&catalog, &config).await?;
-        Self::build(
+        Ok(Self::build(
             config,
             database_name,
             Some(Box::new(catalog)),
             VecDeque::new(),
-        )
+            encoder,
+        ))
     }
 
     #[cfg(test)]
@@ -110,7 +115,13 @@ impl PostgresWalSource {
         database_name: impl Into<String>,
         catalog: Box<dyn PgCatalog>,
     ) -> Result<Self, ConnectError> {
-        Self::build(config, database_name.into(), Some(catalog), VecDeque::new())
+        Ok(Self::build(
+            config,
+            database_name.into(),
+            Some(catalog),
+            VecDeque::new(),
+            PostgresProtoEncoder::for_test()?,
+        ))
     }
 
     #[cfg(test)]
@@ -743,6 +754,7 @@ mod tests {
 
     fn config(slot_name: &str) -> PostgresSourceConfig {
         PostgresSourceConfig {
+            schema_registry_url: "http://localhost:8081".to_owned(),
             database_url: SecretString::new("postgres://localhost/app"),
             slot_name: slot_name.to_owned(),
             publication_name: "crabka_connect".to_owned(),
@@ -1176,6 +1188,7 @@ mod catalog_tests {
 
     fn config_with_tables(tables: Vec<String>) -> PostgresSourceConfig {
         PostgresSourceConfig {
+            schema_registry_url: "http://localhost:8081".to_owned(),
             database_url: SecretString::new("postgres://localhost/app"),
             slot_name: "slot_a".to_owned(),
             publication_name: "crabka_connect".to_owned(),

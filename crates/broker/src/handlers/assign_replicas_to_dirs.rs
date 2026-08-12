@@ -50,6 +50,17 @@ pub(crate) fn handle(
             return encode_resp(version, &AssignReplicasToDirsResponse::default());
         };
         let image = controller.current_image();
+        if image.finalized_metadata_version().is_some_and(|level| {
+            level < crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL
+        }) {
+            return encode_resp(
+                version,
+                &AssignReplicasToDirsResponse {
+                    error_code: codes::UNSUPPORTED_VERSION,
+                    ..Default::default()
+                },
+            );
+        }
         let changes = collect_assignment_changes(&image, broker_slot_id, &req);
 
         if !changes.is_empty()
@@ -195,7 +206,9 @@ fn encode_resp(
 mod tests {
     use assert2::assert;
     use bytes::BytesMut;
-    use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_metadata::{
+        FeatureLevelRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+    };
     use crabka_protocol::{
         Encode,
         owned::assign_replicas_to_dirs_request::{
@@ -399,6 +412,70 @@ mod tests {
         let image = broker.controller.current_image();
         let partition = image.partition("t", 0).expect("partition");
         assert!(partition.directories == vec![dir_uuid]);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_directory_assignment_below_kip_858_metadata_version() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let topic_uuid = uuid::Uuid::from_u128(0xBB);
+        broker
+            .controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level: crabka_metadata::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL - 1,
+            })])
+            .await
+            .expect("seed downgraded metadata version");
+        broker
+            .controller
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: topic_uuid,
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "t".into(),
+                    partition: 0,
+                    leader: crabka_audit::NodeId(1),
+                    replicas: vec![crabka_audit::NodeId(1)],
+                    isr: vec![crabka_audit::NodeId(1)],
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![uuid::Uuid::nil()],
+                    partition_epoch: 0,
+                }),
+            ])
+            .await
+            .expect("seed downgraded partition");
+
+        let bytes = handle(
+            &broker,
+            VERSION,
+            9,
+            &request(uuid::Uuid::from_u128(0xAA), topic_uuid, 0),
+        )
+        .await
+        .expect("AssignReplicasToDirs handler");
+        let resp = decode_response(&bytes);
+
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION, "{resp:?}");
+        // PartitionRecord v0 has no directories field at this metadata
+        // version, so replay projects the seeded nil slot to an empty vector.
+        assert!(
+            broker
+                .controller
+                .current_image()
+                .partition("t", 0)
+                .expect("partition")
+                .directories
+                .is_empty()
+        );
         broker_handle.shutdown().await;
     }
 

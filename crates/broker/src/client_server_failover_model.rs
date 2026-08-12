@@ -304,7 +304,7 @@ impl FailoverState {
 
         s.refresh_leader_producer_entry();
         let entry = s.producer_entry();
-        match check_pure(entry.as_ref(), PRODUCER_EPOCH, base_sequence) {
+        match check_pure(entry.as_ref(), PRODUCER_EPOCH, base_sequence, 0) {
             Decision::Append => {
                 if !matches!(
                     outcome,

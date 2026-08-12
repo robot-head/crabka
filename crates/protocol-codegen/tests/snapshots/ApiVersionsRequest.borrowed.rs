@@ -32,6 +32,7 @@ impl<'a> ApiVersionsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::api_versions_request::ApiVersionsRequest {
         crate::owned::api_versions_request::ApiVersionsRequest {
             client_software_name: (self.client_software_name).to_string(),
@@ -51,14 +52,14 @@ impl<'a> Encode for ApiVersionsRequest<'a> {
                 let () = put_compact_string(buf, self.client_software_name);
             } else {
                 let () = put_string(buf, self.client_software_name);
-            }
+            };
         }
         if version >= 3 {
             if flex {
                 let () = put_compact_string(buf, self.client_software_version);
             } else {
                 let () = put_string(buf, self.client_software_version);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

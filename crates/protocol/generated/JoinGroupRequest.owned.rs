@@ -108,7 +108,7 @@ impl JoinGroupRequest {
                 for it in &self.protocols {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

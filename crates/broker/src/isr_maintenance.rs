@@ -2,8 +2,6 @@
 //! last-fetch time against `replica_lag_time_max` and proposes an
 //! `AlterPartition` shrink or expand to the controller leader.
 
-#![allow(dead_code)]
-
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -393,7 +391,9 @@ mod tests {
             host: format!("b{id}"),
             port: 9092,
             rack: None,
+            log_dirs: vec![],
             endpoints: vec![],
+            features: std::collections::BTreeMap::new(),
         })
     }
 

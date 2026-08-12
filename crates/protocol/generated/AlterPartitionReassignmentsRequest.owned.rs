@@ -55,7 +55,7 @@ impl Encode for AlterPartitionReassignmentsRequest {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -158,7 +158,7 @@ impl Encode for ReassignableTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -256,7 +256,7 @@ impl Encode for ReassignablePartition {
                         put_i32(buf, *it);
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

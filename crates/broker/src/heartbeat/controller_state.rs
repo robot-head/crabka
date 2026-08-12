@@ -4,10 +4,6 @@
 //! registered broker and drives a periodic liveness ticker that emits
 //! `LivenessTransition` events when a broker goes dead or comes alive.
 
-// Items are consumed by the BrokerHeartbeat handler and the liveness
-// ticker spawn. Allow dead_code until those land.
-#![allow(dead_code)]
-
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
@@ -26,7 +22,7 @@ pub(crate) enum BrokerLivenessState {
 }
 
 /// An edge transition emitted by [`ControllerLivenessState::tick`] or
-/// [`ControllerLivenessState::record_heartbeat`].
+/// [`ControllerLivenessState::record_fenced_heartbeat`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LivenessTransition {
     /// Broker was `Dead`; this heartbeat revived it.
@@ -38,6 +34,7 @@ pub(crate) enum LivenessTransition {
 struct BrokerEntry {
     last_heartbeat: Instant,
     state: BrokerLivenessState,
+    fenced: bool,
 }
 
 /// Monotonic time source for liveness tracking.
@@ -87,9 +84,7 @@ impl TestClock {
     fn new() -> Self {
         Self(std::sync::Arc::new(TestClockInner {
             base: Instant::now(),
-            // Start an hour in so `seed_brokers_expiring_after`'s `checked_sub`
-            // never underflows the monotonic clock in short-lived test processes.
-            offset_nanos: std::sync::atomic::AtomicU64::new(3_600_000_000_000),
+            offset_nanos: std::sync::atomic::AtomicU64::new(0),
         }))
     }
 
@@ -108,7 +103,7 @@ impl TestClock {
 /// Controller-side heartbeat registry.
 ///
 /// One instance lives on the `Broker` struct. Handlers call
-/// [`record_heartbeat`](Self::record_heartbeat) on every incoming
+/// [`record_fenced_heartbeat`](Self::record_fenced_heartbeat) on every incoming
 /// `BrokerHeartbeat` RPC. The liveness ticker calls [`tick`](Self::tick)
 /// every second to expire stale entries.
 pub(crate) struct ControllerLivenessState {
@@ -160,19 +155,36 @@ impl ControllerLivenessState {
 
     /// Returns `true` if `broker_id` is currently in the wants-shutdown
     /// set.
-    pub(crate) async fn wants_shutdown(&self, broker_id: u64) -> bool {
+    #[cfg(test)]
+    async fn wants_shutdown(&self, broker_id: u64) -> bool {
         self.wants_shutdown.lock().await.contains(&broker_id)
     }
 
-    /// Record a heartbeat from `broker_id`. Returns `Some(DeadToAlive)`
-    /// if this heartbeat revives a previously-dead broker. Returns
-    /// `None` if the broker was already alive or is new.
+    /// Record a heartbeat from `broker_id`. A broker that has no existing
+    /// session starts fenced until the handler confirms metadata catch-up.
+    pub(crate) async fn record_fenced_heartbeat(
+        &self,
+        broker_id: u64,
+    ) -> Option<LivenessTransition> {
+        self.record_heartbeat_inner(broker_id, true).await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn record_heartbeat(&self, broker_id: u64) -> Option<LivenessTransition> {
+        self.record_heartbeat_inner(broker_id, false).await
+    }
+
+    async fn record_heartbeat_inner(
+        &self,
+        broker_id: u64,
+        initially_fenced: bool,
+    ) -> Option<LivenessTransition> {
         let mut map = self.brokers.lock().await;
         let now = self.clock.now();
         let entry = map.entry(broker_id).or_insert(BrokerEntry {
             last_heartbeat: now,
             state: BrokerLivenessState::Alive,
+            fenced: initially_fenced,
         });
         let prev = entry.state;
         entry.last_heartbeat = now;
@@ -216,7 +228,8 @@ impl ControllerLivenessState {
 
     /// Return the current liveness state for `broker_id`, or `None` if
     /// the broker has never sent a heartbeat.
-    pub(crate) async fn state(&self, broker_id: u64) -> Option<BrokerLivenessState> {
+    #[cfg(test)]
+    async fn state(&self, broker_id: u64) -> Option<BrokerLivenessState> {
         let map = self.brokers.lock().await;
         map.get(&broker_id).map(|e| e.state)
     }
@@ -225,10 +238,32 @@ impl ControllerLivenessState {
     /// heartbeat within the timeout window). Returns `false` for unknown
     /// brokers and for brokers whose heartbeat has expired.
     pub(crate) async fn is_alive(&self, broker_id: u64) -> bool {
-        matches!(
-            self.state(broker_id).await,
-            Some(BrokerLivenessState::Alive)
-        )
+        self.brokers
+            .lock()
+            .await
+            .get(&broker_id)
+            .is_some_and(|entry| entry.state == BrokerLivenessState::Alive && !entry.fenced)
+    }
+
+    /// Apply the broker's fencing request. A broker can only unfence after it
+    /// has caught up through its registration record. Returns the resulting
+    /// fenced state.
+    pub(crate) async fn apply_fencing(
+        &self,
+        broker_id: u64,
+        want_fence: bool,
+        is_caught_up: bool,
+    ) -> bool {
+        let mut map = self.brokers.lock().await;
+        let Some(entry) = map.get_mut(&broker_id) else {
+            return true;
+        };
+        if want_fence {
+            entry.fenced = true;
+        } else if is_caught_up {
+            entry.fenced = false;
+        }
+        entry.fenced
     }
 
     /// Snapshot the set of currently-`Alive` broker ids under a single
@@ -242,7 +277,19 @@ impl ControllerLivenessState {
     pub(crate) async fn alive_snapshot(&self) -> HashSet<u64> {
         let map = self.brokers.lock().await;
         map.iter()
-            .filter(|(_, e)| e.state == BrokerLivenessState::Alive)
+            .filter(|(_, e)| e.state == BrokerLivenessState::Alive && !e.fenced)
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
+    /// Snapshot brokers that are known to be unavailable for new replica
+    /// assignments. Unknown brokers are deliberately omitted: immediately
+    /// after a controller election, registrations may be visible before the
+    /// liveness registry has been seeded.
+    pub(crate) async fn unavailable_snapshot(&self) -> HashSet<u64> {
+        let map = self.brokers.lock().await;
+        map.iter()
+            .filter(|(_, entry)| entry.state == BrokerLivenessState::Dead || entry.fenced)
             .map(|(&id, _)| id)
             .collect()
     }
@@ -264,28 +311,8 @@ impl ControllerLivenessState {
                 .or_insert(BrokerEntry {
                     last_heartbeat: now,
                     state: BrokerLivenessState::Alive,
+                    fenced: false,
                 });
-        }
-    }
-
-    /// Seed brokers as alive, but with only `grace` remaining before timeout.
-    /// The broker calls this when this node becomes controller leader. Live
-    /// peers should heartbeat quickly. A broker that died with the previous
-    /// leader should not get a full fresh session timeout.
-    pub(crate) async fn seed_brokers_expiring_after(
-        &self,
-        broker_ids: impl IntoIterator<Item = u64>,
-        grace: Duration,
-    ) {
-        let mut map = self.brokers.lock().await;
-        let now = self.clock.now();
-        let backdated = self.timeout.saturating_sub(grace);
-        let last_heartbeat = now.checked_sub(backdated).unwrap_or(now);
-        for id in broker_ids {
-            map.entry(id).or_insert(BrokerEntry {
-                last_heartbeat,
-                state: BrokerLivenessState::Alive,
-            });
         }
     }
 }
@@ -333,19 +360,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expiring_seed_times_out_without_fresh_heartbeat() {
+    async fn fencing_removes_alive_broker_from_eligible_snapshot() {
+        let liveness = ControllerLivenessState::new(crabka_units::secs(10));
+        liveness.record_heartbeat(3).await;
+
+        assert!(liveness.apply_fencing(3, true, true).await);
+        assert!(!liveness.is_alive(3).await);
+        assert!(!liveness.alive_snapshot().await.contains(&3));
+        assert!(liveness.unavailable_snapshot().await.contains(&3));
+    }
+
+    #[tokio::test]
+    async fn unavailable_snapshot_includes_dead_but_not_unknown_brokers() {
         let clock = TestClock::new();
         let liveness =
             ControllerLivenessState::with_clock(Duration::from_millis(10), clock.clock());
-        liveness
-            .seed_brokers_expiring_after([7], Duration::from_nanos(1))
-            .await;
-        // Only ~1ns of grace was granted; any advance past it expires the seed.
-        clock.advance(Duration::from_millis(1));
+        liveness.record_heartbeat(2).await;
+        clock.advance(Duration::from_millis(11));
+        let _ = liveness.tick().await;
 
-        let transitions = liveness.tick().await;
+        let unavailable = liveness.unavailable_snapshot().await;
+        assert!(unavailable.contains(&2));
+        assert!(!unavailable.contains(&99));
+    }
 
-        assert!(transitions == vec![LivenessTransition::AliveToDead(7)]);
+    #[tokio::test]
+    async fn broker_only_unfences_after_metadata_catch_up() {
+        let liveness = ControllerLivenessState::new(crabka_units::secs(10));
+        liveness.record_fenced_heartbeat(3).await;
+
+        assert!(liveness.apply_fencing(3, false, false).await);
+        assert!(!liveness.is_alive(3).await);
+        assert!(!liveness.apply_fencing(3, false, true).await);
+        assert!(liveness.is_alive(3).await);
     }
 
     #[tokio::test]
@@ -378,20 +425,6 @@ mod tests {
         // entry would be ~21ms stale here and `tick` would mark it dead — which
         // is exactly the regression this test guards.
         clock.advance(Duration::from_millis(1));
-        let transitions = liveness.tick().await;
-
-        assert!(transitions.is_empty());
-        assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
-    }
-
-    #[tokio::test]
-    async fn expiring_seed_stays_alive_after_fresh_heartbeat() {
-        let liveness = ControllerLivenessState::new(crabka_units::minutes(1));
-        liveness
-            .seed_brokers_expiring_after([7], Duration::from_nanos(1))
-            .await;
-        liveness.record_heartbeat(7).await;
-
         let transitions = liveness.tick().await;
 
         assert!(transitions.is_empty());

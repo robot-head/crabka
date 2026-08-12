@@ -31,6 +31,11 @@ impl HealthState {
     pub fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
     }
+
+    /// Mark the operator as unable to reconcile safely. Reflected in `/readyz`.
+    pub fn mark_not_ready(&self) {
+        self.ready.store(false, Ordering::Release);
+    }
 }
 
 pub fn router(state: HealthState) -> Router {

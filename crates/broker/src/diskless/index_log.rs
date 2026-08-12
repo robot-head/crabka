@@ -1,7 +1,5 @@
 //! Projection of committed diskless WAL index events.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use crabka_remote_storage_topic::{MetadataEventLog, PartitionStart};
@@ -19,6 +17,7 @@ pub(crate) struct DisklessIndexLog {
 }
 
 impl DisklessIndexLog {
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn start(log: Arc<dyn MetadataEventLog>) -> Self {
         let cache = Arc::new(Mutex::new(WalIndexCache::default()));

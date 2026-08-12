@@ -4,12 +4,12 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use async_trait::async_trait;
-use crabka_client_consumer::{AutoOffsetReset, Consumer};
+use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_connect::{ConnectError, ConnectRecord, OffsetMap, OffsetValue, Source, SourceOffset};
 use crabka_units::prelude::Time;
 
 use crate::{
-    config::{ClientResourcePolicy, ReplicatorRuntimePolicy},
+    config::{ClientResourcePolicy, Delivery, ReplicatorRuntimePolicy},
     ids::{Offset, PartitionIndex, Timestamp},
     record::ReplicatedRecord,
 };
@@ -101,6 +101,7 @@ impl SourceConsumer {
             security,
             client_resource_policy,
             &ReplicatorRuntimePolicy::default(),
+            Delivery::AtLeastOnce,
         )
         .await
     }
@@ -112,6 +113,7 @@ impl SourceConsumer {
         security: Option<crabka_client_core::security::ClientSecurity>,
         client_resource_policy: ClientResourcePolicy,
         runtime_policy: &ReplicatorRuntimePolicy,
+        delivery: Delivery,
     ) -> Result<Self, ConnectError> {
         let builder = Consumer::builder()
             .bootstrap(bootstrap)
@@ -120,6 +122,10 @@ impl SourceConsumer {
             .request_timeout(runtime_policy.client_request_timeout)
             .group_id(group_id)
             .subscribe(topics.to_vec())
+            .isolation_level(match delivery {
+                Delivery::AtLeastOnce => IsolationLevel::ReadUncommitted,
+                Delivery::ExactlyOnce => IsolationLevel::ReadCommitted,
+            })
             .auto_offset_reset(AutoOffsetReset::Earliest);
 
         let consumer = match security {
@@ -222,9 +228,10 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
     /// restart then resumes **from the last fully-committed record** and does
     /// not re-read the topic from offset 0. No record below the sought offset is
     /// re-delivered and no record above it is skipped, so there is no data gap.
-    /// Delivery stays **at-least-once**: a crash between a sink flush and the
-    /// checkpoint save can re-deliver the in-flight batch, but it never loses a
-    /// record.
+    /// An at-least-once flow can re-deliver a batch after a crash between the
+    /// sink flush and checkpoint save. An exactly-once flow writes this same
+    /// position inside the target producer transaction, so output and recovery
+    /// position become visible together.
     ///
     /// This method skips a malformed key with a warning and does not fail the
     /// restore. A malformed key has no `-`, or a non-integer partition or

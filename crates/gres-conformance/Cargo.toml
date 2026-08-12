@@ -46,12 +46,12 @@ bytes = { workspace = true }
 futures-util = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
-crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
+crabka-pgparser = { version = "0.4.0", path = "../pgparser" }
 
 [dev-dependencies]
 assert2 = { workspace = true }
 tempfile = { workspace = true }
-crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
-crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
-crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
-crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+crabka-pgexec = { version = "0.4.0", path = "../pgexec" }
+crabka-pgwire = { version = "0.4.0", path = "../pgwire" }
+crabka-pgcatalog = { version = "0.4.0", path = "../pgcatalog" }
+crabka-pgtypes = { version = "0.4.0", path = "../pgtypes" }

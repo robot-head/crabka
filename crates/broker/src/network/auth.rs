@@ -9,8 +9,6 @@
 
 // Several variants and the `principal` accessor are exercised by the PLAIN,
 // SCRAM, and admin paths — keep the surface in one place.
-#![allow(dead_code)]
-
 use std::{collections::HashMap, hash::BuildHasher};
 
 use crabka_protocol::{
@@ -26,7 +24,7 @@ use crabka_security::{Principal, SaslMechanism, ScramServerExchange};
 use crabka_units::{ByteSize, Time, convert::TimeExt as _, kibibytes};
 
 use crate::{
-    codes::{ILLEGAL_SASL_STATE, UNSUPPORTED_SASL_MECHANISM},
+    codes::{ILLEGAL_SASL_STATE, SASL_AUTHENTICATION_FAILED, UNSUPPORTED_SASL_MECHANISM},
     handlers::ApiKeyCode,
 };
 
@@ -167,21 +165,6 @@ impl ConnectionAuth {
         }
     }
 
-    /// KIP-48: whether the current session authenticated with a delegation
-    /// token. The four delegation-token RPC handlers read it to gate
-    /// token-creating-token (`Create`) and visibility restriction
-    /// (`Describe`). It is `false` for any non-`Authenticated` state.
-    #[must_use]
-    pub fn authenticated_via_token(&self) -> bool {
-        matches!(
-            self,
-            Self::Authenticated {
-                authenticated_via_token: true,
-                ..
-            }
-        )
-    }
-
     /// Whether the broker may serve `api_key` in the current auth state.
     /// - `Anonymous` / `Negotiating`: allow the pre-auth allowlist
     ///   (ApiVersions=18, SaslHandshake=17, SaslAuthenticate=36).
@@ -214,16 +197,10 @@ pub fn is_pre_auth_allowed(api_key: ApiKeyCode) -> bool {
     )
 }
 
-/// `SASL_AUTHENTICATION_FAILED` (58): the broker rejected the credential
-/// check. The caller closes the connection after it writes the response.
-/// This code is not yet in `crate::codes`, because this is its only use site.
-const SASL_AUTHENTICATION_FAILED: i16 = 58;
-
-/// RFC 4752 server "maximum message size" that the broker advertises in the
-/// auth-only security-layer offer. 64 KiB matches the JVM broker's default
-/// SASL receive buffer. With confidentiality and integrity disabled, the value
-/// only bounds the size of the empty wrapped payloads, so the exact value does
-/// not matter.
+/// RFC 4752 server "maximum message size" advertised in the auth-only
+/// security-layer offer. 64 KiB matches the JVM broker's default SASL receive
+/// buffer; with confidentiality/integrity disabled it only bounds the size of
+/// the (empty) wrapped payloads, so the exact value is not load-bearing.
 const GSSAPI_MAX_RECV: ByteSize = kibibytes(64);
 
 /// Handles `SaslHandshake` (`api_key` 17).

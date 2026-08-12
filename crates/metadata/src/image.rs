@@ -13,9 +13,10 @@ use crate::{
     error::MetadataError,
     records::{
         BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
-        DelegationTokenRecord, FeatureLevelRecord, FeaturesEpochRecord, KRaftVersionRecord,
-        MetadataRecord, NodeId, PartitionOffsetAdvanceRecord, PartitionRecord, QuotaEntity,
-        ScramCredentialRecord, TopicConfigRecord, TopicRecord, VotersRecord,
+        ControllerRegistrationRecord, DEFAULT_BROKER_CONFIG_NODE_ID, DelegationTokenRecord,
+        FeatureLevelRecord, FeaturesEpochRecord, GroupConfigRecord, KRaftVersionRecord,
+        MetadataRecord, NodeId, PartitionOffsetAdvanceRecord, PartitionRecord, ProducerIdsRecord,
+        QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord, VotersRecord,
     },
 };
 
@@ -72,6 +73,7 @@ fn record_variant(rec: &MetadataRecord) -> &'static str {
         MetadataRecord::V1DeleteAccessControlEntry(_) => "V1DeleteAccessControlEntry",
         MetadataRecord::V1BrokerConfig(_) => "V1BrokerConfig",
         MetadataRecord::V1ClientQuota(_) => "V1ClientQuota",
+        MetadataRecord::V1ProducerIds(_) => "V1ProducerIds",
         MetadataRecord::V1DelegationToken(_) => "V1DelegationToken",
         MetadataRecord::V1DeleteDelegationToken(_) => "V1DeleteDelegationToken",
         MetadataRecord::V1UnregisterBroker(_) => "V1UnregisterBroker",
@@ -82,6 +84,8 @@ fn record_variant(rec: &MetadataRecord) -> &'static str {
         MetadataRecord::V1FeaturesEpoch(_) => "V1FeaturesEpoch",
         MetadataRecord::V1PartitionDirAssignment(_) => "V1PartitionDirAssignment",
         MetadataRecord::V1PartitionOffsetAdvance(_) => "V1PartitionOffsetAdvance",
+        MetadataRecord::V1GroupConfig(_) => "V1GroupConfig",
+        MetadataRecord::V1ControllerRegistration(_) => "V1ControllerRegistration",
     }
 }
 
@@ -103,13 +107,16 @@ pub struct MetadataImage {
     partitions: HashMap<String, BTreeMap<i32, PartitionRecord>>,
     partition_next_offsets: HashMap<(String, i32), i64>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
+    controllers: HashMap<NodeId, ControllerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
     broker_configs: HashMap<NodeId, BTreeMap<String, String>>,
     client_metrics_configs: HashMap<String, BTreeMap<String, String>>,
+    group_configs: HashMap<String, BTreeMap<String, String>>,
     scram_credentials: HashMap<(String, SaslMechanism), ScramCredential>,
     acls_literal: HashMap<(ResourceType, String), Vec<AclEntry>>,
     acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
     client_quotas: HashMap<EntityKey, BTreeMap<String, f64>>,
+    producer_ids: Option<ProducerIdsRecord>,
     delegation_tokens: HashMap<String, DelegationToken>,
     kraft_version: u16,
     voters: crate::voters::VoterSet,
@@ -121,11 +128,12 @@ pub struct MetadataImage {
     features_epoch: i64,
 }
 
-/// Selects which KIP-73 throttle rate config key to read.
+/// Selects which broker byte-rate config key to read.
 #[derive(Debug, Clone, Copy)]
 pub enum ThrottleKind {
     Leader,
     Follower,
+    AlterLogDirs,
 }
 
 impl MetadataImage {
@@ -138,13 +146,16 @@ impl MetadataImage {
             partitions: HashMap::new(),
             partition_next_offsets: HashMap::new(),
             brokers: HashMap::new(),
+            controllers: HashMap::new(),
             topic_configs: HashMap::new(),
             broker_configs: HashMap::new(),
             client_metrics_configs: HashMap::new(),
+            group_configs: HashMap::new(),
             scram_credentials: HashMap::new(),
             acls_literal: HashMap::new(),
             acls_prefixed: HashMap::new(),
             client_quotas: HashMap::new(),
+            producer_ids: None,
             delegation_tokens: HashMap::new(),
             kraft_version: 0,
             voters: crate::voters::VoterSet::default(),
@@ -260,6 +271,13 @@ impl MetadataImage {
         self.broker_configs.get(&node_id)
     }
 
+    /// Cluster-wide dynamic broker-config defaults, or `None` when no default
+    /// broker config has been applied.
+    #[must_use]
+    pub fn default_broker_config(&self) -> Option<&BTreeMap<String, String>> {
+        self.broker_config(DEFAULT_BROKER_CONFIG_NODE_ID)
+    }
+
     /// Returns the KIP-73 throttle rate for `node_id` and `kind`.
     /// Returns `None` if the config key is absent, unparseable, or negative.
     /// `-1` is Kafka's convention for "disabled" or "unlimited".
@@ -268,8 +286,12 @@ impl MetadataImage {
         let key = match kind {
             ThrottleKind::Leader => "leader.replication.throttled.rate",
             ThrottleKind::Follower => "follower.replication.throttled.rate",
+            ThrottleKind::AlterLogDirs => "replica.alter.log.dirs.io.max.bytes.per.second",
         };
-        let raw = self.broker_config(node_id)?.get(key)?;
+        let raw = self
+            .broker_config(node_id)
+            .and_then(|configs| configs.get(key))
+            .or_else(|| self.default_broker_config()?.get(key))?;
         let v: i64 = raw.parse().ok()?;
         (v >= 0).then(|| ByteRate::from_bytes_per_sec(v))
     }
@@ -285,6 +307,17 @@ impl MetadataImage {
         &self,
     ) -> impl Iterator<Item = (&String, &BTreeMap<String, String>)> {
         self.client_metrics_configs.iter()
+    }
+
+    /// Dynamic KIP-1071 overrides for one GROUP config resource.
+    #[must_use]
+    pub fn group_config(&self, group_id: &str) -> Option<&BTreeMap<String, String>> {
+        self.group_configs.get(group_id)
+    }
+
+    /// All configured GROUP resources.
+    pub fn group_configs(&self) -> impl Iterator<Item = (&String, &BTreeMap<String, String>)> {
+        self.group_configs.iter()
     }
 
     #[must_use]
@@ -329,6 +362,11 @@ impl MetadataImage {
         self.brokers.get(&node_id)
     }
 
+    #[must_use]
+    pub fn controller(&self, node_id: NodeId) -> Option<&ControllerRegistrationRecord> {
+        self.controllers.get(&node_id)
+    }
+
     /// KIP-903: the broker epoch (registration commit offset) for `node_id`,
     /// or `None` if the broker is not registered in this image.
     #[must_use]
@@ -336,8 +374,18 @@ impl MetadataImage {
         self.brokers.get(&node_id).map(|b| b.broker_epoch)
     }
 
+    /// First producer ID not covered by any committed allocation block.
+    #[must_use]
+    pub fn next_producer_id(&self) -> i64 {
+        self.producer_ids.as_ref().map_or(0, |r| r.next_producer_id)
+    }
+
     pub fn brokers(&self) -> impl Iterator<Item = &BrokerRegistrationRecord> {
         self.brokers.values()
+    }
+
+    pub fn controllers(&self) -> impl Iterator<Item = &ControllerRegistrationRecord> {
+        self.controllers.values()
     }
 
     #[must_use]
@@ -492,6 +540,67 @@ impl MetadataImage {
         floor
     }
 
+    /// Metadata removals needed to materialize this image at `target`.
+    /// An empty result means the downgrade is lossless. The controller emits
+    /// these records before the trailing metadata.version feature record only
+    /// for an explicitly unsafe downgrade.
+    #[must_use]
+    pub fn metadata_version_downgrade_records(&self, target: i16) -> Vec<MetadataRecord> {
+        use crate::{
+            metadata_version::{
+                DELEGATION_TOKEN_MIN_LEVEL, DIRECTORY_ASSIGNMENT_MIN_LEVEL, SCRAM_MIN_LEVEL,
+            },
+            records::{DeleteDelegationTokenRecord, DeleteScramCredentialRecord},
+        };
+
+        let mut records = Vec::new();
+        if target < SCRAM_MIN_LEVEL {
+            records.extend(self.scram_credentials.keys().map(|(user, mechanism)| {
+                MetadataRecord::V1DeleteScramCredential(DeleteScramCredentialRecord {
+                    user: user.clone(),
+                    mechanism: *mechanism,
+                })
+            }));
+        }
+        if target < DELEGATION_TOKEN_MIN_LEVEL {
+            records.extend(self.delegation_tokens.keys().map(|token_id| {
+                MetadataRecord::V1DeleteDelegationToken(DeleteDelegationTokenRecord {
+                    token_id: token_id.clone(),
+                })
+            }));
+        }
+        if target < DIRECTORY_ASSIGNMENT_MIN_LEVEL {
+            records.extend(self.brokers.values().filter_map(|broker| {
+                if broker.log_dirs.is_empty() {
+                    return None;
+                }
+                let mut projected = broker.clone();
+                projected.log_dirs.clear();
+                Some(MetadataRecord::V1BrokerRegistration(projected))
+            }));
+            for partition in self.all_partitions() {
+                records.extend(
+                    partition
+                        .replicas
+                        .iter()
+                        .zip(&partition.directories)
+                        .filter(|(_, directory)| !directory.is_nil())
+                        .map(|(replica, _)| {
+                            MetadataRecord::V1PartitionDirAssignment(
+                                crate::records::PartitionDirAssignmentRecord {
+                                    topic: partition.topic.clone(),
+                                    partition: partition.partition,
+                                    replica: *replica,
+                                    directory: uuid::Uuid::nil(),
+                                },
+                            )
+                        }),
+                );
+            }
+        }
+        records
+    }
+
     /// Apply one record. Returns the previous record, for `V1Topic` and
     /// `V1BrokerRegistration`, so the caller can observe overwrite cases.
     /// The method is infallible. The controller pre-validates against the
@@ -545,6 +654,9 @@ impl MetadataImage {
             }
             MetadataRecord::V1BrokerRegistration(b) => {
                 self.brokers.insert(b.node_id, b.clone());
+            }
+            MetadataRecord::V1ControllerRegistration(c) => {
+                self.controllers.insert(c.node_id, c.clone());
             }
             MetadataRecord::V1DeleteTopic(d) => {
                 if let Some(prev) = self.topics.get(&d.name) {
@@ -631,6 +743,17 @@ impl MetadataImage {
                     }
                 }
             }
+            MetadataRecord::V1ProducerIds(rec) => {
+                if rec.next_producer_id > self.next_producer_id() {
+                    self.producer_ids = Some(*rec);
+                } else {
+                    tracing::error!(
+                        current = self.next_producer_id(),
+                        proposed = rec.next_producer_id,
+                        "ignoring non-monotonic producer ID allocation record"
+                    );
+                }
+            }
             // Replacement semantics (KIP-48) — same
             // `token_id` overwrites the prior entry (used by Create
             // and Renew). Tombstone removes by `token_id`.
@@ -667,6 +790,14 @@ impl MetadataImage {
                 } else {
                     self.client_metrics_configs
                         .insert(c.name.clone(), c.configs.clone());
+                }
+            }
+            MetadataRecord::V1GroupConfig(c) => {
+                if c.configs.is_empty() {
+                    self.group_configs.remove(&c.group_id);
+                } else {
+                    self.group_configs
+                        .insert(c.group_id.clone(), c.configs.clone());
                 }
             }
             // Snapshot-only: restore the epoch verbatim rather than bumping.
@@ -732,6 +863,9 @@ impl MetadataImage {
         // Brokers before their configs.
         for b in self.brokers.values() {
             out.push(MetadataRecord::V1BrokerRegistration(b.clone()));
+        }
+        for controller in self.controllers.values() {
+            out.push(MetadataRecord::V1ControllerRegistration(controller.clone()));
         }
         for (node_id, configs) in &self.broker_configs {
             for (config_name, config_value) in configs {
@@ -799,6 +933,10 @@ impl MetadataImage {
             }
         }
 
+        if let Some(record) = self.producer_ids {
+            out.push(MetadataRecord::V1ProducerIds(record));
+        }
+
         // Delegation tokens.
         for tok in self.delegation_tokens.values() {
             out.push(MetadataRecord::V1DelegationToken(DelegationTokenRecord {
@@ -820,6 +958,14 @@ impl MetadataImage {
                     configs: configs.clone(),
                 },
             ));
+        }
+
+        // KIP-1071 dynamic GROUP resources.
+        for (group_id, configs) in &self.group_configs {
+            out.push(MetadataRecord::V1GroupConfig(GroupConfigRecord {
+                group_id: group_id.clone(),
+                configs: configs.clone(),
+            }));
         }
 
         // KIP-584 finalized features: one record per live feature, in the
@@ -952,6 +1098,7 @@ impl MetadataImage {
                 Ok(())
             }
             MetadataRecord::V1BrokerRegistration(_)
+            | MetadataRecord::V1ControllerRegistration(_)
             | MetadataRecord::V1ScramCredential(_)
             | MetadataRecord::V1DeleteScramCredential(_)
             | MetadataRecord::V1AccessControlEntry(_)
@@ -982,6 +1129,9 @@ impl MetadataImage {
             // name and config keys before submission; image-level apply
             // is an idempotent map upsert (or removal on empty map).
             | MetadataRecord::V1ClientMetricsConfig(_)
+            // KIP-1071: GROUP config keys and values are validated by the
+            // IncrementalAlterConfigs handler before this whole-map upsert.
+            | MetadataRecord::V1GroupConfig(_)
             // Snapshot-only epoch carrier: only ever produced by `to_records`
             // and replayed on snapshot install, never submitted as a change.
             // Validated permissively for match-exhaustiveness.
@@ -994,6 +1144,19 @@ impl MetadataImage {
             // Diskless offset-sequencer delta. The handler supplies a positive
             // count; image-level apply is an unconditional increment.
             | MetadataRecord::V1PartitionOffsetAdvance(_) => Ok(()),
+            MetadataRecord::V1ProducerIds(record) => {
+                if record.next_producer_id <= self.next_producer_id() {
+                    return Err(MetadataError::InvalidRecord(
+                        "next producer ID must advance monotonically",
+                    ));
+                }
+                if self.broker_epoch(record.broker_id) != Some(record.broker_epoch) {
+                    return Err(MetadataError::InvalidRecord(
+                        "producer ID allocation has a stale broker epoch",
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1157,12 +1320,14 @@ mod tests {
                 host: "h1".into(),
                 port: 9092,
                 rack: Some("r1".into()),
+                log_dirs: vec![],
                 endpoints: vec![crate::records::BrokerEndpoint {
                     name: "EXTERNAL".into(),
                     host: "ext".into(),
                     port: 9093,
                     protocol: crabka_security::ListenerProtocol::SaslSsl,
                 }],
+                features: std::collections::BTreeMap::new(),
             }),
             MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                 node_id: NodeId(2),
@@ -1171,7 +1336,9 @@ mod tests {
                 host: "h2".into(),
                 port: 9092,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
             }),
             MetadataRecord::V1UnregisterBroker(crate::records::UnregisterBrokerRecord {
                 node_id: NodeId(2),
@@ -1710,7 +1877,9 @@ mod tests {
             host: "h".into(),
             port: 9092,
             rack: None,
+            log_dirs: vec![],
             endpoints: vec![],
+            features: std::collections::BTreeMap::new(),
         });
         m.apply(&b);
         m.apply(&b);
@@ -2294,6 +2463,16 @@ mod tests {
         assert2::assert!(
             img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader) == Some(bytes_per_sec(2048))
         );
+
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: NodeId(1),
+            config_name: "replica.alter.log.dirs.io.max.bytes.per.second".into(),
+            config_value: Some("4096".into()),
+        }));
+        assert2::assert!(
+            img.broker_throttle_rate(NodeId(1), ThrottleKind::AlterLogDirs)
+                == Some(bytes_per_sec(4096))
+        );
     }
 
     /// The config value is a `String` holding Kafka's `int64` quota, and the
@@ -2327,6 +2506,43 @@ mod tests {
         }));
         assert2::assert!(
             img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn broker_throttle_rate_uses_cluster_default() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: DEFAULT_BROKER_CONFIG_NODE_ID,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("2048".into()),
+        }));
+
+        assert2::assert!(
+            img.default_broker_config()
+                .and_then(|configs| configs.get("leader.replication.throttled.rate"))
+                .map(String::as_str)
+                == Some("2048")
+        );
+        assert2::assert!(
+            img.broker_throttle_rate(NodeId(7), ThrottleKind::Leader) == Some(bytes_per_sec(2048))
+        );
+    }
+
+    #[test]
+    fn per_broker_disabled_rate_overrides_cluster_default() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        for (node_id, value) in [(DEFAULT_BROKER_CONFIG_NODE_ID, "2048"), (NodeId(7), "-1")] {
+            img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id,
+                config_name: "leader.replication.throttled.rate".into(),
+                config_value: Some(value.into()),
+            }));
+        }
+
+        assert2::assert!(
+            img.broker_throttle_rate(NodeId(7), ThrottleKind::Leader)
                 .is_none()
         );
     }
@@ -2649,6 +2865,54 @@ mod tests {
     }
 
     #[test]
+    fn group_config_apply_snapshot_and_clear() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        let record = MetadataRecord::V1GroupConfig(GroupConfigRecord {
+            group_id: "streams-app".into(),
+            configs: BTreeMap::from([("streams.num.standby.replicas".into(), "1".into())]),
+        });
+        image.apply(&record);
+        assert2::assert!(
+            image
+                .group_config("streams-app")
+                .and_then(|configs| configs.get("streams.num.standby.replicas"))
+                .map(String::as_str)
+                == Some("1")
+        );
+        assert2::assert!(image.to_records().iter().any(|item| item == &record));
+
+        image.apply(&MetadataRecord::V1GroupConfig(GroupConfigRecord {
+            group_id: "streams-app".into(),
+            configs: BTreeMap::new(),
+        }));
+        assert2::assert!(image.group_config("streams-app").is_none());
+    }
+
+    #[test]
+    fn producer_id_boundary_is_monotonic_and_survives_snapshot() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1ProducerIds(ProducerIdsRecord {
+            broker_id: NodeId(1),
+            broker_epoch: 4,
+            next_producer_id: 1_000,
+        }));
+        image.apply(&MetadataRecord::V1ProducerIds(ProducerIdsRecord {
+            broker_id: NodeId(2),
+            broker_epoch: 8,
+            next_producer_id: 2_000,
+        }));
+        image.apply(&MetadataRecord::V1ProducerIds(ProducerIdsRecord {
+            broker_id: NodeId(1),
+            broker_epoch: 4,
+            next_producer_id: 1_000,
+        }));
+        assert2::assert!(image.next_producer_id() == 2_000);
+
+        let restored = MetadataImage::from_records(Uuid::nil(), &image.to_records());
+        assert2::assert!(restored.next_producer_id() == 2_000);
+    }
+
+    #[test]
     fn min_required_metadata_version_rises_with_scram_and_tokens() {
         use crabka_security::{KafkaPrincipal, SaslMechanism};
 
@@ -2680,6 +2944,123 @@ mod tests {
             },
         ));
         assert2::assert!(m.min_required_metadata_version() == DELEGATION_TOKEN_MIN_LEVEL);
+    }
+
+    #[test]
+    fn downgrade_projection_removes_scram_and_tokens_below_their_record_gates() {
+        use crabka_security::{KafkaPrincipal, SaslMechanism};
+
+        use crate::{
+            metadata_version::{METADATA_VERSION_MIN, SCRAM_MIN_LEVEL},
+            records::{
+                DelegationTokenRecord, DeleteDelegationTokenRecord, DeleteScramCredentialRecord,
+                ScramCredentialRecord,
+            },
+        };
+
+        let mut image = img();
+        image.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: SaslMechanism::ScramSha512,
+            salt: vec![1; 16],
+            stored_key: vec![2; 64],
+            server_key: vec![3; 64],
+            iterations: 4096,
+        }));
+        image.apply(&MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: "token-1".into(),
+            owner: KafkaPrincipal {
+                principal_type: "User".into(),
+                name: "alice".into(),
+            },
+            hmac: vec![4; 32],
+            issue_timestamp_ms: 1,
+            expiry_timestamp_ms: 5,
+            max_timestamp_ms: 10,
+            renewers: vec![],
+        }));
+
+        let cleanup = image.metadata_version_downgrade_records(SCRAM_MIN_LEVEL - 1);
+        assert2::assert!(
+            cleanup
+                == vec![
+                    MetadataRecord::V1DeleteScramCredential(DeleteScramCredentialRecord {
+                        user: "alice".into(),
+                        mechanism: SaslMechanism::ScramSha512,
+                    }),
+                    MetadataRecord::V1DeleteDelegationToken(DeleteDelegationTokenRecord {
+                        token_id: "token-1".into(),
+                    }),
+                ]
+        );
+
+        for record in &cleanup {
+            image.apply(record);
+        }
+        assert2::assert!(image.scram_credentials_for_user("alice").is_empty());
+        assert2::assert!(image.all_delegation_tokens().next().is_none());
+        assert2::assert!(image.min_required_metadata_version() == METADATA_VERSION_MIN);
+    }
+
+    #[test]
+    fn downgrade_projection_clears_directory_fields_below_kip_858() {
+        use crate::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL;
+
+        let directory = Uuid::from_u128(0xD1);
+        let mut image = img();
+        let broker = BrokerRegistrationRecord {
+            node_id: NodeId(1),
+            broker_epoch: 7,
+            incarnation_id: Uuid::from_u128(1),
+            host: "broker-1".into(),
+            port: 9092,
+            rack: None,
+            endpoints: vec![],
+            log_dirs: vec![directory],
+            features: std::collections::BTreeMap::new(),
+        };
+        image.apply(&MetadataRecord::V1BrokerRegistration(broker.clone()));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "orders".into(),
+            partition: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2)],
+            isr: vec![NodeId(1), NodeId(2)],
+            directories: vec![directory, Uuid::nil()],
+            ..Default::default()
+        }));
+
+        assert2::assert!(
+            image
+                .metadata_version_downgrade_records(DIRECTORY_ASSIGNMENT_MIN_LEVEL)
+                .is_empty()
+        );
+        let cleanup = image.metadata_version_downgrade_records(DIRECTORY_ASSIGNMENT_MIN_LEVEL - 1);
+        let mut projected_broker = broker;
+        projected_broker.log_dirs.clear();
+        assert2::assert!(
+            cleanup
+                == vec![
+                    MetadataRecord::V1BrokerRegistration(projected_broker),
+                    MetadataRecord::V1PartitionDirAssignment(
+                        crate::records::PartitionDirAssignmentRecord {
+                            topic: "orders".into(),
+                            partition: 0,
+                            replica: NodeId(1),
+                            directory: Uuid::nil(),
+                        },
+                    ),
+                ]
+        );
+
+        for record in &cleanup {
+            image.apply(record);
+        }
+        assert2::assert!(
+            image.partition("orders", 0).expect("partition").directories
+                == vec![Uuid::nil(), Uuid::nil()]
+        );
+        assert2::assert!(image.broker(NodeId(1)).expect("broker").log_dirs.is_empty());
     }
 
     #[test]
@@ -2719,7 +3100,9 @@ mod tests {
                 host: "h".into(),
                 port: 9092,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
             },
         ));
         assert2::assert!(image.broker_epoch(NodeId(5)) == Some(99));
@@ -2747,7 +3130,9 @@ mod tests {
                 host: "h".into(),
                 port: 9092,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
             },
         ));
         let b = image

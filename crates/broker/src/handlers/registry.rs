@@ -179,10 +179,6 @@ impl DispatchEntry {
         }
     }
 
-    pub(crate) fn api_key(self) -> ApiKey {
-        self.api_key
-    }
-
     pub(crate) fn kind(self) -> DispatchKind {
         self.kind
     }
@@ -195,6 +191,7 @@ impl DispatchEntry {
         self.flexible_min != i16::MAX && version >= self.flexible_min
     }
 
+    #[cfg(test)]
     pub(crate) fn is_plain(self) -> bool {
         matches!(self.kind, DispatchKind::Plain(_))
     }
@@ -213,6 +210,7 @@ impl DispatchRegistry {
         self.table.get(&api_key).copied()
     }
 
+    #[cfg(test)]
     pub(crate) fn get_plain(&self, api_key: ApiKeyCode) -> Option<PlainHandler> {
         match self.get(api_key)?.kind {
             DispatchKind::Plain(handler) => Some(handler),
@@ -220,6 +218,7 @@ impl DispatchRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn registered_api_keys(&self) -> impl Iterator<Item = ApiKeyCode> + '_ {
         self.table.keys().copied()
     }
@@ -250,17 +249,16 @@ macro_rules! plain_dispatches {
 
 plain_dispatches!(register_plain_dispatches;
     (ApiVersions, api_versions_request, crate::handlers::api_versions::handle),
+    (AllocateProducerIds, allocate_producer_ids_request, crate::handlers::allocate_producer_ids::handle),
     (AddOffsetsToTxn, add_offsets_to_txn_request, crate::txn::handlers::add_offset_commits_to_txn::handle),
     (WriteTxnMarkers, write_txn_markers_request, crate::txn::handlers::write_txn_markers::handle),
     (FetchSnapshot, fetch_snapshot_request, crate::handlers::fetch_snapshot::handle),
-    (ConsumerGroupDescribe, consumer_group_describe_request, crate::handlers::consumer_group_describe::handle),
     (AssignReplicasToDirs, assign_replicas_to_dirs_request, crate::handlers::assign_replicas_to_dirs::handle),
     (InitializeShareGroupState, initialize_share_group_state_request, crate::share_coordinator::handlers::initialize::handle),
     (ReadShareGroupState, read_share_group_state_request, crate::share_coordinator::handlers::read::handle),
     (WriteShareGroupState, write_share_group_state_request, crate::share_coordinator::handlers::write::handle),
     (DeleteShareGroupState, delete_share_group_state_request, crate::share_coordinator::handlers::delete::handle),
     (ReadShareGroupStateSummary, read_share_group_state_summary_request, crate::share_coordinator::handlers::read_summary::handle),
-    (StreamsGroupDescribe, streams_group_describe_request, crate::handlers::streams_group_describe::handle),
 );
 
 macro_rules! context_adapter {
@@ -702,6 +700,8 @@ fn describe_delegation_token_adapter<'a>(
 }
 
 context_dispatches!(register_context_dispatches;
+    (metadata_adapter, Metadata, metadata_request, crate::handlers::metadata::handle),
+    (describe_cluster_adapter, DescribeCluster, describe_cluster_request, crate::handlers::describe_cluster::handle),
     (create_topics_adapter, CreateTopics, create_topics_request, crate::handlers::create_topics::handle),
     (delete_topics_adapter, DeleteTopics, delete_topics_request, crate::handlers::delete_topics::handle),
     (alter_configs_adapter, AlterConfigs, alter_configs_request, crate::handlers::alter_configs::handle),
@@ -730,12 +730,16 @@ context_dispatches!(register_context_dispatches;
     (update_raft_voter_adapter, UpdateRaftVoter, update_raft_voter_request, crate::handlers::update_raft_voter::handle),
     (alter_partition_adapter, AlterPartition, alter_partition_request, crate::handlers::alter_partition::handle),
     (broker_heartbeat_adapter, BrokerHeartbeat, broker_heartbeat_request, crate::handlers::broker_heartbeat::handle),
+    (broker_registration_adapter, BrokerRegistration, broker_registration_request, crate::handlers::broker_registration::handle),
+    (controller_registration_adapter, ControllerRegistration, controller_registration_request, crate::handlers::controller_registration::handle),
     (heartbeat_adapter, Heartbeat, heartbeat_request, crate::handlers::heartbeat::handle),
     (sync_group_adapter, SyncGroup, sync_group_request, crate::handlers::sync_group::handle),
     (leave_group_adapter, LeaveGroup, leave_group_request, crate::handlers::leave_group::handle),
     (consumer_group_heartbeat_adapter, ConsumerGroupHeartbeat, consumer_group_heartbeat_request, crate::handlers::consumer_group_heartbeat::handle),
     (share_group_heartbeat_adapter, ShareGroupHeartbeat, share_group_heartbeat_request, crate::handlers::share_group_heartbeat::handle),
     (streams_group_heartbeat_adapter, StreamsGroupHeartbeat, streams_group_heartbeat_request, crate::handlers::streams_group_heartbeat::handle),
+    (consumer_group_describe_adapter, ConsumerGroupDescribe, consumer_group_describe_request, crate::handlers::consumer_group_describe::handle),
+    (streams_group_describe_adapter, StreamsGroupDescribe, streams_group_describe_request, crate::handlers::streams_group_describe::handle),
     (find_coordinator_adapter, FindCoordinator, find_coordinator_request, crate::handlers::find_coordinator::handle),
     (list_offsets_adapter, ListOffsets, list_offsets_request, crate::handlers::list_offsets::handle),
     (describe_log_dirs_adapter, DescribeLogDirs, describe_log_dirs_request, crate::handlers::describe_log_dirs::handle),
@@ -746,8 +750,6 @@ context_dispatches!(register_context_dispatches;
 );
 
 sync_context_dispatches!(register_sync_context_dispatches;
-    (metadata_adapter, Metadata, metadata_request, crate::handlers::metadata::handle),
-    (describe_cluster_adapter, DescribeCluster, describe_cluster_request, crate::handlers::describe_cluster::handle),
     (describe_topic_partitions_adapter, DescribeTopicPartitions, describe_topic_partitions_request, crate::handlers::describe_topic_partitions::handle),
     (list_config_resources_adapter, ListConfigResources, list_config_resources_request, crate::handlers::list_config_resources::handle),
     (describe_quorum_adapter, DescribeQuorum, describe_quorum_request, crate::handlers::describe_quorum::handle),
@@ -859,7 +861,7 @@ mod tests {
         assert!(api_versions.body_flexible(3));
         assert!(!api_versions.body_flexible(2));
 
-        for key in [25, 27, 59, 69, 73, 83, 84, 85, 86, 87, 89] {
+        for key in [25, 27, 59, 73, 83, 84, 85, 86, 87] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
@@ -908,11 +910,13 @@ mod tests {
             ApiKey::BrokerHeartbeat,
             ApiKey::GetReplicaLogInfo,
             ApiKey::ConsumerGroupHeartbeat,
+            ApiKey::ConsumerGroupDescribe,
             ApiKey::ShareGroupDescribe,
             ApiKey::ShareFetch,
             ApiKey::ShareAcknowledge,
             ApiKey::ShareGroupHeartbeat,
             ApiKey::StreamsGroupHeartbeat,
+            ApiKey::StreamsGroupDescribe,
             ApiKey::DescribeShareGroupOffsets,
             ApiKey::AlterShareGroupOffsets,
             ApiKey::DeleteShareGroupOffsets,

@@ -30,9 +30,11 @@ pub struct KafkaSpec {
     /// `KRaft` metadata version, the runtime analog of
     /// `inter.broker.protocol.version`. When unset, it tracks the
     /// `major.minor` of `kafkaVersion`. When set, it pins the metadata version
-    /// for the safe two-step upgrade. The operator validates it against
-    /// `kafkaVersion` and the finalized `status.metadataVersion`. An invalid
-    /// value surfaces `KafkaVersionValid=False` and blocks the roll.
+    /// for a two-step upgrade or an online downgrade. The operator validates
+    /// it against `kafkaVersion`; changes on an existing cluster are finalized
+    /// through `UpdateFeatures`, with safe-downgrade semantics for a lower
+    /// target. Rejections surface `KafkaVersionValid=False` and leave
+    /// `status.metadataVersion` unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_version: Option<String>,
     /// Opaque broker properties, in `server.properties`-style key and value
@@ -543,6 +545,10 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] client_metrics_otlp_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] coordinator_actor_mailbox_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] diskless_wal_local_replica_count: usize => refined_type::rule::GreaterUsize<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] diskless_wal_flush_interval: Time => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] diskless_wal_flush_max_size: ByteSize => ();
+    refined #[schemars(range(min = 0))] diskless_wal_trim_safety_lag: i64 => refined_type::rule::GreaterEqualI64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] diskless_wal_index_projection_timeout: Time => ();
     refined #[schemars(range(min = 1))] unclean_recovery_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] share_recovery_read_max: ByteSize => ();
     refined #[schemars(range(min = 1))] share_session_cache_max_when_unlimited: usize => refined_type::rule::GreaterUsize<0>;
@@ -603,12 +609,15 @@ define_broker_tuning! {
     plain share_group_enable: bool => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_session_timeout: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_heartbeat_interval: Time => ();
+    refined #[schemars(range(min = 1))] share_group_max_size: usize => refined_type::rule::GreaterUsize<0>;
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_record_lock_duration: Time => ();
     refined #[schemars(range(min = 1))] share_group_max_delivery_attempts: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 1))] share_group_max_inflight_records: i32 => refined_type::rule::GreaterI32<0>;
     string share_group_isolation_level: String => ();
+    plain streams_group_enable: bool => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_session_timeout: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_heartbeat_interval: Time => ();
+    refined #[schemars(range(min = 1))] streams_group_max_size: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] streams_internal_topic_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 0))] streams_group_num_standby_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
     refined #[schemars(range(min = 0))] streams_group_num_warmup_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
@@ -1648,9 +1657,8 @@ pub struct KafkaStatus {
     /// Echo of `spec.kafkaVersion`, for observability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_version: Option<String>,
-    /// The operator-finalized metadata version. It advances only when the
-    /// version validation passes. It drives the downgrade-window check on the
-    /// next reconcile.
+    /// The operator-finalized metadata version. On an existing cluster it
+    /// advances only after `UpdateFeatures` accepts the requested level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_version: Option<String>,
 }
@@ -1754,7 +1762,11 @@ mod tests {
     #[test]
     fn broker_tuning_diskless_wal_replica_count_reaches_broker_config() {
         let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
-            "disklessWalLocalReplicaCount": 5
+            "disklessWalLocalReplicaCount": 5,
+            "disklessWalFlushInterval": "125ms",
+            "disklessWalFlushMaxSize": "4MiB",
+            "disklessWalTrimSafetyLag": 0,
+            "disklessWalIndexProjectionTimeout": "3s"
         }))
         .expect("deserialize diskless WAL policy");
         tuning.validate().expect("validate diskless WAL policy");
@@ -1764,12 +1776,44 @@ mod tests {
         file.apply_to(&mut broker)
             .expect("apply operator TOML to broker");
         assert!(broker.diskless_wal_local_replica_count == 5);
+        assert!(broker.diskless_wal_flush_interval == crabka_units::millis(125));
+        assert!(broker.diskless_wal_flush_max_size == crabka_units::mebibytes(4));
+        assert!(broker.diskless_wal_trim_safety_lag == 0);
+        assert!(broker.diskless_wal_index_projection_timeout == crabka_units::secs(3));
 
         let invalid: BrokerTuning = serde_json::from_value(serde_json::json!({
             "disklessWalLocalReplicaCount": 0
         }))
         .expect("deserialize invalid diskless WAL policy");
         assert!(invalid.validate().is_err());
+
+        let invalid: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "disklessWalTrimSafetyLag": -1
+        }))
+        .expect("deserialize invalid diskless WAL trim policy");
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn broker_tuning_group_member_limits_reach_broker_config() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "shareGroupMaxSize": 17,
+            "streamsGroupEnable": false,
+            "streamsGroupMaxSize": 19
+        }))
+        .expect("deserialize group limits");
+        tuning.validate().expect("validate group limits");
+        let rendered = tuning.render_runtime_toml();
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+
+        assert!(broker.share_group.max_size == 17);
+        assert!(!broker.streams_group.enable);
+        assert!(broker.streams_group.max_size == 19);
     }
 
     #[test]

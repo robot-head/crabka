@@ -24,6 +24,14 @@ pub enum GatewayError {
     Codec(#[from] crate::codec::CodecError),
     #[error("not authorized: {0}")]
     Unauthorized(String),
+    #[error(
+        "too many outstanding unacknowledged records for {topic}-{partition}; acknowledgement at offset {offset} exceeds the pending cap"
+    )]
+    TooManyUnacked {
+        topic: String,
+        partition: i32,
+        offset: i64,
+    },
     #[error("{0}")]
     Other(String),
 }

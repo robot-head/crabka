@@ -1,6 +1,6 @@
 # Slices 20a + 20b: KRaft Role Separation & Per-Broker Metadata-Partition Assignment — Design
 
-**Status:** Draft 2026-05-28.
+**Status:** Implemented 2026-08-11.
 
 **Goal:** Reach Strimzi/Kafka parity for KRaft role separation. Support dedicated
 **controller-only** and **broker-only** `KafkaNodePool`s (and multi-replica pools),
@@ -13,6 +13,15 @@ broker-side observer-fetch subsystem that makes broker-only nodes possible.
 
 This document supersedes the deferral rows for slices 20a/20b in
 `2026-05-17-crabka-operator-kafkanodepool-20-design.md`.
+
+The shipped operator derives every node id and directory id from the pool ordinal.
+Exactly one deterministic controller is formatted as the initial voter; later
+controllers use the KIP-853 dynamic join path. Controller processes deliberately omit
+the static voter list so an empty controller log cannot accidentally bootstrap a
+second quorum. Broker-only observers receive the complete controller endpoint list.
+Separated roles are passed as the broker process-role environment override, while a
+combined pool keeps the broker's existing default for backwards-compatible
+single-replica behavior.
 
 ---
 
@@ -229,18 +238,23 @@ the result into `voters` (role ⊇ Controller) and `observers` (role == [Broker]
 
 ### 5.3 TOML rendering (`crates/operator/src/controller/listeners.rs`, `common.rs`)
 
-Per-node TOML gains:
-- `process.roles`,
-- `controller.quorum.voters` = the controller nodes' `(node_id, controller_fqdn:9093)`,
-- bootstrap mode: lowest-node-id controller → `Bootstrap`; other controllers → `Join`;
-  brokers → not a member (observer; no bootstrap mode needed). Restarts → `Rejoin` is
-  decided broker-side from on-disk raft log presence (existing design).
+Per-node configuration gains:
+- the effective `process.roles` (injected through the broker CLI environment override),
+- `controller.quorum.voters` on broker-only observers = the controller nodes'
+  `(node_id, controller_fqdn:9093)`,
+- `bootstrap_servers` on every node for discovery,
+- bootstrap mode: lowest-node-id controller → `Bootstrap`; other controllers → dynamic
+  `Join`; brokers → not a member (observer; no bootstrap mode needed). Controller nodes
+  omit `controller.quorum.voters`, because a static list would make a fresh joiner seed
+  a second quorum. Restarts → `Rejoin` is decided broker-side from on-disk raft log
+  presence (existing design).
 
 ### 5.4 Rollout ordering
 
-Extend `plan_rollout` so controller pools reach Ready before broker pools are created —
-a broker cannot observe a quorum that does not yet exist. Within controllers, keep the
-deterministic single-bootstrapper ordering from the bootstrap-then-join design.
+The node-pool reconciler waits for every controller pool to reach its desired ready
+replica count before it creates a broker-only pool — a broker cannot observe a quorum
+that does not yet exist. Within controllers, keep the deterministic single-bootstrapper
+ordering from the bootstrap-then-join design.
 
 ---
 

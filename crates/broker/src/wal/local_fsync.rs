@@ -1,9 +1,6 @@
-//! Slice-1 WAL medium: a single-node, `fsync`-durable WAL that reuses the
-//! partition's existing local `Log`.
-//!
-//! It assigns offsets locally; slice 2 moves that to `KRaft`. Its durability
-//! is a local `fsync`; slice 6 upgrades that to a cross-AZ quorum. This medium
-//! survives a crash and restart, but NOT the loss of a node or a disk.
+//! Test WAL medium: a single-node, `fsync`-durable WAL that reuses the
+//! partition's existing local `Log`. Production diskless partitions use the
+//! quorum WAL.
 
 use std::sync::{Arc, Mutex};
 
@@ -13,17 +10,15 @@ use crabka_log::Log;
 use tokio::runtime::RuntimeFlavor;
 
 use super::WalStore;
-use crate::{error::BrokerError, partition::ProduceData};
+use crate::error::BrokerError;
 
-/// A [`WalStore`] backed by the partition's local `Log` and an explicit
-/// `fsync`, that is `Log::sync`.
-#[allow(dead_code)] // Staged diskless WAL seam; later slices wire this into topics.
+/// A [`WalStore`] backed by the partition's local `Log` plus an explicit
+/// `fsync` (`Log::sync`).
 pub struct LocalFsyncWal {
     log: Arc<Mutex<Log>>,
 }
 
 impl LocalFsyncWal {
-    #[allow(dead_code)]
     #[must_use]
     pub fn new(log: Arc<Mutex<Log>>) -> Self {
         Self { log }
@@ -32,15 +27,6 @@ impl LocalFsyncWal {
 
 #[async_trait]
 impl WalStore for LocalFsyncWal {
-    async fn append(
-        &self,
-        datas: Vec<ProduceData>,
-    ) -> Result<(Vec<Result<Offset, BrokerError>>, Offset), BrokerError> {
-        // Reuse the exact offset-assigning append the classic path uses, so
-        // offsets stay locally assigned and identical to a classic topic.
-        crate::partition_writer::run_produce_append_batch(self.log.clone(), datas).await
-    }
-
     async fn sync_durable(&self, leo: Offset) -> Result<Offset, BrokerError> {
         let log = self.log.clone();
         // fsync off the async poller (mirrors run_produce_append_batch's
@@ -64,6 +50,27 @@ impl WalStore for LocalFsyncWal {
         res.map_err(BrokerError::from)?;
         Ok(leo)
     }
+
+    async fn trim_to_offset(&self, new_start: Offset) -> Result<Offset, BrokerError> {
+        let log = self.log.clone();
+        let result = match tokio::runtime::Handle::current().runtime_flavor() {
+            RuntimeFlavor::MultiThread => tokio::task::block_in_place(|| {
+                log.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .trim_to_offset(new_start)
+            }),
+            _ => tokio::task::spawn_blocking(move || {
+                log.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .trim_to_offset(new_start)
+            })
+            .await
+            .map_err(|error| {
+                crate::partition_writer::storage_failure_error("wal trim task panicked", error)
+            })?,
+        };
+        result.map_err(BrokerError::from)
+    }
 }
 
 #[cfg(test)]
@@ -86,10 +93,12 @@ mod tests {
     async fn append_assigns_sequential_offsets_then_sync_advances_durable() {
         let dir = tempfile::tempdir().unwrap();
         let w = wal(dir.path());
-        let (results, leo) = w
-            .append(vec![sample_owned(2), sample_owned(3)])
-            .await
-            .unwrap();
+        let (results, leo) = crate::partition_writer::run_produce_append_batch(
+            w.log.clone(),
+            vec![sample_owned(2), sample_owned(3)],
+        )
+        .await
+        .unwrap();
         let actual_offsets = results
             .iter()
             .map(|result| result.as_ref().map(|offset| *offset).map_err(|_| ()))
@@ -100,6 +109,22 @@ mod tests {
         // Durable watermark only advances after sync_durable.
         let durable = w.sync_durable(leo).await.unwrap();
         assert!(durable == leo);
+    }
+
+    #[tokio::test]
+    async fn trim_advances_the_local_wal_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = wal(dir.path());
+        let (_results, leo) =
+            crate::partition_writer::run_produce_append_batch(w.log.clone(), vec![sample_owned(3)])
+                .await
+                .unwrap();
+        w.sync_durable(leo).await.unwrap();
+
+        let start = w.trim_to_offset(Offset(2)).await.unwrap();
+
+        assert!(start >= Offset(2));
+        assert!(w.log.lock().unwrap().log_start_offset() == start);
     }
 
     fn sample_owned(n: i32) -> ProduceData {

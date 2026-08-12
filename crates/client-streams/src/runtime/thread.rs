@@ -274,16 +274,9 @@ impl StreamThread {
         Ok(())
     }
 
-    /// Aborts the in-flight txn and rolls back every task to the last committed
-    /// state.
-    ///
-    /// The rollback rewinds source offsets, wipes stores, and re-restores from
-    /// the committed changelog. The thread calls this method on any error
-    /// during an EOS process or commit cycle.
-    //
-    // All EOS-cycle errors are treated as retryable abort+rollback here; the
-    // fenced-fatal distinction (a `ProducerFenced` must shut the thread down, not
-    // retry) is a follow-up.
+    /// Abort the in-flight txn and roll back every task to the last committed
+    /// state (rewind source offsets, wipe stores, re-restore from the committed
+    /// changelog). Called on any error during an EOS process/commit cycle.
     #[tracing::instrument(
         name = "streams.thread.abort_and_rollback",
         level = "info",
@@ -292,8 +285,12 @@ impl StreamThread {
         err,
     )]
     async fn abort_and_rollback(&mut self) -> Result<(), StreamsClientError> {
-        if let Some(txn) = self.txn.as_ref() {
-            let _ = txn.abort_transaction().await;
+        if let Some(txn) = self.txn.as_ref()
+            && let Err(error) = txn.abort_transaction().await
+            && error.is_producer_fenced()
+        {
+            self.in_txn = false;
+            return Err(error);
         }
         self.in_txn = false;
         let fetcher = Arc::clone(&self.fetcher);
@@ -339,8 +336,11 @@ impl StreamThread {
                 // mid-process aborts the txn and rolls every task back to the last
                 // commit; the cycle is then re-begun on the next poll (so
                 // `poll_all` returns Ok).
-                let res = self.eos_begin_and_process(fetcher).await;
-                if res.is_err() {
+                if let Err(error) = self.eos_begin_and_process(fetcher).await {
+                    if error.is_producer_fenced() {
+                        self.in_txn = false;
+                        return Err(error);
+                    }
                     self.abort_and_rollback().await?;
                     return Ok(());
                 }
@@ -485,7 +485,11 @@ impl StreamThread {
                 // A flush failure aborts + rolls back like any other commit-path
                 // error (so the cycle is retried on the next interval).
                 for task in self.tasks.values_mut() {
-                    if task.flush_caches().await.is_err() {
+                    if let Err(error) = task.flush_caches().await {
+                        if error.is_producer_fenced() {
+                            self.in_txn = false;
+                            return Err(error);
+                        }
                         self.abort_and_rollback().await?;
                         return Ok(());
                     }
@@ -494,8 +498,11 @@ impl StreamThread {
                 // `commit_transaction`) aborts the txn and rolls every task back to
                 // the last committed state. The cycle is then retried on the next
                 // interval (so `commit_all` returns Ok after a clean rollback).
-                let res = self.eos_send_offsets_and_commit(meta).await;
-                if res.is_err() {
+                if let Err(error) = self.eos_send_offsets_and_commit(meta).await {
+                    if error.is_producer_fenced() {
+                        self.in_txn = false;
+                        return Err(error);
+                    }
                     self.abort_and_rollback().await?;
                     return Ok(());
                 }
@@ -1910,6 +1917,41 @@ mod tests {
                 .count()
                 == 2
         );
+    }
+
+    #[tokio::test]
+    async fn eos_producer_fence_is_fatal_and_is_not_aborted_or_retried() {
+        use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
+
+        let mock = Arc::new(MockTransactionalProducer {
+            fence_at: StdMutex::new(Some(Step::Commit)),
+            ..Default::default()
+        });
+        let txn: Arc<dyn TransactionalProducer> = Arc::clone(&mock) as _;
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+            ByteSize::ZERO,
+        );
+        thread.guarantee = ProcessingGuarantee::ExactlyOnceV2;
+        thread.txn = Some(txn);
+        thread.initialized = true;
+        thread.in_txn = true;
+
+        let error = thread
+            .commit_all(Some(&StreamsGroupMeta {
+                group: "app".into(),
+                generation: 3,
+                member: "member".into(),
+                group_instance: None,
+            }))
+            .await
+            .expect_err("producer fencing must stop the stream thread");
+
+        check!(error.is_producer_fenced());
+        check!(*mock.calls.lock().unwrap() == vec![Step::SendOffsets, Step::Commit]);
+        check!(!thread.in_txn);
     }
 
     // ─── Bug A: EOS commit flushes record caches into the transaction ─────────

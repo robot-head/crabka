@@ -41,7 +41,7 @@ impl Encode for DeleteRecordsResponse {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -135,7 +135,7 @@ impl Encode for DeleteRecordsTopicResult {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

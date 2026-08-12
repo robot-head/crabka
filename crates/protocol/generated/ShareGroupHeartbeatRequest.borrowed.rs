@@ -95,7 +95,7 @@ impl Encode for ShareGroupHeartbeatRequest<'_> {
                         }
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

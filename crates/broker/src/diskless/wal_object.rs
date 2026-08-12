@@ -6,8 +6,6 @@
 //! Framing is little-endian and Crabka-private. Only the embedded runs need
 //! Kafka byte-exactness.
 
-#![allow(dead_code)] // Consumed by later diskless WAL slice tasks.
-
 use bytes::{BufMut, Bytes, BytesMut};
 use uuid::Uuid;
 
@@ -245,6 +243,7 @@ pub fn parse_wal_object(obj: &Bytes) -> Result<Vec<WalObjectEntry>, WalObjectErr
 }
 
 /// Slice out a run's bytes without copying.
+#[cfg(test)]
 #[must_use]
 pub fn run_bytes(obj: &Bytes, entry: &WalObjectEntry) -> Bytes {
     let start = usize::try_from(entry.byte_start).expect("wal object byte_start fits in usize");

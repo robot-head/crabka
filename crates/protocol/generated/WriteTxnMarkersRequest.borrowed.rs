@@ -53,7 +53,7 @@ impl Encode for WriteTxnMarkersRequest<'_> {
                 for it in &self.markers {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -167,7 +167,7 @@ impl Encode for WritableTxnMarker<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.coordinator_epoch);
@@ -310,7 +310,7 @@ impl Encode for WritableTxnMarkerTopic<'_> {
                 for it in &self.partition_indexes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

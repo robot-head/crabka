@@ -47,6 +47,7 @@ pub(super) enum JoinAction {
 pub(super) fn handle_join(
     state: &mut ClassicState,
     req: &JoinGroupRequest,
+    client_id: &str,
     client_host: &str,
     initial_rebalance_delay: Duration,
 ) -> JoinAction {
@@ -133,7 +134,7 @@ pub(super) fn handle_join(
     let outcome = state.add_member(
         Member::new(
             req.member_id.clone(),
-            String::new(), // client_id is header-level only
+            client_id.to_string(),
             client_host.to_string(),
             session_timeout,
             rebalance_timeout,
@@ -271,10 +272,25 @@ pub(super) fn handle_sync(state: &mut ClassicState, req: &SyncGroupRequest) -> S
 
     let is_leader = state.leader_id.as_deref() == Some(&req.member_id);
     if is_leader {
-        let assignments = req
+        let supplied: std::collections::HashMap<&str, &Bytes> = req
             .assignments
             .iter()
-            .map(|a| (a.member_id.clone(), a.assignment.clone()))
+            .map(|a| (a.member_id.as_str(), &a.assignment))
+            .collect();
+        // Kafka installs an assignment for every current member. A leader may
+        // omit a member from the request; that member gets an empty assignment
+        // instead of retaining bytes from the previous generation.
+        let assignments = state
+            .members
+            .keys()
+            .map(|member_id| {
+                (
+                    member_id.clone(),
+                    supplied
+                        .get(member_id.as_str())
+                        .map_or_else(Bytes::new, |assignment| (*assignment).clone()),
+                )
+            })
             .collect();
         state.install_assignments(assignments);
         SyncAction::LeaderInstalled(read_sync_result(
@@ -482,7 +498,7 @@ mod tests {
         req: &JoinGroupRequest,
         client_host: &str,
     ) -> JoinAction {
-        super::handle_join(state, req, client_host, Duration::from_secs(3))
+        super::handle_join(state, req, "client-a", client_host, Duration::from_secs(3))
     }
 
     fn join_req(member_id: &str, instance: Option<&str>) -> JoinGroupRequest {
@@ -559,6 +575,8 @@ mod tests {
         let mut g = ClassicState::new("g");
         let action = handle_join(&mut g, &join_req("m1", None), "h");
         assert!(matches!(action, JoinAction::Park));
+        check!(g.members["m1"].client_id == "client-a");
+        check!(g.members["m1"].host == "h");
         check!(g.rebalance_deadline.is_some());
         check!(g.state == GroupState::PreparingRebalance);
     }
@@ -570,6 +588,7 @@ mod tests {
         let action = super::handle_join(
             &mut g,
             &join_req("m1", None),
+            "client-a",
             "h",
             Duration::from_millis(17),
         );
@@ -750,6 +769,28 @@ mod tests {
             SyncAction::Immediate(r) => assert!(r.assignment == Bytes::from_static(b"F")),
             _ => panic!("expected Immediate follower assignment"),
         }
+    }
+
+    #[test]
+    fn sync_leader_clears_omitted_member_assignment() {
+        let mut g = stable_two_member_group();
+        let generation = g.generation_id;
+        let leader = g.leader_id.clone().unwrap();
+        let omitted = if leader == "m1" { "m2" } else { "m1" };
+        g.members.get_mut(omitted).unwrap().assignment = Some(Bytes::from_static(b"stale"));
+
+        let mut req = sync_req(&leader, generation);
+        req.assignments = vec![SyncGroupRequestAssignment {
+            member_id: leader,
+            assignment: Bytes::from_static(b"leader"),
+            ..Default::default()
+        }];
+        assert!(matches!(
+            handle_sync(&mut g, &req),
+            SyncAction::LeaderInstalled(_)
+        ));
+
+        check!(g.members[omitted].assignment.as_deref() == Some(&b""[..]));
     }
 
     #[test]

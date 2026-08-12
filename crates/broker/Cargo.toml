@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Single-node Apache Kafka-compatible broker (MVP)"
+description = "Cluster-capable Apache Kafka-compatible krabka broker"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-broker"
@@ -36,22 +36,23 @@ path = "src/bin/broker.rs"
 
 [dependencies]
 crabka-audit = { workspace = true }
-crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
-crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
-crabka-records-legacy = { version = "0.3.8", path = "../records-legacy" }
-crabka-log = { version = "0.3.9", path = "../log" }
-crabka-ids = { version = "0.3.8", path = "../ids" }
-crabka-compression = { version = "0.3.9", path = "../compression", default-features = false }
-crabka-raft = { version = "0.3.8", path = "../raft" }
-crabka-kraft-core = { version = "0.3.8", path = "../kraft-core" }
-crabka-voters = { version = "0.3.8", path = "../voters" }
-crabka-metadata = { version = "0.3.8", path = "../metadata" }
-crabka-authz = { version = "0.3.8", path = "../authz" }
-crabka-remote-storage = { version = "0.3.8", path = "../remote-storage" }
-crabka-remote-storage-topic = { version = "0.3.8", path = "../remote-storage-topic" }
-crabka-object-store = { version = "0.3.8", path = "../object-store" }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
-crabka-throttle = { version = "0.3.8", path = "../throttle" }
+crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-telemetry = { version = "0.4.0", path = "../telemetry" }
+crabka-records-legacy = { version = "0.4.0", path = "../records-legacy" }
+crabka-log = { version = "0.4.0", path = "../log" }
+crabka-ids = { version = "0.4.0", path = "../ids" }
+crabka-compression = { version = "0.4.0", path = "../compression", default-features = false }
+crabka-raft = { version = "0.4.0", path = "../raft" }
+crabka-kraft-core = { version = "0.4.0", path = "../kraft-core" }
+crabka-verified = { version = "0.4.0", path = "../verified" }
+crabka-voters = { version = "0.4.0", path = "../voters" }
+crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-authz = { version = "0.4.0", path = "../authz" }
+crabka-remote-storage = { version = "0.4.0", path = "../remote-storage" }
+crabka-remote-storage-topic = { version = "0.4.0", path = "../remote-storage-topic" }
+crabka-object-store = { version = "0.4.0", path = "../object-store" }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-throttle = { version = "0.4.0", path = "../throttle" }
 crabka-units = { workspace = true }
 crabka-security.workspace = true
 qubit-clock = { workspace = true, features = ["tokio"] }
@@ -70,6 +71,7 @@ tokio-metrics = { workspace = true }
 toml = { workspace = true }
 dashmap = { workspace = true }
 regex = { workspace = true }
+java_regex = { workspace = true }
 refined_type = { workspace = true }
 tracing = { workspace = true }
 rustix = { workspace = true }
@@ -145,15 +147,14 @@ stateright = { workspace = true }
 # complementing the exhaustive stateright model (`producer_state_model.rs`).
 proptest = { workspace = true }
 crabka-broker-test-helpers = { path = "test-helpers" }
-crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
-crabka-client-producer = { version = "0.3", path = "../client-producer" }
-crabka-verified = { version = "0.3", path = "../verified" }
+crabka-client-consumer = { version = "0.4", path = "../client-consumer" }
+crabka-client-producer = { version = "0.4", path = "../client-producer" }
 # Host-side raw `Client::send(DescribeGroupsRequest)` against the
 # real-Kafka Docker capture (`describe_groups_jvm.rs`).
-crabka-client-core = { version = "0.3", path = "../client-core", features = ["mock"] }
-crabka-ids = { version = "0.3", path = "../ids" }
-crabka-records-legacy = { version = "0.3", path = "../records-legacy" }
-crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.4", path = "../client-core", features = ["mock"] }
+crabka-ids = { version = "0.4.0", path = "../ids" }
+crabka-records-legacy = { version = "0.4.0", path = "../records-legacy" }
+crabka-protocol = { version = "0.4", path = "../protocol", default-features = false }
 # Serialize the captured real-Kafka DescribeGroups fixture as JSON.
 serde_json = { workspace = true }
 bytes = { workspace = true }

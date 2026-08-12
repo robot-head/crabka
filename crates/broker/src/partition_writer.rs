@@ -110,6 +110,12 @@ fn append_produce_batch(
                     .append(&mut batch)
                     .map_err(crate::error::BrokerError::from)
             }
+            ProduceData::OwnedCommitMarker {
+                mut batch,
+                commit_stamp,
+            } => guard
+                .append_with_commit_stamp(&mut batch, commit_stamp)
+                .map_err(crate::error::BrokerError::from),
         };
         results.push(r);
     }
@@ -145,6 +151,13 @@ fn append_produce_batch_at(
                     .map(|()| next)
                     .map_err(crate::error::BrokerError::from)
             }
+            ProduceData::OwnedCommitMarker {
+                mut batch,
+                commit_stamp,
+            } => guard
+                .append_at_with_commit_stamp(&mut batch, next, commit_stamp)
+                .map(|()| next)
+                .map_err(crate::error::BrokerError::from),
         };
         if result.is_ok() {
             next = Offset(next.0 + count);
@@ -470,27 +483,36 @@ async fn handle_reset(
 async fn handle_trim(
     log: &Arc<Mutex<Log>>,
     storage_status: (&Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
+    wal: Option<&crate::wal::SharedWal>,
     new_start: Offset,
     ack: tokio::sync::oneshot::Sender<Result<Offset, crate::error::BrokerError>>,
 ) {
-    let log_for_blocking = Arc::clone(log);
-    let result = run_log_mutation(
-        move || {
-            lock_log(&log_for_blocking)
-                .trim_to_offset(new_start)
-                .map_err(crate::error::BrokerError::from)
-        },
-        "trim_to_offset task panicked",
-        storage_status,
-    )
-    .await;
+    let result = if let Some(wal) = wal {
+        let result = wal.trim_to_offset(new_start).await;
+        if let Err(error) = &result {
+            flag_storage_failure(error, storage_status.0, storage_status.1);
+        }
+        result
+    } else {
+        let log_for_blocking = Arc::clone(log);
+        run_log_mutation(
+            move || {
+                lock_log(&log_for_blocking)
+                    .trim_to_offset(new_start)
+                    .map_err(crate::error::BrokerError::from)
+            },
+            "trim_to_offset task panicked",
+            storage_status,
+        )
+        .await
+    };
     let _ = ack.send(result);
 }
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 ///
 /// The loop stops when the channel closes, that is, when all senders drop.
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn run(
     identity: (String, PartitionIndex),
     storage: (Arc<Mutex<Log>>, Arc<ArcSwap<PathBuf>>),
@@ -593,7 +615,14 @@ pub async fn run_with_sequencer(
                 .await;
             }
             WriterMessage::TrimToOffset { new_start, ack } => {
-                handle_trim(&log, (&log_dir, &log_dir_status), new_start, ack).await;
+                handle_trim(
+                    &log,
+                    (&log_dir, &log_dir_status),
+                    wal.as_ref(),
+                    new_start,
+                    ack,
+                )
+                .await;
             }
             WriterMessage::SetLogConfig { config, ack } => {
                 lock_log(&log).set_config(config);
@@ -664,11 +693,13 @@ fn swap_future_log(
     // replicator catch up.
     let mut log_guard = lock_log(log);
     let config = log_guard.config_snapshot();
+    let current_stamp_source = log_guard.stamp_source();
     let current_leo = log_guard.log_end_offset();
     let mut future_guard = lock_log(future_log);
     if future_guard.log_end_offset() < current_leo {
         return Ok(SwapOutcome::NotCaughtUp);
     }
+    let future_stamp_source = future_guard.stamp_source();
 
     let source_partition_path = log_guard.dir().to_path_buf();
 
@@ -693,7 +724,12 @@ fn swap_future_log(
         // source dir so the partition keeps serving against the
         // pre-swap location.
         match Log::open(&source_partition_path, config) {
-            Ok(reopened) => *log_guard = reopened,
+            Ok(mut reopened) => {
+                if let Some(stamp_source) = current_stamp_source {
+                    reopened.set_stamp_source(stamp_source)?;
+                }
+                *log_guard = reopened;
+            }
             Err(reopen_err) => {
                 tracing::error!(
                     error = %reopen_err,
@@ -716,7 +752,11 @@ fn swap_future_log(
     }
     let _ = std::fs::remove_dir_all(&tomb_dir);
 
-    *log_guard = Log::open(target_partition_path, config)?;
+    let mut reopened = Log::open(target_partition_path, config)?;
+    if let Some(stamp_source) = future_stamp_source {
+        reopened.set_stamp_source(stamp_source)?;
+    }
+    *log_guard = reopened;
     log_dir.store(Arc::new(target_log_dir));
     Ok(SwapOutcome::Swapped)
 }
@@ -734,6 +774,15 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct FixedStamp(u64);
+
+    impl crabka_log::StampSource for FixedStamp {
+        fn next_stamp(&self) -> u64 {
+            self.0
+        }
+    }
 
     macro_rules! run_writer {
         ($topic:expr, $partition:expr, $log:expr, $log_dir:expr, $rx:expr,
@@ -786,37 +835,23 @@ mod tests {
     }
 
     struct GatedWal {
-        log: Arc<Mutex<Log>>,
         sync_started: Mutex<Option<oneshot::Sender<()>>>,
         release_sync: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+        trimmed_to: AtomicI64,
     }
 
     impl GatedWal {
-        fn new(
-            log: Arc<Mutex<Log>>,
-            sync_started: oneshot::Sender<()>,
-            release_sync: oneshot::Receiver<()>,
-        ) -> Self {
+        fn new(sync_started: oneshot::Sender<()>, release_sync: oneshot::Receiver<()>) -> Self {
             Self {
-                log,
                 sync_started: Mutex::new(Some(sync_started)),
                 release_sync: tokio::sync::Mutex::new(Some(release_sync)),
+                trimmed_to: AtomicI64::new(-1),
             }
         }
     }
 
     #[async_trait::async_trait]
     impl crate::wal::WalStore for GatedWal {
-        async fn append(
-            &self,
-            datas: Vec<ProduceData>,
-        ) -> Result<
-            (Vec<Result<Offset, crate::error::BrokerError>>, Offset),
-            crate::error::BrokerError,
-        > {
-            run_produce_append_batch(self.log.clone(), datas).await
-        }
-
         async fn sync_durable(&self, leo: Offset) -> Result<Offset, crate::error::BrokerError> {
             if let Some(started) = self.sync_started.lock().unwrap().take() {
                 let _ = started.send(());
@@ -829,6 +864,14 @@ mod tests {
                 .expect("sync release receiver present");
             release.await.expect("sync release sent");
             Ok(leo)
+        }
+
+        async fn trim_to_offset(
+            &self,
+            new_start: Offset,
+        ) -> Result<Offset, crate::error::BrokerError> {
+            self.trimmed_to.store(new_start.0, Ordering::SeqCst);
+            Ok(new_start)
         }
     }
 
@@ -965,11 +1008,8 @@ mod tests {
         ));
         let (sync_started_tx, sync_started_rx) = oneshot::channel();
         let (release_sync_tx, release_sync_rx) = oneshot::channel();
-        let wal: Option<crate::wal::SharedWal> = Some(Arc::new(GatedWal::new(
-            log.clone(),
-            sync_started_tx,
-            release_sync_rx,
-        )));
+        let wal: Option<crate::wal::SharedWal> =
+            Some(Arc::new(GatedWal::new(sync_started_tx, release_sync_rx)));
         let (tx, rx) = mpsc::channel(1);
         let append_notify = Arc::new(Notify::new());
         let replica_state = Arc::new(tokio::sync::Mutex::new(ReplicaState::new()));
@@ -1120,8 +1160,7 @@ mod tests {
         ));
         let (sync_started_tx, sync_started_rx) = oneshot::channel();
         let (_release_sync_tx, release_sync_rx) = oneshot::channel();
-        let wal: crate::wal::SharedWal =
-            Arc::new(GatedWal::new(log.clone(), sync_started_tx, release_sync_rx));
+        let wal: crate::wal::SharedWal = Arc::new(GatedWal::new(sync_started_tx, release_sync_rx));
         let (tx, rx) = mpsc::channel(3);
 
         for _ in 0..3 {
@@ -1160,7 +1199,10 @@ mod tests {
             Some(test_sequencer()),
         ));
 
-        sync_started_rx.await.expect("first group reached WAL sync");
+        tokio::time::timeout(std::time::Duration::from_secs(10), sync_started_rx)
+            .await
+            .expect("first group did not reach WAL sync")
+            .expect("first group reached WAL sync");
         assert!(log.lock().unwrap().log_end_offset() == Offset(2));
 
         writer.abort();
@@ -1251,6 +1293,8 @@ mod tests {
                 max_timestamp: 1_234,
                 leader_epoch: crabka_log::LeaderEpoch(5),
                 producer_id: crabka_log::ProducerId(-1),
+                producer_epoch: -1,
+                base_sequence: -1,
                 is_transactional: false,
             }),
             ack,
@@ -1701,6 +1745,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diskless_writer_delegates_trim_to_the_wal() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        log.lock()
+            .expect("lock")
+            .append(&mut sample_batch(4))
+            .expect("append");
+
+        let (sync_started_tx, _sync_started_rx) = oneshot::channel();
+        let (_release_sync_tx, release_sync_rx) = oneshot::channel();
+        let gated_wal = Arc::new(GatedWal::new(sync_started_tx, release_sync_rx));
+        let wal: crate::wal::SharedWal = gated_wal.clone();
+        let (tx, rx) = mpsc::channel(1);
+        let writer = tokio::spawn(run_writer!(
+            "t".to_string(),
+            PartitionIndex(0),
+            log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            rx,
+            Arc::new(Notify::new()),
+            Arc::new(tokio::sync::Mutex::new(ReplicaState::new())),
+            Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
+            Some(wal),
+        ));
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::TrimToOffset {
+            new_start: Offset(3),
+            ack,
+        })
+        .await
+        .expect("send trim");
+
+        check!(ack_rx.await.expect("trim ack").expect("trim succeeds") == Offset(3));
+        check!(gated_wal.trimmed_to.load(Ordering::SeqCst) == 3);
+        check!(log.lock().expect("lock").log_start_offset() == Offset(0));
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
     async fn writer_does_not_advance_hw_when_followers_lagging() {
         let dir = tempdir().expect("tempdir");
         let log = Arc::new(Mutex::new(
@@ -1767,8 +1857,16 @@ mod tests {
         let future_path = target_dir.join("t-0.future");
         let target_partition_path = target_dir.join("t-0");
 
-        let log = Arc::new(Mutex::new(open_log_with_records(&source_partition, 2)));
-        let future_log = Arc::new(Mutex::new(open_log_with_records(&future_path, 2)));
+        let mut source_log = open_log_with_records(&source_partition, 2);
+        source_log
+            .set_stamp_source(Arc::new(FixedStamp(7)))
+            .expect("source stamp index");
+        let log = Arc::new(Mutex::new(source_log));
+        let mut staged_log = open_log_with_records(&future_path, 2);
+        staged_log
+            .set_stamp_source(Arc::new(FixedStamp(7)))
+            .expect("future stamp index");
+        let future_log = Arc::new(Mutex::new(staged_log));
         let log_dir = Arc::new(ArcSwap::from_pointee(source_dir.clone()));
 
         let result = swap_future_log(
@@ -1783,13 +1881,18 @@ mod tests {
 
         // Pull both log observations under one lock acquisition — two
         // `lock()` temporaries in a single assert statement would deadlock.
-        let (leo, log_dir_now) = {
+        let (leo, log_dir_now, has_stamp_source) = {
             let guard = log.lock().unwrap();
-            (guard.log_end_offset(), guard.dir().to_path_buf())
+            (
+                guard.log_end_offset(),
+                guard.dir().to_path_buf(),
+                guard.stamp_source().is_some(),
+            )
         };
         check!(result == SwapOutcome::Swapped);
         check!(leo == 2);
         check!(log_dir_now == target_partition_path.clone());
+        check!(has_stamp_source);
         check!(log_dir.load().as_ref().clone() == target_dir);
         check!(!source_partition.exists());
         check!(target_partition_path.exists());

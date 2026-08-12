@@ -74,7 +74,7 @@ behind that plumbing; the wire state machine is reused unchanged.
 | KIP-368 re-authentication / `session_lifetime_ms` connection expiry | 49c |
 | Opaque-token validation via an introspection endpoint (RFC 7662) | future |
 | Custom CA trust / mTLS to the JWKS endpoint (`tlsTrustedCertificates`) | future (webpki/Mozilla roots only this slice) |
-| OAUTHBEARER on inter-broker / controller listeners | future (unchanged from 49) |
+| OAUTHBEARER on inter-broker / controller listeners | ✅ shipped later; outbound token files are re-read per connection and controller listeners use the broker OAuth validator |
 | `KafkaUser` OAuth + `Kafka.spec` listener OAuth config | 50 (operator) |
 | Additional algs (RS384/512, ES384/512, PS256) | future (RS256 + ES256 cover the overwhelming majority of IdPs) |
 

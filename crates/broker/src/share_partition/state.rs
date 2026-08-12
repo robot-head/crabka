@@ -150,6 +150,44 @@ impl AcquisitionState {
         self.coalesce();
     }
 
+    /// Archives an internal log offset range so it can never be delivered to
+    /// a share consumer.
+    ///
+    /// Transaction control batches occupy offsets in the partition log but
+    /// are broker metadata, not user records. The `ShareFetch` handler calls
+    /// this after materialization for every control-batch range in the live
+    /// window.
+    pub fn archive_internal(&mut self, first: Offset, last: Offset) {
+        if first > last {
+            return;
+        }
+        self.split_at_offset(first);
+        self.split_at_offset(last + 1);
+        let mut changed = false;
+        for batch in &mut self.batches {
+            if batch.last_offset < first || batch.first_offset > last {
+                continue;
+            }
+            if matches!(
+                batch.state,
+                RecordState::Acknowledged | RecordState::Archived
+            ) {
+                continue;
+            }
+            self.delivery_complete_count = self
+                .delivery_complete_count
+                .saturating_add(clamp_i32(batch.len()));
+            batch.state = RecordState::Archived;
+            batch.acquired_by = None;
+            batch.lock_deadline = None;
+            changed = true;
+        }
+        if changed {
+            self.dirty = true;
+            self.advance_spso();
+        }
+    }
+
     /// Acquires up to `max_records` Available records for `member`. It walks
     /// the window from `start_offset`.
     ///
@@ -345,6 +383,28 @@ impl AcquisitionState {
                 b.state = RecordState::Available;
                 b.acquired_by = None;
                 b.lock_deadline = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.dirty = true;
+            self.coalesce();
+        }
+    }
+
+    /// Releases every record currently acquired by `member` back to
+    /// `Available`. The delivery count is retained for the next delivery.
+    ///
+    /// Session close and connection disconnect call this method so records do
+    /// not remain locked until their timeout after the consumer is gone.
+    pub fn release_member(&mut self, member: &str) {
+        let mut changed = false;
+        for batch in &mut self.batches {
+            if batch.state == RecordState::Acquired && batch.acquired_by.as_deref() == Some(member)
+            {
+                batch.state = RecordState::Available;
+                batch.acquired_by = None;
+                batch.lock_deadline = None;
                 changed = true;
             }
         }
@@ -603,6 +663,22 @@ mod tests {
     }
 
     #[test]
+    fn session_release_makes_only_members_records_available() {
+        let mut state = AcquisitionState::new(Offset(0));
+        state.materialize(Offset(4), 100);
+        let _ = state.acquire("m1", 2, i32::MAX, t0(), LOCK, 5);
+        let _ = state.acquire("m2", 2, i32::MAX, t0(), LOCK, 5);
+
+        state.release_member("m1");
+
+        let reacquired = state.acquire("m3", 10, i32::MAX, t0(), LOCK, 5);
+        assert!(reacquired.len() == 1);
+        assert!(reacquired[0].first == Offset(0));
+        assert!(reacquired[0].last == Offset(1));
+        assert!(reacquired[0].delivery_count == 2);
+    }
+
+    #[test]
     fn delivery_limit_archives_poison_pill() {
         let mut s = AcquisitionState::new(Offset(0));
         s.materialize(Offset(1), 100);
@@ -734,6 +810,31 @@ mod tests {
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         let err = s.acknowledge("m2", Offset(0), Offset(2), AckType::Accept, t0());
         assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
+    }
+
+    #[test]
+    fn internal_offsets_are_archived_before_acquire() {
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(5), 100);
+        s.archive_internal(Offset(2), Offset(2));
+
+        let acquired = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
+        assert!(
+            acquired
+                == vec![
+                    AcquiredRange {
+                        first: Offset(0),
+                        last: Offset(1),
+                        delivery_count: 1,
+                    },
+                    AcquiredRange {
+                        first: Offset(3),
+                        last: Offset(4),
+                        delivery_count: 1,
+                    },
+                ]
+        );
+        check!(s.delivery_complete_count() == 1);
     }
 
     #[test]

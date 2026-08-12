@@ -157,6 +157,13 @@ struct Engine {
     /// HWM at which the last checkpoint was written (and the log pruned to).
     /// Seeded from the recovered checkpoint on `open`.
     last_snapshot_end_offset: Offset,
+    /// The first committed metadata-version downgrade whose mandatory exact
+    /// checkpoint, reload, and prune has not completed locally yet. Capturing
+    /// the image and post-record boundary prevents later committed records from
+    /// changing the checkpoint retried after an I/O failure.
+    downgrade_snapshot_pending: Option<PendingDowngradeSnapshot>,
+    #[cfg(test)]
+    downgrade_snapshot_failures_remaining: usize,
     /// In-flight follower snapshot reassembly, if any.
     snapshot_fetch: Option<SnapshotFetchState>,
     /// Set when a snapshot was just installed; the next follower Fetch carries
@@ -172,6 +179,13 @@ struct Engine {
     replica_fetch_offsets: BTreeMap<NodeId, i64>,
     /// At most one voter/version control operation may be uncommitted.
     pending_reconfig: Option<PendingReconfig>,
+}
+
+#[derive(Clone)]
+struct PendingDowngradeSnapshot {
+    image: MetadataImage,
+    end_offset: Offset,
+    epoch: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +215,23 @@ impl KraftControlState {
     fn latest_version(&self) -> u16 {
         self.version_history
             .last_key_value()
+            .map_or(self.committed_version, |(_, version)| *version)
+    }
+
+    fn voters_at(&self, end_offset: Offset) -> VoterSet {
+        self.voter_history
+            .range(..end_offset.0)
+            .next_back()
+            .map_or_else(
+                || self.committed_voters.clone(),
+                |(_, voters)| voters.clone(),
+            )
+    }
+
+    fn version_at(&self, end_offset: Offset) -> u16 {
+        self.version_history
+            .range(..end_offset.0)
+            .next_back()
             .map_or(self.committed_version, |(_, version)| *version)
     }
 
@@ -666,11 +697,18 @@ impl KraftController {
     /// The returned handle's loop runs until [`Self::shutdown`] (or all handles
     /// drop). `data_dir` is where the engine writes the quorum-state file and
     /// checkpoints.
+    ///
+    /// # Panics
+    ///
+    /// Panics if constructing a fresh controller unexpectedly requires
+    /// downgrade-checkpoint recovery. Fresh controllers have no recovered
+    /// downgrade boundary, so this indicates an internal invariant violation.
     #[must_use]
     pub fn spawn(config: KraftConfig, log: KraftLog, data_dir: PathBuf) -> Self {
         let cluster_id = config.cluster_id;
         let image = MetadataImage::new(cluster_id);
-        Self::spawn_with_image(config, log, data_dir, image, Offset(0))
+        Self::spawn_with_image(config, log, data_dir, image, Offset(0), None)
+            .expect("fresh controller cannot have a pending downgrade checkpoint")
     }
 
     /// Spawn the engine starting from an already-recovered [`MetadataImage`]
@@ -682,7 +720,8 @@ impl KraftController {
         data_dir: PathBuf,
         image: MetadataImage,
         last_snapshot_end_offset: Offset,
-    ) -> Self {
+        downgrade_snapshot_pending: Option<PendingDowngradeSnapshot>,
+    ) -> Result<Self, RaftError> {
         let KraftConfig {
             me,
             cluster_id: _,
@@ -757,7 +796,7 @@ impl KraftController {
         );
 
         let engine_peers = Arc::clone(&peers);
-        let engine = Engine {
+        let mut engine = Engine {
             me,
             core,
             log,
@@ -782,6 +821,9 @@ impl KraftController {
             snapshot_interval_records,
             metadata_snapshot_fetch_max,
             last_snapshot_end_offset,
+            downgrade_snapshot_pending,
+            #[cfg(test)]
+            downgrade_snapshot_failures_remaining: 0,
             snapshot_fetch: None,
             installed_snapshot_epoch: None,
             controls,
@@ -789,16 +831,23 @@ impl KraftController {
             pending_reconfig: None,
         };
 
+        // A restart can rediscover a committed downgrade whose earlier local
+        // checkpoint failed. Make one synchronous recovery attempt before the
+        // engine is exposed; the regular event loop keeps retrying thereafter.
+        while engine.downgrade_snapshot_pending.is_some() {
+            engine.write_downgrade_snapshot_and_prune()?;
+        }
+
         tokio::spawn(engine.run(cmd_rx));
 
-        Self {
+        Ok(Self {
             cmd_tx,
             image_rx,
             leader_rx,
             quorum_rx,
             peers: engine_peers,
             me,
-        }
+        })
     }
 
     /// Open the engine over `data_dir`: recover the [`MetadataImage`] from the
@@ -869,23 +918,58 @@ impl KraftController {
                 // Checkpoint filenames encode the raw offset (on-disk boundary).
                 last_snapshot_end_offset = Offset(off);
             }
-            // Checkpoints cover the in-memory image, not a log
-            // prefix offset, so replay the full log on top (idempotent:
-            // duplicate records fail validate and are skipped). A precise
-            // checkpoint-offset cursor.
+            // Replay starts at the durable log start below. This deliberately
+            // rediscovers a downgrade when a crash landed after checkpoint
+            // rename but before prefix pruning.
         }
-        replay_committed(&log, &mut image, Offset(0), metadata_raft_fetch_max);
+        let mut downgrade_snapshot_pending = replay_committed(
+            &log,
+            &mut image,
+            log.log_start_offset(),
+            metadata_raft_fetch_max,
+        )?;
+
+        let mut boundary_state = QuorumState::bootstrap(cluster_id, bootstrap_voters.clone());
+        if let Some(control) = &snapshot_control {
+            boundary_state.kraft_version = control.kraft_version;
+            boundary_state.voters = control.voters.clone();
+        }
 
         // Seed the durable quorum state from the file, falling back to a fresh
         // bootstrap when absent.
         let mut initial_state = load_quorum_state(&data_dir, cluster_id, &bootstrap_voters)?
             .unwrap_or_else(|| QuorumState::bootstrap(cluster_id, bootstrap_voters));
-        if let Some(control) = snapshot_control {
+        if let Some(control) = &snapshot_control {
             initial_state.kraft_version = control.kraft_version;
-            initial_state.voters = control.voters;
+            initial_state.voters = control.voters.clone();
         }
+        if let Some(pending) = &mut downgrade_snapshot_pending {
+            let boundary_state = control_state_at(
+                &log,
+                &boundary_state,
+                pending.end_offset,
+                metadata_raft_fetch_max,
+            )?;
+            pending.image.apply(&MetadataRecord::V1KRaftVersion(
+                crabka_metadata::KRaftVersionRecord {
+                    kraft_version: boundary_state.kraft_version,
+                },
+            ));
+            pending.image.apply(&MetadataRecord::V1Voters(VotersRecord {
+                voters: boundary_state.voters,
+            }));
+        }
+        replay_control_records(&log, &mut initial_state, metadata_raft_fetch_max);
+        image.apply(&MetadataRecord::V1KRaftVersion(
+            crabka_metadata::KRaftVersionRecord {
+                kraft_version: initial_state.kraft_version,
+            },
+        ));
+        image.apply(&MetadataRecord::V1Voters(VotersRecord {
+            voters: initial_state.voters.clone(),
+        }));
 
-        Ok(Self::spawn_with_image(
+        Self::spawn_with_image(
             KraftConfig {
                 me,
                 cluster_id,
@@ -903,7 +987,8 @@ impl KraftController {
             data_dir,
             image,
             last_snapshot_end_offset,
-        ))
+            downgrade_snapshot_pending,
+        )
     }
 
     /// The node id this controller runs as.
@@ -1139,6 +1224,7 @@ impl Engine {
                     self.on_timer(TimerTick::Heartbeat);
                 }
             }
+            self.retry_pending_downgrade_snapshot();
         }
         // Fail any parked submitters so callers don't hang on shutdown.
         for w in self.commit_waiters.drain(..) {
@@ -1915,11 +2001,19 @@ impl Engine {
             let stamped;
             let r: &MetadataRecord = match r {
                 MetadataRecord::V1BrokerRegistration(b) => {
-                    let delta = i64::try_from(value_blobs.len()).unwrap_or(i64::MAX);
-                    let mut b = b.clone();
-                    b.broker_epoch = assigned_record_offset(assign_base, delta);
-                    stamped = MetadataRecord::V1BrokerRegistration(b);
-                    &stamped
+                    let rewrites_existing = scratch.broker(b.node_id).is_some_and(|existing| {
+                        existing.incarnation_id == b.incarnation_id
+                            && existing.broker_epoch == b.broker_epoch
+                    });
+                    if rewrites_existing {
+                        r
+                    } else {
+                        let delta = i64::try_from(value_blobs.len()).unwrap_or(i64::MAX);
+                        let mut b = b.clone();
+                        b.broker_epoch = assigned_record_offset(assign_base, delta);
+                        stamped = MetadataRecord::V1BrokerRegistration(b);
+                        &stamped
+                    }
                 }
                 other => other,
             };
@@ -2092,7 +2186,9 @@ impl Engine {
         self.image.apply(&MetadataRecord::V1Voters(VotersRecord {
             voters: self.controls.committed_voters.clone(),
         }));
-        let _ = self.image_tx.send(Arc::new(self.image.clone()));
+        if self.downgrade_snapshot_pending.is_none() {
+            let _ = self.image_tx.send(Arc::new(self.image.clone()));
+        }
     }
 
     fn try_resolve_reconfiguration(&mut self) {
@@ -2152,6 +2248,7 @@ impl Engine {
         }
         let mut cursor = prev_hwm;
         let mut changed = false;
+        let mut metadata_version_downgraded = false;
         while cursor < applied_hwm {
             match self
                 .log
@@ -2178,7 +2275,46 @@ impl Engine {
                             match from_kraft_value(value, &self.image) {
                                 Ok(meta) => match self.image.validate(&meta) {
                                     Ok(()) => {
+                                        let is_metadata_version_downgrade = matches!(
+                                            &meta,
+                                            MetadataRecord::V1FeatureLevel(feature)
+                                                if feature.name
+                                                    == crabka_metadata::metadata_version::METADATA_VERSION_FEATURE
+                                                    && self
+                                                        .image
+                                                        .finalized_metadata_version()
+                                                        .is_some_and(|current| feature.level < current)
+                                        );
                                         self.image.apply(&meta);
+                                        if is_metadata_version_downgrade
+                                            && self.downgrade_snapshot_pending.is_none()
+                                        {
+                                            let end_offset = Offset(
+                                                batch
+                                                    .base_offset
+                                                    .saturating_add(i64::from(rec.offset_delta))
+                                                    .saturating_add(1),
+                                            );
+                                            let mut image = self.image.clone();
+                                            image.apply(&MetadataRecord::V1KRaftVersion(
+                                                crabka_metadata::KRaftVersionRecord {
+                                                    kraft_version: self
+                                                        .controls
+                                                        .version_at(end_offset),
+                                                },
+                                            ));
+                                            image.apply(&MetadataRecord::V1Voters(VotersRecord {
+                                                voters: self.controls.voters_at(end_offset),
+                                            }));
+                                            self.downgrade_snapshot_pending =
+                                                Some(PendingDowngradeSnapshot {
+                                                    image,
+                                                    end_offset,
+                                                    epoch: batch.partition_leader_epoch,
+                                                });
+                                        }
+                                        metadata_version_downgraded |=
+                                            is_metadata_version_downgrade;
                                         changed = true;
                                     }
                                     Err(e) => {
@@ -2209,8 +2345,15 @@ impl Engine {
                 }
             }
         }
-        if changed {
+        if changed && !metadata_version_downgraded && self.downgrade_snapshot_pending.is_none() {
             let _ = self.image_tx.send(Arc::new(self.image.clone()));
+        }
+        // KIP-1155: every quorum member that replays a metadata.version
+        // downgrade immediately checkpoints the lower-version image and
+        // discards the incompatible log prefix. This is local work, so
+        // followers do it too rather than waiting to become leader.
+        if metadata_version_downgraded {
+            self.retry_pending_downgrade_snapshot();
         }
         self.publish_leader();
         self.try_resolve_waiters();
@@ -2226,7 +2369,10 @@ impl Engine {
         fields(node = self.me.0, epoch = self.core.quorum_state().leader_epoch, hwm = tracing::field::Empty)
     )]
     fn maybe_snapshot_and_prune(&mut self) {
-        if self.snapshot_interval_records == 0 || !self.core.role().is_leader() {
+        if self.downgrade_snapshot_pending.is_some()
+            || self.snapshot_interval_records == 0
+            || !self.core.role().is_leader()
+        {
             return;
         }
         let hwm = self.log.hwm();
@@ -2235,24 +2381,106 @@ impl Engine {
             return;
         }
         tracing::Span::current().record("hwm", hwm.0);
-        let bytes = match crate::snapshot::SnapshotWriter::serialize(&self.image, 0) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!(?e, "kraft: snapshot serialize failed");
-                return;
-            }
+        if let Err(error) = self.write_snapshot_and_prune() {
+            tracing::error!(?error, "kraft: snapshot/prune failed");
+        }
+    }
+
+    fn write_snapshot_and_prune(&mut self) -> Result<(), RaftError> {
+        let bytes = crate::snapshot::SnapshotWriter::serialize(&self.image, 0)?;
+        let end_offset = self.write_snapshot_checkpoint(&bytes)?;
+        self.prune_to_snapshot(end_offset)?;
+        Ok(())
+    }
+
+    fn write_downgrade_snapshot_and_prune(&mut self) -> Result<(), RaftError> {
+        let Some(pending) = self.downgrade_snapshot_pending.clone() else {
+            return Ok(());
         };
+        #[cfg(test)]
+        if self.downgrade_snapshot_failures_remaining > 0 {
+            self.downgrade_snapshot_failures_remaining -= 1;
+            return Err(RaftError::Startup(
+                "injected metadata downgrade snapshot failure".into(),
+            ));
+        }
+        let bytes = crate::snapshot::SnapshotWriter::serialize(&pending.image, 0)?;
+        // KIP-1155 is a snapshot reload, not only a checkpoint write. Decode
+        // the exact bytes first and rebuild every metadata index from their
+        // lower-version record representation before discarding the log
+        // prefix. This also proves locally that the checkpoint is readable
+        // before any durable state is pruned.
+        let contents = crate::snapshot::SnapshotReader::read(&bytes)?;
+        let mut reloaded =
+            MetadataImage::from_records(pending.image.cluster_id(), &contents.metadata_records);
+        if let Some(control) = &contents.control_state {
+            reloaded.apply(&MetadataRecord::V1KRaftVersion(
+                crabka_metadata::KRaftVersionRecord {
+                    kraft_version: control.kraft_version,
+                },
+            ));
+            reloaded.apply(&MetadataRecord::V1Voters(VotersRecord {
+                voters: control.voters.clone(),
+            }));
+        }
+        write_checkpoint(
+            &checkpoint_dir(&self.data_dir),
+            pending.end_offset.0,
+            pending.epoch,
+            &bytes,
+        )?;
+
+        // Rebuild the committed suffix before pruning. This preserves records
+        // committed after the downgrade failure while keeping the checkpoint
+        // itself pinned to the exact lower-version image and boundary.
+        let next_pending = replay_committed(
+            &self.log,
+            &mut reloaded,
+            pending.end_offset,
+            self.metadata_raft_fetch_max,
+        )?;
+        reloaded.apply(&MetadataRecord::V1KRaftVersion(
+            crabka_metadata::KRaftVersionRecord {
+                kraft_version: self.controls.committed_version,
+            },
+        ));
+        reloaded.apply(&MetadataRecord::V1Voters(VotersRecord {
+            voters: self.controls.committed_voters.clone(),
+        }));
+
+        self.prune_to_snapshot(pending.end_offset)?;
+        self.image = reloaded;
+        self.downgrade_snapshot_pending = next_pending;
+        if self.downgrade_snapshot_pending.is_none() {
+            let _ = self.image_tx.send(Arc::new(self.image.clone()));
+        }
+        Ok(())
+    }
+
+    fn retry_pending_downgrade_snapshot(&mut self) {
+        while self.downgrade_snapshot_pending.is_some() {
+            if let Err(error) = self.write_downgrade_snapshot_and_prune() {
+                tracing::error!(
+                    ?error,
+                    "mandatory metadata downgrade snapshot remains pending"
+                );
+                break;
+            }
+        }
+    }
+
+    fn write_snapshot_checkpoint(&self, bytes: &[u8]) -> Result<Offset, RaftError> {
+        let end_offset = self.log.hwm();
         let epoch = i32::try_from(self.core.quorum_state().leader_epoch).unwrap_or(i32::MAX);
-        // Checkpoint filenames encode the raw offset (on-disk boundary).
-        if let Err(e) = write_checkpoint(&checkpoint_dir(&self.data_dir), hwm.0, epoch, &bytes) {
-            tracing::error!(?e, "kraft: checkpoint write failed; skipping prune");
-            return;
-        }
-        self.last_snapshot_end_offset = hwm;
-        if let Err(e) = self.log.prune_to(hwm) {
-            tracing::error!(?e, "kraft: prune_to failed");
-        }
+        write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset.0, epoch, bytes)?;
+        Ok(end_offset)
+    }
+
+    fn prune_to_snapshot(&mut self, end_offset: Offset) -> Result<(), RaftError> {
+        self.log.prune_to(end_offset)?;
+        self.last_snapshot_end_offset = end_offset;
         retain_latest_checkpoint(&checkpoint_dir(&self.data_dir));
+        Ok(())
     }
 
     /// The latest local snapshot id `(end_offset, epoch)`, if any (leader's
@@ -2314,6 +2542,11 @@ impl Engine {
         err
     )]
     fn do_trigger_snapshot(&self) -> Result<(), RaftError> {
+        if self.downgrade_snapshot_pending.is_some() {
+            return Err(RaftError::ChangeRejected(
+                "mandatory metadata downgrade snapshot is pending".into(),
+            ));
+        }
         let bytes = crate::snapshot::SnapshotWriter::serialize(&self.image, 0)?;
         let end_offset = self.log.hwm();
         let epoch = i32::try_from(self.core.quorum_state().leader_epoch).unwrap_or(i32::MAX);
@@ -2697,6 +2930,11 @@ impl Engine {
         err
     )]
     fn install_fetched_snapshot(&mut self, id: (i64, i32), bytes: &[u8]) -> Result<(), RaftError> {
+        if self.downgrade_snapshot_pending.is_some() {
+            return Err(RaftError::ChangeRejected(
+                "mandatory metadata downgrade snapshot is pending".into(),
+            ));
+        }
         // `end_offset` is the snapshot id's raw offset (wire / checkpoint-filename
         // boundary); wrap into the log offset domain where it addresses the log.
         let (end_offset, epoch) = id;
@@ -2929,45 +3167,64 @@ fn replay_committed(
     image: &mut MetadataImage,
     from: Offset,
     max: MetadataRaftFetchMax,
-) {
+) -> Result<Option<PendingDowngradeSnapshot>, RaftError> {
     let mut cursor = from;
     let target = log.hwm();
+    let mut pending = None;
     while cursor < target {
-        match log.read_decoded(cursor, max.size()) {
-            Ok(batches) => {
-                let next = next_batch_offset(&batches);
-                if batches.is_empty() {
-                    break;
-                }
-                for batch in &batches {
-                    if Offset(batch.base_offset) >= target {
-                        continue;
-                    }
-                    if batch.attributes.is_control_batch() {
-                        continue;
-                    }
-                    for rec in &batch.records {
-                        let Some(value) = rec.value.as_ref() else {
-                            continue;
-                        };
-                        if let Ok(meta) = from_kraft_value(value, image)
-                            && image.validate(&meta).is_ok()
-                        {
-                            image.apply(&meta);
-                        }
-                    }
-                }
-                let Some(next) = next.filter(|next| *next > cursor) else {
-                    break;
-                };
-                cursor = next;
+        let batches = log.read_decoded(cursor, max.size())?;
+        let next = next_batch_offset(&batches);
+        if batches.is_empty() {
+            break;
+        }
+        for batch in &batches {
+            if Offset(batch.base_offset) >= target {
+                continue;
             }
-            Err(e) => {
-                tracing::error!(?e, "kraft: replay for recovery failed");
-                break;
+            if batch.attributes.is_control_batch() {
+                continue;
+            }
+            for rec in &batch.records {
+                let record_offset = Offset(
+                    batch
+                        .base_offset
+                        .saturating_add(i64::from(rec.offset_delta)),
+                );
+                if record_offset < from || record_offset >= target {
+                    continue;
+                }
+                let Some(value) = rec.value.as_ref() else {
+                    continue;
+                };
+                if let Ok(meta) = from_kraft_value(value, image)
+                    && image.validate(&meta).is_ok()
+                {
+                    let is_metadata_version_downgrade = matches!(
+                        &meta,
+                        MetadataRecord::V1FeatureLevel(feature)
+                            if feature.name
+                                == crabka_metadata::metadata_version::METADATA_VERSION_FEATURE
+                                && image
+                                    .finalized_metadata_version()
+                                    .is_some_and(|current| feature.level < current)
+                    );
+                    image.apply(&meta);
+                    if is_metadata_version_downgrade && pending.is_none() {
+                        pending = Some(PendingDowngradeSnapshot {
+                            image: image.clone(),
+                            end_offset: record_offset + 1,
+                            epoch: batch.partition_leader_epoch,
+                        });
+                    }
+                }
             }
         }
+        let Some(next) = next.filter(|next| *next > cursor) else {
+            break;
+        };
+        cursor = next;
     }
+    Ok(pending)
 }
 
 fn replay_control_records(log: &KraftLog, state: &mut QuorumState, max: MetadataRaftFetchMax) {
@@ -3030,6 +3287,58 @@ fn next_batch_offset(batches: &[RecordBatch]) -> Option<Offset> {
                 .saturating_add(1),
         )
     })
+}
+
+fn control_state_at(
+    log: &KraftLog,
+    bootstrap: &QuorumState,
+    end_offset: Offset,
+    max: MetadataRaftFetchMax,
+) -> Result<QuorumState, RaftError> {
+    let mut state = bootstrap.clone();
+    let mut cursor = log.log_start_offset();
+    while cursor < end_offset {
+        let batches = log.read_decoded(cursor, max.size())?;
+        let next = next_batch_offset(&batches);
+        if batches.is_empty() {
+            break;
+        }
+        for batch in &batches {
+            if Offset(batch.base_offset) >= end_offset || !batch.attributes.is_control_batch() {
+                continue;
+            }
+            for record in &batch.records {
+                let record_offset = batch
+                    .base_offset
+                    .saturating_add(i64::from(record.offset_delta));
+                if record_offset >= end_offset.0 {
+                    continue;
+                }
+                let Some(control) = decode_control_record(record)? else {
+                    continue;
+                };
+                match control {
+                    ControlRecord::KRaftVersion(record) => {
+                        state.kraft_version =
+                            u16::try_from(record.k_raft_version).map_err(|_| {
+                                RaftError::ChangeRejected(
+                                    "negative kraft.version control record".into(),
+                                )
+                            })?;
+                    }
+                    ControlRecord::Voters(record) => {
+                        state.voters = voter_set_from_wire(&record)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(next) = next.filter(|next| *next > cursor) else {
+            break;
+        };
+        cursor = next;
+    }
+    Ok(state)
 }
 
 // ---- quorum-state file --------------------------------------------------------
@@ -3544,6 +3853,8 @@ mod tests {
                 snapshot_interval_records: 0,
                 metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
                 last_snapshot_end_offset: Offset(0),
+                downgrade_snapshot_pending: None,
+                downgrade_snapshot_failures_remaining: 0,
                 snapshot_fetch: None,
                 installed_snapshot_epoch: None,
                 controls,
@@ -4227,13 +4538,371 @@ mod tests {
             host: "broker-7".into(),
             port: 9092,
             rack: None,
+            log_dirs: vec![],
             endpoints: vec![],
+            features: std::collections::BTreeMap::new(),
         });
         let (reply, mut rx) = oneshot::channel();
         engine.on_submit_change(&[reg], reply);
 
         assert!(matches!(rx.try_recv(), Ok(Ok(_))));
         assert!(engine.image.broker_epoch(NodeId(7)) == Some(base.0));
+    }
+
+    #[test]
+    fn broker_registration_projection_preserves_existing_epoch() {
+        use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord};
+
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        elect_single_voter_engine(&mut engine);
+        let registration = BrokerRegistrationRecord {
+            node_id: NodeId(7),
+            broker_epoch: 0,
+            incarnation_id: uuid::Uuid::from_u128(7),
+            host: "broker-7".into(),
+            port: 9092,
+            rack: None,
+            endpoints: vec![],
+            log_dirs: vec![uuid::Uuid::from_u128(0xD1)],
+            features: std::collections::BTreeMap::new(),
+        };
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&[MetadataRecord::V1BrokerRegistration(registration)], reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        let mut projection = engine.image.broker(NodeId(7)).unwrap().clone();
+        let assigned_epoch = projection.broker_epoch;
+        projection.log_dirs.clear();
+
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&[MetadataRecord::V1BrokerRegistration(projection)], reply);
+
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        let stored = engine.image.broker(NodeId(7)).unwrap();
+        assert2::assert!(stored.broker_epoch == assigned_epoch);
+        assert2::assert!(stored.log_dirs.is_empty());
+    }
+
+    #[test]
+    fn ordinary_snapshot_does_not_reload_the_live_image() {
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        elect_single_voter_engine(&mut engine);
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&topic_record("ordinary-snapshot"), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+
+        // Replication factor is derived from PartitionRecord on the wire. A
+        // normal KIP-630 checkpoint must not replace unrelated in-memory state
+        // with that canonicalized representation; only a downgrade reloads.
+        let mut in_memory_only = engine.image.topic("ordinary-snapshot").unwrap().clone();
+        in_memory_only.replication_factor = 99;
+        engine.image.apply(&MetadataRecord::V1Topic(in_memory_only));
+
+        engine
+            .write_snapshot_and_prune()
+            .expect("ordinary snapshot");
+
+        assert2::assert!(
+            engine
+                .image
+                .topic("ordinary-snapshot")
+                .unwrap()
+                .replication_factor
+                == 99
+        );
+    }
+
+    #[test]
+    fn metadata_version_downgrade_retries_mandatory_snapshot_and_prune() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        let published_image = engine.image_tx.subscribe();
+        elect_single_voter_engine(&mut engine);
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&topic_record("snapshot-reload"), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        // Plant an in-memory-only sentinel in a TopicRecord field that the
+        // KIP-631 wire shape does not carry. Snapshot decode reconstructs RF
+        // from the PartitionRecord; a clone of the pre-snapshot image would
+        // incorrectly retain 99.
+        let mut in_memory_only = engine.image.topic("snapshot-reload").unwrap().clone();
+        in_memory_only.replication_factor = 99;
+        engine.image.apply(&MetadataRecord::V1Topic(in_memory_only));
+        assert2::assert!(
+            engine
+                .image
+                .topic("snapshot-reload")
+                .unwrap()
+                .replication_factor
+                == 99
+        );
+        let update = |level| {
+            vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level,
+            })]
+        };
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&update(25), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        assert2::assert!(engine.latest_snapshot_id().is_none());
+
+        engine.downgrade_snapshot_failures_remaining = 1;
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&update(16), reply);
+
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        assert2::assert!(engine.image.finalized_metadata_version() == Some(16));
+        assert2::assert!(engine.downgrade_snapshot_pending.is_some());
+        assert2::assert!(engine.latest_snapshot_id().is_none());
+        assert2::assert!(published_image.borrow().finalized_metadata_version() == Some(25));
+        assert2::assert!(
+            engine
+                .image
+                .topic("snapshot-reload")
+                .unwrap()
+                .replication_factor
+                == 99
+        );
+
+        // A later feature upgrade and an ordinary metadata record may commit
+        // while the mandatory lower-version checkpoint is still pending. They
+        // remain unpublished, and the retry must checkpoint level 16 at its
+        // exact boundary before replaying either suffix record.
+        engine.downgrade_snapshot_failures_remaining = 2;
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&update(20), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&topic_record("after-downgrade"), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        assert2::assert!(engine.image.finalized_metadata_version() == Some(20));
+        assert2::assert!(engine.image.topic("after-downgrade").is_some());
+        assert2::assert!(published_image.borrow().finalized_metadata_version() == Some(25));
+        let pending = engine
+            .downgrade_snapshot_pending
+            .as_ref()
+            .expect("downgrade remains pending");
+        assert2::assert!(pending.image.finalized_metadata_version() == Some(16));
+        assert2::assert!(pending.image.topic("after-downgrade").is_none());
+        let downgrade_end = pending.end_offset;
+
+        let mut restart_image = MetadataImage::new(engine.image.cluster_id());
+        assert2::assert!(
+            replay_committed(
+                &engine.log,
+                &mut restart_image,
+                Offset(0),
+                MetadataRaftFetchMax::default(),
+            )
+            .expect("replay")
+            .is_some()
+        );
+        assert2::assert!(restart_image.finalized_metadata_version() == Some(20));
+
+        engine.downgrade_snapshot_failures_remaining = 0;
+        engine.retry_pending_downgrade_snapshot();
+
+        assert2::assert!(engine.downgrade_snapshot_pending.is_none());
+        assert2::assert!(published_image.borrow().finalized_metadata_version() == Some(20));
+        assert2::assert!(published_image.borrow().topic("after-downgrade").is_some());
+        assert2::assert!(
+            engine
+                .image
+                .topic("snapshot-reload")
+                .unwrap()
+                .replication_factor
+                == 1
+        );
+        assert2::assert!(engine.latest_snapshot_id().is_some());
+        assert2::assert!(engine.log.log_start_offset() == downgrade_end);
+        assert2::assert!(engine.last_snapshot_end_offset == downgrade_end);
+        let checkpoint = load_latest_checkpoint(&checkpoint_dir(&engine.data_dir))
+            .expect("read downgrade checkpoint")
+            .expect("downgrade checkpoint exists");
+        let contents = crate::snapshot::SnapshotReader::read(&checkpoint)
+            .expect("decode downgrade checkpoint");
+        let checkpoint_image =
+            MetadataImage::from_records(engine.image.cluster_id(), &contents.metadata_records);
+        assert2::assert!(checkpoint_image.finalized_metadata_version() == Some(16));
+        assert2::assert!(checkpoint_image.topic("after-downgrade").is_none());
+    }
+
+    #[tokio::test]
+    async fn restart_finishes_downgrade_checkpoint_before_exposing_the_image() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+
+        let (mut engine, dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        let data_dir = dir.path().to_path_buf();
+        elect_single_voter_engine(&mut engine);
+        let update = |level| {
+            vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level,
+            })]
+        };
+
+        for records in [
+            update(25),
+            update(16),
+            topic_record("committed-after-downgrade"),
+        ] {
+            let (reply, mut rx) = oneshot::channel();
+            engine.on_submit_change(&records, reply);
+            assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+            if engine.image.finalized_metadata_version() == Some(25) {
+                engine.downgrade_snapshot_failures_remaining = usize::MAX;
+            }
+        }
+        let downgrade_end = engine
+            .downgrade_snapshot_pending
+            .as_ref()
+            .expect("downgrade remains pending before restart")
+            .end_offset;
+        assert2::assert!(engine.latest_snapshot_id().is_none());
+        drop(engine);
+
+        let controller = KraftController::open(
+            data_dir,
+            NodeId(1),
+            uuid::Uuid::nil(),
+            voter_set(&[NodeId(1)]),
+            TEST_ELECTION_TIMEOUT,
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::default(),
+            MetadataRaftFetchMax::default(),
+            Arc::new(NullPeerSender),
+            0,
+            MetadataSnapshotFetchMax::default(),
+        )
+        .expect("restart completes mandatory downgrade recovery");
+
+        assert2::assert!(controller.current_image().finalized_metadata_version() == Some(16));
+        assert2::assert!(
+            controller
+                .current_image()
+                .topic("committed-after-downgrade")
+                .is_some()
+        );
+        drop(controller);
+        let recovered_log = KraftLog::open(dir.path()).expect("inspect recovered log");
+        assert2::assert!(recovered_log.log_start_offset() == downgrade_end);
+        let checkpoint = load_latest_checkpoint(&checkpoint_dir(dir.path()))
+            .expect("read checkpoint")
+            .expect("checkpoint exists");
+        let contents =
+            crate::snapshot::SnapshotReader::read(&checkpoint).expect("decode checkpoint");
+        let checkpoint_image =
+            MetadataImage::from_records(uuid::Uuid::nil(), &contents.metadata_records);
+        assert2::assert!(checkpoint_image.finalized_metadata_version() == Some(16));
+        assert2::assert!(
+            checkpoint_image
+                .topic("committed-after-downgrade")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_checkpoint_written_before_downgrade_prune() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+
+        let (mut engine, dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        let data_dir = dir.path().to_path_buf();
+        elect_single_voter_engine(&mut engine);
+        let update = |level| {
+            vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level,
+            })]
+        };
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&update(25), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        engine.downgrade_snapshot_failures_remaining = usize::MAX;
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&update(16), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        let pending = engine
+            .downgrade_snapshot_pending
+            .clone()
+            .expect("downgrade remains pending");
+        let bytes = crate::snapshot::SnapshotWriter::serialize(&pending.image, 0)
+            .expect("serialize pending image");
+        write_checkpoint(
+            &checkpoint_dir(dir.path()),
+            pending.end_offset.0,
+            pending.epoch,
+            &bytes,
+        )
+        .expect("simulate checkpoint-before-prune crash");
+        assert2::assert!(engine.log.log_start_offset() < pending.end_offset);
+        drop(engine);
+
+        let controller = KraftController::open(
+            data_dir,
+            NodeId(1),
+            uuid::Uuid::nil(),
+            voter_set(&[NodeId(1)]),
+            TEST_ELECTION_TIMEOUT,
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::default(),
+            MetadataRaftFetchMax::default(),
+            Arc::new(NullPeerSender),
+            0,
+            MetadataSnapshotFetchMax::default(),
+        )
+        .expect("restart finishes checkpoint-before-prune recovery");
+        assert2::assert!(controller.current_image().finalized_metadata_version() == Some(16));
+        drop(controller);
+        let recovered_log = KraftLog::open(dir.path()).expect("inspect recovered log");
+        assert2::assert!(recovered_log.log_start_offset() == pending.end_offset);
+    }
+
+    #[tokio::test]
+    async fn restart_propagates_persistent_downgrade_recovery_error() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+
+        let (mut engine, dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        let data_dir = dir.path().to_path_buf();
+        elect_single_voter_engine(&mut engine);
+        let update = |level| {
+            vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level,
+            })]
+        };
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&update(25), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        engine.downgrade_snapshot_failures_remaining = usize::MAX;
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(&update(16), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        drop(engine);
+
+        std::fs::remove_dir_all(checkpoint_dir(dir.path())).expect("remove checkpoint directory");
+        std::fs::write(checkpoint_dir(dir.path()), b"block checkpoint directory")
+            .expect("block checkpoint directory");
+        let result = KraftController::open(
+            data_dir,
+            NodeId(1),
+            uuid::Uuid::nil(),
+            voter_set(&[NodeId(1)]),
+            TEST_ELECTION_TIMEOUT,
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::default(),
+            MetadataRaftFetchMax::default(),
+            Arc::new(NullPeerSender),
+            0,
+            MetadataSnapshotFetchMax::default(),
+        );
+        let Err(error) = result else {
+            panic!("persistent mandatory-checkpoint failure must fail open");
+        };
+        assert2::assert!(matches!(error, RaftError::Storage(_)));
     }
 
     #[test]
@@ -4250,7 +4919,8 @@ mod tests {
             &mut recovered,
             Offset(0),
             MetadataRaftFetchMax::default(),
-        );
+        )
+        .expect("replay");
 
         assert2::assert!(recovered.topic("replayed").is_some());
     }
@@ -4299,7 +4969,7 @@ mod tests {
         assert2::assert!(engine.image.topic("second").is_some());
 
         let mut recovered = MetadataImage::new(uuid::Uuid::nil());
-        replay_committed(&engine.log, &mut recovered, Offset(0), tiny);
+        replay_committed(&engine.log, &mut recovered, Offset(0), tiny).expect("replay");
         assert2::assert!(recovered.topic("first").is_some());
         assert2::assert!(recovered.topic("second").is_some());
     }
@@ -4901,18 +5571,20 @@ mod tests {
             .await
             .unwrap();
         }
-
+        // `inject_event` only enqueues the heartbeat, so query through the same
+        // command queue: that is what makes the final heartbeat processed
+        // before the assertion, rather than racing it.
+        //
         // The epoch, not the leader, is what proves no election happened. A
-        // heartbeat re-attaches to node 2 whatever went before, so reading the
-        // leader after the last one cannot see an election in the middle of the
-        // run -- it has already been papered over. That is the same blindness
-        // that let the wall-clock version pass on a fast machine and fail on a
-        // slow one, and it would have hidden a lost miss-counter reset here
-        // too. An election increments the epoch and nothing puts it back.
+        // heartbeat re-attaches node 2 to whatever went before, so reading the
+        // leader alone cannot see an election in the middle of the run -- it
+        // has already been papered over. That is the same blindness that let
+        // the wall-clock version pass on a fast machine and fail on a slow
+        // one, and it would have hidden a lost miss-counter reset here too. An
+        // election increments the epoch and nothing puts it back.
         let state = ctrl.quorum_state().await.unwrap();
         assert2::assert!(state.leader_epoch == 1);
-        let leader = *ctrl.watch_leader().borrow();
-        assert2::assert!(leader == Some(NodeId(2)));
+        assert2::assert!(state.leader_id == Some(NodeId(2)));
         ctrl.shutdown().await;
     }
 
@@ -5358,7 +6030,9 @@ mod tests {
                     host: "h".into(),
                     port: 9092,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             )]
         };

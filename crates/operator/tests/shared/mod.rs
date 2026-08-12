@@ -155,6 +155,32 @@ pub fn fake_sts_body(
     fake_sts_body_with_storage(name, namespace, replicas, ready_replicas, None)
 }
 
+/// A `StatefulSet` whose controller status proves the supplied pod-template
+/// config hash has fully rolled out.
+pub fn fake_converged_sts_body(
+    name: &str,
+    namespace: &str,
+    cluster: &str,
+    pool: &str,
+    replicas: i32,
+    config_hash: &str,
+) -> serde_json::Value {
+    let mut statefulset = fake_sts_body(name, namespace, replicas, Some(replicas));
+    statefulset["metadata"]["generation"] = serde_json::json!(2);
+    statefulset["metadata"]["labels"] = serde_json::json!({
+        "app.kubernetes.io/instance": cluster,
+        "app.kubernetes.io/name": "crabka-broker",
+        "crabka.io/pool": pool,
+    });
+    statefulset["spec"]["template"]["metadata"]["annotations"] =
+        serde_json::json!({ "crabka.io/config-hash": config_hash });
+    statefulset["status"]["observedGeneration"] = serde_json::json!(2);
+    statefulset["status"]["currentRevision"] = serde_json::json!(format!("{name}-revision"));
+    statefulset["status"]["updateRevision"] = serde_json::json!(format!("{name}-revision"));
+    statefulset["status"]["updatedReplicas"] = serde_json::json!(replicas);
+    statefulset
+}
+
 /// JSON body shaped like an `apps/v1/StatefulSet`, with optional
 /// `volumeClaimTemplates` injected into the spec. Monotonic-storage validation
 /// reads the `size` and the `storageClassName` of the `data` PVC template from
@@ -611,6 +637,32 @@ pub fn happy_path_rules(
         },
         MockRule {
             method: Method::GET,
+            path_substr: format!("/namespaces/{namespace}/statefulsets"),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "apps/v1",
+                    "kind": "StatefulSetList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": []
+                }),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{namespace}/pods"),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "PodList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": []
+                }),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
             path_substr: format!("/secrets/{keystore_name}"),
             response: Response::builder()
                 .status(404)
@@ -863,6 +915,32 @@ pub fn dynamic_quorum_rules(parent: &str, pool: &str, namespace: &str) -> Vec<Mo
             response: json_response(
                 200,
                 &fake_pool_list_body(&[fake_pool_body(pool, namespace, parent)]),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/statefulsets?".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "apps/v1",
+                    "kind": "StatefulSetList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": [],
+                }),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/pods?".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "PodList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": [],
+                }),
             ),
         },
         MockRule {

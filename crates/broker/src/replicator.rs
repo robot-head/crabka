@@ -34,9 +34,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    broker::spawn_partition,
+    broker::spawn_partition_with_replication_target,
     codes,
     config::ReplicationRuntimeConfig,
+    partition::ReplicationTarget,
     partition_registry::PartitionRegistry,
     throttle::{ThrottleState, TopicThrottle},
 };
@@ -65,6 +66,7 @@ pub(crate) struct Config {
     pub topic_id: WireUuid,
     pub partition: PartitionIndex,
     pub leader_node_id: NodeId,
+    pub leader_epoch: crabka_metadata::LeaderEpoch,
     /// The `host` portion of the leader from the metadata image.
     ///
     /// This is the inter-broker endpoint when one is available, and the legacy
@@ -158,8 +160,9 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
                 .parent()
                 .expect("placed partition dir always has a parent log.dir")
                 .to_path_buf();
-            Ok(spawn_partition(
+            Ok(spawn_partition_with_replication_target(
                 cfg.topic.clone(),
+                task_replication_target(cfg),
                 cfg.partition,
                 owning_dir,
                 log,
@@ -174,7 +177,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
     let mut client = connect_with_backoff(cfg).await?;
 
     loop {
-        if cfg.shutdown.is_cancelled() {
+        if cfg.shutdown.is_cancelled() || replication_target_changed(cfg) {
             return Ok(());
         }
 
@@ -355,24 +358,33 @@ enum LoopAction {
     StopNotLeader,
 }
 
-/// `true` if the committed metadata image now lists THIS broker as the leader of
-/// the partition this replicator follows.
+/// `true` if this task no longer targets the leader and epoch in the committed
+/// metadata image.
 ///
 /// The cancellation of a follower-replicator on a leadership change is
 /// cooperative. The run loop checks the shutdown token only between fetches.
-/// The replicator can thus process an in-flight Fetch response after the
-/// cluster has promoted this broker to leader. A truncation or a reset of the
-/// local log from such a stale response would drop data that the new leader
-/// appended, and the cluster can already have acknowledged that data. This
-/// would stall `acks=all` produces and lose records silently. Each caller reads
-/// this value immediately before any truncation and stops the replicator
-/// instead.
-fn became_partition_leader(cfg: &Config) -> bool {
-    cfg.controller
-        .current_image()
-        .partition(&cfg.topic, cfg.partition.get())
-        .map(|pr| pr.leader)
-        == Some(cfg.node_id)
+/// The replicator can thus process an in-flight Fetch response after metadata
+/// has selected another target. Applying that stale response can append,
+/// truncate, or reset the local log against the wrong leader. Each response and
+/// each destructive recovery path rechecks the task's immutable target.
+fn replication_target_changed(cfg: &Config) -> bool {
+    let image = cfg.controller.current_image();
+    image
+        .topic(&cfg.topic)
+        .is_none_or(|topic| topic.topic_id.as_bytes() != &cfg.topic_id.0)
+        || image
+            .partition(&cfg.topic, cfg.partition.get())
+            .is_none_or(|partition| {
+                partition.leader != cfg.leader_node_id || partition.leader_epoch != cfg.leader_epoch
+            })
+}
+
+fn task_replication_target(cfg: &Config) -> ReplicationTarget {
+    ReplicationTarget {
+        topic_id: Some(uuid::Uuid::from_bytes(cfg.topic_id.0)),
+        leader_node_id: cfg.leader_node_id,
+        leader_epoch: cfg.leader_epoch,
+    }
 }
 
 // KIP-320 in-band truncation + KIP-101 epoch fence add match arms
@@ -390,6 +402,17 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
         return LoopAction::Continue;
     };
 
+    if replication_target_changed(cfg) {
+        warn!(
+            topic = %cfg.topic,
+            partition = cfg.partition.get(),
+            leader_node_id = cfg.leader_node_id.0,
+            leader_epoch = cfg.leader_epoch.0,
+            "replicator: discarding response from stale replication target"
+        );
+        return LoopAction::StopNotLeader;
+    }
+
     match part_resp.error_code {
         codes::NONE => {
             // KIP-320: an in-band divergence signal. The leader served no
@@ -397,16 +420,26 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // `EpochEndOffset` defaults to (epoch:-1, end_offset:-1); a
             // populated `end_offset >= 0` means "truncate here".
             if part_resp.diverging_epoch.end_offset >= 0 {
-                // Stale-response guard: never truncate from a Fetch response if
-                // we have since become this partition's leader (see
-                // `became_partition_leader`).
-                if became_partition_leader(cfg) {
+                // Recheck immediately before mutating: metadata may have
+                // changed since the response-level guard above.
+                if replication_target_changed(cfg) {
                     warn!(topic = %cfg.topic, partition = cfg.partition.get(),
-                        "replicator: skipping diverging_epoch truncation — this broker is now the partition leader (stale fetch response)");
+                        "replicator: skipping diverging_epoch truncation from stale target");
                     return LoopAction::StopNotLeader;
                 }
                 let end_offset = part_resp.diverging_epoch.end_offset;
                 if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
+                    let _target_guard = match part
+                        .lock_replication_target(task_replication_target(cfg))
+                        .await
+                    {
+                        Ok(guard) => guard,
+                        Err(error) => {
+                            warn!(topic = %cfg.topic, partition = cfg.partition.get(), %error,
+                                "replicator: skipping diverging_epoch truncation from stale local target");
+                            return LoopAction::StopNotLeader;
+                        }
+                    };
                     // Wrap the wire `i64` into `Offset` for the log-layer call.
                     match part.truncate_to(Offset(end_offset)).await {
                         Ok(()) => {
@@ -441,6 +474,17 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                     "replicator: local partition vanished between fetches");
                 return LoopAction::Continue;
             };
+            let _target_guard = match part
+                .lock_replication_target(task_replication_target(cfg))
+                .await
+            {
+                Ok(guard) => guard,
+                Err(error) => {
+                    warn!(topic = %cfg.topic, partition = cfg.partition.get(), %error,
+                        "replicator: discarding response for stale local target");
+                    return LoopAction::StopNotLeader;
+                }
+            };
             // Move the parsed v2 batches out of the owned response so each
             // batch can be handed to the writer BY VALUE — no per-batch deep
             // clone. `take()` leaves `None` behind; the response is dropped at
@@ -449,6 +493,9 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // `as_v2()` returned `None` for them), so they are ignored.
             if let Some(RecordsPayload::V2(batches)) = part_resp.records.take() {
                 for batch in batches {
+                    if replication_target_changed(cfg) {
+                        return LoopAction::StopNotLeader;
+                    }
                     // Capture byte count before the move into replicate_batch
                     // so the metrics update only fires on a successful append.
                     // PERF: `encoded_len()` is computed here for the metric and
@@ -471,6 +518,9 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // KIP-392: record the leader's high watermark so consumer reads
             // served from this follower are bounded correctly. Done on every
             // successful response, including empty ones. Wrap the wire `i64`.
+            if replication_target_changed(cfg) {
+                return LoopAction::StopNotLeader;
+            }
             part.set_follower_hw(Offset(part_resp.high_watermark)).await;
             LoopAction::Continue
         }
@@ -483,17 +533,16 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
         }
         codes::NOT_LEADER_OR_FOLLOWER => LoopAction::StopNotLeader,
         codes::FENCED_LEADER_EPOCH | codes::UNKNOWN_LEADER_EPOCH => {
-            // Stale-response guard: if we have become this partition's leader,
-            // a fenced response from our former leader means this
+            // Stale-response guard: if the target changed, this
             // follower-replicator is stale — STOP it. Without this it neither
-            // truncates (the `became_partition_leader` guard in
+            // truncates (the `replication_target_changed` guard in
             // `handle_epoch_fence` skips that) nor stops, so it hot-loops the
             // Fetch at ~full CPU, starving metadata propagation and the
             // cooperative cancellation that would otherwise retire it — the
             // broker then never becomes ready and crashloops.
-            if became_partition_leader(cfg) {
+            if replication_target_changed(cfg) {
                 warn!(topic = %cfg.topic, partition = cfg.partition.get(),
-                    "replicator: stopping on fenced epoch — this broker is now the partition leader");
+                    "replicator: stopping on fenced epoch from stale target");
                 return LoopAction::StopNotLeader;
             }
             warn!(
@@ -543,9 +592,9 @@ async fn handle_offset_out_of_range(
     partition_response: &PartitionData,
     cfg: &Config,
 ) -> LoopAction {
-    if became_partition_leader(cfg) {
+    if replication_target_changed(cfg) {
         warn!(topic = %cfg.topic, partition = cfg.partition.get(),
-            "replicator: skipping out_of_range reset — this broker is now the partition leader (stale fetch response)");
+            "replicator: skipping out_of_range reset from stale target");
         return LoopAction::StopNotLeader;
     }
     let leader_log_start = partition_response.log_start_offset;
@@ -556,6 +605,17 @@ async fn handle_offset_out_of_range(
         "replicator.out_of_range; resetting local log to leader log_start"
     );
     if let Some(partition) = cfg.partitions.get(&cfg.topic, cfg.partition) {
+        let _target_guard = match partition
+            .lock_replication_target(task_replication_target(cfg))
+            .await
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                warn!(topic = %cfg.topic, partition = cfg.partition.get(), %error,
+                    "replicator: skipping out_of_range reset from stale local target");
+                return LoopAction::StopNotLeader;
+            }
+        };
         match partition.reset_to(Offset(leader_log_start)).await {
             Ok(()) => {
                 cfg.producer_state
@@ -637,13 +697,18 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     };
 
     // Stale-response guard: never truncate/reset from an OffsetForLeaderEpoch
-    // response if we have since become this partition's leader (see
-    // `became_partition_leader`).
-    if became_partition_leader(cfg) {
+    // response if metadata has since selected another target (see
+    // `replication_target_changed`).
+    if replication_target_changed(cfg) {
         warn!(topic = %cfg.topic, partition = cfg.partition.get(),
-            "replicator: skipping epoch-fence truncation — this broker is now the partition leader (stale response)");
+            "replicator: skipping epoch-fence truncation from stale target");
         return Ok(());
     }
+
+    let _target_guard = part
+        .lock_replication_target(task_replication_target(cfg))
+        .await
+        .map_err(|error| format!("handle_epoch_fence: stale local target: {error}"))?;
 
     if end_offset >= 0 {
         // Truncate to the epoch boundary. Wrap the wire `i64` into `Offset`.
@@ -886,10 +951,14 @@ mod tests {
     }
 
     fn image_with_leader(leader: NodeId) -> MetadataImage {
+        image_with_topic_id_and_leader(uuid::Uuid::from_bytes(WIRE_TOPIC_ID.0), leader)
+    }
+
+    fn image_with_topic_id_and_leader(topic_id: uuid::Uuid, leader: NodeId) -> MetadataImage {
         let mut image = MetadataImage::new(uuid::Uuid::nil());
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: TOPIC.into(),
-            topic_id: uuid::Uuid::from_bytes(WIRE_TOPIC_ID.0),
+            topic_id,
             partitions: 1,
             replication_factor: 2,
         }));
@@ -930,6 +999,7 @@ mod tests {
             topic_id: WIRE_TOPIC_ID,
             partition: PartitionIndex(PARTITION),
             leader_node_id: LEADER_ID,
+            leader_epoch: crabka_metadata::LeaderEpoch(4),
             leader_host: "127.0.0.1".into(),
             leader_port: 9,
             partitions: Arc::new(PartitionRegistry::new()),
@@ -1100,15 +1170,29 @@ mod tests {
     }
 
     #[test]
-    fn became_partition_leader_reflects_current_metadata_leader() {
-        let cases = [(NODE_ID, true), (LEADER_ID, false)];
-        for (leader, want) in cases {
-            let (cfg, _log_dir) = test_config(image_with_leader(leader));
+    fn replication_target_changed_compares_topic_leader_and_epoch() {
+        let cases = [
+            (LEADER_ID, crabka_metadata::LeaderEpoch(4), false),
+            (NODE_ID, crabka_metadata::LeaderEpoch(4), true),
+            (LEADER_ID, crabka_metadata::LeaderEpoch(3), true),
+        ];
+        for (leader, target_epoch, want) in cases {
+            let (mut cfg, _log_dir) = test_config(image_with_leader(leader));
+            cfg.leader_epoch = target_epoch;
             assert!(
-                became_partition_leader(&cfg) == want,
-                "metadata leader {leader}"
+                replication_target_changed(&cfg) == want,
+                "metadata leader {leader}, task epoch {target_epoch:?}"
             );
         }
+
+        let (cfg, _log_dir) = test_config(image_with_topic_id_and_leader(
+            uuid::Uuid::new_v4(),
+            LEADER_ID,
+        ));
+        assert!(
+            replication_target_changed(&cfg),
+            "a recreated topic with the same name and generation is a new target"
+        );
     }
 
     #[test]
@@ -1212,8 +1296,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_response_stops_on_out_of_range_after_local_promotion() {
-        let (cfg, _log_dir) = test_config(image_with_leader(NODE_ID));
+    async fn handle_response_stops_on_out_of_range_after_remote_target_change() {
+        let (cfg, _log_dir) = test_config(image_with_leader(NodeId(99)));
         let resp = fetch_response(
             TOPIC,
             WIRE_TOPIC_ID,
@@ -1231,7 +1315,17 @@ mod tests {
 
         run(cfg).await;
 
-        assert!(partitions.contains(TOPIC, PartitionIndex(PARTITION)));
+        let partition = partitions
+            .get(TOPIC, PartitionIndex(PARTITION))
+            .expect("materialized");
+        assert!(
+            *partition.replication_target.read().await
+                == ReplicationTarget {
+                    topic_id: Some(uuid::Uuid::from_bytes(WIRE_TOPIC_ID.0)),
+                    leader_node_id: LEADER_ID,
+                    leader_epoch: crabka_metadata::LeaderEpoch(4),
+                }
+        );
     }
 
     #[tokio::test]

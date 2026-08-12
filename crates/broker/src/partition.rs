@@ -7,10 +7,6 @@
 //! - a [`Notify`] that fires after every successful append. Long-poll Fetch
 //!   uses it to wake when new data arrives.
 
-// Fields (`log`, `writer_tx`, `append_notify`) are consumed by the Produce
-// + Fetch handlers landing in Tasks 15-16; keep this allow until then.
-#![allow(dead_code)]
-
 use std::{
     path::PathBuf,
     sync::{
@@ -21,7 +17,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use crabka_ids::PartitionIndex;
-use crabka_log::{AbortedTxn, Log, Offset, ReadOutput, VerbatimBatch};
+use crabka_log::{Log, Offset, ReadOutput, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
 use crabka_units::ByteSize;
 use tokio::{
@@ -33,6 +29,26 @@ use tokio::{
 // `replica_state` uses `tokio::sync::Mutex` to avoid blocking worker threads.
 use crate::error::BrokerError;
 use crate::replica_state::ReplicaState;
+
+/// Immutable topic identity plus the leader generation allowed to mutate a
+/// follower log. A read guard over this value linearizes replication writes
+/// with [`Partition::install_leader_change`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplicationTarget {
+    pub(crate) topic_id: Option<uuid::Uuid>,
+    pub(crate) leader_node_id: crabka_raft::NodeId,
+    pub(crate) leader_epoch: crabka_metadata::LeaderEpoch,
+}
+
+pub(crate) fn initial_replication_target(
+    topic_id: Option<uuid::Uuid>,
+) -> Arc<tokio::sync::RwLock<ReplicationTarget>> {
+    Arc::new(tokio::sync::RwLock::new(ReplicationTarget {
+        topic_id,
+        leader_node_id: crabka_raft::NodeId(0),
+        leader_epoch: crabka_metadata::LeaderEpoch(0),
+    }))
+}
 
 /// Absolute record offset within a partition's log (base offset, log end
 /// offset, high watermark, truncation points, …). This is an alias only. It
@@ -56,6 +72,13 @@ pub enum ProduceData {
     /// Decode and re-encode the owned batch on append (the original path).
     /// The writer mutates `base_offset` before append.
     Owned(RecordBatch),
+    /// An internally built COMMIT marker plus the cross-domain coordinator's
+    /// commit stamp. The stamp is written only to `.stampindex`; it never
+    /// enters the Kafka batch bytes.
+    OwnedCommitMarker {
+        batch: RecordBatch,
+        commit_stamp: u64,
+    },
 }
 
 impl ProduceData {
@@ -66,6 +89,8 @@ impl ProduceData {
                 .expect("verbatim batch offset count is non-negative"),
             Self::Owned(batch) => u32::try_from(batch.last_offset_delta + 1)
                 .expect("owned batch offset count is non-negative"),
+            Self::OwnedCommitMarker { batch, .. } => u32::try_from(batch.last_offset_delta + 1)
+                .expect("commit marker offset count is non-negative"),
         }
     }
 }
@@ -213,15 +238,45 @@ pub struct Partition {
     /// Current `leader_epoch` from the metadata image. The broker stamps it on
     /// every appended batch and validates it on every follower Fetch.
     pub current_leader_epoch: Arc<AtomicI32>,
+    /// Serializes follower mutations against topic recreation and local
+    /// leader/epoch installation. Replication holds a read guard through the
+    /// writer acknowledgement; metadata reconciliation takes the write guard.
+    pub(crate) replication_target: Arc<tokio::sync::RwLock<ReplicationTarget>>,
     /// True for Slice 1 diskless partitions whose client-visible HW may only
     /// advance through the WAL durable-sync path.
     pub(crate) diskless: bool,
-    /// Held so the writer task is reaped when every `Partition` handle is
-    /// dropped. Not accessed after construction.
-    pub writer_handle: Arc<JoinHandle<()>>,
+    /// Retained so broker shutdown can abort and await the writer task after
+    /// all request handlers have drained.
+    pub(crate) writer_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl Partition {
+    /// Hold the partition's metadata-transition barrier through one Produce.
+    /// A diskless nominal-leader promotion takes the matching write lock while
+    /// it hydrates the canonical log and rebuilds producer state, so no append
+    /// can race that publication boundary.
+    pub(crate) async fn lock_produce_transition(
+        &self,
+    ) -> tokio::sync::OwnedRwLockReadGuard<ReplicationTarget> {
+        self.replication_target.clone().read_owned().await
+    }
+
+    /// Lock this partition for a mutation from `expected`, rejecting a stale
+    /// task before it can enqueue work on the single writer.
+    pub(crate) async fn lock_replication_target(
+        &self,
+        expected: ReplicationTarget,
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<ReplicationTarget>, BrokerError> {
+        let current = self.replication_target.clone().read_owned().await;
+        if *current != expected {
+            return Err(BrokerError::Replication(format!(
+                "stale replication target: expected {expected:?}, current {:?}",
+                *current
+            )));
+        }
+        Ok(current)
+    }
+
     /// Next offset the underlying [`Log`] will assign. Cheap: takes the
     /// `Arc<Mutex<Log>>` briefly. Replicators call this before each Fetch
     /// to compute `fetch_offset`.
@@ -385,19 +440,6 @@ impl Partition {
         }
     }
 
-    /// Return aborted transactions from the active segment's `.txnindex`
-    /// whose offset range overlaps `[start, end)`.
-    ///
-    /// Locks the `Arc<Mutex<Log>>` briefly. Returns an empty `Vec` if
-    /// the mutex is poisoned.
-    #[must_use]
-    pub fn aborted_in_range(&self, start: Offset, end: Offset) -> Vec<AbortedTxn> {
-        match self.log.lock() {
-            Ok(g) => g.aborted_in_range(start, end),
-            Err(_) => Vec::new(),
-        }
-    }
-
     /// The additional internal stamp coordinate that covers `offset`. Returns
     /// `None` when this partition is unstamped, that is, when no
     /// [`crabka_log::StampSource`] is injected, or when no stamped range
@@ -406,12 +448,22 @@ impl Partition {
     /// Locks the `Arc<Mutex<Log>>` briefly. This is a server-side query only.
     /// No produce or fetch handler consults it, so the stamp cannot leak into
     /// any client-facing response. Returns `None` if the mutex is poisoned.
+    #[cfg(test)]
     #[must_use]
     pub fn stamp_for_offset(&self, offset: Offset) -> Option<u64> {
         match self.log.lock() {
             Ok(g) => g.stamp_for_offset(offset),
             Err(_) => None,
         }
+    }
+
+    /// Remove and return the writer task handle exactly once. Broker shutdown
+    /// uses this after request handlers drain, then aborts and awaits the task.
+    pub(crate) fn take_writer_handle(&self) -> Option<JoinHandle<()>> {
+        self.writer_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Read batches from the underlying [`Log`] that start at `offset`, and
@@ -462,6 +514,34 @@ impl Partition {
             .map_err(|_| BrokerError::Txn("ack dropped".into()))?
     }
 
+    /// Append an internally built COMMIT marker with a coordinator-supplied
+    /// commit stamp. The partition writer keeps it ordered with all produce
+    /// and replication appends.
+    ///
+    /// # Errors
+    /// Returns an error if the writer task is unavailable or the log rejects
+    /// the marker/stamp pair.
+    pub(crate) async fn produce_commit_marker(
+        &self,
+        batch: RecordBatch,
+        commit_stamp: u64,
+    ) -> Result<Offset, BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::Produce(ProduceJob {
+                data: ProduceData::OwnedCommitMarker {
+                    batch,
+                    commit_stamp,
+                },
+                ack: ack_tx,
+            }))
+            .await
+            .map_err(|_| BrokerError::Txn("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Txn("ack dropped".into()))?
+    }
+
     /// Cached High Watermark. Awaits `replica_state` cooperatively, so it
     /// does not block tokio worker threads.
     #[must_use]
@@ -490,20 +570,6 @@ impl Partition {
         if advanced {
             self.hw_advance_notify.notify_waiters();
         }
-    }
-
-    pub(crate) async fn install_diskless_durable_hw(&self, durable_leo: Offset) -> Offset {
-        let advanced = {
-            let mut st = self.replica_state.lock().await;
-            let previous = st.hw;
-            st.recompute_hw_for_wal_durable(durable_leo);
-            st.hw = st.hw.max(previous);
-            st.hw > previous
-        };
-        if advanced {
-            self.hw_advance_notify.notify_waiters();
-        }
-        self.high_watermark().await
     }
 
     /// Install (or reinstall) the ISR membership and seed non-leader
@@ -554,8 +620,86 @@ impl Partition {
     /// The method fires `hw_advance_notify` so waiting Produce gates can
     /// re-check.
     pub async fn install_leader_change(&self, new_leader: u64, new_epoch: i32) {
+        self.install_replication_target(None, new_leader, new_epoch)
+            .await;
+    }
+
+    /// Install the complete metadata identity used to fence follower writes.
+    /// `topic_id` is optional so callers that only process leader changes can
+    /// preserve an identity installed when the partition was materialized.
+    pub(crate) async fn install_replication_target(
+        &self,
+        topic_id: Option<uuid::Uuid>,
+        new_leader: u64,
+        new_epoch: i32,
+    ) {
+        // Reconciliation also runs for metadata-only changes such as an ISR
+        // update. Do not queue for the exclusive transition barrier when the
+        // target itself is unchanged: an acks=all Produce holds a read guard
+        // while it waits for that ISR update to advance the HW.
+        {
+            let current = self.replication_target.read().await;
+            if topic_id.is_none_or(|id| current.topic_id == Some(id))
+                && current.leader_node_id == crabka_raft::NodeId(new_leader)
+                && current.leader_epoch == crabka_metadata::LeaderEpoch(new_epoch)
+            {
+                return;
+            }
+        }
+        // Wait for any accepted follower mutation to finish before making the
+        // new local role visible. Conversely, a mutation that arrives after
+        // this write lock observes the new tuple and is fenced.
+        let target = self.replication_target.write().await;
+        self.publish_replication_target(target, topic_id, new_leader, new_epoch)
+            .await;
+    }
+
+    /// Serialize a local promotion with all follower mutations, prepare the
+    /// canonical log, and only then publish the new leader role.
+    ///
+    /// Produce admission also checks `current_leader`, so it cannot observe
+    /// the metadata promotion until `prepare` and producer-state recovery have
+    /// completed successfully.
+    pub(crate) async fn install_replication_target_after_log_prepare<T, F>(
+        &self,
+        topic_id: Option<uuid::Uuid>,
+        new_leader: u64,
+        new_epoch: i32,
+        prepare: impl FnOnce(&mut Log) -> Result<T, BrokerError>,
+        after_prepare: impl FnOnce(T) -> F,
+    ) -> Result<(), BrokerError>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        let target = self.replication_target.write().await;
+        let prepared = {
+            let mut log = self
+                .log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            prepare(&mut log)?
+        };
+        after_prepare(prepared).await;
+        self.publish_replication_target(target, topic_id, new_leader, new_epoch)
+            .await;
+        Ok(())
+    }
+
+    async fn publish_replication_target(
+        &self,
+        mut target: tokio::sync::RwLockWriteGuard<'_, ReplicationTarget>,
+        topic_id: Option<uuid::Uuid>,
+        new_leader: u64,
+        new_epoch: i32,
+    ) {
         let prev_leader = self.current_leader.swap(new_leader, Ordering::AcqRel);
         let prev_epoch = self.current_leader_epoch.swap(new_epoch, Ordering::AcqRel);
+        if let Some(topic_id) = topic_id {
+            target.topic_id = Some(topic_id);
+        }
+        target.leader_node_id = crabka_raft::NodeId(new_leader);
+        target.leader_epoch = crabka_metadata::LeaderEpoch(new_epoch);
+        drop(target);
         let leader_changed = prev_leader != new_leader || prev_epoch != new_epoch;
         let mut st = self.replica_state.lock().await;
         if leader_changed {
@@ -703,10 +847,78 @@ mod tests {
             hw_advance_notify,
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         (p, dir)
+    }
+
+    #[tokio::test]
+    async fn replication_target_guard_fences_stale_generation_and_topic_identity() {
+        let (partition, _dir) = test_partition(Arc::new(Notify::new()));
+        let partition = Arc::new(partition);
+        let topic_id = uuid::Uuid::new_v4();
+        let current = ReplicationTarget {
+            topic_id: Some(topic_id),
+            leader_node_id: crabka_raft::NodeId(1),
+            leader_epoch: crabka_metadata::LeaderEpoch(7),
+        };
+        partition
+            .install_replication_target(current.topic_id, 1, 7)
+            .await;
+
+        for stale in [
+            ReplicationTarget {
+                leader_node_id: crabka_raft::NodeId(2),
+                ..current
+            },
+            ReplicationTarget {
+                leader_epoch: crabka_metadata::LeaderEpoch(6),
+                ..current
+            },
+            ReplicationTarget {
+                topic_id: Some(uuid::Uuid::new_v4()),
+                ..current
+            },
+        ] {
+            assert!(partition.lock_replication_target(stale).await.is_err());
+        }
+
+        let guard = partition
+            .lock_replication_target(current)
+            .await
+            .expect("current target");
+        let update = tokio::spawn({
+            let partition = partition.clone();
+            async move { partition.install_replication_target(None, 2, 8).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !update.is_finished(),
+            "leader install waits for mutation guard"
+        );
+        drop(guard);
+        update.await.expect("leader install");
+        assert!(partition.lock_replication_target(current).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn idempotent_replication_target_install_does_not_wait_for_produce_guard() {
+        let (partition, _dir) = test_partition(Arc::new(Notify::new()));
+        let topic_id = uuid::Uuid::new_v4();
+        partition
+            .install_replication_target(Some(topic_id), 1, 7)
+            .await;
+
+        let produce_guard = partition.lock_produce_transition().await;
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            partition.install_replication_target(Some(topic_id), 1, 7),
+        )
+        .await
+        .expect("unchanged target should not wait for the Produce read guard");
+        drop(produce_guard);
     }
 
     fn test_partition_with_writer() -> (Partition, tempfile::TempDir) {
@@ -747,8 +959,9 @@ mod tests {
             hw_advance_notify,
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         (p, dir)
     }
@@ -821,6 +1034,19 @@ mod tests {
         assert_clone::<Partition>();
     }
 
+    #[test]
+    fn commit_marker_record_count_uses_batch_offset_span() {
+        let data = ProduceData::OwnedCommitMarker {
+            batch: crabka_protocol::records::RecordBatch {
+                last_offset_delta: 3,
+                ..crabka_protocol::records::RecordBatch::default()
+            },
+            commit_stamp: 99,
+        };
+
+        check!(data.record_count() == 4);
+    }
+
     #[tokio::test]
     async fn debug_does_not_dump_log() {
         let dir = tempdir().expect("tempdir");
@@ -840,8 +1066,9 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let s = format!("{p:?}");
         // topic/partition_id appear; the mutex/log internals must NOT appear
@@ -881,8 +1108,9 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         assert!(p.high_watermark().await == 42);
     }
@@ -906,8 +1134,9 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         p.install_isr(
             &[
@@ -992,27 +1221,6 @@ mod tests {
             futures_util::poll!(&mut waiter).is_pending(),
             "diskless ISR install must not release HW before WAL sync"
         );
-    }
-
-    #[tokio::test]
-    async fn install_diskless_durable_hw_advances_and_notifies_monotonically() {
-        let hw_advance_notify = Arc::new(Notify::new());
-        let (mut p, _td) = test_partition(hw_advance_notify.clone());
-        p.diskless = true;
-
-        let waiter = hw_advance_notify.notified();
-        tokio::pin!(waiter);
-        assert!(futures_util::poll!(&mut waiter).is_pending());
-
-        assert!(p.install_diskless_durable_hw(Offset(4)).await == Offset(4));
-        assert!(p.high_watermark().await == Offset(4));
-        assert!(futures_util::poll!(&mut waiter).is_ready());
-
-        let waiter = hw_advance_notify.notified();
-        tokio::pin!(waiter);
-        assert!(futures_util::poll!(&mut waiter).is_pending());
-        assert!(p.install_diskless_durable_hw(Offset(2)).await == Offset(4));
-        assert!(futures_util::poll!(&mut waiter).is_pending());
     }
 
     #[tokio::test]
@@ -1134,8 +1342,9 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         p.await_hw_at_least(Offset(50), deadline)
@@ -1162,8 +1371,9 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
         let result = p.await_hw_at_least(Offset(100), deadline).await;
@@ -1192,8 +1402,9 @@ mod tests {
             hw_advance_notify: hw_advance_notify.clone(),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
 
         // Append a 3-record batch so log_end_offset() == 3.
@@ -1294,8 +1505,9 @@ mod tests {
             hw_advance_notify: hw_advance_notify.clone(),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
-            writer_handle: Arc::new(writer),
+            writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

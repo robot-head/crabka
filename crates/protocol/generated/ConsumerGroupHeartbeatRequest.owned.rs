@@ -110,7 +110,7 @@ impl ConsumerGroupHeartbeatRequest {
                         }
                     }
                 }
-            }
+            };
         }
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -146,7 +146,7 @@ impl ConsumerGroupHeartbeatRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -523,7 +523,7 @@ impl Encode for TopicPartitions {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -63,6 +63,10 @@ pub(crate) async fn handle(
             );
         }
 
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(&error(error_code), version);
+        }
+
         // KIP-1071: the streams protocol is gated on a finalized
         // streams.version >= 1 (early access, default-disabled) AND the
         // `streams_group.enable` config kill-switch. Either off → reject so the
@@ -95,14 +99,12 @@ pub(crate) async fn handle(
         ng.mark_streams(&req.group_id);
         let handle = ng.get_or_create_streams(&req.group_id);
         let (tx, rx) = oneshot::channel();
-        // The actor message shape carries client_id/client_host, but this
-        // handler does not use them for routing, so pass empty values.
         if handle
             .tx
             .send(StreamsGroupActorMessage::Heartbeat {
                 request: Box::new(req),
-                client_id: String::new(),
-                client_host: String::new(),
+                client_id: ctx.client_id.to_owned(),
+                client_host: ctx.client_host(),
                 reply: tx,
             })
             .await
@@ -118,13 +120,6 @@ pub(crate) async fn handle(
             .unwrap_or_else(|_| error(codes::UNKNOWN_SERVER_ERROR));
         crate::handlers::encode_response(&resp, version)
     }
-}
-
-/// The response the handler returns when the streams protocol is disabled on
-/// this broker, because the feature is unfinalized or the config kill-switch
-/// is off.
-fn disabled_response() -> StreamsGroupHeartbeatResponse {
-    error(codes::UNSUPPORTED_VERSION)
 }
 
 fn error(code: i16) -> StreamsGroupHeartbeatResponse {
@@ -247,13 +242,69 @@ mod tests {
         broker_handle.shutdown().await;
     }
 
-    use super::*;
+    #[tokio::test]
+    async fn handle_persists_request_client_identity() {
+        let version = streams_group_heartbeat_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        finalize_streams_version(&broker).await;
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
 
-    #[test]
-    fn disabled_feature_yields_unsupported_version() {
-        let resp = disabled_response();
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        let bytes = handle(
+            &broker,
+            version,
+            1,
+            &encode_request(&request("identity-group")),
+            &ctx,
+        )
+        .await
+        .expect("StreamsGroupHeartbeat handler");
+        assert!(decode_response(&bytes).error_code == 0);
+
+        let actor = broker
+            .group_coordinator
+            .get_or_create_streams("identity-group");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(StreamsGroupActorMessage::Describe { reply: tx })
+            .await
+            .expect("describe streams group");
+        let view = rx.await.expect("streams group view");
+
+        assert!(view.members.len() == 1);
+        assert!(view.members[0].client_id == "streams-client");
+        assert!(view.members[0].client_host == "/127.0.0.1");
+
+        let peer: SocketAddr = "127.0.0.2:9093".parse().unwrap();
+        let ctx = crate::test_support::request_context(&principal, &peer, "streams-client-b");
+        let req = StreamsGroupHeartbeatRequest {
+            group_id: "identity-group".into(),
+            member_id: view.members[0].member_id.clone(),
+            member_epoch: view.members[0].member_epoch,
+            ..Default::default()
+        };
+        let bytes = handle(&broker, version, 2, &encode_request(&req), &ctx)
+            .await
+            .expect("StreamsGroupHeartbeat identity refresh");
+        assert!(decode_response(&bytes).error_code == 0);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(StreamsGroupActorMessage::Describe { reply: tx })
+            .await
+            .expect("describe refreshed streams group");
+        let view = rx.await.expect("refreshed streams group view");
+        assert!(view.members[0].client_id == "streams-client-b");
+        assert!(view.members[0].client_host == "/127.0.0.2");
+
+        broker_handle.shutdown().await;
     }
+
+    use super::*;
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {

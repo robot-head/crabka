@@ -10,7 +10,7 @@
 //! Locking discipline: the `DashMap` guard is NEVER held across an `.await`.
 //! Callers clone the cell `Arc` out of the map first, then lock and await.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use crabka_ids::PartitionIndex;
 use crabka_log::Offset;
@@ -24,7 +24,10 @@ use crate::{
     metadata_source::MetadataSource,
     partition_registry::PartitionRegistry,
     share_coordinator::persister_client::SharePersister,
-    share_partition::{session::ShareSessionCache, state::AcquisitionState},
+    share_partition::{
+        session::{ShareFetchSessionUpdate, SharePartitionKey, ShareSessionCache},
+        state::AcquisitionState,
+    },
 };
 
 /// Live acquisition-state machines keyed by `(group, topic_id, partition)`.
@@ -60,16 +63,8 @@ impl SharePartitionLeaderManager {
         controller: Arc<dyn MetadataSource>,
         persister: Arc<SharePersister>,
         config: Arc<ShareGroupConfig>,
-        unlimited_session_fallback: usize,
+        session_max: usize,
     ) -> Self {
-        // The share-session cache is capped at the same per-broker session
-        // ceiling as classic fetch sessions; `max_groups` of 0 means
-        // "unbounded" in `ShareGroupConfig`, so use the broker fallback.
-        let session_max = if config.max_groups == 0 {
-            unlimited_session_fallback
-        } else {
-            config.max_groups.saturating_mul(config.max_size.max(1))
-        };
         Self {
             node_id,
             partitions,
@@ -81,16 +76,71 @@ impl SharePartitionLeaderManager {
         }
     }
 
-    /// Validates the share session for `(group, member)` and advances it.
-    ///
-    /// See [`ShareSessionCache::validate`].
-    pub(crate) fn validate_session(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn update_fetch_session(
+        &self,
+        group: &str,
+        member: &str,
+        connection_id: &str,
+        epoch: i32,
+        requested: &HashSet<SharePartitionKey>,
+        forgotten: &HashSet<SharePartitionKey>,
+        has_acknowledgements: bool,
+        final_has_additions: bool,
+    ) -> Result<ShareFetchSessionUpdate, i16> {
+        self.sessions.update_fetch(
+            group,
+            member,
+            connection_id,
+            epoch,
+            requested,
+            forgotten,
+            has_acknowledgements,
+            final_has_additions,
+        )
+    }
+
+    pub(crate) fn update_acknowledge_session(
         &self,
         group: &str,
         member: &str,
         epoch: i32,
-    ) -> Result<(), i16> {
-        self.sessions.validate(group, member, epoch)
+    ) -> Result<HashSet<SharePartitionKey>, i16> {
+        self.sessions.update_acknowledge(group, member, epoch)
+    }
+
+    /// Releases all acquisitions owned by `member` in the supplied session
+    /// partitions. Only already-loaded cells can contain live acquisitions;
+    /// durable state stores acquired records as available.
+    pub(crate) async fn release_session_partitions(
+        &self,
+        group: &str,
+        member: &str,
+        partitions: &HashSet<SharePartitionKey>,
+    ) {
+        for &(topic_id, partition) in partitions {
+            let cell = self
+                .leaders
+                .get(&(group.to_string(), topic_id, partition))
+                .map(|entry| entry.value().clone());
+            let Some(cell) = cell else {
+                continue;
+            };
+            let mut state = cell.lock().await;
+            state.release_member(member);
+            self.persist_if_dirty(group, topic_id, partition, &mut state)
+                .await;
+        }
+    }
+
+    /// Closes the share session tied to a disconnected client and releases
+    /// its outstanding acquisitions.
+    pub(crate) async fn release_connection(&self, connection_id: &str) {
+        let Some(session) = self.sessions.disconnect(connection_id) else {
+            return;
+        };
+        self.release_session_partitions(&session.group, &session.member, &session.partitions)
+            .await;
     }
 
     /// Resolves the wire `(leader_id, leader_epoch)` for
@@ -485,12 +535,47 @@ mod tests {
     #[test]
     fn nondefault_unlimited_fallback_bounds_sessions() {
         let manager = manager_with_unlimited_fallback(2);
+        let partitions = HashSet::new();
 
-        assert!(manager.validate_session("g", "m1", 0) == Ok(()));
-        assert!(manager.validate_session("g", "m2", 0) == Ok(()));
         assert!(
-            manager.validate_session("g", "m3", 0)
-                == Err(crate::codes::SHARE_SESSION_LIMIT_REACHED)
+            manager
+                .update_fetch_session(
+                    "g",
+                    "m1",
+                    "connection-1",
+                    0,
+                    &partitions,
+                    &partitions,
+                    false,
+                    false,
+                )
+                .is_ok()
+        );
+        assert!(
+            manager
+                .update_fetch_session(
+                    "g",
+                    "m2",
+                    "connection-2",
+                    0,
+                    &partitions,
+                    &partitions,
+                    false,
+                    false,
+                )
+                .is_ok()
+        );
+        assert!(
+            manager.update_fetch_session(
+                "g",
+                "m3",
+                "connection-3",
+                0,
+                &partitions,
+                &partitions,
+                false,
+                false,
+            ) == Err(crate::codes::SHARE_SESSION_LIMIT_REACHED)
         );
     }
 
@@ -507,6 +592,38 @@ mod tests {
         // A second call returns the same cached cell.
         let cell2 = mgr.get_or_load("g1", tid, 0).await;
         assert!(Arc::ptr_eq(&cell, &cell2));
+    }
+
+    #[tokio::test]
+    async fn disconnect_releases_the_sessions_acquired_records() {
+        let mgr = manager();
+        let tid = uuid::Uuid::from_bytes([27; 16]);
+        let cell = mgr.get_or_load("g1", tid, 0).await;
+        {
+            let mut state = cell.lock().await;
+            state.materialize(Offset(1), 100);
+            let acquired = state.acquire("m1", 1, i32::MAX, std::time::Instant::now(), LOCK, 5);
+            assert!(acquired.len() == 1);
+        }
+        let partitions = HashSet::from([(tid, 0)]);
+        mgr.update_fetch_session(
+            "g1",
+            "m1",
+            "connection-1",
+            0,
+            &partitions,
+            &HashSet::new(),
+            false,
+            false,
+        )
+        .expect("open session");
+
+        mgr.release_connection("connection-1").await;
+
+        let mut state = cell.lock().await;
+        let redelivered = state.acquire("m2", 1, i32::MAX, std::time::Instant::now(), LOCK, 5);
+        assert!(redelivered.len() == 1);
+        assert!(redelivered[0].delivery_count == 2);
     }
 
     #[tokio::test]

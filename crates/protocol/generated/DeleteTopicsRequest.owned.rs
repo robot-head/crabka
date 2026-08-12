@@ -40,7 +40,7 @@ impl Encode for DeleteTopicsRequest {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if (0..=5).contains(&version) {
             {
@@ -52,7 +52,7 @@ impl Encode for DeleteTopicsRequest {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.timeout_ms);

@@ -31,7 +31,7 @@ impl Encode for DescribeGroupsResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -39,7 +39,7 @@ impl Encode for DescribeGroupsResponse {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -67,7 +67,7 @@ impl Encode for DescribeGroupsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeGroupsResponse {
+impl Decode<'_> for DescribeGroupsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
@@ -137,7 +137,7 @@ impl Default for DescribedGroup {
 impl DescribedGroup {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -146,7 +146,7 @@ impl DescribedGroup {
                 let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
                 let () = put_nullable_string(buf, self.error_message.as_deref());
-            }
+            };
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -155,7 +155,7 @@ impl DescribedGroup {
                 let () = put_compact_string(buf, &self.group_id);
             } else {
                 let () = put_string(buf, &self.group_id);
-            }
+            };
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -164,7 +164,7 @@ impl DescribedGroup {
                 let () = put_compact_string(buf, &self.group_state);
             } else {
                 let () = put_string(buf, &self.group_state);
-            }
+            };
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -173,7 +173,7 @@ impl DescribedGroup {
                 let () = put_compact_string(buf, &self.protocol_type);
             } else {
                 let () = put_string(buf, &self.protocol_type);
-            }
+            };
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
@@ -182,7 +182,7 @@ impl DescribedGroup {
                 let () = put_compact_string(buf, &self.protocol_data);
             } else {
                 let () = put_string(buf, &self.protocol_data);
-            }
+            };
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
@@ -192,16 +192,16 @@ impl DescribedGroup {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 3 {
-            put_i32(buf, self.authorized_operations)
+            put_i32(buf, self.authorized_operations);
         }
     }
-    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -262,7 +262,7 @@ impl DescribedGroup {
         }
         Ok(())
     }
-    fn decode_tagged_fields<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_tagged_fields<B: Buf>(out: &mut Self, buf: &mut B, _version: i16, flex: bool) -> Result<(), ProtocolError> {
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
@@ -325,7 +325,7 @@ impl Encode for DescribedGroup {
         n
     }
 }
-impl<'de> Decode<'de> for DescribedGroup {
+impl Decode<'_> for DescribedGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
@@ -391,42 +391,42 @@ impl Encode for DescribedGroupMember {
                 let () = put_compact_string(buf, &self.member_id);
             } else {
                 let () = put_string(buf, &self.member_id);
-            }
+            };
         }
         if version >= 4 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
                 let () = put_nullable_string(buf, self.group_instance_id.as_deref());
-            }
+            };
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_string(buf, &self.client_id);
             } else {
                 let () = put_string(buf, &self.client_id);
-            }
+            };
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_string(buf, &self.client_host);
             } else {
                 let () = put_string(buf, &self.client_host);
-            }
+            };
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_bytes(buf, &self.member_metadata);
             } else {
                 let () = put_bytes(buf, &self.member_metadata);
-            }
+            };
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_bytes(buf, &self.member_assignment);
             } else {
                 let () = put_bytes(buf, &self.member_assignment);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -466,7 +466,7 @@ impl Encode for DescribedGroupMember {
         n
     }
 }
-impl<'de> Decode<'de> for DescribedGroupMember {
+impl Decode<'_> for DescribedGroupMember {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();

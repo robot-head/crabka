@@ -6,8 +6,6 @@
 //! in `removing_replicas`, the task first hands leadership to a target replica
 //! that is in the ISR.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -287,7 +285,9 @@ mod tests {
                     host: String::new(),
                     port: 0,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }
@@ -371,7 +371,9 @@ mod tests {
                     host: String::new(),
                     port: 0,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }
@@ -559,7 +561,9 @@ mod tests {
                     host: String::new(),
                     port: 0,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }

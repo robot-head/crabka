@@ -17,12 +17,12 @@
 //! ## Object-key layout
 //!
 //! ```text
-//! <prefix?>/<topic_id>_<partition>/<segment_uuid>/log
-//! <prefix?>/<topic_id>_<partition>/<segment_uuid>/offset_index
-//! <prefix?>/<topic_id>_<partition>/<segment_uuid>/time_index
-//! <prefix?>/<topic_id>_<partition>/<segment_uuid>/producer_snapshot   (when present)
-//! <prefix?>/<topic_id>_<partition>/<segment_uuid>/leader_epoch
-//! <prefix?>/<topic_id>_<partition>/<segment_uuid>/txn_index           (when present)
+//! <prefix?>/<topic>-<partition>-<topic_id_base64>/<base_offset>-<segment_id_base64>.log
+//! <prefix?>/<topic>-<partition>-<topic_id_base64>/<base_offset>-<segment_id_base64>.index
+//! <prefix?>/<topic>-<partition>-<topic_id_base64>/<base_offset>-<segment_id_base64>.timeindex
+//! <prefix?>/<topic>-<partition>-<topic_id_base64>/<base_offset>-<segment_id_base64>.snapshot
+//! <prefix?>/<topic>-<partition>-<topic_id_base64>/<base_offset>-<segment_id_base64>.leader_epoch_checkpoint
+//! <prefix?>/<topic>-<partition>-<topic_id_base64>/<base_offset>-<segment_id_base64>.txnindex
 //! ```
 //!
 //! Keys mirror [`LocalTieredStorage`](crate::LocalTieredStorage)'s
@@ -123,25 +123,60 @@ impl S3RemoteStorage {
     }
 
     fn segment_key(&self, metadata: &RemoteLogSegmentMetadata, suffix: &str) -> ObjectPath {
-        use std::fmt::Write;
-        let id = metadata.remote_log_segment_id();
-        let tp = &id.topic_id_partition;
         let mut key = String::new();
         if let Some(p) = &self.prefix {
             key.push_str(p);
             key.push('/');
         }
-        // Infallible — writing into a String.
-        let _ = write!(key, "{}_{}/{}/{}", tp.topic_id, tp.partition, id.id, suffix);
+        key.push_str(&crate::storage_manager::partition_dir_name(metadata));
+        key.push('/');
+        key.push_str(&crate::storage_manager::segment_file_name(metadata, suffix));
         ObjectPath::from(key)
     }
 
     fn log_key(&self, metadata: &RemoteLogSegmentMetadata) -> ObjectPath {
-        self.segment_key(metadata, "log")
+        self.segment_key(metadata, ".log")
     }
 
     fn index_key(&self, metadata: &RemoteLogSegmentMetadata, index_type: IndexType) -> ObjectPath {
-        self.segment_key(metadata, index_filename(index_type))
+        self.segment_key(metadata, index_type.suffix())
+    }
+
+    /// Crabka 0.3.8 and earlier used UUID directories and extensionless
+    /// artifact names. New writes use Kafka's layout; reads and deletes keep
+    /// the old keys reachable during upgrades.
+    fn legacy_segment_key(&self, metadata: &RemoteLogSegmentMetadata, name: &str) -> ObjectPath {
+        use std::fmt::Write as _;
+
+        let id = metadata.remote_log_segment_id();
+        let tp = &id.topic_id_partition;
+        let mut key = String::new();
+        if let Some(prefix) = &self.prefix {
+            key.push_str(prefix);
+            key.push('/');
+        }
+        write!(key, "{}_{}/{}/{name}", tp.topic_id, tp.partition, id.id)
+            .expect("writing to String cannot fail");
+        ObjectPath::from(key)
+    }
+
+    fn legacy_log_key(&self, metadata: &RemoteLogSegmentMetadata) -> ObjectPath {
+        self.legacy_segment_key(metadata, "log")
+    }
+
+    fn legacy_index_key(
+        &self,
+        metadata: &RemoteLogSegmentMetadata,
+        index_type: IndexType,
+    ) -> ObjectPath {
+        let name = match index_type {
+            IndexType::Offset => "offset_index",
+            IndexType::Timestamp => "time_index",
+            IndexType::ProducerSnapshot => "producer_snapshot",
+            IndexType::LeaderEpoch => "leader_epoch",
+            IndexType::Transaction => "txn_index",
+        };
+        self.legacy_segment_key(metadata, name)
     }
 
     /// Runs an async [`ObjectOps`] call to completion on the current Tokio
@@ -158,16 +193,6 @@ impl S3RemoteStorage {
             )
         })?;
         tokio::task::block_in_place(|| handle.block_on(fut))
-    }
-}
-
-fn index_filename(index_type: IndexType) -> &'static str {
-    match index_type {
-        IndexType::Offset => "offset_index",
-        IndexType::Timestamp => "time_index",
-        IndexType::ProducerSnapshot => "producer_snapshot",
-        IndexType::LeaderEpoch => "leader_epoch",
-        IndexType::Transaction => "txn_index",
     }
 }
 
@@ -254,20 +279,28 @@ impl RemoteStorageManager for S3RemoteStorage {
         end_position: Option<u32>,
     ) -> Result<Vec<u8>, RemoteStorageError> {
         let key = self.log_key(metadata);
-        let range = match end_position {
+        if let Some(end) = end_position
+            && end < start_position
+        {
+            return Err(RemoteStorageError::InvalidArgument(format!(
+                "end_position {end} < start_position {start_position}"
+            )));
+        }
+        let range = || match end_position {
             Some(end) => {
-                if end < start_position {
-                    return Err(RemoteStorageError::InvalidArgument(format!(
-                        "end_position {end} < start_position {start_position}"
-                    )));
-                }
                 // GetRange::Bounded is half-open [start, end); the trait
                 // contract is inclusive end, so add 1 and saturate.
                 GetRange::Bounded(u64::from(start_position)..u64::from(end).saturating_add(1))
             }
             None => GetRange::Offset(u64::from(start_position)),
         };
-        match Self::block_os(self.ops.get_range(&key, range)) {
+        let result = match Self::block_os(self.ops.get_range(&key, range())) {
+            Err(ObjectStoreError::NotFound(_)) => {
+                Self::block_os(self.ops.get_range(&self.legacy_log_key(metadata), range()))
+            }
+            result => result,
+        };
+        match result {
             Ok(bytes) => Ok(bytes.to_vec()),
             Err(ObjectStoreError::NotFound(_)) => Err(RemoteStorageError::SegmentNotFound(
                 metadata.remote_log_segment_id().clone(),
@@ -293,7 +326,13 @@ impl RemoteStorageManager for S3RemoteStorage {
         index_type: IndexType,
     ) -> Result<Vec<u8>, RemoteStorageError> {
         let key = self.index_key(metadata, index_type);
-        match Self::block_os(self.ops.get(&key)) {
+        let result = match Self::block_os(self.ops.get(&key)) {
+            Err(ObjectStoreError::NotFound(_)) => {
+                Self::block_os(self.ops.get(&self.legacy_index_key(metadata, index_type)))
+            }
+            result => result,
+        };
+        match result {
             Ok(bytes) => Ok(bytes.to_vec()),
             Err(ObjectStoreError::NotFound(_)) => Err(RemoteStorageError::SegmentNotFound(
                 metadata.remote_log_segment_id().clone(),
@@ -322,6 +361,12 @@ impl RemoteStorageManager for S3RemoteStorage {
             self.index_key(metadata, IndexType::ProducerSnapshot),
             self.index_key(metadata, IndexType::LeaderEpoch),
             self.index_key(metadata, IndexType::Transaction),
+            self.legacy_log_key(metadata),
+            self.legacy_index_key(metadata, IndexType::Offset),
+            self.legacy_index_key(metadata, IndexType::Timestamp),
+            self.legacy_index_key(metadata, IndexType::ProducerSnapshot),
+            self.legacy_index_key(metadata, IndexType::LeaderEpoch),
+            self.legacy_index_key(metadata, IndexType::Transaction),
         ] {
             match Self::block_os(self.ops.delete(&key)) {
                 // Idempotent: deleting an absent object succeeds.
@@ -531,6 +576,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reads_and_deletes_pre_kafka_layout_objects() {
+        let store = rsm(None);
+        let md = sample_metadata(12);
+        tokio::task::spawn_blocking(move || {
+            S3RemoteStorage::block_os(store.ops.put(
+                &store.legacy_log_key(&md),
+                Bytes::from_static(b"legacy-log"),
+            ))
+            .unwrap();
+            S3RemoteStorage::block_os(store.ops.put(
+                &store.legacy_index_key(&md, IndexType::ProducerSnapshot),
+                Bytes::from_static(b"legacy-snapshot"),
+            ))
+            .unwrap();
+
+            check!(store.fetch_log_segment(&md, 0, None).unwrap() == b"legacy-log");
+            check!(
+                store.fetch_index(&md, IndexType::ProducerSnapshot).unwrap() == b"legacy-snapshot"
+            );
+            store.delete_log_segment_data(&md).unwrap();
+            check!(matches!(
+                store.fetch_log_segment(&md, 0, None),
+                Err(RemoteStorageError::SegmentNotFound(_))
+            ));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_is_idempotent() {
         let store = rsm(None);
         let src = TempDir::new().unwrap();
@@ -582,9 +657,13 @@ mod tests {
         let md = sample_metadata(30);
         let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), Some("c".to_string()));
         let key = store.log_key(&md);
+        let expected = concat!(
+            "c/orders-0-AAAAAAAAAAAAAAAAAAAAAQ/",
+            "00000000000000000000-AAAAAAAAAAAAAAAAAAAAHg.log"
+        );
         assert!(
-            key.as_ref().starts_with("c/"),
-            "expected prefix to be applied, got {key:?}",
+            key.as_ref() == expected,
+            "unexpected Kafka-compatible object key {key:?}",
         );
     }
 

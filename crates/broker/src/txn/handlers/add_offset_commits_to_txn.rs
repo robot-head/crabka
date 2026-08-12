@@ -22,10 +22,9 @@ use futures_util::future::BoxFuture;
 use crate::{
     broker::Broker,
     codes,
-    coordinator::bootstrap::{OFFSETS_NUM_PARTITIONS, OFFSETS_TOPIC},
+    coordinator::{bootstrap::OFFSETS_TOPIC, partitioner::partition_for_group},
     error::BrokerError,
     txn::{
-        partitioner::partition_for_tid,
         state::{TopicPartition, TxnState},
         util::now_millis,
     },
@@ -70,6 +69,10 @@ pub(crate) fn handle(
 
         let mut entry = entry_mutex.lock().await;
 
+        if entry.has_staged_producer_identity() {
+            return encode_err(version, codes::INVALID_TXN_STATE);
+        }
+
         // `req.producer_id` is the raw wire `i64`; wrap to compare with the
         // coordinator's `ProducerId`.
         if entry.producer_id != crabka_log::ProducerId(req.producer_id)
@@ -89,17 +92,9 @@ pub(crate) fn handle(
         // (Kafka's TransactionLogValue has no group-name field). EndTxn fans a
         // marker to every partition in the set, including this one.
         //
-        // NOTE: `partition_for_tid` is the murmur2 partitioner Kafka uses for
-        // `transactional_id -> __transaction_state`. Kafka partitions
-        // `__consumer_offsets` by group with `abs(groupId.hashCode()) % N`
-        // (Java String.hashCode), NOT murmur2. This is only correct today
-        // because `OFFSETS_NUM_PARTITIONS == 1` (every group maps to 0). A real
-        // multi-partition `__consumer_offsets` will need a dedicated
-        // `partition_for_group` using the Java-hashCode rule — see the const's
-        // doc in `coordinator::bootstrap`.
         entry.partitions.insert(TopicPartition {
             topic: OFFSETS_TOPIC.to_string(),
-            partition: PartitionIndex(partition_for_tid(&req.group_id, OFFSETS_NUM_PARTITIONS)),
+            partition: PartitionIndex(partition_for_group(&image, &req.group_id)),
         });
         entry.last_update_ms = now_millis();
 

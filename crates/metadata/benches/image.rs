@@ -55,12 +55,14 @@ fn broker_record(node_id: u64) -> MetadataRecord {
         host: format!("broker-{node_id}.example.com"),
         port: 9092,
         rack: Some("us-east-1a".to_string()),
+        log_dirs: vec![],
         endpoints: vec![BrokerEndpoint {
             name: "PLAINTEXT".to_string(),
             host: format!("broker-{node_id}"),
             port: 9092,
             protocol: ListenerProtocol::Plaintext,
         }],
+        features: std::collections::BTreeMap::new(),
     })
 }
 

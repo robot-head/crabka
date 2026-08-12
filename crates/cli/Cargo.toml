@@ -25,13 +25,13 @@ workspace = true
 assert2 = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 crabka-security = { workspace = true }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
-crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
-crabka-gres-balancer = { version = "0.3.9", path = "../gres-balancer" }
-crabka-gres-control = { version = "0.3.8", path = "../gres-control" }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
+crabka-gres-balancer = { version = "0.4.0", path = "../gres-balancer" }
+crabka-gres-control = { version = "0.4.0", path = "../gres-control" }
 crabka-units = { workspace = true }
-crabka-metadata = { version = "0.3.8", path = "../metadata" }
-crabka-raft = { version = "0.3.9", path = "../raft" }
+crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-raft = { version = "0.4.0", path = "../raft" }
 derive_more = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
@@ -45,5 +45,5 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-crabka-broker = { version = "0.3.9", path = "../broker" }
+crabka-broker = { version = "0.4.0", path = "../broker" }
 tempfile = { workspace = true }

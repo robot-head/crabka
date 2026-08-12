@@ -195,6 +195,45 @@ pub trait RaftShardRouter: Send + Sync {
     fn route(&self, api_key: i16, body: Bytes) -> ShardRouteFuture<'_>;
 }
 
+/// One Kafka API version range served by a controller-listener Admin router.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerApiVersion {
+    pub api_key: i16,
+    pub min_version: i16,
+    pub max_version: i16,
+    pub flexible_min: i16,
+}
+
+/// Authenticated request handed from the controller listener to the broker's
+/// existing Admin handler registry.
+#[derive(Clone, Debug)]
+pub struct ControllerAdminRequest {
+    pub api_key: i16,
+    pub api_version: i16,
+    pub correlation_id: i32,
+    pub client_id: Option<String>,
+    pub body: Bytes,
+    pub peer: SocketAddr,
+    pub principal: Option<crabka_security::Principal>,
+    pub authenticated_via_token: bool,
+}
+
+/// Encoded Kafka response body plus its response-header shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControllerAdminResponse {
+    pub body: Bytes,
+    pub flexible: bool,
+}
+
+pub type ControllerAdminRouteFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<ControllerAdminResponse>, RaftError>> + Send + 'a>>;
+
+/// Optional KIP-919 Admin RPC surface attached by the broker crate.
+pub trait ControllerAdminRouter: Send + Sync {
+    fn api_versions(&self) -> &[ControllerApiVersion];
+    fn route(&self, request: ControllerAdminRequest) -> ControllerAdminRouteFuture<'_>;
+}
+
 /// Bootstrap orchestration for a freshly-formatted controller node.
 ///
 /// Openraft 0.9 lacks pre-vote (KIP-595's equivalent), so simultaneous
@@ -278,6 +317,10 @@ pub struct ControllerConfig {
     /// Optional KIP-595 shard router. Metadata traffic returns `None`; diskless
     /// WAL shards return an encoded response body and bypass metadata dispatch.
     pub shard_router: Option<Arc<dyn RaftShardRouter>>,
+    /// Optional KIP-919 Admin router. The broker injects its existing handler
+    /// registry here after construction, keeping controller and broker
+    /// semantics on one implementation.
+    pub admin_router: Option<Arc<dyn ControllerAdminRouter>>,
     /// `metadata.log.max.record.bytes.between.snapshots` (default 20 MiB).
     pub max_bytes_between_snapshots: ByteSize,
     /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
@@ -333,6 +376,7 @@ impl std::fmt::Debug for ControllerConfig {
             .field("dialer", &self.dialer.is_some())
             .field("handshake", &self.handshake.is_some())
             .field("shard_router", &self.shard_router.is_some())
+            .field("admin_router", &self.admin_router.is_some())
             .field(
                 "max_bytes_between_snapshots",
                 &self.max_bytes_between_snapshots.human().to_string(),
@@ -389,6 +433,7 @@ impl ControllerConfig {
             dialer: None,
             handshake: None,
             shard_router: None,
+            admin_router: None,
             max_bytes_between_snapshots: DEFAULT_MAX_BYTES_BETWEEN_SNAPSHOTS,
             max_snapshot_interval: DEFAULT_MAX_SNAPSHOT_INTERVAL,
             snapshot_interval_records: 0,

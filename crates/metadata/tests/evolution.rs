@@ -48,7 +48,7 @@ prop_compose! {
         port in 1024..65535u16,
         rack in prop::option::of("[a-zA-Z][a-zA-Z0-9-]{0,16}"),
     ) -> BrokerRegistrationRecord {
-        BrokerRegistrationRecord { node_id: NodeId(node_id), broker_epoch: 0, incarnation_id: uuid::Uuid::nil(), host, port, rack, endpoints: vec![] }
+        BrokerRegistrationRecord { node_id: NodeId(node_id), broker_epoch: 0, incarnation_id: uuid::Uuid::nil(), host, port, rack, endpoints: vec![], log_dirs: vec![], features: std::collections::BTreeMap::new() }
     }
 }
 

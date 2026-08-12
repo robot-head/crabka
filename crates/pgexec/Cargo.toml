@@ -19,16 +19,16 @@ workspace = true
 [dependencies]
 crabka-units = { workspace = true }
 thiserror = { workspace = true }
-crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
-crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
-crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
-crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
-crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
-crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+crabka-pgtypes = { version = "0.4.0", path = "../pgtypes" }
+crabka-pgkv = { version = "0.4.0", path = "../pgkv" }
+crabka-pgmvcc = { version = "0.4.0", path = "../pgmvcc" }
+crabka-pgcatalog = { version = "0.4.0", path = "../pgcatalog" }
+crabka-pgparser = { version = "0.4.0", path = "../pgparser" }
+crabka-pgwire = { version = "0.4.0", path = "../pgwire" }
 # W3C trace-context parsing for the `crabka.traceparent` GUC ingress. A leaf
 # crate by design: `crabka-telemetry` is `publish = false`, and this crate is
 # published.
-crabka-trace-context = { version = "0.3.9", path = "../trace-context" }
+crabka-trace-context = { version = "0.4.0", path = "../trace-context" }
 bytes = { workspace = true }
 shlex = { workspace = true }
 tracing = { workspace = true }

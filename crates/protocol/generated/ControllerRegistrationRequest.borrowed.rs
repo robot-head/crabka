@@ -69,7 +69,7 @@ impl Encode for ControllerRegistrationRequest<'_> {
                 for it in &self.listeners {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -77,7 +77,7 @@ impl Encode for ControllerRegistrationRequest<'_> {
                 for it in &self.features {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -33,6 +33,7 @@ impl<'a> DescribeGroupsRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_groups_request::DescribeGroupsRequest {
         crate::owned::describe_groups_request::DescribeGroupsRequest {
             groups: (self.groups).iter().map(|s| s.to_string()).collect(),
@@ -57,10 +58,10 @@ impl<'a> Encode for DescribeGroupsRequest<'a> {
                         let () = put_string(buf, *it);
                     };
                 }
-            }
+            };
         }
         if version >= 3 {
-            put_bool(buf, self.include_authorized_operations)
+            put_bool(buf, self.include_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

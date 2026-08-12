@@ -1,10 +1,8 @@
-//! Kafka wire-level error codes used in this MVP.
+//! Kafka wire-level error codes used by the broker.
 //!
 //! Per-(topic, partition) response fields use these `i16` values. JVM clients
 //! react to specific codes, so a substitution changes client behavior. The
 //! values here mirror the canonical Apache Kafka table.
-
-#![allow(dead_code)] // codes are consumed by handlers as APIs are enabled.
 
 pub const NONE: i16 = 0;
 pub const UNKNOWN_SERVER_ERROR: i16 = -1;
@@ -45,15 +43,22 @@ pub const ILLEGAL_SASL_STATE: i16 = 34;
 /// the broker does not offer on this listener.
 pub const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
 pub const UNSUPPORTED_VERSION: i16 = 35;
+/// `SASL_AUTHENTICATION_FAILED` (58) — the supplied credentials were rejected.
+pub const SASL_AUTHENTICATION_FAILED: i16 = 58;
+pub const STALE_BROKER_EPOCH: i16 = 77;
+pub const BROKER_ID_NOT_REGISTERED: i16 = 102;
+pub const DUPLICATE_BROKER_REGISTRATION: i16 = 101;
 pub const TOPIC_ALREADY_EXISTS: i16 = 36;
 pub const INVALID_PARTITIONS: i16 = 37;
 pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const NOT_CONTROLLER: i16 = 41;
 pub const INVALID_REQUEST: i16 = 42;
-/// Kafka error 87. The broker returns it when a Produce payload is
-/// structurally malformed. For example, a legacy v0/v1 `MessageSet` that fails
-/// CRC, has nested compression, or that the broker cannot parse into v2
-/// records.
+/// `INVALID_REGULAR_EXPRESSION` (128): a request contains a malformed regex.
+pub const INVALID_REGULAR_EXPRESSION: i16 = 128;
+/// Kafka error 87. The broker returns it when a record-bearing payload is
+/// structurally malformed. Examples include an invalid Produce `MessageSet`
+/// and a `PushTelemetry` payload that cannot be decompressed or decoded as
+/// OTLP metrics.
 pub const INVALID_RECORD: i16 = 87;
 
 // Phase 5 additions — group coordinator codes.
@@ -61,7 +66,13 @@ pub const ILLEGAL_GENERATION: i16 = 22;
 pub const INCONSISTENT_GROUP_PROTOCOL: i16 = 23;
 pub const UNKNOWN_MEMBER_ID: i16 = 25;
 pub const REBALANCE_IN_PROGRESS: i16 = 27;
+/// `INVALID_TIMESTAMP` (32): a producer supplied a timestamp type or value
+/// that the broker cannot accept for the target topic.
+pub const INVALID_TIMESTAMP: i16 = 32;
 pub const MEMBER_ID_REQUIRED: i16 = 79;
+/// `GROUP_MAX_SIZE_REACHED` (81): a new member cannot join because the group
+/// already has its configured maximum number of members.
+pub const GROUP_MAX_SIZE_REACHED: i16 = 81;
 
 // Phase 6 additions — idempotent-producer codes.
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
@@ -72,21 +83,19 @@ pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
 /// (`transactional_id`, `producer_id`) pair. The Rust producer client maps
 /// this code to `ProducerError::FencedProducer`.
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
-/// Alias for handlers that check for an unknown (tid, pid) mapping. Both cases
-/// produce error code 47 on the wire. This matches Apache Kafka, which uses
-/// `INVALID_PRODUCER_EPOCH` for every epoch and pid mismatch.
-pub const INVALID_PRODUCER_ID_MAPPING: i16 = INVALID_PRODUCER_EPOCH;
+/// `INVALID_PRODUCER_ID_MAPPING` (49) — the transactional id is not mapped to
+/// the supplied producer id.
+pub const INVALID_PRODUCER_ID_MAPPING: i16 = 49;
 pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
 
 // Phase 9 additions — transactional protocol codes.
-pub const INVALID_TXN_STATE: i16 = 24;
-pub const INVALID_TXN_TIMEOUT: i16 = 48;
-pub const CONCURRENT_TRANSACTIONS: i16 = 49;
-pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
-/// `TRANSACTION_ABORTABLE` (120, KIP-890): the operation failed, but the
-/// client can still abort the transaction. For example, `AddPartitionsToTxn`
-/// verify-only found a partition that is not part of the ongoing
-/// transaction.
+pub const INVALID_TXN_STATE: i16 = 48;
+pub const INVALID_TXN_TIMEOUT: i16 = 50;
+pub const CONCURRENT_TRANSACTIONS: i16 = 51;
+pub const TRANSACTION_COORDINATOR_FENCED: i16 = 52;
+/// `TRANSACTION_ABORTABLE` (120, KIP-890) — the operation failed but the
+/// transaction can still be aborted by the client; e.g. `AddPartitionsToTxn`
+/// verify-only found a partition that is not part of the ongoing transaction.
 pub const TRANSACTION_ABORTABLE: i16 = 120;
 
 /// `FENCED_INSTANCE_ID` (82, KIP-345): another client is currently pinned to
@@ -101,12 +110,18 @@ pub const STALE_MEMBER_EPOCH: i16 = 113;
 /// `FENCED_MEMBER_EPOCH` (110, KIP-848): the supplied member epoch is newer
 /// than the coordinator's. The consumer must rejoin from epoch 0.
 pub const FENCED_MEMBER_EPOCH: i16 = 110;
-/// `UNSUPPORTED_ASSIGNOR` (111, KIP-848): the requested `server_assignor`
+/// `UNSUPPORTED_ASSIGNOR` (112, KIP-848): the requested `server_assignor`
 /// is not enabled on this broker.
-pub const UNSUPPORTED_ASSIGNOR: i16 = 111;
-/// `UNRELEASED_INSTANCE_ID` (114, KIP-848 + KIP-345): the static
+pub const UNSUPPORTED_ASSIGNOR: i16 = 112;
+/// `UNRELEASED_INSTANCE_ID` (111, KIP-848 + KIP-345): the static
 /// `instance_id` is still bound to a live member of the group.
-pub const UNRELEASED_INSTANCE_ID: i16 = 114;
+pub const UNRELEASED_INSTANCE_ID: i16 = 111;
+/// `MISMATCHED_ENDPOINT_TYPE` (114, KIP-919): the request reached a broker
+/// endpoint while asking for controllers, or vice versa.
+pub const MISMATCHED_ENDPOINT_TYPE: i16 = 114;
+/// `UNSUPPORTED_ENDPOINT_TYPE` (115, KIP-919): the listener recognizes the
+/// requested endpoint type but does not implement that API on this surface.
+pub const UNSUPPORTED_ENDPOINT_TYPE: i16 = 115;
 /// `UNKNOWN_SUBSCRIPTION_ID` (117, KIP-848): the coordinator did not find the
 /// consumer's persisted subscription identifier.
 pub const UNKNOWN_SUBSCRIPTION_ID: i16 = 117;
@@ -255,6 +270,11 @@ pub const POSITION_OUT_OF_RANGE: i16 = 99;
 /// `INCONSISTENT_CLUSTER_ID` (104): the request's `cluster_id` does not
 /// match this cluster's id.
 pub const INCONSISTENT_CLUSTER_ID: i16 = 104;
+/// `UNKNOWN_CONTROLLER_ID` (116): a controller registration names a node that
+/// is not in the active voter set.
+pub const UNKNOWN_CONTROLLER_ID: i16 = 116;
+/// `INVALID_REGISTRATION` (119): a broker/controller registration is malformed.
+pub const INVALID_REGISTRATION: i16 = 119;
 /// `UNKNOWN_TOPIC_ID` (100): a request referenced a topic by UUID that this
 /// cluster does not know about (KIP-516).
 pub const UNKNOWN_TOPIC_ID: i16 = 100;
@@ -424,6 +444,40 @@ mod tests {
     }
 
     #[test]
+    fn invalid_timestamp_code_matches_kafka() {
+        assert!(INVALID_TIMESTAMP == 32);
+    }
+
+    #[test]
+    fn transaction_and_sasl_codes_match_kafka() {
+        let cases = [
+            ("INVALID_PRODUCER_EPOCH", INVALID_PRODUCER_EPOCH, 47),
+            ("INVALID_TXN_STATE", INVALID_TXN_STATE, 48),
+            (
+                "INVALID_PRODUCER_ID_MAPPING",
+                INVALID_PRODUCER_ID_MAPPING,
+                49,
+            ),
+            ("INVALID_TXN_TIMEOUT", INVALID_TXN_TIMEOUT, 50),
+            ("CONCURRENT_TRANSACTIONS", CONCURRENT_TRANSACTIONS, 51),
+            (
+                "TRANSACTION_COORDINATOR_FENCED",
+                TRANSACTION_COORDINATOR_FENCED,
+                52,
+            ),
+            (
+                "TRANSACTIONAL_ID_AUTHORIZATION_FAILED",
+                TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
+                53,
+            ),
+            ("SASL_AUTHENTICATION_FAILED", SASL_AUTHENTICATION_FAILED, 58),
+        ];
+        for (name, code, want) in cases {
+            assert!(code == want, "{name}");
+        }
+    }
+
+    #[test]
     fn scram_error_code_numbers_match_kafka() {
         let cases = [
             ("UNSUPPORTED_SASL_MECHANISM", UNSUPPORTED_SASL_MECHANISM, 33),
@@ -458,5 +512,20 @@ mod tests {
     fn ineligible_replica_code_does_not_collide_with_duplicate_resource() {
         assert!(DUPLICATE_RESOURCE == 92);
         assert!(INELIGIBLE_REPLICA == 107);
+    }
+
+    #[test]
+    fn kip848_and_kip919_error_codes_match_kafka() {
+        let cases = [
+            ("UNRELEASED_INSTANCE_ID", UNRELEASED_INSTANCE_ID, 111),
+            ("UNSUPPORTED_ASSIGNOR", UNSUPPORTED_ASSIGNOR, 112),
+            ("STALE_MEMBER_EPOCH", STALE_MEMBER_EPOCH, 113),
+            ("MISMATCHED_ENDPOINT_TYPE", MISMATCHED_ENDPOINT_TYPE, 114),
+            ("UNSUPPORTED_ENDPOINT_TYPE", UNSUPPORTED_ENDPOINT_TYPE, 115),
+            ("UNKNOWN_CONTROLLER_ID", UNKNOWN_CONTROLLER_ID, 116),
+        ];
+        for (name, code, want) in cases {
+            assert!(code == want, "{name}");
+        }
     }
 }
