@@ -630,6 +630,12 @@ async fn nodeport_listener_external_san_added_to_per_broker_cert() {
             response: json_response(200, &fake_pool_list_body(&items)),
         },
         empty_statefulset_list_rule(ns),
+        // Topology validation lists pods before listener-address discovery.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{ns}/pods"),
+            response: json_response(200, &pod_list_response),
+        },
         // observe_listener_addresses: GET nodes (nodeport+tls triggers this).
         MockRule {
             method: Method::GET,

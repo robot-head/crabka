@@ -1,7 +1,8 @@
 //! `DescribeCluster` (`api_key=60`).
 //!
-//! This handler is a pure projection over the metadata image. It authorizes
-//! `Describe` on `Cluster("kafka-cluster")`. On Deny it returns a
+//! This handler projects registrations from the metadata image and broker
+//! fencing from the controller's heartbeat registry. It authorizes `Describe`
+//! on `Cluster("kafka-cluster")`. On Deny it returns a
 //! whole-response `error_code = CLUSTER_AUTHORIZATION_FAILED` (31).
 //!
 //! KIP-430: when the request sets the
@@ -33,8 +34,6 @@ use crate::{
 /// `DescribeCluster` `endpoint_type` (KIP-919): `1` = BROKERS.
 const ENDPOINT_TYPE_BROKERS: i8 = 1;
 
-// `async` for symmetry with other handlers that do await `controller.submit_change`;
-// DescribeCluster is read-only so it never suspends.
 // cargo-mutants: the only surviving mutants here flip `-1` node/controller-id
 // sentinel fallbacks (`try_from(id).unwrap_or(-1)`, `watch_leader().map_or(-1, ..)`);
 // broker/controller ids are int32 on the wire so `try_from` never fails, and a
@@ -48,7 +47,7 @@ const ENDPOINT_TYPE_BROKERS: i8 = 1;
     fields(api = "DescribeCluster", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: crate::handlers::ApiVersion,
     _correlation_id: crate::handlers::CorrelationId,
@@ -97,12 +96,20 @@ pub(crate) fn handle(
         .borrow()
         .map_or(-1, |n| i32::try_from(n.0).unwrap_or(-1));
 
-    // KIP-919: a broker listener serves only BROKERS. Advertise each broker's
-    // address for the listener this request arrived on, with the same fallback
-    // chain as `Metadata` so the two RPCs agree.
+    // KIP-919: a broker listener serves only BROKERS. KIP-1073 excludes known
+    // dead/fenced brokers unless the request opts in, and marks included
+    // unavailable rows as fenced. Unknown liveness entries remain eligible
+    // while a newly elected controller seeds its heartbeat registry.
+    let is_controller = *broker.controller.watch_leader().borrow() == Some(broker.config.node_id);
+    let unavailable = if is_controller {
+        broker.liveness.unavailable_snapshot().await
+    } else {
+        std::collections::HashSet::new()
+    };
     let inter_broker_name = broker.config.inter_broker_listener_name.as_str();
     let brokers: Vec<DescribeClusterBroker> = image
         .brokers()
+        .filter(|b| req.include_fenced_brokers || !unavailable.contains(&b.node_id.0))
         .map(|b| {
             let (host, port) = crate::handlers::metadata::pick_endpoint_host_port(
                 b,
@@ -114,6 +121,7 @@ pub(crate) fn handle(
                 host,
                 port,
                 rack: b.rack.clone(),
+                is_fenced: unavailable.contains(&b.node_id.0),
                 ..Default::default()
             }
         })
@@ -164,7 +172,7 @@ mod tests {
         test_support::{DenyAll, peer, principal},
     };
 
-    const VERSION: i16 = 1;
+    const VERSION: i16 = 2;
 
     crate::test_support::wire_helpers!(
         DescribeClusterRequest,
@@ -218,7 +226,9 @@ mod tests {
         let ctx = test_context(&p, &peer);
         let req = encode_request(&request(false));
 
-        let bytes = handle(&broker, VERSION, 123, &req, &ctx).expect("handle");
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
         let resp = decode_response(&bytes);
 
         let expected = DescribeClusterResponse {
@@ -247,7 +257,9 @@ mod tests {
         let ctx = test_context(&p, &peer);
         let req = encode_request(&request(false));
 
-        let bytes = handle(&broker, VERSION, 123, &req, &ctx).expect("handle");
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
         let resp = decode_response(&bytes);
 
         assert!(
@@ -281,6 +293,51 @@ mod tests {
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
         assert!(*broker_row == expected_row);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn fenced_brokers_require_explicit_opt_in() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_broker(&broker_handle).await;
+        let broker = broker_handle.broker_arc_for_test();
+        broker.liveness.record_fenced_heartbeat(42).await;
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        let bytes = handle(
+            &broker,
+            VERSION,
+            123,
+            &encode_request(&request(false)),
+            &ctx,
+        )
+        .await
+        .expect("exclude fenced broker");
+        let response = decode_response(&bytes);
+        assert!(response.brokers.iter().all(|row| row.broker_id != 42));
+
+        let mut include_fenced = request(false);
+        include_fenced.include_fenced_brokers = true;
+        let bytes = handle(
+            &broker,
+            VERSION,
+            123,
+            &encode_request(&include_fenced),
+            &ctx,
+        )
+        .await
+        .expect("include fenced broker");
+        let response = decode_response(&bytes);
+        let fenced = response
+            .brokers
+            .iter()
+            .find(|row| row.broker_id == 42)
+            .expect("fenced broker row");
+        assert!(fenced.is_fenced);
+
         broker_handle.shutdown().await;
     }
 }

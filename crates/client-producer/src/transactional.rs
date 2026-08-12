@@ -325,10 +325,14 @@ mod tests {
     use crabka_protocol::{
         Encode,
         owned::{
-            api_versions_request, api_versions_response::ApiVersionsResponse, end_txn_request,
-            end_txn_response::EndTxnResponse, find_coordinator_request,
-            find_coordinator_response::FindCoordinatorResponse, init_producer_id_request,
-            init_producer_id_response::InitProducerIdResponse,
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            end_txn_request,
+            end_txn_response::EndTxnResponse,
+            find_coordinator_request,
+            find_coordinator_response::FindCoordinatorResponse,
+            init_producer_id_request,
+            init_producer_id_response::{self, InitProducerIdResponse},
         },
     };
 
@@ -446,9 +450,17 @@ mod tests {
         let handler_port = port_cell.clone();
         let next_epoch = Arc::new(AtomicI16::new(3));
         let handler_epoch = Arc::clone(&next_epoch);
-        let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+        let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
             if api_key == api_versions_request::API_KEY {
-                return Some(encode_v0(&ApiVersionsResponse::default()));
+                return Some(encode_v0(&ApiVersionsResponse {
+                    api_keys: vec![ApiVersion {
+                        api_key: init_producer_id_request::API_KEY,
+                        min_version: 0,
+                        max_version: if two_phase_commit_enabled { 6 } else { 0 },
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }));
             }
             if api_key == find_coordinator_request::API_KEY {
                 return Some(encode_v0(&FindCoordinatorResponse {
@@ -460,12 +472,18 @@ mod tests {
                 }));
             }
             if api_key == init_producer_id_request::API_KEY {
-                return Some(encode_v0(&InitProducerIdResponse {
+                let response = InitProducerIdResponse {
                     error_code: 0,
                     producer_id: 7,
                     producer_epoch: handler_epoch.fetch_add(1, Ordering::SeqCst),
                     ..Default::default()
-                }));
+                };
+                let mut buf = BytesMut::new();
+                if version >= init_producer_id_response::FLEXIBLE_MIN {
+                    buf.extend_from_slice(&[0]);
+                }
+                response.encode(&mut buf, version).unwrap();
+                return Some(buf.to_vec());
             }
             if api_key == end_txn_request::API_KEY {
                 if end_txn_silent.load(Ordering::SeqCst) {

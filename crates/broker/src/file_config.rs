@@ -4838,9 +4838,9 @@ kdc_url = "tcp://kdc:88"
             r#"
 [inter_broker_credentials]
 type = "oauth-bearer"
-token_path = "{}"
+token_path = {}
 "#,
-            token_path.display()
+            toml::Value::String(token_path.to_string_lossy().into_owned())
         );
         let file: FileConfig = toml::from_str(&src).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
@@ -4865,9 +4865,9 @@ token_path = "{}"
             r#"
 [inter_broker_credentials]
 type = "oauth-bearer"
-token_path = "{}"
+token_path = {}
 "#,
-            token_path.display()
+            toml::Value::String(token_path.to_string_lossy().into_owned())
         );
         let file: FileConfig = toml::from_str(&src).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();

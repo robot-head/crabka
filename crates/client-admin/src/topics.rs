@@ -14,6 +14,7 @@ use crabka_protocol::{
             DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic,
         },
         delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
+        describe_cluster_request::DescribeClusterRequest,
         list_partition_reassignments_request::ListPartitionReassignmentsRequest,
         list_partition_reassignments_response::ListPartitionReassignmentsResponse,
         metadata_request::{MetadataRequest, MetadataRequestTopic},
@@ -130,6 +131,16 @@ impl AdminClient {
         replication_factor: i32,
         timeout: Time,
     ) -> Result<TopicReplicationStatus, AdminError> {
+        if self.conn.uses_controller_bootstrap() {
+            return Err(AdminError::Broker {
+                api: "ControllerEndpoint",
+                code: 115,
+                name: "UNSUPPORTED_ENDPOINT_TYPE",
+                message: Some(
+                    "replication-factor reconciliation requires a broker bootstrap endpoint".into(),
+                ),
+            });
+        }
         // Replica selection depends on the controller's authoritative
         // heartbeat registry. Connect to the active controller before reading
         // Metadata so dead-but-still-registered brokers are not candidates.
@@ -179,9 +190,35 @@ impl AdminClient {
             return Ok(TopicReplicationStatus::ReassignmentInProgress);
         }
 
+        // The public entrypoint reconnects to the active controller before
+        // calling this method, so DescribeCluster carries that controller's
+        // authoritative heartbeat/fencing state.
+        let cluster = self
+            .conn
+            .send_at_least(
+                DescribeClusterRequest {
+                    include_fenced_brokers: true,
+                    ..Default::default()
+                },
+                2,
+            )
+            .await?;
+        broker_error("DescribeCluster", cluster.error_code, cluster.error_message)?;
+        let eligible_brokers = cluster
+            .brokers
+            .iter()
+            .filter(|broker| !broker.is_fenced)
+            .map(|broker| broker.broker_id)
+            .collect::<Vec<_>>();
+
         let metadata: MetadataResponse = self.conn.send(build_metadata(&[topic])).await?;
-        let Some(request) =
-            build_replication_factor_reassignment(&metadata, topic, replication_factor, timeout)?
+        let Some(request) = build_replication_factor_reassignment(
+            &metadata,
+            &eligible_brokers,
+            topic,
+            replication_factor,
+            timeout,
+        )?
         else {
             return Ok(TopicReplicationStatus::InSync);
         };
@@ -469,6 +506,7 @@ fn broker_error(api: &'static str, code: i16, message: Option<String>) -> Result
 
 fn build_replication_factor_reassignment(
     metadata: &MetadataResponse,
+    eligible_brokers: &[i32],
     topic_name: &str,
     replication_factor: i32,
     timeout: Time,
@@ -483,11 +521,7 @@ fn build_replication_factor_reassignment(
         ));
     }
 
-    let mut brokers = metadata
-        .brokers
-        .iter()
-        .map(|broker| broker.node_id)
-        .collect::<Vec<_>>();
+    let mut brokers = eligible_brokers.to_vec();
     brokers.sort_unstable();
     brokers.dedup();
     if desired > brokers.len() {
@@ -790,6 +824,7 @@ mod tests {
         for (case, metadata, replication_factor, expected_partitions) in cases {
             let actual = build_replication_factor_reassignment(
                 &metadata,
+                &[1, 2, 3],
                 "orders",
                 replication_factor,
                 crabka_units::secs(5),
@@ -820,6 +855,7 @@ mod tests {
     fn replication_factor_reassignment_rejects_factor_above_broker_count() {
         let error = build_replication_factor_reassignment(
             &reassignment_metadata(&[&[1]]),
+            &[1, 2, 3],
             "orders",
             4,
             crabka_units::secs(5),
@@ -835,6 +871,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn replication_factor_reassignment_replaces_fenced_replica() {
+        let actual = build_replication_factor_reassignment(
+            &reassignment_metadata(&[&[1, 2]]),
+            &[1, 3],
+            "orders",
+            2,
+            crabka_units::secs(5),
+        )
+        .unwrap()
+        .expect("fenced replica requires reassignment");
+
+        assert2::assert!(actual.topics[0].partitions[0].replicas == Some(vec![1, 3]));
     }
 
     #[test]

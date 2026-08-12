@@ -650,6 +650,19 @@ pub fn happy_path_rules(
         },
         MockRule {
             method: Method::GET,
+            path_substr: format!("/namespaces/{namespace}/pods"),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "PodList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": []
+                }),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
             path_substr: format!("/secrets/{keystore_name}"),
             response: Response::builder()
                 .status(404)
@@ -912,6 +925,19 @@ pub fn dynamic_quorum_rules(parent: &str, pool: &str, namespace: &str) -> Vec<Mo
                 &serde_json::json!({
                     "apiVersion": "apps/v1",
                     "kind": "StatefulSetList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": [],
+                }),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/pods?".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "PodList",
                     "metadata": { "resourceVersion": "1" },
                     "items": [],
                 }),

@@ -318,7 +318,7 @@ jobs:
   rust:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

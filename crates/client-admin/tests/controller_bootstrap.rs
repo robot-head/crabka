@@ -56,6 +56,19 @@ async fn controller_bootstrap_routes_supported_and_rejects_unsupported_admin_rpc
     check!(configs.len() == 1);
     check!(configs[0].topic == "controller-admin");
 
+    let unsupported_reconciliation = controller_admin
+        .reconcile_topic_replication_factor("controller-admin", 1, crabka_units::secs(5))
+        .await;
+    check!(matches!(
+        unsupported_reconciliation,
+        Err(AdminError::Broker {
+            api: "ControllerEndpoint",
+            code: 115,
+            name: "UNSUPPORTED_ENDPOINT_TYPE",
+            ..
+        })
+    ));
+
     let unsupported = controller_admin
         .create_topics(
             &[CreateTopicSpec {

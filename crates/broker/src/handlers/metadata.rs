@@ -1,5 +1,6 @@
-//! `Metadata` (`api_key=3`). It returns available brokers and the partitions
-//! of the requested topics, or of all topics when `topics` is `None`.
+//! `Metadata` (`api_key=3`). It returns registered broker endpoints and the
+//! partitions of the requested topics, or of all topics when `topics` is
+//! `None`.
 //!
 //! The metadata comes from `controller.current_image()`, the
 //! quorum-replicated snapshot, and not from a local in-memory struct.
@@ -109,29 +110,20 @@ pub(crate) async fn handle(
         candidate_topics.iter().map(String::as_str),
     );
 
-    // The controller's heartbeat registry is the authoritative source for
-    // broker availability. Unknown entries remain eligible so a fresh
-    // controller does not briefly advertise an empty cluster before seeding
-    // the registry. Non-controller brokers do not own authoritative liveness
-    // state and therefore retain the image-only projection.
-    let is_controller = *controller.watch_leader().borrow() == Some(broker.config.node_id);
-    let unavailable = if is_controller {
-        broker.liveness.unavailable_snapshot().await
-    } else {
-        std::collections::HashSet::new()
-    };
-
-    // Brokers: enumerate available registered nodes from the metadata image.
+    // Brokers: enumerate registered nodes from the metadata image. Keep
+    // endpoint discovery separate from replica-placement eligibility: a
+    // partition can still name a fenced/dead broker as leader until failover
+    // commits, and clients need its endpoint to route or receive the broker's
+    // protocol error. DescribeCluster v2 exposes authoritative fencing state
+    // to placement clients.
     // Each broker's `host:port` is projected from the endpoint matching the
     // listener this request arrived on (Kafka returns the connection
     // listener's advertised address), falling back to the inter-broker
     // endpoint when the connection listener isn't recorded on that broker.
-    let brokers = project_available_brokers(
-        &image,
-        &unavailable,
-        ctx.connection_listener_name,
-        &inter_broker_name,
-    );
+    let brokers = image
+        .brokers()
+        .map(|broker| project_broker(broker, ctx.connection_listener_name, &inter_broker_name))
+        .collect();
 
     let topics_out = build_topic_rows(
         broker,
@@ -370,19 +362,6 @@ pub(crate) fn pick_endpoint_host_port(
     }
 }
 
-fn project_available_brokers(
-    image: &crabka_metadata::MetadataImage,
-    unavailable: &std::collections::HashSet<u64>,
-    connection_listener_name: &str,
-    inter_broker_name: &str,
-) -> Vec<MetadataResponseBroker> {
-    image
-        .brokers()
-        .filter(|broker| !unavailable.contains(&broker.node_id.0))
-        .map(|broker| project_broker(broker, connection_listener_name, inter_broker_name))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -481,32 +460,5 @@ mod tests {
         let out = project_broker(&rec, "tls", "plain");
         assert!(out.host == "legacy-host");
         assert!(out.port == 1000);
-    }
-
-    #[test]
-    fn unavailable_brokers_are_not_advertised() {
-        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
-        for node_id in [7, 8] {
-            let mut broker = record(vec![]);
-            broker.node_id = crabka_metadata::NodeId(node_id);
-            image.apply(&crabka_metadata::MetadataRecord::V1BrokerRegistration(
-                broker,
-            ));
-        }
-
-        let projected = project_available_brokers(
-            &image,
-            &std::collections::HashSet::from([8]),
-            "plain",
-            "plain",
-        );
-
-        assert!(
-            projected
-                .iter()
-                .map(|broker| broker.node_id)
-                .collect::<Vec<_>>()
-                == vec![7]
-        );
     }
 }

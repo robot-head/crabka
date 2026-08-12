@@ -61,7 +61,10 @@ jobs:
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-oauth')) ||
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection'))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A cold melange build can exceed 30 minutes before the shared cache has
+    # been populated; leave enough time for that first build to finish and
+    # publish the image artifacts used by every downstream kind job.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7.0.0
@@ -104,6 +107,9 @@ jobs:
               --repository-append "$PWD/packages" \
               --keyring-append "$PWD/melange.rsa.pub"
           done
+      - name: Make melange cache readable by the cache action
+        if: ${{ always() }}
+        run: sudo chown -R "$(id -u):$(id -g)" .melange-cache
       - name: Upload image tarballs
         uses: actions/upload-artifact@v7
         with:
@@ -2334,6 +2340,13 @@ jobs:
           spec:
             authentication:
               type: delegation-token
+            authorization:
+              type: simple
+              acls:
+                - resource:
+                    type: topic
+                    name: delegation-token-test
+                  operations: [Describe, Write]
           EOF
 
       - name: Wait for KafkaUser alice Ready

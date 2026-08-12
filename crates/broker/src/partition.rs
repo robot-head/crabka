@@ -633,6 +633,19 @@ impl Partition {
         new_leader: u64,
         new_epoch: i32,
     ) {
+        // Reconciliation also runs for metadata-only changes such as an ISR
+        // update. Do not queue for the exclusive transition barrier when the
+        // target itself is unchanged: an acks=all Produce holds a read guard
+        // while it waits for that ISR update to advance the HW.
+        {
+            let current = self.replication_target.read().await;
+            if topic_id.is_none_or(|id| current.topic_id == Some(id))
+                && current.leader_node_id == crabka_raft::NodeId(new_leader)
+                && current.leader_epoch == crabka_metadata::LeaderEpoch(new_epoch)
+            {
+                return;
+            }
+        }
         // Wait for any accepted follower mutation to finish before making the
         // new local role visible. Conversely, a mutation that arrives after
         // this write lock observes the new tuple and is fenced.
@@ -888,6 +901,24 @@ mod tests {
         drop(guard);
         update.await.expect("leader install");
         assert!(partition.lock_replication_target(current).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn idempotent_replication_target_install_does_not_wait_for_produce_guard() {
+        let (partition, _dir) = test_partition(Arc::new(Notify::new()));
+        let topic_id = uuid::Uuid::new_v4();
+        partition
+            .install_replication_target(Some(topic_id), 1, 7)
+            .await;
+
+        let produce_guard = partition.lock_produce_transition().await;
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            partition.install_replication_target(Some(topic_id), 1, 7),
+        )
+        .await
+        .expect("unchanged target should not wait for the Produce read guard");
+        drop(produce_guard);
     }
 
     fn test_partition_with_writer() -> (Partition, tempfile::TempDir) {

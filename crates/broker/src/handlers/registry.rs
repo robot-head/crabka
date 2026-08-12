@@ -701,6 +701,7 @@ fn describe_delegation_token_adapter<'a>(
 
 context_dispatches!(register_context_dispatches;
     (metadata_adapter, Metadata, metadata_request, crate::handlers::metadata::handle),
+    (describe_cluster_adapter, DescribeCluster, describe_cluster_request, crate::handlers::describe_cluster::handle),
     (create_topics_adapter, CreateTopics, create_topics_request, crate::handlers::create_topics::handle),
     (delete_topics_adapter, DeleteTopics, delete_topics_request, crate::handlers::delete_topics::handle),
     (alter_configs_adapter, AlterConfigs, alter_configs_request, crate::handlers::alter_configs::handle),
@@ -749,7 +750,6 @@ context_dispatches!(register_context_dispatches;
 );
 
 sync_context_dispatches!(register_sync_context_dispatches;
-    (describe_cluster_adapter, DescribeCluster, describe_cluster_request, crate::handlers::describe_cluster::handle),
     (describe_topic_partitions_adapter, DescribeTopicPartitions, describe_topic_partitions_request, crate::handlers::describe_topic_partitions::handle),
     (list_config_resources_adapter, ListConfigResources, list_config_resources_request, crate::handlers::list_config_resources::handle),
     (describe_quorum_adapter, DescribeQuorum, describe_quorum_request, crate::handlers::describe_quorum::handle),

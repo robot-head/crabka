@@ -7996,7 +7996,7 @@ fn produce_records(topic: &str, n: usize) {
 }
 
 /// Poll `mc ls --recursive local/<bucket>` until it lists at least
-/// `min_log_objects` entries whose path ends with `/log`, then return the
+/// `min_log_objects` entries whose path ends with `.log`, then return the
 /// full listing.
 ///
 /// The poll runs at 500 ms intervals for up to 20 s (40 iterations). It
@@ -8011,14 +8011,18 @@ async fn wait_for_minio_segments(bucket: &str, min_log_objects: usize) -> String
         bucket_listing = minio_list_objects(bucket);
         copied_log_objects = bucket_listing
             .lines()
-            .filter(|l| l.ends_with("/log"))
+            .filter(|line| {
+                std::path::Path::new(line)
+                    .extension()
+                    .is_some_and(|extension| extension == "log")
+            })
             .count();
         if copied_log_objects >= min_log_objects {
             return bucket_listing;
         }
     }
     panic!(
-        "expected ≥{min_log_objects} segment `/log` objects in MinIO; \
+        "expected ≥{min_log_objects} segment `.log` objects in MinIO; \
          saw {copied_log_objects}. Bucket listing:\n{bucket_listing}"
     );
 }
@@ -8174,7 +8178,7 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
     create_tiered_topic(&broker, TOPIC).await;
     produce_records(TOPIC, RECORDS);
 
-    // Wait for ≥2 segment `/log` objects to appear in MinIO: that means at
+    // Wait for ≥2 segment `.log` objects to appear in MinIO: that means at
     // least two sealed segments have been copied and the local-retention pass
     // has run (evicting them from disk).
     wait_for_minio_segments(MINIO_BUCKET, 2).await;

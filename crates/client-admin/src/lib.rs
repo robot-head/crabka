@@ -565,9 +565,33 @@ impl RecoveringConnection {
         R: crabka_protocol::ProtocolRequest + Clone,
         R::Response: 'static,
     {
+        self.send_with_min_version(request, None).await
+    }
+
+    pub(crate) async fn send_at_least<R>(
+        &self,
+        request: R,
+        min_version: i16,
+    ) -> Result<R::Response, AdminError>
+    where
+        R: crabka_protocol::ProtocolRequest + Clone,
+        R::Response: 'static,
+    {
+        self.send_with_min_version(request, Some(min_version)).await
+    }
+
+    async fn send_with_min_version<R>(
+        &self,
+        request: R,
+        min_version: Option<i16>,
+    ) -> Result<R::Response, AdminError>
+    where
+        R: crabka_protocol::ProtocolRequest + Clone,
+        R::Response: 'static,
+    {
         self.require_advertised_controller_api::<R>().await?;
         self.begin_metadata_attempt::<R>();
-        let first = self.inner.read().await.send(request.clone()).await;
+        let first = self.send_current(request.clone(), min_version).await;
         match first {
             Ok(response) if Self::response_requires_rebootstrap(&response) => {
                 if self.strategy == MetadataRecoveryStrategy::None {
@@ -575,10 +599,10 @@ impl RecoveringConnection {
                         error_code: 129,
                     }));
                 }
-                self.send_after_rebootstrap(request).await
+                self.send_after_rebootstrap(request, min_version).await
             }
             Ok(response) if self.metadata_attempt_timed_out(&response) => {
-                self.send_after_rebootstrap(request).await
+                self.send_after_rebootstrap(request, min_version).await
             }
             Ok(response) => {
                 self.observe_cluster_endpoints(&response);
@@ -586,10 +610,13 @@ impl RecoveringConnection {
                 Ok(response)
             }
             Err(error) if AdminClient::is_retriable_transport_error(&error) => {
-                match self.send_after_current_metadata(request.clone()).await {
+                match self
+                    .send_after_current_metadata(request.clone(), min_version)
+                    .await
+                {
                     Ok(response) => Ok(response),
                     Err(_) if self.strategy == MetadataRecoveryStrategy::Rebootstrap => {
-                        self.send_after_rebootstrap(request).await
+                        self.send_after_rebootstrap(request, min_version).await
                     }
                     Err(_) => Err(AdminError::from(error)),
                 }
@@ -602,7 +629,26 @@ impl RecoveringConnection {
         *self.inner.write().await = connection;
     }
 
-    async fn send_after_rebootstrap<R>(&self, request: R) -> Result<R::Response, AdminError>
+    async fn send_current<R>(
+        &self,
+        request: R,
+        min_version: Option<i16>,
+    ) -> Result<R::Response, ClientError>
+    where
+        R: crabka_protocol::ProtocolRequest,
+    {
+        let connection = self.inner.read().await;
+        if let Some(min_version) = min_version {
+            return send_connection_at_least(&connection, request, min_version).await;
+        }
+        connection.send(request).await
+    }
+
+    async fn send_after_rebootstrap<R>(
+        &self,
+        request: R,
+        min_version: Option<i16>,
+    ) -> Result<R::Response, AdminError>
     where
         R: crabka_protocol::ProtocolRequest,
         R::Response: 'static,
@@ -610,7 +656,7 @@ impl RecoveringConnection {
         self.rebootstrap().await?;
         self.require_advertised_controller_api::<R>().await?;
         self.begin_metadata_attempt::<R>();
-        let response = self.inner.read().await.send(request).await?;
+        let response = self.send_current(request, min_version).await?;
         if Self::response_requires_rebootstrap(&response) {
             return Err(AdminError::Transport(ClientError::Server {
                 error_code: 129,
@@ -621,24 +667,28 @@ impl RecoveringConnection {
         Ok(response)
     }
 
-    async fn send_after_current_metadata<R>(&self, request: R) -> Result<R::Response, AdminError>
+    async fn send_after_current_metadata<R>(
+        &self,
+        request: R,
+        min_version: Option<i16>,
+    ) -> Result<R::Response, AdminError>
     where
         R: crabka_protocol::ProtocolRequest + Clone,
         R::Response: 'static,
     {
         self.reconnect_current_metadata().await?;
         self.require_advertised_controller_api::<R>().await?;
-        let response = self.inner.read().await.send(request.clone()).await?;
+        let response = self.send_current(request.clone(), min_version).await?;
         if Self::response_requires_rebootstrap(&response) {
             if self.strategy == MetadataRecoveryStrategy::Rebootstrap {
-                return self.send_after_rebootstrap(request).await;
+                return self.send_after_rebootstrap(request, min_version).await;
             }
             return Err(AdminError::Transport(ClientError::Server {
                 error_code: 129,
             }));
         }
         if self.metadata_attempt_timed_out(&response) {
-            return self.send_after_rebootstrap(request).await;
+            return self.send_after_rebootstrap(request, min_version).await;
         }
         self.observe_cluster_endpoints(&response);
         self.complete_metadata_attempt(&response);
@@ -814,6 +864,31 @@ impl RecoveringConnection {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
+}
+
+async fn send_connection_at_least<R>(
+    connection: &Connection,
+    request: R,
+    min_version: i16,
+) -> Result<R::Response, ClientError>
+where
+    R: crabka_protocol::ProtocolRequest,
+{
+    let (broker_min, broker_max) = connection
+        .advertised_api_range(R::API_KEY)
+        .unwrap_or((0, 0));
+    let client_min = R::MIN_VERSION.max(min_version);
+    let chosen = R::MAX_VERSION.min(broker_max);
+    if chosen < client_min || chosen < broker_min {
+        return Err(ClientError::IncompatibleVersion {
+            api_key: R::API_KEY,
+            broker_min,
+            broker_max,
+            client_min,
+            client_max: R::MAX_VERSION,
+        });
+    }
+    connection.send(request).await
 }
 
 impl AdminClient {
@@ -1070,12 +1145,15 @@ impl AdminClient {
 
         const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
         let bootstrap = Self::connect_one(host_port, options.clone()).await?;
-        let response = bootstrap
-            .send(DescribeClusterRequest {
+        let response = send_connection_at_least(
+            &bootstrap,
+            DescribeClusterRequest {
                 endpoint_type: ENDPOINT_TYPE_CONTROLLERS,
                 ..Default::default()
-            })
-            .await?;
+            },
+            1,
+        )
+        .await?;
         if response.error_code != 0 {
             return Err(AdminError::Broker {
                 api: "DescribeCluster",
@@ -1398,7 +1476,7 @@ mod tests {
     }
 
     impl ObservedController {
-        async fn start() -> Self {
+        async fn start(describe_cluster_max_version: i16) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let connections = Arc::new(AtomicUsize::new(0));
@@ -1442,7 +1520,7 @@ mod tests {
                                             ApiVersion {
                                                 api_key: describe_cluster_request::API_KEY,
                                                 min_version: 0,
-                                                max_version: 2,
+                                                max_version: describe_cluster_max_version,
                                                 ..Default::default()
                                             },
                                         ],
@@ -1570,6 +1648,29 @@ mod tests {
                     api_key: metadata_request::API_KEY,
                     min_version: 0,
                     max_version: 13,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut bytes = BytesMut::new();
+        response.encode(&mut bytes, 0).unwrap();
+        bytes.to_vec()
+    }
+
+    fn admin_mock_api_versions_with_describe_cluster(max_version: i16) -> Vec<u8> {
+        let response = ApiVersionsResponse {
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 3,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: describe_cluster_request::API_KEY,
+                    min_version: 0,
+                    max_version,
                     ..Default::default()
                 },
             ],
@@ -1785,8 +1886,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovering_connection_enforces_required_api_version() {
+        let broker =
+            crabka_client_core::MockBroker::start(|api_key, _version, _correlation_id, _body| {
+                (api_key == api_versions_request::API_KEY)
+                    .then(|| admin_mock_api_versions_with_describe_cluster(1))
+            })
+            .await;
+        let admin = AdminClient::connect(&[broker.addr.to_string()])
+            .await
+            .expect("admin connects");
+
+        let result = admin
+            .conn
+            .send_at_least(DescribeClusterRequest::default(), 2)
+            .await;
+
+        assert2::assert!(matches!(
+            result,
+            Err(AdminError::Transport(ClientError::IncompatibleVersion {
+                api_key: describe_cluster_request::API_KEY,
+                broker_max: 1,
+                client_min: 2,
+                ..
+            }))
+        ));
+        broker.stop();
+    }
+
+    #[tokio::test]
     async fn controller_bootstrap_discovers_and_connects_active_controller() {
-        let controller = ObservedController::start().await;
+        let controller = ObservedController::start(2).await;
 
         let admin = AdminClient::connect_controller(&[controller.addr.to_string()])
             .await
@@ -1801,6 +1931,24 @@ mod tests {
         assert2::assert!(admin.conn.uses_controller_bootstrap());
         assert2::assert!(controller.connections.load(Ordering::SeqCst) == 2);
         assert2::assert!(*controller.endpoint_types.lock().unwrap() == vec![2]);
+    }
+
+    #[tokio::test]
+    async fn controller_bootstrap_requires_endpoint_type_version() {
+        let controller = ObservedController::start(0).await;
+
+        let result = AdminClient::connect_controller(&[controller.addr.to_string()]).await;
+
+        assert2::assert!(matches!(
+            result,
+            Err(AdminError::Transport(ClientError::IncompatibleVersion {
+                api_key: describe_cluster_request::API_KEY,
+                broker_max: 0,
+                client_min: 1,
+                ..
+            }))
+        ));
+        assert2::assert!(controller.endpoint_types.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
