@@ -272,7 +272,11 @@ async fn disk_backed_restart_recovers_idempotent_producer_state() {
     let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     broker
-        .wait_until_partition_present("restart-dedup", 0)
+        .wait_until_local_partition_leader(
+            "restart-dedup",
+            0,
+            crabka_broker::NodeId(broker.node_id()),
+        )
         .await;
 
     let duplicate = produce_batch(
