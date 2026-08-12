@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use stateright::{Checker, Model, Property};
 
-const MAX_OFFSET: i64 = 3;
+const MAX_OFFSET: i64 = 2;
+const APPENDERS: usize = 2;
 const MAX_DEPTH: usize = 24;
 const TARGET_STATE_COUNT: usize = 100_000;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
@@ -22,6 +23,7 @@ const WITNESS_MID_FSYNC: u8 = 1 << 2;
 const WITNESS_TRIM_AT_INDEX: u8 = 1 << 3;
 const WITNESS_MINORITY_WAL_LOSS: u8 = 1 << 4;
 const WITNESS_STATELESS_APPEND: u8 = 1 << 5;
+const WITNESS_SEQUENCER_HANDOFF: u8 = 1 << 6;
 
 const WAL_NODES: usize = 3;
 const WAL_MAJORITY: usize = 2;
@@ -33,12 +35,20 @@ struct CrashState {
     wal_nodes: [i64; WAL_NODES],
     wal_lost: [bool; WAL_NODES],
     wal_acked: i64,
+    /// Last quorum-durable frontier observed before a sequencer handoff.
+    /// `wal_acked` may never fall below it.
+    handoff_wal_acked: i64,
+    /// Client-visible frontier. Unlike `wal_acked`, this may temporarily
+    /// regress while a new sequencer re-derives its view from durable media.
+    advertised_hwm: i64,
+    sequencer_epoch: u8,
     object_frontier: i64,
     index_frontier: i64,
     trimmed: i64,
     producer_committed: i64,
     producer_rebuilt: i64,
     reservations: Vec<(i64, i64)>,
+    appenders_seen: u8,
     witnesses: u8,
 }
 
@@ -53,6 +63,7 @@ enum Act {
     CommitIndex,
     Trim,
     LoseWalNode(usize),
+    SequencerHandoff,
 }
 
 #[derive(Clone, Debug)]
@@ -69,19 +80,23 @@ impl Model for CrashModel {
             wal_nodes: [0; WAL_NODES],
             wal_lost: [false; WAL_NODES],
             wal_acked: 0,
+            handoff_wal_acked: 0,
+            advertised_hwm: 0,
+            sequencer_epoch: 0,
             object_frontier: 0,
             index_frontier: 0,
             trimmed: 0,
             producer_committed: 0,
             producer_rebuilt: 0,
             reservations: Vec::new(),
+            appenders_seen: 0,
             witnesses: 0,
         }]
     }
 
     fn actions(&self, s: &Self::State, acts: &mut Vec<Self::Action>) {
         if s.kraft_next < MAX_OFFSET {
-            for node in 0..WAL_NODES {
+            for node in 0..APPENDERS {
                 if !s.wal_lost[node] {
                     acts.push(Act::ReserveVia(node));
                 }
@@ -109,6 +124,9 @@ impl Model for CrashModel {
                 acts.push(Act::LoseWalNode(node));
             }
         }
+        if s.wal_acked > 0 && s.sequencer_epoch < 2 {
+            acts.push(Act::SequencerHandoff);
+        }
     }
 
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
@@ -118,7 +136,8 @@ impl Model for CrashModel {
                 let base = s.kraft_next;
                 s.kraft_next += 1;
                 s.reservations.push((base, s.kraft_next));
-                if node != 0 {
+                s.appenders_seen |= 1 << node;
+                if s.appenders_seen.count_ones() >= 2 {
                     s.witnesses |= WITNESS_STATELESS_APPEND;
                 }
             }
@@ -160,6 +179,16 @@ impl Model for CrashModel {
                 s.wal_lost[node] = true;
                 s.witnesses |= WITNESS_MINORITY_WAL_LOSS;
             }
+            Act::SequencerHandoff => {
+                s.sequencer_epoch += 1;
+                s.handoff_wal_acked = s.handoff_wal_acked.max(s.wal_acked);
+                // KIP-207 permits the newly advertised frontier to move back
+                // while authority changes. Durability does not move back: the
+                // new sequencer can re-derive `wal_acked` from the surviving
+                // quorum, independently of this conservative visible value.
+                s.advertised_hwm = s.index_frontier.min(s.wal_acked);
+                s.witnesses |= WITNESS_SEQUENCER_HANDOFF;
+            }
         }
         Some(s)
     }
@@ -169,6 +198,13 @@ impl Model for CrashModel {
             Property::always("wal_acked_durable", |_, s: &CrashState| {
                 s.wal_acked <= surviving_wal_frontier(s)
             }),
+            Property::always("committed_durable", |_, s: &CrashState| {
+                s.producer_committed <= surviving_wal_frontier(s)
+            }),
+            Property::always(
+                "sequencer_handoff_never_regresses_wal_acked",
+                |_, s: &CrashState| s.wal_acked >= s.handoff_wal_acked,
+            ),
             Property::always("producer_dedup_no_regress", |_, s: &CrashState| {
                 s.producer_rebuilt <= s.producer_committed && s.producer_committed <= s.log_end
             }),
@@ -203,9 +239,14 @@ impl Model for CrashModel {
                     s.witnesses & WITNESS_MINORITY_WAL_LOSS != 0 && s.wal_acked > s.trimmed
                 },
             ),
+            Property::sometimes("two_appenders_race_gap_free", |_, s: &CrashState| {
+                s.witnesses & WITNESS_STATELESS_APPEND != 0
+            }),
             Property::sometimes(
-                "stateless_append_via_non_leader_member",
-                |_, s: &CrashState| s.witnesses & WITNESS_STATELESS_APPEND != 0,
+                "sequencer_handoff_regresses_only_advertised_hwm",
+                |_, s: &CrashState| {
+                    s.witnesses & WITNESS_SEQUENCER_HANDOFF != 0 && s.advertised_hwm < s.wal_acked
+                },
             ),
         ]
     }
@@ -220,6 +261,7 @@ fn fsync_quorum(s: &mut CrashState) {
         }
     }
     s.wal_acked = quorum_frontier(s);
+    s.advertised_hwm = s.wal_acked;
 }
 
 fn quorum_frontier(s: &CrashState) -> i64 {

@@ -2,7 +2,7 @@
 //! `init_transactions` / `begin` / `commit` / `abort` / `send_offsets_to_transaction`
 //! flow.
 
-use std::sync::Arc;
+use std::{fmt, str::FromStr, sync::Arc};
 
 use crate::{error::ProducerError, producer::Producer};
 
@@ -15,6 +15,12 @@ pub(crate) enum TxnState {
     Ready,
     /// Inside `begin_transaction` ... `commit/abort`.
     InTransaction,
+    /// `prepare_transaction` has stopped new writes and is flushing records.
+    Preparing,
+    /// A 2PC transaction has been flushed and awaits its external decision.
+    Prepared,
+    /// `init_transactions_with_keep_prepared` is in flight.
+    Initializing,
     /// A `commit` or an `abort` is in progress.
     CommittingOrAborting,
     /// A guard was dropped or `EndTxn` had an uncertain transport outcome.
@@ -24,6 +30,104 @@ pub(crate) enum TxnState {
     /// re-init.
     Fenced,
 }
+
+/// Stable identity of a transaction prepared for external two-phase commit.
+///
+/// Its string form is Kafka-compatible: `"producer_id:producer_epoch"`.
+/// The empty string represents no transaction and round-trips through
+/// [`Default`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PreparedTransactionState {
+    producer_id: i64,
+    producer_epoch: i16,
+}
+
+impl PreparedTransactionState {
+    /// Creates a prepared transaction identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PreparedTransactionStateParseError`] when either identity
+    /// component is negative.
+    pub fn new(
+        producer_id: i64,
+        producer_epoch: i16,
+    ) -> Result<Self, PreparedTransactionStateParseError> {
+        if producer_id < 0 || producer_epoch < 0 {
+            return Err(PreparedTransactionStateParseError);
+        }
+        Ok(Self {
+            producer_id,
+            producer_epoch,
+        })
+    }
+
+    /// Producer ID of the prepared transaction.
+    #[must_use]
+    pub const fn producer_id(self) -> i64 {
+        self.producer_id
+    }
+
+    /// Producer epoch of the prepared transaction.
+    #[must_use]
+    pub const fn producer_epoch(self) -> i16 {
+        self.producer_epoch
+    }
+
+    /// Whether this token identifies a real transaction.
+    #[must_use]
+    pub const fn has_transaction(self) -> bool {
+        self.producer_id >= 0
+    }
+}
+
+impl Default for PreparedTransactionState {
+    fn default() -> Self {
+        Self {
+            producer_id: -1,
+            producer_epoch: -1,
+        }
+    }
+}
+
+impl fmt::Display for PreparedTransactionState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.has_transaction() {
+            write!(formatter, "{}:{}", self.producer_id, self.producer_epoch)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl FromStr for PreparedTransactionState {
+    type Err = PreparedTransactionStateParseError;
+
+    fn from_str(serialized: &str) -> Result<Self, Self::Err> {
+        if serialized.is_empty() {
+            return Ok(Self::default());
+        }
+        let (producer_id, producer_epoch) = serialized
+            .split_once(':')
+            .ok_or(PreparedTransactionStateParseError)?;
+        if producer_epoch.contains(':') {
+            return Err(PreparedTransactionStateParseError);
+        }
+        Self::new(
+            producer_id
+                .parse()
+                .map_err(|_| PreparedTransactionStateParseError)?,
+            producer_epoch
+                .parse()
+                .map_err(|_| PreparedTransactionStateParseError)?,
+        )
+    }
+}
+
+/// Error returned when a prepared transaction token is malformed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid prepared transaction state; expected producer_id:producer_epoch")]
+pub struct PreparedTransactionStateParseError;
 
 /// An open transaction, borrowing the [`Producer`] that opened it.
 ///
@@ -49,9 +153,19 @@ pub(crate) enum TxnState {
 pub struct Transaction<'p> {
     pub(crate) producer: &'p Producer,
     pub(crate) finished: bool,
+    pub(crate) guard_generation: u64,
 }
 
 impl Transaction<'_> {
+    /// Flushes and prepares this transaction for external two-phase commit.
+    ///
+    /// # Errors
+    ///
+    /// See [`Producer::prepare_transaction`].
+    pub async fn prepare(&self) -> Result<PreparedTransactionState, ProducerError> {
+        self.producer.prepare_transaction().await
+    }
+
     /// Commit this transaction.
     ///
     /// # Errors
@@ -96,7 +210,8 @@ impl Transaction<'_> {
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if !self.finished {
-            self.producer.require_transaction_recovery();
+            self.producer
+                .abandon_transaction_guard(self.guard_generation);
         }
     }
 }
@@ -114,9 +229,19 @@ impl Drop for Transaction<'_> {
 pub struct OwnedTransaction {
     pub(crate) producer: Arc<Producer>,
     pub(crate) finished: bool,
+    pub(crate) guard_generation: u64,
 }
 
 impl OwnedTransaction {
+    /// Flushes and prepares this transaction for external two-phase commit.
+    ///
+    /// # Errors
+    ///
+    /// See [`Producer::prepare_transaction`].
+    pub async fn prepare(&self) -> Result<PreparedTransactionState, ProducerError> {
+        self.producer.prepare_transaction().await
+    }
+
     /// Commit this transaction.
     ///
     /// # Errors
@@ -161,7 +286,8 @@ impl OwnedTransaction {
 impl Drop for OwnedTransaction {
     fn drop(&mut self) {
         if !self.finished {
-            self.producer.require_transaction_recovery();
+            self.producer
+                .abandon_transaction_guard(self.guard_generation);
         }
     }
 }
@@ -206,7 +332,30 @@ mod tests {
         },
     };
 
+    use super::{PreparedTransactionState, TxnState};
     use crate::{ProducerRecord, error::ProducerError, producer::Producer};
+
+    #[test]
+    fn prepared_transaction_state_has_stable_string_round_trip() {
+        let state = PreparedTransactionState::new(42, 7).expect("valid transaction identity");
+
+        assert2::assert!(state.producer_id() == 42);
+        assert2::assert!(state.producer_epoch() == 7);
+        assert2::assert!(state.has_transaction());
+        assert2::assert!(state.to_string() == "42:7");
+        assert2::assert!("42:7".parse::<PreparedTransactionState>() == Ok(state));
+        assert2::assert!(PreparedTransactionState::default().to_string().is_empty());
+        assert2::assert!(
+            "".parse::<PreparedTransactionState>() == Ok(PreparedTransactionState::default())
+        );
+    }
+
+    #[test]
+    fn prepared_transaction_state_rejects_malformed_or_negative_identity() {
+        for serialized in ["42", "-1:0", "1:-1", "1:2:3", "a:2", "1:b"] {
+            assert2::assert!(serialized.parse::<PreparedTransactionState>().is_err());
+        }
+    }
 
     fn encode_v0(resp: &impl Encode) -> Vec<u8> {
         let mut buf = BytesMut::new();
@@ -285,6 +434,14 @@ mod tests {
         end_txn_error: Arc<AtomicI16>,
         end_txn_silent: Arc<AtomicBool>,
     ) -> (MockBroker, Producer) {
+        transactional_producer_configured(end_txn_error, end_txn_silent, false).await
+    }
+
+    async fn transactional_producer_configured(
+        end_txn_error: Arc<AtomicI16>,
+        end_txn_silent: Arc<AtomicBool>,
+        two_phase_commit_enabled: bool,
+    ) -> (MockBroker, Producer) {
         let port_cell = Arc::new(AtomicU16::new(0));
         let handler_port = port_cell.clone();
         let next_epoch = Arc::new(AtomicI16::new(3));
@@ -328,6 +485,7 @@ mod tests {
             .bootstrap(mock.addr.to_string())
             .enable_idempotence(false)
             .transactional_id("test-txn")
+            .transaction_two_phase_commit_enable(two_phase_commit_enabled)
             .request_timeout(std::time::Duration::from_millis(100))
             .build()
             .await
@@ -337,6 +495,38 @@ mod tests {
             .await
             .expect("init_transactions against the mock coordinator");
         (mock, producer)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prepared_guard_can_drop_without_poisoning_the_next_transaction() {
+        let end_txn_error = Arc::new(AtomicI16::new(0));
+        let (mock, producer) = transactional_producer_configured(
+            end_txn_error,
+            Arc::new(AtomicBool::new(false)),
+            true,
+        )
+        .await;
+        let transaction = producer
+            .begin_transaction()
+            .await
+            .expect("begin transaction");
+        let prepared = transaction.prepare().await.expect("prepare transaction");
+
+        assert2::assert!(*producer.txn_state.lock().await == TxnState::Prepared);
+        drop(transaction);
+        assert2::assert!(!producer.txn_recovery_required.load(Ordering::Acquire));
+        producer
+            .complete_transaction(prepared)
+            .await
+            .expect("complete prepared transaction");
+        producer
+            .begin_transaction()
+            .await
+            .expect("begin next transaction")
+            .abort()
+            .await
+            .expect("abort next transaction");
+        mock.stop();
     }
 
     macro_rules! end_txn_retry_test {

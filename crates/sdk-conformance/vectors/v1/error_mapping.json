@@ -1,0 +1,123 @@
+{
+  "id": "error_mapping",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "empty topic maps to invalid argument",
+      "command": {
+        "cmd": "publish",
+        "topic": "",
+        "value_b64": "eA==",
+        "headers": []
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "topic is required"
+        }
+      }
+    },
+    {
+      "name": "unknown topic maps to not found",
+      "command": {
+        "cmd": "publish",
+        "topic": "__missing_topic",
+        "value_b64": "eA==",
+        "headers": []
+      },
+      "expect": {
+        "error": {
+          "kind": "not_found",
+          "message": "topic not found"
+        }
+      }
+    },
+    {
+      "name": "empty CloudEvent id maps to invalid argument",
+      "command": {
+        "cmd": "publish_event",
+        "topic": "events",
+        "event": {
+          "id": "",
+          "source": "/tests",
+          "type": "example.created",
+          "specversion": "1.0",
+          "datacontenttype": null,
+          "data_b64": ""
+        }
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "CloudEvent id is required"
+        }
+      }
+    },
+    {
+      "name": "malformed filter path maps to invalid argument",
+      "command": {
+        "cmd": "subscribe",
+        "topics": ["events"],
+        "group": "reader",
+        "filter": {
+          "path": "kind",
+          "op": "equals",
+          "value": "created"
+        }
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "filter path must start with $."
+        }
+      }
+    },
+    {
+      "name": "nonscalar filter value maps to invalid argument",
+      "command": {
+        "cmd": "subscribe",
+        "topics": ["events"],
+        "group": "reader",
+        "filter": {
+          "path": "$.kind",
+          "op": "equals",
+          "value": ["created"]
+        }
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "filter value must be a string, number, boolean, or null"
+        }
+      }
+    },
+    {
+      "name": "configure unreachable endpoint",
+      "command": {
+        "cmd": "configure",
+        "endpoint": "unreachable://gateway",
+        "bearer": null
+      },
+      "expect": {
+        "ok": {
+          "bearer_configured": false
+        }
+      }
+    },
+    {
+      "name": "unreachable endpoint maps to transport",
+      "command": {
+        "cmd": "publish",
+        "topic": "t",
+        "value_b64": "eA==",
+        "headers": []
+      },
+      "expect": {
+        "error": {
+          "kind": "transport",
+          "message": "endpoint unreachable"
+        }
+      }
+    }
+  ]
+}

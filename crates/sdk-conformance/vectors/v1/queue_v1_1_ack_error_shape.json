@@ -1,0 +1,65 @@
+{
+  "id": "queue_v1_1_ack_error_shape",
+  "since": { "major": 1, "minor": 1 },
+  "steps": [
+    {
+      "name": "publish queue record before ack error",
+      "command": {
+        "cmd": "publish",
+        "topic": "queue-ack-error",
+        "value_b64": "ZXJyb3I=",
+        "headers": []
+      },
+      "expect": {
+        "ok": { "deduplicated": false, "offset": 0, "partition": 0 }
+      }
+    },
+    {
+      "name": "acquire a real queue session before ack error",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-ack-error",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "ok": {
+          "session_id": "queue-session-1",
+          "messages": [
+            {
+              "message_id": "queue-ack-error:0:0",
+              "topic": "queue-ack-error",
+              "partition": 0,
+              "offset": 0,
+              "value_b64": "ZXJyb3I=",
+              "headers": [],
+              "delivery_count": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "ack unknown message returns per-entry error",
+      "command": {
+        "cmd": "queue_acknowledge",
+        "session_id": "queue-session-1",
+        "entries": [{ "message_id": "missing:0:0", "ack_type": "accept" }]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            {
+              "message_id": "missing:0:0",
+              "error": {
+                "kind": "invalid_argument",
+                "message": "queue message is not acquired"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -47,11 +47,14 @@ pub const UNSUPPORTED_VERSION: i16 = 35;
 pub const SASL_AUTHENTICATION_FAILED: i16 = 58;
 pub const STALE_BROKER_EPOCH: i16 = 77;
 pub const BROKER_ID_NOT_REGISTERED: i16 = 102;
+pub const DUPLICATE_BROKER_REGISTRATION: i16 = 101;
 pub const TOPIC_ALREADY_EXISTS: i16 = 36;
 pub const INVALID_PARTITIONS: i16 = 37;
 pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const NOT_CONTROLLER: i16 = 41;
 pub const INVALID_REQUEST: i16 = 42;
+/// `INVALID_REGULAR_EXPRESSION` (128): a request contains a malformed regex.
+pub const INVALID_REGULAR_EXPRESSION: i16 = 128;
 /// Kafka error 87. The broker returns it when a record-bearing payload is
 /// structurally malformed. Examples include an invalid Produce `MessageSet`
 /// and a `PushTelemetry` payload that cannot be decompressed or decoded as
@@ -107,12 +110,18 @@ pub const STALE_MEMBER_EPOCH: i16 = 113;
 /// `FENCED_MEMBER_EPOCH` (110, KIP-848): the supplied member epoch is newer
 /// than the coordinator's. The consumer must rejoin from epoch 0.
 pub const FENCED_MEMBER_EPOCH: i16 = 110;
-/// `UNSUPPORTED_ASSIGNOR` (111, KIP-848): the requested `server_assignor`
+/// `UNSUPPORTED_ASSIGNOR` (112, KIP-848): the requested `server_assignor`
 /// is not enabled on this broker.
-pub const UNSUPPORTED_ASSIGNOR: i16 = 111;
-/// `UNRELEASED_INSTANCE_ID` (114, KIP-848 + KIP-345): the static
+pub const UNSUPPORTED_ASSIGNOR: i16 = 112;
+/// `UNRELEASED_INSTANCE_ID` (111, KIP-848 + KIP-345): the static
 /// `instance_id` is still bound to a live member of the group.
-pub const UNRELEASED_INSTANCE_ID: i16 = 114;
+pub const UNRELEASED_INSTANCE_ID: i16 = 111;
+/// `MISMATCHED_ENDPOINT_TYPE` (114, KIP-919): the request reached a broker
+/// endpoint while asking for controllers, or vice versa.
+pub const MISMATCHED_ENDPOINT_TYPE: i16 = 114;
+/// `UNSUPPORTED_ENDPOINT_TYPE` (115, KIP-919): the listener recognizes the
+/// requested endpoint type but does not implement that API on this surface.
+pub const UNSUPPORTED_ENDPOINT_TYPE: i16 = 115;
 /// `UNKNOWN_SUBSCRIPTION_ID` (117, KIP-848): the coordinator did not find the
 /// consumer's persisted subscription identifier.
 pub const UNKNOWN_SUBSCRIPTION_ID: i16 = 117;
@@ -261,6 +270,11 @@ pub const POSITION_OUT_OF_RANGE: i16 = 99;
 /// `INCONSISTENT_CLUSTER_ID` (104): the request's `cluster_id` does not
 /// match this cluster's id.
 pub const INCONSISTENT_CLUSTER_ID: i16 = 104;
+/// `UNKNOWN_CONTROLLER_ID` (116): a controller registration names a node that
+/// is not in the active voter set.
+pub const UNKNOWN_CONTROLLER_ID: i16 = 116;
+/// `INVALID_REGISTRATION` (119): a broker/controller registration is malformed.
+pub const INVALID_REGISTRATION: i16 = 119;
 /// `UNKNOWN_TOPIC_ID` (100): a request referenced a topic by UUID that this
 /// cluster does not know about (KIP-516).
 pub const UNKNOWN_TOPIC_ID: i16 = 100;
@@ -498,5 +512,20 @@ mod tests {
     fn ineligible_replica_code_does_not_collide_with_duplicate_resource() {
         assert!(DUPLICATE_RESOURCE == 92);
         assert!(INELIGIBLE_REPLICA == 107);
+    }
+
+    #[test]
+    fn kip848_and_kip919_error_codes_match_kafka() {
+        let cases = [
+            ("UNRELEASED_INSTANCE_ID", UNRELEASED_INSTANCE_ID, 111),
+            ("UNSUPPORTED_ASSIGNOR", UNSUPPORTED_ASSIGNOR, 112),
+            ("STALE_MEMBER_EPOCH", STALE_MEMBER_EPOCH, 113),
+            ("MISMATCHED_ENDPOINT_TYPE", MISMATCHED_ENDPOINT_TYPE, 114),
+            ("UNSUPPORTED_ENDPOINT_TYPE", UNSUPPORTED_ENDPOINT_TYPE, 115),
+            ("UNKNOWN_CONTROLLER_ID", UNKNOWN_CONTROLLER_ID, 116),
+        ];
+        for (name, code, want) in cases {
+            assert!(code == want, "{name}");
+        }
     }
 }

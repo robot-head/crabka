@@ -728,6 +728,8 @@ context_dispatches!(register_context_dispatches;
     (update_raft_voter_adapter, UpdateRaftVoter, update_raft_voter_request, crate::handlers::update_raft_voter::handle),
     (alter_partition_adapter, AlterPartition, alter_partition_request, crate::handlers::alter_partition::handle),
     (broker_heartbeat_adapter, BrokerHeartbeat, broker_heartbeat_request, crate::handlers::broker_heartbeat::handle),
+    (broker_registration_adapter, BrokerRegistration, broker_registration_request, crate::handlers::broker_registration::handle),
+    (controller_registration_adapter, ControllerRegistration, controller_registration_request, crate::handlers::controller_registration::handle),
     (heartbeat_adapter, Heartbeat, heartbeat_request, crate::handlers::heartbeat::handle),
     (sync_group_adapter, SyncGroup, sync_group_request, crate::handlers::sync_group::handle),
     (leave_group_adapter, LeaveGroup, leave_group_request, crate::handlers::leave_group::handle),

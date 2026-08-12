@@ -33,6 +33,7 @@ impl<'a> ProduceResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::ProduceResponse {
         crate::owned::produce_response::ProduceResponse {
             responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
@@ -53,10 +54,10 @@ impl<'a> Encode for ProduceResponse<'a> {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -143,6 +144,7 @@ impl<'a> TopicProduceResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::TopicProduceResponse {
         crate::owned::produce_response::TopicProduceResponse {
             name: (self.name).to_string(),
@@ -159,7 +161,7 @@ impl<'a> Encode for TopicProduceResponse<'a> {
                 let () = put_compact_string(buf, self.name);
             } else {
                 let () = put_string(buf, self.name);
-            }
+            };
         }
         if version >= 0 {
             {
@@ -167,7 +169,7 @@ impl<'a> Encode for TopicProduceResponse<'a> {
                 for it in &self.partition_responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -261,6 +263,7 @@ impl<'a> PartitionProduceResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::PartitionProduceResponse {
         crate::owned::produce_response::PartitionProduceResponse {
             index: (self.index),
@@ -278,19 +281,19 @@ impl<'a> Encode for PartitionProduceResponse<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.index)
+            put_i32(buf, self.index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i64(buf, self.base_offset)
+            put_i64(buf, self.base_offset);
         }
         if version >= 2 {
-            put_i64(buf, self.log_append_time_ms)
+            put_i64(buf, self.log_append_time_ms);
         }
         if version >= 5 {
-            put_i64(buf, self.log_start_offset)
+            put_i64(buf, self.log_start_offset);
         }
         if version >= 8 {
             {
@@ -298,14 +301,14 @@ impl<'a> Encode for PartitionProduceResponse<'a> {
                 for it in &self.record_errors {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 8 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.error_message);
             } else {
                 let () = put_nullable_string(buf, self.error_message);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -434,6 +437,7 @@ impl<'a> BatchIndexAndErrorMessage<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_response::BatchIndexAndErrorMessage {
         crate::owned::produce_response::BatchIndexAndErrorMessage {
             batch_index: (self.batch_index),
@@ -446,14 +450,14 @@ impl<'a> Encode for BatchIndexAndErrorMessage<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 8 {
-            put_i32(buf, self.batch_index)
+            put_i32(buf, self.batch_index);
         }
         if version >= 8 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.batch_index_error_message);
             } else {
                 let () = put_nullable_string(buf, self.batch_index_error_message);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

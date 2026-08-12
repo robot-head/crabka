@@ -26,6 +26,8 @@ LSN.
 
 This slice needs:
 
+- A Confluent-compatible Schema Registry URL. Startup registers the shared CDC
+  key and value Protobuf schemas and uses the returned IDs in every frame.
 - A `pgoutput` logical replication slot.
 - A publication that covers the configured tables.
 - Configured table names for the source.

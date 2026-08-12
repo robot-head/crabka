@@ -24,7 +24,9 @@ crabka-protocol = { path = "../protocol", version = "0.3.9", default-features = 
 crabka-security = { path = "../security", version = "0.3.9" }
 crabka-units = { workspace = true }
 crabka-log = { path = "../log", version = "0.3.9" }
+crabka-metadata = { path = "../metadata", version = "0.3.9" }
 serde_json = { workspace = true }
+stateright = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 tempfile = { workspace = true }
 testcontainers = { workspace = true }

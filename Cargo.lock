@@ -2261,6 +2261,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-app-sdk"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "base64 0.23.1",
+ "bytes",
+ "crabka-sdk-conformance",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "protox",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "crabka-audit"
 version = "0.3.9"
 dependencies = [
@@ -2563,6 +2584,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.20",
@@ -2715,6 +2737,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
@@ -2734,6 +2757,7 @@ dependencies = [
  "crabka-connect",
  "crabka-connect-postgres",
  "crabka-replicator",
+ "crabka-schema-registry",
  "crabka-security",
  "crabka-units",
  "prometheus-client",
@@ -3054,6 +3078,7 @@ dependencies = [
  "anyhow",
  "apache-avro",
  "arc-swap",
+ "arrow",
  "assert2",
  "async-stream",
  "async-trait",
@@ -3069,6 +3094,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-client-streams",
  "crabka-ids",
  "crabka-metadata",
  "crabka-protocol",
@@ -3076,6 +3102,7 @@ dependencies = [
  "crabka-telemetry",
  "crabka-units",
  "dashmap",
+ "datafusion",
  "derive_more",
  "futures-util",
  "hex",
@@ -3137,6 +3164,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-log",
+ "crabka-metadata",
  "crabka-observability",
  "crabka-protocol",
  "crabka-raft",
@@ -3149,6 +3177,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde_json",
  "snap",
+ "stateright",
  "tempfile",
  "testcontainers",
  "tokio",
@@ -3800,6 +3829,7 @@ version = "0.3.9"
 dependencies = [
  "assert2",
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "crabka-client-core",
  "crabka-ids",
@@ -3807,6 +3837,7 @@ dependencies = [
  "crabka-log",
  "crabka-metadata",
  "crabka-protocol",
+ "crabka-security",
  "crabka-units",
  "crabka-verified",
  "dashmap",
@@ -3890,11 +3921,15 @@ name = "crabka-remote-storage"
 version = "0.3.9"
 dependencies = [
  "assert2",
+ "base64 0.23.1",
  "bytes",
  "crabka-ids",
+ "crabka-log",
  "crabka-object-store",
+ "crabka-protocol",
  "crabka-units",
  "object_store",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -4037,6 +4072,28 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "crabka-sdk-conformance"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "clap",
+ "crabka-authz",
+ "crabka-broker",
+ "crabka-client-admin",
+ "crabka-grpc-gateway",
+ "crabka-units",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

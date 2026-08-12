@@ -141,33 +141,50 @@ impl ProducerState {
         partition: PartitionIndex,
         log: &crabka_log::Log,
     ) -> Result<(), crabka_log::LogError> {
-        let recovered_at = crate::txn::util::now_millis();
-        let entries = log
-            .producer_state_snapshot()
-            .into_iter()
-            .map(|entry| {
-                let base_offset = if entry.last_offset >= 0 {
-                    entry.last_offset.0 - i64::from(entry.offset_delta)
-                } else {
-                    // A marker-only producer has no retained data batch.
-                    -1
-                };
-                (
-                    entry.producer_id,
-                    ProducerEntry {
-                        epoch: entry.producer_epoch,
-                        last_sequence: entry.last_sequence,
-                        last_offset: entry.last_offset.0,
-                        base_offset,
-                        last_timestamp: entry.timestamp,
-                        last_activity_ms: recovered_at,
-                    },
-                )
-            })
-            .collect();
-
-        self.handle(topic, partition).lock().await.entries = entries;
+        self.rebuild_from_snapshot(topic, partition, log.producer_state_snapshot())
+            .await;
         Ok(())
+    }
+
+    pub(crate) async fn rebuild_from_snapshot(
+        &self,
+        topic: &str,
+        partition: PartitionIndex,
+        snapshot: Vec<crabka_log::ProducerSnapshotEntry>,
+    ) {
+        self.handle(topic, partition).lock().await.entries = entries_from_snapshot(snapshot);
+    }
+
+    /// Install recovered producer state before a partition becomes
+    /// request-visible as leader.
+    ///
+    /// Unlike [`Self::rebuild_from_snapshot`], this replaces the map handle
+    /// synchronously. The partition does not exist in `PartitionRegistry` yet,
+    /// so no request can have acquired the new handle. Vacant materialization
+    /// can therefore make follower-prefix hydration and idempotent-producer
+    /// recovery one atomic publication boundary from the request path's point
+    /// of view.
+    pub(crate) fn install_snapshot_before_materialization(
+        &self,
+        topic: &str,
+        partition: PartitionIndex,
+        snapshot: Vec<crabka_log::ProducerSnapshotEntry>,
+    ) {
+        let parts = if let Some(existing) = self.by_topic.get(topic) {
+            existing.value().clone()
+        } else {
+            self.by_topic
+                .entry(topic.to_string())
+                .or_insert_with(|| Arc::new(DashMap::new()))
+                .value()
+                .clone()
+        };
+        parts.insert(
+            partition,
+            Arc::new(Mutex::new(PartitionProducerState {
+                entries: entries_from_snapshot(snapshot),
+            })),
+        );
     }
 
     /// Decide whether to append the incoming batch.
@@ -418,6 +435,34 @@ impl ProducerState {
         }
         evicted
     }
+}
+
+fn entries_from_snapshot(
+    snapshot: Vec<crabka_log::ProducerSnapshotEntry>,
+) -> HashMap<ProducerId, ProducerEntry> {
+    let recovered_at = crate::txn::util::now_millis();
+    snapshot
+        .into_iter()
+        .map(|entry| {
+            let base_offset = if entry.last_offset >= 0 {
+                entry.last_offset.0 - i64::from(entry.offset_delta)
+            } else {
+                // A marker-only producer has no retained data batch.
+                -1
+            };
+            (
+                entry.producer_id,
+                ProducerEntry {
+                    epoch: entry.producer_epoch,
+                    last_sequence: entry.last_sequence,
+                    last_offset: entry.last_offset.0,
+                    base_offset,
+                    last_timestamp: entry.timestamp,
+                    last_activity_ms: recovered_at,
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

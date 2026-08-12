@@ -33,6 +33,7 @@ impl<'a> OffsetCommitResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_response::OffsetCommitResponse {
         crate::owned::offset_commit_response::OffsetCommitResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -48,7 +49,7 @@ impl<'a> Encode for OffsetCommitResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -56,7 +57,7 @@ impl<'a> Encode for OffsetCommitResponse<'a> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -145,6 +146,7 @@ impl<'a> OffsetCommitResponseTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_response::OffsetCommitResponseTopic {
         crate::owned::offset_commit_response::OffsetCommitResponseTopic {
             name: (self.name).to_string(),
@@ -162,10 +164,10 @@ impl<'a> Encode for OffsetCommitResponseTopic<'a> {
                 let () = put_compact_string(buf, self.name);
             } else {
                 let () = put_string(buf, self.name);
-            }
+            };
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -173,7 +175,7 @@ impl<'a> Encode for OffsetCommitResponseTopic<'a> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -266,6 +268,7 @@ impl OffsetCommitResponsePartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_response::OffsetCommitResponsePartition {
         crate::owned::offset_commit_response::OffsetCommitResponsePartition {
             partition_index: (self.partition_index),
@@ -278,10 +281,10 @@ impl Encode for OffsetCommitResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

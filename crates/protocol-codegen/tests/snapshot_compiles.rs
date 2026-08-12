@@ -12,5 +12,5 @@ fn snapshot_smoke() {
     let contents = std::fs::read_to_string(&path).unwrap();
     check!(contents.contains("pub struct ApiVersionsRequest"));
     check!(contents.contains("impl Encode for ApiVersionsRequest"));
-    check!(contents.contains("impl<'de> Decode<'de> for ApiVersionsRequest"));
+    check!(contents.contains("impl Decode<'_> for ApiVersionsRequest"));
 }

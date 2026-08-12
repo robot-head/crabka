@@ -1,0 +1,23 @@
+[[allowed_targets]]
+scheme = "http"
+host = "127.0.0.1"
+
+[[subscriptions]]
+name = "cloudevents-demo-binary"
+source_topics = ["cloudevents-demo"]
+target_url = "http://127.0.0.1:18080/hook"
+content_mode = "cloud_events_binary"
+max_attempts = 3
+base_backoff_ms = 100
+max_backoff_ms = 1000
+request_timeout_ms = 5000
+
+[[subscriptions]]
+name = "cloudevents-demo-structured"
+source_topics = ["cloudevents-demo"]
+target_url = "http://127.0.0.1:18080/hook"
+content_mode = "cloud_events_structured"
+max_attempts = 3
+base_backoff_ms = 100
+max_backoff_ms = 1000
+request_timeout_ms = 5000

@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![recursion_limit = "256"]
 
 //! Docker-backed acceptance proof for the managed Postgres CDC worker.
 
@@ -14,14 +15,20 @@ use crabka_connect_postgres::{
     schema::PostgresProtoEncoder,
 };
 use crabka_connect_worker::{KafkaCheckpointStore, KafkaSink};
+use crabka_schema_registry::{
+    config::{RegistryConfig, RegistryRuntimeConfig, SecurityConfig},
+    kafkastore::KafkaStore,
+    rest::{self, AppState},
+};
 use crabka_units::millis;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{IntoContainerPort as _, WaitFor},
     runners::AsyncRunner as _,
 };
-use tokio::{task::JoinHandle, time::timeout};
+use tokio::{net::TcpListener, task::JoinHandle, time::timeout};
 use tokio_postgres::{Client, NoTls};
+use tokio_util::sync::CancellationToken;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -59,8 +66,9 @@ async fn postgres_cdc_survives_checkpointed_worker_restart() -> TestResult {
     broker_config.advertised_listener = broker_addr.to_string();
     let broker = Broker::start(broker_config).await?;
     let bootstrap = broker.listen_addr().to_string();
+    let (registry_url, registry_cancel) = start_registry(&bootstrap).await?;
 
-    let first_runtime = start_connector(&database_url, &bootstrap).await?;
+    let first_runtime = start_connector(&database_url, &bootstrap, &registry_url).await?;
     wait_for_running(&first_runtime).await?;
     database
         .batch_execute(
@@ -79,7 +87,8 @@ async fn postgres_cdc_survives_checkpointed_worker_restart() -> TestResult {
         );
     }
     let first = read_records(&bootstrap, "orders-cdc-first", 3).await?;
-    let key_one = encoded_key(1)?;
+    let encoder = PostgresProtoEncoder::from_registry(&registry_url).await?;
+    let key_one = encoded_key(&encoder, 1)?;
     assert!(first.len() == 3);
     assert!(
         first
@@ -100,7 +109,7 @@ async fn postgres_cdc_survives_checkpointed_worker_restart() -> TestResult {
 
     first_runtime.shutdown().await?;
 
-    let second_runtime = start_connector(&database_url, &bootstrap).await?;
+    let second_runtime = start_connector(&database_url, &bootstrap, &registry_url).await?;
     wait_for_running(&second_runtime).await?;
     database
         .execute(
@@ -114,10 +123,11 @@ async fn postgres_cdc_survives_checkpointed_worker_restart() -> TestResult {
     assert!(final_records.len() == 4);
     assert!(final_records[..3] == first);
     assert!(final_records[3].operation == "insert");
-    assert!(final_records[3].key.as_deref() == Some(encoded_key(2)?.as_ref()));
+    assert!(final_records[3].key.as_deref() == Some(encoded_key(&encoder, 2)?.as_ref()));
     assert!(final_records[3].value.is_some());
 
     second_runtime.shutdown().await?;
+    registry_cancel.cancel();
     broker.shutdown().await;
     drop(database);
     database_connection.await??;
@@ -161,8 +171,37 @@ async fn connect_postgres(
     Ok(connected)
 }
 
-async fn start_connector(database_url: &str, bootstrap: &str) -> TestResult<ConnectorHandle> {
+async fn start_registry(bootstrap: &str) -> TestResult<(String, CancellationToken)> {
+    let cancel = CancellationToken::new();
+    let config = RegistryConfig {
+        bootstrap: bootstrap.to_owned(),
+        schemas_topic: "_schemas".into(),
+        schemas_topic_rf: 1,
+        client_id: "connect-worker-acceptance-registry".into(),
+        advertised_url: "http://127.0.0.1:0".into(),
+        group_id: "connect-worker-acceptance-registry".into(),
+        leader_eligibility: true,
+        runtime: RegistryRuntimeConfig::default(),
+        security: SecurityConfig::default(),
+    };
+    let store = KafkaStore::start(&config, cancel.clone()).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let registry_url = format!("http://{}", listener.local_addr()?);
+    let serve_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let _ =
+            rest::serve::serve_http(listener, rest::router(AppState { store }), serve_cancel).await;
+    });
+    Ok((registry_url, cancel))
+}
+
+async fn start_connector(
+    database_url: &str,
+    bootstrap: &str,
+    schema_registry_url: &str,
+) -> TestResult<ConnectorHandle> {
     let source = PostgresWalSource::connect(PostgresSourceConfig {
+        schema_registry_url: schema_registry_url.to_owned(),
         database_url: SecretString::new(database_url),
         slot_name: "orders_crabka".to_owned(),
         publication_name: "crabka_connect".to_owned(),
@@ -280,8 +319,8 @@ fn observe(record: ConsumerRecord) -> TestResult<ObservedRecord> {
     })
 }
 
-fn encoded_key(id: i64) -> TestResult<Bytes> {
-    Ok(PostgresProtoEncoder::new()?.encode_key(&EntityKey {
+fn encoded_key(encoder: &PostgresProtoEncoder, id: i64) -> TestResult<Bytes> {
+    Ok(encoder.encode_key(&EntityKey {
         table: "public.orders".to_owned(),
         columns: vec![ColumnValue {
             name: "id".to_owned(),

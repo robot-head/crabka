@@ -120,6 +120,11 @@ publish = false
 release = false
 
 [[package]]
+name = "crabka-app-sdk"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-audit"
 publish = false
 release = false
@@ -341,6 +346,11 @@ release = false
 
 [[package]]
 name = "crabka-schema-registry"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-sdk-conformance"
 publish = false
 release = false
 

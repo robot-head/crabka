@@ -24,7 +24,7 @@ impl Encode for ResponseHeader {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.correlation_id)
+            put_i32(buf, self.correlation_id);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -45,7 +45,7 @@ impl Encode for ResponseHeader {
         n
     }
 }
-impl<'de> Decode<'de> for ResponseHeader {
+impl Decode<'_> for ResponseHeader {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch("ResponseHeader version out of range"));

@@ -72,6 +72,12 @@ fn tagged_should_encode(f: &FieldSpec) -> TokenStream {
 
 fn tagged_should_encode_from_default(f: &FieldSpec) -> TokenStream {
     let default = tagged_is_default_cond(f);
+    if let Some(option) = default.strip_suffix(".is_none()") {
+        return parse_expr(&format!("{option}.is_some()"));
+    }
+    if let Some((value, expected)) = default.split_once(" == ") {
+        return parse_expr(&format!("{value} != {expected}"));
+    }
     if let Some(positive) = default.strip_prefix('!') {
         parse_expr(positive)
     } else {
@@ -338,7 +344,7 @@ fn struct_block(
             }
         }
 
-        impl<'de> Decode<'de> for #ty {
+        impl Decode<'_> for #ty {
             fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
                 #guard
                 #decode_flex
@@ -417,7 +423,7 @@ fn split_encode_body(fields: &[FieldSpec], has_flex: bool) -> (TokenStream, Toke
         } else {
             helpers.push(quote! {
                 fn #helper<B: BufMut>(&self, buf: &mut B, version: i16, #flex: bool) {
-                    #body
+                    #body;
                 }
             });
             calls.push(quote!(self.#helper(buf, version, flex);));
@@ -438,11 +444,16 @@ fn split_encode_body(fields: &[FieldSpec], has_flex: bool) -> (TokenStream, Toke
                 tagged.write(buf, &self.unknown_tagged_fields);
             }
         };
+        let version = if body.to_string().contains("version") {
+            quote!(version)
+        } else {
+            quote!(_version)
+        };
         helpers.push(quote! {
             fn #helper<B: BufMut>(
                 &self,
                 buf: &mut B,
-                version: i16,
+                #version: i16,
                 flex: bool,
             ) {
                 #body
@@ -466,7 +477,7 @@ fn encode_one(f: &FieldSpec) -> TokenStream {
         let b = parse_expr(&encode_call(&f.field_type, &expr, is_nullable(f)));
         non_flex_wrap(f, b)
     };
-    quote!(if #cond { #inner })
+    quote!(if #cond { #inner; })
 }
 
 /// `flexibleVersions: "none"` on a field forces the legacy codec. This
@@ -598,11 +609,16 @@ fn split_decode_body(
     if has_flex {
         let helper = format_ident!("decode_tagged_fields");
         let body = decode_tagged_block(fields, res_map, lenient);
+        let version = if body.to_string().contains("version") {
+            quote!(version)
+        } else {
+            quote!(_version)
+        };
         helpers.push(quote! {
             fn #helper<B: Buf>(
                 out: &mut Self,
                 buf: &mut B,
-                version: i16,
+                #version: i16,
                 flex: bool,
             ) -> Result<(), ProtocolError> {
                 #body

@@ -81,4 +81,7 @@ pub use crabka_client_consumer::ConsumerGroupMetadata;
 pub use error::ProducerError;
 pub use producer::{Acks, Producer};
 pub use record::{Header, ProducerRecord, RecordMetadata};
-pub use transactional::{EndTransactionError, OwnedTransaction, Transaction};
+pub use transactional::{
+    EndTransactionError, OwnedTransaction, PreparedTransactionState,
+    PreparedTransactionStateParseError, Transaction,
+};

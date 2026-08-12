@@ -5,7 +5,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -46,6 +46,8 @@ fn self_registration_record(config: &BrokerConfig) -> crabka_metadata::BrokerReg
             }
         })
         .collect();
+    let log_dirs = config.all_log_dirs();
+    let log_dir_ids = crate::log_dir_id::LogDirIds::resolve(&log_dirs).ids_for(&log_dirs);
 
     crabka_metadata::BrokerRegistrationRecord {
         node_id: config.node_id,
@@ -55,6 +57,36 @@ fn self_registration_record(config: &BrokerConfig) -> crabka_metadata::BrokerReg
         port,
         rack: config.rack.clone(),
         endpoints,
+        log_dirs: log_dir_ids,
+        features: crabka_metadata::supported_feature_ranges(),
+    }
+}
+
+fn self_controller_registration_record(
+    config: &BrokerConfig,
+) -> crabka_metadata::ControllerRegistrationRecord {
+    let (host, port) = config
+        .controller_quorum_voters
+        .iter()
+        .find(|(node_id, _)| *node_id == config.node_id)
+        .and_then(|(_, endpoint)| crate::host_port::parse_host_port(endpoint))
+        .unwrap_or_else(|| {
+            (
+                config.controller_listen_addr.ip().to_string(),
+                config.controller_listen_addr.port(),
+            )
+        });
+    crabka_metadata::ControllerRegistrationRecord {
+        node_id: config.node_id,
+        incarnation_id: config.incarnation_id,
+        zk_migration_ready: false,
+        endpoints: vec![crabka_metadata::BrokerEndpoint {
+            name: "CONTROLLER".into(),
+            host,
+            port,
+            protocol: config.controller_listener_protocol,
+        }],
+        features: crabka_metadata::supported_feature_ranges(),
     }
 }
 
@@ -230,6 +262,7 @@ struct RaftTransport {
     controller_cell: Arc<tokio::sync::OnceCell<Arc<crabka_raft::ControllerHandle>>>,
     handshake: Option<Arc<dyn crabka_raft::RaftListenerHandshake>>,
     dialer: Option<Arc<dyn crabka_raft::OutboundDialer>>,
+    admin_router: Option<Arc<crate::controller_admin::BrokerControllerAdminRouter>>,
 }
 
 fn prepare_raft_transport(
@@ -252,6 +285,8 @@ fn prepare_raft_transport(
                 plain_credentials: config.plain_credentials.clone(),
                 enabled_sasl_mechanisms: config.enabled_sasl_mechanisms.clone(),
                 gssapi: config.gssapi.clone(),
+                oauthbearer_validator: config.oauthbearer_validator.clone(),
+                oauthbearer_max_session_lifetime: config.oauthbearer_max_session_lifetime,
                 protocol: config.controller_listener_protocol,
                 controller: Arc::clone(&controller_cell),
                 max_frame_bytes: config.socket_request_max.bytes_usize(),
@@ -272,6 +307,9 @@ fn prepare_raft_transport(
         controller_cell,
         handshake,
         dialer: Some(dialer),
+        admin_router: config
+            .is_controller()
+            .then(|| Arc::new(crate::controller_admin::BrokerControllerAdminRouter::new())),
     }
 }
 
@@ -318,11 +356,18 @@ async fn start_metadata_source(
     controller_listener: Option<tokio::net::TcpListener>,
     transport: RaftTransport,
     wal_shards: Arc<crate::wal::quorum::registry::WalShardRegistry>,
-) -> Result<Arc<dyn crate::metadata_source::MetadataSource>, BrokerError> {
+) -> Result<
+    (
+        Arc<dyn crate::metadata_source::MetadataSource>,
+        Option<Arc<crate::controller_admin::BrokerControllerAdminRouter>>,
+    ),
+    BrokerError,
+> {
     let RaftTransport {
         controller_cell,
         handshake,
         dialer,
+        admin_router,
     } = transport;
     if config.is_controller() {
         let controller_config = crabka_raft::ControllerConfig {
@@ -351,6 +396,9 @@ async fn start_metadata_source(
             shard_router: Some(Arc::new(crate::wal::quorum::registry::WalShardRouter::new(
                 wal_shards,
             ))),
+            admin_router: admin_router
+                .clone()
+                .map(|router| router as Arc<dyn crabka_raft::ControllerAdminRouter>),
             max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
             max_snapshot_interval: config.metadata_max_snapshot_interval,
             snapshot_interval_records: config.metadata_snapshot_interval_records,
@@ -362,7 +410,10 @@ async fn start_metadata_source(
                 .map_err(|error| BrokerError::Startup(error.to_string()))?,
         );
         let _ = controller_cell.set(Arc::clone(&controller));
-        return Ok(controller as Arc<dyn crate::metadata_source::MetadataSource>);
+        return Ok((
+            controller as Arc<dyn crate::metadata_source::MetadataSource>,
+            admin_router,
+        ));
     }
 
     drop(controller_listener);
@@ -388,10 +439,13 @@ async fn start_metadata_source(
         client_id: format!("crabka-broker-{}-writer", config.broker_id),
         leader: observer.watch_leader(),
     };
-    Ok(Arc::new(crate::metadata_source::ObserverSource::new(
-        observer,
-        Arc::new(forwarder),
-    )))
+    Ok((
+        Arc::new(crate::metadata_source::ObserverSource::new(
+            observer,
+            Arc::new(forwarder),
+        )),
+        None,
+    ))
 }
 
 fn spawn_auto_join(
@@ -441,16 +495,12 @@ async fn wait_for_metadata_leader(
     Ok(())
 }
 
-async fn register_broker(
-    config: &mut BrokerConfig,
+async fn submit_self_registration(
+    config: &BrokerConfig,
     controller: &dyn crate::metadata_source::MetadataSource,
+    registration: crabka_metadata::MetadataRecord,
+    role: &str,
 ) -> Result<(), BrokerError> {
-    if !config.is_broker() {
-        return Ok(());
-    }
-    config.incarnation_id = crate::incarnation::load_or_generate(&config.log_dir);
-    let registration =
-        crabka_metadata::MetadataRecord::V1BrokerRegistration(self_registration_record(config));
     let backoff = exponential_backoff::Backoff::new(
         config.self_registration_max_attempts,
         config.self_registration_backoff_min.to_std(),
@@ -461,12 +511,12 @@ async fn register_broker(
             Ok(_) => return Ok(()),
             Err(error) => match delay {
                 Some(delay) => {
-                    tracing::warn!(attempt = attempt_index + 1, %error, "registration retry");
+                    tracing::warn!(attempt = attempt_index + 1, %error, role, "registration retry");
                     tokio::time::sleep(delay).await;
                 }
                 None => {
                     return Err(BrokerError::Startup(format!(
-                        "self-registration failed after {} attempts: {error}",
+                        "{role} self-registration failed after {} attempts: {error}",
                         attempt_index + 1
                     )));
                 }
@@ -474,6 +524,97 @@ async fn register_broker(
         }
     }
     Ok(())
+}
+
+async fn register_controller(
+    config: &BrokerConfig,
+    controller: &dyn crate::metadata_source::MetadataSource,
+) -> Result<(), BrokerError> {
+    if !config.is_controller() {
+        return Ok(());
+    }
+    let registration = self_controller_registration_record(config);
+    let Some(record) = controller_registration_update(&controller.current_image(), &registration)
+    else {
+        return Ok(());
+    };
+    submit_self_registration(config, controller, record, "controller").await
+}
+
+fn controller_registration_update(
+    image: &crabka_metadata::MetadataImage,
+    registration: &crabka_metadata::ControllerRegistrationRecord,
+) -> Option<crabka_metadata::MetadataRecord> {
+    let registration_supported = image.finalized_metadata_version().is_some_and(|level| {
+        level >= crabka_metadata::metadata_version::ONLINE_DOWNGRADE_MIN_LEVEL
+    });
+    (registration_supported && image.controller(registration.node_id) != Some(registration))
+        .then(|| crabka_metadata::MetadataRecord::V1ControllerRegistration(registration.clone()))
+}
+
+fn spawn_deferred_controller_registration(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+) {
+    if !config.is_controller() {
+        return;
+    }
+    let registration = self_controller_registration_record(config);
+    let mut images = controller.watch_image();
+    let controller = Arc::clone(controller);
+    let retry_backoff = config.self_registration_backoff_min.to_std();
+    tokio::spawn(async move {
+        loop {
+            let update = {
+                let image = images.borrow();
+                controller_registration_update(&image, &registration)
+            };
+            let Some(update) = update else {
+                if images.borrow().controller(registration.node_id) == Some(&registration) {
+                    return;
+                }
+                if images.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            };
+
+            match controller.submit_change(vec![update]).await {
+                Ok(_) => {
+                    // A successful submit normally publishes the committed
+                    // image before returning. If publication trails the reply,
+                    // wait for it rather than submitting the same registration
+                    // twice.
+                    while images.borrow().controller(registration.node_id) != Some(&registration) {
+                        if images.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "deferred controller registration retry");
+                    tokio::time::sleep(retry_backoff).await;
+                }
+            }
+        }
+    });
+}
+
+async fn register_broker(
+    config: &BrokerConfig,
+    controller: &dyn crate::metadata_source::MetadataSource,
+) -> Result<(), BrokerError> {
+    if !config.is_broker() {
+        return Ok(());
+    }
+    submit_self_registration(
+        config,
+        controller,
+        crabka_metadata::MetadataRecord::V1BrokerRegistration(self_registration_record(config)),
+        "broker",
+    )
+    .await
 }
 
 async fn submit_bootstrap_records(
@@ -526,6 +667,10 @@ async fn recover_storage_and_groups(
     if config.is_broker() {
         let startup_image = controller.current_image();
         let scan_dirs = log_dir_status.online_subset(&log_dirs);
+        let wal_placements = crate::replicator_supervisor::desired_wal_placements(
+            &startup_image,
+            config.diskless_wal_local_replica_count,
+        );
         for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
             let directory = log_dir::partition_dir(&owning_dir, &topic, partition_id);
             let diskless = diskless_topic_config(startup_image.topic_config(&topic));
@@ -535,6 +680,30 @@ async fn recover_storage_and_groups(
                 log.set_stamp_source(stamp_source)?;
             }
             if diskless {
+                if let Some(topic_id) = startup_image.topic(&topic).map(|topic| topic.topic_id) {
+                    let shard = crate::wal::quorum::registry::ShardId {
+                        topic_id,
+                        partition: PartitionIndex(partition_id),
+                    };
+                    if wal_placements.get(&shard).and_then(|voters| voters.first())
+                        == Some(&config.node_id)
+                    {
+                        // Promotion hydration is deliberately repeated before
+                        // the partition writer starts. If the preceding process
+                        // crashed after adopting only part of the checkpointed
+                        // follower prefix, the exact-overlap check makes this a
+                        // safe retry and closes the remaining durable tail
+                        // before any request can observe the partition.
+                        crate::wal::quorum::follower::hydrate_on_promotion(
+                            &scan_dirs,
+                            &topic,
+                            shard,
+                            config.node_id,
+                            &config.log_config,
+                            &mut log,
+                        )?;
+                    }
+                }
                 crate::diskless::recovery::recover_open_log(
                     &topic,
                     PartitionIndex(partition_id),
@@ -1730,8 +1899,9 @@ fn spawn_diskless_bootstrap(
     handle: &Arc<crate::diskless::read::DisklessReadHandle>,
     kickoff: &KafkaSwapKickoff,
     shutdown: &CancellationToken,
-) -> JoinHandle<()> {
+) -> (JoinHandle<()>, Arc<AtomicBool>) {
     let cache = Arc::clone(&handle.index);
+    let ready = Arc::new(AtomicBool::new(false));
     let flusher = DisklessFlusherStartup {
         partitions: Arc::clone(&broker.partitions),
         image_rx: broker.controller.watch_image(),
@@ -1739,12 +1909,14 @@ fn spawn_diskless_bootstrap(
         node_id: broker.config.node_id,
         broker_id: broker.config.broker_id,
         flush_config: crate::diskless::flusher::FlushConfig::from_broker(&broker.config),
+        ready: Arc::clone(&ready),
     };
     let kickoff = kickoff.clone();
     let shutdown = shutdown.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         bootstrap_diskless_index_log(cache, kickoff, flusher, shutdown).await;
-    })
+    });
+    (task, ready)
 }
 
 async fn start_metadata_phase(
@@ -1753,7 +1925,13 @@ async fn start_metadata_phase(
     tls_dynamic: Option<&Arc<crabka_security::DynamicServerConfig>>,
     inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
     wal_shards: Arc<crate::wal::quorum::registry::WalShardRegistry>,
-) -> Result<Arc<dyn crate::metadata_source::MetadataSource>, BrokerError> {
+) -> Result<
+    (
+        Arc<dyn crate::metadata_source::MetadataSource>,
+        Option<Arc<crate::controller_admin::BrokerControllerAdminRouter>>,
+    ),
+    BrokerError,
+> {
     let transport = prepare_raft_transport(config, tls_dynamic, inter_broker_client);
     let mut bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
     let controller = start_metadata_source(
@@ -1764,10 +1942,15 @@ async fn start_metadata_phase(
         wal_shards,
     )
     .await?;
-    spawn_auto_join(config, &controller, inter_broker_client);
-    wait_for_metadata_leader(&*controller, config.startup_leader_wait_timeout.to_std()).await?;
-    register_broker(config, &*controller).await?;
-    submit_bootstrap_records(config, &*controller, bootstrap_records).await?;
+    spawn_auto_join(config, &controller.0, inter_broker_client);
+    wait_for_metadata_leader(&*controller.0, config.startup_leader_wait_timeout.to_std()).await?;
+    if config.is_controller() || config.is_broker() {
+        config.incarnation_id = crate::incarnation::load_or_generate(&config.log_dir);
+    }
+    submit_bootstrap_records(config, &*controller.0, bootstrap_records).await?;
+    register_controller(config, &*controller.0).await?;
+    register_broker(config, &*controller.0).await?;
+    spawn_deferred_controller_registration(config, &controller.0);
     Ok(controller)
 }
 
@@ -1791,6 +1974,7 @@ async fn finish_broker_startup(
     metadata: (
         Arc<dyn crate::metadata_source::MetadataSource>,
         Arc<PartitionRegistry>,
+        Option<Arc<crate::controller_admin::BrokerControllerAdminRouter>>,
     ),
     coordinators: BrokerCoordinatorSet,
     transport: (
@@ -1801,6 +1985,7 @@ async fn finish_broker_startup(
     runtime: BrokerRuntimeStartup,
     storage: BrokerStorageStartup,
 ) -> Result<BrokerHandle, BrokerError> {
+    let (controller, partitions, admin_router) = metadata;
     let ListenerStartup {
         bound,
         listen_addr,
@@ -1808,15 +1993,15 @@ async fn finish_broker_startup(
     } = bind_listeners_and_recover_moves(
         &mut config,
         data_listener,
-        &metadata.1,
+        &partitions,
         &runtime.throttle_state,
     )
     .await?;
     let connections = ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
     let broker = Arc::new(Broker {
         config,
-        controller: metadata.0,
-        partitions: metadata.1,
+        controller,
+        partitions,
         future_logs,
         group_coordinator: coordinators.0,
         producer_ids: coordinators.1,
@@ -1852,6 +2037,12 @@ async fn finish_broker_startup(
         audit_writer_handle: tokio::sync::Mutex::new(runtime.audit_writer_handle),
         handlers: crate::handlers::registry::build_registry(),
     });
+    if let Some(router) = admin_router {
+        router.bind(&broker).map_err(|error| {
+            broker.supervisor_shutdown.cancel();
+            BrokerError::Startup(error.into())
+        })?;
+    }
     let diskless_bootstrap = match (
         broker.diskless_read.as_ref(),
         runtime.kafka_swap_kickoff.as_ref(),
@@ -1873,14 +2064,18 @@ async fn finish_broker_startup(
         runtime.kafka_swap_kickoff.as_ref(),
         &shutdown,
     );
-    let diskless_task = diskless_bootstrap
-        .map(|(handle, kickoff)| spawn_diskless_bootstrap(&broker, handle, kickoff, &shutdown));
+    let (diskless_task, diskless_flusher_ready) =
+        diskless_bootstrap.map_or((None, None), |(handle, kickoff)| {
+            let (task, ready) = spawn_diskless_bootstrap(&broker, handle, kickoff, &shutdown);
+            (Some(task), Some(ready))
+        });
     Ok(BrokerHandle {
         listen_addr,
         shutdown,
         listener_tasks,
         topic_rlmm_task,
         diskless_task,
+        diskless_flusher_ready,
         broker,
     })
 }
@@ -2188,6 +2383,8 @@ pub struct BrokerHandle {
     /// Topic-backed diskless WAL index projection and object flusher task.
     /// Retained so shutdown can join it before the Tokio runtime drops.
     diskless_task: Option<JoinHandle<()>>,
+    /// Instance-scoped readiness for this broker's index projection/flusher.
+    diskless_flusher_ready: Option<Arc<AtomicBool>>,
     /// Shared broker state, including the registries that own background task
     /// handles.
     broker: Arc<Broker>,
@@ -2870,9 +3067,11 @@ impl BrokerHandle {
                     "partition {topic}-{partition} not local"
                 ))
             })?;
+        let leader_epoch = part.current_leader_epoch.load(Ordering::Acquire);
         let mut last_offset = 0i64;
         for i in 0..n {
             let batch = crabka_protocol::records::RecordBatch {
+                partition_leader_epoch: leader_epoch,
                 records: vec![crabka_protocol::records::Record {
                     offset_delta: 0,
                     value: Some(bytes::Bytes::from(format!("test-record-{i}").into_bytes())),
@@ -2895,6 +3094,111 @@ impl BrokerHandle {
     #[must_use]
     pub fn rlmm_topic_backed_active_for_test(&self) -> bool {
         self.broker.metrics.tiered_storage_rlmm_topic_backed.get() == 1
+    }
+
+    /// Test-only count of object PUT errors observed by the diskless WAL
+    /// flusher. Shipping-gate tests sample this before and after fault
+    /// injection so a PUT failure that never reaches the real flusher cannot
+    /// pass as a no-op.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    pub fn diskless_put_failure_count_for_test(&self) -> u64 {
+        crate::diskless::flusher::put_failure_count(self.broker.config.broker_id)
+    }
+
+    /// Test-only: await this broker's own diskless index/flusher bootstrap.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn wait_until_diskless_flusher_ready(&self) {
+        let ready = self
+            .diskless_flusher_ready
+            .as_ref()
+            .expect("diskless flusher is configured");
+        tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
+            while !ready.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("diskless index/flusher bootstrap did not become ready within 30s");
+    }
+
+    /// Test-only snapshot of the local inputs used by the diskless flusher:
+    /// `(diskless, runtime leader, log start, log end, high watermark,
+    /// projected flush frontier)`.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn diskless_flush_state_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<(bool, u64, i64, i64, i64, Option<i64>)> {
+        let part = self
+            .broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
+        let (log_start, log_end) = {
+            let log = part
+                .log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (log.log_start_offset().0, log.log_end_offset().0)
+        };
+        let high_watermark = part.high_watermark().await.0;
+        let topic_id = self
+            .broker
+            .controller
+            .current_image()
+            .topic(topic)?
+            .topic_id;
+        let frontier = self
+            .broker
+            .diskless_read
+            .as_ref()?
+            .index
+            .lock()
+            .await
+            .flushed_frontier(topic_id, partition);
+        Some((
+            part.diskless,
+            part.current_leader.load(Ordering::Acquire),
+            log_start,
+            log_end,
+            high_watermark,
+            frontier,
+        ))
+    }
+
+    /// Test-only readiness check for a distributed diskless WAL shard. This
+    /// observes the real runtime registry rather than only the metadata image,
+    /// so a shipping gate cannot race Produce against asynchronous placement
+    /// reconciliation.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    pub fn diskless_wal_ready_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+        expected_leader: crabka_raft::NodeId,
+        expected_voters: usize,
+    ) -> bool {
+        let image = self.broker.controller.current_image();
+        let Some(topic_id) = image.topic(topic).map(|record| record.topic_id) else {
+            return false;
+        };
+        let shard = crate::wal::quorum::registry::ShardId {
+            topic_id,
+            partition: PartitionIndex(partition),
+        };
+        self.broker
+            .wal_shards
+            .placement(shard)
+            .is_some_and(|voters| {
+                voters.len() == expected_voters && voters.first() == Some(&expected_leader)
+            })
+            && self.broker.wal_shards.get(shard).is_some()
+            && self.broker.wal_shards.follower_fetcher_count(shard)
+                == expected_voters.saturating_sub(1)
     }
 
     /// Test-only: submit a [`crabka_metadata::MetadataRecord`] directly to
@@ -3105,6 +3409,36 @@ impl BrokerHandle {
         } else {
             Some(p.leader.0)
         }
+    }
+
+    /// Test-only: await until the local partition runtime, rather than only
+    /// this broker's metadata image, has installed `leader`.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn wait_until_local_partition_leader(
+        &self,
+        topic: &str,
+        partition: i32,
+        leader: crabka_raft::NodeId,
+    ) {
+        let result = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
+            loop {
+                if self
+                    .broker
+                    .partitions
+                    .get(topic, PartitionIndex(partition))
+                    .is_some_and(|part| part.current_leader.load(Ordering::Acquire) == leader.0)
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "local partition leader for {topic}-{partition} did not become {leader} within 30s"
+        );
     }
 
     /// Test-only: return the current ISR for `(topic, partition)` as seen
@@ -3525,6 +3859,58 @@ impl BrokerHandle {
         }
     }
 
+    /// Abort broker work without draining in-flight data-path tasks.
+    ///
+    /// This is intentionally exposed only as fault-injection support. Unlike
+    /// [`shutdown`](Self::shutdown), it aborts retained tasks before cancelling
+    /// controller participation, so tests can model process death rather than
+    /// an orderly stop.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn crash_for_test(mut self) {
+        self.broker.supervisor_shutdown.cancel();
+        self.shutdown.cancel();
+        self.broker.audit_log.close();
+
+        // Stop the object writer first: an abrupt victim must not complete a
+        // blocked flush while the rest of the broker is being torn down.
+        if let Some(task) = self.diskless_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.topic_rlmm_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+
+        // Awaiting the cancelled listener tasks lets each accept loop abort
+        // and join all active connection children. The requests themselves
+        // are not drained, but this method does not return while a child can
+        // still mutate the victim's data files.
+        for task in self.listener_tasks.drain(..) {
+            let _ = task.await;
+        }
+
+        // The supervisor's cancellation epilogue aborts and joins its private
+        // ordinary and WAL follower tasks. Its run loop races every reconcile
+        // after startup against this token, so awaiting it is bounded even if
+        // a network-backed reconciliation was in flight.
+        if let Some(task) = self.broker.supervisor_handle.lock().await.take() {
+            let _ = task.await;
+        }
+        if let Some(task) = self.broker.disk_scanner_handle.lock().await.take() {
+            let _ = task.await;
+        }
+
+        crate::future_log::shutdown_moves(&self.broker.future_logs).await;
+        shutdown_partition_writers(&self.broker.partitions).await;
+        if let Some(task) = self.broker.audit_writer_handle.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.broker.controller.cancel().await;
+    }
+
     /// Cancel the listener and drain in-flight connections. The returned
     /// future completes when the listener task exits.
     pub async fn shutdown(mut self) {
@@ -3844,7 +4230,7 @@ impl Broker {
         // on `bootstrap_servers` + auto-join instead. Broker-only nodes never
         // run a controller, so the records stay unused (step 2b is gated on
         // having a non-empty set and `Bootstrap` mode).
-        let controller = start_metadata_phase(
+        let (controller, controller_admin_router) = start_metadata_phase(
             &mut config,
             controller_listener,
             tls_dynamic.as_ref(),
@@ -3941,7 +4327,7 @@ impl Broker {
         finish_broker_startup(
             config,
             data_plane_listener,
-            (controller, partitions),
+            (controller, partitions, controller_admin_router),
             (
                 group_coordinator,
                 producer_ids,
@@ -4163,6 +4549,7 @@ struct DisklessFlusherStartup {
     node_id: crabka_metadata::NodeId,
     broker_id: i32,
     flush_config: crate::diskless::flusher::FlushConfig,
+    ready: Arc<AtomicBool>,
 }
 
 async fn bootstrap_diskless_index_log(
@@ -4192,6 +4579,7 @@ async fn bootstrap_diskless_index_log(
                     topic = crate::diskless::index_log::DISKLESS_WAL_INDEX_TOPIC,
                     "diskless WAL index projection and object flusher started"
                 );
+                flusher.ready.store(true, Ordering::Release);
                 crate::diskless::flusher::run(
                     crate::diskless::flusher::FlusherContext {
                         partitions: flusher.partitions,
@@ -4371,10 +4759,37 @@ pub(crate) fn spawn_partition(
     producer_state: Arc<crate::producer_state::ProducerState>,
     diskless: bool,
 ) -> Arc<Partition> {
-    let broker_config = BrokerConfig::default();
-    try_spawn_partition_with_sequencer(PartitionSpawnConfig {
+    spawn_partition_with_replication_target(
         topic,
-        topic_id: None,
+        crate::partition::ReplicationTarget {
+            topic_id: None,
+            leader_node_id: crabka_raft::NodeId(0),
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
+        },
+        partition_id,
+        log_dir,
+        log,
+        log_dir_status,
+        producer_state,
+        diskless,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors spawn_partition plus the replication target.
+pub(crate) fn spawn_partition_with_replication_target(
+    topic: String,
+    replication_target: crate::partition::ReplicationTarget,
+    partition_id: PartitionIndex,
+    log_dir: std::path::PathBuf,
+    log: crabka_log::Log,
+    log_dir_status: crate::log_dir_status::LogDirRegistry,
+    producer_state: Arc<crate::producer_state::ProducerState>,
+    diskless: bool,
+) -> Arc<Partition> {
+    let broker_config = BrokerConfig::default();
+    let partition = try_spawn_partition_with_sequencer(PartitionSpawnConfig {
+        topic,
+        topic_id: replication_target.topic_id,
         partition_id,
         log_dir,
         log,
@@ -4389,7 +4804,20 @@ pub(crate) fn spawn_partition(
         wal_shards: None,
         sequencer: None,
     })
-    .expect("spawn partition")
+    .expect("spawn partition");
+    partition.current_leader.store(
+        replication_target.leader_node_id.0,
+        std::sync::atomic::Ordering::Release,
+    );
+    partition.current_leader_epoch.store(
+        replication_target.leader_epoch.0,
+        std::sync::atomic::Ordering::Release,
+    );
+    *partition
+        .replication_target
+        .try_write()
+        .expect("new partition target is uncontended") = replication_target;
+    partition
 }
 
 pub(crate) struct PartitionSpawnConfig {
@@ -4451,6 +4879,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
     let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
     let current_leader = Arc::new(AtomicU64::new(0));
     let current_leader_epoch = Arc::new(AtomicI32::new(0));
+    let replication_target = crate::partition::initial_replication_target(topic_id);
     let log_dir = Arc::new(arc_swap::ArcSwap::from_pointee(log_dir));
     let writer_future = crate::partition_writer::run_with_sequencer(
         (topic.clone(), partition_id),
@@ -4501,6 +4930,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         hw_advance_notify,
         current_leader,
         current_leader_epoch,
+        replication_target,
         diskless,
         writer_handle: Arc::new(Mutex::new(Some(writer))),
     }))
@@ -5717,6 +6147,63 @@ protocol = "Plaintext"
     }
 
     #[test]
+    fn self_controller_registration_uses_quorum_endpoint_and_feature_ranges() {
+        let config = BrokerConfig {
+            node_id: crabka_metadata::NodeId(7),
+            incarnation_id: uuid::Uuid::from_u128(0xCAFE),
+            controller_quorum_voters: vec![(
+                crabka_metadata::NodeId(7),
+                "controller.example:19093".into(),
+            )],
+            controller_listener_protocol: crabka_security::ListenerProtocol::Ssl,
+            ..Default::default()
+        };
+
+        let registration = self_controller_registration_record(&config);
+
+        assert!(registration.node_id == crabka_metadata::NodeId(7));
+        assert!(registration.incarnation_id == uuid::Uuid::from_u128(0xCAFE));
+        assert!(registration.features == crabka_metadata::supported_feature_ranges());
+        assert!(
+            registration.endpoints
+                == vec![crabka_metadata::BrokerEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "controller.example".into(),
+                    port: 19093,
+                    protocol: crabka_security::ListenerProtocol::Ssl,
+                }]
+        );
+    }
+
+    #[test]
+    fn controller_registration_starts_at_kip_919_floor_and_is_idempotent() {
+        let config = BrokerConfig::default();
+        let registration = self_controller_registration_record(&config);
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&crabka_metadata::MetadataRecord::V1FeatureLevel(
+            crabka_metadata::FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level: crabka_metadata::metadata_version::ONLINE_DOWNGRADE_MIN_LEVEL - 1,
+            },
+        ));
+
+        assert!(controller_registration_update(&image, &registration).is_none());
+
+        image.apply(&crabka_metadata::MetadataRecord::V1FeatureLevel(
+            crabka_metadata::FeatureLevelRecord {
+                name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+                level: crabka_metadata::metadata_version::ONLINE_DOWNGRADE_MIN_LEVEL,
+            },
+        ));
+        let update = controller_registration_update(&image, &registration)
+            .expect("crossing the KIP-919 floor registers the controller");
+        image.apply(&update);
+
+        assert!(image.controller(config.node_id) == Some(&registration));
+        assert!(controller_registration_update(&image, &registration).is_none());
+    }
+
+    #[test]
     fn connection_guard_increments_and_decrements_global_and_per_ip() {
         let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -6107,12 +6594,14 @@ protocol = "Plaintext"
                     host: "127.0.0.1".to_string(),
                     port: 19_092,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![crabka_metadata::BrokerEndpoint {
                         name: "PLAINTEXT".to_string(),
                         host: "127.0.0.1".to_string(),
                         port: 19_092,
                         protocol: crabka_security::ListenerProtocol::Plaintext,
                     }],
+                    features: std::collections::BTreeMap::new(),
                 },
             ))
             .await
@@ -7201,6 +7690,7 @@ protocol = "Plaintext"
             node_id: crabka_raft::NodeId(7),
             broker_id: 1,
             flush_config: crate::diskless::flusher::FlushConfig::default(),
+            ready: Arc::new(AtomicBool::new(false)),
         };
         let shutdown = CancellationToken::new();
         let bootstrap = bootstrap_diskless_index_log(

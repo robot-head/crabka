@@ -29,9 +29,14 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    codec::RecordCodec, error::GatewayError, metrics::metrics,
-    outbound_config::CompiledSubscription,
+    ce_translate,
+    codec::RecordCodec,
+    error::GatewayError,
+    metrics::metrics,
+    outbound_config::{CompiledSubscription, OutboundContentMode},
 };
+
+const CLOUDEVENTS_JSON_CONTENT_TYPE: &str = "application/cloudevents+json; charset=UTF-8";
 
 /// RAII guard that decrements the active-subscriptions gauge exactly once on
 /// drop. It does this however `run_subscription` exits: on a normal shutdown,
@@ -221,21 +226,28 @@ async fn deliver_one(
         return;
     }
 
-    // 2. Build the delivery body. event_id = topic-partition-offset is the
-    //    receiver's dedup key (X-Crabka-Event-Id). When `decode_to_json` is set,
-    //    the (Confluent-framed) record value is decoded and its JSON view is
-    //    delivered verbatim; otherwise — and whenever decode yields no JSON or
-    //    errors — the standard signed JSON envelope is delivered (raw path,
-    //    inert under `RawCodec`).
+    // 2. Build the mode-specific body and binding headers. Invalid
+    //    CloudEvents records never reach the HTTP target; they follow the same
+    //    DLQ/drop policy as exhausted requests.
     let event_id = format!("{}-{}-{}", rec.topic, rec.partition, rec.offset);
-    let body = decoded_body(codec, sub, rec)
-        .await
-        .unwrap_or_else(|| render_envelope(&event_id, rec));
+    let delivery = match render_delivery(codec, sub, &event_id, rec).await {
+        Ok(delivery) => delivery,
+        Err(error) => {
+            tracing::warn!(
+                subscription = %sub.name,
+                event = %event_id,
+                error = %error,
+                "outbound CloudEvents record is invalid; dropping or dead-lettering",
+            );
+            dead_letter(producer, sub, rec, &event_id).await;
+            return;
+        }
+    };
     let ts = now_unix_ms();
     let sig = sub
         .signing_secret
         .as_ref()
-        .map(|s| crate::webhook_config::sign_hmac_hex(s, &body));
+        .map(|s| crate::webhook_config::sign_hmac_hex(s, &delivery.body));
 
     // 3. POST with exponential backoff + jitter up to max_attempts.
     let mut attempt: u32 = 0;
@@ -245,8 +257,10 @@ async fn deliver_one(
             .post(&sub.target_url)
             .header("X-Crabka-Event-Id", &event_id)
             .header("X-Crabka-Timestamp", ts.to_string())
-            .header("content-type", "application/json")
-            .body(body.clone());
+            .body(delivery.body.clone());
+        for (name, value) in &delivery.headers {
+            req = req.header(name, value);
+        }
         if let Some(sig) = &sig {
             req = req.header("X-Crabka-Signature", sig);
         }
@@ -287,6 +301,121 @@ async fn deliver_one(
     }
 }
 
+struct RenderedDelivery {
+    body: Vec<u8>,
+    headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
+}
+
+async fn render_delivery(
+    codec: &dyn RecordCodec,
+    sub: &CompiledSubscription,
+    event_id: &str,
+    rec: &ConsumerRecord,
+) -> Result<RenderedDelivery, ce_translate::CeError> {
+    match sub.content_mode {
+        OutboundContentMode::Envelope => Ok(RenderedDelivery {
+            body: decoded_body(codec, sub, rec)
+                .await
+                .unwrap_or_else(|| render_envelope(event_id, rec)),
+            headers: vec![content_type_header("application/json")],
+        }),
+        OutboundContentMode::CloudEventsBinary => render_cloudevents_binary(rec),
+        OutboundContentMode::CloudEventsStructured => render_cloudevents_structured(rec),
+    }
+}
+
+fn render_cloudevents_binary(
+    rec: &ConsumerRecord,
+) -> Result<RenderedDelivery, ce_translate::CeError> {
+    let (headers, body) = if is_structured_at_rest(rec)? {
+        let event = parse_structured_record(rec)?;
+        let (headers, body) = ce_translate::binary_from_structured(&event)?;
+        (
+            headers
+                .into_iter()
+                .map(|(key, value)| (key, Some(value)))
+                .collect(),
+            body.to_vec(),
+        )
+    } else {
+        let headers = record_headers(rec);
+        validate_record_cloudevent(&headers)?;
+        (headers, rec.value.clone().unwrap_or_default().to_vec())
+    };
+
+    Ok(RenderedDelivery {
+        body,
+        headers: ce_translate::kafka_headers_to_http(&headers)?,
+    })
+}
+
+fn render_cloudevents_structured(
+    rec: &ConsumerRecord,
+) -> Result<RenderedDelivery, ce_translate::CeError> {
+    let body = if is_structured_at_rest(rec)? {
+        let event = parse_structured_record(rec)?;
+        ce_translate::validate_structured_json(&event)?;
+        rec.value.clone().unwrap_or_default().to_vec()
+    } else {
+        let headers = record_headers(rec);
+        validate_record_cloudevent(&headers)?;
+        ce_translate::structured_from_binary(&headers, rec.value.as_deref().unwrap_or_default())?
+    };
+
+    Ok(RenderedDelivery {
+        body,
+        headers: vec![content_type_header(CLOUDEVENTS_JSON_CONTENT_TYPE)],
+    })
+}
+
+fn record_headers(rec: &ConsumerRecord) -> Vec<(String, Option<Bytes>)> {
+    rec.headers
+        .iter()
+        .map(|header| (header.key.clone(), header.value.clone()))
+        .collect()
+}
+
+fn validate_record_cloudevent(
+    headers: &[(String, Option<Bytes>)],
+) -> Result<(), ce_translate::CeError> {
+    let present = headers
+        .iter()
+        .filter_map(|(key, value)| Some((key.clone(), value.clone()?)))
+        .collect::<Vec<_>>();
+    ce_translate::validate_binary_required(&present)
+}
+
+fn is_structured_at_rest(rec: &ConsumerRecord) -> Result<bool, ce_translate::CeError> {
+    for header in &rec.headers {
+        if header.key != "content-type" {
+            continue;
+        }
+        let Some(value) = header.value.as_deref() else {
+            continue;
+        };
+        let value = std::str::from_utf8(value)
+            .map_err(|_| ce_translate::CeError::NonUtf8Attribute(header.key.clone()))?;
+        if ce_translate::is_structured_media_type(value) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn parse_structured_record(rec: &ConsumerRecord) -> Result<Value, ce_translate::CeError> {
+    serde_json::from_slice(rec.value.as_deref().unwrap_or_default())
+        .map_err(|_| ce_translate::CeError::MalformedJson)
+}
+
+fn content_type_header(
+    value: &'static str,
+) -> (reqwest::header::HeaderName, reqwest::header::HeaderValue) {
+    (
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static(value),
+    )
+}
+
 /// The decoded-to-JSON delivery body, or `None` to fall back to the envelope.
 ///
 /// Returns `None` (envelope path) when `decode_to_json` is off, the record
@@ -322,8 +451,9 @@ async fn decoded_body(
 /// Render the delivery envelope as serialized JSON bytes.
 ///
 /// The envelope embeds the value as raw JSON when the record value parses as
-/// JSON, and otherwise wraps it as `{"_base64": "..."}`. The key is base64. The
-/// envelope omits record headers, because `ConsumerRecord` exposes none.
+/// JSON, and otherwise wraps it as `{"_base64": "..."}`. The key is base64.
+/// Record headers are an ordered, duplicate-preserving array; each value is
+/// base64 or `null`.
 fn render_envelope(event_id: &str, rec: &ConsumerRecord) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "event_id": event_id,
@@ -333,6 +463,10 @@ fn render_envelope(event_id: &str, rec: &ConsumerRecord) -> Vec<u8> {
         "timestamp_ms": rec.timestamp,
         "key": rec.key.as_ref().map(|k| b64(k)),
         "value": value_field(rec),
+        "headers": rec.headers.iter().map(|header| json!({
+            "key": header.key,
+            "value": header.value.as_ref().map(|value| b64(value)),
+        })).collect::<Vec<_>>(),
     }))
     .unwrap_or_default()
 }
@@ -538,6 +672,7 @@ mod tests {
             request_timeout: millis(1),
             filter: None,
             headers: vec![],
+            content_mode: OutboundContentMode::Envelope,
             decode_to_json,
         }
     }
@@ -553,6 +688,33 @@ mod tests {
             value: value.map(|v| Bytes::from(v.to_vec())),
             headers: vec![],
         }
+    }
+
+    fn binary_cloudevent_record(value: &[u8]) -> ConsumerRecord {
+        let mut record = rec_with_value(Some(value));
+        record.headers = vec![
+            crabka_client_consumer::Header {
+                key: "ce_id".into(),
+                value: Some(Bytes::from_static(b"event-1")),
+            },
+            crabka_client_consumer::Header {
+                key: "ce_source".into(),
+                value: Some(Bytes::from_static(b"/tests")),
+            },
+            crabka_client_consumer::Header {
+                key: "ce_type".into(),
+                value: Some(Bytes::from_static(b"example.created")),
+            },
+            crabka_client_consumer::Header {
+                key: "ce_specversion".into(),
+                value: Some(Bytes::from_static(b"1.0")),
+            },
+            crabka_client_consumer::Header {
+                key: "content-type".into(),
+                value: Some(Bytes::from_static(b"application/json")),
+            },
+        ];
+        record
     }
 
     #[test]
@@ -581,9 +743,134 @@ mod tests {
                 "timestamp_ms": 1_700_000_000_000_i64,
                 "key": B64STD.encode(b"k1"),
                 "value": expected_value,
+                "headers": [],
             });
             assert2::assert!(actual == expected);
         }
+    }
+
+    #[test]
+    fn envelope_preserves_order_duplicates_and_null_header_values() {
+        let mut rec = rec_with_value(Some(br#"{"n":1}"#));
+        rec.headers = vec![
+            crabka_client_consumer::Header {
+                key: "ce-type".into(),
+                value: Some(Bytes::from_static(b"order")),
+            },
+            crabka_client_consumer::Header {
+                key: "duplicate".into(),
+                value: Some(Bytes::from_static(b"first")),
+            },
+            crabka_client_consumer::Header {
+                key: "duplicate".into(),
+                value: Some(Bytes::from_static(b"last")),
+            },
+            crabka_client_consumer::Header {
+                key: "null-value".into(),
+                value: None,
+            },
+        ];
+
+        let actual: Value = serde_json::from_slice(&render_envelope("events-3-42", &rec))
+            .expect("envelope is JSON");
+
+        assert2::assert!(
+            actual["headers"]
+                == serde_json::json!([
+                    {"key": "ce-type", "value": B64STD.encode(b"order")},
+                    {"key": "duplicate", "value": B64STD.encode(b"first")},
+                    {"key": "duplicate", "value": B64STD.encode(b"last")},
+                    {"key": "null-value", "value": null},
+                ])
+        );
+    }
+
+    #[tokio::test]
+    async fn cloudevents_binary_delivery_has_raw_body_and_binding_headers() {
+        let codec = RawCodec;
+        let mut sub = sub_with_decode(false);
+        sub.content_mode = OutboundContentMode::CloudEventsBinary;
+        let record = binary_cloudevent_record(br#"{"n":1}"#);
+
+        let delivery = render_delivery(&codec, &sub, "events-3-42", &record)
+            .await
+            .expect("binary delivery renders");
+
+        assert2::assert!(delivery.body == br#"{"n":1}"#);
+        assert2::assert!(
+            delivery.headers.iter().any(|(name, value)| {
+                name.as_str() == "ce-id" && value.as_bytes() == b"event-1"
+            })
+        );
+        assert2::assert!(delivery.headers.iter().any(|(name, value)| {
+            name.as_str() == "content-type" && value.as_bytes() == b"application/json"
+        }));
+    }
+
+    #[tokio::test]
+    async fn cloudevents_structured_delivery_uses_charset_media_type() {
+        let codec = RawCodec;
+        let mut sub = sub_with_decode(false);
+        sub.content_mode = OutboundContentMode::CloudEventsStructured;
+        let record = binary_cloudevent_record(br#"{"n":1}"#);
+
+        let delivery = render_delivery(&codec, &sub, "events-3-42", &record)
+            .await
+            .expect("structured delivery renders");
+        let event: Value = serde_json::from_slice(&delivery.body).expect("CloudEvent JSON");
+
+        assert2::assert!(event["id"] == "event-1");
+        assert2::assert!(event["data"]["n"] == 1);
+        assert2::assert!(delivery.headers.iter().any(|(name, value)| {
+            name.as_str() == "content-type"
+                && value.as_bytes() == CLOUDEVENTS_JSON_CONTENT_TYPE.as_bytes()
+        }));
+    }
+
+    #[tokio::test]
+    async fn structured_at_rest_is_verbatim_or_converted_for_requested_mode() {
+        let codec = RawCodec;
+        let body = br#"{ "specversion":"1.0", "id":"event-1", "source":"/tests", "type":"example.created", "datacontenttype":"application/json", "data":{"n":7} }"#;
+        let mut record = rec_with_value(Some(body));
+        record.headers = vec![crabka_client_consumer::Header {
+            key: "content-type".into(),
+            value: Some(Bytes::from_static(
+                b"application/cloudevents+json; charset=UTF-8",
+            )),
+        }];
+
+        let mut sub = sub_with_decode(false);
+        sub.content_mode = OutboundContentMode::CloudEventsStructured;
+        let structured = render_delivery(&codec, &sub, "events-3-42", &record)
+            .await
+            .expect("structured delivery renders");
+        assert2::assert!(structured.body == body);
+
+        sub.content_mode = OutboundContentMode::CloudEventsBinary;
+        let binary = render_delivery(&codec, &sub, "events-3-42", &record)
+            .await
+            .expect("binary delivery renders");
+        assert2::assert!(binary.body == br#"{"n":7}"#);
+        assert2::assert!(
+            binary.headers.iter().any(|(name, value)| {
+                name.as_str() == "ce-id" && value.as_bytes() == b"event-1"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn cloudevents_delivery_rejects_missing_required_attributes() {
+        let codec = RawCodec;
+        let mut sub = sub_with_decode(false);
+        sub.content_mode = OutboundContentMode::CloudEventsBinary;
+        let record = rec_with_value(Some(b"data"));
+
+        let result = render_delivery(&codec, &sub, "events-3-42", &record).await;
+
+        assert2::assert!(matches!(
+            result,
+            Err(ce_translate::CeError::MissingAttribute("id"))
+        ));
     }
 
     #[test]

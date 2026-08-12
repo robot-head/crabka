@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
+use uuid::Uuid;
 
 use crate::{
     error::RemoteStorageError,
@@ -24,7 +26,8 @@ pub enum IndexType {
     Timestamp,
     /// Producer id snapshot (`.snapshot`).
     ProducerSnapshot,
-    /// Leader-epoch checkpoint (`leader-epoch-checkpoint`).
+    /// Leader-epoch checkpoint (`.leader_epoch_checkpoint` in Kafka's
+    /// `LocalTieredStorage`).
     LeaderEpoch,
     /// Aborted-transaction index (`.txnindex`). It is optional. A segment
     /// with no aborted transactions has none.
@@ -32,19 +35,40 @@ pub enum IndexType {
 }
 
 impl IndexType {
-    /// The conventional Kafka filename suffix for this index type.
-    /// Filesystem-backed stores use it. `LeaderEpoch` has no dotted suffix in
-    /// Kafka, so the reference store uses `.leader-epoch-checkpoint`.
+    /// The Kafka `LocalTieredStorage` filename suffix for this index type.
+    /// Its remote leader-epoch artifact uses `.leader_epoch_checkpoint`,
+    /// distinct from a partition log's local `leader-epoch-checkpoint` file.
     #[must_use]
     pub fn suffix(self) -> &'static str {
         match self {
             IndexType::Offset => ".index",
             IndexType::Timestamp => ".timeindex",
             IndexType::ProducerSnapshot => ".snapshot",
-            IndexType::LeaderEpoch => ".leader-epoch-checkpoint",
+            IndexType::LeaderEpoch => ".leader_epoch_checkpoint",
             IndexType::Transaction => ".txnindex",
         }
     }
+}
+
+/// Kafka renders UUIDs in URL-safe, unpadded Base64 for remote-tier paths.
+pub(crate) fn kafka_uuid(uuid: Uuid) -> String {
+    URL_SAFE_NO_PAD.encode(uuid.as_bytes())
+}
+
+/// Directory name used by Kafka's `LocalTieredStorage` for a partition.
+pub(crate) fn partition_dir_name(metadata: &RemoteLogSegmentMetadata) -> String {
+    let tp = &metadata.remote_log_segment_id().topic_id_partition;
+    format!("{}-{}-{}", tp.topic, tp.partition, kafka_uuid(tp.topic_id))
+}
+
+/// Filename used by Kafka's `LocalTieredStorage` for one segment artifact.
+pub(crate) fn segment_file_name(metadata: &RemoteLogSegmentMetadata, suffix: &str) -> String {
+    format!(
+        "{:020}-{}{}",
+        metadata.start_offset(),
+        kafka_uuid(metadata.remote_log_segment_id().id),
+        suffix
+    )
 }
 
 /// The local files, and the in-memory leader-epoch bytes, that make up one
@@ -154,10 +178,45 @@ mod tests {
             (IndexType::Offset, ".index"),
             (IndexType::Timestamp, ".timeindex"),
             (IndexType::ProducerSnapshot, ".snapshot"),
-            (IndexType::LeaderEpoch, ".leader-epoch-checkpoint"),
+            (IndexType::LeaderEpoch, ".leader_epoch_checkpoint"),
             (IndexType::Transaction, ".txnindex"),
         ] {
             check!(index_type.suffix() == want, "{index_type:?}");
         }
+    }
+
+    #[test]
+    fn local_tiered_storage_names_match_kafka() {
+        use std::collections::BTreeMap;
+
+        use crabka_ids::LeaderEpoch;
+
+        use crate::metadata::{
+            RemoteLogSegmentDetails, RemoteLogSegmentId, RemoteLogSegmentState, TopicIdPartition,
+        };
+
+        let metadata = RemoteLogSegmentMetadata::new(
+            RemoteLogSegmentId::new(
+                TopicIdPartition::new(Uuid::from_u128(1), "orders", 7),
+                Uuid::from_u128(0xfe),
+            ),
+            11,
+            19,
+            0,
+            1,
+            0,
+            RemoteLogSegmentDetails::new(
+                1,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(LeaderEpoch(0), 11)]),
+            ),
+        )
+        .unwrap();
+
+        check!(partition_dir_name(&metadata) == "orders-7-AAAAAAAAAAAAAAAAAAAAAQ");
+        check!(
+            segment_file_name(&metadata, IndexType::ProducerSnapshot.suffix())
+                == "00000000000000000011-AAAAAAAAAAAAAAAAAAAA_g.snapshot"
+        );
     }
 }

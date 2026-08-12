@@ -39,3 +39,4 @@ tracing = { workspace = true }
 mockall = { workspace = true }
 mutants = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"

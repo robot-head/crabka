@@ -64,7 +64,7 @@ pub use crabka_voters as voters;
 pub use error::MetadataError;
 pub use feature::{
     Feature, bootstrap_feature_records, bootstrap_feature_records_with_overrides, feature,
-    feature_registry, is_supported_level, validate_feature_dependencies,
+    feature_registry, is_supported_level, supported_feature_ranges, validate_feature_dependencies,
 };
 pub use image::{DelegationToken, EntityKey, MetadataImage, ThrottleKind, canonicalize_entity};
 pub use kafka_record::{KafkaRecordError, from_kafka_record, to_kafka_record};
@@ -73,11 +73,11 @@ pub use kraft_translate::{
 };
 pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientMetricsConfigRecord,
-    ClientQuotaRecord, DEFAULT_BROKER_CONFIG_NODE_ID, DelegationTokenRecord,
-    DeleteDelegationTokenRecord, DeleteScramCredentialRecord, DeleteTopicRecord,
-    FeatureLevelRecord, FeaturesEpochRecord, GroupConfigRecord, KRaftVersionRecord, LeaderEpoch,
-    MetadataRecord, NodeId, PartitionDirAssignmentRecord, PartitionOffsetAdvanceRecord,
-    PartitionRecord, ProducerIdsRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
-    TopicRecord, UnregisterBrokerRecord, VotersRecord,
+    ClientQuotaRecord, ControllerRegistrationRecord, DEFAULT_BROKER_CONFIG_NODE_ID,
+    DelegationTokenRecord, DeleteDelegationTokenRecord, DeleteScramCredentialRecord,
+    DeleteTopicRecord, FeatureLevelRecord, FeaturesEpochRecord, GroupConfigRecord,
+    KRaftVersionRecord, LeaderEpoch, MetadataRecord, NodeId, PartitionDirAssignmentRecord,
+    PartitionOffsetAdvanceRecord, PartitionRecord, ProducerIdsRecord, QuotaEntity,
+    ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord, VotersRecord,
 };
 pub use voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};

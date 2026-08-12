@@ -10,11 +10,13 @@ use std::{
 };
 
 use bytes::Bytes;
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_grpc_gateway::{codec::RawCodec, produce::ProduceCore, types::GatewayRecord};
+use crabka_security::ListenerProtocol;
 
-const BOOTSTRAP: &str = "host.docker.internal:9092";
+const HOST_BOOTSTRAP: &str = "127.0.0.1:19092";
+const DOCKER_BOOTSTRAP: &str = "host.docker.internal:19094";
 const IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -22,16 +24,34 @@ const IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";
 async fn jvm_consumer_reads_gateway_output() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // Build a host-advertised BrokerConfig modeled on broker/tests/jvm_acceptance.rs.
-    // `for_tests` gives us port-0 ephemeral defaults; we override listen_addr and
-    // advertised_listener so Docker containers can reach the broker via
-    // `host.docker.internal:9092`.
+    // Give host-side Rust clients and the Dockerized JVM consumer distinct
+    // listener identities. Metadata then advertises an address reachable from
+    // the same network that made the request.
     let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
-    config.listen_addr = "0.0.0.0:9092".parse().unwrap();
-    config.advertised_listener = BOOTSTRAP.into();
+    config.listen_addr = HOST_BOOTSTRAP.parse().unwrap();
+    config.advertised_listener = HOST_BOOTSTRAP.into();
+    config.listeners = vec![
+        ListenerSpec {
+            name: "HOST".into(),
+            bind_addr: HOST_BOOTSTRAP.parse().unwrap(),
+            advertised: HOST_BOOTSTRAP.into(),
+            protocol: ListenerProtocol::Plaintext,
+            tls_config: None,
+            sasl_mechanisms: None,
+        },
+        ListenerSpec {
+            name: "DOCKER".into(),
+            bind_addr: "0.0.0.0:19094".parse().unwrap(),
+            advertised: DOCKER_BOOTSTRAP.into(),
+            protocol: ListenerProtocol::Plaintext,
+            tls_config: None,
+            sasl_mechanisms: None,
+        },
+    ];
+    config.inter_broker_listener_name = "HOST".into();
     let broker: BrokerHandle = Broker::start(config).await.expect("broker");
 
-    let mut admin = AdminClient::connect(&[BOOTSTRAP.to_string()])
+    let mut admin = AdminClient::connect(&[HOST_BOOTSTRAP.to_string()])
         .await
         .expect("admin");
     admin
@@ -47,7 +67,7 @@ async fn jvm_consumer_reads_gateway_output() {
         .await
         .expect("create");
 
-    let core = ProduceCore::new(BOOTSTRAP, "gw-jvm", Arc::new(RawCodec), None)
+    let core = ProduceCore::new(HOST_BOOTSTRAP, "gw-jvm", Arc::new(RawCodec), None)
         .await
         .expect("core");
     let anon = crabka_security::Principal {
@@ -80,7 +100,7 @@ async fn jvm_consumer_reads_gateway_output() {
             IMAGE,
             "kafka-console-consumer",
             "--bootstrap-server",
-            BOOTSTRAP,
+            DOCKER_BOOTSTRAP,
             "--topic",
             "gw-jvm",
             "--from-beginning",

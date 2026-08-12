@@ -153,6 +153,7 @@ pub mod offset_fetch_request;
 pub mod offset_fetch_response;
 pub mod offset_for_leader_epoch_request;
 pub mod offset_for_leader_epoch_response;
+pub mod partition_change_record;
 pub mod partition_record;
 pub mod produce_request;
 pub mod produce_response;

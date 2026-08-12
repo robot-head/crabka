@@ -70,10 +70,10 @@ implementation internals are not compatibility goals.
 | Idempotent and transactional produce / consume | Implemented |
 | Classic and next-generation consumer groups | Implemented |
 | Share groups / queues | Implemented |
-| Tiered storage | Implemented; segment-data JVM interop is still in validation |
+| Tiered storage | Implemented, including Kafka 4.0 JVM segment-layout and producer-snapshot validation |
 | TLS, SASL, delegation tokens, ACLs, and quotas | Implemented |
 | Schema Registry-compatible REST service | Implemented |
-| Kubernetes operator | Implemented; external listener surfaces continue to mature |
+| Kubernetes operator | Implemented, including Ingress and OpenShift Route listeners |
 | Rust Streams client | Partial versus the full JVM Kafka Streams library |
 | Kafka Connect-equivalent runtime | Partial; managed Postgres CDC workers, durable offsets, connector SPI, and `KafkaConnector` CRD are implemented |
 | ZooKeeper mode and ZooKeeper-to-KRaft migration | Out of scope |

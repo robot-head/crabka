@@ -5,6 +5,8 @@ per process and writes its change records to Kafka. It uses an idempotent
 producer with `acks=all` and persists the acknowledged `PostgreSQL` LSN in the
 compacted `__crabka_connect_offsets` topic, keyed by connector and source
 identity.
+At startup it registers the shared CDC key and value Protobuf schemas through
+the configured Schema Registry and frames records with the allocated IDs.
 The key also hashes the `PostgreSQL` URL and slot, so changing the source cannot
 reuse an incompatible checkpoint from an earlier deployment.
 

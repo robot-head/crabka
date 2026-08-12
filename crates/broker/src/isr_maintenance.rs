@@ -391,7 +391,9 @@ mod tests {
             host: format!("b{id}"),
             port: 9092,
             rack: None,
+            log_dirs: vec![],
             endpoints: vec![],
+            features: std::collections::BTreeMap::new(),
         })
     }
 

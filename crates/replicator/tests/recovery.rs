@@ -25,7 +25,11 @@ use crabka_units::prelude::secs;
 /// Build a `ReplicatorConfig` for the us-east → eu-west flow that replicates
 /// the `orders` topic. Both brokers must already run when the test calls this
 /// function. The config is a cheap value type, so the test constructs it twice.
-fn make_config(source_bootstrap: &str, target_bootstrap: &str) -> ReplicatorConfig {
+fn make_config(
+    source_bootstrap: &str,
+    target_bootstrap: &str,
+    delivery: Delivery,
+) -> ReplicatorConfig {
     let mut clusters = BTreeMap::new();
     clusters.insert(
         "us-east".to_string(),
@@ -54,7 +58,7 @@ fn make_config(source_bootstrap: &str, target_bootstrap: &str) -> ReplicatorConf
             },
             groups: Selectors::default(),
             naming: NamingPolicy::Default,
-            delivery: Delivery::AtLeastOnce,
+            delivery,
         }],
         policies: vec![],
     }
@@ -76,7 +80,7 @@ async fn restart_resumes_with_no_gap() {
     }
 
     // ── Step 2 & 3: first supervisor run ──────────────────────────────────────
-    let config_1 = make_config(&source.bootstrap, &target.bootstrap);
+    let config_1 = make_config(&source.bootstrap, &target.bootstrap, Delivery::AtLeastOnce);
     let sup = FlowSupervisor::run(config_1)
         .await
         .expect("first supervisor run");
@@ -94,7 +98,7 @@ async fn restart_resumes_with_no_gap() {
     }
 
     // ── Step 5: second supervisor run (same flow name → same consumer group) ──
-    let config_2 = make_config(&source.bootstrap, &target.bootstrap);
+    let config_2 = make_config(&source.bootstrap, &target.bootstrap, Delivery::AtLeastOnce);
     let sup2 = FlowSupervisor::run(config_2)
         .await
         .expect("second supervisor run");
@@ -152,4 +156,54 @@ async fn restart_resumes_with_no_gap() {
 
     // ── Step 8: clean shutdown ────────────────────────────────────────────────
     sup2.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exactly_once_restart_does_not_duplicate_committed_output() {
+    let source = common::start_broker().await;
+    let target = common::start_broker().await;
+    common::create_topic(&source.bootstrap, "orders", 1).await;
+    for i in 0..10u32 {
+        let key = format!("k{i}");
+        common::produce(&source.bootstrap, "orders", key.as_bytes(), b"value").await;
+    }
+
+    let first = FlowSupervisor::run(make_config(
+        &source.bootstrap,
+        &target.bootstrap,
+        Delivery::ExactlyOnce,
+    ))
+    .await
+    .expect("first exactly-once supervisor run");
+    common::await_count(&target.bootstrap, "us-east.orders", 10, secs(30)).await;
+    first.shutdown().await;
+    assert2::assert!(common::count(&target.bootstrap, "us-east.orders").await == 10);
+    for i in 10..20u32 {
+        let key = format!("k{i}");
+        common::produce(&source.bootstrap, "orders", key.as_bytes(), b"value").await;
+    }
+
+    let second = FlowSupervisor::run(make_config(
+        &source.bootstrap,
+        &target.bootstrap,
+        Delivery::ExactlyOnce,
+    ))
+    .await
+    .expect("second exactly-once supervisor run");
+    common::await_count(&target.bootstrap, "us-east.orders", 20, secs(30)).await;
+    // Settle after restart. With a missing or non-atomic checkpoint the first
+    // ten source records replay here and the committed count grows above twenty.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    second.shutdown().await;
+
+    let records =
+        crabka_replicator::admin_util::read_all(&target.bootstrap, "us-east.orders", None)
+            .await
+            .expect("read exactly-once output");
+    let keys: HashSet<Vec<u8>> = records
+        .iter()
+        .filter_map(|(key, _)| key.as_ref().map(|key| key.to_vec()))
+        .collect();
+    assert2::assert!(records.len() == 20);
+    assert2::assert!(keys.len() == 20);
 }

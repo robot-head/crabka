@@ -282,7 +282,7 @@ pub(crate) fn to_producer_record(rec: &GatewayRecord, value: bytes::Bytes) -> Pr
             .iter()
             .map(|(k, v)| Header {
                 key: k.clone(),
-                value: Some(v.clone()),
+                value: v.clone(),
             })
             .collect(),
         timestamp_ms: rec.timestamp_ms,

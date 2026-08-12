@@ -15,7 +15,7 @@ gres-substrate = { max-threads = 2 }
 schema-registry-fixed-port-captures = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'package(crabka-broker) & (binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen))'
+filter = 'package(crabka-broker) & (binary(describe_groups_jvm) | binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen) | binary(jvm_kip320_divergence))'
 test-group = 'broker-jvm-acceptance'
 threads-required = 'num-test-threads'
 
@@ -60,7 +60,7 @@ filter = 'package(crabka-gres-ranges) & (binary(multiprocess) | binary(jepsen_ba
 test-group = 'gres-ranges-process'
 
 [[profile.ci.overrides]]
-filter = 'package(crabka-broker) & (binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen))'
+filter = 'package(crabka-broker) & (binary(describe_groups_jvm) | binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen) | binary(jvm_kip320_divergence))'
 test-group = 'broker-jvm-acceptance'
 threads-required = 'num-test-threads'
 

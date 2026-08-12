@@ -61,16 +61,16 @@ impl Encode for MetadataRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if version >= 4 {
-            put_bool(buf, self.allow_auto_topic_creation)
+            put_bool(buf, self.allow_auto_topic_creation);
         }
         if (8..=10).contains(&version) {
-            put_bool(buf, self.include_cluster_authorized_operations)
+            put_bool(buf, self.include_cluster_authorized_operations);
         }
         if version >= 8 {
-            put_bool(buf, self.include_topic_authorized_operations)
+            put_bool(buf, self.include_topic_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -85,7 +85,7 @@ impl Encode for MetadataRequest {
             n += if version >= 1 {
                 {
                     let opt: Option<&Vec<_>> = (self.topics).as_ref();
-                    let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex);
+                    let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
                     let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
                     prefix + body
                 }
@@ -114,7 +114,7 @@ impl Encode for MetadataRequest {
         n
     }
 }
-impl<'de> Decode<'de> for MetadataRequest {
+impl Decode<'_> for MetadataRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
@@ -192,7 +192,7 @@ impl Encode for MetadataRequestTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             if version >= 10 {
@@ -207,7 +207,7 @@ impl Encode for MetadataRequestTopic {
                 } else {
                     let () = put_string(buf, (self.name).as_deref().unwrap_or(""));
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -239,7 +239,7 @@ impl Encode for MetadataRequestTopic {
         n
     }
 }
-impl<'de> Decode<'de> for MetadataRequestTopic {
+impl Decode<'_> for MetadataRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();

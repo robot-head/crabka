@@ -1326,7 +1326,7 @@ fn finish_in_flight(cfg: &SenderConfig) {
 async fn txn_pid_snapshot(cfg: &SenderConfig) -> Option<(i64, i16)> {
     cfg.transactional_id.as_ref()?;
     let state = *cfg.txn_state.lock().await;
-    if state == TxnState::InTransaction {
+    if matches!(state, TxnState::InTransaction | TxnState::Preparing) {
         Some(*cfg.txn_pid_epoch.lock().await)
     } else {
         None

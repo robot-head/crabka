@@ -1233,6 +1233,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 9,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![BrokerEndpoint {
                     name: "INTERNAL".to_string(),
                     host: "127.0.0.1".to_string(),
@@ -1240,6 +1241,7 @@ mod tests {
                     port: 9,
                     protocol: ListenerProtocol::Plaintext,
                 }],
+                features: std::collections::BTreeMap::new(),
             },
         ));
         let err = send_test_markers(&image, NodeId(2), "INTERNAL")
@@ -1265,6 +1267,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 9,
                 rack: None,
+                log_dirs: vec![],
                 // Endpoint exists but under a different listener name, so the
                 // `find(name == inter_broker_listener_name)` misses.
                 endpoints: vec![BrokerEndpoint {
@@ -1273,6 +1276,7 @@ mod tests {
                     port: 65000,
                     protocol: ListenerProtocol::Plaintext,
                 }],
+                features: std::collections::BTreeMap::new(),
             },
         ));
         let err = send_test_markers(&image, NodeId(2), "INTERNAL")
@@ -1320,12 +1324,14 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![BrokerEndpoint {
                     name: "INTERNAL".to_string(),
                     host: "127.0.0.1".to_string(),
                     port,
                     protocol: ListenerProtocol::Ssl,
                 }],
+                features: std::collections::BTreeMap::new(),
             },
         ));
         let tls = ClientConfig::builder()

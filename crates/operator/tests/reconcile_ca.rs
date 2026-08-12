@@ -130,6 +130,22 @@ fn secret_rule_404(method: Method, path_substr: String) -> MockRule {
     }
 }
 
+fn statefulset_list_rule(namespace: &str) -> MockRule {
+    MockRule {
+        method: Method::GET,
+        path_substr: format!("/namespaces/{namespace}/statefulsets"),
+        response: json_response(
+            200,
+            &json!({
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSetList",
+                "metadata": { "resourceVersion": "1" },
+                "items": []
+            }),
+        ),
+    }
+}
+
 fn fake_secret_body_cluster_id(name: &str, namespace: &str) -> serde_json::Value {
     let b64 =
         base64::engine::general_purpose::STANDARD.encode(b"00000000-0000-0000-0000-000000000000");
@@ -218,6 +234,7 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(&[])),
         },
+        statefulset_list_rule(ns),
         // 13. GET keystore → 404 (no pools → no brokers → keystore still called with empty requests)
         secret_rule_404(Method::GET, format!("/secrets/{keystore_name}")),
         // 14. PATCH keystore
@@ -405,6 +422,7 @@ async fn byo_mode_adopts_pre_existing_secrets_does_not_overwrite() {
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(&[])),
         },
+        statefulset_list_rule(ns),
         // 9. GET keystore → 404 (first time)
         secret_rule_404(Method::GET, format!("/secrets/{keystore_name}")),
         // 10. PATCH keystore (signed against the BYO cluster CA)
@@ -548,6 +566,7 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(&[])),
         },
+        statefulset_list_rule(ns),
         // 4. GET cluster-ca key → 404 (BYO Secret missing)
         secret_rule_404(Method::GET, format!("/secrets/{cluster_ca_key}")),
         // 5. GET cluster-ca cert → 404 (BYO Secret missing)
@@ -790,6 +809,7 @@ async fn reconciler_does_not_renew_valid_leaf_certs() {
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(&[pool_item])),
         },
+        statefulset_list_rule(ns),
         // 9. GET keystore → 200 with pre-seeded broker 0 cert
         MockRule {
             method: Method::GET,
@@ -1028,6 +1048,7 @@ async fn broker_leaf_certs_chain_to_cluster_ca() {
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(&[pool_one])),
         },
+        statefulset_list_rule(ns),
         secret_rule_404(Method::GET, format!("/secrets/{keystore_name}")),
         MockRule {
             method: Method::PATCH,
@@ -1259,6 +1280,7 @@ async fn scale_up_adds_entries_does_not_reissue_existing() {
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(&pool_items)),
         },
+        statefulset_list_rule(ns),
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{keystore_name}"),
@@ -1466,6 +1488,7 @@ async fn scale_down_prunes_entries() {
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(&pool_items)),
         },
+        statefulset_list_rule(ns),
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{keystore_name}"),

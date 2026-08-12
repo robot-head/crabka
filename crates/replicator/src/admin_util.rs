@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_client_consumer::{AutoOffsetReset, Consumer};
+use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::security::ClientSecurity;
 
 use crate::config::{ClientResourcePolicy, ReplicationFactor, ReplicatorRuntimePolicy};
@@ -284,6 +284,7 @@ async fn build_drain_consumer(
             .frame_max(client_resource_policy.frame_max.size())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
+            .isolation_level(IsolationLevel::ReadCommitted)
             .security(sec)
             .build()
             .await
@@ -296,6 +297,7 @@ async fn build_drain_consumer(
             .frame_max(client_resource_policy.frame_max.size())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
+            .isolation_level(IsolationLevel::ReadCommitted)
             .build()
             .await
     }

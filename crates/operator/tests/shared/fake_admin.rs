@@ -18,8 +18,9 @@ use crabka_client_admin::{
     AclEntry, AclEntryFilter, AdminClientLike, AdminError, AlterConfigsOutcome, CreateAclOutcome,
     CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,
     DeleteAclFilterOutcome, DeleteRecordsOp, DeleteRecordsOutcome, DeleteTopicOutcome,
-    IncrementalAlterOp, KafkaError, MetadataQuorum, QuotaOp, ScramDeletion, ScramUpsertion,
-    ScramUserOutcome, TopicConfigOverrides, TopicMetadata, TopicMetadataEntry, UserQuotaConfig,
+    IncrementalAlterOp, KafkaError, MetadataQuorum, MetadataVersionUpdate, QuotaOp, ScramDeletion,
+    ScramUpsertion, ScramUserOutcome, TopicConfigOverrides, TopicMetadata, TopicMetadataEntry,
+    TopicReplicationStatus, UserQuotaConfig,
 };
 use crabka_client_core::ClientError;
 use crabka_metadata::DelegationToken;
@@ -50,6 +51,7 @@ pub enum InjectableError {
 
 #[derive(Debug, Default)]
 pub struct InjectedErrors {
+    pub metadata_version_update: Option<InjectableError>,
     pub create_topics: Option<InjectableError>,
     pub delete_topics: Option<InjectableError>,
     pub create_partitions: Option<InjectableError>,
@@ -62,6 +64,11 @@ pub struct InjectedErrors {
 /// sequence to verify which RPCs were issued (and in what order).
 #[derive(Debug, Clone)]
 pub enum RecordedCall {
+    UpdateMetadataVersion {
+        level: i16,
+        safe_downgrade: bool,
+        timeout: Time,
+    },
     DescribeMetadataQuorum,
     RemoveRaftVoter {
         cluster_id: uuid::Uuid,
@@ -69,6 +76,11 @@ pub enum RecordedCall {
         directory_id: uuid::Uuid,
     },
     Metadata(Vec<String>),
+    ReconcileTopicReplicationFactor {
+        topic: String,
+        replication_factor: i32,
+        timeout: Time,
+    },
     CreateTopics(Vec<CreateTopicSpec>),
     DeleteTopics(Vec<String>),
     DeleteRecords(Vec<DeleteRecordsOp>),
@@ -262,6 +274,21 @@ impl FakeAdminClient {
     pub fn inject_metadata_transport_error(&self) {
         self.injected.lock().unwrap().metadata = Some(InjectableError::Transport);
     }
+
+    pub fn inject_metadata_version_update_broker_error(
+        &self,
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    ) {
+        self.injected.lock().unwrap().metadata_version_update =
+            Some(InjectableError::BrokerToplevel {
+                api: "UpdateFeatures",
+                code,
+                name,
+                message,
+            });
+    }
 }
 
 fn transport_error() -> AdminError {
@@ -270,6 +297,50 @@ fn transport_error() -> AdminError {
 
 #[async_trait::async_trait]
 impl AdminClientLike for FakeAdminClient {
+    async fn update_metadata_version(
+        &mut self,
+        level: i16,
+        safe_downgrade: bool,
+        timeout: Time,
+    ) -> Result<MetadataVersionUpdate, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::UpdateMetadataVersion {
+                level,
+                safe_downgrade,
+                timeout,
+            });
+        if let Some(error) = self
+            .injected
+            .lock()
+            .unwrap()
+            .metadata_version_update
+            .clone()
+        {
+            return match error {
+                InjectableError::Transport => Err(transport_error()),
+                InjectableError::Broker {
+                    code,
+                    name,
+                    message,
+                }
+                | InjectableError::BrokerToplevel {
+                    code,
+                    name,
+                    message,
+                    ..
+                } => Err(AdminError::Broker {
+                    api: "UpdateFeatures",
+                    code,
+                    name,
+                    message,
+                }),
+            };
+        }
+        Ok(MetadataVersionUpdate { level })
+    }
+
     async fn describe_metadata_quorum(&mut self) -> Result<MetadataQuorum, AdminError> {
         self.recorded_calls
             .lock()
@@ -361,6 +432,34 @@ impl AdminClientLike for FakeAdminClient {
             controller_id: 0,
             topics: entries,
         })
+    }
+
+    async fn reconcile_topic_replication_factor(
+        &mut self,
+        topic: &str,
+        replication_factor: i32,
+        timeout: Time,
+    ) -> Result<TopicReplicationStatus, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::ReconcileTopicReplicationFactor {
+                topic: topic.to_string(),
+                replication_factor,
+                timeout,
+            });
+        let mut topics = self.topics.lock().unwrap();
+        let state = topics.get_mut(topic).ok_or(AdminError::Broker {
+            api: "Metadata",
+            code: 3,
+            name: "UNKNOWN_TOPIC_OR_PARTITION",
+            message: None,
+        })?;
+        if state.replicas == replication_factor {
+            return Ok(TopicReplicationStatus::InSync);
+        }
+        state.replicas = replication_factor;
+        Ok(TopicReplicationStatus::ReassignmentSubmitted)
     }
 
     async fn create_topics(

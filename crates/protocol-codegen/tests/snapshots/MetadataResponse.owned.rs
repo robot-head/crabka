@@ -49,7 +49,7 @@ impl Encode for MetadataResponse {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -57,17 +57,17 @@ impl Encode for MetadataResponse {
                 for it in &self.brokers {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 2 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
                 let () = put_nullable_string(buf, self.cluster_id.as_deref());
-            }
+            };
         }
         if version >= 1 {
-            put_i32(buf, self.controller_id)
+            put_i32(buf, self.controller_id);
         }
         if version >= 0 {
             {
@@ -75,13 +75,13 @@ impl Encode for MetadataResponse {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if (8..=10).contains(&version) {
-            put_i32(buf, self.cluster_authorized_operations)
+            put_i32(buf, self.cluster_authorized_operations);
         }
         if version >= 13 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -132,7 +132,7 @@ impl Encode for MetadataResponse {
         n
     }
 }
-impl<'de> Decode<'de> for MetadataResponse {
+impl Decode<'_> for MetadataResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
@@ -221,24 +221,24 @@ impl Encode for MetadataResponseBroker {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_string(buf, &self.host);
             } else {
                 let () = put_string(buf, &self.host);
-            }
+            };
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 1 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.rack.as_deref());
             } else {
                 let () = put_nullable_string(buf, self.rack.as_deref());
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -268,7 +268,7 @@ impl Encode for MetadataResponseBroker {
         n
     }
 }
-impl<'de> Decode<'de> for MetadataResponseBroker {
+impl Decode<'_> for MetadataResponseBroker {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
@@ -337,7 +337,7 @@ impl Encode for MetadataResponseTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if version >= 12 {
@@ -352,13 +352,13 @@ impl Encode for MetadataResponseTopic {
                 } else {
                     let () = put_string(buf, (self.name).as_deref().unwrap_or(""));
                 }
-            }
+            };
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 1 {
-            put_bool(buf, self.is_internal)
+            put_bool(buf, self.is_internal);
         }
         if version >= 0 {
             {
@@ -366,10 +366,10 @@ impl Encode for MetadataResponseTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 8 {
-            put_i32(buf, self.topic_authorized_operations)
+            put_i32(buf, self.topic_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -417,7 +417,7 @@ impl Encode for MetadataResponseTopic {
         n
     }
 }
-impl<'de> Decode<'de> for MetadataResponseTopic {
+impl Decode<'_> for MetadataResponseTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
@@ -511,16 +511,16 @@ impl Encode for MetadataResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 7 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 0 {
             {
@@ -528,7 +528,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.replica_nodes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -536,7 +536,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.isr_nodes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 5 {
             {
@@ -544,7 +544,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.offline_replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -595,7 +595,7 @@ impl Encode for MetadataResponsePartition {
         n
     }
 }
-impl<'de> Decode<'de> for MetadataResponsePartition {
+impl Decode<'_> for MetadataResponsePartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();

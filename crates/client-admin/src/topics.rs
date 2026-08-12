@@ -1,16 +1,23 @@
 //! Topic CRUD wrappers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crabka_protocol::{
     owned::{
+        alter_partition_reassignments_request::{
+            AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+        },
+        alter_partition_reassignments_response::AlterPartitionReassignmentsResponse,
         create_partitions_request::{CreatePartitionsRequest, CreatePartitionsTopic},
         create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
         delete_records_request::{
             DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic,
         },
         delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
+        list_partition_reassignments_request::ListPartitionReassignmentsRequest,
+        list_partition_reassignments_response::ListPartitionReassignmentsResponse,
         metadata_request::{MetadataRequest, MetadataRequestTopic},
+        metadata_response::MetadataResponse,
     },
     primitives::uuid::Uuid as ProtoUuid,
 };
@@ -82,6 +89,18 @@ pub struct TopicMetadataEntry {
     pub error: Option<KafkaError>,
 }
 
+/// Result of converging one topic's partition assignments to a replication
+/// factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopicReplicationStatus {
+    /// Every partition already has the requested number of replicas.
+    InSync,
+    /// Kafka is still completing an earlier reassignment for the topic.
+    ReassignmentInProgress,
+    /// A reassignment for every out-of-sync partition was accepted.
+    ReassignmentSubmitted,
+}
+
 impl AdminClient {
     /// Metadata for the named topics. Pass an empty slice to fetch all
     /// topics, per Kafka semantics.
@@ -92,6 +111,96 @@ impl AdminClient {
         let req = build_metadata(topics);
         let resp = self.conn.send(req).await?;
         Ok(parse_metadata(resp))
+    }
+
+    /// Converges every partition of `topic` to `replication_factor` through
+    /// `AlterPartitionReassignments`.
+    ///
+    /// Existing replicas are retained where possible. Added replicas rotate
+    /// across the broker list, and decreases preserve the leading replica
+    /// order. An existing reassignment is never overwritten.
+    ///
+    /// # Errors
+    /// Returns an error when the factor is invalid for the live broker set,
+    /// metadata cannot be read, Kafka rejects a reassignment, or transport I/O
+    /// fails.
+    pub async fn reconcile_topic_replication_factor(
+        &mut self,
+        topic: &str,
+        replication_factor: i32,
+        timeout: Time,
+    ) -> Result<TopicReplicationStatus, AdminError> {
+        let first = self
+            .reconcile_topic_replication_factor_once(topic, replication_factor, timeout)
+            .await;
+        if !matches!(
+            first,
+            Err(AdminError::Broker {
+                code: NOT_CONTROLLER,
+                ..
+            })
+        ) {
+            return first;
+        }
+
+        self.refresh_controller_connection().await?;
+        match self
+            .reconcile_topic_replication_factor_once(topic, replication_factor, timeout)
+            .await
+        {
+            Err(AdminError::Broker {
+                code: NOT_CONTROLLER,
+                ..
+            }) => Err(AdminError::NotControllerExhausted),
+            result => result,
+        }
+    }
+
+    async fn reconcile_topic_replication_factor_once(
+        &mut self,
+        topic: &str,
+        replication_factor: i32,
+        timeout: Time,
+    ) -> Result<TopicReplicationStatus, AdminError> {
+        let ongoing: ListPartitionReassignmentsResponse = self
+            .conn
+            .send(ListPartitionReassignmentsRequest::default())
+            .await?;
+        broker_error(
+            "ListPartitionReassignments",
+            ongoing.error_code,
+            ongoing.error_message,
+        )?;
+        if ongoing.topics.iter().any(|entry| entry.name == topic) {
+            return Ok(TopicReplicationStatus::ReassignmentInProgress);
+        }
+
+        let metadata: MetadataResponse = self.conn.send(build_metadata(&[topic])).await?;
+        let Some(request) =
+            build_replication_factor_reassignment(&metadata, topic, replication_factor, timeout)?
+        else {
+            return Ok(TopicReplicationStatus::InSync);
+        };
+        let response: AlterPartitionReassignmentsResponse = self.conn.send(request).await?;
+        broker_error(
+            "AlterPartitionReassignments",
+            response.error_code,
+            response.error_message,
+        )?;
+        if let Some(error) = response.responses.into_iter().find_map(|topic_response| {
+            topic_response
+                .partitions
+                .into_iter()
+                .find(|partition| partition.error_code != 0)
+        }) {
+            return Err(AdminError::Broker {
+                api: "AlterPartitionReassignments",
+                code: error.error_code,
+                name: crate::kafka_error_name(error.error_code),
+                message: error.error_message,
+            });
+        }
+        Ok(TopicReplicationStatus::ReassignmentSubmitted)
     }
 
     /// # Errors
@@ -227,7 +336,10 @@ impl AdminClient {
     /// Fetches Metadata, finds the controller's `host:port`, and replaces
     /// `self.conn` with a connection to it. The per-method `NOT_CONTROLLER`
     /// retry paths above use it.
-    async fn refresh_controller_connection(&mut self) -> Result<(), AdminError> {
+    pub(crate) async fn refresh_controller_connection(&mut self) -> Result<(), AdminError> {
+        if self.conn.uses_controller_bootstrap() {
+            return self.conn.rebootstrap().await;
+        }
         let md_resp = self.conn.send(build_metadata(&[])).await?;
         let controller_addr =
             controller_endpoint(&md_resp).ok_or(AdminError::NotControllerExhausted)?;
@@ -330,6 +442,110 @@ fn build_metadata(topics: &[&str]) -> MetadataRequest {
         include_topic_authorized_operations: false,
         ..Default::default()
     }
+}
+
+fn broker_error(api: &'static str, code: i16, message: Option<String>) -> Result<(), AdminError> {
+    if code == 0 {
+        return Ok(());
+    }
+    Err(AdminError::Broker {
+        api,
+        code,
+        name: crate::kafka_error_name(code),
+        message,
+    })
+}
+
+fn build_replication_factor_reassignment(
+    metadata: &MetadataResponse,
+    topic_name: &str,
+    replication_factor: i32,
+    timeout: Time,
+) -> Result<Option<AlterPartitionReassignmentsRequest>, AdminError> {
+    broker_error("Metadata", metadata.error_code, None)?;
+    let desired = usize::try_from(replication_factor).map_err(|_| {
+        AdminError::Protocol("replication factor must be a positive integer".into())
+    })?;
+    if desired == 0 {
+        return Err(AdminError::Protocol(
+            "replication factor must be a positive integer".into(),
+        ));
+    }
+
+    let mut brokers = metadata
+        .brokers
+        .iter()
+        .map(|broker| broker.node_id)
+        .collect::<Vec<_>>();
+    brokers.sort_unstable();
+    brokers.dedup();
+    if desired > brokers.len() {
+        return Err(AdminError::Broker {
+            api: "AlterPartitionReassignments",
+            code: 38,
+            name: crate::kafka_error_name(38),
+            message: Some(format!(
+                "replication factor {replication_factor} exceeds live broker count {}",
+                brokers.len()
+            )),
+        });
+    }
+
+    let topic = metadata
+        .topics
+        .iter()
+        .find(|topic| topic.name.as_deref() == Some(topic_name))
+        .ok_or_else(|| AdminError::Broker {
+            api: "Metadata",
+            code: 3,
+            name: crate::kafka_error_name(3),
+            message: Some(format!("topic {topic_name:?} is absent from metadata")),
+        })?;
+    broker_error("Metadata", topic.error_code, None)?;
+
+    let available = brokers.iter().copied().collect::<HashSet<_>>();
+    let mut partitions = Vec::new();
+    for (rotation, partition) in topic.partitions.iter().enumerate() {
+        broker_error("Metadata", partition.error_code, None)?;
+        let mut selected = HashSet::with_capacity(desired);
+        let mut target = partition
+            .replica_nodes
+            .iter()
+            .copied()
+            .filter(|broker| available.contains(broker) && selected.insert(*broker))
+            .take(desired)
+            .collect::<Vec<_>>();
+        for offset in 0..brokers.len() {
+            if target.len() == desired {
+                break;
+            }
+            let broker = brokers[(rotation + offset) % brokers.len()];
+            if selected.insert(broker) {
+                target.push(broker);
+            }
+        }
+        if target != partition.replica_nodes {
+            partitions.push(ReassignablePartition {
+                partition_index: partition.partition_index,
+                replicas: Some(target),
+                ..Default::default()
+            });
+        }
+    }
+    if partitions.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(AlterPartitionReassignmentsRequest {
+        timeout_ms: timeout.millis_i32(),
+        allow_replication_factor_change: true,
+        topics: vec![ReassignableTopic {
+            name: topic_name.to_string(),
+            partitions,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }))
 }
 
 fn build_create_topics(specs: &[CreateTopicSpec], timeout: Time) -> CreateTopicsRequest {
@@ -500,9 +716,107 @@ fn proto_uuid_to_opt(u: ProtoUuid) -> Option<Uuid> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::metadata_response::{
+            MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
+        },
+    };
 
     use super::*;
+
+    fn reassignment_metadata(assignments: &[&[i32]]) -> MetadataResponse {
+        MetadataResponse {
+            brokers: (1..=3)
+                .map(|node_id| MetadataResponseBroker {
+                    node_id,
+                    ..Default::default()
+                })
+                .collect(),
+            topics: vec![MetadataResponseTopic {
+                name: Some("orders".into()),
+                partitions: assignments
+                    .iter()
+                    .enumerate()
+                    .map(|(partition_index, replicas)| MetadataResponsePartition {
+                        partition_index: i32::try_from(partition_index)
+                            .expect("test partition index fits i32"),
+                        replica_nodes: replicas.to_vec(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replication_factor_reassignment_preserves_and_rotates_replicas() {
+        let cases = [
+            (
+                "increase",
+                reassignment_metadata(&[&[1], &[2]]),
+                2,
+                vec![(0, vec![1, 2]), (1, vec![2, 3])],
+            ),
+            (
+                "decrease",
+                reassignment_metadata(&[&[1, 2, 3], &[2, 3, 1]]),
+                2,
+                vec![(0, vec![1, 2]), (1, vec![2, 3])],
+            ),
+        ];
+
+        for (case, metadata, replication_factor, expected_partitions) in cases {
+            let actual = build_replication_factor_reassignment(
+                &metadata,
+                "orders",
+                replication_factor,
+                crabka_units::secs(5),
+            )
+            .unwrap();
+            let expected = Some(AlterPartitionReassignmentsRequest {
+                timeout_ms: 5_000,
+                allow_replication_factor_change: true,
+                topics: vec![ReassignableTopic {
+                    name: "orders".into(),
+                    partitions: expected_partitions
+                        .into_iter()
+                        .map(|(partition_index, replicas)| ReassignablePartition {
+                            partition_index,
+                            replicas: Some(replicas),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            assert2::assert!(actual == expected, "case {case}");
+        }
+    }
+
+    #[test]
+    fn replication_factor_reassignment_rejects_factor_above_broker_count() {
+        let error = build_replication_factor_reassignment(
+            &reassignment_metadata(&[&[1]]),
+            "orders",
+            4,
+            crabka_units::secs(5),
+        )
+        .unwrap_err();
+
+        assert2::assert!(matches!(
+            error,
+            AdminError::Broker {
+                api: "AlterPartitionReassignments",
+                code: 38,
+                name: "INVALID_REPLICATION_FACTOR",
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn build_create_topics_one_spec() {

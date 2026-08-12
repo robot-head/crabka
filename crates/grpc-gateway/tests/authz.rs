@@ -189,7 +189,7 @@ fn send_one(topic: &str, value: &[u8]) -> pb::SendRequest {
             topic: topic.into(),
             key: None,
             body: Some(pb::record::Body::Raw(value.to_vec())),
-            headers: BTreeMap::new().into_iter().collect(),
+            headers: vec![],
             partition: None,
             timestamp_ms: None,
             idempotency_key: None,

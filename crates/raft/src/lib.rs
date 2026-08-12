@@ -73,8 +73,9 @@ mod types;
 mod wire;
 
 pub use config::{
-    BootstrapMode, ControllerConfig, ControllerFetchMissLimit, MetadataRaftCommandQueueCapacity,
-    MetadataRaftFetchMax, RaftShardRouter, ShardRouteFuture,
+    BootstrapMode, ControllerAdminRequest, ControllerAdminResponse, ControllerAdminRouteFuture,
+    ControllerAdminRouter, ControllerApiVersion, ControllerConfig, ControllerFetchMissLimit,
+    MetadataRaftCommandQueueCapacity, MetadataRaftFetchMax, RaftShardRouter, ShardRouteFuture,
 };
 pub use controller::{
     Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice, metadata_log_nonempty,

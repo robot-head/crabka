@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crabka_schema_serde::wire::encode_protobuf;
+use crabka_schema_serde::{RegistryClient, SchemaKind, wire::encode_protobuf};
 use prost::Message as _;
 use prost_reflect::{
     DescriptorPool, DynamicMessage, MessageDescriptor, Value,
@@ -14,32 +14,100 @@ use crate::{
     model::{ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue},
 };
 
-// Local placeholder IDs until schema registry allocation is wired in.
-const KEY_SCHEMA_ID: u32 = 1;
-const VALUE_SCHEMA_ID: u32 = 2;
-
 const KEY_MESSAGE_INDEX: &[i32] = &[1];
 const VALUE_MESSAGE_INDEX: &[i32] = &[2];
 const PACKAGE: &str = "crabka.connect.postgres";
 const COLUMN_VALUE: &str = "ColumnValue";
 const ENTITY_KEY: &str = "EntityKey";
 const ENTITY_DIFFERENCE: &str = "EntityDifference";
+const KEY_SUBJECT: &str = "crabka-connect-postgres-key";
+const VALUE_SUBJECT: &str = "crabka-connect-postgres-value";
+const KEY_MESSAGE_TYPE: &str = "crabka.connect.postgres.EntityKey";
+const VALUE_MESSAGE_TYPE: &str = "crabka.connect.postgres.EntityDifference";
+const PROTO_SCHEMA: &str = r#"syntax = "proto3";
+package crabka.connect.postgres;
+
+message ColumnValue {
+  string name = 1;
+  string kind = 2;
+  string string_value = 3;
+  bool bool_value = 4;
+  int64 int_value = 5;
+  bytes bytes_value = 6;
+  bool is_null = 7;
+}
+
+message EntityKey {
+  string table = 1;
+  repeated ColumnValue columns = 2;
+}
+
+message EntityDifference {
+  string table = 1;
+  string operation = 2;
+  string lsn = 3;
+  repeated ColumnValue before = 4;
+  repeated ColumnValue after = 5;
+  EntityKey key = 6;
+  int64 txid = 7;
+  int64 commit_timestamp_ms = 8;
+}
+"#;
 
 #[derive(Debug, Clone)]
 pub struct PostgresProtoEncoder {
+    key_schema_id: u32,
+    value_schema_id: u32,
     key: MessageDescriptor,
     value: MessageDescriptor,
     column_value: MessageDescriptor,
 }
 
 impl PostgresProtoEncoder {
+    /// Register the connector schemas and build an encoder with the allocated IDs.
+    ///
+    /// # Errors
+    /// Returns an error when Schema Registry rejects either schema or descriptor construction fails.
+    pub async fn from_registry(registry_url: &str) -> Result<Self, PostgresConnectError> {
+        let registry = RegistryClient::new(registry_url);
+        let key_schema_id = registry
+            .register(
+                KEY_SUBJECT,
+                SchemaKind::Protobuf,
+                PROTO_SCHEMA,
+                Some(KEY_MESSAGE_TYPE),
+            )
+            .await
+            .map_err(registry_error)?;
+        let value_schema_id = registry
+            .register(
+                VALUE_SUBJECT,
+                SchemaKind::Protobuf,
+                PROTO_SCHEMA,
+                Some(VALUE_MESSAGE_TYPE),
+            )
+            .await
+            .map_err(registry_error)?;
+        Self::with_schema_ids(key_schema_id, value_schema_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Result<Self, PostgresConnectError> {
+        Self::with_schema_ids(41, 57)
+    }
+
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
-    pub fn new() -> Result<Self, PostgresConnectError> {
+    fn with_schema_ids(
+        key_schema_id: u32,
+        value_schema_id: u32,
+    ) -> Result<Self, PostgresConnectError> {
         let pool = DescriptorPool::from_file_descriptor_set(schema_descriptor_set())
             .map_err(convert_error)?;
 
         Ok(Self {
+            key_schema_id,
+            value_schema_id,
             key: message_descriptor(&pool, ENTITY_KEY)?,
             value: message_descriptor(&pool, ENTITY_DIFFERENCE)?,
             column_value: message_descriptor(&pool, COLUMN_VALUE)?,
@@ -51,7 +119,7 @@ impl PostgresProtoEncoder {
     pub fn encode_key(&self, key: &EntityKey) -> Result<Bytes, PostgresConnectError> {
         let message = self.key_to_message(key)?;
         Ok(encode_protobuf(
-            KEY_SCHEMA_ID,
+            self.key_schema_id,
             KEY_MESSAGE_INDEX,
             &message.encode_to_vec(),
         ))
@@ -62,7 +130,7 @@ impl PostgresProtoEncoder {
     pub fn encode_value(&self, value: &EntityDifference) -> Result<Bytes, PostgresConnectError> {
         let message = self.difference_to_message(value)?;
         Ok(encode_protobuf(
-            VALUE_SCHEMA_ID,
+            self.value_schema_id,
             VALUE_MESSAGE_INDEX,
             &message.encode_to_vec(),
         ))
@@ -295,15 +363,23 @@ fn convert_error(error: impl std::fmt::Display) -> PostgresConnectError {
     PostgresConnectError::Convert(error.to_string())
 }
 
+fn registry_error(error: impl std::fmt::Display) -> PostgresConnectError {
+    PostgresConnectError::Convert(format!("schema registry: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
     use crabka_schema_serde::wire::decode_protobuf;
     use prost_reflect::{DescriptorPool, DynamicMessage, Value};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
 
     use super::{
-        COLUMN_VALUE, ENTITY_DIFFERENCE, ENTITY_KEY, KEY_SCHEMA_ID, PostgresProtoEncoder,
-        VALUE_SCHEMA_ID, message_descriptor, schema_descriptor_set,
+        COLUMN_VALUE, ENTITY_DIFFERENCE, ENTITY_KEY, KEY_MESSAGE_TYPE, PROTO_SCHEMA,
+        PostgresProtoEncoder, VALUE_MESSAGE_TYPE, message_descriptor, schema_descriptor_set,
     };
     use crate::{
         ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema,
@@ -314,7 +390,8 @@ mod tests {
 
     #[test]
     fn encoder_frames_key_and_value_as_protobuf() {
-        let encoder = PostgresProtoEncoder::new().expect("encoder builds descriptors");
+        let encoder =
+            PostgresProtoEncoder::with_schema_ids(41, 57).expect("encoder builds descriptors");
         let diff = sample_difference();
         let pool = DescriptorPool::from_file_descriptor_set(schema_descriptor_set())
             .expect("descriptor pool builds");
@@ -383,8 +460,8 @@ mod tests {
             string_field(unchanged_toast_column, "kind"),
         );
 
-        assert2::assert!(key_frame == (KEY_SCHEMA_ID, vec![1], false));
-        assert2::assert!(value_frame == (VALUE_SCHEMA_ID, vec![2], false));
+        assert2::assert!(key_frame == (41, vec![1], false));
+        assert2::assert!(value_frame == (57, vec![2], false));
         assert2::assert!(
             key_projection
                 == (
@@ -417,6 +494,39 @@ mod tests {
         assert2::assert!(
             unchanged_projection == ("details".to_string(), "unchanged_toast".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn registry_allocates_ids_used_by_key_and_value_frames() {
+        let server = MockServer::start().await;
+        for (subject, message_type, id) in [
+            ("crabka-connect-postgres-key", KEY_MESSAGE_TYPE, 73),
+            ("crabka-connect-postgres-value", VALUE_MESSAGE_TYPE, 91),
+        ] {
+            Mock::given(method("POST"))
+                .and(path(format!("/subjects/{subject}/versions")))
+                .and(body_json(serde_json::json!({
+                    "schema": PROTO_SCHEMA,
+                    "schemaType": "PROTOBUF",
+                    "messageType": message_type,
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": id,
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let encoder = PostgresProtoEncoder::from_registry(&server.uri())
+            .await
+            .expect("registry allocates both IDs");
+        let difference = sample_difference();
+        let key = encoder.encode_key(&difference.key).expect("key encodes");
+        let value = encoder.encode_value(&difference).expect("value encodes");
+
+        assert2::assert!(decode_protobuf(&key).expect("key frame").0 == 73);
+        assert2::assert!(decode_protobuf(&value).expect("value frame").0 == 91);
     }
 
     #[test]
@@ -478,7 +588,8 @@ mod tests {
                 }
         );
 
-        let encoder = PostgresProtoEncoder::new().expect("encoder builds descriptors");
+        let encoder =
+            PostgresProtoEncoder::with_schema_ids(41, 57).expect("encoder builds descriptors");
         let key = encoder.encode_key(&difference.key).expect("key encodes");
         let pool = DescriptorPool::from_file_descriptor_set(schema_descriptor_set())
             .expect("descriptor pool builds");

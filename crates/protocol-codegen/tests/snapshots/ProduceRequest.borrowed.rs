@@ -39,6 +39,7 @@ impl<'a> ProduceRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_request::ProduceRequest {
         crate::owned::produce_request::ProduceRequest {
             transactional_id: (self.transactional_id).map(|s| s.to_string()),
@@ -60,13 +61,13 @@ impl<'a> Encode for ProduceRequest<'a> {
                 let () = put_compact_nullable_string(buf, self.transactional_id);
             } else {
                 let () = put_nullable_string(buf, self.transactional_id);
-            }
+            };
         }
         if version >= 0 {
-            put_i16(buf, self.acks)
+            put_i16(buf, self.acks);
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
             {
@@ -74,7 +75,7 @@ impl<'a> Encode for ProduceRequest<'a> {
                 for it in &self.topic_data {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -181,6 +182,7 @@ impl<'a> TopicProduceData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_request::TopicProduceData {
         crate::owned::produce_request::TopicProduceData {
             name: (self.name).to_string(),
@@ -198,10 +200,10 @@ impl<'a> Encode for TopicProduceData<'a> {
                 let () = put_compact_string(buf, self.name);
             } else {
                 let () = put_string(buf, self.name);
-            }
+            };
         }
         if version >= 13 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -209,7 +211,7 @@ impl<'a> Encode for TopicProduceData<'a> {
                 for it in &self.partition_data {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -302,6 +304,7 @@ impl<'a> PartitionProduceData<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::produce_request::PartitionProduceData {
         crate::owned::produce_request::PartitionProduceData {
             index: (self.index),
@@ -314,7 +317,7 @@ impl<'a> Encode for PartitionProduceData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.index)
+            put_i32(buf, self.index);
         }
         if version >= 0 {
             match &self.records {
@@ -334,7 +337,7 @@ impl<'a> Encode for PartitionProduceData<'a> {
                         let () = put_bytes(buf, &__rb_buf);
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

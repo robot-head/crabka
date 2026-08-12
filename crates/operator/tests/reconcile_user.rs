@@ -1063,6 +1063,97 @@ async fn tls_reconcile_reuses_existing_cert_when_not_near_expiry() {
     );
 }
 
+/// After clients-CA rotation prunes the old root, a still-valid leaf does not
+/// need reissuing, but its Secret must stop advertising the pruned root.
+#[tokio::test]
+async fn tls_reconcile_after_ca_prune_synchronizes_only_active_root() {
+    use base64::Engine as _;
+
+    let old_ca = ca::generate_clients_ca("old-ca", 365).expect("old CA");
+    let active_ca = ca::generate_clients_ca("active-ca", 365).expect("active CA");
+    let user =
+        ca::issue_user_cert(&active_ca.cert_pem, &active_ca.key_pem, USER, 365).expect("user cert");
+    let stale_bundle = format!("{}{}", active_ca.cert_pem, old_ca.cert_pem);
+
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca-cert"),
+            response: json_response(
+                200,
+                &clients_ca_cert_secret_body(CLUSTER, NS, &active_ca.cert_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca"),
+            response: json_response(
+                200,
+                &clients_ca_key_secret_body(CLUSTER, NS, &active_ca.key_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{USER}"),
+            response: json_response(
+                200,
+                &tls_user_secret_body(USER, NS, &user.cert_pem, &user.key_pem, &stale_bundle),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{USER}"),
+            response: json_response(
+                200,
+                &tls_user_secret_body(USER, NS, &user.cert_pem, &user.key_pem, &active_ca.cert_pem),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+    ];
+    let state = MockState::new(rules);
+    let ctx = Arc::new(fixture_ctx(mock_client(&state, NS), NS));
+    ctx.insert_admin_client_for_test(
+        CLUSTER,
+        Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new())),
+    )
+    .await;
+
+    reconcile(Arc::new(ku_tls(USER, vec![])), ctx)
+        .await
+        .unwrap();
+
+    let observed = state.take_observed();
+    let user_patches: Vec<_> = observed
+        .iter()
+        .filter(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{USER}"))
+        })
+        .collect();
+    assert!(user_patches.len() == 1, "expected one CA-only patch");
+    let body: serde_json::Value =
+        serde_json::from_slice(user_patches[0].body()).expect("user Secret patch JSON");
+    let data = body["data"].as_object().expect("Secret data patch");
+    assert!(data.len() == 1 && data.contains_key("ca.crt"));
+    let patched_ca = base64::engine::general_purpose::STANDARD
+        .decode(data["ca.crt"].as_str().expect("base64 ca.crt"))
+        .expect("ca.crt decodes");
+    assert!(patched_ca == active_ca.cert_pem.as_bytes());
+    assert!(state.remaining_rules() == 0);
+}
+
 /// A TLS reconcile with an existing cert inside the renewal window issues
 /// a new cert. It makes exactly one PATCH on the Secret of the user.
 #[tokio::test]

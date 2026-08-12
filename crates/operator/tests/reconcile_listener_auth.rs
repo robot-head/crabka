@@ -69,6 +69,22 @@ fn internal_listener(
     }
 }
 
+fn empty_statefulset_list_rule(namespace: &str) -> MockRule {
+    MockRule {
+        method: Method::GET,
+        path_substr: format!("/namespaces/{namespace}/statefulsets"),
+        response: json_response(
+            200,
+            &serde_json::json!({
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSetList",
+                "metadata": { "resourceVersion": "1" },
+                "items": []
+            }),
+        ),
+    }
+}
+
 // ── test 1 ────────────────────────────────────────────────────────────────────
 
 /// SCRAM-SHA-512 internal listener with TLS renders `protocol = "SaslSsl"`
@@ -613,6 +629,7 @@ async fn nodeport_listener_external_san_added_to_per_broker_cert() {
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(&items)),
         },
+        empty_statefulset_list_rule(ns),
         // observe_listener_addresses: GET nodes (nodeport+tls triggers this).
         MockRule {
             method: Method::GET,

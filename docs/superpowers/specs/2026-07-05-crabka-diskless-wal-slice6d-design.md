@@ -1,7 +1,7 @@
 # Diskless WAL — Slice 6d: re-composed durability gate + Jepsen — design
 
 **Date:** 2026-07-05
-**Status:** Approved
+**Status:** Implemented — local composite gate green; required CI gate wired
 **Type:** Subsystem design (final sub-slice of Slice 6). **The shipping gate — diskless does not ship until this is green.**
 
 ## Context — where this sits
@@ -41,11 +41,11 @@ LINEARIZABILITY (crates/raft/tests/model/mod.rs) — extend:
 
 JEPSEN (greenfield, crates/integration-tests/tests/diskless_jepsen.rs) — black-box, real cluster:
    SUBSTRATE: 3× Broker::start (broker.rs) + KRaft-quorum-WAL diskless cluster
-   GENERATOR: real crabka-client-producer/consumer → an acked-record ledger
+   GENERATOR: real crabka-client-producer → an acked-record ledger
    NEMESIS  : kill-accepting-broker / kill-WAL-node-within-quorum / PUT-failure / KRaft-leader-change
               (drop BrokerHandle = in-process kill; pattern from durability.rs/leader_election.rs)
-   CHECKER  : every acked offset still consumable (no-acked-loss) + feed history to
-              LinearizabilityTester/KraftLogSpec + a JVM byte-exact differential leg
+   CHECKER  : direct Kafka Fetch of every acked offset (no-acked-loss) + feed history to
+              LinearizabilityTester/KafkaLogSpec + a JVM byte-exact differential leg
 ```
 
 ## Key Design Decisions
@@ -61,15 +61,15 @@ Three always-properties carried green: `committed_durable`, `wal_acked_durable` 
 
 ### Extend the KRaft linearizability model
 
-In `crates/raft/tests/model/mod.rs`: the `LinearizabilityTester` (`:147`) already supports concurrent in-flight ops — only the emission gate blocks it (`ClientAppend` emits solely when `leaders.len()==1`, `:172`/`:566-576`). Replace it with **`AppendVia(appender_id, value)`** per live stateless appender (a fresh `ClientId` each), and move the linearization point in `settle_committed` (`:467`) from **HWM-passes-offset** to **WAL-quorum-durable** (`KraftLogSpec::invoke` unchanged — it abstracts over which offset). Assert `linearizable`/`log_matching` (`:682`/`:699`) alongside `gap_free`/`unique`.
+In `crates/raft/tests/model/mod.rs`: the `LinearizabilityTester` already supports concurrent in-flight ops. `AppendVia(appender_id, value)` is emitted without the old `leaders.len() == 1` gate, and routes to the highest-epoch live authority during handoff. Two exchangeable appender identities are symmetry-normalized to one representative ordering, retaining the mandatory state with both appends concurrently pending. `settle_committed` returns the contiguous pending prefix only after its configured commit point: ordinary appends use HWM, while diskless appends use the majority-th **WAL-quorum-durable** frontier. The complete tiny bound is two voters, two appenders, two appends, `max_epoch=2`; assert `linearizable`/`log_matching` alongside assigned-offset `gap_free`/`unique`.
 
 ### Jepsen — greenfield, assembled from three in-tree parts
 
 No jepsen/nemesis crate exists (confirmed); assemble one at `crates/integration-tests/tests/diskless_jepsen.rs`:
 - **Substrate:** extend the in-process `Broker::start`/`BrokerHandle`/`listen_addr()` pattern to a 3-broker + quorum-WAL diskless cluster.
-- **Generator:** real `crabka-client-producer`/`consumer` recording an **acked-record ledger**.
+- **Generator:** two real `crabka-client-producer` instances recording an **acked-record ledger**.
 - **Nemesis:** the model actions as fault injectors — kill-accepting-broker, kill-a-WAL-quorum-node-*within-quorum*, force-a-PUT-failure, trigger-a-KRaft-leader-change (in-process "kill" = drop the `BrokerHandle`; the metadata-driven leader resolution + kill pattern from `durability.rs`/`leader_election.rs`).
-- **Checker:** after the fault schedule, assert **every acked offset in the ledger is still consumable** (no-acked-loss), feed the produce/consume history into the `LinearizabilityTester`/`KraftLogSpec` for serializability, and run the **JVM byte-exact differential** leg (reuse the existing differential oracle used by the `jvm_*` acceptance tests).
+- **Checker:** after the fault schedule, issue public `crabka-client-core` partition Fetch requests and assert **every acked offset in the ledger is still consumable** (no-acked-loss). Direct Fetch deliberately avoids coupling the durability gate to classic group-coordinator availability after its host is killed. Feed the acknowledged invocation/return history into `LinearizabilityTester`/`KafkaLogSpec`, and run a Dockerized JVM console consumer over the same partition for the **byte-exact differential** leg.
 
 *Clean split:* stateright = exhaustive interleavings on a tiny model; Creusot = offset-allocator arithmetic (6c) + the WAL-durability watermark (reuse `recompute_high_watermark`); Jepsen = a real running cluster under real faults.
 
@@ -96,6 +96,26 @@ No new kernel. Reuse `recompute_high_watermark` as the WAL-durability watermark;
 - **Linearizability:** the produce/consume history is linearizable with concurrent `AppendVia` appenders and the WAL-quorum-durable linearization point.
 - **Jepsen:** under the fault schedule (kill-accepting-broker / kill-WAL-node-within-quorum / PUT-failure / leader-change), **no acked offset is ever lost or unreadable**, the history is serializable, and the JVM differential leg is byte-exact.
 - **Out-of-scope confirmed:** full-quorum WAL-node loss shows the un-flushed tail is *not* recoverable (Slice-6 boundary), while flushed offsets remain recoverable — asserted explicitly.
+
+### Local and CI invocation
+
+The live 3-broker gate needs a file-descriptor soft limit above the common local default of 1024. Without it, the three broker runtimes and WAL follower connections can fail before fault injection with `Too many open files`, which is an infrastructure failure rather than a durability counterexample.
+
+```bash
+ulimit -n 65536
+CARGO_INCREMENTAL=0 cargo test -p crabka-integration-tests \
+  --test diskless_jepsen \
+  three_broker_fault_schedule_preserves_the_acked_ledger \
+  -- --ignored --nocapture
+```
+
+CI applies the same limit in the named **Diskless WAL Slice 6d live shipping gate** step before running the ignored test with nextest.
+
+### Implementation evidence (2026-08-12)
+
+- Re-composed crash model: complete PASS, 17,701 unique states / 56,343 generated / depth 16. Witnesses cover two appenders, minority WAL loss, PUT-before-index, crash, and explicit `SequencerHandoff` with advertised-HWM regression but no durable-ack regression.
+- KRaft linearizability model: complete PASS, 230,591 unique states / 938,679 generated / depth 32 at the two-voter/two-appender/two-append bound. The search finished below its 2,000,000 generated-state and depth-60 hard caps.
+- Live RF=3 gate: PASS with eight `acks=all` records. Observed witness: two real object PUT failures; WAL node 3's exact user shard erased; controller 3→2; partition leader 3→1; Rust direct-Fetch ledger exact; recovered object PUT; JVM bytes exact.
 
 ## Risks (carried into the plan)
 

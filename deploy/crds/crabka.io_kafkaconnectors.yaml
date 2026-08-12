@@ -108,6 +108,10 @@ spec:
                 description: Default `PostgreSQL` schema for unqualified table names. Default `public`.
                 nullable: true
                 type: string
+              schemaRegistryUrl:
+                description: Confluent-compatible Schema Registry base URL used to allocate record schema IDs.
+                minLength: 1
+                type: string
               slot:
                 description: '`PostgreSQL` logical replication slot.'
                 minLength: 1
@@ -130,6 +134,7 @@ spec:
             required:
             - databaseUrl
             - publication
+            - schemaRegistryUrl
             - slot
             - type
             type: object

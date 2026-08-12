@@ -2155,7 +2155,7 @@ impl Log {
     pub fn offset_for_timestamp(&self, target_ts: i64) -> Option<(Offset, i64)> {
         let scan_window = self.config.read().unwrap().timestamp_scan_window;
         for seg in &self.segments {
-            if seg.max_timestamp() >= target_ts
+            if (seg.max_timestamp() == i64::MIN || seg.max_timestamp() >= target_ts)
                 && let Some(hit) = seg.offset_for_timestamp_with_window(target_ts, scan_window)
             {
                 return Some(hit);
@@ -5417,6 +5417,27 @@ mod tests {
         }
         log.close();
         drop(dir);
+    }
+
+    #[test]
+    fn reopened_log_scans_sealed_segments_with_unknown_max_timestamp() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_size: bytes(1),
+            ..LogConfig::default()
+        };
+        {
+            let mut log = Log::open(dir.path(), config.clone()).unwrap();
+            for timestamp in [100, 200, 300] {
+                log.append(&mut ts_batch(timestamp)).unwrap();
+            }
+            log.close();
+        }
+
+        let log = Log::open(dir.path(), config).unwrap();
+        assert2::assert!(log.offset_for_timestamp(150) == Some((Offset(1), 200)));
+        assert2::assert!(log.max_timestamp_offset_and_ts() == Some((Offset(2), 300)));
+        log.close();
     }
 
     #[test]

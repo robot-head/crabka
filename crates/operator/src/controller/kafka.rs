@@ -19,10 +19,12 @@ use std::{
     sync::Arc,
 };
 
+use crabka_units::{Time, secs};
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
     api::{
+        apps::v1::StatefulSet,
         core::v1::{ConfigMap, Node, Pod, Secret, Service},
         networking::v1::Ingress,
     },
@@ -47,6 +49,7 @@ use crate::{
             self, FIELD_MANAGER, ReconcileError, apply_dynamic, apply_object, condition,
             ensure_cluster_id_secret, owner_ref, patch_status, render_service,
         },
+        kafka_node_pool,
         listeners::{
             self, AdvertisedAddress, INGRESS_PORT, compute_advertised,
             effective_inter_broker_listener_name, ingress_bootstrap_host, render_bootstrap_ingress,
@@ -54,10 +57,10 @@ use crate::{
             render_broker_route, render_broker_service, synthesized_default_listener,
             validate_listeners,
         },
-        logging, network_policy,
+        logging, network_policy, user_tls,
     },
     crd::{
-        Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress,
+        Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, KafkaUser, Listener, ListenerAddress,
         ListenerAuthentication, ListenerAuthenticationOAuth, ListenerStatus, ListenerType,
     },
     ids::{ReadyReplicaCount, ReplicaCount},
@@ -209,44 +212,100 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Identifier triple for one broker, derived from a `KafkaNodePool`.
+/// Identity and roles for one node, derived from a `KafkaNodePool` ordinal.
 ///
 /// `pod_fqdn` is the stable in-cluster DNS name in the subdomain of the
 /// cluster headless Service. The string is the same whether the pod is
 /// scheduled or not, so internal listeners can advertise it before any pod
 /// exists.
 #[derive(Debug, Clone)]
-pub(crate) struct BrokerInfo {
+pub(crate) struct NodeInfo {
     pub broker_id: i32,
     pub pod_name: String,
     pub pod_fqdn: String,
+    pub roles: Vec<crate::crd::NodeRole>,
 }
 
-/// Walks the pools in the order that the caller gave and returns one
-/// `BrokerInfo` for each pool.
-///
-/// The operator enforces `replicas == 1`, so each pool maps to exactly one
-/// broker. The id of that broker is the `nodeIdStart` of the pool.
-pub(crate) fn enumerate_brokers(
+impl NodeInfo {
+    fn is_broker(&self) -> bool {
+        self.roles.contains(&crate::crd::NodeRole::Broker)
+    }
+}
+
+struct NodeInventory {
+    all: Vec<NodeInfo>,
+    brokers: Vec<NodeInfo>,
+    roles: BTreeMap<i32, Vec<crate::crd::NodeRole>>,
+    broker_ids: Vec<i32>,
+}
+
+/// Enumerate every pool ordinal as a stable node id and pod DNS name.
+pub(crate) fn enumerate_nodes(
     cluster_name: &str,
     namespace: &str,
     pools: &[KafkaNodePool],
-) -> Vec<BrokerInfo> {
+) -> Vec<NodeInfo> {
     let svc = format!("{cluster_name}-broker-headless");
-    let mut out = Vec::with_capacity(pools.len());
+    let mut out = Vec::new();
     let mut sorted: Vec<&KafkaNodePool> = pools.iter().collect();
     sorted.sort_by_key(|p| p.name_any());
     for pool in sorted {
         let pool_name = pool.name_any();
-        let pod_name = format!("{cluster_name}-{pool_name}-0");
-        let pod_fqdn = format!("{pod_name}.{svc}.{namespace}.svc.cluster.local");
-        out.push(BrokerInfo {
-            broker_id: pool.spec.node_id_start,
-            pod_name,
-            pod_fqdn,
-        });
+        for ordinal in 0..pool.spec.replicas {
+            let Some(broker_id) = pool.spec.node_id_start.checked_add(ordinal) else {
+                continue;
+            };
+            let pod_name = format!("{cluster_name}-{pool_name}-{ordinal}");
+            let pod_fqdn = format!("{pod_name}.{svc}.{namespace}.svc.cluster.local");
+            out.push(NodeInfo {
+                broker_id,
+                pod_name,
+                pod_fqdn,
+                roles: pool.spec.roles.clone(),
+            });
+        }
     }
     out
+}
+
+fn inventory_nodes(cluster_name: &str, namespace: &str, pools: &[KafkaNodePool]) -> NodeInventory {
+    let all = enumerate_nodes(cluster_name, namespace, pools);
+    let brokers: Vec<NodeInfo> = all
+        .iter()
+        .filter(|node| node.is_broker())
+        .cloned()
+        .collect();
+    let roles = all
+        .iter()
+        .map(|node| (node.broker_id, node.roles.clone()))
+        .collect();
+    let broker_ids = brokers.iter().map(|node| node.broker_id).collect();
+    NodeInventory {
+        all,
+        brokers,
+        roles,
+        broker_ids,
+    }
+}
+
+fn controller_tls_per_node(nodes: &[NodeInfo]) -> BTreeMap<i32, listeners::BrokerTlsRender> {
+    nodes
+        .iter()
+        .map(|node| {
+            let id = node.broker_id;
+            (
+                id,
+                listeners::BrokerTlsRender {
+                    controller_listener_protocol: "Ssl".into(),
+                    cert_path: format!("/etc/crabka/broker-tls/{id}.crt"),
+                    key_path: format!("/etc/crabka/broker-tls/{id}.key"),
+                    client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+                    client_auth: "Required".into(),
+                    trust_roots_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Builds the per-listener `ListenerStatus` entries.
@@ -374,7 +433,7 @@ async fn apply_external_services(
     namespace: &str,
     cluster_name: &str,
     effective_listeners: &[Listener],
-    brokers: &[BrokerInfo],
+    brokers: &[NodeInfo],
 ) -> Result<(), ReconcileError> {
     let ingress_api: Api<Ingress> = Api::namespaced(ctx.client.clone(), namespace);
     for l in effective_listeners
@@ -715,7 +774,7 @@ async fn read_external_state(
     namespace: &str,
     cluster_name: &str,
     effective_listeners: &[Listener],
-    brokers: &[BrokerInfo],
+    brokers: &[NodeInfo],
 ) -> Result<ExternalState, ReconcileError> {
     // Node + Pod state is only needed to resolve NodePort advertised hosts (the
     // node's external IP) / LoadBalancer scheduling. ingress/route advertised
@@ -773,7 +832,8 @@ async fn read_external_state(
 /// changes on every pass.
 fn resolve_addresses_per_broker(
     effective_listeners: &[Listener],
-    brokers: &[BrokerInfo],
+    inter_broker_listener_name: &str,
+    brokers: &[NodeInfo],
     pods_by_name: &HashMap<String, Pod>,
     nodes: &HashMap<String, Node>,
     broker_services: &HashMap<(String, i32), Service>,
@@ -781,7 +841,10 @@ fn resolve_addresses_per_broker(
     let mut out: BTreeMap<i32, BTreeMap<String, AdvertisedAddress>> = BTreeMap::new();
     for b in brokers {
         let mut listener_map: BTreeMap<String, AdvertisedAddress> = BTreeMap::new();
-        for l in effective_listeners {
+        for l in effective_listeners
+            .iter()
+            .filter(|listener| b.is_broker() || listener.name == inter_broker_listener_name)
+        {
             let pod_node = pods_by_name
                 .get(&b.pod_name)
                 .and_then(|p| p.spec.as_ref())
@@ -941,14 +1004,15 @@ async fn reconcile_cas(input: CaPhaseInput<'_>) -> Result<CaPhaseResult, Reconci
         logging_filter,
     } = input;
     // Reconcile both CAs with rotation. The cluster CA drives the
-    // staged key-replacement machine + the config-hash; the clients CA only
-    // creates / same-key-renews (its truststore is hot-reloaded). force-* and
-    // CronJob `ca-renew-after` annotations target the cluster CA. On
-    // BYO-missing, surface a False condition and requeue.
+    // staged key-replacement machine + the config-hash. The clients CA uses
+    // the same trust-first machine, then reissues every managed TLS user before
+    // its old trust anchor can be pruned. On BYO-missing, surface a False
+    // condition and requeue.
     let cr_anns = obj.meta().annotations.clone().unwrap_or_default();
     let force_renew = cr_anns.contains_key(cluster_ca::ANN_FORCE_RENEW)
         || cr_anns.contains_key(cluster_ca::ANN_RENEW_AFTER);
     let force_replace_key = cr_anns.contains_key(cluster_ca::ANN_FORCE_REPLACE_KEY);
+    let force_replace_clients_key = cr_anns.contains_key(cluster_ca::ANN_FORCE_REPLACE_CLIENTS_KEY);
     let now = time::OffsetDateTime::now_utc();
 
     let (cluster_ca_outcome, clients_ca_outcome, cluster_ca_cond, clients_ca_cond) = {
@@ -979,14 +1043,13 @@ async fn reconcile_cas(input: CaPhaseInput<'_>) -> Result<CaPhaseResult, Reconci
             }
             Err(e) => return Err(e),
         };
-        // Clients CA never enters the staged machine and takes no force flags.
         let clients_result = cluster_ca::reconcile_ca(
             secret_api,
             obj,
             cluster_ca::WhichCa::Clients,
             false,
-            false,
-            true,
+            force_replace_clients_key,
+            rollout_converged,
             now,
         )
         .await;
@@ -1022,11 +1085,40 @@ async fn reconcile_cas(input: CaPhaseInput<'_>) -> Result<CaPhaseResult, Reconci
         (cluster_outcome, clients_outcome, cc, clic)
     };
 
+    // Generation counters make convergence retryable after a partial failure:
+    // once this CA has ever rotated, each Kafka reconcile cheaply verifies all
+    // managed TLS-user Secrets. A prune may patch the CA Secret successfully
+    // and then fail on one user; the next pass is still required to repair it
+    // even though the one-pass `pruned_old_trust` signal is gone.
+    let sync_tls_user_secrets = clients_ca_outcome.leaf_transition.requires_reissue()
+        || clients_ca_outcome.leaf_transition.pruned_old_trust()
+        || clients_ca_outcome.cert_generation.0 > 0
+        || clients_ca_outcome.key_generation.0 > 0;
+    if sync_tls_user_secrets {
+        let user_api: Api<KafkaUser> = Api::namespaced(ctx.client.clone(), ns);
+        let users = user_api
+            .list(&ListParams::default().labels(&format!("crabka.io/cluster={name}")))
+            .await?;
+        let issued = user_tls::reissue_tls_user_cert_secrets(
+            secret_api,
+            &users.items,
+            &clients_ca_outcome.signing_material,
+            &clients_ca_outcome.trust_bundle_pem,
+        )
+        .await?;
+        if clients_ca_outcome.leaf_transition.requires_reissue() {
+            cluster_ca::mark_leafs_reissued(secret_api, name, clients_ca_outcome.key_generation)
+                .await?;
+        }
+        tracing::info!(issued, "clients CA user Secret convergence complete");
+    }
+
     // Strip the one-shot rotation-trigger annotations once consumed (force
     // renew/replace + CronJob nudge are all acted on this pass).
     let strip_keys: Vec<&str> = [
         cluster_ca::ANN_FORCE_RENEW,
         cluster_ca::ANN_FORCE_REPLACE_KEY,
+        cluster_ca::ANN_FORCE_REPLACE_CLIENTS_KEY,
         cluster_ca::ANN_RENEW_AFTER,
     ]
     .into_iter()
@@ -1037,34 +1129,54 @@ async fn reconcile_cas(input: CaPhaseInput<'_>) -> Result<CaPhaseResult, Reconci
         strip_annotations(&kafka_api, name, &strip_keys).await?;
     }
 
-    // A forced rotation the operator can't honor (BYO / clients-CA key
-    // replace) surfaces a Warning Event; the condition explains it too.
+    // A forced rotation the operator can't honor (BYO) surfaces a Warning
+    // Event; the condition explains it too.
     if cluster_ca_outcome.refused.is_some() {
         emit_ca_rotation_refused_event(&ctx.client, ns, obj, &cluster_ca_outcome.rotation_message)
             .await
             .ok();
     }
+    if clients_ca_outcome.refused.is_some() {
+        emit_ca_rotation_refused_event(&ctx.client, ns, obj, &clients_ca_outcome.rotation_message)
+            .await
+            .ok();
+    }
 
+    let cluster_rotation_visible = cluster_ca_outcome.rotation_in_progress
+        || cluster_ca_outcome.refused.is_some()
+        || cluster_ca_outcome.rotation_message != "no rotation in progress";
+    let clients_rotation_visible = clients_ca_outcome.rotation_in_progress
+        || clients_ca_outcome.refused.is_some()
+        || clients_ca_outcome.rotation_message != "no rotation in progress";
+    let rotation_outcome = if !cluster_rotation_visible && clients_rotation_visible {
+        &clients_ca_outcome
+    } else {
+        &cluster_ca_outcome
+    };
     let ca_rotation_cond = condition(
         "CaRotation",
-        if cluster_ca_outcome.rotation_in_progress {
+        if rotation_outcome.rotation_in_progress {
             "True"
         } else {
             "False"
         },
-        cluster_ca_outcome.rotation_reason,
-        &cluster_ca_outcome.rotation_message,
+        rotation_outcome.rotation_reason,
+        &rotation_outcome.rotation_message,
     );
 
-    // The config-hash covers the cluster-CA *trust bundle* (not just
-    // the signing cert), so adding / promoting / pruning a trust anchor rolls
-    // the cluster, while same-key leaf renewal (hot-reload) does not.
-    let cfg_hash = common::combined_config_hash(
-        &obj.spec,
-        Some(&cluster_ca_outcome.trust_bundle_pem),
-        explicit_pin,
-        logging_filter,
-    );
+    // During clients-CA key replacement, include that trust bundle in the
+    // roll gate before any user certificate switches to the new signing key.
+    // Idle clients-CA renewals remain hot-reload-only.
+    let ca_trust = if clients_ca_outcome.phase == cluster_ca::CaPhase::Idle {
+        cluster_ca_outcome.trust_bundle_pem.clone()
+    } else {
+        format!(
+            "{}\x1E{}",
+            cluster_ca_outcome.trust_bundle_pem, clients_ca_outcome.trust_bundle_pem
+        )
+    };
+    let cfg_hash =
+        common::combined_config_hash(&obj.spec, Some(&ca_trust), explicit_pin, logging_filter);
 
     Ok(CaPhaseResult::Ready(Box::new(CaArtifacts {
         cluster: cluster_ca_outcome,
@@ -1268,245 +1380,227 @@ async fn reconcile_listener_resources(
     input: ListenerPhaseInput<'_>,
     validation: Result<(), listeners::ValidationError>,
 ) -> Result<ListenerPhaseResult, ReconcileError> {
-    let ListenerPhaseInput {
-        obj,
-        ctx,
-        namespace: ns,
-        name,
-        effective_listeners,
-        inter_broker_name,
-        logging_filter,
-        service_api: svc_api,
-        config_map_api: cm_api,
-        secret_api,
-        pool_api,
-        pools,
-        config_hash: cfg_hash,
-        cluster_ca: cluster_ca_outcome,
-    } = input;
-    // If validation failed, leave the existing ConfigMap untouched —
-    // per the spec, "existing objects are not deleted; surface the
-    // error and wait." Stripping `broker-{id}.toml` keys would crash
-    // a previously-healthy cluster on the next pod restart. The pool
-    // is still adopted so the config-hash annotation reflects the
-    // (invalid) intent, but no roll fires until the user fixes the spec.
-    let listener_status: Vec<ListenerStatus>;
-    let (listeners_valid_cond, listeners_ready_cond);
-    let mut lb_pending: Vec<(i32, String)> = Vec::new();
     if let Err(e) = validation {
-        adopt_pools(pool_api, obj, pools.iter(), cfg_hash).await?;
-        listener_status = vec![];
-        listeners_valid_cond = condition("ListenersValid", "False", e.reason(), &e.message());
-        listeners_ready_cond =
-            condition("ListenersReady", "False", "ListenersInvalid", &e.message());
-    } else {
-        if let Some(action) = validate_listener_dependencies(ListenerDependencyInput {
-            obj,
-            ctx,
-            namespace: ns,
-            name,
-            listeners: effective_listeners,
-            inter_broker_name,
-            secret_api,
-        })
-        .await?
-        {
-            return Ok(ListenerPhaseResult::Done(action));
-        }
-
-        // Enumerate brokers from sibling pools. Empty pool list ->
-        // empty broker list -> ConfigMap with no per-broker TOML keys,
-        // but listeners are still "valid" (just no consumers yet).
-        let pool_items: Vec<KafkaNodePool> = pools.to_vec();
-        let brokers = enumerate_brokers(name, ns, &pool_items);
-
-        // Observe external listener addresses for SAN extension.
-        let broker_ids: Vec<i32> = brokers.iter().map(|b| b.broker_id).collect();
-        let observed =
-            listeners::observe_listener_addresses(ctx, ns, name, effective_listeners, &broker_ids)
-                .await?;
-
-        // Brokers whose LB ingress isn't ready yet are skipped; a status condition will surface this.
-        let extra_sans_per_broker: BTreeMap<i32, Vec<crabka_security::ca::SubjectAltName>> =
-            brokers
-                .iter()
-                .filter_map(|b| {
-                    match listeners::compute_extra_sans(b.broker_id, effective_listeners, &observed)
-                    {
-                        Ok(sans) => Some((b.broker_id, sans)),
-                        Err(listeners::SanComputationError::SansNotReady {
-                            broker_id,
-                            listener,
-                        }) => {
-                            tracing::warn!(
-                                broker_id,
-                                %listener,
-                                "LB ingress not ready; skipping cert SAN extension for this broker"
-                            );
-                            lb_pending.push((broker_id, listener));
-                            None
-                        }
-                    }
-                })
-                .collect();
-
-        // Issue per-broker leaf certs into the broker-keystore Secret.
-        let keystore_requests: Vec<cluster_ca::BrokerCertRequest> = brokers
-            .iter()
-            .map(|b| {
-                let id = b.broker_id;
-                let cn = b.pod_name.clone();
-                let sans = vec![
-                    crabka_security::ca::SubjectAltName::Dns(b.pod_fqdn.clone()),
-                    crabka_security::ca::SubjectAltName::Dns(b.pod_name.clone()),
-                    crabka_security::ca::SubjectAltName::Dns(format!(
-                        "{name}-broker-headless.{ns}.svc.cluster.local"
-                    )),
-                    crabka_security::ca::SubjectAltName::Ip(std::net::IpAddr::V4(
-                        std::net::Ipv4Addr::LOCALHOST,
-                    )),
-                ];
-                let extra = extra_sans_per_broker.get(&id).cloned().unwrap_or_default();
-                cluster_ca::BrokerCertRequest {
-                    broker_id: id,
-                    cn,
-                    sans,
-                    extra_sans: extra,
-                }
-            })
-            .collect();
-        // Keystore status fields (issued/reused/pruned) are reserved
-        // for a future status surface; ignored for now.
-        cluster_ca::ensure_broker_keystore(
-            secret_api,
-            obj,
-            &keystore_requests,
-            &cluster_ca_outcome.signing_material,
-            cluster_ca_outcome.force_reissue_leafs,
+        adopt_pools(
+            input.pool_api,
+            input.obj,
+            input.pools.iter(),
+            input.config_hash,
         )
         .await?;
-
-        // Build per-broker TLS render map (paths inside the
-        // mounted broker-tls volume).
-        let tls_per_broker: std::collections::BTreeMap<i32, listeners::BrokerTlsRender> = brokers
-            .iter()
-            .map(|b| {
-                let id = b.broker_id;
-                (
-                    id,
-                    listeners::BrokerTlsRender {
-                        controller_listener_protocol: "Ssl".into(),
-                        cert_path: format!("/etc/crabka/broker-tls/{id}.crt"),
-                        key_path: format!("/etc/crabka/broker-tls/{id}.key"),
-                        client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
-                        client_auth: "Required".into(),
-                        trust_roots_path: "/etc/crabka/cluster-ca/ca.crt".into(),
-                    },
-                )
-            })
-            .collect();
-
-        let clients_ca_path: Option<&str> = if effective_listeners
-            .iter()
-            .any(|l| matches!(l.authentication, Some(ListenerAuthentication::Tls)))
-        {
-            Some("/etc/crabka/clients-ca/ca.crt")
-        } else {
-            None
-        };
-
-        // Helper to render+apply a ConfigMap with the supplied address map.
-        // Defined here (inside the validation-ok branch) so it can capture
-        // `tls_per_broker` and `clients_ca_path`. On the
-        // validation-fail path there is no `apply_cm` call.
-        let apply_cm = async |listeners_for_cm: &[Listener],
-                              addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
-               -> Result<(), ReconcileError> {
-            let cm = common::render_configmap(
-                obj,
-                listeners_for_cm,
-                addresses,
-                inter_broker_name,
-                Some(&tls_per_broker),
-                clients_ca_path,
-                logging_filter,
-            )?;
-            apply_object(cm_api, &cm_name(name), &cm).await?;
-            Ok(())
-        };
-
-        // Optimization: when every effective listener is internal (e.g. the
-        // synthesized default), `compute_advertised` only needs
-        // `pod_fqdn` (from `BrokerInfo`), so we skip per-broker object
-        // rendering and the Pod/Node/Service reads entirely. This preserves
-        // the internal-only request sequence exactly.
-        let has_external = effective_listeners
-            .iter()
-            .any(|l| l.type_ != ListenerType::Internal);
-
-        let (nodes, pods_by_name, bootstrap_services, broker_services) = if has_external {
-            apply_external_services(ctx, svc_api, obj, ns, name, effective_listeners, &brokers)
-                .await?;
-            read_external_state(ctx, svc_api, ns, name, effective_listeners, &brokers).await?
-        } else {
-            (
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-            )
-        };
-
-        match resolve_addresses_per_broker(
-            effective_listeners,
-            &brokers,
-            &pods_by_name,
-            &nodes,
-            &broker_services,
-        ) {
-            Err(err) => {
-                // Pending external addresses (cold-start LB provisioning,
-                // node not scheduled yet). Leave the existing ConfigMap
-                // untouched — pods that are already running should not
-                // be disturbed; cold-start pods sit pending the CM,
-                // which arrives once the apiserver populates the
-                // Service status on a subsequent reconcile.
-                adopt_pools(pool_api, obj, pools.iter(), cfg_hash).await?;
-                listener_status = vec![];
-                listeners_valid_cond =
-                    condition("ListenersValid", "True", "Valid", "listeners validated");
-                listeners_ready_cond = condition(
-                    "ListenersReady",
-                    "False",
-                    "PendingExternalAddresses",
-                    &err.message(),
-                );
-            }
-            Ok(addresses_per_broker) => {
-                apply_cm(effective_listeners, &addresses_per_broker).await?;
-                adopt_pools(pool_api, obj, pools.iter(), cfg_hash).await?;
-                listener_status = build_listener_status(
-                    effective_listeners,
-                    &addresses_per_broker,
-                    &bootstrap_services,
-                    &nodes,
-                    name,
-                    ns,
-                );
-                listeners_valid_cond =
-                    condition("ListenersValid", "True", "Valid", "listeners validated");
-                let msg = format!("{} listener(s) ready", effective_listeners.len());
-                listeners_ready_cond = condition("ListenersReady", "True", "Ready", &msg);
-            }
-        }
+        return Ok(ListenerPhaseResult::Ready(Box::new(ListenerArtifacts {
+            status: vec![],
+            valid_condition: condition("ListenersValid", "False", e.reason(), &e.message()),
+            ready_condition: condition("ListenersReady", "False", "ListenersInvalid", &e.message()),
+            load_balancer_pending: vec![],
+        })));
     }
 
-    Ok(ListenerPhaseResult::Ready(Box::new(ListenerArtifacts {
-        status: listener_status,
-        valid_condition: listeners_valid_cond,
-        ready_condition: listeners_ready_cond,
-        load_balancer_pending: lb_pending,
-    })))
+    if let Some(action) = validate_listener_dependencies(ListenerDependencyInput {
+        obj: input.obj,
+        ctx: input.ctx,
+        namespace: input.namespace,
+        name: input.name,
+        listeners: input.effective_listeners,
+        inter_broker_name: input.inter_broker_name,
+        secret_api: input.secret_api,
+    })
+    .await?
+    {
+        return Ok(ListenerPhaseResult::Done(action));
+    }
+
+    reconcile_valid_listener_resources(input)
+        .await
+        .map(|artifacts| ListenerPhaseResult::Ready(Box::new(artifacts)))
+}
+
+struct ListenerTlsArtifacts {
+    inventory: NodeInventory,
+    per_node: BTreeMap<i32, listeners::BrokerTlsRender>,
+    clients_ca_path: Option<&'static str>,
+    load_balancer_pending: Vec<(i32, String)>,
+}
+
+async fn prepare_listener_tls(
+    input: &ListenerPhaseInput<'_>,
+) -> Result<ListenerTlsArtifacts, ReconcileError> {
+    let inventory = inventory_nodes(input.name, input.namespace, input.pools);
+    let observed = listeners::observe_listener_addresses(
+        input.ctx,
+        input.namespace,
+        input.name,
+        input.effective_listeners,
+        &inventory.broker_ids,
+    )
+    .await?;
+    let mut load_balancer_pending = Vec::new();
+    let extra_sans: BTreeMap<i32, Vec<crabka_security::ca::SubjectAltName>> = inventory
+        .brokers
+        .iter()
+        .filter_map(|broker| {
+            match listeners::compute_extra_sans(
+                broker.broker_id,
+                input.effective_listeners,
+                &observed,
+            ) {
+                Ok(sans) => Some((broker.broker_id, sans)),
+                Err(listeners::SanComputationError::SansNotReady {
+                    broker_id,
+                    listener,
+                }) => {
+                    tracing::warn!(
+                        broker_id,
+                        %listener,
+                        "LB ingress not ready; skipping cert SAN extension for this broker"
+                    );
+                    load_balancer_pending.push((broker_id, listener));
+                    None
+                }
+            }
+        })
+        .collect();
+    let requests = inventory
+        .all
+        .iter()
+        .map(|node| cluster_ca::BrokerCertRequest {
+            broker_id: node.broker_id,
+            cn: node.pod_name.clone(),
+            sans: vec![
+                crabka_security::ca::SubjectAltName::Dns(node.pod_fqdn.clone()),
+                crabka_security::ca::SubjectAltName::Dns(node.pod_name.clone()),
+                crabka_security::ca::SubjectAltName::Dns(format!(
+                    "{}-broker-headless.{}.svc.cluster.local",
+                    input.name, input.namespace
+                )),
+                crabka_security::ca::SubjectAltName::Ip(std::net::IpAddr::V4(
+                    std::net::Ipv4Addr::LOCALHOST,
+                )),
+            ],
+            extra_sans: extra_sans.get(&node.broker_id).cloned().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    cluster_ca::ensure_broker_keystore(
+        input.secret_api,
+        input.obj,
+        &requests,
+        &input.cluster_ca.signing_material,
+        input.cluster_ca.leaf_transition.requires_reissue(),
+    )
+    .await?;
+    let clients_ca_path = input
+        .effective_listeners
+        .iter()
+        .any(|listener| matches!(listener.authentication, Some(ListenerAuthentication::Tls)))
+        .then_some("/etc/crabka/clients-ca/ca.crt");
+    Ok(ListenerTlsArtifacts {
+        per_node: controller_tls_per_node(&inventory.all),
+        inventory,
+        clients_ca_path,
+        load_balancer_pending,
+    })
+}
+
+async fn load_external_listener_state(
+    input: &ListenerPhaseInput<'_>,
+    inventory: &NodeInventory,
+) -> Result<ExternalState, ReconcileError> {
+    if !input
+        .effective_listeners
+        .iter()
+        .any(|listener| listener.type_ != ListenerType::Internal)
+    {
+        return Ok(Default::default());
+    }
+    apply_external_services(
+        input.ctx,
+        input.service_api,
+        input.obj,
+        input.namespace,
+        input.name,
+        input.effective_listeners,
+        &inventory.brokers,
+    )
+    .await?;
+    read_external_state(
+        input.ctx,
+        input.service_api,
+        input.namespace,
+        input.name,
+        input.effective_listeners,
+        &inventory.brokers,
+    )
+    .await
+}
+
+async fn reconcile_valid_listener_resources(
+    input: ListenerPhaseInput<'_>,
+) -> Result<ListenerArtifacts, ReconcileError> {
+    let tls = prepare_listener_tls(&input).await?;
+    let (nodes, pods, bootstrap_services, broker_services) =
+        load_external_listener_state(&input, &tls.inventory).await?;
+    let resolved = resolve_addresses_per_broker(
+        input.effective_listeners,
+        input.inter_broker_name,
+        &tls.inventory.all,
+        &pods,
+        &nodes,
+        &broker_services,
+    );
+    let valid = condition("ListenersValid", "True", "Valid", "listeners validated");
+    let (status, ready) = match resolved {
+        Err(err) => (
+            vec![],
+            condition(
+                "ListenersReady",
+                "False",
+                "PendingExternalAddresses",
+                &err.message(),
+            ),
+        ),
+        Ok(addresses) => {
+            let cm = common::render_configmap(
+                input.obj,
+                input.effective_listeners,
+                (&addresses, &tls.inventory.roles),
+                input.inter_broker_name,
+                Some(&tls.per_node),
+                tls.clients_ca_path,
+                input.logging_filter,
+            )?;
+            apply_object(input.config_map_api, &cm_name(input.name), &cm).await?;
+            let broker_addresses = addresses
+                .into_iter()
+                .filter(|(id, _)| tls.inventory.broker_ids.contains(id))
+                .collect();
+            let status = build_listener_status(
+                input.effective_listeners,
+                &broker_addresses,
+                &bootstrap_services,
+                &nodes,
+                input.name,
+                input.namespace,
+            );
+            let message = format!("{} listener(s) ready", input.effective_listeners.len());
+            (
+                status,
+                condition("ListenersReady", "True", "Ready", &message),
+            )
+        }
+    };
+    adopt_pools(
+        input.pool_api,
+        input.obj,
+        input.pools.iter(),
+        input.config_hash,
+    )
+    .await?;
+    Ok(ListenerArtifacts {
+        status,
+        valid_condition: valid,
+        ready_condition: ready,
+        load_balancer_pending: tls.load_balancer_pending,
+    })
 }
 
 async fn finalize_kafka(input: FinalizeKafkaInput<'_>) -> Result<Action, ReconcileError> {
@@ -1712,6 +1806,161 @@ async fn finalize_kafka(input: FinalizeKafkaInput<'_>) -> Result<Action, Reconci
     Ok(common::requeue(ctx.config.controller_dependency_requeue))
 }
 
+async fn validate_kafka_runtime(
+    obj: &Kafka,
+    ctx: &Context,
+    namespace: &str,
+    name: &str,
+) -> Result<(), ReconcileError> {
+    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), namespace);
+    if let Some(tuning) = &obj.spec.broker_tuning
+        && let Err(why) = tuning.validate()
+    {
+        let cond = condition("KafkaConfigValid", "False", "KafkaConfigInvalid", &why);
+        patch_status_with_condition(&kafka_api, name, cond).await?;
+        return Err(ReconcileError::KafkaConfigInvalid(why));
+    }
+    if let Some(tiered_storage) = &obj.spec.tiered_storage {
+        let (condition, error) = match tiered_storage.validate() {
+            Ok(()) => (
+                condition(
+                    "TieredStorageReady",
+                    "True",
+                    "Validated",
+                    "tieredStorage spec is well-formed",
+                ),
+                None,
+            ),
+            Err(why) => (
+                condition(
+                    "TieredStorageReady",
+                    "False",
+                    "TieredStorageInvalid",
+                    &format!("tieredStorage: {why}"),
+                ),
+                Some(why),
+            ),
+        };
+        patch_status_with_condition(&kafka_api, name, condition).await?;
+        if let Some(why) = error {
+            return Err(ReconcileError::TieredStorageInvalid(why));
+        }
+    }
+    if let Some(tracing) = &obj.spec.tracing {
+        let (condition, error) = match tracing.validate() {
+            Ok(()) => (
+                condition(
+                    "TracingReady",
+                    "True",
+                    "Validated",
+                    "tracing spec is well-formed",
+                ),
+                None,
+            ),
+            Err(why) => (
+                condition(
+                    "TracingReady",
+                    "False",
+                    "TracingInvalid",
+                    &format!("tracing: {why}"),
+                ),
+                Some(why),
+            ),
+        };
+        patch_status_with_condition(&kafka_api, name, condition).await?;
+        if let Some(why) = error {
+            return Err(ReconcileError::TracingInvalid(why));
+        }
+    }
+    Ok(())
+}
+
+fn evaluate_kafka_version(obj: &Kafka) -> (KafkaCondition, Option<String>) {
+    let finalized = obj
+        .status
+        .as_ref()
+        .and_then(|status| status.metadata_version.as_deref());
+    match crate::version::evaluate(
+        &obj.spec.kafka_version,
+        obj.spec.metadata_version.as_deref(),
+        finalized,
+    ) {
+        crate::version::VersionOutcome::Valid { resolved_metadata } => (
+            condition(
+                "KafkaVersionValid",
+                "True",
+                "Valid",
+                &format!(
+                    "kafkaVersion {} metadata.version {resolved_metadata}",
+                    obj.spec.kafka_version
+                ),
+            ),
+            Some(resolved_metadata),
+        ),
+        crate::version::VersionOutcome::Invalid { reason, message } => (
+            condition("KafkaVersionValid", "False", reason.as_str(), &message),
+            None,
+        ),
+    }
+}
+
+fn metadata_version_level(version: &str) -> Option<i16> {
+    crabka_metadata::metadata_version::from_version_string(version)
+        .map(crabka_metadata::metadata_version::MetadataVersion::feature_level)
+}
+
+async fn reconcile_metadata_version(
+    ctx: &Context,
+    namespace: &str,
+    name: &str,
+    port: i32,
+    resolved: Option<&str>,
+    finalized: Option<&str>,
+    timeout: Time,
+) -> Result<Option<String>, KafkaCondition> {
+    let Some(resolved) = resolved else {
+        return Ok(None);
+    };
+    let Some(finalized) = finalized else {
+        return Ok(Some(resolved.to_string()));
+    };
+    let Some(target_level) = metadata_version_level(resolved) else {
+        return Ok(None);
+    };
+    let Some(finalized_level) = metadata_version_level(finalized) else {
+        return Ok(None);
+    };
+    if target_level == finalized_level {
+        return Ok(Some(resolved.to_string()));
+    }
+
+    let bootstrap = format!("{name}-broker-headless.{namespace}.svc.cluster.local:{port}");
+    let admin = ctx
+        .admin_client_for(name, &bootstrap)
+        .await
+        .map_err(|error| {
+            condition(
+                "KafkaVersionValid",
+                "False",
+                "MetadataVersionUpdateFailed",
+                &format!("UpdateFeatures connection failed: {error}"),
+            )
+        })?;
+    let mut admin = admin.lock().await;
+    admin
+        .update_metadata_version(target_level, target_level < finalized_level, timeout)
+        .await
+        .map_err(|error| {
+            condition(
+                "KafkaVersionValid",
+                "False",
+                "MetadataVersionUpdateFailed",
+                &format!("UpdateFeatures rejected metadata.version {resolved}: {error}"),
+            )
+        })?;
+    Ok(Some(resolved.to_string()))
+}
+
 async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
@@ -1756,116 +2005,31 @@ async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, R
 
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
 
-    if let Some(tuning) = &obj.spec.broker_tuning
-        && let Err(why) = tuning.validate()
-    {
-        let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-        let cond = condition("KafkaConfigValid", "False", "KafkaConfigInvalid", &why);
-        patch_status_with_condition(&kafka_api, &name, cond).await?;
-        return Err(ReconcileError::KafkaConfigInvalid(why));
-    }
-
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let _cluster_id = ensure_cluster_id_secret(&secret_api, &obj).await?;
-
-    // KIP-405: shape-validate `spec.tieredStorage` before
-    // any ConfigMap render — a mis-paired discriminator (`type=S3` with no
-    // `s3` block, or an S3 spec missing `bucket`/`region`) would otherwise
-    // produce broker TOML the broker rejects at boot. Failing here keeps
-    // the broker pods on the previously-valid generation.
-    //
-    // Surface the failure as a `TieredStorageReady=False`
-    // condition on `Kafka.status.conditions[]` (matching the OAuth-
-    // validation pattern) so operators see *why* their spec was rejected
-    // instead of having to read controller logs. The happy path emits
-    // `TieredStorageReady=True` so a transition from invalid → valid
-    // clears the condition.
-    let kafka_api_for_ts: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-    if let Some(ts) = &obj.spec.tiered_storage {
-        match ts.validate() {
-            Ok(()) => {
-                let cond = condition(
-                    "TieredStorageReady",
-                    "True",
-                    "Validated",
-                    "tieredStorage spec is well-formed",
-                );
-                patch_status_with_condition(&kafka_api_for_ts, &name, cond).await?;
-            }
-            Err(why) => {
-                let cond = condition(
-                    "TieredStorageReady",
-                    "False",
-                    "TieredStorageInvalid",
-                    &format!("tieredStorage: {why}"),
-                );
-                patch_status_with_condition(&kafka_api_for_ts, &name, cond).await?;
-                return Err(ReconcileError::TieredStorageInvalid(why));
-            }
-        }
-    }
-
-    // Validate `spec.tracing` before rendering pods. Same
-    // pattern as the tiered-storage `TieredStorageReady` condition:
-    // emit a `TracingReady` condition on validation
-    // pass/fail so operators see *why* their OTLP spec was rejected
-    // instead of having to read controller logs.
-    if let Some(tr) = &obj.spec.tracing {
-        match tr.validate() {
-            Ok(()) => {
-                let cond = condition(
-                    "TracingReady",
-                    "True",
-                    "Validated",
-                    "tracing spec is well-formed",
-                );
-                patch_status_with_condition(&kafka_api_for_ts, &name, cond).await?;
-            }
-            Err(why) => {
-                let cond = condition(
-                    "TracingReady",
-                    "False",
-                    "TracingInvalid",
-                    &format!("tracing: {why}"),
-                );
-                patch_status_with_condition(&kafka_api_for_ts, &name, cond).await?;
-                return Err(ReconcileError::TracingInvalid(why));
-            }
-        }
-    }
-
-    // Evaluate the declared versions against the operator-
-    // finalized metadata version (read from the watched object's status —
-    // no extra API request). On a failure we surface KafkaVersionValid=
-    // False, do not inject the new metadata version, and do not advance the
-    // config hash or the finalized version — "surface the error and wait".
+    validate_kafka_runtime(&obj, &ctx, &ns, &name).await?;
     let finalized_metadata = obj
         .status
         .as_ref()
         .and_then(|s| s.metadata_version.as_deref());
-    let version_outcome = crate::version::evaluate(
-        &obj.spec.kafka_version,
-        obj.spec.metadata_version.as_deref(),
+    let (version_cond, resolved_metadata) = evaluate_kafka_version(&obj);
+    let inter_broker_port = effective_listeners
+        .iter()
+        .find(|listener| listener.name == inter_broker_name)
+        .map_or(common::BROKER_PORT, |listener| listener.port);
+    let (version_cond, resolved_metadata) = match reconcile_metadata_version(
+        &ctx,
+        &ns,
+        &name,
+        inter_broker_port,
+        resolved_metadata.as_deref(),
         finalized_metadata,
-    );
-    let (version_cond, resolved_metadata): (KafkaCondition, Option<String>) = match &version_outcome
+        secs(30),
+    )
+    .await
     {
-        crate::version::VersionOutcome::Valid { resolved_metadata } => (
-            condition(
-                "KafkaVersionValid",
-                "True",
-                "Valid",
-                &format!(
-                    "kafkaVersion {} metadata.version {resolved_metadata}",
-                    obj.spec.kafka_version
-                ),
-            ),
-            Some(resolved_metadata.clone()),
-        ),
-        crate::version::VersionOutcome::Invalid { reason, message } => (
-            condition("KafkaVersionValid", "False", reason.as_str(), message),
-            None,
-        ),
+        Ok(resolved) => (version_cond, resolved),
+        Err(condition) => (condition, None),
     };
     // Only an explicit, valid pin enters the config hash (a defaulted
     // metadata version rolls via the pod-template image change instead,
@@ -1891,7 +2055,38 @@ async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, R
     let pool_api: Api<KafkaNodePool> = Api::namespaced(ctx.client.clone(), &ns);
     let lp = ListParams::default().labels(&format!("crabka.io/cluster={name}"));
     let pools = pool_api.list(&lp).await?;
-    let rollout_converged = pools_converged(pools.iter());
+    let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
+    let statefulsets = sts_api
+        .list(&ListParams::default().labels(&format!(
+            "app.kubernetes.io/instance={name},app.kubernetes.io/name={}",
+            common::APP_LABEL
+        )))
+        .await?;
+    let topology_pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
+    let topology_pods = topology_pod_api
+        .list(&ListParams::default().labels(&format!(
+            "app.kubernetes.io/instance={name},app.kubernetes.io/name={}",
+            common::APP_LABEL
+        )))
+        .await?;
+    if let Err(error) =
+        kafka_node_pool::validate_topology(&pools.items, &statefulsets.items, &topology_pods.items)
+    {
+        let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+        patch_status_with_condition(
+            &kafka_api,
+            &name,
+            condition(
+                "NodePoolTopologyValid",
+                "False",
+                "InvalidNodePoolTopology",
+                &error.to_string(),
+            ),
+        )
+        .await?;
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
+    }
+    let rollout_converged = pools_converged(pools.iter(), statefulsets.iter());
 
     let CaArtifacts {
         cluster: cluster_ca_outcome,
@@ -2029,7 +2224,7 @@ async fn adopt_pools<'a>(
                 .as_ref()
                 .and_then(|s| s.ready_replicas)
                 .unwrap_or(0)
-                >= 1,
+                >= p.spec.replicas,
         })
         .collect();
     let plan = common::plan_rollout(&states, config_hash);
@@ -2088,8 +2283,8 @@ async fn emit_weak_auth_event(
 /// Emits a Warning Event when the operator cannot do a forced CA
 /// rotation.
 ///
-/// The two causes are a BYO CA and a clients-CA key replacement. The call
-/// site does not wait for the result.
+/// BYO CAs are immutable, so a force annotation is rejected. The call site
+/// does not wait for the Event result.
 async fn emit_ca_rotation_refused_event(
     client: &kube::Client,
     namespace: &str,
@@ -2115,14 +2310,27 @@ async fn emit_ca_rotation_refused_event(
 /// Reports whether no roll is in flight.
 ///
 /// No roll is in flight when every pool carries the same non-empty
-/// `crabka.io/config-hash` label and the broker of every pool is Ready.
+/// `crabka.io/config-hash` label and its live `StatefulSet` has observed that
+/// hash, completed its current revision, and made every desired replica both
+/// updated and Ready.
 /// The CA rotation state machine advances a staged phase only in this
 /// condition. Trust distribution therefore finishes before the operator
 /// promotes the new key, and the promotion finishes before the operator
 /// prunes the old anchor. An empty pool list counts as converged.
-pub(crate) fn pools_converged<'a>(pools: impl IntoIterator<Item = &'a KafkaNodePool>) -> bool {
+pub(crate) fn pools_converged<'a, 'b>(
+    pools: impl IntoIterator<Item = &'a KafkaNodePool>,
+    statefulsets: impl IntoIterator<Item = &'b StatefulSet>,
+) -> bool {
+    let mut statefulsets_by_name: HashMap<String, &StatefulSet> = HashMap::new();
+    for statefulset in statefulsets {
+        if statefulsets_by_name
+            .insert(statefulset.name_any(), statefulset)
+            .is_some()
+        {
+            return false;
+        }
+    }
     let mut hashes = std::collections::BTreeSet::new();
-    let mut all_ready = true;
     let mut any = false;
     for p in pools {
         any = true;
@@ -2131,17 +2339,65 @@ pub(crate) fn pools_converged<'a>(pools: impl IntoIterator<Item = &'a KafkaNodeP
             .labels
             .as_ref()
             .and_then(|l| l.get("crabka.io/config-hash").cloned());
-        hashes.insert(h);
-        if p.status
+        hashes.insert(h.clone());
+        let Some(hash) = h else { return false };
+        if hash.is_empty() {
+            return false;
+        }
+        let cluster = p
+            .metadata
+            .labels
             .as_ref()
-            .and_then(|s| s.ready_replicas)
-            .unwrap_or(0)
-            < 1
+            .and_then(|labels| labels.get("crabka.io/cluster"));
+        let Some(cluster) = cluster else { return false };
+        let pool_name = p.name_any();
+        let Some(statefulset) = statefulsets_by_name.get(&format!("{cluster}-{pool_name}")) else {
+            return false;
+        };
+        let statefulset_labels = statefulset.metadata.labels.as_ref();
+        if statefulset_labels
+            .and_then(|labels| labels.get("app.kubernetes.io/instance"))
+            .map(String::as_str)
+            != Some(cluster.as_str())
+            || statefulset_labels
+                .and_then(|labels| labels.get("app.kubernetes.io/name"))
+                .map(String::as_str)
+                != Some(common::APP_LABEL)
+            || statefulset_labels
+                .and_then(|labels| labels.get("crabka.io/pool"))
+                .map(String::as_str)
+                != Some(pool_name.as_str())
         {
-            all_ready = false;
+            return false;
+        }
+        let Some(spec) = statefulset.spec.as_ref() else {
+            return false;
+        };
+        let Some(status) = statefulset.status.as_ref() else {
+            return false;
+        };
+        let template_hash = spec
+            .template
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.annotations.as_ref())
+            .and_then(|annotations| annotations.get("crabka.io/config-hash"));
+        let desired = p.spec.replicas;
+        let Some(generation) = statefulset.metadata.generation else {
+            return false;
+        };
+        if template_hash != Some(&hash)
+            || spec.replicas != Some(desired)
+            || status.observed_generation != Some(generation)
+            || status.current_revision.is_none()
+            || status.current_revision != status.update_revision
+            || status.updated_replicas.unwrap_or_default() != desired
+            || status.ready_replicas.unwrap_or_default() != desired
+        {
+            return false;
         }
     }
-    !any || (hashes.len() == 1 && !hashes.contains(&None) && all_ready)
+    !any || hashes.len() == 1
 }
 
 /// Removes the one-shot rotation-trigger annotations from the `Kafka` CR.
@@ -2184,7 +2440,7 @@ mod tests {
             name,
             KafkaNodePoolSpec {
                 roles: vec![NodeRole::Controller, NodeRole::Broker],
-                replicas: 1,
+                replicas,
                 node_id_start: 0,
                 image: None,
                 resources: None,
@@ -2200,6 +2456,66 @@ mod tests {
             ready_replicas: Some(ready),
         });
         p
+    }
+
+    #[test]
+    fn enumerate_nodes_expands_ordinals_with_roles_and_dns() {
+        let mut controllers = pool_with_status("controllers", 0, 0);
+        controllers.spec.roles = vec![NodeRole::Controller];
+        controllers.spec.replicas = 3;
+        controllers.spec.node_id_start = 10;
+        let mut brokers = pool_with_status("brokers", 0, 0);
+        brokers.spec.roles = vec![NodeRole::Broker];
+        brokers.spec.replicas = 2;
+        brokers.spec.node_id_start = 20;
+
+        let nodes = enumerate_nodes("demo", "ns", &[controllers, brokers]);
+        let actual: Vec<_> = nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.broker_id,
+                    node.pod_name.as_str(),
+                    node.pod_fqdn.as_str(),
+                    node.roles.as_slice(),
+                )
+            })
+            .collect();
+        assert!(
+            actual
+                == vec![
+                    (
+                        20,
+                        "demo-brokers-0",
+                        "demo-brokers-0.demo-broker-headless.ns.svc.cluster.local",
+                        &[NodeRole::Broker][..],
+                    ),
+                    (
+                        21,
+                        "demo-brokers-1",
+                        "demo-brokers-1.demo-broker-headless.ns.svc.cluster.local",
+                        &[NodeRole::Broker][..],
+                    ),
+                    (
+                        10,
+                        "demo-controllers-0",
+                        "demo-controllers-0.demo-broker-headless.ns.svc.cluster.local",
+                        &[NodeRole::Controller][..],
+                    ),
+                    (
+                        11,
+                        "demo-controllers-1",
+                        "demo-controllers-1.demo-broker-headless.ns.svc.cluster.local",
+                        &[NodeRole::Controller][..],
+                    ),
+                    (
+                        12,
+                        "demo-controllers-2",
+                        "demo-controllers-2.demo-broker-headless.ns.svc.cluster.local",
+                        &[NodeRole::Controller][..],
+                    ),
+                ]
+        );
     }
 
     #[test]
@@ -2226,6 +2542,72 @@ mod tests {
         let (ready, reason, _) = rollup_condition(&r);
         assert!(ready);
         assert!(reason == "Available");
+    }
+
+    #[test]
+    fn ca_rollout_gate_rejects_stale_ready_revision_then_accepts_convergence() {
+        let mut p = pool_with_status("controllers", 3, 3);
+        p.metadata.labels = Some(BTreeMap::from([
+            ("crabka.io/config-hash".into(), "new-hash".into()),
+            ("crabka.io/cluster".into(), "demo".into()),
+        ]));
+        let mut statefulset = StatefulSet::default();
+        statefulset.metadata.name = Some("demo-controllers".into());
+        statefulset.metadata.generation = Some(2);
+        statefulset.metadata.labels = Some(BTreeMap::from([
+            ("app.kubernetes.io/instance".into(), "demo".into()),
+            ("app.kubernetes.io/name".into(), common::APP_LABEL.into()),
+            ("crabka.io/pool".into(), "controllers".into()),
+        ]));
+        statefulset.spec = Some(
+            serde_json::from_value(json!({
+                "serviceName": "demo-broker-headless",
+                "replicas": 3,
+                "selector": { "matchLabels": {} },
+                "template": {
+                    "metadata": { "annotations": { "crabka.io/config-hash": "new-hash" } },
+                    "spec": { "containers": [] }
+                }
+            }))
+            .unwrap(),
+        );
+        statefulset.status = Some(
+            serde_json::from_value(json!({
+                "replicas": 3,
+                "readyReplicas": 3,
+                "updatedReplicas": 3,
+                "observedGeneration": 1,
+                "currentRevision": "revision-2",
+                "updateRevision": "revision-2"
+            }))
+            .unwrap(),
+        );
+
+        assert!(!pools_converged([&p], []));
+        assert!(!pools_converged([&p], [&statefulset, &statefulset]));
+
+        // Ready counts alone are insufficient until the controller has
+        // observed the latest StatefulSet generation.
+        assert!(!pools_converged([&p], [&statefulset]));
+
+        statefulset.status.as_mut().unwrap().observed_generation = Some(2);
+        statefulset.status.as_mut().unwrap().current_revision = Some("revision-1".into());
+        // A fully Ready old revision must not advance CA promotion/pruning.
+        assert!(!pools_converged([&p], [&statefulset]));
+
+        statefulset.status.as_mut().unwrap().current_revision = Some("revision-2".into());
+        assert!(pools_converged([&p], [&statefulset]));
+
+        statefulset.spec.as_mut().unwrap().replicas = Some(2);
+        assert!(!pools_converged([&p], [&statefulset]));
+        statefulset.spec.as_mut().unwrap().replicas = Some(3);
+
+        p.metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert("crabka.io/config-hash".into(), String::new());
+        assert!(!pools_converged([&p], [&statefulset]));
     }
 
     #[test]

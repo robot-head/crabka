@@ -41,7 +41,7 @@ pub struct ForwardRecord {
     pub topic: String,
     pub key: Option<Vec<u8>>,
     pub value: Vec<u8>,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: Vec<(String, Option<Vec<u8>>)>,
     pub partition: Option<i32>,
     pub timestamp_ms: Option<i64>,
     pub idempotency_key: Option<String>,
@@ -124,7 +124,7 @@ impl ForwardRecord {
             headers: r
                 .headers
                 .iter()
-                .map(|(k, v)| (k.clone(), v.to_vec()))
+                .map(|(k, v)| (k.clone(), v.as_ref().map(|value| value.to_vec())))
                 .collect(),
             partition: r.partition,
             timestamp_ms: r.timestamp_ms,
@@ -144,7 +144,7 @@ impl ForwardRecord {
             headers: self
                 .headers
                 .into_iter()
-                .map(|(k, v)| (k, bytes::Bytes::from(v)))
+                .map(|(k, v)| (k, v.map(bytes::Bytes::from)))
                 .collect(),
             partition: self.partition,
             timestamp_ms: self.timestamp_ms,

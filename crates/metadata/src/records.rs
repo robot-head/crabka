@@ -58,9 +58,8 @@ pub struct PartitionRecord {
 /// sets ONLY the slot of the reporting replica in
 /// `PartitionRecord.directories` and never touches leader, isr, replicas,
 /// adding, or removing. It therefore cannot clobber a concurrent reassignment
-/// or ISR change. On the `KRaft` log it rides a Crabka-private carrier through
-/// `to_kraft`, so it decodes back to this same delta and applies as a one-slot
-/// merge, never as a full-record replace.
+/// or ISR change. On the `KRaft` log it is encoded as Kafka's standard
+/// `PartitionChangeRecord` with only the directories field set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionDirAssignmentRecord {
     pub topic: String,
@@ -76,8 +75,7 @@ pub struct PartitionDirAssignmentRecord {
 ///
 /// Applied as a delta, never a full-record replace, so sequential advances on
 /// the committed metadata log yield a gap-free, strictly-monotonic, unique
-/// offset sequence. On the `KRaft` log it rides a Crabka-private carrier like
-/// [`PartitionDirAssignmentRecord`], so it decodes back to this same delta.
+/// offset sequence. On the `KRaft` log it still uses a Crabka-private carrier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionOffsetAdvanceRecord {
     pub topic: String,
@@ -125,6 +123,30 @@ pub struct BrokerRegistrationRecord {
     /// field was added; populated from
     /// `BrokerConfig::effective_listeners()` for self-registration.
     pub endpoints: Vec<BrokerEndpoint>,
+    /// KIP-858 stable IDs for the broker's online log directories.
+    /// Empty at metadata versions before `3.7-IV2` and in legacy snapshots.
+    #[serde(default)]
+    pub log_dirs: Vec<uuid::Uuid>,
+    /// KIP-584 feature ranges advertised by this broker at registration.
+    /// Empty only for legacy Crabka snapshots written before the ranges were
+    /// retained in the image.
+    #[serde(default)]
+    pub features: std::collections::BTreeMap<String, (i16, i16)>,
+}
+
+/// KIP-919 controller registration persisted in the metadata log.
+///
+/// Static controller voters still register their current process incarnation,
+/// listener endpoints, and supported feature ranges.  Keeping that state in
+/// the image lets every controller replay the same registration and gives JVM
+/// peers the `RegisterControllerRecord` they expect in a mixed quorum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerRegistrationRecord {
+    pub node_id: NodeId,
+    pub incarnation_id: Uuid,
+    pub zk_migration_ready: bool,
+    pub endpoints: Vec<BrokerEndpoint>,
+    pub features: std::collections::BTreeMap<String, (i16, i16)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,6 +361,8 @@ pub enum MetadataRecord {
     V1PartitionOffsetAdvance(PartitionOffsetAdvanceRecord),
     /// KIP-1071 dynamic GROUP resource configuration.
     V1GroupConfig(GroupConfigRecord),
+    /// KIP-919 controller registration.
+    V1ControllerRegistration(ControllerRegistrationRecord),
 }
 
 #[cfg(test)]
@@ -371,6 +395,23 @@ mod tests {
                 "streams.num.standby.replicas".into(),
                 "1".into(),
             )]),
+        });
+        assert2::assert!(round_trip(&r) == r);
+    }
+
+    #[test]
+    fn controller_registration_round_trip() {
+        let r = MetadataRecord::V1ControllerRegistration(ControllerRegistrationRecord {
+            node_id: NodeId(3),
+            incarnation_id: Uuid::from_u128(7),
+            zk_migration_ready: false,
+            endpoints: vec![BrokerEndpoint {
+                name: "CONTROLLER".into(),
+                host: "controller-3".into(),
+                port: 9093,
+                protocol: crabka_security::ListenerProtocol::Plaintext,
+            }],
+            features: std::collections::BTreeMap::from([("metadata.version".into(), (7, 25))]),
         });
         assert2::assert!(round_trip(&r) == r);
     }
@@ -439,7 +480,9 @@ mod tests {
             host: "192.168.1.10".into(),
             port: 9092,
             rack: Some("us-east-1a".into()),
+            log_dirs: vec![],
             endpoints: vec![],
+            features: std::collections::BTreeMap::new(),
         });
         assert2::assert!(round_trip(&r) == r);
     }
@@ -453,12 +496,14 @@ mod tests {
             host: "h".into(),
             port: 9092,
             rack: None,
+            log_dirs: vec![],
             endpoints: vec![BrokerEndpoint {
                 name: "EXTERNAL".into(),
                 host: "ext.example.com".into(),
                 port: 9092,
                 protocol: crabka_security::ListenerProtocol::SaslSsl,
             }],
+            features: std::collections::BTreeMap::new(),
         });
         assert2::assert!(round_trip(&r) == r);
     }

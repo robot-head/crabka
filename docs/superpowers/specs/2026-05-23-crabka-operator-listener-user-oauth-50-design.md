@@ -52,7 +52,7 @@ their broker counterparts (49c–49g) land.
 | `groupsClaim`, `groupsClaimDelimiter`, `fallbackUserNameClaim`, `fallbackUserNamePrefix`, `validTokenType`, full-shape `customClaimCheck`, `jwksMinRefreshPauseSeconds`, `jwksExpirySeconds`, `jwksIgnoreKeyUse` | 50f (paired with 49g) |
 | Two OAuth listeners with divergent config on one broker | Future broker slice (likely 49h); slice 50 rejects this at reconcile |
 | `KafkaUser.authentication: oauth` variant | Never — the umbrella commits to `tls-external` as the OAuth user model |
-| Inter-broker OAuth (`serverBearerTokenLocation`) | Never |
+| Inter-broker OAuth (`serverBearerTokenLocation`) | Broker runtime shipped later; operator CRD/rendering is outside slice 50 |
 
 ## CRD shape
 

@@ -1,0 +1,56 @@
+name: sdk-rust
+
+on:
+  push:
+    paths:
+      - "crates/app-sdk/**"
+      - "crates/sdk-conformance/**"
+      - "crates/grpc-gateway/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "release-plz.toml"
+      - "tools/check-publish-allowlist.sh"
+      - ".github/workflows/sdk-rust.yml"
+  pull_request:
+    paths:
+      - "crates/app-sdk/**"
+      - "crates/sdk-conformance/**"
+      - "crates/grpc-gateway/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "release-plz.toml"
+      - "tools/check-publish-allowlist.sh"
+      - ".github/workflows/sdk-rust.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app-sdk-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.1'
+          components: clippy
+      - uses: taiki-e/install-action@nextest
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Verify Rust SDK crates
+        run: |
+          cargo +nightly fmt --all -- --check
+          cargo clippy -p crabka-sdk-conformance -p crabka-app-sdk --all-targets --features crabka-app-sdk/conformance-adapter -- -D warnings
+          cargo nextest run -p crabka-sdk-conformance -p crabka-app-sdk --features crabka-app-sdk/conformance-adapter
+          ./tools/check-publish-allowlist.sh
+      - name: Build Rust conformance adapter
+        run: cargo build -p crabka-app-sdk --bin conformance_adapter --features conformance-adapter
+      - name: Run Rust SDK conformance
+        run: cargo run -p crabka-sdk-conformance --bin conformance -- --adapter target/debug/conformance_adapter --vectors crates/sdk-conformance/vectors/v1
+      - name: Run live-compatible Rust SDK conformance
+        run: cargo run -p crabka-sdk-conformance --bin conformance -- --adapter target/debug/conformance_adapter --vectors crates/sdk-conformance/vectors/v1 --live-substrate --live-compatible-only

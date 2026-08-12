@@ -672,31 +672,13 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
             None
         }
         Authentication::Tls(tls_auth) => {
-            let ca_outcome = match crate::controller::cluster_ca::reconcile_ca(
-                &secret_api,
-                &kafka,
-                crate::controller::cluster_ca::WhichCa::Clients,
-                false,
-                false,
-                true,
-                time::OffsetDateTime::now_utc(),
-            )
-            .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::warn!(error = %e, %cluster, "clients CA reconcile failed");
-                    return Ok(common::requeue(ctx.config.controller_error_requeue));
-                }
-            };
-            // Sign user certs with the clients CA's active signer (the
-            // first block of the trust bundle, paired with the active key).
-            let ca = ca_outcome.signing_material;
             let cert_status =
-                match user_tls::ensure_user_cert_secret(&secret_api, &obj, &ca, tls_auth).await {
+                match user_tls::reconcile_user_cert_secret(&secret_api, &obj, &kafka, tls_auth)
+                    .await
+                {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::warn!(error = %e, %name, "ensure_user_cert_secret failed");
+                        tracing::warn!(error = %e, %name, "TLS credential reconcile failed");
                         return Ok(common::requeue(ctx.config.controller_error_requeue));
                     }
                 };

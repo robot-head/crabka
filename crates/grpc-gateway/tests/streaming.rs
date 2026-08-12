@@ -18,9 +18,9 @@ use tempfile::TempDir;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.classic_group_initial_rebalance_delay = millis(1);
+    let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     (broker, bootstrap, dir)
 }
@@ -79,7 +79,7 @@ fn rec(topic: &str, value: &'static [u8]) -> pb::Record {
         topic: topic.into(),
         key: None,
         body: Some(pb::record::Body::Raw(value.to_vec())),
-        headers: std::collections::HashMap::default(),
+        headers: vec![],
         partition: None,
         timestamp_ms: None,
         idempotency_key: None,
@@ -161,7 +161,7 @@ async fn send_stream_produces_all_records() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn subscribe_streams_records_then_commits() {
+async fn subscribe_streams_cloudevent_headers_then_commits() {
     let (broker, bootstrap, _dir) = boot().await;
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
@@ -196,7 +196,19 @@ async fn subscribe_streams_records_then_commits() {
             key: None,
             value: Bytes::from_static(b"hello"),
             body_structured: None,
-            headers: vec![],
+            headers: vec![
+                ("ce_id".into(), Some(Bytes::from_static(b"event-1"))),
+                ("ce_source".into(), Some(Bytes::from_static(b"/tests"))),
+                (
+                    "ce_type".into(),
+                    Some(Bytes::from_static(b"example.created")),
+                ),
+                ("ce_specversion".into(), Some(Bytes::from_static(b"1.0"))),
+                (
+                    "content-type".into(),
+                    Some(Bytes::from_static(b"text/plain")),
+                ),
+            ],
             partition: None,
             timestamp_ms: None,
             idempotency_key: None,
@@ -212,7 +224,7 @@ async fn subscribe_streams_records_then_commits() {
             group_id: "sub-group".into(),
             topics: vec!["sub-topic".into()],
             auto_commit: true,
-            predicates: vec![],
+            filter: String::new(),
         })),
     };
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -244,7 +256,107 @@ async fn subscribe_streams_records_then_commits() {
     drop(tx);
     let msg = got.expect("received an Inbound record");
     check!((msg.topic.as_str(), msg.value.as_slice()) == ("sub-topic", b"hello".as_slice()));
+    check!(
+        msg.headers
+            == vec![
+                pb::Header {
+                    key: "ce_id".to_string(),
+                    value: Some(b"event-1".to_vec())
+                },
+                pb::Header {
+                    key: "ce_source".to_string(),
+                    value: Some(b"/tests".to_vec())
+                },
+                pb::Header {
+                    key: "ce_type".to_string(),
+                    value: Some(b"example.created".to_vec())
+                },
+                pb::Header {
+                    key: "ce_specversion".to_string(),
+                    value: Some(b"1.0".to_vec())
+                },
+                pb::Header {
+                    key: "content-type".to_string(),
+                    value: Some(b"text/plain".to_vec())
+                },
+            ]
+    );
 
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_filters_raw_json_through_live_consume_session() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "filtered-live".into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            crabka_units::secs(10),
+        )
+        .await
+        .unwrap();
+    let state = state_for(&bootstrap).await;
+    let producer = crabka_grpc_gateway::produce::ProduceCore::new(
+        &bootstrap,
+        "filtered-live-producer",
+        Arc::new(RawCodec),
+        None,
+    )
+    .await
+    .unwrap();
+    let (principal, host) = anon();
+    for value in [br#"{"kind":"skip"}"#.as_slice(), br#"{"kind":"keep"}"#] {
+        producer
+            .produce(
+                crabka_grpc_gateway::types::GatewayRecord {
+                    topic: "filtered-live".into(),
+                    key: None,
+                    value: Bytes::copy_from_slice(value),
+                    body_structured: None,
+                    headers: Vec::new(),
+                    partition: None,
+                    timestamp_ms: None,
+                    idempotency_key: None,
+                },
+                &principal,
+            )
+            .await
+            .unwrap();
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+        Result<pb::SubscribeFrame, connectrpc_axum::message::ConnectError>,
+    >();
+    tx.send(Ok(pb::SubscribeFrame {
+        frame: Some(pb::subscribe_frame::Frame::Start(pb::SubscribeStart {
+            group_id: "filtered-live-reader".into(),
+            topics: vec!["filtered-live".into()],
+            auto_commit: true,
+            filter: "kind = 'keep'".into(),
+        })),
+    }))
+    .unwrap();
+    let inbound = Streaming::new(Box::pin(
+        tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+    ));
+    let mut out = Box::pin(streaming::subscribe_inner(inbound, state, principal, host));
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(10), out.next())
+        .await
+        .expect("matching record arrives before timeout")
+        .expect("subscription remains open")
+        .expect("subscription succeeds");
+    check!(message.offset == 1);
+    check!(message.value == br#"{"kind":"keep"}"#);
+    drop(tx);
     broker.shutdown().await;
 }
 

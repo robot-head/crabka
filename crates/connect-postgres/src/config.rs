@@ -2,6 +2,8 @@ use crabka_connect::{ConnectorConfig, SecretString};
 
 #[derive(Debug, Clone, ConnectorConfig)]
 pub struct PostgresSourceConfig {
+    #[config(required)]
+    pub schema_registry_url: String,
     #[config(required, secret)]
     pub database_url: SecretString,
     #[config(required)]
@@ -37,6 +39,7 @@ mod tests {
                 ("max_messages_per_poll", ConfigKind::UnsignedInteger, false),
                 ("publication_name", ConfigKind::String, false),
                 ("schema", ConfigKind::String, false),
+                ("schema_registry_url", ConfigKind::String, true),
                 ("slot_name", ConfigKind::String, true),
                 ("tables", ConfigKind::StringList, true),
             ]
@@ -46,6 +49,10 @@ mod tests {
             (
                 "database_url".to_string(),
                 json!("postgres://localhost/app"),
+            ),
+            (
+                "schema_registry_url".to_string(),
+                json!("http://localhost:8081"),
             ),
             ("slot_name".to_string(), json!("crabka_slot")),
             ("tables".to_string(), json!(["accounts", "transactions"])),
@@ -64,6 +71,7 @@ mod tests {
         let config = PostgresSourceConfig::from_resolved(&resolved).unwrap();
 
         assert2::assert!(config.database_url.expose_secret() == "postgres://localhost/app");
+        assert2::assert!(config.schema_registry_url == "http://localhost:8081");
         assert2::assert!(config.slot_name.as_str() == "crabka_slot");
         assert2::assert!(config.publication_name.as_str() == "crabka_connect");
         assert2::assert!(config.schema.as_str() == "public");

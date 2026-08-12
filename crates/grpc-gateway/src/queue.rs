@@ -1,6 +1,7 @@
 //! Pull-based gateway access to Kafka share groups, the KIP-932 work queues.
 
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     sync::{
         Arc, Mutex as StdMutex, Weak,
@@ -30,16 +31,22 @@ use crate::{
 const MAX_SESSIONS: usize = 1_024;
 const MAX_MESSAGES: u32 = 500;
 const MAX_WAIT_MS: u32 = 30_000;
+const SUPPORTED_QUEUE_LOCK_DURATION_MS: u64 = 30_000;
 const SESSION_IDLE: Duration = Duration::from_mins(1);
 const SESSION_SWEEP: Duration = Duration::from_secs(5);
 
 struct QueueSession {
     principal: Principal,
+    group_id: String,
+    topics: Vec<String>,
     consumer: Mutex<ShareConsumer>,
+    acquired: StdMutex<HashSet<QueueCoordinate>>,
     max_messages: u32,
     last_used: StdMutex<Instant>,
     _permit: OwnedSemaphorePermit,
 }
+
+type QueueCoordinate = (String, i32, i64);
 
 impl QueueSession {
     fn touch(&self) {
@@ -242,16 +249,21 @@ async fn start_session(
     max_messages: u32,
     permit: OwnedSemaphorePermit,
 ) -> Result<QueueSession, ConnectError> {
-    if group_id.is_empty() || topics.is_empty() {
+    if group_id.is_empty() {
         return Err(ConnectError::new_invalid_argument(
-            "group_id and at least one topic are required",
+            "queue group is required",
+        ));
+    }
+    if topics.is_empty() || topics.iter().any(String::is_empty) {
+        return Err(ConnectError::new_invalid_argument(
+            "queue topic is required",
         ));
     }
     let consumer = ShareConsumer::builder()
         .bootstrap(state.config.bootstrap.clone())
         .client_id(format!("{}-queue", state.config.client_id))
-        .group_id(group_id)
-        .subscribe(topics)
+        .group_id(group_id.clone())
+        .subscribe(topics.clone())
         .ack_mode(ShareAckMode::Explicit)
         .acquire_mode(ShareAcquireMode::RecordLimit)
         .fetch_max_records(i32::try_from(max_messages).expect("queue cap fits i32"))
@@ -263,11 +275,29 @@ async fn start_session(
         .map_err(|error| ConnectError::new_unavailable(error.to_string()))?;
     Ok(QueueSession {
         principal,
+        group_id,
+        topics,
         consumer: Mutex::new(consumer),
+        acquired: StdMutex::new(HashSet::new()),
         max_messages,
         last_used: StdMutex::new(Instant::now()),
         _permit: permit,
     })
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_session_subscription(
+    session_group_id: &str,
+    session_topics: &[String],
+    request_group_id: &str,
+    request_topics: &[String],
+) -> Result<(), ConnectError> {
+    if session_group_id == request_group_id && session_topics == request_topics {
+        return Ok(());
+    }
+    Err(ConnectError::new_invalid_argument(
+        "group_id and topics are fixed when a queue session is created",
+    ))
 }
 
 fn queued_message(record: ShareConsumerRecord) -> pb::QueuedMessage {
@@ -276,11 +306,11 @@ fn queued_message(record: ShareConsumerRecord) -> pb::QueuedMessage {
         partition: record.partition,
         offset: record.offset,
         key: record.key.map(|key| key.to_vec()),
-        value: record.value.map(|value| value.to_vec()),
+        value: record.value.map_or_else(Vec::new, |value| value.to_vec()),
         headers: record
             .headers
             .into_iter()
-            .map(|(key, value)| pb::QueueHeader {
+            .map(|(key, value)| pb::Header {
                 key,
                 value: value.map(|value| value.to_vec()),
             })
@@ -290,11 +320,23 @@ fn queued_message(record: ShareConsumerRecord) -> pb::QueuedMessage {
     }
 }
 
+fn validate_lock_duration(lock_duration_ms: u64) -> Result<(), String> {
+    if lock_duration_ms == SUPPORTED_QUEUE_LOCK_DURATION_MS {
+        return Ok(());
+    }
+    Err(format!(
+        "queue lock_duration_ms must be {SUPPORTED_QUEUE_LOCK_DURATION_MS}; per-acquire lock durations are not supported"
+    ))
+}
+
 /// Acquire up to the session's fixed message limit from a share group.
 ///
 /// # Errors
 /// Returns a Connect error for invalid input, denied access, session expiry, or
 /// native share-consumer failures.
+///
+/// # Panics
+/// Panics if the process-local queue session mutex is poisoned.
 pub async fn queue_acquire(
     Extension(state): Extension<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -302,6 +344,7 @@ pub async fn queue_acquire(
     req: ConnectRequest<pb::QueueAcquireRequest>,
 ) -> Result<ConnectResponse<pb::QueueAcquireResponse>, ConnectError> {
     let request = req.0;
+    validate_lock_duration(request.lock_duration_ms).map_err(ConnectError::new_invalid_argument)?;
     let (principal, host) = effective_identity(principal, peer);
     let requested_max = request.max_messages.clamp(1, MAX_MESSAGES);
     let is_new = request.session_id.is_empty();
@@ -326,6 +369,12 @@ pub async fn queue_acquire(
         state.queue.insert(session)
     } else {
         let session = state.queue.get(&request.session_id, &principal)?;
+        validate_session_subscription(
+            &session.group_id,
+            &session.topics,
+            &request.group_id,
+            &request.topics,
+        )?;
         if request.max_messages != 0 && requested_max != session.max_messages {
             return Err(ConnectError::new_invalid_argument(
                 "max_messages is fixed when a queue session is created",
@@ -350,6 +399,15 @@ pub async fn queue_acquire(
             return Err(ConnectError::new_unavailable(error.to_string()));
         }
     };
+    session
+        .acquired
+        .lock()
+        .expect("queue acquired-record mutex poisoned")
+        .extend(
+            records
+                .iter()
+                .map(|record| (record.topic.clone(), record.partition, record.offset)),
+        );
     session.touch();
     Ok(ConnectResponse::new(pb::QueueAcquireResponse {
         session_id,
@@ -391,6 +449,49 @@ fn ack_record(entry: &pb::QueueAckEntry) -> ShareConsumerRecord {
     }
 }
 
+fn not_acquired_error() -> pb::ErrorInfo {
+    pb::ErrorInfo {
+        code: 9,
+        message: "record is not acquired by this session".to_string(),
+        retriable: false,
+    }
+}
+
+fn coordinate(entry: &pb::QueueAckEntry) -> QueueCoordinate {
+    (entry.topic.clone(), entry.partition, entry.offset)
+}
+
+fn contains_acquired(acquired: &HashSet<QueueCoordinate>, entry: &pb::QueueAckEntry) -> bool {
+    acquired.contains(&coordinate(entry))
+}
+
+fn is_acquired(session: &QueueSession, entry: &pb::QueueAckEntry) -> bool {
+    let acquired = session
+        .acquired
+        .lock()
+        .expect("queue acquired-record mutex poisoned");
+    contains_acquired(&acquired, entry)
+}
+
+fn finish_acquired(session: &QueueSession, entry: &pb::QueueAckEntry) {
+    session
+        .acquired
+        .lock()
+        .expect("queue acquired-record mutex poisoned")
+        .remove(&coordinate(entry));
+}
+
+async fn acknowledge_entry(
+    consumer: &mut ShareConsumer,
+    entry: &pb::QueueAckEntry,
+    ack: ShareAckType,
+) -> Option<crabka_client_consumer::ConsumerError> {
+    if let Err(error) = consumer.acknowledge(&ack_record(entry), ack) {
+        return Some(error);
+    }
+    consumer.commit().await.err()
+}
+
 /// Apply explicit share acknowledgements. This function commits each entry
 /// separately, so it can return a broker verdict for that exact coordinate.
 ///
@@ -413,17 +514,22 @@ pub async fn queue_acknowledge(
             Ok(pb::QueueAckType::Reject) => Some(ShareAckType::Reject),
             Ok(pb::QueueAckType::Unspecified) | Err(_) => None,
         };
+        if ack.is_some() && !is_acquired(&session, &entry) {
+            results.push(pb::QueueAckResult {
+                entry: Some(entry),
+                error: Some(not_acquired_error()),
+            });
+            continue;
+        }
         let error = match ack {
-            Some(ack) => consumer.acknowledge(&ack_record(&entry), ack).err(),
+            Some(ack) => acknowledge_entry(&mut consumer, &entry, ack).await,
             None => Some(crabka_client_consumer::ConsumerError::IllegalState(
                 "queue acknowledgement type is required".to_string(),
             )),
         };
-        let error = if error.is_none() {
-            consumer.commit().await.err()
-        } else {
-            error
-        };
+        if error.is_none() {
+            finish_acquired(&session, &entry);
+        }
         results.push(pb::QueueAckResult {
             entry: Some(entry),
             error: error.map(|error| ack_error(&error)),
@@ -450,6 +556,13 @@ pub async fn queue_renew(
     let mut consumer = session.consumer.lock().await;
     let mut results = Vec::with_capacity(req.0.entries.len());
     for entry in req.0.entries {
+        if !is_acquired(&session, &entry) {
+            results.push(pb::QueueAckResult {
+                entry: Some(entry),
+                error: Some(not_acquired_error()),
+            });
+            continue;
+        }
         let error = consumer
             .renew(&ack_record(&entry))
             .await
@@ -477,9 +590,9 @@ mod tests {
         });
 
         let permit = table.reserve().expect("first reservation");
-        assert!(table.reserve().is_err());
+        assert2::assert!(table.reserve().is_err());
         drop(permit);
-        assert!(table.reserve().is_ok());
+        assert2::assert!(table.reserve().is_ok());
     }
 
     #[test]
@@ -504,14 +617,14 @@ mod tests {
         assert2::assert!(
             (message.value, message.delivery_count, message.headers)
                 == (
-                    None,
+                    Vec::new(),
                     3,
                     vec![
-                        pb::QueueHeader {
+                        pb::Header {
                             key: "ce_type".to_string(),
                             value: Some(b"job.created".to_vec()),
                         },
-                        pb::QueueHeader {
+                        pb::Header {
                             key: "ce_type".to_string(),
                             value: None,
                         },
@@ -521,11 +634,83 @@ mod tests {
     }
 
     #[test]
+    fn queue_lock_duration_is_fixed_to_broker_supported_value() {
+        assert2::assert!(validate_lock_duration(SUPPORTED_QUEUE_LOCK_DURATION_MS).is_ok());
+        let error = validate_lock_duration(1_000)
+            .map_err(ConnectError::new_invalid_argument)
+            .expect_err("custom duration rejected");
+        assert2::assert!(error.code() == connectrpc_axum::message::Code::InvalidArgument);
+        assert2::assert!(
+            error
+                .message()
+                .is_some_and(|message| message.contains("lock_duration_ms"))
+        );
+    }
+
+    #[test]
     fn acknowledgement_preserves_broker_error_code() {
         let error = ack_error(&crabka_client_consumer::ConsumerError::Server(121));
-        assert_eq!(error.code, 121);
-        assert_eq!(error.message, "broker error_code 121");
-        assert!(!error.retriable);
-        assert!(ack_error(&crabka_client_consumer::ConsumerError::Server(6)).retriable);
+        assert2::assert!(
+            error
+                == pb::ErrorInfo {
+                    code: 121,
+                    message: "broker error_code 121".to_string(),
+                    retriable: false,
+                }
+        );
+        assert2::assert!(ack_error(&crabka_client_consumer::ConsumerError::Server(6)).retriable);
+    }
+
+    #[test]
+    fn unknown_queue_coordinate_is_rejected_before_the_broker() {
+        let acquired = HashSet::from([("jobs".to_string(), 0, 7)]);
+        let known = pb::QueueAckEntry {
+            topic: "jobs".to_string(),
+            partition: 0,
+            offset: 7,
+            r#type: pb::QueueAckType::Accept as i32,
+        };
+        let unknown = pb::QueueAckEntry {
+            topic: "missing".to_string(),
+            ..known.clone()
+        };
+        let error = not_acquired_error();
+        assert2::assert!(
+            (
+                contains_acquired(&acquired, &known),
+                contains_acquired(&acquired, &unknown),
+                error
+            ) == (
+                true,
+                false,
+                pb::ErrorInfo {
+                    code: 9,
+                    message: "record is not acquired by this session".to_string(),
+                    retriable: false,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn queue_session_subscription_is_immutable() {
+        let topics = vec!["jobs".to_string()];
+        assert2::assert!(
+            validate_session_subscription("workers", &topics, "workers", &topics).is_ok()
+        );
+
+        for (group_id, request_topics) in [
+            ("other-workers", vec!["jobs".to_string()]),
+            ("workers", vec!["other-jobs".to_string()]),
+        ] {
+            let error =
+                validate_session_subscription("workers", &topics, group_id, &request_topics)
+                    .expect_err("changed queue subscription rejected");
+            assert2::assert!(
+                error.code() == connectrpc_axum::message::Code::InvalidArgument
+                    && error.message().is_some_and(|message| message
+                        == "group_id and topics are fixed when a queue session is created")
+            );
+        }
     }
 }

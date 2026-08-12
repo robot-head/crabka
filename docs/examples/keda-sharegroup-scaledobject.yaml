@@ -17,13 +17,17 @@ spec:
       metadata:
         serverAddress: http://prometheus.monitoring.svc:9090
         metricName: crabka_share_group_backlog
-        query: sum(crabka_broker_share_group_backlog{group_id="order-workers"})
+        # Keep the query defined while the coordinator is moving or before the
+        # first labeled series exists. Crabka removes stale per-broker series.
+        query: sum(crabka_broker_share_group_backlog{group_id="order-workers"}) or on() vector(0)
         threshold: "100"
-        activationThreshold: "1"
+        # KEDA activates when the value is greater than this threshold, so 0
+        # wakes the deployment as soon as one committed record is available.
+        activationThreshold: "0"
 
-# Crabka emits zero only after every initialized partition is drained and never
-# exposes an uninitialized start offset as -1, so activationThreshold=1 supports
-# scale-to-zero without hiding queued records. Conventional consumer groups can
+# Crabka computes backlog from each partition's committed high watermark, emits
+# an explicit zero after every initialized partition is drained, and never
+# exposes an uninitialized start offset as -1. Conventional consumer groups can
 # use KEDA's stock kafka scaler instead; this metric is specifically for KIP-932
 # share groups. Older KEDA releases may require metricName to be unique per
 # ScaledObject.

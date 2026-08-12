@@ -22,8 +22,9 @@ use crate::{
         client_quota_record::ClientQuotaRecord, config_record::ConfigRecord,
         delegation_token_record::DelegationTokenRecord,
         end_transaction_record::EndTransactionRecord, feature_level_record::FeatureLevelRecord,
-        no_op_record::NoOpRecord, partition_record::PartitionRecord,
-        producer_ids_record::ProducerIdsRecord, register_broker_record::RegisterBrokerRecord,
+        no_op_record::NoOpRecord, partition_change_record::PartitionChangeRecord,
+        partition_record::PartitionRecord, producer_ids_record::ProducerIdsRecord,
+        register_broker_record::RegisterBrokerRecord,
         register_controller_record::RegisterControllerRecord,
         remove_access_control_entry_record::RemoveAccessControlEntryRecord,
         remove_delegation_token_record::RemoveDelegationTokenRecord,
@@ -45,6 +46,7 @@ pub enum KraftMetadataRecord {
     Topic(TopicRecord),                             // apiKey 2
     Partition(PartitionRecord),                     // apiKey 3
     Config(ConfigRecord),                           // apiKey 4
+    PartitionChange(PartitionChangeRecord),         // apiKey 5
     RemoveTopic(RemoveTopicRecord),                 // apiKey 9
     DelegationToken(DelegationTokenRecord),         // apiKey 10
     UserScramCredential(UserScramCredentialRecord), // apiKey 11
@@ -95,6 +97,7 @@ impl KraftMetadataRecord {
             Self::RegisterBroker(_) => 0,
             Self::Topic(_) => 2,
             Self::Partition(_) => 3,
+            Self::PartitionChange(_) => 5,
             Self::RemoveTopic(_) => 9,
             Self::FeatureLevel(_) => 12,
             Self::BrokerRegistrationChange(_) => 17,
@@ -133,6 +136,7 @@ impl KraftMetadataRecord {
             Self::RegisterBroker(r) => r.encode(&mut body, v)?,
             Self::Topic(r) => r.encode(&mut body, v)?,
             Self::Partition(r) => r.encode(&mut body, v)?,
+            Self::PartitionChange(r) => r.encode(&mut body, v)?,
             Self::RemoveTopic(r) => r.encode(&mut body, v)?,
             Self::BeginTransaction(r) => r.encode(&mut body, v)?,
             Self::EndTransaction(r) => r.encode(&mut body, v)?,
@@ -177,6 +181,7 @@ impl KraftMetadataRecord {
             0 => Self::RegisterBroker(RegisterBrokerRecord::decode(&mut cur, v)?),
             2 => Self::Topic(TopicRecord::decode(&mut cur, v)?),
             3 => Self::Partition(PartitionRecord::decode(&mut cur, v)?),
+            5 => Self::PartitionChange(PartitionChangeRecord::decode(&mut cur, v)?),
             9 => Self::RemoveTopic(RemoveTopicRecord::decode(&mut cur, v)?),
             12 => Self::FeatureLevel(FeatureLevelRecord::decode(&mut cur, v)?),
             17 => {
@@ -279,7 +284,8 @@ mod tests {
         use crate::owned::{
             access_control_entry_record::AccessControlEntryRecord,
             client_quota_record::ClientQuotaRecord, config_record::ConfigRecord,
-            delegation_token_record::DelegationTokenRecord, producer_ids_record::ProducerIdsRecord,
+            delegation_token_record::DelegationTokenRecord,
+            partition_change_record::PartitionChangeRecord, producer_ids_record::ProducerIdsRecord,
             remove_access_control_entry_record::RemoveAccessControlEntryRecord,
             remove_delegation_token_record::RemoveDelegationTokenRecord,
             remove_user_scram_credential_record::RemoveUserScramCredentialRecord,
@@ -292,6 +298,10 @@ mod tests {
                 1,
             ),
             (KraftMetadataRecord::Config(ConfigRecord::default()), 4),
+            (
+                KraftMetadataRecord::PartitionChange(PartitionChangeRecord::default()),
+                5,
+            ),
             (
                 KraftMetadataRecord::DelegationToken(DelegationTokenRecord::default()),
                 10,

@@ -154,8 +154,10 @@ pub(crate) mod assign_replicas_to_dirs;
 // describe_cluster, describe_groups when the request opts in.
 pub(crate) mod authorized_operations;
 pub(crate) mod broker_heartbeat;
+pub(crate) mod broker_registration;
 pub(crate) mod consumer_group_describe;
 pub(crate) mod consumer_group_heartbeat;
+pub(crate) mod controller_registration;
 pub(crate) mod create_acls;
 pub(crate) mod create_delegation_token;
 pub(crate) mod create_partitions;

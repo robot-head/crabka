@@ -557,7 +557,7 @@ async fn process_partition(
     // (3); presence-but-not-leader maps to NOT_LEADER_OR_FOLLOWER (6) with
     // a `current_leader` hint (encodes at Produce v10+, KIP-951) so the
     // client re-routes without a full Metadata round-trip.
-    let (part, leader_epoch) = match validate_partition_gate(
+    let (part, _) = match validate_partition_gate(
         topic_name,
         idx,
         acks,
@@ -575,6 +575,26 @@ async fn process_partition(
             return Ok(out);
         }
     };
+    // Hold the transition barrier through dedup, enqueue, append, and ack.
+    // Diskless promotion takes the write side before hydrating and rebuilding
+    // producer state, so it cannot publish a half-adopted prefix or race an
+    // idempotent retry already admitted here.
+    let _transition = part.lock_produce_transition().await;
+    if part.diskless {
+        let record = image.partition(topic_name, idx).expect("gate checked");
+        if !diskless_role_ready(&part, record) {
+            out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+            out.current_leader = LeaderIdAndEpoch {
+                leader_id: i32::try_from(record.leader.0).unwrap_or(NO_LEADER_ID),
+                leader_epoch: record.leader_epoch.0,
+                ..Default::default()
+            };
+            return Ok(out);
+        }
+    }
+    let leader_epoch = part
+        .current_leader_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
 
     // ── transactional produce verify (KIP-1319 v2) ──────────
     // This check is more authoritative than idempotent dedup,
@@ -622,6 +642,21 @@ async fn process_partition(
         },
     )
     .await
+}
+
+fn diskless_role_ready(
+    partition: &crate::partition::Partition,
+    record: &crabka_metadata::PartitionRecord,
+) -> bool {
+    crabka_metadata::NodeId(
+        partition
+            .current_leader
+            .load(std::sync::atomic::Ordering::Acquire),
+    ) == record.leader
+        && partition
+            .current_leader_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+            == record.leader_epoch.0
 }
 
 #[derive(Clone, Copy)]
@@ -1486,8 +1521,8 @@ mod tests {
     use super::{
         FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionInput, PartitionPayload,
         PartitionServices, PreparedSource, build_topic_error_response, decode_owned_batch,
-        prepare_batch, process_partition, produce_bytes_by_qos_tier, resolve_topic_compression,
-        topic_min_insync_replicas,
+        diskless_role_ready, prepare_batch, process_partition, produce_bytes_by_qos_tier,
+        resolve_topic_compression, topic_min_insync_replicas,
     };
 
     fn image_with_topic(topic: &str, isr: &[u64]) -> MetadataImage {
@@ -1511,6 +1546,37 @@ mod tests {
             partition_epoch: 0,
         }));
         img
+    }
+
+    #[tokio::test]
+    async fn diskless_produce_waits_for_installed_role_and_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = image_with_topic("orders", &[1]);
+        let record = image.partition("orders", 0).expect("partition");
+        let log = crabka_log::Log::open(
+            crate::log_dir::partition_dir(dir.path(), "orders", 0),
+            crabka_log::LogConfig::default(),
+        )
+        .unwrap();
+        let partition = crate::broker::spawn_partition(
+            "orders".into(),
+            crabka_ids::PartitionIndex(0),
+            dir.path().to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+            true,
+        );
+
+        assert!(!diskless_role_ready(&partition, record));
+        partition
+            .install_leader_change(record.leader.0, record.leader_epoch.0)
+            .await;
+        assert!(diskless_role_ready(&partition, record));
+        partition
+            .install_leader_change(record.leader.0, record.leader_epoch.0 + 1)
+            .await;
+        assert!(!diskless_role_ready(&partition, record));
     }
 
     fn set_min_isr(img: &mut MetadataImage, topic: &str, n: i32) {

@@ -793,7 +793,9 @@ mod tests {
                 host: "broker-1".into(),
                 port: 9092,
                 rack: Some("rack-a".into()),
+                log_dirs: vec![],
                 endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
             },
         ));
         // Config (apiKey 4), broker scope.

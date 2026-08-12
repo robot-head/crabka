@@ -45,7 +45,7 @@ use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_grpc_gateway::{
     codec::RawCodec,
     outbound,
-    outbound_config::{CompiledSubscription, OutboundFile},
+    outbound_config::{CompiledSubscription, OutboundContentMode, OutboundFile},
 };
 use crabka_protocol::owned::{
     fetch_request::{FetchPartition, FetchRequest, FetchTopic},
@@ -189,6 +189,7 @@ fn sub(
         request_timeout: secs(2),
         filter,
         headers: vec![],
+        content_mode: OutboundContentMode::Envelope,
         decode_to_json: false,
     }
 }

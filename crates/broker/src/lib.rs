@@ -169,6 +169,7 @@ pub mod codes;
 pub mod config;
 pub(crate) mod config_keys;
 pub mod config_value;
+mod controller_admin;
 pub mod coordinator;
 /// Compositional end-to-end data-path verification model (produce → replicate →
 /// commit → fetch across clean and unclean failover). It wraps the real

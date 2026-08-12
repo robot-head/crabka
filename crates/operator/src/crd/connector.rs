@@ -69,6 +69,9 @@ pub struct KafkaConnectorSpec {
     pub resources: Option<ResourceRequirements>,
     /// `Secret` key containing the `PostgreSQL` connection URL.
     pub database_url: ConnectorSecretKeyRef,
+    /// Confluent-compatible Schema Registry base URL used to allocate record schema IDs.
+    #[schemars(length(min = 1))]
+    pub schema_registry_url: String,
     /// `PostgreSQL` logical replication slot.
     #[schemars(length(min = 1))]
     pub slot: String,
@@ -122,7 +125,13 @@ mod tests {
         check!(crd["spec"]["names"]["shortNames"][0] == "kc");
         let spec = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
         let required = spec["required"].as_array().unwrap();
-        for field in ["type", "databaseUrl", "slot", "publication"] {
+        for field in [
+            "type",
+            "databaseUrl",
+            "schemaRegistryUrl",
+            "slot",
+            "publication",
+        ] {
             assert!(
                 required.iter().any(|value| value == field),
                 "missing {field}"
@@ -146,6 +155,7 @@ mod tests {
                 name: "database".into(),
                 key: "url".into(),
             },
+            schema_registry_url: "http://schema-registry:8081".into(),
             slot: "orders_crabka".into(),
             publication: "crabka_connect".into(),
             schema: Some("public".into()),
@@ -160,6 +170,7 @@ mod tests {
         let value = serde_json::to_value(spec).unwrap();
         check!(value["type"] == "postgresSource");
         check!(value["databaseUrl"]["name"] == "database");
+        check!(value["schemaRegistryUrl"] == "http://schema-registry:8081");
         check!(value["runtime"]["commitIntervalMs"] == 1_000);
     }
 }

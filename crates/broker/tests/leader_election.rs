@@ -24,7 +24,7 @@ use tempfile::TempDir;
 
 mod support;
 
-/// Waits until exactly one broker reports itself as the openraft controller
+/// Waits until exactly one broker reports itself as the metadata controller
 /// leader. It returns the 0-based cluster index of that broker.
 async fn find_controller_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) -> usize {
     for (h, _, _) in cluster {
@@ -224,7 +224,6 @@ async fn acks_all_completes_after_isr_shrink() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "KIP-853 dynamic reconfig (change_membership/add_learner): Slice 5"]
 async fn isr_expand_on_catchup() {
     let _g = cluster_lock().lock().await;
     let mut cluster = support::start_n_node_with_retry(3).await;
@@ -233,87 +232,65 @@ async fn isr_expand_on_catchup() {
 
     create_topic(&cluster[0].0, &bootstrap_1, "expand", 3).await;
 
-    // 1. Find the current openraft leader so we can drive membership changes on it.
+    // 1. Find the controller leader so we can activate dynamic membership.
     let leader_idx = find_controller_leader(&cluster).await;
     let leader_node_id = cluster[leader_idx].1.node_id;
     eprintln!("CRABKA[test] controller leader is node_id={leader_node_id}");
 
-    // 2. Remove node 3 from the voter set BEFORE kill. The leader's openraft
-    //    commits a joint config then a uniform config; after the second commit
-    //    survivors stop replicating to node 3.
+    let outcome = cluster[leader_idx]
+        .0
+        .finalize_kraft_version_for_test(1)
+        .await
+        .expect("activate kraft.version 1");
+    assert!(
+        matches!(outcome, crabka_raft::reconfig::ReconfigOutcome::Committed),
+        "kraft.version activation was not committed: {outcome:?}"
+    );
+
+    // Prefer the highest-numbered follower so this test never removes the
+    // active controller leader and normally leaves partition leader 1 alone.
+    let leader_idx = find_controller_leader(&cluster).await;
+    let victim_idx = (0..cluster.len())
+        .rev()
+        .find(|&idx| idx != leader_idx)
+        .expect("a follower controller");
+    let victim_node_id = cluster[victim_idx].1.node_id;
+
+    // 2. Remove the victim from the voter set before killing it.
     cluster[leader_idx]
         .0
         .change_membership(
-            [crabka_broker::NodeId(1), crabka_broker::NodeId(2)]
-                .into_iter()
+            cluster
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx != victim_idx)
+                .map(|(_, (_, cfg, _))| cfg.node_id)
                 .collect(),
         )
         .await
-        .expect("remove node 3 from voter set");
+        .expect("remove follower from voter set");
 
-    // 3. Capture node 3's addr for the reborn broker, then kill.
-    let dead_listen_addr = cluster[2].1.listen_addr;
-    let dead_controller_addr = cluster[2].1.controller_listen_addr;
-    let (dead_h, _dead_cfg, _dead_dir) = cluster.remove(2);
+    // 3. Capture the victim's config, then kill it.
+    let (dead_h, mut reborn_cfg, _dead_dir) = cluster.remove(victim_idx);
     dead_h.shutdown().await;
+    cluster[0].0.wait_until_isr_len("expand", 0, 2).await;
 
-    // 4. Reboot node 3 with a fresh TempDir + same controller addr.
-    //    Boot as a 1-node cluster (voters = [self]) so node 3 can
-    //    self-elect immediately and Broker::start returns quickly.
-    //    The actual cluster leader will call add_learner below, which
-    //    sends AppendEntries at a higher term and causes node 3 to
-    //    step down and follow the real leader.
+    // 4. Reboot the victim through the production KIP-853 join path. It must
+    //    catch up as an observer before auto-join promotes it to a voter.
     let reborn_dir = TempDir::new().unwrap();
-    let voters = [(3u64, dead_controller_addr)];
-    let reborn_cfg = BrokerConfig {
-        broker_id: 3,
-        listen_addr: dead_listen_addr,
-        advertised_listener: dead_listen_addr.to_string(),
-        log_dir: reborn_dir.path().to_path_buf(),
-        log_config: crabka_log::LogConfig::default(),
-        node_id: crabka_broker::NodeId(3),
-        controller_listen_addr: dead_controller_addr,
-        controller_quorum_voters: voters
-            .iter()
-            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
-            .collect(),
-        heartbeat_interval: crabka_units::millis(200),
-        heartbeat_timeout: crabka_units::millis(2_000),
-        replica_lag_time_max: crabka_units::millis(2_000),
-        controller_election_timeout: crabka_units::millis(500),
-        controller_heartbeat_interval: crabka_units::millis(100),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
-        ..BrokerConfig::default()
-    };
-    let reborn = Broker::start(reborn_cfg).await.expect("reborn node 3");
-    eprintln!("CRABKA[test] reborn node 3 started");
-
-    // 5. Re-find the controller leader (broker_death_elects_new_leader proves it
-    //    might have changed during the joint-config commit).
     let leader_idx = find_controller_leader(&cluster).await;
+    let bootstrap_node_id = cluster[leader_idx].1.node_id;
+    let bootstrap_controller = cluster[leader_idx].1.controller_listen_addr;
+    reborn_cfg.log_dir = reborn_dir.path().to_path_buf();
+    reborn_cfg.bootstrap_mode = crabka_broker::BootstrapMode::Join;
+    reborn_cfg.controller_quorum_voters =
+        vec![(bootstrap_node_id, bootstrap_controller.to_string())];
+    reborn_cfg.bootstrap_servers = vec![bootstrap_controller.to_string()];
+    reborn_cfg.auto_join = true;
+    let reborn = Broker::start(reborn_cfg).await.expect("reborn follower");
+    eprintln!("CRABKA[test] reborn follower {victim_node_id} started");
 
-    // 6. Register reborn node 3 as a learner; openraft will replicate the
-    //    committed log to it. Then promote it back to a voter.
-    cluster[leader_idx]
-        .0
-        .add_learner(crabka_broker::NodeId(3), dead_controller_addr)
-        .await
-        .expect("add reborn node 3 as learner");
-    cluster[leader_idx]
-        .0
-        .change_membership(
-            [
-                crabka_broker::NodeId(1),
-                crabka_broker::NodeId(2),
-                crabka_broker::NodeId(3),
-            ]
-            .into_iter()
-            .collect(),
-        )
-        .await
-        .expect("promote reborn node 3 to voter");
-
-    // 7. Wait for the partition's ISR to expand back to {1, 2, 3}.
+    // 5. Wait for the partition's ISR to expand back to {1, 2, 3}.
     cluster[0].0.wait_until_isr_len("expand", 0, 3).await;
 
     reborn.shutdown().await;

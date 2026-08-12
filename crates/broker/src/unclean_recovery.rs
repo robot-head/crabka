@@ -677,7 +677,9 @@ mod run_recovery_tests {
                 host: host.into(),
                 port,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
             },
         ));
     }

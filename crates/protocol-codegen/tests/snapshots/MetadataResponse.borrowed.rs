@@ -43,6 +43,7 @@ impl<'a> MetadataResponse<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponse {
         crate::owned::metadata_response::MetadataResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -63,7 +64,7 @@ impl<'a> Encode for MetadataResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -71,17 +72,17 @@ impl<'a> Encode for MetadataResponse<'a> {
                 for it in &self.brokers {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 2 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.cluster_id);
             } else {
                 let () = put_nullable_string(buf, self.cluster_id);
-            }
+            };
         }
         if version >= 1 {
-            put_i32(buf, self.controller_id)
+            put_i32(buf, self.controller_id);
         }
         if version >= 0 {
             {
@@ -89,13 +90,13 @@ impl<'a> Encode for MetadataResponse<'a> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if (8..=10).contains(&version) {
-            put_i32(buf, self.cluster_authorized_operations)
+            put_i32(buf, self.cluster_authorized_operations);
         }
         if version >= 13 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -242,6 +243,7 @@ impl<'a> MetadataResponseBroker<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponseBroker {
         crate::owned::metadata_response::MetadataResponseBroker {
             node_id: (self.node_id),
@@ -256,24 +258,24 @@ impl<'a> Encode for MetadataResponseBroker<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_string(buf, self.host);
             } else {
                 let () = put_string(buf, self.host);
-            }
+            };
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 1 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.rack);
             } else {
                 let () = put_nullable_string(buf, self.rack);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -372,6 +374,7 @@ impl<'a> MetadataResponseTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponseTopic {
         crate::owned::metadata_response::MetadataResponseTopic {
             error_code: (self.error_code),
@@ -388,7 +391,7 @@ impl<'a> Encode for MetadataResponseTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if version >= 12 {
@@ -403,13 +406,13 @@ impl<'a> Encode for MetadataResponseTopic<'a> {
                 } else {
                     let () = put_string(buf, (self.name).unwrap_or(""));
                 }
-            }
+            };
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 1 {
-            put_bool(buf, self.is_internal)
+            put_bool(buf, self.is_internal);
         }
         if version >= 0 {
             {
@@ -417,10 +420,10 @@ impl<'a> Encode for MetadataResponseTopic<'a> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 8 {
-            put_i32(buf, self.topic_authorized_operations)
+            put_i32(buf, self.topic_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -558,6 +561,7 @@ impl MetadataResponsePartition {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_response::MetadataResponsePartition {
         crate::owned::metadata_response::MetadataResponsePartition {
             error_code: (self.error_code),
@@ -575,16 +579,16 @@ impl Encode for MetadataResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 7 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 0 {
             {
@@ -592,7 +596,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.replica_nodes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -600,7 +604,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.isr_nodes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 5 {
             {
@@ -608,7 +612,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.offline_replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

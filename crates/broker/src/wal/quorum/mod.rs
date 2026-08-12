@@ -279,6 +279,81 @@ pub(crate) fn remove_shard(
     }
 }
 
+pub(crate) fn remove_leader_shard(
+    registry: &registry::WalShardRegistry,
+    log_dir: &std::path::Path,
+    topic: &str,
+    topic_id: Uuid,
+    partition: PartitionIndex,
+) -> std::io::Result<()> {
+    registry.remove(registry::ShardId {
+        topic_id,
+        partition,
+    });
+    let root = shard_dir(log_dir, topic, Some(topic_id), partition);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("voter-") {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        }?;
+    }
+    Ok(())
+}
+
+/// Remove follower-only WAL shard directories that the current metadata image
+/// no longer assigns to this broker.
+///
+/// Reconciliation calls this after obsolete WAL-follower tasks have stopped.
+/// A root is eligible only when every child is a `voter-*` follower directory;
+/// roots carrying any leader/runtime state are left to the owner-aware
+/// partition prune path. This closes the offline-delete/reassignment case that
+/// an in-memory task reconciliation cannot observe after a process restart.
+pub(crate) fn prune_orphaned_shard_dirs(
+    log_dirs: &[std::path::PathBuf],
+    keep: &std::collections::HashSet<std::path::PathBuf>,
+) -> std::io::Result<()> {
+    for log_dir in log_dirs {
+        let root = log_dir.join("__diskless_wal_quorum");
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if keep.contains(&path) {
+                continue;
+            }
+            if !path.is_dir() {
+                continue;
+            }
+            let follower_only = fs::read_dir(&path)?.all(|child| {
+                child.is_ok_and(|child| {
+                    child.path().is_dir()
+                        && child.file_name().to_string_lossy().starts_with("voter-")
+                })
+            });
+            if follower_only {
+                fs::remove_dir_all(path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl WalStore for QuorumWalStore {
     async fn sync_durable(&self, leo: Offset) -> Result<Offset, BrokerError> {
@@ -386,9 +461,69 @@ mod tests {
         remove_shard(&registry, root.path(), "orders", topic_id, partition).unwrap();
 
         let path = shard_dir(root.path(), "orders", Some(topic_id), partition);
+        fs::create_dir_all(path.join("voter-2")).unwrap();
+        fs::write(path.join("voter-2/checkpoint"), b"durable").unwrap();
+        remove_shard(&registry, root.path(), "orders", topic_id, partition).unwrap();
+        assert!(!path.exists());
+
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"not a directory").unwrap();
         assert!(remove_shard(&registry, root.path(), "orders", topic_id, partition).is_err());
+    }
+
+    #[test]
+    fn remove_leader_shard_preserves_follower_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = registry::WalShardRegistry::new(NodeId(2));
+        let topic_id = Uuid::from_u128(4);
+        let partition = PartitionIndex(0);
+        let shard = shard_dir(root.path(), "orders", Some(topic_id), partition);
+        fs::create_dir_all(shard.join("voter-2")).unwrap();
+        fs::write(shard.join("voter-2/checkpoint"), b"durable").unwrap();
+        fs::write(shard.join("quorum-state.json"), b"leader").unwrap();
+
+        remove_leader_shard(&registry, root.path(), "orders", topic_id, partition).unwrap();
+
+        assert!(shard.join("voter-2/checkpoint").exists());
+        assert!(!shard.join("quorum-state.json").exists());
+    }
+
+    #[test]
+    fn prune_removes_only_unassigned_wal_shards() {
+        let root = tempfile::tempdir().unwrap();
+        let keep = shard_dir(
+            root.path(),
+            "orders",
+            Some(Uuid::from_u128(5)),
+            PartitionIndex(0),
+        );
+        let orphan = shard_dir(
+            root.path(),
+            "deleted",
+            Some(Uuid::from_u128(6)),
+            PartitionIndex(1),
+        );
+        fs::create_dir_all(keep.join("voter-2")).unwrap();
+        fs::create_dir_all(orphan.join("voter-2")).unwrap();
+        fs::write(orphan.join("voter-2/checkpoint"), b"durable").unwrap();
+        let active = shard_dir(
+            root.path(),
+            "active",
+            Some(Uuid::from_u128(7)),
+            PartitionIndex(2),
+        );
+        fs::create_dir_all(active.join("voter-2")).unwrap();
+        fs::write(active.join(QUORUM_STATE_FILE), b"leader runtime").unwrap();
+
+        prune_orphaned_shard_dirs(
+            &[root.path().to_path_buf()],
+            &std::collections::HashSet::from([keep.clone()]),
+        )
+        .unwrap();
+
+        assert!(keep.exists());
+        assert!(!orphan.exists());
+        assert!(active.exists());
     }
 
     #[test]

@@ -42,16 +42,14 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 /// host gateway IP.
 const LISTEN: &str = "0.0.0.0:9092";
 const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:6.1.1";
-/// Newer Kafka image for tests that need tools not bundled in
+/// Newer Kafka image for tests that need tools or client APIs not bundled in
 /// [`KAFKA_IMAGE`]. These tests use it:
 ///
 /// - `kafka_cluster_describe`: `cp-kafka:6.1.1` has no `kafka-cluster`
 ///   binary, but `cp-kafka:7.5.0` has one.
 ///
-/// NOTE: the `kafka-verifiable-producer` bundled in `cp-kafka:7.5.0` does
-/// NOT support `--transactional-id`, although the image ships Kafka 3.5.
-/// `CRABKA_RUN_TXN_JVM_TEST` gates the test that needs that flag. The test
-/// waits for a custom Java snippet harness.
+/// - `transactional_console_producer_eos`: the image includes `javac` and the
+///   Kafka 3.5 client jars used by the transactional Java helper.
 const KAFKA_IMAGE_TXN: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";
 /// Kafka 0.10.1 console tools from Confluent Platform 3.1.2. The
 /// legacy-client acceptance tests (`jvm_legacy_010_*`) use them. The
@@ -1049,35 +1047,60 @@ async fn three_node_replication_byte_compare() {
     }
 }
 
-// Transactional EOS smoke: stand up a 3-broker Crabka cluster, run the JVM
-// `kafka-verifiable-producer` with `--transactional-id eos-tid` to send 6
-// committed records, then verify `kafka-console-consumer --isolation-level
-// read_committed` sees at least 6 records.
+const TRANSACTIONAL_PRODUCER_JAVA: &str = r#"
+import java.util.Properties;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+public final class TransactionalProducer {
+  public static void main(String[] args) throws Exception {
+    Properties config = new Properties();
+    config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, args[0]);
+    config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+        "org.apache.kafka.common.serialization.StringSerializer");
+    config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+        "org.apache.kafka.common.serialization.StringSerializer");
+    config.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "eos-tid");
+
+    try (KafkaProducer<String, String> producer = new KafkaProducer<>(config)) {
+      producer.initTransactions();
+      producer.beginTransaction();
+      for (int i = 0; i < 6; i++) {
+        producer.send(new ProducerRecord<>(args[1], "committed-" + i)).get();
+      }
+      producer.commitTransaction();
+    }
+
+    // Mirror two independent CLI invocations. The second init obtains the
+    // post-EndTxn epoch before it writes the transaction that is aborted.
+    try (KafkaProducer<String, String> producer = new KafkaProducer<>(config)) {
+      producer.initTransactions();
+      producer.beginTransaction();
+      for (int i = 0; i < 2; i++) {
+        producer.send(new ProducerRecord<>(args[1], "aborted-" + i)).get();
+      }
+      producer.abortTransaction();
+    }
+    System.out.println("TXNPROBE OK");
+  }
+}
+"#;
+
+// Transactional EOS smoke: stand up a 3-broker Crabka cluster, compile and
+// run a small official JVM KafkaProducer client that commits 6 records and
+// aborts 2, then verify read_committed and read_uncommitted isolation.
 //
-// Fixed ports 9792/9892/9992 + 9793/9893/9993 (offset 300 from the
-// replication test which uses 9492/9592/9692) to dodge TIME_WAIT collisions
-// when running all JVM tests in sequence.
+// Fixed external ports 9792/9892/9992, controller ports 9793/9893/9993,
+// and loopback-only inter-broker ports 9794/9894/9994. The split listeners
+// let Docker clients use host.docker.internal while host-side brokers use
+// loopback, so local Linux runs do not need an /etc/hosts entry.
 //
 // Same multi-thread runtime caveat as the other multi-broker tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires Docker and CRABKA_RUN_TXN_JVM_TEST=1"]
+#[ignore = "requires Docker"]
 async fn transactional_console_producer_eos() {
     const TOPIC: &str = "crabka-txn-itest";
-
-    // Gated behind an env var because `cp-kafka:7.5.0`'s bundled
-    // `kafka-verifiable-producer` does not support `--transactional-id`
-    // despite shipping Kafka 3.5. A custom Java snippet harness is needed
-    // and is deferred. Set CRABKA_RUN_TXN_JVM_TEST=1 to run.
-    if std::env::var("CRABKA_RUN_TXN_JVM_TEST").is_err() {
-        eprintln!(
-            "Skipping transactional_console_producer_eos: set \
-             CRABKA_RUN_TXN_JVM_TEST=1 to run. Reason: cp-kafka \
-             verifiable-producer doesn't support --transactional-id; \
-             this test needs a custom Java snippet harness which is \
-             not yet implemented."
-        );
-        return;
-    }
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -1089,6 +1112,7 @@ async fn transactional_console_producer_eos() {
 
     let client_ports = [9792u16, 9892, 9992];
     let controller_ports = [9793u16, 9893, 9993];
+    let inter_broker_ports = [9794u16, 9894, 9994];
 
     let voters: Vec<(u64, std::net::SocketAddr)> = (0..3)
         .map(|i| {
@@ -1106,12 +1130,17 @@ async fn transactional_console_producer_eos() {
     let mut spawns = Vec::with_capacity(3);
     for i in 0..3 {
         let dir = tempfile::tempdir().expect("tempdir");
+        let listen_addr = format!("0.0.0.0:{}", client_ports[i])
+            .parse()
+            .expect("static addr");
+        let advertised_listener = format!("host.docker.internal:{}", client_ports[i]);
+        let inter_broker_addr = format!("127.0.0.1:{}", inter_broker_ports[i])
+            .parse()
+            .expect("static addr");
         let cfg = BrokerConfig {
             broker_id: i32::try_from(i + 1).unwrap(),
-            listen_addr: format!("0.0.0.0:{}", client_ports[i])
-                .parse()
-                .expect("static addr"),
-            advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
+            listen_addr,
+            advertised_listener: advertised_listener.clone(),
             log_dir: dir.path().to_path_buf(),
             log_config: LogConfig::default(),
             node_id: crabka_broker::NodeId(u64::try_from(i + 1).unwrap()),
@@ -1127,11 +1156,26 @@ async fn transactional_console_producer_eos() {
             replica_lag_time_max: crabka_units::millis(30_000),
             controller_election_timeout: crabka_units::secs(5),
             controller_heartbeat_interval: crabka_units::millis(500),
-            bootstrap_mode: if i == 0 {
-                crabka_broker::BootstrapMode::Bootstrap
-            } else {
-                crabka_broker::BootstrapMode::Join
-            },
+            bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+            listeners: vec![
+                crabka_broker::config::ListenerSpec {
+                    name: "EXTERNAL".to_string(),
+                    bind_addr: listen_addr,
+                    advertised: advertised_listener,
+                    protocol: crabka_security::ListenerProtocol::Plaintext,
+                    tls_config: None,
+                    sasl_mechanisms: None,
+                },
+                crabka_broker::config::ListenerSpec {
+                    name: "INTERNAL".to_string(),
+                    bind_addr: inter_broker_addr,
+                    advertised: inter_broker_addr.to_string(),
+                    protocol: crabka_security::ListenerProtocol::Plaintext,
+                    tls_config: None,
+                    sasl_mechanisms: None,
+                },
+            ],
+            inter_broker_listener_name: "INTERNAL".to_string(),
             ..BrokerConfig::default()
         };
         tempdirs.push(dir);
@@ -1162,43 +1206,55 @@ async fn transactional_console_producer_eos() {
         &bootstrap_1,
     ]);
 
-    // 2. Produce 6 records transactionally.
-    //    `kafka-verifiable-producer` requires cp-kafka 7.x (Kafka 3.x) for
-    //    `--transactional-id` support; the global KAFKA_IMAGE (6.1.1) predates
-    //    that flag. Use KAFKA_IMAGE_TXN for this command only.
-    let producer_out = std::process::Command::new("docker")
+    // 2. Compile the small Java helper against the image's Kafka client jars.
+    //    It writes one committed transaction and one aborted transaction.
+    let mut producer = Command::new("docker")
         .args([
             "run",
             "--rm",
+            "-i",
             "--add-host=host.docker.internal:host-gateway",
+            "--entrypoint",
+            "bash",
             KAFKA_IMAGE_TXN,
-            "kafka-verifiable-producer",
-            "--bootstrap-server",
+            "-c",
+            r#"set -e; cat >/tmp/TransactionalProducer.java; \
+               CP=$(ls /usr/share/java/kafka/*.jar | tr '\n' ':')$(ls /usr/share/java/cp-base-new/*.jar | tr '\n' ':'); \
+               javac -cp "$CP" -d /tmp /tmp/TransactionalProducer.java; \
+               java -cp "/tmp:$CP" TransactionalProducer "$1" "$2""#,
+            "--",
             &bootstrap_1,
-            "--topic",
             TOPIC,
-            "--max-messages",
-            "6",
-            "--transactional-id",
-            "eos-tid",
-            "--transaction-duration-ms",
-            "200",
         ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .expect("spawn verifiable-producer");
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn transactional Java producer");
+    producer
+        .stdin
+        .as_mut()
+        .expect("producer stdin")
+        .write_all(TRANSACTIONAL_PRODUCER_JAVA.as_bytes())
+        .expect("write Java helper");
+    drop(producer.stdin.take());
+    let producer_out = producer.wait_with_output().expect("wait Java producer");
     eprintln!(
-        "CRABKA[test] verifiable-producer status={} stdout={} stderr={}",
+        "CRABKA[test] transactional Java producer status={} stdout={} stderr={}",
         producer_out.status,
         String::from_utf8_lossy(&producer_out.stdout),
         String::from_utf8_lossy(&producer_out.stderr),
     );
     assert!(
         producer_out.status.success(),
-        "kafka-verifiable-producer failed: stdout={}, stderr={}",
+        "transactional Java producer failed: stdout={}, stderr={}",
         String::from_utf8_lossy(&producer_out.stdout),
         String::from_utf8_lossy(&producer_out.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&producer_out.stdout).contains("TXNPROBE OK"),
+        "transactional Java producer did not report success: {}",
+        String::from_utf8_lossy(&producer_out.stdout),
     );
 
     // 3. Brief pause to let commit markers propagate through the log.
@@ -1206,10 +1262,8 @@ async fn transactional_console_producer_eos() {
     // not in the metadata image and have no crabka awaiter/metric.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // 4. Consume with `read_committed` via node 3. The consumer must see at
-    //    least 6 committed records. Aborted records (if any) are filtered out
-    //    by the broker's LSO + per-segment `.txnindex`.
-    let consume_out = docker_run_kafka_tool(&[
+    // 4. read_committed must return exactly the committed transaction.
+    let committed_out = docker_run_kafka_tool(&[
         "kafka-console-consumer",
         "--bootstrap-server",
         &bootstrap_3,
@@ -1223,11 +1277,57 @@ async fn transactional_console_producer_eos() {
         "--timeout-ms",
         "20000",
     ]);
-    let s = String::from_utf8_lossy(&consume_out.stdout);
-    let line_count = s.lines().filter(|l| !l.trim().is_empty()).count();
+    let committed_stdout = String::from_utf8_lossy(&committed_out.stdout);
+    let committed: Vec<_> = committed_stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     assert!(
-        line_count >= 6,
-        "read_committed should see at least 6 committed records, got {line_count}: {s}",
+        committed
+            == [
+                "committed-0",
+                "committed-1",
+                "committed-2",
+                "committed-3",
+                "committed-4",
+                "committed-5",
+            ],
+        "read_committed returned the wrong records: {committed_stdout}",
+    );
+
+    // 5. read_uncommitted must return both transactions in log order.
+    let uncommitted_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        &bootstrap_3,
+        "--topic",
+        TOPIC,
+        "--isolation-level",
+        "read_uncommitted",
+        "--from-beginning",
+        "--max-messages",
+        "8",
+        "--timeout-ms",
+        "20000",
+    ]);
+    let uncommitted_stdout = String::from_utf8_lossy(&uncommitted_out.stdout);
+    let uncommitted: Vec<_> = uncommitted_stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert!(
+        uncommitted
+            == [
+                "committed-0",
+                "committed-1",
+                "committed-2",
+                "committed-3",
+                "committed-4",
+                "committed-5",
+                "aborted-0",
+                "aborted-1",
+            ],
+        "read_uncommitted returned the wrong records: {uncommitted_stdout}",
     );
 
     for (h, _) in cluster {

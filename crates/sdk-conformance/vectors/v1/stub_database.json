@@ -1,0 +1,20 @@
+{
+  "id": "stub_database",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "database connect returns gated unimplemented",
+      "command": {
+        "cmd": "db_connect",
+        "name": "orders"
+      },
+      "expect": {
+        "error": {
+          "kind": "unimplemented",
+          "module": "database",
+          "gated_on": "chapter-f-control-plane"
+        }
+      }
+    }
+  ]
+}

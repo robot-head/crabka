@@ -285,7 +285,9 @@ mod tests {
                     host: String::new(),
                     port: 0,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }
@@ -369,7 +371,9 @@ mod tests {
                     host: String::new(),
                     port: 0,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }
@@ -557,7 +561,9 @@ mod tests {
                     host: String::new(),
                     port: 0,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }

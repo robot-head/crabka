@@ -204,8 +204,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub gssapi: Option<FileGssapiConfig>,
 
-    /// Credentials this broker uses to authenticate *to* peer brokers
-    /// (inter-broker initiate path). Only the `gssapi` variant is supported.
+    /// Credentials this broker uses to authenticate *to* peer brokers and
+    /// controller listeners (inter-broker initiate path).
     #[serde(default)]
     pub inter_broker_credentials: Option<FileInterBrokerCredentials>,
 
@@ -546,6 +546,9 @@ pub struct RuntimeFileConfig {
     pub share_group_record_lock_duration: Option<Time>,
     pub share_group_max_delivery_attempts: Option<i16>,
     pub share_group_max_inflight_records: Option<i32>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub share_group_backlog_poll_interval: Option<Time>,
     pub share_group_isolation_level: Option<String>,
     pub streams_group_enable: Option<bool>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
@@ -1048,8 +1051,8 @@ pub struct FileGssapiConfig {
 }
 
 /// TOML shape of `[inter_broker_credentials]`. A `type` discriminator
-/// selects the variant; only `gssapi` is implemented (PLAIN/SCRAM
-/// inter-broker over TOML is intentionally not exposed).
+/// selects the variant. PLAIN/SCRAM inter-broker over TOML remain
+/// intentionally unexposed.
 #[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum FileInterBrokerCredentials {
@@ -1059,6 +1062,12 @@ pub enum FileInterBrokerCredentials {
         #[serde(default)]
         service_name: Option<String>,
         kdc_url: String,
+    },
+    #[serde(rename = "oauth-bearer")]
+    OAuthBearer {
+        /// File containing the bearer token. A trailing newline is ignored.
+        /// The token itself never appears in the parsed config's `Debug` form.
+        token_path: std::path::PathBuf,
     },
 }
 
@@ -1725,18 +1734,36 @@ fn apply_config_tail(
             max_time_skew,
         });
     }
-    if let Some(FileInterBrokerCredentials::Gssapi {
-        keytab_path,
-        client_principal,
-        service_name,
-        kdc_url,
-    }) = tail.inter_broker_credentials
-    {
-        cfg.inter_broker_credentials = Some(crate::config::InterBrokerCredentials::Gssapi {
-            keytab_path,
-            client_principal,
-            service_name: service_name.unwrap_or_else(|| DEFAULT_KERBEROS_SERVICE_NAME.to_owned()),
-            kdc_url,
+    if let Some(credentials) = tail.inter_broker_credentials {
+        cfg.inter_broker_credentials = Some(match credentials {
+            FileInterBrokerCredentials::Gssapi {
+                keytab_path,
+                client_principal,
+                service_name,
+                kdc_url,
+            } => crate::config::InterBrokerCredentials::Gssapi {
+                keytab_path,
+                client_principal,
+                service_name: service_name
+                    .unwrap_or_else(|| DEFAULT_KERBEROS_SERVICE_NAME.to_owned()),
+                kdc_url,
+            },
+            FileInterBrokerCredentials::OAuthBearer { token_path } => {
+                let token = std::fs::read(&token_path).map_err(|error| {
+                    FileConfigError::InvalidConfig(format!(
+                        "cannot read inter-broker OAUTHBEARER token {}: {error}",
+                        token_path.display()
+                    ))
+                })?;
+                let token = token.trim_ascii();
+                if token.is_empty() || token.contains(&b'\x01') {
+                    return Err(FileConfigError::InvalidConfig(
+                        "inter-broker OAUTHBEARER token must be non-empty and contain no RFC 7628 separator"
+                            .into(),
+                    ));
+                }
+                crate::config::InterBrokerCredentials::OAuthBearer { token_path }
+            }
         });
     }
     if !tail.controller_quorum_voters.is_empty() {
@@ -2711,6 +2738,11 @@ impl RuntimeFileConfig {
             runtime,
             share_group_max_inflight_records,
             cfg.share_group.max_inflight_records
+        );
+        set_runtime_duration!(
+            runtime,
+            share_group_backlog_poll_interval,
+            cfg.share_group.backlog_poll_interval
         );
         if let Some(value) = runtime.share_group_isolation_level.take() {
             use crate::coordinator::unified::share::config::ShareIsolationLevel;
@@ -4798,6 +4830,54 @@ kdc_url = "tcp://kdc:88"
     }
 
     #[test]
+    fn apply_to_inter_broker_credentials_oauthbearer_reads_redacted_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "header.payload.\n").unwrap();
+        let src = format!(
+            r#"
+[inter_broker_credentials]
+type = "oauth-bearer"
+token_path = "{}"
+"#,
+            token_path.display()
+        );
+        let file: FileConfig = toml::from_str(&src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+
+        let Some(crate::config::InterBrokerCredentials::OAuthBearer {
+            token_path: actual_path,
+        }) = cfg.inter_broker_credentials
+        else {
+            panic!("expected OAuthBearer credentials");
+        };
+        assert!(actual_path == token_path);
+        assert!(!format!("{actual_path:?}").contains("header.payload"));
+    }
+
+    #[test]
+    fn apply_to_inter_broker_credentials_oauthbearer_rejects_empty_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "\n").unwrap();
+        let src = format!(
+            r#"
+[inter_broker_credentials]
+type = "oauth-bearer"
+token_path = "{}"
+"#,
+            token_path.display()
+        );
+        let file: FileConfig = toml::from_str(&src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        let error = file
+            .apply_to(&mut cfg)
+            .expect_err("empty bearer token is rejected");
+        assert!(error.to_string().contains("token must be non-empty"));
+    }
+
+    #[test]
     fn file_config_schema_generates() {
         let schema = schemars::schema_for!(FileConfig);
         let value = serde_json::to_value(&schema).expect("schema serializes");
@@ -4934,6 +5014,7 @@ controller_fetch_miss_limit = 7
 metadata_raft_command_queue_capacity = 512
 metadata_raft_fetch_max = "4MiB"
 share_group_max_size = 17
+share_group_backlog_poll_interval = "250ms"
 streams_group_enable = false
 streams_group_max_size = 19
 "#,
@@ -4970,6 +5051,7 @@ streams_group_max_size = 19
         assert!(cfg.diskless_wal_trim_safety_lag == 0);
         assert!(cfg.diskless_wal_index_projection_timeout == secs(3));
         assert!(cfg.share_group.max_size == 17);
+        assert!(cfg.share_group.backlog_poll_interval == std::time::Duration::from_millis(250));
         assert!(!cfg.streams_group.enable);
         assert!(cfg.streams_group.max_size == 19);
     }

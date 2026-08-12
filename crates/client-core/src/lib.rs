@@ -67,7 +67,10 @@ mod version;
 #[cfg(any(test, feature = "mock"))]
 mod mock;
 
-pub use client::{BrokerHandle, Client};
+pub use client::{
+    BrokerHandle, Client, DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER,
+    MetadataRecoveryRebootstrapTrigger, MetadataRecoveryStrategy,
+};
 pub use connection::{
     ClientDnsTimeout, ClientDuplex, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
     ConnectionOptions, DEFAULT_CLIENT_CONNECT_TIMEOUT, DEFAULT_CLIENT_DNS_TIMEOUT,

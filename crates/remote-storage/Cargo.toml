@@ -18,6 +18,7 @@ categories = ["database-implementations", "filesystem"]
 workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 bytes = { workspace = true }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-object-store = { version = "0.3.8", path = "../object-store" }
@@ -30,5 +31,8 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+crabka-log = { version = "0.3.9", path = "../log" }
+crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

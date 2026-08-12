@@ -386,7 +386,9 @@ mod tests {
             host: "legacy-host".to_string(),
             port: 1000,
             rack: Some("rack-a".to_string()),
+            log_dirs: vec![],
             endpoints,
+            features: std::collections::BTreeMap::new(),
         }
     }
 

@@ -6,10 +6,9 @@
 //! headless `Service` owned by the parent `Kafka` (looked up via the
 //! `crabka.io/cluster` label).
 //!
-//! Constraints: pools must be mixed `{Controller, Broker}`,
-//! `replicas` must equal 1, and `nodeIdStart` must lie in `0..=999_999`.
-//! Validation errors surface as a `Ready=False` condition without
-//! attempting any further reconcile.
+//! A pool can contain controller nodes, broker nodes, or combined nodes.
+//! Pod ordinals map to consecutive node ids. Validation errors surface as a
+//! `Ready=False` condition without attempting any further reconcile.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -22,7 +21,7 @@ use futures::StreamExt as _;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
-        core::v1::{PersistentVolumeClaim, Pod, ResourceRequirements, Secret},
+        core::v1::{PersistentVolumeClaim, Pod, PodSpec, ResourceRequirements, Secret},
     },
     apimachinery::pkg::api::resource::Quantity,
 };
@@ -54,6 +53,9 @@ use crate::{
 /// `PodMonitor` / `ServiceMonitor` endpoints.
 pub(crate) const METRICS_PORT: i32 = 9404;
 const FINALIZER: &str = "crabka.io/kafka-node-pool-finalizer";
+const MAX_NODE_ID: i32 = 999_999;
+const NODE_ID_START_ANNOTATION: &str = "crabka.io/node-id-start";
+const PROCESS_ROLES_ANNOTATION: &str = "crabka.io/process-roles";
 
 /// Validation errors for a `KafkaNodePool`. Each variant maps to a
 /// distinct condition reason; the operator surfaces the variant as
@@ -61,12 +63,42 @@ const FINALIZER: &str = "crabka.io/kafka-node-pool-finalizer";
 /// is corrected.
 #[derive(Debug, thiserror::Error)]
 pub enum PoolValidationError {
-    #[error("spec.roles must equal {{Controller, Broker}}; got {0:?}")]
-    RolesNotMixed(Vec<NodeRole>),
-    #[error("spec.replicas={0} is unsupported (only 1 allowed)")]
-    ReplicasNotOne(i32),
+    #[error("spec.roles must contain at least one role")]
+    RolesEmpty,
+    #[error("spec.roles contains duplicate role {0:?}")]
+    DuplicateRole(NodeRole),
+    #[error("spec.replicas={0} must be at least 1")]
+    ReplicasInvalid(i32),
     #[error("spec.nodeIdStart={0} is out of range 0..=999999")]
     NodeIdOutOfRange(i32),
+    #[error(
+        "node-id range for pool {pool:?} exceeds 0..=999999 (start={start}, replicas={replicas})"
+    )]
+    NodeIdRangeOutOfRange {
+        pool: String,
+        start: i32,
+        replicas: i32,
+    },
+    #[error("node-id ranges overlap between pools {first:?} and {second:?}")]
+    NodeIdRangeOverlap { first: String, second: String },
+    #[error(
+        "spec.nodeIdStart changed for pool {pool:?} from observed {observed} to desired {desired}: immutable"
+    )]
+    NodeIdStartChanged {
+        pool: String,
+        observed: i32,
+        desired: i32,
+    },
+    #[error(
+        "spec.roles changed for pool {pool:?} from observed {observed} to desired {desired}: immutable"
+    )]
+    RolesChanged {
+        pool: String,
+        observed: String,
+        desired: String,
+    },
+    #[error("the cluster has no Controller-role node")]
+    NoControllerNodes,
     #[error("metadata.labels.\"crabka.io/cluster\" missing")]
     MissingClusterLabel,
     #[error("spec.storage.size={0:?} is not a valid positive Quantity ({1})")]
@@ -95,21 +127,24 @@ pub enum PoolValidationError {
 
 /// Validate a `KafkaNodePool` spec against its invariants.
 pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> {
-    let roles: HashSet<NodeRole> = pool.spec.roles.iter().copied().collect();
-    let expected: HashSet<NodeRole> = [NodeRole::Controller, NodeRole::Broker]
-        .into_iter()
-        .collect();
-    if roles != expected {
-        return Err(PoolValidationError::RolesNotMixed(pool.spec.roles.clone()));
+    if pool.spec.roles.is_empty() {
+        return Err(PoolValidationError::RolesEmpty);
     }
-    if pool.spec.replicas != 1 {
-        return Err(PoolValidationError::ReplicasNotOne(pool.spec.replicas));
+    let mut roles = HashSet::new();
+    for role in &pool.spec.roles {
+        if !roles.insert(*role) {
+            return Err(PoolValidationError::DuplicateRole(*role));
+        }
     }
-    if !(0..=999_999).contains(&pool.spec.node_id_start) {
+    if pool.spec.replicas < 1 {
+        return Err(PoolValidationError::ReplicasInvalid(pool.spec.replicas));
+    }
+    if !(0..=MAX_NODE_ID).contains(&pool.spec.node_id_start) {
         return Err(PoolValidationError::NodeIdOutOfRange(
             pool.spec.node_id_start,
         ));
     }
+    node_id_end(pool)?;
     match pool.spec.storage.as_ref() {
         Some(Storage::PersistentClaim(pc)) => {
             common::parse_quantity(&pc.size)
@@ -137,15 +172,323 @@ pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> 
     Ok(())
 }
 
+fn node_id_end(pool: &KafkaNodePool) -> Result<i32, PoolValidationError> {
+    node_id_end_for_replicas(pool, pool.spec.replicas)
+}
+
+fn node_id_end_for_replicas(
+    pool: &KafkaNodePool,
+    replicas: i32,
+) -> Result<i32, PoolValidationError> {
+    replicas
+        .checked_sub(1)
+        .and_then(|last_ordinal| pool.spec.node_id_start.checked_add(last_ordinal))
+        .filter(|end| *end <= MAX_NODE_ID)
+        .ok_or_else(|| PoolValidationError::NodeIdRangeOutOfRange {
+            pool: pool.name_any(),
+            start: pool.spec.node_id_start,
+            replicas,
+        })
+}
+
+fn observed_statefulset_replicas(statefulset: &StatefulSet) -> i32 {
+    let mut replicas = statefulset
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.replicas)
+        .unwrap_or_default();
+    if let Some(status) = statefulset.status.as_ref() {
+        replicas = replicas
+            .max(status.replicas)
+            .max(status.available_replicas.unwrap_or_default())
+            .max(status.current_replicas.unwrap_or_default())
+            .max(status.ready_replicas.unwrap_or_default())
+            .max(status.updated_replicas.unwrap_or_default());
+    }
+    replicas.max(0)
+}
+
+fn observed_pool_replicas(pool: &KafkaNodePool, statefulsets: &[StatefulSet]) -> i32 {
+    let pool_name = pool.name_any();
+    statefulsets
+        .iter()
+        .filter(|statefulset| {
+            statefulset
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get("crabka.io/pool"))
+                == Some(&pool_name)
+        })
+        .map(observed_statefulset_replicas)
+        .max()
+        .unwrap_or_default()
+}
+
+fn observed_pool_pod_replicas(pods: &[Pod], statefulset_name: &str) -> i32 {
+    let prefix = format!("{statefulset_name}-");
+    pods.iter()
+        .filter_map(|pod| pod.metadata.name.as_deref())
+        .filter_map(|name| name.strip_prefix(&prefix))
+        .filter_map(|ordinal| ordinal.parse::<i32>().ok())
+        .filter_map(|ordinal| ordinal.checked_add(1))
+        .max()
+        .unwrap_or_default()
+}
+
+fn pool_labels_match(labels: Option<&BTreeMap<String, String>>, pool_name: &str) -> bool {
+    labels
+        .and_then(|values| values.get("crabka.io/pool"))
+        .is_some_and(|value| value == pool_name)
+}
+
+fn observed_pool_pods_replicas(pool: &KafkaNodePool, pods: &[Pod]) -> i32 {
+    let pool_name = pool.name_any();
+    pods.iter()
+        .filter(|pod| pool_labels_match(pod.metadata.labels.as_ref(), &pool_name))
+        .filter_map(|pod| pod.metadata.name.as_deref())
+        .filter_map(|name| name.rsplit_once('-').map(|(_, ordinal)| ordinal))
+        .filter_map(|ordinal| ordinal.parse::<i32>().ok())
+        .filter_map(|ordinal| ordinal.checked_add(1))
+        .max()
+        .unwrap_or_default()
+}
+
+fn node_id_start_from_pod_spec(spec: Option<&PodSpec>) -> Option<i32> {
+    spec?
+        .init_containers
+        .as_ref()?
+        .iter()
+        .flat_map(|container| container.env.as_deref().unwrap_or_default())
+        .find(|env| env.name == "NODE_ID_START")?
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
+}
+
+fn annotation_value<'a>(
+    annotations: Option<&'a BTreeMap<String, String>>,
+    key: &str,
+) -> Option<&'a str> {
+    annotations?.get(key).map(String::as_str)
+}
+
+fn role_mask(roles: &[NodeRole]) -> u8 {
+    let broker = u8::from(roles.contains(&NodeRole::Broker));
+    let controller = u8::from(roles.contains(&NodeRole::Controller)) << 1;
+    broker | controller
+}
+
+fn role_mask_name(mask: u8) -> &'static str {
+    match mask {
+        1 => "broker",
+        2 => "controller",
+        3 => "broker,controller",
+        _ => "none",
+    }
+}
+
+fn parse_role_mask(value: &str) -> Option<u8> {
+    let mask = value.split(',').fold(0, |mask, role| match role.trim() {
+        "broker" => mask | 1,
+        "controller" => mask | 2,
+        _ => mask,
+    });
+    (mask != 0).then_some(mask)
+}
+
+fn role_mask_from_labels(labels: Option<&BTreeMap<String, String>>) -> Option<u8> {
+    let labels = labels?;
+    let broker = labels
+        .get("crabka.io/broker-role")
+        .is_some_and(|value| value == "true");
+    let controller = labels
+        .get("crabka.io/controller-role")
+        .is_some_and(|value| value == "true");
+    (broker || controller).then_some(u8::from(broker) | (u8::from(controller) << 1))
+}
+
+fn role_mask_from_pod_spec(spec: Option<&PodSpec>) -> Option<u8> {
+    let spec = spec?;
+    let configured = spec
+        .containers
+        .iter()
+        .flat_map(|container| container.env.as_deref().unwrap_or_default())
+        .find(|env| env.name == "CRABKA_PROCESS_ROLES")
+        .and_then(|env| env.value.as_deref());
+    match configured {
+        Some(value) => parse_role_mask(value),
+        // Older operator-rendered combined-role pods omitted the variable;
+        // the broker default was `broker,controller`.
+        None => Some(3),
+    }
+}
+
+fn observed_statefulset_identity(statefulset: &StatefulSet) -> (Option<i32>, Option<u8>) {
+    let template = statefulset.spec.as_ref().map(|spec| &spec.template);
+    let start = annotation_value(
+        statefulset.metadata.annotations.as_ref(),
+        NODE_ID_START_ANNOTATION,
+    )
+    .or_else(|| {
+        template.and_then(|template| {
+            annotation_value(
+                template
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.annotations.as_ref()),
+                NODE_ID_START_ANNOTATION,
+            )
+        })
+    })
+    .and_then(|value| value.parse().ok())
+    .or_else(|| node_id_start_from_pod_spec(template.and_then(|template| template.spec.as_ref())));
+    let roles = annotation_value(
+        statefulset.metadata.annotations.as_ref(),
+        PROCESS_ROLES_ANNOTATION,
+    )
+    .or_else(|| {
+        template.and_then(|template| {
+            annotation_value(
+                template
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.annotations.as_ref()),
+                PROCESS_ROLES_ANNOTATION,
+            )
+        })
+    })
+    .and_then(parse_role_mask)
+    .or_else(|| {
+        template.and_then(|template| {
+            role_mask_from_labels(
+                template
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.labels.as_ref()),
+            )
+        })
+    })
+    .or_else(|| template.and_then(|template| role_mask_from_pod_spec(template.spec.as_ref())));
+    (start, roles)
+}
+
+fn observed_pod_identity(pod: &Pod) -> (Option<i32>, Option<u8>) {
+    let start = annotation_value(pod.metadata.annotations.as_ref(), NODE_ID_START_ANNOTATION)
+        .and_then(|value| value.parse().ok())
+        .or_else(|| node_id_start_from_pod_spec(pod.spec.as_ref()));
+    let roles = annotation_value(pod.metadata.annotations.as_ref(), PROCESS_ROLES_ANNOTATION)
+        .and_then(parse_role_mask)
+        .or_else(|| role_mask_from_labels(pod.metadata.labels.as_ref()))
+        .or_else(|| role_mask_from_pod_spec(pod.spec.as_ref()));
+    (start, roles)
+}
+
+fn observed_pool_identity(
+    pool: &KafkaNodePool,
+    statefulsets: &[StatefulSet],
+    pods: &[Pod],
+) -> (Option<i32>, Option<u8>) {
+    let pool_name = pool.name_any();
+    let from_statefulset = statefulsets
+        .iter()
+        .find(|statefulset| pool_labels_match(statefulset.metadata.labels.as_ref(), &pool_name))
+        .map(observed_statefulset_identity)
+        .unwrap_or_default();
+    let from_pod = pods
+        .iter()
+        .find(|pod| pool_labels_match(pod.metadata.labels.as_ref(), &pool_name))
+        .map(observed_pod_identity)
+        .unwrap_or_default();
+    (
+        from_statefulset.0.or(from_pod.0),
+        from_statefulset.1.or(from_pod.1),
+    )
+}
+
+/// Validate cluster-wide node identities and controller availability.
+///
+/// Live `StatefulSet` replicas extend a pool's occupied range until Kubernetes
+/// has removed them, preventing a concurrent shrink/add from reusing node ids.
+pub(crate) fn validate_topology(
+    pools: &[KafkaNodePool],
+    statefulsets: &[StatefulSet],
+    pods: &[Pod],
+) -> Result<(), PoolValidationError> {
+    if pools.is_empty() {
+        return Ok(());
+    }
+    let mut ranges = Vec::with_capacity(pools.len());
+    let mut has_controller = false;
+    for pool in pools {
+        validate(pool)?;
+        let (observed_start, observed_roles) = observed_pool_identity(pool, statefulsets, pods);
+        if let Some(observed) = observed_start
+            && observed != pool.spec.node_id_start
+        {
+            return Err(PoolValidationError::NodeIdStartChanged {
+                pool: pool.name_any(),
+                observed,
+                desired: pool.spec.node_id_start,
+            });
+        }
+        let desired_roles = role_mask(&pool.spec.roles);
+        if let Some(observed) = observed_roles
+            && observed != desired_roles
+        {
+            return Err(PoolValidationError::RolesChanged {
+                pool: pool.name_any(),
+                observed: role_mask_name(observed).to_string(),
+                desired: role_mask_name(desired_roles).to_string(),
+            });
+        }
+        has_controller |= pool.spec.roles.contains(&NodeRole::Controller);
+        let replicas = pool
+            .spec
+            .replicas
+            .max(observed_pool_replicas(pool, statefulsets))
+            .max(observed_pool_pods_replicas(pool, pods));
+        ranges.push((
+            pool.spec.node_id_start,
+            node_id_end_for_replicas(pool, replicas)?,
+            pool.name_any(),
+        ));
+    }
+    if !has_controller {
+        return Err(PoolValidationError::NoControllerNodes);
+    }
+    ranges.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+    for pair in ranges.windows(2) {
+        if pair[1].0 <= pair[0].1 {
+            return Err(PoolValidationError::NodeIdRangeOverlap {
+                first: pair[0].2.clone(),
+                second: pair[1].2.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn select_quorum_bootstrap(pools: &[KafkaNodePool]) -> Option<common::QuorumBootstrapController> {
     pools
         .iter()
-        .filter(|pool| validate(pool).is_ok())
+        .filter(|pool| validate(pool).is_ok() && pool.spec.roles.contains(&NodeRole::Controller))
         .min_by_key(|pool| (pool.spec.node_id_start, pool.name_any()))
         .map(|pool| common::QuorumBootstrapController {
             node_id: pool.spec.node_id_start,
             pool: pool.name_any(),
         })
+}
+
+fn pool_is_available(pool: &KafkaNodePool) -> bool {
+    pool.status.as_ref().is_some_and(|status| {
+        status.ready_replicas.unwrap_or(0) >= pool.spec.replicas
+            && status
+                .conditions
+                .iter()
+                .any(|condition| condition.type_ == "Ready" && condition.status == "True")
+    })
 }
 
 /// JBOD volumes sorted ascending by id. Empty for non-JBOD storage.
@@ -203,6 +546,7 @@ fn jbod_extra_mounts(storage: Option<&Storage>) -> Vec<(String, String)> {
 const INIT_SCRIPT: &str = "set -eu\n\
 ORDINAL=\"${HOSTNAME##*-}\"\n\
 NODE_ID=$((NODE_ID_START + ORDINAL))\n\
+CRABKA_DIRECTORY_ID=\"$(cat \"/etc/crabka/cluster-id/quorumDirectoryId-${NODE_ID}\")\"\n\
 mkdir -p /var/lib/crabka/data\n\
 rm -rf /var/lib/crabka/data/lost+found\n\
 if [ ! -f /var/lib/crabka/data/.formatted ]; then\n\
@@ -303,13 +647,15 @@ fn render_init_container(
             { "name": "CRABKA_POOL_NAME", "value": pool_name },
             { "name": "CRABKA_HEADLESS_SERVICE", "value": headless_service_name },
             { "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } },
-            { "name": "CRABKA_DIRECTORY_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": common::quorum_directory_id_key(node_id_start) } } },
             { "name": "CRABKA_QUORUM_BOOTSTRAP_NODE_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": common::QUORUM_BOOTSTRAP_NODE_ID_KEY } } },
             { "name": "CRABKA_QUORUM_BOOTSTRAP_POOL", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": common::QUORUM_BOOTSTRAP_POOL_KEY } } },
             { "name": "CRABKA_QUORUM_BOOTSTRAP_INITIALIZED", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": common::QUORUM_BOOTSTRAP_INITIALIZED_KEY } } },
             { "name": "CRABKA_METADATA_VERSION", "value": metadata_version.to_string() }
         ],
-        "volumeMounts": [{ "name": "data", "mountPath": "/var/lib/crabka/data" }],
+        "volumeMounts": [
+            { "name": "data", "mountPath": "/var/lib/crabka/data" },
+            { "name": "cluster-id", "mountPath": "/etc/crabka/cluster-id", "readOnly": true }
+        ],
         "securityContext": {
             "allowPrivilegeEscalation": false,
             "readOnlyRootFilesystem": true,
@@ -331,6 +677,7 @@ struct BrokerContainerSpec<'a> {
     delegation_token: Option<&'a crate::crd::kafka::DelegationTokenConfig>,
     tiered_storage: Option<&'a crate::crd::kafka::TieredStorage>,
     tracing: Option<&'a crate::crd::kafka::Tracing>,
+    process_roles: Option<&'a str>,
     client_resource_policy: (
         Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
         Option<crabka_client_core::ClientFrameMax>,
@@ -353,6 +700,7 @@ fn render_broker_container(spec: BrokerContainerSpec<'_>) -> serde_json::Value {
         delegation_token,
         tiered_storage,
         tracing,
+        process_roles,
         client_resource_policy,
     } = spec;
     let (metrics_enabled, logging_enabled, gssapi_keytab, krb5_conf) = features;
@@ -374,6 +722,9 @@ fn render_broker_container(spec: BrokerContainerSpec<'_>) -> serde_json::Value {
         json!({ "name": "POD_NAMESPACE", "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } } }),
         json!({ "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } }),
     ];
+    if let Some(roles) = process_roles {
+        env.push(json!({ "name": "CRABKA_PROCESS_ROLES", "value": roles }));
+    }
     append_logging_env(&mut env, logging_enabled, cm_name);
     append_jbod_env(&mut env, jbod_extra_mounts);
     // When `Kafka.spec.delegationToken` is set, source the
@@ -718,6 +1069,13 @@ fn render_storage(
             "defaultMode": 0o400_i32,
         }
     });
+    let cluster_id_vol = json!({
+        "name": "cluster-id",
+        "secret": {
+            "secretName": format!("{parent_name}-cluster-id"),
+            "defaultMode": 0o400_i32,
+        }
+    });
     let (mut volumes, mut templates) = match storage {
         None | Some(Storage::Ephemeral) => {
             let volumes = json!([
@@ -727,6 +1085,7 @@ fn render_storage(
                 cluster_ca_cert_vol,
                 broker_tls_vol,
                 clients_ca_cert_vol,
+                cluster_id_vol,
             ]);
             (volumes, Vec::new())
         }
@@ -739,6 +1098,7 @@ fn render_storage(
                     cluster_ca_cert_vol,
                     broker_tls_vol,
                     clients_ca_cert_vol,
+                    cluster_id_vol,
                 ]),
                 vec![template],
             )
@@ -762,6 +1122,7 @@ fn render_storage(
                     cluster_ca_cert_vol,
                     broker_tls_vol,
                     clients_ca_cert_vol,
+                    cluster_id_vol,
                 ]),
                 templates,
             )
@@ -954,6 +1315,17 @@ fn resolved_metadata_version(parent: &Kafka) -> String {
     }
 }
 
+fn separated_process_roles(roles: &[NodeRole]) -> Option<&'static str> {
+    match (
+        roles.contains(&NodeRole::Controller),
+        roles.contains(&NodeRole::Broker),
+    ) {
+        (true, false) => Some("controller"),
+        (false, true) => Some("broker"),
+        (true, true) | (false, false) => None,
+    }
+}
+
 /// Render the `StatefulSet` for a pool. Naming: `<parent>-<pool>`,
 /// served from the parent's shared headless `Service`
 /// `<parent>-broker-headless`. Owner-ref points to the pool, not the
@@ -1077,12 +1449,19 @@ pub(crate) fn render_statefulset(
         delegation_token: parent.spec.delegation_token.as_ref(),
         tiered_storage,
         tracing: parent.spec.tracing.as_ref(),
+        process_roles: separated_process_roles(&pool.spec.roles),
         client_resource_policy,
     });
 
     // Merge user-provided pod metadata under operator-owned labels.
     // Operator labels win collisions; user labels fill in the rest.
     let mut pod_labels = labels.clone();
+    if pool.spec.roles.contains(&NodeRole::Controller) {
+        pod_labels.insert("crabka.io/controller-role".into(), "true".into());
+    }
+    if pool.spec.roles.contains(&NodeRole::Broker) {
+        pod_labels.insert("crabka.io/broker-role".into(), "true".into());
+    }
     let mut pod_annotations: BTreeMap<String, String> = BTreeMap::new();
     if let Some(meta) = pool
         .spec
@@ -1111,6 +1490,12 @@ pub(crate) fn render_statefulset(
     {
         pod_annotations.insert("crabka.io/config-hash".into(), hash.clone());
     }
+    let process_roles = role_mask_name(role_mask(&pool.spec.roles));
+    pod_annotations.insert(
+        NODE_ID_START_ANNOTATION.into(),
+        pool.spec.node_id_start.to_string(),
+    );
+    pod_annotations.insert(PROCESS_ROLES_ANNOTATION.into(), process_roles.into());
 
     let mut template_meta = json!({ "labels": pod_labels });
     if !pod_annotations.is_empty() {
@@ -1211,6 +1596,10 @@ pub(crate) fn render_statefulset(
             "name": sts_name,
             "namespace": namespace,
             "labels": labels,
+            "annotations": {
+                (NODE_ID_START_ANNOTATION): pool.spec.node_id_start.to_string(),
+                (PROCESS_ROLES_ANNOTATION): process_roles,
+            },
             "ownerReferences": [owner_ref::<KafkaNodePool>(pool)?],
         },
         "spec": sts_spec,
@@ -1402,17 +1791,59 @@ fn storage_kind(s: Option<&Storage>) -> &'static str {
 /// (and the e2e tests) match on.
 fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
     let (reason, message) = match err {
-        PoolValidationError::RolesNotMixed(roles) => (
-            "RolesNotMixed",
-            format!("spec.roles must equal {{Controller, Broker}}; got {roles:?}"),
+        PoolValidationError::RolesEmpty => (
+            "RolesEmpty",
+            "spec.roles must contain at least one role".to_string(),
         ),
-        PoolValidationError::ReplicasNotOne(n) => (
-            "UnsupportedReplicaCount",
-            format!("spec.replicas={n} is unsupported (only 1 allowed)"),
+        PoolValidationError::DuplicateRole(role) => (
+            "DuplicateRole",
+            format!("spec.roles contains duplicate role {role:?}"),
+        ),
+        PoolValidationError::ReplicasInvalid(n) => (
+            "InvalidReplicaCount",
+            format!("spec.replicas={n} must be at least 1"),
         ),
         PoolValidationError::NodeIdOutOfRange(n) => (
             "NodeIdOutOfRange",
             format!("spec.nodeIdStart={n} is out of range 0..=999999"),
+        ),
+        PoolValidationError::NodeIdRangeOutOfRange {
+            pool,
+            start,
+            replicas,
+        } => (
+            "NodeIdRangeOutOfRange",
+            format!(
+                "node-id range for pool {pool:?} exceeds 0..=999999 (start={start}, replicas={replicas})"
+            ),
+        ),
+        PoolValidationError::NodeIdRangeOverlap { first, second } => (
+            "NodeIdRangeOverlap",
+            format!("node-id ranges overlap between pools {first:?} and {second:?}"),
+        ),
+        PoolValidationError::NodeIdStartChanged {
+            pool,
+            observed,
+            desired,
+        } => (
+            "NodeIdStartImmutable",
+            format!(
+                "spec.nodeIdStart changed for pool {pool:?} from observed {observed} to desired {desired}"
+            ),
+        ),
+        PoolValidationError::RolesChanged {
+            pool,
+            observed,
+            desired,
+        } => (
+            "RolesImmutable",
+            format!(
+                "spec.roles changed for pool {pool:?} from observed {observed} to desired {desired}"
+            ),
+        ),
+        PoolValidationError::NoControllerNodes => (
+            "NoControllerNodes",
+            "the cluster has no Controller-role node".to_string(),
         ),
         PoolValidationError::MissingClusterLabel => (
             "MissingClusterLabel",
@@ -1528,8 +1959,43 @@ async fn reconcile_deletion(
 
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), namespace);
     let sts_name = format!("{cluster}-{name}");
+    let observed_sts = sts_api.get_opt(&sts_name).await?;
+    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+    let pods = pod_api
+        .list(&ListParams::default().labels(&format!(
+            "app.kubernetes.io/instance={cluster},crabka.io/pool={name}"
+        )))
+        .await?;
+    let observed_replicas = pool
+        .spec
+        .replicas
+        .max(
+            observed_sts
+                .as_ref()
+                .map(observed_statefulset_replicas)
+                .unwrap_or_default(),
+        )
+        .max(observed_pool_pod_replicas(&pods.items, &sts_name));
+    let observed_identity = observed_sts
+        .as_ref()
+        .map(observed_statefulset_identity)
+        .unwrap_or_default();
+    let pod_identity = pods
+        .items
+        .first()
+        .map(observed_pod_identity)
+        .unwrap_or_default();
+    let observed_node_id_start = observed_identity
+        .0
+        .or(pod_identity.0)
+        .unwrap_or(pool.spec.node_id_start);
+    let observed_roles = observed_identity
+        .1
+        .or(pod_identity.1)
+        .unwrap_or_else(|| role_mask(&pool.spec.roles));
+    let statefulset_exists = observed_sts.is_some();
     let scale_down = async {
-        if sts_api.get_opt(&sts_name).await?.is_some() {
+        if statefulset_exists {
             let params = PatchParams {
                 field_manager: Some(common::FIELD_MANAGER.into()),
                 ..Default::default()
@@ -1547,12 +2013,6 @@ async fn reconcile_deletion(
 
     if parent.is_none_or(|parent| parent.meta().deletion_timestamp.is_some()) {
         scale_down.await?;
-        let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
-        let pods = pod_api
-            .list(&ListParams::default().labels(&format!(
-                "app.kubernetes.io/instance={cluster},crabka.io/pool={name}"
-            )))
-            .await?;
         if !pods.items.is_empty() {
             return Ok(common::requeue(ctx.config.controller_dependency_requeue));
         }
@@ -1560,73 +2020,75 @@ async fn reconcile_deletion(
         return Ok(Action::await_change());
     }
 
-    /*
-     * Keep the voter alive until the reduced voter set commits. In particular,
-     * stopping either member of a two-voter quorum first would leave no
-     * majority able to commit its removal.
-     */
-    let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), namespace);
-    let secret = secret_api.get(&format!("{cluster}-cluster-id")).await?;
-    let cluster_id = common::uuid_from_secret(&secret)?;
-    let bootstrap = quorum_bootstrap_address(cluster, namespace);
-    let admin = match ctx.admin_client_for(cluster, &bootstrap).await {
-        Ok(admin) => admin,
-        Err(error) => {
-            tracing::warn!(%error, %cluster, "quorum admin connection failed during pool deletion");
-            return Ok(common::requeue(ctx.config.controller_error_requeue));
-        }
-    };
-    let mut admin = admin.lock().await;
-    let quorum = match admin.describe_metadata_quorum().await {
-        Ok(quorum) => quorum,
-        Err(error) => {
-            tracing::warn!(%error, %cluster, "DescribeQuorum failed during pool deletion");
-            drop(admin);
-            ctx.drop_admin_client(cluster).await;
-            return Ok(common::requeue(ctx.config.controller_error_requeue));
-        }
-    };
-    let target = quorum
-        .voters
-        .iter()
-        .find(|voter| voter.node_id == pool.spec.node_id_start)
-        .cloned();
-    if let Some(target) = target {
-        if quorum.voters.len() == 1 {
-            drop(admin);
-            patch_status_for_pool(
-                pool_api,
-                name,
-                condition(
-                    "Ready",
-                    "False",
-                    "LastVoterDeletionBlocked",
-                    "cannot delete the last metadata-quorum voter",
-                ),
-            )
-            .await?;
+    if observed_roles & 2 != 0 {
+        /*
+         * Keep each voter alive until its removal commits. Removing one node
+         * per reconcile keeps every membership change observable.
+         */
+        let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), namespace);
+        let secret = secret_api.get(&format!("{cluster}-cluster-id")).await?;
+        let cluster_id = common::uuid_from_secret(&secret)?;
+        let bootstrap = quorum_bootstrap_address(cluster, namespace);
+        let admin = match ctx.admin_client_for(cluster, &bootstrap).await {
+            Ok(admin) => admin,
+            Err(error) => {
+                tracing::warn!(%error, %cluster, "quorum admin connection failed during pool deletion");
+                return Ok(common::requeue(ctx.config.controller_error_requeue));
+            }
+        };
+        let mut admin = admin.lock().await;
+        let quorum = match admin.describe_metadata_quorum().await {
+            Ok(quorum) => quorum,
+            Err(error) => {
+                tracing::warn!(%error, %cluster, "DescribeQuorum failed during pool deletion");
+                drop(admin);
+                ctx.drop_admin_client(cluster).await;
+                return Ok(common::requeue(ctx.config.controller_error_requeue));
+            }
+        };
+        let node_id_end = observed_node_id_start
+            .checked_add(observed_replicas - 1)
+            .filter(|end| *end <= MAX_NODE_ID)
+            .ok_or_else(|| {
+                ReconcileError::Malformed("observed controller node-id range overflow".into())
+            })?;
+        let target = quorum
+            .voters
+            .iter()
+            .filter(|voter| (observed_node_id_start..=node_id_end).contains(&voter.node_id))
+            .max_by_key(|voter| voter.node_id)
+            .cloned();
+        if let Some(target) = target {
+            if quorum.voters.len() == 1 {
+                drop(admin);
+                patch_status_for_pool(
+                    pool_api,
+                    name,
+                    condition(
+                        "Ready",
+                        "False",
+                        "LastVoterDeletionBlocked",
+                        "cannot delete the last metadata-quorum voter",
+                    ),
+                )
+                .await?;
+                return Ok(common::requeue(ctx.config.controller_dependency_requeue));
+            }
+            if let Err(error) = admin
+                .remove_raft_voter(cluster_id, target.node_id, target.directory_id)
+                .await
+            {
+                tracing::warn!(%error, node_id = target.node_id, "RemoveRaftVoter failed during pool deletion");
+                drop(admin);
+                ctx.drop_admin_client(cluster).await;
+                return Ok(common::requeue(ctx.config.controller_error_requeue));
+            }
             return Ok(common::requeue(ctx.config.controller_dependency_requeue));
         }
-        if let Err(error) = admin
-            .remove_raft_voter(cluster_id, target.node_id, target.directory_id)
-            .await
-        {
-            tracing::warn!(%error, node_id = target.node_id, "RemoveRaftVoter failed during pool deletion");
-            drop(admin);
-            ctx.drop_admin_client(cluster).await;
-            return Ok(common::requeue(ctx.config.controller_error_requeue));
-        }
-        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
+        drop(admin);
     }
-    drop(admin);
 
     scale_down.await?;
-    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
-    let pods = pod_api
-        .list(&ListParams::default().labels(&format!(
-            "app.kubernetes.io/instance={cluster},crabka.io/pool={name}"
-        )))
-        .await?;
     if !pods.items.is_empty() {
         return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     }
@@ -1743,6 +2205,163 @@ pub async fn reconcile(
     .await
 }
 
+struct ControllerScaleDownInput<'a> {
+    pool: &'a KafkaNodePool,
+    observed: Option<&'a StatefulSet>,
+    secret_api: &'a Api<Secret>,
+    pool_api: &'a Api<KafkaNodePool>,
+    ctx: &'a Context,
+    namespace: &'a str,
+    cluster: &'a str,
+    name: &'a str,
+}
+
+async fn reconcile_controller_scale_down(
+    input: ControllerScaleDownInput<'_>,
+) -> Result<Option<Action>, ReconcileError> {
+    let Some(observed_replicas) = input
+        .observed
+        .and_then(|stateful_set| stateful_set.spec.as_ref())
+        .and_then(|spec| spec.replicas)
+    else {
+        return Ok(None);
+    };
+    let observed_identity = input
+        .observed
+        .map(observed_statefulset_identity)
+        .unwrap_or_default();
+    let observed_roles = observed_identity
+        .1
+        .unwrap_or_else(|| role_mask(&input.pool.spec.roles));
+    if observed_roles & 2 == 0 || observed_replicas <= input.pool.spec.replicas {
+        return Ok(None);
+    }
+    let observed_node_id_start = observed_identity.0.unwrap_or(input.pool.spec.node_id_start);
+    let first_removed = observed_node_id_start
+        .checked_add(input.pool.spec.replicas)
+        .ok_or_else(|| ReconcileError::Malformed("controller node-id range overflow".into()))?;
+    let removed_end = observed_node_id_start
+        .checked_add(observed_replicas - 1)
+        .ok_or_else(|| ReconcileError::Malformed("controller node-id range overflow".into()))?;
+    let secret = input
+        .secret_api
+        .get(&format!("{}-cluster-id", input.cluster))
+        .await?;
+    let cluster_id = common::uuid_from_secret(&secret)?;
+    let address = quorum_bootstrap_address(input.cluster, input.namespace);
+    let admin = input.ctx.admin_client_for(input.cluster, &address).await?;
+    let mut admin = admin.lock().await;
+    let quorum = admin.describe_metadata_quorum().await?;
+    let target = quorum
+        .voters
+        .iter()
+        .filter(|voter| (first_removed..=removed_end).contains(&voter.node_id))
+        .max_by_key(|voter| voter.node_id)
+        .cloned();
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    if quorum.voters.len() == 1 {
+        drop(admin);
+        patch_status_for_pool(
+            input.pool_api,
+            input.name,
+            condition(
+                "Ready",
+                "False",
+                "LastVoterScaleDownBlocked",
+                "cannot scale down the last metadata-quorum voter",
+            ),
+        )
+        .await?;
+        return Ok(Some(common::requeue(
+            input.ctx.config.controller_dependency_requeue,
+        )));
+    }
+    admin
+        .remove_raft_voter(cluster_id, target.node_id, target.directory_id)
+        .await?;
+    drop(admin);
+    patch_status_for_pool(
+        input.pool_api,
+        input.name,
+        condition(
+            "Ready",
+            "False",
+            "QuorumScaleDownInProgress",
+            &format!(
+                "removed voter {}; waiting before scaling pods",
+                target.node_id
+            ),
+        ),
+    )
+    .await?;
+    Ok(Some(common::requeue(
+        input.ctx.config.controller_dependency_requeue,
+    )))
+}
+
+struct PoolReadinessInput<'a> {
+    pool: &'a KafkaNodePool,
+    ctx: &'a Context,
+    namespace: &'a str,
+    cluster: &'a str,
+    name: &'a str,
+    directory_ids: &'a BTreeMap<i32, uuid::Uuid>,
+}
+
+async fn evaluate_pool_readiness(
+    input: PoolReadinessInput<'_>,
+    reason: &'static str,
+    message: String,
+) -> (&'static str, &'static str, String) {
+    if reason != "Available" {
+        return ("False", reason, message);
+    }
+    if !input.pool.spec.roles.contains(&NodeRole::Controller) {
+        return ("True", reason, message);
+    }
+    let address = quorum_bootstrap_address(input.cluster, input.namespace);
+    let admin = match input.ctx.admin_client_for(input.cluster, &address).await {
+        Ok(admin) => admin,
+        Err(error) => {
+            return (
+                "False",
+                "QuorumMembershipUnknown",
+                format!("pod is ready but quorum admin connection failed: {error}"),
+            );
+        }
+    };
+    let mut admin = admin.lock().await;
+    match admin.describe_metadata_quorum().await {
+        Ok(quorum)
+            if input.directory_ids.iter().all(|(node_id, directory_id)| {
+                quorum
+                    .voters
+                    .iter()
+                    .any(|voter| voter.node_id == *node_id && voter.directory_id == *directory_id)
+            }) =>
+        {
+            ("True", "Available", message)
+        }
+        Ok(_) => (
+            "False",
+            "QuorumMembershipPending",
+            "pods are ready but not every controller voter is committed".to_string(),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, pool = %input.name, "DescribeQuorum failed during readiness check");
+            drop(admin);
+            input.ctx.drop_admin_client(input.cluster).await;
+            (
+                "False",
+                "QuorumMembershipUnknown",
+                format!("pod is ready but DescribeQuorum failed: {error}"),
+            )
+        }
+    }
+}
+
 async fn reconcile_inner(
     pool: Arc<KafkaNodePool>,
     ctx: Arc<Context>,
@@ -1825,15 +2444,57 @@ async fn reconcile_inner(
     let siblings = pool_api
         .list(&ListParams::default().labels(&format!("crabka.io/cluster={kafka_name}")))
         .await?;
+    let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
+    let statefulsets = sts_api
+        .list(&ListParams::default().labels(&format!(
+            "app.kubernetes.io/instance={kafka_name},app.kubernetes.io/name={APP_LABEL}"
+        )))
+        .await?;
+    let topology_pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
+    let topology_pods = topology_pod_api
+        .list(&ListParams::default().labels(&format!(
+            "app.kubernetes.io/instance={kafka_name},app.kubernetes.io/name={APP_LABEL}"
+        )))
+        .await?;
+    if let Err(error) =
+        validate_topology(&siblings.items, &statefulsets.items, &topology_pods.items)
+    {
+        patch_status_for_pool(&pool_api, &name, condition_for_validation_error(&error)).await?;
+        return Ok(Action::await_change());
+    }
+    if !pool.spec.roles.contains(&NodeRole::Controller)
+        && siblings
+            .items
+            .iter()
+            .filter(|sibling| sibling.spec.roles.contains(&NodeRole::Controller))
+            .any(|controller| !pool_is_available(controller))
+    {
+        patch_status_for_pool(
+            &pool_api,
+            &name,
+            condition(
+                "Ready",
+                "False",
+                "WaitingForControllers",
+                "waiting for all Controller-role pools to become ready",
+            ),
+        )
+        .await?;
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
+    }
     let candidate = select_quorum_bootstrap(&siblings.items).ok_or_else(|| {
         ReconcileError::Malformed("no valid KafkaNodePool available for quorum bootstrap".into())
     })?;
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let bootstrap =
         common::ensure_quorum_bootstrap_state(&secret_api, &kafka_name, &candidate).await?;
-    let directory_id =
-        common::ensure_quorum_directory_id(&secret_api, &kafka_name, pool.spec.node_id_start)
-            .await?;
+    let mut directory_ids = BTreeMap::new();
+    for ordinal in 0..pool.spec.replicas {
+        let node_id = pool.spec.node_id_start + ordinal;
+        let directory_id =
+            common::ensure_quorum_directory_id(&secret_api, &kafka_name, node_id).await?;
+        directory_ids.insert(node_id, directory_id);
+    }
 
     // 3. Resolve broker image: spec override > operator default > built-in.
     let image = pool
@@ -1846,7 +2507,6 @@ async fn reconcile_inner(
     // 4. Pre-apply GET: capture the live StatefulSet (or None on first
     //    reconcile) so the monotonic-storage validator can compare
     //    desired spec.storage against the existing volumeClaimTemplates.
-    let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
     let sts_name = format!("{kafka_name}-{name}");
     let observed_sts = sts_api.get_opt(&sts_name).await?;
     // `None` = no live StatefulSet (first reconcile). `Some(templates)`
@@ -1870,6 +2530,21 @@ async fn reconcile_inner(
         return Ok(Action::await_change());
     }
 
+    if let Some(action) = reconcile_controller_scale_down(ControllerScaleDownInput {
+        pool: &pool,
+        observed: observed_sts.as_ref(),
+        secret_api: &secret_api,
+        pool_api: &pool_api,
+        ctx: &ctx,
+        namespace: &ns,
+        cluster: &kafka_name,
+        name: &name,
+    })
+    .await?
+    {
+        return Ok(action);
+    }
+
     // 5. Render + apply the StatefulSet.
     let sts = render_statefulset(&parent, &pool, &image)?;
     apply_object(&sts_api, &sts_name, &sts).await?;
@@ -1878,49 +2553,19 @@ async fn reconcile_inner(
     let live = sts_api.get_opt(&sts_name).await?;
     let (replicas, ready_replicas, reason, message) =
         derive_status(live.as_ref(), pool.spec.replicas);
-    let (status_value, reason, message) = if reason == "Available" {
-        let bootstrap_address = quorum_bootstrap_address(&kafka_name, &ns);
-        match ctx.admin_client_for(&kafka_name, &bootstrap_address).await {
-            Ok(admin) => {
-                let mut admin = admin.lock().await;
-                match admin.describe_metadata_quorum().await {
-                    Ok(quorum)
-                        if quorum.voters.iter().any(|voter| {
-                            voter.node_id == pool.spec.node_id_start
-                                && voter.directory_id == directory_id
-                        }) =>
-                    {
-                        ("True", "Available", message)
-                    }
-                    Ok(_) => (
-                        "False",
-                        "QuorumMembershipPending",
-                        format!(
-                            "pod is ready but voter {}/{} is not committed",
-                            pool.spec.node_id_start, directory_id
-                        ),
-                    ),
-                    Err(error) => {
-                        tracing::warn!(%error, pool = %name, "DescribeQuorum failed during readiness check");
-                        drop(admin);
-                        ctx.drop_admin_client(&kafka_name).await;
-                        (
-                            "False",
-                            "QuorumMembershipUnknown",
-                            format!("pod is ready but DescribeQuorum failed: {error}"),
-                        )
-                    }
-                }
-            }
-            Err(error) => (
-                "False",
-                "QuorumMembershipUnknown",
-                format!("pod is ready but quorum admin connection failed: {error}"),
-            ),
-        }
-    } else {
-        ("False", reason, message)
-    };
+    let (status_value, reason, message) = evaluate_pool_readiness(
+        PoolReadinessInput {
+            pool: &pool,
+            ctx: &ctx,
+            namespace: &ns,
+            cluster: &kafka_name,
+            name: &name,
+            directory_ids: &directory_ids,
+        },
+        reason,
+        message,
+    )
+    .await;
     if status_value == "True"
         && !bootstrap.initialized
         && bootstrap.controller.node_id == pool.spec.node_id_start
@@ -2026,6 +2671,46 @@ mod tests {
     }
 
     #[test]
+    fn quorum_bootstrap_ignores_broker_only_pool() {
+        let mut brokers = pool_fixture("brokers", "demo", 3);
+        brokers.spec.roles = vec![NodeRole::Broker];
+        brokers.spec.node_id_start = 0;
+        let mut controllers = pool_fixture("controllers", "demo", 3);
+        controllers.spec.roles = vec![NodeRole::Controller];
+        controllers.spec.node_id_start = 10;
+
+        let selected =
+            select_quorum_bootstrap(&[brokers, controllers]).expect("controller candidate");
+        assert!(selected.node_id == 10);
+        assert!(selected.pool == "controllers");
+    }
+
+    #[test]
+    fn controller_availability_requires_committed_quorum_readiness() {
+        let mut pool = pool_fixture("controllers", "demo", 3);
+        pool.spec.roles = vec![NodeRole::Controller];
+        pool.status = Some(KafkaNodePoolStatus {
+            conditions: vec![condition(
+                "Ready",
+                "False",
+                "QuorumMembershipPending",
+                "pods are ready but voters are not committed",
+            )],
+            replicas: Some(3),
+            ready_replicas: Some(3),
+        });
+        assert!(!pool_is_available(&pool));
+
+        pool.status.as_mut().unwrap().conditions = vec![condition(
+            "Ready",
+            "True",
+            "Available",
+            "all voters committed",
+        )];
+        assert!(pool_is_available(&pool));
+    }
+
+    #[test]
     fn init_script_selects_standalone_once_and_dynamic_join_afterward() {
         let init = render_init_container(
             "img:tag",
@@ -2038,6 +2723,7 @@ mod tests {
         let script = init["args"][0].as_str().expect("init script");
         assert!(script.contains("--standalone --node-id \"$NODE_ID\""));
         assert!(script.contains("--no-initial-controllers"));
+        assert!(script.contains("quorumDirectoryId-${NODE_ID}"));
         assert!(script.contains("CRABKA_QUORUM_BOOTSTRAP_INITIALIZED"));
         assert!(script.contains(
             "${HOSTNAME}.${CRABKA_HEADLESS_SERVICE}.${POD_NAMESPACE}.svc.cluster.local:9093"
@@ -2073,6 +2759,56 @@ mod tests {
         let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
         let spec = sts.spec.expect("sts spec");
         assert!(spec.service_name.as_deref() == Some("demo-broker-headless"));
+    }
+
+    #[test]
+    fn render_statefulset_preserves_replicas_and_wires_separated_role() {
+        let parent = parent_fixture("demo");
+        let mut pool = pool_fixture("controllers", "demo", 3);
+        pool.spec.roles = vec![NodeRole::Controller];
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let spec = sts.spec.expect("sts spec");
+        assert!(spec.replicas == Some(3));
+        let pod = spec.template.spec.expect("pod spec");
+        let broker = pod
+            .containers
+            .iter()
+            .find(|container| container.name == "broker")
+            .expect("broker container");
+        let roles = broker
+            .env
+            .as_ref()
+            .expect("env")
+            .iter()
+            .find(|env| env.name == "CRABKA_PROCESS_ROLES")
+            .expect("separated role env");
+        assert!(roles.value.as_deref() == Some("controller"));
+    }
+
+    #[test]
+    fn render_statefulset_combined_role_keeps_broker_default() {
+        let sts = render_statefulset(
+            &parent_fixture("demo"),
+            &pool_fixture("brokers", "demo", 1),
+            DEFAULT_BROKER_IMAGE,
+        )
+        .unwrap();
+        let broker = sts
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .containers
+            .into_iter()
+            .find(|container| container.name == "broker")
+            .expect("broker container");
+        assert!(
+            broker
+                .env
+                .as_ref()
+                .is_none_or(|env| env.iter().all(|entry| entry.name != "CRABKA_PROCESS_ROLES"))
+        );
     }
 
     #[test]
@@ -2244,34 +2980,183 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_replicas_two() {
+    fn validate_accepts_multi_replica_and_separated_roles() {
         let pool = pool_fixture("brokers", "demo", 2);
+        assert!(validate(&pool).is_ok());
+
+        let mut controller = pool_fixture("controllers", "demo", 3);
+        controller.spec.roles = vec![NodeRole::Controller];
+        assert!(validate(&controller).is_ok());
+
+        let mut broker = pool_fixture("brokers", "demo", 4);
+        broker.spec.roles = vec![NodeRole::Broker];
+        assert!(validate(&broker).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_and_duplicate_roles() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.roles.clear();
+        let err = validate(&pool).unwrap_err();
+        assert!(matches!(err, PoolValidationError::RolesEmpty));
+
+        pool.spec.roles = vec![NodeRole::Broker, NodeRole::Broker];
         let err = validate(&pool).unwrap_err();
         assert!(
-            matches!(err, PoolValidationError::ReplicasNotOne(2)),
-            "expected ReplicasNotOne(2), got {err:?}"
+            matches!(err, PoolValidationError::DuplicateRole(NodeRole::Broker)),
+            "expected duplicate Broker role, got {err:?}"
         );
     }
 
     #[test]
-    fn validate_rejects_controller_only_roles() {
-        let mut pool = pool_fixture("brokers", "demo", 1);
+    fn validate_rejects_non_positive_replicas_and_range_overflow() {
+        let pool = pool_fixture("brokers", "demo", 0);
+        assert!(matches!(
+            validate(&pool),
+            Err(PoolValidationError::ReplicasInvalid(0))
+        ));
+
+        let mut pool = pool_fixture("brokers", "demo", 2);
+        pool.spec.node_id_start = MAX_NODE_ID;
+        assert!(matches!(
+            validate(&pool),
+            Err(PoolValidationError::NodeIdRangeOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn topology_rejects_overlap_and_requires_a_controller() {
+        let mut first = pool_fixture("first", "demo", 3);
+        first.spec.node_id_start = 10;
+        let mut second = pool_fixture("second", "demo", 2);
+        second.spec.node_id_start = 12;
+        assert!(matches!(
+            validate_topology(&[first, second], &[], &[]),
+            Err(PoolValidationError::NodeIdRangeOverlap { .. })
+        ));
+
+        let mut brokers = pool_fixture("brokers", "demo", 2);
+        brokers.spec.roles = vec![NodeRole::Broker];
+        assert!(matches!(
+            validate_topology(&[brokers], &[], &[]),
+            Err(PoolValidationError::NoControllerNodes)
+        ));
+    }
+
+    #[test]
+    fn topology_reserves_node_ids_while_old_statefulset_replicas_are_live() {
+        let mut shrinking = pool_fixture("shrinking", "demo", 1);
+        shrinking.spec.node_id_start = 10;
+        let mut added = pool_fixture("added", "demo", 1);
+        added.spec.node_id_start = 12;
+        added.spec.roles = vec![NodeRole::Broker];
+
+        let mut observed = StatefulSet::default();
+        observed.metadata.labels = Some(
+            [("crabka.io/pool".to_string(), "shrinking".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        observed.spec = Some(k8s_openapi::api::apps::v1::StatefulSetSpec {
+            replicas: Some(1),
+            ..Default::default()
+        });
+        observed.status = Some(k8s_openapi::api::apps::v1::StatefulSetStatus {
+            replicas: 3,
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            validate_topology(&[shrinking, added], &[observed], &[]),
+            Err(PoolValidationError::NodeIdRangeOverlap { first, second })
+                if first == "shrinking" && second == "added"
+        ));
+    }
+
+    #[test]
+    fn topology_rejects_node_id_start_and_role_mutation_from_live_identity() {
+        let mut observed = StatefulSet::default();
+        observed.metadata.labels = Some(
+            [("crabka.io/pool".to_string(), "controllers".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        observed.metadata.annotations = Some(
+            [
+                (NODE_ID_START_ANNOTATION.to_string(), "10".to_string()),
+                (
+                    PROCESS_ROLES_ANNOTATION.to_string(),
+                    "controller".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let mut changed_start = pool_fixture("controllers", "demo", 1);
+        changed_start.spec.node_id_start = 20;
+        changed_start.spec.roles = vec![NodeRole::Controller];
+        assert!(matches!(
+            validate_topology(&[changed_start], &[observed.clone()], &[]),
+            Err(PoolValidationError::NodeIdStartChanged {
+                observed: 10,
+                desired: 20,
+                ..
+            })
+        ));
+
+        let mut changed_roles = pool_fixture("controllers", "demo", 1);
+        changed_roles.spec.node_id_start = 10;
+        changed_roles.spec.roles = vec![NodeRole::Broker];
+        assert!(matches!(
+            validate_topology(&[changed_roles], &[observed], &[]),
+            Err(PoolValidationError::RolesChanged { .. })
+        ));
+    }
+
+    #[test]
+    fn topology_reserves_node_ids_for_surviving_pod_ordinals() {
+        let mut first = pool_fixture("first", "demo", 1);
+        first.spec.node_id_start = 10;
+        let mut added = pool_fixture("added", "demo", 1);
+        added.spec.node_id_start = 12;
+        added.spec.roles = vec![NodeRole::Broker];
+
+        let mut pod = Pod::default();
+        pod.metadata.name = Some("demo-first-2".into());
+        pod.metadata.labels = Some(
+            [("crabka.io/pool".to_string(), "first".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        assert!(matches!(
+            validate_topology(&[first, added], &[], &[pod]),
+            Err(PoolValidationError::NodeIdRangeOverlap { first, second })
+                if first == "first" && second == "added"
+        ));
+    }
+
+    #[test]
+    fn rendered_statefulset_persists_immutable_pool_identity() {
+        let parent = parent_fixture("demo");
+        let mut pool = pool_fixture("controllers", "demo", 1);
+        pool.spec.node_id_start = 10;
         pool.spec.roles = vec![NodeRole::Controller];
-        let err = validate(&pool).unwrap_err();
-        assert!(
-            matches!(err, PoolValidationError::RolesNotMixed(_)),
-            "expected RolesNotMixed, got {err:?}"
-        );
-    }
 
-    #[test]
-    fn validate_rejects_broker_only_roles() {
-        let mut pool = pool_fixture("brokers", "demo", 1);
-        pool.spec.roles = vec![NodeRole::Broker];
-        let err = validate(&pool).unwrap_err();
+        let statefulset = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let annotations = statefulset.metadata.annotations.unwrap();
         assert!(
-            matches!(err, PoolValidationError::RolesNotMixed(_)),
-            "expected RolesNotMixed, got {err:?}"
+            annotations
+                .get(NODE_ID_START_ANNOTATION)
+                .map(String::as_str)
+                == Some("10")
+        );
+        assert!(
+            annotations
+                .get(PROCESS_ROLES_ANNOTATION)
+                .map(String::as_str)
+                == Some("controller")
         );
     }
 

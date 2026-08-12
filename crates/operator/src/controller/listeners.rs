@@ -695,7 +695,7 @@ pub fn render_broker_service(
 
 /// Renders the bootstrap Service for one external listener.
 ///
-/// Its selector matches every broker pod of the cluster.
+/// Its selector matches every pod with the broker role in the cluster.
 ///
 /// `nodeport` and `loadbalancer` give a `NodePort` or `LoadBalancer`
 /// Service. `ingress` and `route` give a `ClusterIP` Service that the
@@ -739,6 +739,7 @@ pub fn render_bootstrap_service(
     let mut selector: BTreeMap<String, String> = BTreeMap::new();
     selector.insert("app.kubernetes.io/name".into(), APP_LABEL.into());
     selector.insert("app.kubernetes.io/instance".into(), cluster_name.clone());
+    selector.insert("crabka.io/broker-role".into(), "true".into());
 
     let service_type = match listener.type_ {
         ListenerType::Nodeport => "NodePort",
@@ -1198,6 +1199,7 @@ mod service_rendering_tests {
         let spec = svc.spec.as_ref().unwrap();
         let sel = spec.selector.as_ref().unwrap();
         check!(sel.get("app.kubernetes.io/instance") == Some(&"demo".to_string()));
+        check!(sel.get("crabka.io/broker-role") == Some(&"true".to_string()));
         check!(sel.get("statefulset.kubernetes.io/pod-name").is_none());
         check!(spec.ports.as_ref().unwrap()[0].node_port == Some(32099));
     }

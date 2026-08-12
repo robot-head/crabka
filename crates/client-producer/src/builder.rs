@@ -469,16 +469,39 @@ impl Producer {
         #[builder(default = DEFAULT_PRODUCER_INIT_RETRY_TIMEOUT)] init_retry_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_INIT_MAX_BACKOFF)] init_max_backoff: Duration,
         #[builder(default = DEFAULT_PRODUCER_MAX_IN_FLIGHT)] max_in_flight_per_connection: usize,
+        #[builder(default)]
+        metadata_recovery_strategy: crabka_client_core::MetadataRecoveryStrategy,
+        #[builder(default = crabka_client_core::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER)]
+        metadata_recovery_rebootstrap_trigger: Time,
         #[builder(into)] transactional_id: Option<String>,
-        #[builder(default = DEFAULT_PRODUCER_TRANSACTION_TIMEOUT)] transaction_timeout: Duration,
+        transaction_timeout: Option<Duration>,
+        #[builder(default)] transaction_two_phase_commit_enable: bool,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ProducerError> {
+        if transaction_two_phase_commit_enable && transaction_timeout.is_some() {
+            return Err(ProducerError::InvalidConfig(
+                "transaction_timeout cannot be set when transaction_two_phase_commit_enable=true"
+                    .to_owned(),
+            ));
+        }
+        if transaction_two_phase_commit_enable && transactional_id.is_none() {
+            return Err(ProducerError::InvalidConfig(
+                "transaction_two_phase_commit_enable=true requires transactional_id".to_owned(),
+            ));
+        }
+        let transaction_timeout =
+            transaction_timeout.unwrap_or(DEFAULT_PRODUCER_TRANSACTION_TIMEOUT);
         let dns_timeout =
             ClientDnsTimeout::new(dns_timeout).map_err(ProducerError::InvalidConfig)?;
         let dispatch_queue_capacity = ConnectionDispatchQueueCapacity::new(dispatch_queue_capacity)
             .map_err(ProducerError::InvalidConfig)?;
         let frame_max =
             ClientFrameMax::try_from(frame_max).map_err(ProducerError::InvalidConfig)?;
+        let metadata_recovery_rebootstrap_trigger =
+            crabka_client_core::MetadataRecoveryRebootstrapTrigger::new(
+                metadata_recovery_rebootstrap_trigger,
+            )
+            .map_err(ProducerError::InvalidConfig)?;
         let throughput_policy = ProducerThroughputPolicy::new(
             compression,
             linger,
@@ -525,6 +548,8 @@ impl Producer {
             .frame_max(frame_max.size())
             .connect_timeout(request_timeout)
             .request_timeout(request_timeout)
+            .metadata_recovery_strategy(metadata_recovery_strategy)
+            .metadata_recovery_rebootstrap_trigger(metadata_recovery_rebootstrap_trigger.time())
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -568,7 +593,9 @@ impl Producer {
         let txn_state = Arc::new(Mutex::new(TxnState::Uninitialized));
         let txn_recovery_required = Arc::new(AtomicBool::new(false));
         let txn_recovery_generation = Arc::new(AtomicU64::new(0));
+        let txn_guard_generation = Arc::new(AtomicU64::new(0));
         let txn_pid_epoch = Arc::new(Mutex::new(initial_txn_pid_epoch()));
+        let prepared_transaction_state = Arc::new(Mutex::new(None));
 
         let sender_handle = tokio::spawn(sender::run(sender::SenderConfig {
             transport: Box::new(ClientTransport::new(client.clone())),
@@ -629,14 +656,17 @@ impl Producer {
             sender_handle: Some(sender_handle),
             transactional_id,
             transaction_timeout_ms: retry_policy.transaction_timeout_ms(),
+            two_phase_commit_enabled: transaction_two_phase_commit_enable,
             init_retry_timeout: retry_policy.init_retry_timeout().as_time(),
             init_retry_backoff: retry_policy.retry_backoff().as_time(),
             init_max_backoff: retry_policy.init_max_backoff().as_time(),
             txn_state,
             txn_recovery_required,
             txn_recovery_generation,
+            txn_guard_generation,
             txn_coord_client: Mutex::new(None),
             txn_pid_epoch,
+            prepared_transaction_state,
         })
     }
 }
@@ -1246,6 +1276,35 @@ mod security_arg_tests {
     }
 
     #[tokio::test]
+    async fn two_phase_commit_rejects_conflicting_or_incomplete_configuration() {
+        let conflict = Producer::builder()
+            .bootstrap("127.0.0.1:1")
+            .transactional_id("payments")
+            .transaction_two_phase_commit_enable(true)
+            .transaction_timeout(Duration::from_secs(30))
+            .build()
+            .await
+            .expect_err("2PC owns the transaction timeout");
+        assert2::assert!(matches!(
+            conflict,
+            ProducerError::InvalidConfig(message)
+                if message == "transaction_timeout cannot be set when transaction_two_phase_commit_enable=true"
+        ));
+
+        let missing_id = Producer::builder()
+            .bootstrap("127.0.0.1:1")
+            .transaction_two_phase_commit_enable(true)
+            .build()
+            .await
+            .expect_err("2PC requires a transactional id");
+        assert2::assert!(matches!(
+            missing_id,
+            ProducerError::InvalidConfig(message)
+                if message == "transaction_two_phase_commit_enable=true requires transactional_id"
+        ));
+    }
+
+    #[tokio::test]
     async fn producer_builder_rejects_invalid_dns_timeout_before_connection_io() {
         for timeout in [Time::ZERO, micros(1), Time::from_secs_f64(f64::INFINITY)] {
             let error = Producer::builder()
@@ -1259,6 +1318,19 @@ mod security_arg_tests {
                 ProducerError::InvalidConfig(message)
                     if message.starts_with("client DNS timeout")
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn producer_builder_rejects_invalid_metadata_rebootstrap_trigger_before_io() {
+        for trigger in [Time::from_millis(-1), crabka_units::micros(1)] {
+            let error = Producer::builder()
+                .bootstrap("127.0.0.1:1")
+                .metadata_recovery_rebootstrap_trigger(trigger)
+                .build()
+                .await
+                .expect_err("invalid metadata recovery trigger");
+            assert2::assert!(matches!(error, ProducerError::InvalidConfig(_)));
         }
     }
 

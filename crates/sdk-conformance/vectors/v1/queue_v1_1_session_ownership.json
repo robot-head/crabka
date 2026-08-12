@@ -1,0 +1,210 @@
+{
+  "id": "queue_v1_1_session_ownership",
+  "since": { "major": 1, "minor": 1 },
+  "steps": [
+    {
+      "name": "publish session-owned queue record",
+      "command": {
+        "cmd": "publish",
+        "topic": "queue-session-ownership",
+        "value_b64": "b3duZWQ=",
+        "headers": []
+      },
+      "expect": {
+        "ok": { "deduplicated": false, "offset": 0, "partition": 0 }
+      }
+    },
+    {
+      "name": "first session acquires the record",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-session-ownership",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "ok": {
+          "session_id": "queue-session-1",
+          "messages": [
+            {
+              "message_id": "queue-session-ownership:0:0",
+              "topic": "queue-session-ownership",
+              "partition": 0,
+              "offset": 0,
+              "value_b64": "b3duZWQ=",
+              "headers": [],
+              "delivery_count": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "session maximum is immutable",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-session-ownership",
+        "group": "queue-workers",
+        "max": 2,
+        "lock_duration_ms": 30000,
+        "session_id": "queue-session-1"
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "max_messages is fixed when a queue session is created"
+        }
+      }
+    },
+    {
+      "name": "second session is created without stealing the record",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-session-ownership",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "ok": { "session_id": "queue-session-2", "messages": [] }
+      }
+    },
+    {
+      "name": "second session cannot acknowledge the first session record",
+      "command": {
+        "cmd": "queue_acknowledge",
+        "session_id": "queue-session-2",
+        "entries": [
+          { "message_id": "queue-session-ownership:0:0", "ack_type": "accept" }
+        ]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            {
+              "message_id": "queue-session-ownership:0:0",
+              "error": {
+                "kind": "invalid_argument",
+                "message": "queue message is not acquired"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "second session cannot renew the first session record",
+      "command": {
+        "cmd": "queue_renew",
+        "session_id": "queue-session-2",
+        "entries": [{ "message_id": "queue-session-ownership:0:0" }]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            {
+              "message_id": "queue-session-ownership:0:0",
+              "error": {
+                "kind": "invalid_argument",
+                "message": "queue message is not acquired"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a different group independently acquires the record",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-session-ownership",
+        "group": "queue-workers-b",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "ok": {
+          "session_id": "queue-session-3",
+          "messages": [
+            {
+              "message_id": "queue-session-ownership:0:0",
+              "topic": "queue-session-ownership",
+              "partition": 0,
+              "offset": 0,
+              "value_b64": "b3duZWQ=",
+              "headers": [],
+              "delivery_count": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "the different group accepts its delivery",
+      "command": {
+        "cmd": "queue_acknowledge",
+        "session_id": "queue-session-3",
+        "entries": [
+          { "message_id": "queue-session-ownership:0:0", "ack_type": "accept" }
+        ]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            { "message_id": "queue-session-ownership:0:0", "error": null }
+          ]
+        }
+      }
+    },
+    {
+      "name": "the first group lease survives the other group acknowledgement",
+      "command": {
+        "cmd": "queue_renew",
+        "session_id": "queue-session-1",
+        "entries": [{ "message_id": "queue-session-ownership:0:0" }]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            { "message_id": "queue-session-ownership:0:0", "error": null }
+          ]
+        }
+      }
+    },
+    {
+      "name": "the first group accepts its independent delivery",
+      "command": {
+        "cmd": "queue_acknowledge",
+        "session_id": "queue-session-1",
+        "entries": [
+          { "message_id": "queue-session-ownership:0:0", "ack_type": "accept" }
+        ]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            { "message_id": "queue-session-ownership:0:0", "error": null }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unknown session reuse is rejected",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-session-ownership",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000,
+        "session_id": "missing-session"
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "queue session expired; re-acquire"
+        }
+      }
+    }
+  ]
+}

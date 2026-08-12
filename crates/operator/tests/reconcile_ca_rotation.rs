@@ -22,8 +22,9 @@ use crabka_security::ca::{generate_clients_ca, generate_cluster_ca};
 use http::{Method, Response};
 use serde_json::{Value, json};
 use shared::{
-    MockRule, build_ctx, fake_configmap_body, fake_kafka_body, fake_keystore_secret,
-    fake_pool_list_body, fake_pool_list_item, fake_service_body, json_response, not_found_body,
+    MockRule, build_ctx, fake_configmap_body, fake_converged_sts_body, fake_kafka_body,
+    fake_keystore_secret, fake_pool_list_body, fake_pool_list_item, fake_service_body,
+    json_response, not_found_body,
 };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +90,32 @@ fn count_cert_blocks(b64_pem: &str) -> usize {
     pem.matches("BEGIN CERTIFICATE").count()
 }
 
+fn decode_secret_data(body: &Value, key: &str) -> String {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body["data"][key].as_str().expect("Secret data value"))
+        .expect("Secret data base64");
+    String::from_utf8(bytes).expect("Secret data UTF-8")
+}
+
+fn cert_is_signed_by(cert_pem: &str, ca_pem: &str) -> bool {
+    use rustls::pki_types::{CertificateDer, pem::PemObject as _};
+    use x509_parser::prelude::{FromDer as _, X509Certificate};
+
+    let Some(Ok(cert_der)) = CertificateDer::pem_slice_iter(cert_pem.as_bytes()).next() else {
+        return false;
+    };
+    let Ok((_, cert)) = X509Certificate::from_der(cert_der.as_ref()) else {
+        return false;
+    };
+    let Some(Ok(ca_der)) = CertificateDer::pem_slice_iter(ca_pem.as_bytes()).next() else {
+        return false;
+    };
+    let Ok((_, ca)) = X509Certificate::from_der(ca_der.as_ref()) else {
+        return false;
+    };
+    cert.verify_signature(Some(ca.public_key())).is_ok()
+}
+
 fn kafka_cr(name: &str, ns: &str, anns: &[(&str, &str)]) -> Kafka {
     let mut k = Kafka::new(
         name,
@@ -129,6 +156,19 @@ fn kafka_cr(name: &str, ns: &str, anns: &[(&str, &str)]) -> Kafka {
 /// pool LIST. It also holds the tail: keystore, CM, pool adopt, and status.
 /// Each test splices the CA GET and PATCH rules in between.
 fn head_rules(c: &str, ns: &str) -> Vec<MockRule> {
+    head_rules_for_pool(c, ns, fake_pool_list_item("brokers", ns, c, 1, 1))
+}
+
+fn head_rules_for_pool(c: &str, ns: &str, pool: Value) -> Vec<MockRule> {
+    head_rules_for_pool_and_statefulsets(c, ns, pool, &[])
+}
+
+fn head_rules_for_pool_and_statefulsets(
+    c: &str,
+    ns: &str,
+    pool: Value,
+    statefulsets: &[Value],
+) -> Vec<MockRule> {
     vec![
         patch(
             format!("/services/{c}-broker-headless"),
@@ -149,9 +189,46 @@ fn head_rules(c: &str, ns: &str) -> Vec<MockRule> {
         },
         get(
             format!("/namespaces/{ns}/kafkanodepools"),
-            &fake_pool_list_body(&[fake_pool_list_item("brokers", ns, c, 1, 1)]),
+            &fake_pool_list_body(&[pool]),
+        ),
+        get(
+            format!("/namespaces/{ns}/statefulsets"),
+            &json!({
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSetList",
+                "metadata": { "resourceVersion": "1" },
+                "items": statefulsets,
+            }),
+        ),
+        get(
+            format!("/namespaces/{ns}/pods"),
+            &json!({
+                "apiVersion": "v1",
+                "kind": "PodList",
+                "metadata": { "resourceVersion": "1" },
+                "items": [],
+            }),
         ),
     ]
+}
+
+fn tls_user_list_body(name: &str, ns: &str, cluster: &str) -> Value {
+    json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaUserList",
+        "metadata": { "resourceVersion": "1" },
+        "items": [{
+            "apiVersion": "crabka.io/v1alpha1",
+            "kind": "KafkaUser",
+            "metadata": {
+                "name": name,
+                "namespace": ns,
+                "uid": format!("{name}-uid"),
+                "labels": { "crabka.io/cluster": cluster }
+            },
+            "spec": { "authentication": { "type": "tls" } }
+        }]
+    })
 }
 
 fn tail_rules(c: &str, ns: &str) -> Vec<MockRule> {
@@ -441,4 +518,427 @@ async fn force_replace_key_starts_staged_rotation() {
     check!(rot["reason"] == "DistributingTrust", "body = {sbody}");
 
     check!(state.remaining_rules() == 0, "all rules consumed");
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: clients-CA replacement distributes trust before leaf reissue.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn force_replace_clients_key_starts_trust_distribution() {
+    let ns = "default";
+    let c = "c3";
+    let cluster = generate_cluster_ca("c3-cluster-ca", 365).expect("cluster CA");
+    let clients = generate_clients_ca("c3-clients-ca", 365).expect("clients CA");
+
+    let mut rules = head_rules(c, ns);
+    rules.extend([
+        get(
+            format!("/secrets/{c}-cluster-ca"),
+            &secret_with(
+                &format!("{c}-cluster-ca"),
+                ns,
+                &[("ca.key", &cluster.key_pem)],
+                &[("crabka.io/ca-key-generation", "0")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-cluster-ca-cert"),
+            &secret_with(
+                &format!("{c}-cluster-ca-cert"),
+                ns,
+                &[("ca.crt", &cluster.cert_pem)],
+                &[("crabka.io/ca-cert-generation", "0")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-clients-ca"),
+            &secret_with(
+                &format!("{c}-clients-ca"),
+                ns,
+                &[("ca.key", &clients.key_pem)],
+                &[("crabka.io/ca-key-generation", "0")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-clients-ca-cert"),
+            &secret_with(
+                &format!("{c}-clients-ca-cert"),
+                ns,
+                &[("ca.crt", &clients.cert_pem)],
+                &[("crabka.io/ca-cert-generation", "0")],
+            ),
+        ),
+        patch(
+            format!("/secrets/{c}-clients-ca"),
+            &secret_with(&format!("{c}-clients-ca"), ns, &[], &[]),
+        ),
+        patch(
+            format!("/secrets/{c}-clients-ca-cert"),
+            &secret_with(&format!("{c}-clients-ca-cert"), ns, &[], &[]),
+        ),
+        patch(format!("/kafkas/{c}"), &fake_kafka_body(c, ns)),
+    ]);
+    rules.extend(tail_rules(c, ns));
+
+    let (ctx, state) = build_ctx(ns, rules);
+    reconcile(
+        Arc::new(kafka_cr(
+            c,
+            ns,
+            &[("crabka.io/force-replace-clients-ca-key", "true")],
+        )),
+        ctx,
+    )
+    .await
+    .expect("reconcile ok");
+    let observed = state.take_observed();
+
+    let cert_patch = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{c}-clients-ca-cert"))
+        })
+        .expect("clients CA cert patch");
+    let body: Value = serde_json::from_slice(cert_patch.body()).expect("cert patch JSON");
+    assert!(count_cert_blocks(body["data"]["ca.crt"].as_str().expect("ca.crt")) == 2);
+    assert!(body["metadata"]["annotations"]["crabka.io/ca-rotation-phase"] == "key-replace-trust");
+    assert!(
+        !observed
+            .iter()
+            .any(|request| request.uri().to_string().contains("/kafkausers")),
+        "user certificates must not change before broker trust converges"
+    );
+
+    let status_patch = observed
+        .iter()
+        .rev()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains(&format!("/kafkas/{c}/status"))
+        })
+        .expect("status patch");
+    let status: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
+    let rotation = status_condition(&status, "CaRotation");
+    assert!(rotation["status"] == "True");
+    assert!(rotation["reason"] == "DistributingTrust");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: promotion reissues TLS users before recording leaf convergence.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn clients_key_promotion_reissues_users_before_marking_converged() {
+    let ns = "default";
+    let c = "c4";
+    let user_name = "alice";
+    let cluster = generate_cluster_ca("c4-cluster-ca", 365).expect("cluster CA");
+    let old = generate_clients_ca("c4-clients-ca", 365).expect("old clients CA");
+    let new = generate_clients_ca("c4-clients-ca", 365).expect("new clients CA");
+    let old_user =
+        crabka_security::ca::issue_user_cert(&old.cert_pem, &old.key_pem, user_name, 365)
+            .expect("old user cert");
+    let bundle = format!("{}{}", old.cert_pem, new.cert_pem);
+    let mut pool = fake_pool_list_item("brokers", ns, c, 1, 1);
+    pool["metadata"]["labels"]["crabka.io/config-hash"] = json!("trust-roll-complete");
+    let statefulset = fake_converged_sts_body(
+        &format!("{c}-brokers"),
+        ns,
+        c,
+        "brokers",
+        1,
+        "trust-roll-complete",
+    );
+
+    let mut rules = head_rules_for_pool_and_statefulsets(c, ns, pool, &[statefulset]);
+    rules.extend([
+        get(
+            format!("/secrets/{c}-cluster-ca"),
+            &secret_with(
+                &format!("{c}-cluster-ca"),
+                ns,
+                &[("ca.key", &cluster.key_pem)],
+                &[("crabka.io/ca-key-generation", "0")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-cluster-ca-cert"),
+            &secret_with(
+                &format!("{c}-cluster-ca-cert"),
+                ns,
+                &[("ca.crt", &cluster.cert_pem)],
+                &[("crabka.io/ca-cert-generation", "0")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-clients-ca"),
+            &secret_with(
+                &format!("{c}-clients-ca"),
+                ns,
+                &[
+                    ("ca.key", &old.key_pem),
+                    ("ca.key.next", &new.key_pem),
+                    ("ca.crt.next", &new.cert_pem),
+                ],
+                &[("crabka.io/ca-key-generation", "0")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-clients-ca-cert"),
+            &secret_with(
+                &format!("{c}-clients-ca-cert"),
+                ns,
+                &[("ca.crt", &bundle)],
+                &[
+                    ("crabka.io/ca-cert-generation", "0"),
+                    ("crabka.io/ca-rotation-phase", "key-replace-trust"),
+                ],
+            ),
+        ),
+        patch(
+            format!("/secrets/{c}-clients-ca"),
+            &secret_with(&format!("{c}-clients-ca"), ns, &[], &[]),
+        ),
+        patch(
+            format!("/secrets/{c}-clients-ca-cert"),
+            &secret_with(&format!("{c}-clients-ca-cert"), ns, &[], &[]),
+        ),
+        get(
+            format!("/namespaces/{ns}/kafkausers"),
+            &tls_user_list_body(user_name, ns, c),
+        ),
+        get(
+            format!("/secrets/{user_name}"),
+            &secret_with(
+                user_name,
+                ns,
+                &[
+                    ("user.crt", &old_user.cert_pem),
+                    ("user.key", &old_user.key_pem),
+                    ("ca.crt", &old.cert_pem),
+                ],
+                &[],
+            ),
+        ),
+        patch(
+            format!("/secrets/{user_name}"),
+            &secret_with(user_name, ns, &[], &[]),
+        ),
+        patch(
+            format!("/secrets/{c}-clients-ca-cert"),
+            &secret_with(&format!("{c}-clients-ca-cert"), ns, &[], &[]),
+        ),
+    ]);
+    rules.extend(tail_rules(c, ns));
+
+    let (ctx, state) = build_ctx(ns, rules);
+    reconcile(Arc::new(kafka_cr(c, ns, &[])), ctx)
+        .await
+        .expect("reconcile ok");
+    let observed = state.take_observed();
+
+    let user_patch_index = observed
+        .iter()
+        .position(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{user_name}"))
+        })
+        .expect("user Secret patch");
+    let promoted_key_patch = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{c}-clients-ca"))
+                && !request.uri().to_string().contains("clients-ca-cert")
+        })
+        .expect("promoted clients CA key patch");
+    let promoted_key_body: Value =
+        serde_json::from_slice(promoted_key_patch.body()).expect("key patch JSON");
+    for key in ["ca.key", "ca.key.next", "ca.crt.next"] {
+        assert!(
+            promoted_key_body["data"][key].is_string(),
+            "staged material must survive promotion until prune: {promoted_key_body}"
+        );
+    }
+    let cert_patch_indices: Vec<usize> = observed
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{c}-clients-ca-cert"))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        cert_patch_indices.len() == 2,
+        "promote patch then convergence marker"
+    );
+    assert!(cert_patch_indices[0] < user_patch_index);
+    assert!(user_patch_index < cert_patch_indices[1]);
+
+    let user_body: Value =
+        serde_json::from_slice(observed[user_patch_index].body()).expect("user patch JSON");
+    let issued_user_cert = decode_secret_data(&user_body, "user.crt");
+    assert!(cert_is_signed_by(&issued_user_cert, &new.cert_pem));
+    assert!(!cert_is_signed_by(&issued_user_cert, &old.cert_pem));
+    assert!(
+        count_cert_blocks(user_body["data"]["ca.crt"].as_str().expect("user ca.crt")) == 2,
+        "user Secret carries both trust anchors during promotion"
+    );
+    let marker_body: Value =
+        serde_json::from_slice(observed[cert_patch_indices[1]].body()).expect("marker patch JSON");
+    assert!(marker_body["metadata"]["annotations"]["crabka.io/ca-leafs-key-generation"] == "1");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: prune converges every managed TLS-user trust bundle in one pass.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn clients_ca_prune_removes_old_root_from_user_secrets_before_returning() {
+    let ns = "default";
+    let c = "c5";
+    let user_name = "alice";
+    let cluster = generate_cluster_ca("c5-cluster-ca", 365).expect("cluster CA");
+    let old = generate_clients_ca("c5-clients-ca", 365).expect("old clients CA");
+    let new = generate_clients_ca("c5-clients-ca", 365).expect("new clients CA");
+    let user = crabka_security::ca::issue_user_cert(&new.cert_pem, &new.key_pem, user_name, 365)
+        .expect("new-key user cert");
+    let bundle = format!("{}{}", new.cert_pem, old.cert_pem);
+    let mut pool = fake_pool_list_item("brokers", ns, c, 1, 1);
+    pool["metadata"]["labels"]["crabka.io/config-hash"] = json!("promote-roll-complete");
+    let statefulset = fake_converged_sts_body(
+        &format!("{c}-brokers"),
+        ns,
+        c,
+        "brokers",
+        1,
+        "promote-roll-complete",
+    );
+
+    let mut rules = head_rules_for_pool_and_statefulsets(c, ns, pool, &[statefulset]);
+    rules.extend([
+        get(
+            format!("/secrets/{c}-cluster-ca"),
+            &secret_with(
+                &format!("{c}-cluster-ca"),
+                ns,
+                &[("ca.key", &cluster.key_pem)],
+                &[("crabka.io/ca-key-generation", "0")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-cluster-ca-cert"),
+            &secret_with(
+                &format!("{c}-cluster-ca-cert"),
+                ns,
+                &[("ca.crt", &cluster.cert_pem)],
+                &[("crabka.io/ca-cert-generation", "0")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-clients-ca"),
+            &secret_with(
+                &format!("{c}-clients-ca"),
+                ns,
+                &[("ca.key", &new.key_pem)],
+                &[("crabka.io/ca-key-generation", "1")],
+            ),
+        ),
+        get(
+            format!("/secrets/{c}-clients-ca-cert"),
+            &secret_with(
+                &format!("{c}-clients-ca-cert"),
+                ns,
+                &[("ca.crt", &bundle)],
+                &[
+                    ("crabka.io/ca-cert-generation", "1"),
+                    ("crabka.io/ca-key-generation", "1"),
+                    ("crabka.io/ca-leafs-key-generation", "1"),
+                    ("crabka.io/ca-rotation-phase", "key-replace-promote"),
+                ],
+            ),
+        ),
+        patch(
+            format!("/secrets/{c}-clients-ca"),
+            &secret_with(&format!("{c}-clients-ca"), ns, &[], &[]),
+        ),
+        patch(
+            format!("/secrets/{c}-clients-ca-cert"),
+            &secret_with(&format!("{c}-clients-ca-cert"), ns, &[], &[]),
+        ),
+        get(
+            format!("/namespaces/{ns}/kafkausers"),
+            &tls_user_list_body(user_name, ns, c),
+        ),
+        get(
+            format!("/secrets/{user_name}"),
+            &secret_with(
+                user_name,
+                ns,
+                &[
+                    ("user.crt", &user.cert_pem),
+                    ("user.key", &user.key_pem),
+                    ("ca.crt", &bundle),
+                ],
+                &[],
+            ),
+        ),
+        patch(
+            format!("/secrets/{user_name}"),
+            &secret_with(user_name, ns, &[], &[]),
+        ),
+    ]);
+    rules.extend(tail_rules(c, ns));
+
+    let (ctx, state) = build_ctx(ns, rules);
+    reconcile(Arc::new(kafka_cr(c, ns, &[])), ctx)
+        .await
+        .expect("prune reconcile ok");
+    let observed = state.take_observed();
+
+    let clients_ca_patch_index = observed
+        .iter()
+        .position(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{c}-clients-ca-cert"))
+        })
+        .expect("clients CA prune patch");
+    let user_patch_index = observed
+        .iter()
+        .position(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/secrets/{user_name}"))
+        })
+        .expect("user trust patch");
+    assert!(clients_ca_patch_index < user_patch_index);
+    let user_patch: Value =
+        serde_json::from_slice(observed[user_patch_index].body()).expect("user patch JSON");
+    assert!(count_cert_blocks(user_patch["data"]["ca.crt"].as_str().expect("ca.crt")) == 1);
+    assert!(decode_secret_data(&user_patch, "ca.crt") == new.cert_pem);
+    assert!(state.remaining_rules() == 0, "all rules consumed");
 }

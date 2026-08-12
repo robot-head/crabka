@@ -31,13 +31,13 @@ impl Encode for RequestHeader {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.request_api_key)
+            put_i16(buf, self.request_api_key);
         }
         if version >= 0 {
-            put_i16(buf, self.request_api_version)
+            put_i16(buf, self.request_api_version);
         }
         if version >= 0 {
-            put_i32(buf, self.correlation_id)
+            put_i32(buf, self.correlation_id);
         }
         if version >= 1 {
             {
@@ -47,7 +47,7 @@ impl Encode for RequestHeader {
                 } else {
                     let () = put_nullable_string(buf, self.client_id.as_deref());
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -84,7 +84,7 @@ impl Encode for RequestHeader {
         n
     }
 }
-impl<'de> Decode<'de> for RequestHeader {
+impl Decode<'_> for RequestHeader {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch("RequestHeader version out of range"));

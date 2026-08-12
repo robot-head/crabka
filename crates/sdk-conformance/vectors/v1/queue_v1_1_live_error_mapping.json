@@ -1,0 +1,24 @@
+{
+  "id": "queue_v1_1_live_error_mapping",
+  "since": { "major": 1, "minor": 1 },
+  "live_only": true,
+  "steps": [
+    {
+      "name": "unknown queue session maps real Connect failed precondition",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-live-error",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000,
+        "session_id": "missing-session"
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "queue session expired; re-acquire"
+        }
+      }
+    }
+  ]
+}
