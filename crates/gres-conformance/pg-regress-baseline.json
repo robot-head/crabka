@@ -409,10 +409,10 @@
       "sha256": "91bdb37f62d44ccdfe7f119f9a415cddfce2129ff5e3e3b4c4d1090b5ac88a6d"
     },
     "horology": {
-      "changed_lines": 737,
+      "changed_lines": 732,
       "expected": "horology.out",
       "hunks": 37,
-      "sha256": "58da9012136311d2e058119ca5b24b53457570150f3e0b8d6ec41f64a37e1183"
+      "sha256": "5c9f9e9bf7504f88575a5d97749c1e8e7f759f658bd46766ea76382a0d9f312b"
     },
     "identity": {
       "changed_lines": 528,
@@ -481,10 +481,10 @@
       "sha256": "b78e3930608148bc85bf2abef8e493078f122b5175a1629394b1c56abf121ff1"
     },
     "interval": {
-      "changed_lines": 327,
+      "changed_lines": 311,
       "expected": "interval.out",
       "hunks": 25,
-      "sha256": "cd6da6816543746a42e2b665820ec499e7fcf869e11a0a3195a67ab49cd8ef93"
+      "sha256": "3ceb5c9f5126816e3abf2b3de3f42f5912ef850f311500ef217c37de714bcf2c"
     },
     "join": {
       "changed_lines": 7992,
@@ -960,12 +960,6 @@
       "hunks": 9,
       "sha256": "09a04ce86de9bd70767589d970ed1eafcc5e146575eeefa91c7a42d50136b491"
     },
-    "time": {
-      "changed_lines": 5,
-      "expected": "time.out",
-      "hunks": 1,
-      "sha256": "0d0f742b79f7ab85435e1fe79ebb6ae696d1530fc7db965086e08cfb6f13c81c"
-    },
     "timestamp": {
       "changed_lines": 883,
       "expected": "timestamp.out",
@@ -973,16 +967,16 @@
       "sha256": "09bacb3dfe8cf50aff3727773bf2b51fe914ad8d778a1f408538c57df116b257"
     },
     "timestamptz": {
-      "changed_lines": 1256,
+      "changed_lines": 1224,
       "expected": "timestamptz.out",
       "hunks": 38,
-      "sha256": "7f7f3af0230bcf3b3c2875da431d567224fe333d67dac54be20b92d67a32c8de"
+      "sha256": "17da0c0056e2838121f7f27a6b22c798bbff58b6e42d40423267fcb29fce1b5d"
     },
     "timetz": {
-      "changed_lines": 52,
+      "changed_lines": 2,
       "expected": "timetz.out",
-      "hunks": 2,
-      "sha256": "1c9856f730aeb3d19b8e0b4c9d6ba17fe5c8e8c64d257edf138fc4f54074ad8f"
+      "hunks": 1,
+      "sha256": "62e10adc67d50530af3d0205ce6e162675bfb83353f8081df025050f48fb167e"
     },
     "transactions": {
       "changed_lines": 264,
@@ -1129,7 +1123,7 @@
       "sha256": "c0f90338e27ec100f860eb0891f6f32fdb6155e1f7d302e4890c2b5adfca1068"
     }
   },
-  "passed": 43,
+  "passed": 44,
   "postgres_tag": "REL_18_4",
   "schedule": [
     "test_setup",
