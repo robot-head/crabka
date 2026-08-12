@@ -35,6 +35,16 @@
 //! that `"\ud800"` is an unpaired surrogate — `'"\ud800"'::json` is accepted and
 //! `'"\ud800"'::jsonb` is not. That is `PostgreSQL`'s behaviour, not an accident
 //! of this port.
+//!
+//! The fork does not stop at input. `makeJsonLexContext` takes `need_escapes` as
+//! an argument, so every accessor over an *already stored* `json` value picks a
+//! side of it again: `get_worker` (`->`, `->>`, `#>`, `#>>`,
+//! `json_extract_path`) passes true, `each_worker` and `json_object_keys` pass
+//! true, `elements_worker` passes its `as_text` flag, and `json_array_length`
+//! and `json_typeof` pass false. So `'{"a":"\ud800"}'::json` is a legal value
+//! that `json_typeof` reports on happily and `-> 'a'` refuses — the accessor,
+//! not the value, decides. [`validate`] is the false side and
+//! [`validate_escapes`] the true one; they must not be merged.
 
 #![expect(
     clippy::pedantic,
@@ -784,6 +794,31 @@ pub fn validate(input: &str) -> Result<(), TypeError> {
     .map(|_| ())
 }
 
+/// The same walk as [`validate`] with the lexer's `need_escapes` set — the
+/// `pg_parse_json` an accessor built by `makeJsonLexContext(…, true)` runs.
+///
+/// This is not a stricter `json_in`, and it must not be used as one. `json_in`
+/// decodes nothing, so `'"\ud800"'::json` and `'"\u0000"'::json` are both legal
+/// `json` values and stay legal; this is what `->` and its relatives run over
+/// that stored text *afterwards*, and it is the reason those operators reject
+/// documents the cast accepted. Nothing is built: the decoded strings exist only
+/// so the lexer can trip over the ones that cannot be decoded.
+///
+/// # Errors
+///
+/// 22P02 for malformed JSON or an unpaired surrogate, 22P05 for `\u0000`, and
+/// 54001 past [`MAX_DEPTH`] levels of nesting.
+pub fn validate_escapes(input: &str) -> Result<(), TypeError> {
+    Parser {
+        lex: Lexer::new(input, true),
+        build: false,
+        reject_duplicates: false,
+        saw_duplicate: false,
+    }
+    .parse()
+    .map(|_| ())
+}
+
 /// `jsonb_in`: the same walk, decomposing as it goes.
 ///
 /// The second element of the pair is `PostgreSQL`'s `WITH UNIQUE KEYS`
@@ -1000,6 +1035,19 @@ pub fn object_fields(input: &str) -> Option<Vec<(String, &str)>> {
     }
 }
 
+/// A high surrogate whose partner never arrived. It is damage, not absence, so
+/// it decodes to the replacement character instead of vanishing: dropping it
+/// silently made `"\ud800"` and `"\ud801"` both decode to the empty string, and
+/// two distinct documents then produced one indistinguishable value.
+///
+/// Every accessor that decodes runs [`validate_escapes`] first and so cannot
+/// reach this at all — it is the floor under a caller that forgets to.
+fn flush_surrogate(hi_surrogate: &mut Option<u32>, out: &mut String) {
+    if hi_surrogate.take().is_some() {
+        out.push(char::REPLACEMENT_CHARACTER);
+    }
+}
+
 /// The de-escaped contents of a JSON string literal (`raw` includes its quotes).
 /// `None` when `raw` is not a string literal.
 #[must_use]
@@ -1013,10 +1061,15 @@ pub fn unescape(raw: &str) -> Option<String> {
     let mut hi_surrogate: Option<u32> = None;
     while let Some(c) = chars.next() {
         if c != '\\' {
+            flush_surrogate(&mut hi_surrogate, &mut out);
             out.push(c);
             continue;
         }
-        match chars.next() {
+        let escape = chars.next();
+        if escape != Some('u') {
+            flush_surrogate(&mut hi_surrogate, &mut out);
+        }
+        match escape {
             Some('"') => out.push('"'),
             Some('\\') => out.push('\\'),
             Some('/') => out.push('/'),
@@ -1031,6 +1084,9 @@ pub fn unescape(raw: &str) -> Option<String> {
                     let d = chars.next()?;
                     ch = ch * 16 + d.to_digit(16)?;
                 }
+                if !(0xdc00..0xe000).contains(&ch) {
+                    flush_surrogate(&mut hi_surrogate, &mut out);
+                }
                 if (0xd800..0xdc00).contains(&ch) {
                     hi_surrogate = Some(ch);
                     continue;
@@ -1040,14 +1096,12 @@ pub fn unescape(raw: &str) -> Option<String> {
                 {
                     ch = 0x10000 + ((hi - 0xd800) << 10) + (ch - 0xdc00);
                 }
-                // `json` accepts unpaired surrogates that no `char` can hold;
-                // they render as the replacement character rather than failing,
-                // because the value was already accepted on input.
                 out.push(char::from_u32(ch).unwrap_or(char::REPLACEMENT_CHARACTER));
             }
             other => out.push(other?),
         }
     }
+    flush_surrogate(&mut hi_surrogate, &mut out);
     Some(out)
 }
 
@@ -1359,6 +1413,102 @@ mod tests {
                 (e.sqlstate(), e.detail().as_deref()) == (sqlstate, Some(detail)),
                 "{input:?}"
             );
+        }
+    }
+
+    /// `json_encoding`'s surrogate block, which is the same five documents read
+    /// three ways: `json_in` takes all five, the accessors take only the
+    /// well-formed one, and neither rewrites what it accepted.
+    #[test]
+    fn an_accessor_decodes_the_escapes_json_in_stored_without_reading() {
+        // (document, sqlstate, DETAIL, CONTEXT) for the four `validate_escapes`
+        // refuses, verbatim from PostgreSQL 18.4's json_encoding.out.
+        let refused = [
+            (
+                r#"{ "a":  "\ud83d\ud83d" }"#,
+                "22P02",
+                "Unicode high surrogate must not follow a high surrogate.",
+                "JSON data, line 1: { \"a\":  \"\\ud83d\\ud83d...",
+            ),
+            (
+                r#"{ "a":  "\ude04\ud83d" }"#,
+                "22P02",
+                "Unicode low surrogate must follow a high surrogate.",
+                "JSON data, line 1: { \"a\":  \"\\ude04...",
+            ),
+            (
+                r#"{ "a":  "\ud83dX" }"#,
+                "22P02",
+                "Unicode low surrogate must follow a high surrogate.",
+                "JSON data, line 1: { \"a\":  \"\\ud83dX...",
+            ),
+            (
+                r#"{ "a":  "\ude04X" }"#,
+                "22P02",
+                "Unicode low surrogate must follow a high surrogate.",
+                "JSON data, line 1: { \"a\":  \"\\ude04...",
+            ),
+            // `\u0000` decodes to nothing `text` can hold, and is the one case
+            // re-coded to 22P05.
+            (
+                r#"{ "a":  "null \u0000 escape" }"#,
+                "22P05",
+                "\\u0000 cannot be converted to text.",
+                "JSON data, line 1: { \"a\":  \"null \\u0000...",
+            ),
+        ];
+        for (input, sqlstate, detail, context) in refused {
+            // `json_in` stores every one of them: the cast must keep working.
+            assert2::assert!(validate(input).is_ok(), "{input:?}");
+            let e = validate_escapes(input).expect_err(input);
+            let got = (
+                e.sqlstate().to_string(),
+                e.detail().map(|d| d.into_owned()).unwrap_or_default(),
+                e.context().map(str::to_string).unwrap_or_default(),
+            );
+            assert2::assert!(
+                got == (
+                    sqlstate.to_string(),
+                    detail.to_string(),
+                    context.to_string()
+                ),
+                "{input:?}"
+            );
+        }
+
+        // The well-formed pair passes both readings, and the accessor still
+        // hands back the ORIGINAL escapes rather than the decoded emoji — a fix
+        // that decoded the output would satisfy the four cases above and be
+        // just as wrong.
+        let paired = r#"{ "a":  "\ud83d\ude04\ud83d\udc36" }"#;
+        assert2::assert!(validate(paired).is_ok());
+        assert2::assert!(validate_escapes(paired).is_ok());
+        assert2::assert!(
+            object_fields(paired).expect("object")
+                == vec![("a".to_string(), r#""\ud83d\ude04\ud83d\udc36""#)]
+        );
+        // …and `->>`'s reading of that same field does decode it.
+        assert2::assert!(as_text(r#""\ud83d\ude04\ud83d\udc36""#) == "😄🐶");
+    }
+
+    /// A high surrogate with no partner used to be dropped rather than replaced,
+    /// so `"\ud800"` and `"\ud801"` decoded to the same empty string. No
+    /// accessor can reach that any more, but the decoder must not be the thing
+    /// that loses the distinction if one ever does.
+    #[test]
+    fn a_dangling_high_surrogate_decodes_to_a_character_not_to_nothing() {
+        let cases = [
+            (r#""\ud800""#, "\u{fffd}"),
+            (r#""\ud83dX""#, "\u{fffd}X"),
+            (r#""\ud83d\ud83d""#, "\u{fffd}\u{fffd}"),
+            (r#""\ud83d\n""#, "\u{fffd}\n"),
+            (r#""\ude04""#, "\u{fffd}"),
+            // A well-formed pair still combines, and nothing else moved.
+            (r#""😄""#, "😄"),
+            (r#""a\tb""#, "a\tb"),
+        ];
+        for (raw, expected) in cases {
+            assert2::assert!(unescape(raw).as_deref() == Some(expected), "{raw:?}");
         }
     }
 

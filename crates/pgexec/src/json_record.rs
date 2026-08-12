@@ -64,9 +64,19 @@ impl<'a> Node<'a> {
     /// A `json` call reads `Datum::Json`, a `jsonb` call reads `Datum::Jsonb`;
     /// the coercion of an `unknown` literal to one or the other has already run
     /// by the time a value gets here.
+    ///
+    /// The whole family populates fields from *decoded* strings — object keys to
+    /// match on and `text` values to store — so `get_json_object_as_hash`,
+    /// `populate_array_json` and `populate_recordset_worker` all build their
+    /// lexer with `need_escapes` set. That check belongs here rather than at the
+    /// point a string is decoded, because upstream parses the document up front
+    /// and so rejects a bad escape in a field the call never reads.
     pub(crate) fn of(value: &'a Datum, flavour: Flavour) -> Result<Self, ExecError> {
         match (flavour, value) {
-            (Flavour::Json, Datum::Json(text)) => Ok(Node::Json(text)),
+            (Flavour::Json, Datum::Json(text)) => {
+                json::validate_escapes(text)?;
+                Ok(Node::Json(text))
+            }
             (Flavour::Jsonb, Datum::Jsonb(value)) => Ok(Node::Jsonb(value)),
             (_, other) => Err(ExecError::TypeMismatch(format!(
                 "{} does not accept an argument of type {}",

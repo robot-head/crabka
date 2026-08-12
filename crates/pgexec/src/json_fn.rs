@@ -634,7 +634,9 @@ pub(crate) fn eval_json(
                 return Ok(Datum::Null);
             }
             let count = if json_flavoured {
-                let doc = json_operand(&vals[0], &fc.name)?;
+                // `json_array_length` builds its lexer with `need_escapes`
+                // false: it counts elements without looking inside a string.
+                let doc = json_operand(&vals[0], &fc.name, Escapes::Raw)?;
                 match json::kind(&doc) {
                     Kind::Array => json::array_elements(&doc).unwrap_or_default().len(),
                     Kind::Object => {
@@ -662,7 +664,9 @@ pub(crate) fn eval_json(
                 return Ok(Datum::Null);
             }
             let name = if json_flavoured {
-                json::kind(&json_operand(&vals[0], &fc.name)?)
+                // `json_get_first_token` does not even reach the strings, let
+                // alone decode them.
+                json::kind(&json_operand(&vals[0], &fc.name, Escapes::Raw)?)
                     .name()
                     .to_string()
             } else {
@@ -681,7 +685,9 @@ pub(crate) fn eval_json(
             }
             let want_document = f == JsonFunc::ExtractPath;
             if json_flavoured {
-                let doc = json_operand(&vals[0], &fc.name)?;
+                // `json_extract_path` and its `_text` sibling are `get_worker`,
+                // which always sets `need_escapes` — the non-text form included.
+                let doc = json_operand(&vals[0], &fc.name, Escapes::Decoded)?;
                 return Ok(match (json_navigate(&doc, &path), want_document) {
                     (None, _) => Datum::Null,
                     (Some(sub), true) => Datum::Json(sub.to_string()),
@@ -769,7 +775,9 @@ pub(crate) fn eval_json(
                 Some(other) => return Err(type_error(&fc.name, other)),
             };
             if json_flavoured {
-                let doc = json_operand(&vals[0], &fc.name)?;
+                // `json_strip_nulls` re-serializes the keys it keeps, so it
+                // decodes them.
+                let doc = json_operand(&vals[0], &fc.name, Escapes::Decoded)?;
                 return Ok(Datum::Json(json::strip_nulls(&doc, in_arrays)));
             }
             let value = jsonb_operand(&vals[0], &fc.name)?;
@@ -2346,21 +2354,46 @@ fn object_key_null() -> ExecError {
 
 // ---- the `json` text reader ----
 
+/// `makeJsonLexContext`'s `need_escapes` argument, which every `json` accessor
+/// chooses again for itself.
+///
+/// `json_in` stores the document's bytes without ever decoding a string escape,
+/// so `'{"a":"\ud83dX"}'::json` — a lone high surrogate — is a perfectly legal
+/// stored value. Whether reading it back is an error depends entirely on which
+/// side of this flag the accessor is on, and `PostgreSQL` is not uniform about
+/// it: `json_typeof` and `json_array_length` answer, `->` raises `invalid input
+/// syntax for type json`. Neither is a shortcut for the other, so the flag is
+/// spelled out at each call rather than folded into [`json_operand`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Escapes {
+    /// `need_escapes = false`: the accessor only ever hands back spans of the
+    /// original text, so an escape it cannot decode is none of its business.
+    Raw,
+    /// `need_escapes = true`: the accessor decodes strings — object keys, or a
+    /// `_text` result — so an unpaired surrogate is 22P02 and `\u0000` is 22P05,
+    /// for the whole document, whether or not the sought value contains one.
+    Decoded,
+}
+
 /// The `json` document an argument denotes: a `json` value's stored text, or a
 /// `text` value put through `json_in`.
 ///
 /// The plan-time check has already refused a `jsonb` argument to a `json_*`
 /// function, so the remaining `text` case only arises on paths that never ran
 /// it — validating rather than failing keeps those working.
-fn json_operand<'a>(d: &'a Datum, name: &str) -> Result<Cow<'a, str>, ExecError> {
-    match d {
-        Datum::Json(text) => Ok(Cow::Borrowed(text.as_str())),
+fn json_operand<'a>(d: &'a Datum, name: &str, escapes: Escapes) -> Result<Cow<'a, str>, ExecError> {
+    let text = match d {
+        Datum::Json(text) => text.as_str(),
         Datum::Text(s) => {
             json::validate(s)?;
-            Ok(Cow::Borrowed(s.as_str()))
+            s.as_str()
         }
-        other => Err(type_error(name, other)),
+        other => return Err(type_error(name, other)),
+    };
+    if escapes == Escapes::Decoded {
+        json::validate_escapes(text)?;
     }
+    Ok(Cow::Borrowed(text))
 }
 
 /// An object field's ORIGINAL text. `json` keeps duplicate keys, and
@@ -2434,7 +2467,15 @@ pub(crate) fn json_srf_rows(kind: JsonbSrf, vals: &[Datum]) -> Result<Vec<Vec<Da
         JsonbSrf::ArrayElements => "json_array_elements",
         JsonbSrf::ArrayElementsText => "json_array_elements_text",
     };
-    let doc = json_operand(&vals[0], name)?;
+    // `each_worker` sets `need_escapes` for both of its forms and
+    // `json_object_keys` for its only one, because all three hand back decoded
+    // keys. `elements_worker` passes its own `as_text` flag instead, so
+    // `json_array_elements` — which returns spans and no keys — does not.
+    let escapes = match kind {
+        JsonbSrf::ArrayElements => Escapes::Raw,
+        _ => Escapes::Decoded,
+    };
+    let doc = json_operand(&vals[0], name, escapes)?;
     let shape = json::kind(&doc);
     Ok(match kind {
         JsonbSrf::Each | JsonbSrf::EachText => {
@@ -2626,18 +2667,34 @@ pub(crate) fn eval_json_operator(
 ///
 /// The four extraction operators are the only ones `json` has, so this is the
 /// whole of `json`'s operator surface.
+///
+/// All four are `get_worker`, which builds its lexer with `need_escapes` set
+/// whether or not the result is text, and parses the whole document before it
+/// answers. So a bad escape anywhere raises even when the sought field is
+/// elsewhere and even when there is no such field —
+/// `'{"a":1,"b":"\ud83dX"}'::json -> 'zz'` is an error, not SQL NULL.
 fn json_text_operator(op: JsonOp, left: &Datum, right: &Datum) -> Result<Option<Datum>, ExecError> {
     let Datum::Json(doc) = left else {
         return Ok(None);
     };
+    // Both drop out before `get_worker` is reached — the operators are strict,
+    // and `get_path_all` returns NULL for a path array holding a NULL without
+    // looking at the document at all. So neither reports the bad escape.
     let found = match op {
         JsonOp::Get | JsonOp::GetText => match subscript_operand(op, left, right)? {
             None => return Ok(Some(Datum::Null)),
-            Some(subscript) => json_extract(doc, &subscript),
+            Some(subscript) => {
+                json::validate_escapes(doc)?;
+                json_extract(doc, &subscript)
+            }
         },
         _ => match array_operand(op, left, right)? {
             None => return Ok(Some(Datum::Null)),
-            Some(path) => json_navigate(doc, &path),
+            Some(path) if path.iter().any(Option::is_none) => return Ok(Some(Datum::Null)),
+            Some(path) => {
+                json::validate_escapes(doc)?;
+                json_navigate(doc, &path)
+            }
         },
     };
     let as_document = matches!(op, JsonOp::Get | JsonOp::GetPath);
@@ -4845,6 +4902,127 @@ mod tests {
         assert!(
             json_operator_result_type(JsonOp::Contains, ColumnType::Jsonb, ColumnType::Json)
                 .is_none()
+        );
+    }
+
+    /// PostgreSQL 18.4's json_encoding.out: an escape `json_in` stored without
+    /// reading is an error at the accessors that decode and a non-event at the
+    /// ones that do not, and which accessor is which is not a pattern — it is
+    /// `makeJsonLexContext`'s `need_escapes` argument, read off `jsonfuncs.c`.
+    #[test]
+    fn the_accessors_that_decode_reject_the_escapes_the_others_hand_back() {
+        // The four `json_encoding` malformed documents plus the one well-formed
+        // pair, and the SQLSTATE each raises where it is read.
+        // (object document, the same string as a one-element array, SQLSTATE)
+        let malformed: [(&str, &str, &str); 5] = [
+            (
+                r#"{ "a":  "\ud83d\ud83d" }"#,
+                r#"["\ud83d\ud83d"]"#,
+                "22P02",
+            ),
+            (
+                r#"{ "a":  "\ude04\ud83d" }"#,
+                r#"["\ude04\ud83d"]"#,
+                "22P02",
+            ),
+            (r#"{ "a":  "\ud83dX" }"#, r#"["\ud83dX"]"#, "22P02"),
+            (r#"{ "a":  "\ude04X" }"#, r#"["\ude04X"]"#, "22P02"),
+            // `\u0000` decodes to nothing `text` can hold: 22P05, not 22P02.
+            (
+                r#"{ "a":  "null \u0000 escape" }"#,
+                r#"["null \u0000 escape"]"#,
+                "22P05",
+            ),
+        ];
+        let paired = r#"{ "a":  "\ud83d\ude04\ud83d\udc36" }"#;
+
+        for (doc, array_doc, code) in malformed {
+            // `get_worker` sets `need_escapes` for all four operators, whether
+            // or not the result is text.
+            assert!(
+                sqlstate(json_get(&jn(doc), &t("a")).expect_err(doc)) == code,
+                "-> {doc}"
+            );
+            assert!(
+                sqlstate(json_get_text(&jn(doc), &t("a")).expect_err(doc)) == code,
+                "->> {doc}"
+            );
+            assert!(
+                sqlstate(json_get_path(&jn(doc), &text_array(&["a"])).expect_err(doc)) == code,
+                "#> {doc}"
+            );
+            assert!(
+                sqlstate(json_get_path_text(&jn(doc), &text_array(&["a"])).expect_err(doc)) == code,
+                "#>> {doc}"
+            );
+            // It parses the whole document before answering, so a field the
+            // caller never asked for still raises — and so does a missing one.
+            assert!(
+                sqlstate(json_get(&jn(doc), &t("zz")).expect_err(doc)) == code,
+                "-> missing {doc}"
+            );
+            // Strict, though: a NULL subscript never reaches the parse.
+            assert!(json_get(&jn(doc), &Datum::Null).expect("strict") == Datum::Null);
+
+            for name in ["json_extract_path", "json_extract_path_text"] {
+                let err = call(name, vec![json_expr(doc), u("a")]).expect_err(doc);
+                assert!(sqlstate(err) == code, "{name} {doc}");
+            }
+            // `json_strip_nulls` re-serializes the keys it keeps, so it decodes.
+            let stripped = call("json_strip_nulls", vec![json_expr(doc)]).expect_err(doc);
+            assert!(sqlstate(stripped) == code, "json_strip_nulls {doc}");
+            // `json_get_first_token` and `json_array_length` set `need_escapes`
+            // false, so both answer over the very same bytes.
+            assert!(
+                call("json_typeof", vec![json_expr(doc)]).expect(doc) == t("object"),
+                "json_typeof {doc}"
+            );
+            assert!(
+                call("json_array_length", vec![json_expr(array_doc)]).expect(array_doc)
+                    == Datum::Int4(1),
+                "json_array_length {array_doc}"
+            );
+            // The record family reads its document through one seam, and
+            // `get_json_object_as_hash`, `populate_array_json` and
+            // `populate_recordset_worker` all set `need_escapes`.
+            let document = jn(doc);
+            let node = crate::json_record::Node::of(&document, crate::json_record::Flavour::Json);
+            assert!(
+                sqlstate(node.expect_err("record family refused")) == code,
+                "json_populate_record {doc}"
+            );
+
+            for srf in [
+                JsonbSrf::Each,
+                JsonbSrf::EachText,
+                JsonbSrf::ObjectKeys,
+                JsonbSrf::ArrayElementsText,
+            ] {
+                let err = json_srf_rows(srf, &[jn(doc)]).expect_err(doc);
+                assert!(sqlstate(err) == code, "{srf:?} {doc}");
+            }
+            // `elements_worker` passes its own `as_text` flag, so the non-text
+            // form reads the same document without complaint.
+            assert!(
+                json_srf_rows(JsonbSrf::ArrayElements, &[jn(array_doc)]).is_ok(),
+                "json_array_elements {array_doc}"
+            );
+        }
+
+        // The other direction, which a fix that simply rejected everything
+        // would break: the well-formed pair still extracts, and `->` hands back
+        // the ORIGINAL escapes rather than the decoded emoji.
+        assert!(json_get(&jn(paired), &t("a")).expect("->") == jn(r#""\ud83d\ude04\ud83d\udc36""#));
+        // `->>` is the one that decodes.
+        assert!(json_get_text(&jn(paired), &t("a")).expect("->>") == t("😄🐶"));
+        assert!(
+            json_srf_rows(JsonbSrf::Each, &[jn(paired)]).expect("json_each")
+                == vec![vec![t("a"), jn(r#""\ud83d\ude04\ud83d\udc36""#)]]
+        );
+        let paired_document = jn(paired);
+        assert!(
+            crate::json_record::Node::of(&paired_document, crate::json_record::Flavour::Json)
+                .is_ok()
         );
     }
 
