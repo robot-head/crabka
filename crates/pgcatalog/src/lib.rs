@@ -1827,6 +1827,205 @@ pub fn drop_operator_family_ops(
     Ok(ops)
 }
 
+/// One user-defined operator, as `pg_operator` describes it.
+///
+/// The field names are `PostgreSQL`'s column names without the `opr` prefix,
+/// because this row *is* the catalog tuple: `CREATE OPERATOR` writes it whole
+/// and `pg_operator` projects it whole. A `0` oid means "no such object" in
+/// every position, exactly as `InvalidOid` does upstream.
+///
+/// The links are stored as oids and not as names. `DROP OPERATOR` must find
+/// every reference to the operator it removes, and an oid is the only thing
+/// that a rename or a schema change cannot invalidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserOperator {
+    /// `0` asks [`put_user_operator_ops`] to allocate one.
+    pub oid: u32,
+    /// The namespace the operator lives in. Always resolved; never a written
+    /// qualifier.
+    pub schema: String,
+    /// The symbol, without a qualifier: `===`.
+    pub symbol: String,
+    pub owner: String,
+    /// `b` for an infix operator, `l` for a prefix one. `PostgreSQL` 14 removed
+    /// postfix operators, so `r` can no longer be written.
+    pub kind: char,
+    /// `0` for a prefix operator, which has no left operand.
+    pub left_type_oid: u32,
+    pub right_type_oid: u32,
+    pub result_type_oid: u32,
+    /// `pg_proc.oid` of the function that implements the operator.
+    pub code_oid: u32,
+    pub commutator_oid: u32,
+    pub negator_oid: u32,
+    pub restrict_oid: u32,
+    pub join_oid: u32,
+    pub can_merge: bool,
+    pub can_hash: bool,
+}
+
+const USER_OPERATOR_PREFIX: &[u8] = b"\0\0\0\0catalog_operator/";
+
+/// The identity of an operator: its namespace, its symbol, and both operand
+/// types, because a symbol alone is overloaded.
+///
+/// The operand oids go in as decimal text so the key stays one
+/// [`key::push_key_part`] list that [`key::key_parts`] can split back apart.
+fn user_operator_key(schema: &str, symbol: &str, left: u32, right: u32) -> Vec<u8> {
+    let mut out = USER_OPERATOR_PREFIX.to_vec();
+    key::push_key_part(&mut out, schema);
+    key::push_key_part(&mut out, symbol);
+    key::push_key_part(&mut out, &left.to_string());
+    key::push_key_part(&mut out, &right.to_string());
+    out
+}
+
+/// The fields of a stored operator, in the order [`read_user_operator`] reads
+/// them back.
+fn user_operator_fields(operator: &UserOperator) -> [u32; 11] {
+    [
+        u32::from(operator.kind),
+        operator.left_type_oid,
+        operator.right_type_oid,
+        operator.result_type_oid,
+        operator.code_oid,
+        operator.commutator_oid,
+        operator.negator_oid,
+        operator.restrict_oid,
+        operator.join_oid,
+        u32::from(operator.can_merge),
+        u32::from(operator.can_hash),
+    ]
+}
+
+fn read_user_operator(
+    schema: &str,
+    symbol: &str,
+    bytes: &[u8],
+) -> Result<UserOperator, CatalogError> {
+    let (oid, owner, mut fields) = read_operator_object(bytes)?;
+    let mut next = || {
+        let (value, rest) = U32::read_from_prefix(fields)
+            .map_err(|_| KvError::CorruptRow("operator fields are incomplete".into()))?;
+        fields = rest;
+        Ok::<_, KvError>(value.get())
+    };
+    let kind = char::from_u32(next()?)
+        .ok_or_else(|| KvError::CorruptRow("operator kind is not a character".into()))?;
+    Ok(UserOperator {
+        oid,
+        schema: schema.to_string(),
+        symbol: symbol.to_string(),
+        owner,
+        kind,
+        left_type_oid: next()?,
+        right_type_oid: next()?,
+        result_type_oid: next()?,
+        code_oid: next()?,
+        commutator_oid: next()?,
+        negator_oid: next()?,
+        restrict_oid: next()?,
+        join_oid: next()?,
+        can_merge: next()? != 0,
+        can_hash: next()? != 0,
+    })
+}
+
+/// The oid a new operator will carry, and the op that advances the cursor.
+///
+/// The oid is handed out *before* the row is built, and not allocated by the
+/// write, because `CREATE OPERATOR === (…, COMMUTATOR = ===)` has to store the
+/// operator's own oid inside its own tuple. `PostgreSQL` reaches that state by
+/// inserting the row and then updating it; a write batch has no "then", so the
+/// oid is read out first and the row is written once.
+///
+/// The cursor is the one operator classes and families already draw on.
+/// Sharing it is what keeps a user operator's oid distinct from every other
+/// object this catalog allocates.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn allocate_user_operator_oid(kv: &dyn Kv) -> Result<(u32, WriteOp), CatalogError> {
+    let oid = operator_object_oid(kv)?;
+    Ok((
+        oid,
+        WriteOp::Put {
+            key: NEXT_OPERATOR_OBJECT_OID_KEY.to_vec(),
+            value: U32::new(oid + 1).as_bytes().to_vec(),
+        },
+    ))
+}
+
+/// Store `operator` whole.
+///
+/// The same call creates an operator and rewrites one whose commutator or
+/// negator link changed, because `PostgreSQL`'s `OperatorUpd` rewrites the
+/// whole tuple too.
+#[must_use]
+pub fn put_user_operator_ops(operator: &UserOperator) -> Vec<WriteOp> {
+    vec![WriteOp::Put {
+        key: user_operator_key(
+            &operator.schema,
+            &operator.symbol,
+            operator.left_type_oid,
+            operator.right_type_oid,
+        ),
+        value: operator_object_bytes(
+            operator.oid,
+            &operator.owner,
+            &user_operator_fields(operator),
+        ),
+    }]
+}
+
+/// Remove one user-defined operator. Its back-links are the caller's business.
+#[must_use]
+pub fn drop_user_operator_ops(operator: &UserOperator) -> Vec<WriteOp> {
+    vec![WriteOp::Delete {
+        key: user_operator_key(
+            &operator.schema,
+            &operator.symbol,
+            operator.left_type_oid,
+            operator.right_type_oid,
+        ),
+    }]
+}
+
+/// Every user-defined operator, in oid order.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_user_operators(kv: &dyn Kv) -> Result<Vec<UserOperator>, CatalogError> {
+    let mut out = Vec::new();
+    for (key, bytes) in kv.scan_prefix(USER_OPERATOR_PREFIX)? {
+        let parts = key::key_parts(&key[USER_OPERATOR_PREFIX.len()..], 4)
+            .ok_or_else(|| KvError::CorruptRow("operator key is incomplete".into()))?;
+        out.push(read_user_operator(parts[0], parts[1], &bytes)?);
+    }
+    out.sort_by_key(|operator| operator.oid);
+    Ok(out)
+}
+
+/// One user-defined operator by its full identity, or `None`.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn get_user_operator(
+    kv: &dyn Kv,
+    schema: &str,
+    symbol: &str,
+    left_type_oid: u32,
+    right_type_oid: u32,
+) -> Result<Option<UserOperator>, CatalogError> {
+    let key = user_operator_key(schema, symbol, left_type_oid, right_type_oid);
+    kv.get(&key)?
+        .map(|bytes| read_user_operator(schema, symbol, &bytes))
+        .transpose()
+}
+
 fn serialize_tablespace(tablespace: &Tablespace) -> Vec<u8> {
     let mut bytes = U32::new(tablespace.oid).as_bytes().to_vec();
     for field in [&tablespace.owner, &tablespace.location] {

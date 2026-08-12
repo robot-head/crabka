@@ -791,7 +791,7 @@ pub(crate) fn rows(
         "pg_init_privs" => Ok(pg_init_privs_rows()),
         "pg_opclass" => pg_opclass_rows(kv),
         "pg_opfamily" => pg_opfamily_rows(kv),
-        "pg_operator" => Ok(pg_operator_rows()),
+        "pg_operator" => pg_operator_rows(kv),
         "pg_depend" => pg_depend_rows(kv),
         "pg_description" => pg_description_rows(kv),
         "pg_event_trigger" => pg_event_trigger_rows(kv),
@@ -2091,7 +2091,14 @@ fn pg_amproc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
-fn pg_operator_rows() -> Vec<Vec<Datum>> {
+/// `pg_operator`: the pinned built-in rows, then one per user-defined operator.
+fn pg_operator_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = builtin_pg_operator_rows();
+    rows.extend(crate::useroperator::pg_operator_rows(kv)?);
+    Ok(rows)
+}
+
+fn builtin_pg_operator_rows() -> Vec<Vec<Datum>> {
     crate::builtin_operators::BUILTIN_OPERATORS
         .iter()
         .map(

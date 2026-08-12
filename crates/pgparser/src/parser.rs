@@ -3443,6 +3443,11 @@ impl Parser {
                     {
                         emitted(I::DropOperatorFamily, self.drop_operator_object())
                     }
+                    // The bare form, which the two arms above have already
+                    // taken their spellings out of.
+                    Token::Ident(s) if s == "operator" => {
+                        emitted(I::DropOperator, self.drop_operator())
+                    }
                     Token::Keyword(Keyword::Schema) => emitted(I::DropSchema, self.drop_schema()),
                     Token::Ident(s) if s == "type" => emitted(I::DropType, self.drop_type()),
                     Token::Ident(s) if s == "domain" => emitted(I::DropDomain, self.drop_domain()),
@@ -5345,6 +5350,11 @@ impl Parser {
                     && matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(next) if next == "family") =>
             {
                 emitted(I::CreateOperatorFamily, self.create_operator_family())
+            }
+            // The bare form, which the two arms above have already taken their
+            // spellings out of.
+            Token::Ident(s) if s == "operator" => {
+                emitted(I::CreateOperator, self.create_operator())
             }
             Token::Ident(s) if s == "tablespace" => {
                 emitted(I::CreateTablespace, self.create_tablespace())
@@ -9416,6 +9426,167 @@ impl Parser {
         ))
     }
 
+    /// `[schema.]symbol` wherever `PostgreSQL` writes `any_operator`: the name
+    /// after `CREATE OPERATOR`/`DROP OPERATOR`, and the value of a `COMMUTATOR`
+    /// or `NEGATOR` attribute.
+    ///
+    /// The lexer cannot help here, and is deliberately not asked to. Its
+    /// punctuation table is a closed maximal-munch list of `PostgreSQL` 18's
+    /// *built-in* spellings, so a user-defined name reaches the parser already
+    /// split: `===` is three [`Token::Eq`], `!==` is [`Token::Ne`] then
+    /// [`Token::Eq`], `<|` is [`Token::Lt`] then [`Token::Pipe`]. Widening the
+    /// lexer to one generic operator token would instead force every expression
+    /// to re-derive where one built-in operator ends and the next begins. So
+    /// the name is sliced back out of the source and the tokens it covers are
+    /// skipped.
+    ///
+    /// The qualifier follows `any_operator: all_Op | ColId '.' any_operator`. A
+    /// leading name is therefore *always* a schema and the `.` after it is
+    /// mandatory, which is what puts the error of `DROP OPERATOR equals` on the
+    /// token after `equals`, exactly where `PostgreSQL` puts it.
+    fn operator_name(&mut self) -> Result<crate::ast::OperatorName, ParseError> {
+        let schema = if self.peek_n_is_col_id(0) {
+            let schema = self.expect_col_id()?;
+            self.expect(&Token::Dot)?;
+            Some(schema)
+        } else {
+            None
+        };
+        Ok(crate::ast::OperatorName {
+            schema,
+            symbol: self.operator_symbol()?,
+        })
+    }
+
+    /// The operator symbol at the cursor, sliced out of the source by
+    /// [`longest_operator`], with the tokens it covers consumed.
+    fn operator_symbol(&mut self) -> Result<String, ParseError> {
+        let start = self.peek_pos();
+        let symbol = longest_operator(&self.source[start..]).to_string();
+        if symbol.is_empty() {
+            return Err(ParseError::new(
+                format!("expected an operator name, found {:?}", self.peek()),
+                start,
+            ));
+        }
+        // A run that comes out as exactly `=>` is `scan.l`'s `EQUALS_GREATER`,
+        // the separator of a named function argument. `all_Op` does not include
+        // it, so `=>` cannot be an operator's name — it is the one spelling the
+        // run rules produce that this position must still refuse.
+        if symbol == "=>" {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "syntax error at or near \"=>\"",
+                start,
+            ));
+        }
+        // Every token inside the run belongs to this one name. How the lexer
+        // split them says nothing about where the name ends.
+        let end = start + symbol.len();
+        while self.peek_pos() < end && *self.peek() != Token::Eof {
+            self.bump();
+        }
+        Ok(symbol)
+    }
+
+    /// `CREATE OPERATOR [schema.]symbol ( attribute [, …] )`.
+    ///
+    /// The attribute list is order-independent and, apart from being non-empty,
+    /// unconstrained: `PostgreSQL` collects it into a `DefElem` list and only
+    /// `DefineOperator` decides what is missing. That ordering is observable —
+    /// `DefineOperator` warns about every unrecognized attribute *before* it
+    /// reports the missing function — so this refuses nothing that `gram.y`
+    /// accepts.
+    fn create_operator(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{CreateOperatorStmt, UtilityStatement};
+
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("operator")?;
+        let name = self.operator_name()?;
+        self.expect(&Token::LParen)?;
+        let mut function = None;
+        let mut left_type = None;
+        let mut right_type = None;
+        let mut commutator = None;
+        let mut negator = None;
+        let mut restrict = None;
+        let mut join = None;
+        let mut hashes = false;
+        let mut merges = false;
+        let mut unrecognized_options = Vec::new();
+        loop {
+            // A `def_elem` name is a `ColLabel`, so a keyword may be one:
+            // `JOIN` is a type/function-name keyword and still an attribute.
+            let attribute = self.expect_col_label()?;
+            match attribute.as_str() {
+                "function" | "procedure" => function = Some(self.operator_attribute_routine()?),
+                "leftarg" => {
+                    self.expect(&Token::Eq)?;
+                    left_type = Some(self.routine_type()?);
+                }
+                "rightarg" => {
+                    self.expect(&Token::Eq)?;
+                    right_type = Some(self.routine_type()?);
+                }
+                "commutator" => {
+                    self.expect(&Token::Eq)?;
+                    commutator = Some(self.operator_name()?);
+                }
+                "negator" => {
+                    self.expect(&Token::Eq)?;
+                    negator = Some(self.operator_name()?);
+                }
+                "restrict" => restrict = Some(self.operator_attribute_routine()?),
+                "join" => join = Some(self.operator_attribute_routine()?),
+                "hashes" => hashes = true,
+                "merges" => merges = true,
+                _ => {
+                    // `DefineOperator` warns and ignores. The name is carried
+                    // so the executor can warn with the written spelling; the
+                    // value is read and dropped, and may be absent entirely —
+                    // `SORT1, SORT2, LTCMP, GTCMP` are all written bare.
+                    if self.eat_token(&Token::Eq) {
+                        self.aggregate_option_value()?;
+                    }
+                    unrecognized_options.push(attribute);
+                }
+            }
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect_statement_end("CREATE OPERATOR")?;
+        Ok(crate::ast::Statement::Utility(
+            UtilityStatement::CreateOperator(Box::new(CreateOperatorStmt {
+                name,
+                function,
+                left_type,
+                right_type,
+                commutator,
+                negator,
+                restrict,
+                join,
+                hashes,
+                merges,
+                unrecognized_options,
+            })),
+        ))
+    }
+
+    /// The `= <name>` of a `FUNCTION`, `PROCEDURE`, `RESTRICT` or `JOIN`
+    /// attribute. `PostgreSQL` reads all four with `defGetQualifiedName`, which
+    /// keeps only the name: a written `f(int4, int4)` names the plain `f`, so
+    /// the parenthesized part is parsed and dropped.
+    fn operator_attribute_routine(&mut self) -> Result<crate::ast::RelationRef, ParseError> {
+        self.expect(&Token::Eq)?;
+        let name = self.relation_ref()?;
+        if *self.peek() == Token::LParen {
+            let _ = self.routine_arg_list()?;
+        }
+        Ok(name)
+    }
+
     fn alter_operator_object(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::{OperatorObjectAlterAction, OperatorObjectKind, UtilityStatement};
 
@@ -9653,6 +9824,76 @@ impl Parser {
                 cascade,
             },
         ))
+    }
+
+    /// `DROP OPERATOR [IF EXISTS] signature [, …] [CASCADE | RESTRICT]`.
+    fn drop_operator(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::UtilityStatement;
+
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("operator")?;
+        let if_exists = self.eat_if_exists();
+        let mut operators = Vec::new();
+        loop {
+            operators.push(self.operator_signature()?);
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        let cascade = self.eat_drop_behavior();
+        self.expect_statement_end("DROP OPERATOR")?;
+        Ok(crate::ast::Statement::Utility(
+            UtilityStatement::DropOperator {
+                if_exists,
+                operators,
+                cascade,
+            },
+        ))
+    }
+
+    /// `[schema.]symbol ( { type | NONE } , { type | NONE } )`.
+    ///
+    /// `PostgreSQL`'s `oper_argtypes` has four productions and every one of
+    /// them takes two operands, so a prefix operator is named `(NONE, t)` and
+    /// never `(t)`. The one-operand spelling is a production of its own whose
+    /// only action is the `missing argument` error reproduced here; `(NONE,
+    /// NONE)` has no production at all.
+    fn operator_signature(&mut self) -> Result<crate::ast::OperatorSignature, ParseError> {
+        let name = self.operator_name()?;
+        self.expect(&Token::LParen)?;
+        let left_type = self.operator_operand_type()?;
+        if *self.peek() == Token::RParen {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "missing argument",
+                self.peek_pos(),
+            ));
+        }
+        self.expect(&Token::Comma)?;
+        let right_position = self.peek_pos();
+        let right_type = self.operator_operand_type()?;
+        if left_type.is_none() && right_type.is_none() {
+            return Err(ParseError::new(
+                "an operator must have an operand type on at least one side",
+                right_position,
+            ));
+        }
+        self.expect(&Token::RParen)?;
+        Ok(crate::ast::OperatorSignature {
+            name,
+            left_type,
+            right_type,
+        })
+    }
+
+    /// One operand of an operator signature. `NONE` is the operand a prefix
+    /// operator does not have, and never a type of that name.
+    fn operator_operand_type(&mut self) -> Result<Option<crate::ast::RoutineType>, ParseError> {
+        if self.peek_ident_eq("none") {
+            self.bump();
+            return Ok(None);
+        }
+        Ok(Some(self.routine_type()?))
     }
 
     /// `CREATE TYPE name [ AS { (field type, …) | ENUM (…) | RANGE (…) } ]`.
@@ -14556,6 +14797,44 @@ fn prefix_operator(token: &Token) -> Option<UnaryOp> {
     })
 }
 
+/// The operator `PostgreSQL`'s `scan.l` would lex at the start of `text`, empty
+/// when `text` does not begin with an operator character at all.
+///
+/// `scan.l` matches the longest run of `op_chars` and then shortens it twice,
+/// and both rules are observable in the regression suite:
+///   * an embedded `--` or `/*` opens a comment, so the operator stops there —
+///     which is why `SELECT 2 !=-- comment` compares with `!=`; and
+///   * a multi-character operator may not end in `+` or `-` unless it holds one
+///     of the characters no SQL operator uses. That is what makes `x*+y` two
+///     operators and `!=-` a single legal operator name.
+///
+/// Called on an operator-*name* position, where the run is the whole name. In
+/// an expression the lexer's own table does this job.
+fn longest_operator(text: &str) -> &str {
+    /// The `op_chars` no SQL operator is spelled with. One of these anywhere in
+    /// a name lifts the trailing-`+`/`-` restriction, because the name can then
+    /// not be read as a sequence of SQL operators.
+    const NON_SQL_OPERATOR_CHARS: &[char] = &['~', '!', '@', '#', '%', '^', '&', '|', '`', '?'];
+
+    let run_end = text
+        .find(|c: char| !OPERATOR_CHARS.contains(c))
+        .unwrap_or(text.len());
+    let run = &text[..run_end];
+    let comment_at = match (run.find("--"), run.find("/*")) {
+        (Some(dashes), Some(slash_star)) => dashes.min(slash_star),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => run.len(),
+    };
+    let mut run = &run[..comment_at];
+    while run.len() > 1
+        && run.ends_with(['+', '-'])
+        && !run[..run.len() - 1].contains(NON_SQL_OPERATOR_CHARS)
+    {
+        run = &run[..run.len() - 1];
+    }
+    run
+}
+
 /// How an operator token is spelled, for error messages that quote the operator
 /// the query wrote. `None` for a token that is not an operator at all.
 fn operator_spelling(token: &Token) -> Option<&'static str> {
@@ -15075,7 +15354,6 @@ fn refusal_tokens_match(candidate: &[(Token, usize)], representative: &str) -> b
         "am",
         "handler_fn",
         "func",
-        "int4eq",
         "f",
     ];
     let Ok(pattern) = lex(representative) else {
@@ -21593,13 +21871,15 @@ fn explicit_compatibility_refusals_reject_malformed_neighbors() {
 
 #[test]
 fn every_non_goal_has_a_bounded_typed_refusal_probe() {
+    use assert2::assert;
+
     use crate::ast::{NON_GOAL_REFUSALS, Statement};
 
-    assert_eq!(NON_GOAL_REFUSALS.len(), 29);
+    assert!(NON_GOAL_REFUSALS.len() == 27);
     for spec in NON_GOAL_REFUSALS {
-        assert_eq!(
-            parse(spec.representative_sql),
-            Ok(vec![Statement::CompatibilityRefusal(spec.command)]),
+        assert!(
+            parse(spec.representative_sql)
+                == Ok(vec![Statement::CompatibilityRefusal(spec.command)]),
             "{}",
             spec.command.command_name(),
         );
@@ -21609,10 +21889,9 @@ fn every_non_goal_has_a_bounded_typed_refusal_probe() {
             spec.command.command_name(),
         );
         let variant = refusal_variant_sql(spec.representative_sql);
-        assert_ne!(variant, spec.representative_sql);
-        assert_eq!(
-            parse(&variant),
-            Ok(vec![Statement::CompatibilityRefusal(spec.command)]),
+        assert!(variant != spec.representative_sql);
+        assert!(
+            parse(&variant) == Ok(vec![Statement::CompatibilityRefusal(spec.command)]),
             "{} variant: {variant}",
             spec.command.command_name(),
         );
@@ -21764,7 +22043,6 @@ fn refusal_variant_sql(sql: &str) -> String {
         "am",
         "handler_fn",
         "func",
-        "int4eq",
         "f",
     ];
     let tokens = lex(sql).expect("representative lexes");
@@ -24082,4 +24360,624 @@ fn keyword_word(kw: Keyword) -> Option<&'static str> {
         Keyword::Exists => "exists",
         _ => return None,
     })
+}
+
+/// The bare `CREATE OPERATOR` and `DROP OPERATOR` grammar, and the source
+/// re-slicing that reads an operator name the lexer has split apart.
+#[cfg(test)]
+mod operator_tests {
+    use assert2::assert;
+    use crabka_pgtypes::ColumnType;
+
+    use super::{longest_operator, parse};
+    use crate::ast::{
+        CreateOperatorStmt, OperatorName, OperatorObjectKind, OperatorSignature, RelationRef,
+        RoutineType, Statement, UtilityStatement,
+    };
+
+    /// The one statement `sql` parses to, as a utility statement.
+    fn utility(sql: &str) -> UtilityStatement {
+        let mut parsed = parse(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        assert!(parsed.len() == 1, "{sql}");
+        match parsed.pop().expect("one statement") {
+            Statement::Utility(utility) => utility,
+            other => panic!("{sql}: not a utility statement: {other:?}"),
+        }
+    }
+
+    /// A built-in operand type, spelled the way
+    /// [`Parser::routine_type`](super::Parser::routine_type) spells one.
+    fn builtin(ty: ColumnType) -> RoutineType {
+        RoutineType::builtin(ty, ty.name().to_string())
+    }
+
+    /// The `CREATE OPERATOR` shape `drop_operator.sql` writes, with only the
+    /// parts each of its statements sets filled in.
+    fn create_operator(
+        symbol: &str,
+        function: &str,
+        commutator: Option<&str>,
+        negator: Option<&str>,
+    ) -> UtilityStatement {
+        UtilityStatement::CreateOperator(Box::new(CreateOperatorStmt {
+            name: OperatorName::bare(symbol),
+            function: Some(RelationRef::bare(function)),
+            left_type: Some(builtin(ColumnType::Int8)),
+            right_type: Some(builtin(ColumnType::Int8)),
+            commutator: commutator.map(OperatorName::bare),
+            negator: negator.map(OperatorName::bare),
+            restrict: None,
+            join: None,
+            hashes: false,
+            merges: false,
+            unrecognized_options: Vec::new(),
+        }))
+    }
+
+    /// One `DROP OPERATOR sym(bigint, bigint)`, the only signature shape
+    /// `drop_operator.sql` writes.
+    fn drop_int8_operator(symbol: &str) -> UtilityStatement {
+        UtilityStatement::DropOperator {
+            if_exists: false,
+            operators: vec![OperatorSignature {
+                name: OperatorName::bare(symbol),
+                left_type: Some(builtin(ColumnType::Int8)),
+                right_type: Some(builtin(ColumnType::Int8)),
+            }],
+            cascade: false,
+        }
+    }
+
+    /// Every DDL statement of `src/test/regress/sql/drop_operator.sql`, quoted
+    /// verbatim. The file is the authority for this grammar, and each of its
+    /// four operator names (`===`, `!==`, `<|`, `|>`) is a name this lexer
+    /// splits across two or three tokens.
+    #[test]
+    fn every_drop_operator_regress_statement_parses() {
+        let cases: &[(&str, UtilityStatement)] = &[
+            (
+                "CREATE OPERATOR === (
+        PROCEDURE = int8eq,
+        LEFTARG = bigint,
+        RIGHTARG = bigint,
+        COMMUTATOR = ===
+)",
+                create_operator("===", "int8eq", Some("==="), None),
+            ),
+            (
+                "CREATE OPERATOR !== (
+        PROCEDURE = int8ne,
+        LEFTARG = bigint,
+        RIGHTARG = bigint,
+        NEGATOR = ===,
+        COMMUTATOR = !==
+)",
+                create_operator("!==", "int8ne", Some("!=="), Some("===")),
+            ),
+            (
+                "DROP OPERATOR !==(bigint, bigint)",
+                drop_int8_operator("!=="),
+            ),
+            (
+                "DROP OPERATOR ===(bigint, bigint)",
+                drop_int8_operator("==="),
+            ),
+            (
+                "CREATE OPERATOR <| (
+        PROCEDURE = int8lt,
+        LEFTARG = bigint,
+        RIGHTARG = bigint
+)",
+                create_operator("<|", "int8lt", None, None),
+            ),
+            (
+                "CREATE OPERATOR |> (
+        PROCEDURE = int8gt,
+        LEFTARG = bigint,
+        RIGHTARG = bigint,
+        NEGATOR = <|,
+        COMMUTATOR = <|
+)",
+                create_operator("|>", "int8gt", Some("<|"), Some("<|")),
+            ),
+            ("DROP OPERATOR |>(bigint, bigint)", drop_int8_operator("|>")),
+            ("DROP OPERATOR <|(bigint, bigint)", drop_int8_operator("<|")),
+        ];
+        for (sql, expected) in cases {
+            assert!(utility(sql) == *expected, "{sql}");
+        }
+    }
+
+    /// `scan.l`'s two truncation rules, on the raw text the parser re-reads.
+    #[test]
+    fn longest_operator_follows_scan_l() {
+        let cases: &[(&str, &str)] = &[
+            // The four names `drop_operator.sql` defines, each of which the
+            // lexer splits.
+            ("===", "==="),
+            ("!==", "!=="),
+            ("<|", "<|"),
+            ("|>", "|>"),
+            // Single-token names still read back whole.
+            ("=", "="),
+            ("<>", "<>"),
+            ("@#@", "@#@"),
+            ("!~~*", "!~~*"),
+            // The run ends at the first character that is not an `op_char`.
+            ("===(bigint, bigint)", "==="),
+            ("|> (bigint)", "|>"),
+            ("= 1", "="),
+            // A comment opener ends the operator, whichever opener is first.
+            ("@#@--comment", "@#@"),
+            ("!=-- comment", "!="),
+            ("@/*comment*/", "@"),
+            ("@--/*", "@"),
+            ("@/*--", "@"),
+            // Trailing `+`/`-`: kept when the name holds a character no SQL
+            // operator uses, dropped when it does not.
+            ("@+", "@+"),
+            ("!=-", "!=-"),
+            ("?-", "?-"),
+            ("*+", "*"),
+            ("=-", "="),
+            ("<=+", "<="),
+            ("*+-", "*"),
+            ("++", "+"),
+            // A single `+` or `-` is an operator in its own right.
+            ("+", "+"),
+            ("-", "-"),
+            // The run rules alone do not know `=>` from any other run; the
+            // caller is what refuses it, and only at exactly two characters.
+            ("=>", "=>"),
+            ("=>-", "=>"),
+            ("=>=", "=>="),
+            // Not an operator at all.
+            ("", ""),
+            ("bigint", ""),
+            ("(int4, int4)", ""),
+        ];
+        for (text, expected) in cases {
+            assert!(longest_operator(text) == *expected, "{text}");
+        }
+    }
+
+    /// The operator-name reader, driven through the grammar that uses it. Each
+    /// case leaves the parser on the token after the name, which is what makes
+    /// the rest of the signature parse.
+    #[test]
+    fn operator_names_read_back_out_of_the_source() {
+        let cases: &[(&str, OperatorName)] = &[
+            ("DROP OPERATOR ===(int4, int4)", OperatorName::bare("===")),
+            ("DROP OPERATOR !==(int4, int4)", OperatorName::bare("!==")),
+            ("DROP OPERATOR <|(int4, int4)", OperatorName::bare("<|")),
+            ("DROP OPERATOR |>(int4, int4)", OperatorName::bare("|>")),
+            ("DROP OPERATOR =(int4, int4)", OperatorName::bare("=")),
+            ("DROP OPERATOR <>(int4, int4)", OperatorName::bare("<>")),
+            ("DROP OPERATOR @#@(int4, int4)", OperatorName::bare("@#@")),
+            ("DROP OPERATOR !~~*(int4, int4)", OperatorName::bare("!~~*")),
+            ("DROP OPERATOR @+(int4, int4)", OperatorName::bare("@+")),
+            ("DROP OPERATOR !=-(int4, int4)", OperatorName::bare("!=-")),
+            // `>=` and `=>=` are names; only a bare `=>` is not.
+            ("DROP OPERATOR >=(int4, int4)", OperatorName::bare(">=")),
+            ("DROP OPERATOR =>=(int4, int4)", OperatorName::bare("=>=")),
+            // No space between the name and its argument list.
+            ("DROP OPERATOR ===(int4,int4)", OperatorName::bare("===")),
+            // A comment right after the name ends it.
+            (
+                "DROP OPERATOR @#@--the name stops at the comment\n(int4, int4)",
+                OperatorName::bare("@#@"),
+            ),
+            (
+                "DROP OPERATOR @#@/*and at this one*/(int4, int4)",
+                OperatorName::bare("@#@"),
+            ),
+            // Schema qualification, as `alter_table.sql` writes it.
+            (
+                "DROP OPERATOR alter1.=(int4, int4)",
+                OperatorName::qualified("alter1", "="),
+            ),
+            (
+                "DROP OPERATOR pg_catalog.===(int4, int4)",
+                OperatorName::qualified("pg_catalog", "==="),
+            ),
+        ];
+        for (sql, expected) in cases {
+            let UtilityStatement::DropOperator { operators, .. } = utility(sql) else {
+                panic!("{sql}: not a DROP OPERATOR");
+            };
+            assert!(
+                operators
+                    == vec![OperatorSignature {
+                        name: expected.clone(),
+                        left_type: Some(builtin(ColumnType::Int4)),
+                        right_type: Some(builtin(ColumnType::Int4)),
+                    }],
+                "{sql}",
+            );
+        }
+    }
+
+    /// `IF EXISTS`, `NONE` on either side, a list, and the drop behavior.
+    #[test]
+    fn drop_operator_carries_the_whole_statement() {
+        let int4 = Some(builtin(ColumnType::Int4));
+        let int8 = Some(builtin(ColumnType::Int8));
+        let cases: &[(&str, UtilityStatement)] = &[
+            (
+                "DROP OPERATOR IF EXISTS ===(int4, int4)",
+                UtilityStatement::DropOperator {
+                    if_exists: true,
+                    operators: vec![OperatorSignature {
+                        name: OperatorName::bare("==="),
+                        left_type: int4.clone(),
+                        right_type: int4.clone(),
+                    }],
+                    cascade: false,
+                },
+            ),
+            (
+                "DROP OPERATOR !!(NONE, int8)",
+                UtilityStatement::DropOperator {
+                    if_exists: false,
+                    operators: vec![OperatorSignature {
+                        name: OperatorName::bare("!!"),
+                        left_type: None,
+                        right_type: int8.clone(),
+                    }],
+                    cascade: false,
+                },
+            ),
+            (
+                "DROP OPERATOR ######(int4, none)",
+                UtilityStatement::DropOperator {
+                    if_exists: false,
+                    operators: vec![OperatorSignature {
+                        name: OperatorName::bare("######"),
+                        left_type: int4.clone(),
+                        right_type: None,
+                    }],
+                    cascade: false,
+                },
+            ),
+            (
+                "DROP OPERATOR ===(int4, int4) CASCADE",
+                UtilityStatement::DropOperator {
+                    if_exists: false,
+                    operators: vec![OperatorSignature {
+                        name: OperatorName::bare("==="),
+                        left_type: int4.clone(),
+                        right_type: int4.clone(),
+                    }],
+                    cascade: true,
+                },
+            ),
+            (
+                "DROP OPERATOR ===(int4, int4) RESTRICT",
+                UtilityStatement::DropOperator {
+                    if_exists: false,
+                    operators: vec![OperatorSignature {
+                        name: OperatorName::bare("==="),
+                        left_type: int4.clone(),
+                        right_type: int4.clone(),
+                    }],
+                    cascade: false,
+                },
+            ),
+            (
+                "DROP OPERATOR IF EXISTS s.@>(int4, int4), <|(int8, int8) CASCADE",
+                UtilityStatement::DropOperator {
+                    if_exists: true,
+                    operators: vec![
+                        OperatorSignature {
+                            name: OperatorName::qualified("s", "@>"),
+                            left_type: int4.clone(),
+                            right_type: int4.clone(),
+                        },
+                        OperatorSignature {
+                            name: OperatorName::bare("<|"),
+                            left_type: int8.clone(),
+                            right_type: int8.clone(),
+                        },
+                    ],
+                    cascade: true,
+                },
+            ),
+            // An operand type the parser cannot resolve is carried by name, so
+            // the executor reports `42704` for one that truly does not exist.
+            (
+                "DROP OPERATOR <%(widget, widget)",
+                UtilityStatement::DropOperator {
+                    if_exists: false,
+                    operators: vec![OperatorSignature {
+                        name: OperatorName::bare("<%"),
+                        left_type: Some(RoutineType::named("widget".into())),
+                        right_type: Some(RoutineType::named("widget".into())),
+                    }],
+                    cascade: false,
+                },
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(utility(sql) == *expected, "{sql}");
+        }
+    }
+
+    /// The attribute list is a `DefElem` list: order-free, `FUNCTION` and
+    /// `PROCEDURE` are one attribute, and the flags take no value.
+    #[test]
+    fn create_operator_attributes_are_order_free() {
+        let full = UtilityStatement::CreateOperator(Box::new(CreateOperatorStmt {
+            name: OperatorName::bare("==="),
+            function: Some(RelationRef::bare("fn_op2")),
+            left_type: Some(builtin(ColumnType::Bool)),
+            right_type: Some(builtin(ColumnType::Bool)),
+            commutator: Some(OperatorName::bare("===")),
+            negator: Some(OperatorName::bare("!==")),
+            restrict: Some(RelationRef::bare("contsel")),
+            join: Some(RelationRef::bare("contjoinsel")),
+            hashes: true,
+            merges: true,
+            unrecognized_options: Vec::new(),
+        }));
+        let cases: &[(&str, UtilityStatement)] = &[
+            (
+                "CREATE OPERATOR === (LEFTARG = boolean, RIGHTARG = boolean, \
+                 PROCEDURE = fn_op2, COMMUTATOR = ===, NEGATOR = !==, \
+                 RESTRICT = contsel, JOIN = contjoinsel, HASHES, MERGES)",
+                full.clone(),
+            ),
+            // The same statement with every attribute in a different place,
+            // and `FUNCTION` for `PROCEDURE`.
+            (
+                "CREATE OPERATOR === (MERGES, JOIN = contjoinsel, NEGATOR = !==, \
+                 RIGHTARG = boolean, HASHES, FUNCTION = fn_op2, RESTRICT = contsel, \
+                 COMMUTATOR = ===, LEFTARG = boolean)",
+                full.clone(),
+            ),
+            // Prefix form: no `LEFTARG`, and a schema-qualified name.
+            (
+                "CREATE OPERATOR schema_op1.#*# (rightarg = int8, procedure = factorial)",
+                UtilityStatement::CreateOperator(Box::new(CreateOperatorStmt {
+                    name: OperatorName::qualified("schema_op1", "#*#"),
+                    function: Some(RelationRef::bare("factorial")),
+                    left_type: None,
+                    right_type: Some(builtin(ColumnType::Int8)),
+                    commutator: None,
+                    negator: None,
+                    restrict: None,
+                    join: None,
+                    hashes: false,
+                    merges: false,
+                    unrecognized_options: Vec::new(),
+                })),
+            ),
+            // A schema-qualified function, and an operand type this parser
+            // does not resolve.
+            (
+                "create operator alter1.=(procedure = alter1.same, leftarg = ctype, rightarg = ctype)",
+                UtilityStatement::CreateOperator(Box::new(CreateOperatorStmt {
+                    name: OperatorName::qualified("alter1", "="),
+                    function: Some(RelationRef::qualified("alter1", "same")),
+                    left_type: Some(RoutineType::named("ctype".into())),
+                    right_type: Some(RoutineType::named("ctype".into())),
+                    commutator: None,
+                    negator: None,
+                    restrict: None,
+                    join: None,
+                    hashes: false,
+                    merges: false,
+                    unrecognized_options: Vec::new(),
+                })),
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(utility(sql) == *expected, "{sql}");
+        }
+    }
+
+    /// `DefineOperator` warns about an attribute it does not know and carries
+    /// on, so the grammar must accept one — with a value or without — and keep
+    /// the written spelling for the warning. Quoting preserves case, which is
+    /// what makes `"Leftarg"` unrecognized where `LEFTARG` is not.
+    #[test]
+    fn create_operator_keeps_unrecognized_attributes() {
+        let cases: &[(&str, Vec<String>)] = &[
+            (
+                "CREATE OPERATOR === (LEFTARG = boolean, RIGHTARG = boolean, \
+                 PROCEDURE = fn_op2, SORT1, SORT2, LTCMP, GTCMP, HASHES, MERGES)",
+                vec![
+                    "sort1".into(),
+                    "sort2".into(),
+                    "ltcmp".into(),
+                    "gtcmp".into(),
+                ],
+            ),
+            (
+                "CREATE OPERATOR #@%# (rightarg = int8, procedure = factorial, invalid_att = int8)",
+                vec!["invalid_att".into()],
+            ),
+            (
+                "CREATE OPERATOR === (\"Leftarg\" = box, \"Procedure\" = area_equal, \"Hashes\")",
+                vec!["Leftarg".into(), "Procedure".into(), "Hashes".into()],
+            ),
+        ];
+        for (sql, expected) in cases {
+            let UtilityStatement::CreateOperator(operator) = utility(sql) else {
+                panic!("{sql}: not a CREATE OPERATOR");
+            };
+            assert!(operator.unrecognized_options == *expected, "{sql}");
+        }
+        // The quoted spellings above are recognized by nothing, so the
+        // statement carries no function and no operand type at all.
+        let quoted = utility("CREATE OPERATOR === (\"Leftarg\" = box, \"Procedure\" = area_equal)");
+        assert!(
+            quoted
+                == UtilityStatement::CreateOperator(Box::new(CreateOperatorStmt {
+                    name: OperatorName::bare("==="),
+                    function: None,
+                    left_type: None,
+                    right_type: None,
+                    commutator: None,
+                    negator: None,
+                    restrict: None,
+                    join: None,
+                    hashes: false,
+                    merges: false,
+                    unrecognized_options: vec!["Leftarg".into(), "Procedure".into()],
+                }))
+        );
+    }
+
+    /// The forms `PostgreSQL` reports as syntax errors, and the two it words
+    /// itself. `errors.sql` is the authority for the `DROP OPERATOR` half.
+    #[test]
+    fn malformed_operator_ddl_is_refused() {
+        let cases: &[&str] = &[
+            // No argument list at all.
+            "DROP OPERATOR ===",
+            "DROP OPERATOR",
+            // An empty argument list, and a one-operand one.
+            "DROP OPERATOR === ()",
+            "DROP OPERATOR === (int4)",
+            "DROP OPERATOR = (nonesuch)",
+            // A missing operand, on either side.
+            "DROP OPERATOR = ( , int4)",
+            "DROP OPERATOR = (int4, )",
+            // Both operands `NONE`: an operator must have one.
+            "DROP OPERATOR = (NONE, NONE)",
+            // A name that is not an operator.
+            "DROP OPERATOR equals",
+            "DROP OPERATOR (int4, int4)",
+            "DROP OPERATOR int4, int4",
+            // `=>` is `EQUALS_GREATER`, not an operator name, whether it is
+            // written that way or truncated down to it.
+            "CREATE OPERATOR => (rightarg = int8, procedure = factorial)",
+            "CREATE OPERATOR =>- (rightarg = int8, procedure = factorial)",
+            "DROP OPERATOR =>(int4, int4)",
+            // Trailing garbage after a complete statement.
+            "DROP OPERATOR ===(int4, int4) unexpected",
+            "DROP OPERATOR ===(int4, int4) CASCADE unexpected",
+            // `CREATE OPERATOR` without its parentheses, and with an empty
+            // attribute list.
+            "CREATE OPERATOR ===",
+            "CREATE OPERATOR === FUNCTION = int4eq",
+            "CREATE OPERATOR === ()",
+            "CREATE OPERATOR === (LEFTARG = int4,)",
+            "CREATE OPERATOR === (LEFTARG = int4) unexpected",
+            // An attribute that needs a value, written without one.
+            "CREATE OPERATOR === (LEFTARG)",
+        ];
+        for sql in cases {
+            let error = parse(sql).expect_err(sql);
+            assert!(error.sqlstate() == "42601", "{sql}: {error}");
+        }
+    }
+
+    /// The one-operand form is `PostgreSQL`'s own error, not a generic syntax
+    /// error, because `oper_argtypes` spells the production out to raise it.
+    #[test]
+    fn a_one_operand_signature_reports_a_missing_argument() {
+        let error = parse("DROP OPERATOR === (int4)").expect_err("one operand is refused");
+        assert!(error.message == "missing argument");
+        assert!(error.sqlstate() == "42601");
+    }
+
+    /// The new arms take only the bare spellings. `OPERATOR CLASS` and
+    /// `OPERATOR FAMILY` still reach the productions that own them.
+    #[test]
+    fn operator_class_and_family_are_not_stolen_by_the_bare_arms() {
+        assert!(
+            utility("CREATE OPERATOR FAMILY fam USING btree")
+                == UtilityStatement::CreateOperatorFamily {
+                    name: RelationRef::bare("fam"),
+                    method: "btree".into(),
+                }
+        );
+        assert!(
+            utility("CREATE OPERATOR CLASS cls FOR TYPE int4 USING btree AS STORAGE int4")
+                == UtilityStatement::CreateOperatorClass {
+                    name: RelationRef::bare("cls"),
+                    default: false,
+                    input_type: ColumnType::Int4,
+                    method: "btree".into(),
+                    family: None,
+                    key_type: Some(ColumnType::Int4),
+                }
+        );
+        for (sql, kind) in [
+            (
+                "DROP OPERATOR CLASS cls USING btree",
+                OperatorObjectKind::Class,
+            ),
+            (
+                "DROP OPERATOR FAMILY fam USING btree",
+                OperatorObjectKind::Family,
+            ),
+        ] {
+            let name = if kind == OperatorObjectKind::Class {
+                "cls"
+            } else {
+                "fam"
+            };
+            assert!(
+                utility(sql)
+                    == UtilityStatement::DropOperatorObject {
+                        kind,
+                        name: RelationRef::bare(name),
+                        method: "btree".into(),
+                        if_exists: false,
+                        cascade: false,
+                    },
+                "{sql}",
+            );
+        }
+    }
+
+    /// The two spellings that used to be architectural refusals now parse. A
+    /// `0A000` here would mean `bounded_non_goal_refusal` still claims them
+    /// before the parser ever runs.
+    #[test]
+    fn the_former_non_goal_spellings_parse_as_real_statements() {
+        for sql in [
+            "CREATE OPERATOR === (FUNCTION = int4eq, LEFTARG = integer, RIGHTARG = integer)",
+            "DROP OPERATOR +(integer, integer)",
+        ] {
+            let parsed = parse(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+            assert!(
+                !matches!(parsed.as_slice(), [Statement::CompatibilityRefusal(_)]),
+                "{sql}",
+            );
+        }
+    }
+
+    /// Both commands report their own accepted identity, which the session
+    /// layer turns into a command tag.
+    #[test]
+    fn the_bare_forms_carry_their_own_command_identity() {
+        use crate::{command::CommandIdentity, parse_with_command_identities};
+
+        for (sql, expected) in [
+            (
+                "CREATE OPERATOR === (PROCEDURE = int8eq, LEFTARG = bigint, RIGHTARG = bigint)",
+                CommandIdentity::CreateOperator,
+            ),
+            (
+                "DROP OPERATOR ===(bigint, bigint)",
+                CommandIdentity::DropOperator,
+            ),
+            (
+                "CREATE OPERATOR FAMILY fam USING btree",
+                CommandIdentity::CreateOperatorFamily,
+            ),
+            (
+                "DROP OPERATOR CLASS cls USING btree",
+                CommandIdentity::DropOperatorClass,
+            ),
+        ] {
+            let parsed =
+                parse_with_command_identities(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+            assert!(parsed.len() == 1, "{sql}");
+            assert!(parsed[0].1 == expected, "{sql}");
+        }
+    }
 }

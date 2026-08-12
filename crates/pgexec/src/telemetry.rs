@@ -265,8 +265,19 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
             UtilityStatement::Reindex(_) => "REINDEX",
             UtilityStatement::CreateOperatorFamily { .. } => "CREATE OPERATOR FAMILY",
             UtilityStatement::CreateOperatorClass { .. } => "CREATE OPERATOR CLASS",
-            UtilityStatement::AlterOperatorObject { .. } => "ALTER OPERATOR",
-            UtilityStatement::DropOperatorObject { .. } => "DROP OPERATOR",
+            // The operator *objects* are not the operator: their tags name the
+            // kind, and the bare `ALTER`/`DROP OPERATOR` tags belong to the
+            // operator itself.
+            UtilityStatement::AlterOperatorObject { kind, .. } => match kind {
+                crabka_pgparser::ast::OperatorObjectKind::Class => "ALTER OPERATOR CLASS",
+                crabka_pgparser::ast::OperatorObjectKind::Family => "ALTER OPERATOR FAMILY",
+            },
+            UtilityStatement::DropOperatorObject { kind, .. } => match kind {
+                crabka_pgparser::ast::OperatorObjectKind::Class => "DROP OPERATOR CLASS",
+                crabka_pgparser::ast::OperatorObjectKind::Family => "DROP OPERATOR FAMILY",
+            },
+            UtilityStatement::CreateOperator(_) => "CREATE OPERATOR",
+            UtilityStatement::DropOperator { .. } => "DROP OPERATOR",
             UtilityStatement::Load { .. } => "LOAD",
             UtilityStatement::SecurityLabel { .. } => "SECURITY LABEL",
             UtilityStatement::CreateTablespace { .. } => "CREATE TABLESPACE",

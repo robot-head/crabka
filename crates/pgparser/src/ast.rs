@@ -1335,11 +1335,27 @@ pub enum UtilityStatement {
         method: String,
         action: OperatorObjectAlterAction,
     },
+    /// `DROP OPERATOR { CLASS | FAMILY } …` — an index access method's operator
+    /// *object*, not an operator. The bare `DROP OPERATOR` is
+    /// [`UtilityStatement::DropOperator`].
     DropOperatorObject {
         kind: OperatorObjectKind,
         name: RelationRef,
         method: String,
         if_exists: bool,
+        cascade: bool,
+    },
+    /// `CREATE OPERATOR [schema.]symbol ( attribute [, …] )`. Boxed because its
+    /// eleven attributes make it twice the size of any other variant here.
+    CreateOperator(Box<CreateOperatorStmt>),
+    /// `DROP OPERATOR [IF EXISTS] signature [, …] [CASCADE | RESTRICT]`.
+    ///
+    /// The operator *objects* — `DROP OPERATOR CLASS`/`FAMILY` — are
+    /// [`UtilityStatement::DropOperatorObject`] instead.
+    DropOperator {
+        if_exists: bool,
+        /// One entry per comma-separated signature; never empty.
+        operators: Vec<OperatorSignature>,
         cascade: bool,
     },
     /// `ALTER SYSTEM SET <name> = <value>` / `ALTER SYSTEM RESET { <name> | ALL }`.
@@ -1382,6 +1398,102 @@ pub enum TablespaceAlterAction {
 pub enum OperatorObjectKind {
     Class,
     Family,
+}
+
+/// An operator's own name: the symbol, plus the schema qualifier when one was
+/// written.
+///
+/// Deliberately not a [`RelationRef`]. An operator name is a run of operator
+/// characters that no `ColId` can spell, it lives in `pg_operator` rather than
+/// `pg_class`, and it is overloaded on its operand types, so nothing that
+/// resolves a relation can resolve one of these.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct OperatorName {
+    /// The qualifier, when one was written. `None` resolves against the search
+    /// path.
+    pub schema: Option<String>,
+    /// The symbol itself, without the qualifier: `===`, `<|`, `=`.
+    pub symbol: String,
+}
+
+impl OperatorName {
+    /// An unqualified operator name: `===`.
+    #[must_use]
+    pub fn bare(symbol: impl Into<String>) -> Self {
+        Self {
+            schema: None,
+            symbol: symbol.into(),
+        }
+    }
+
+    /// A schema-qualified operator name: `s.===`.
+    #[must_use]
+    pub fn qualified(schema: impl Into<String>, symbol: impl Into<String>) -> Self {
+        Self {
+            schema: Some(schema.into()),
+            symbol: symbol.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for OperatorName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.schema {
+            Some(schema) => write!(f, "{schema}.{}", self.symbol),
+            None => f.write_str(&self.symbol),
+        }
+    }
+}
+
+/// The body of [`UtilityStatement::CreateOperator`].
+///
+/// Every attribute is optional *in the grammar*. `PostgreSQL` collects the list
+/// into `DefElem`s and only `DefineOperator` decides what is missing, which
+/// matters because it warns once per unrecognized attribute *before* it reports
+/// the missing function. Refusing an incomplete definition at parse time would
+/// swallow those warnings, so the parse tree carries the holes and the executor
+/// reports them in `PostgreSQL`'s order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOperatorStmt {
+    pub name: OperatorName,
+    /// `FUNCTION = f`, or its `PROCEDURE = f` synonym. `PostgreSQL` reads both
+    /// into one attribute, so the written spelling is not kept.
+    pub function: Option<RelationRef>,
+    /// `LEFTARG = t`. `None` is a prefix operator, which has no left operand —
+    /// and also the malformed form that names no operand at all.
+    pub left_type: Option<RoutineType>,
+    /// `RIGHTARG = t`. `PostgreSQL` requires it, and reports its absence from
+    /// `DefineOperator` rather than from the grammar.
+    pub right_type: Option<RoutineType>,
+    /// `COMMUTATOR = op`. May name the operator being defined, which is how a
+    /// self-commutator is written.
+    pub commutator: Option<OperatorName>,
+    pub negator: Option<OperatorName>,
+    pub restrict: Option<RelationRef>,
+    pub join: Option<RelationRef>,
+    /// `HASHES` was written.
+    pub hashes: bool,
+    /// `MERGES` was written.
+    pub merges: bool,
+    /// The attributes `PostgreSQL` does not recognize, in written order and
+    /// with their written spelling. `DefineOperator` warns once per name and
+    /// then ignores it, so the long-dead `SORT1` and a case-preserving
+    /// `"Leftarg"` both land here instead of failing the statement. The
+    /// spelling is kept because the warning quotes it.
+    pub unrecognized_options: Vec<String>,
+}
+
+/// One operator named the way `DROP OPERATOR` names it: a symbol and both
+/// operand types, because the symbol alone is ambiguous.
+///
+/// `PostgreSQL`'s `oper_argtypes` has no one-operand and no zero-operand form.
+/// The absent operand of a prefix operator is written `NONE` and arrives here
+/// as `None`, never as a type named `none`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorSignature {
+    pub name: OperatorName,
+    pub left_type: Option<RoutineType>,
+    pub right_type: Option<RoutineType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2029,10 +2141,6 @@ non_goal_specs!(
         "CREATE CONVERSION conv FOR 'UTF8' TO 'LATIN1' FROM func"
     ),
     (CreateLanguage, "CREATE LANGUAGE lang"),
-    (
-        CreateOperator,
-        "CREATE OPERATOR === (FUNCTION = int4eq, LEFTARG = integer, RIGHTARG = integer)"
-    ),
     (CreatePublication, "CREATE PUBLICATION pub"),
     (
         CreateRule,
@@ -2057,7 +2165,6 @@ non_goal_specs!(
     (DropAccessMethod, "DROP ACCESS METHOD am"),
     (DropConversion, "DROP CONVERSION conv"),
     (DropLanguage, "DROP LANGUAGE lang"),
-    (DropOperator, "DROP OPERATOR +(integer, integer)"),
     (DropPublication, "DROP PUBLICATION pub"),
     (DropRule, "DROP RULE r ON t"),
     (DropSubscription, "DROP SUBSCRIPTION sub"),
@@ -4264,7 +4371,7 @@ pub struct RoutineArg {
 /// cannot resolve. The parser carries those names through as
 /// [`RoutineType::Named`], and the catalog resolves them when the routine is
 /// created.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutineType {
     /// The resolved built-in type, absent when the name is not a built-in.
     pub resolved: Option<ColumnType>,

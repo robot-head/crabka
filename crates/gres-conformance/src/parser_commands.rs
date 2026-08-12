@@ -699,6 +699,21 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "CREATE OPERATOR",
+        sql: "CREATE OPERATOR === (PROCEDURE = int8eq, LEFTARG = bigint, RIGHTARG = bigint)",
+        expected_statement: "CreateOperator",
+        refusal: None,
+    },
+    // `IF EXISTS` so the probe needs no setup of its own: the notice path is a
+    // documented success, and the lifecycle pairing with the `CREATE OPERATOR`
+    // probe above is covered by the session tests rather than here.
+    CommandProbe {
+        command: "DROP OPERATOR",
+        sql: "DROP OPERATOR IF EXISTS ===(bigint, bigint)",
+        expected_statement: "DropOperator",
+        refusal: None,
+    },
+    CommandProbe {
         command: "DROP OPERATOR CLASS",
         sql: "DROP OPERATOR CLASS IF EXISTS parser_commands_ops USING hash",
         expected_statement: "DropOperatorObject",
@@ -1139,6 +1154,8 @@ fn statement_shape(statement: &Statement) -> &'static str {
             crabka_pgparser::ast::UtilityStatement::DropOperatorObject { .. } => {
                 "DropOperatorObject"
             }
+            crabka_pgparser::ast::UtilityStatement::CreateOperator(_) => "CreateOperator",
+            crabka_pgparser::ast::UtilityStatement::DropOperator { .. } => "DropOperator",
             crabka_pgparser::ast::UtilityStatement::AlterSystem { .. } => "AlterSystem",
             crabka_pgparser::ast::UtilityStatement::SetConstraints { .. } => "SetConstraints",
             crabka_pgparser::ast::UtilityStatement::SetSessionAuthorization { .. } => {

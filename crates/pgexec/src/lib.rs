@@ -122,6 +122,7 @@ pub mod timestamp_txn;
 mod trigger;
 pub mod ts_gc;
 mod useragg;
+mod useroperator;
 mod usertype;
 mod values;
 mod viewdef;

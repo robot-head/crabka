@@ -6138,6 +6138,45 @@ impl SqlSession {
                     .into(),
                 })
             }
+            UtilityStatement::CreateOperator(stmt) => {
+                // `DefineOperator` warns once per unrecognized attribute and
+                // only then reports what the definition is missing, so the
+                // warnings are emitted before anything can refuse the
+                // statement.
+                for warning in crate::useroperator::unrecognized_attribute_warnings(stmt) {
+                    self.plpgsql_notice(PgError::warning(warning).with_code("42601"))?;
+                }
+                let scope = self.resolution_scope();
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let (result, ops) = crate::useroperator::create(
+                    &*self.catalog_kv,
+                    &scope,
+                    stmt,
+                    &self.current_role,
+                )?;
+                self.commit_catalog(ops).await?;
+                Ok(result)
+            }
+            UtilityStatement::DropOperator {
+                if_exists,
+                operators,
+                cascade,
+            } => {
+                let scope = self.resolution_scope();
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let (result, outcome) = crate::useroperator::drop_operators(
+                    &*self.catalog_kv,
+                    &scope,
+                    *if_exists,
+                    operators,
+                    *cascade,
+                )?;
+                self.commit_catalog(outcome.ops).await?;
+                for notice in outcome.notices {
+                    self.plpgsql_notice(PgError::notice(notice))?;
+                }
+                Ok(result)
+            }
             UtilityStatement::AlterSystem { name } => {
                 // `ALTER SYSTEM` never changes the running session in PostgreSQL
                 // either, but it does validate the parameter name.
@@ -14148,6 +14187,88 @@ fn encloses_function_call(tokens: &[(crabka_pgparser::token::Token, usize)], ind
     false
 }
 
+/// How a source literal can carry the value a type-input message quotes.
+enum LiteralMatch {
+    /// The literal *is* the value, which is how a scalar coercion writes it.
+    Whole,
+    /// The literal writes a composite value and the rejected value is one
+    /// component of it, which is how a component's own input function fails.
+    Component,
+}
+
+/// The characters that bound one component inside a composite literal: the
+/// separators PostgreSQL writes between components, and every delimiter it
+/// opens and closes a container with.
+fn bounds_component(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, ',' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
+}
+
+/// Whether `literal` writes a composite value that has `value` as one of its
+/// components.
+///
+/// The literal must open with a container delimiter, which is what an array
+/// (`{…}`), a range (`[…)`), a row (`(…)`) and every geometric type write, so
+/// that a scalar which merely contains the same characters does not qualify.
+/// The value must then sit *inside* that container, bounded on both sides, so
+/// that `1e+50` does not match the `1e+500` in `(10.0, 1e+500)`.
+fn spells_component(literal: &str, value: &str) -> bool {
+    if value.is_empty() || !literal.starts_with(['(', '[', '{', '<']) {
+        return false;
+    }
+    literal.match_indices(value).any(|(start, _)| {
+        let before = literal[..start].chars().next_back();
+        let after = literal[start + value.len()..].chars().next();
+        matches!((before, after), (Some(open), Some(close))
+            if bounds_component(open) && bounds_component(close))
+    })
+}
+
+/// The one-based positions of every source literal a type-input error can be
+/// blamed on, under one reading of how a literal carries the rejected value.
+fn blamed_literal_positions(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    rejected: &RejectedInput<'_>,
+    reading: LiteralMatch,
+) -> Vec<usize> {
+    use crabka_pgparser::token::Token;
+
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (token, offset))| {
+            let Token::StringLit(candidate) = token else {
+                return None;
+            };
+            let carries = match reading {
+                LiteralMatch::Whole => rejected.value.is_none_or(|value| candidate == value),
+                LiteralMatch::Component => rejected
+                    .value
+                    .is_some_and(|value| spells_component(candidate, value)),
+            };
+            if !carries {
+                return None;
+            }
+            let coerced = match reading {
+                // A component's message names the component's type while the
+                // source states the outer one, so the stated type can neither
+                // confirm nor deny the literal. That leaves the call exclusion
+                // as the whole of the evidence, and it still holds: a function
+                // receives its argument already typed and raises its own error.
+                LiteralMatch::Component => !encloses_function_call(tokens, index),
+                LiteralMatch::Whole => match stated_literal_type(sql, tokens, index) {
+                    Some(stated) => {
+                        rejected.expected.accepts(&stated)
+                            && (rejected.indirect_ok || !encloses_function_call(tokens, index))
+                    }
+                    None => rejected.indirect_ok && !encloses_function_call(tokens, index),
+                },
+            };
+            coerced.then(|| sql[..*offset].chars().count() + 1)
+        })
+        .collect()
+}
+
 /// PostgreSQL's input functions run during parse analysis for a *constant*, so
 /// it points its caret at the source literal that failed — for every spelling
 /// of the cast (`int2 '34.5'`, `'34.5'::int2`, `CAST('zz' AS int4)`, and a
@@ -14169,14 +14290,22 @@ fn encloses_function_call(tokens: &[(crabka_pgparser::token::Token, usize)], ind
 /// source states that type next to it. A `VALUES` item, which states nothing,
 /// stays undecorated there even though a value-carrying message would claim it.
 ///
-/// Known gap: when a *component* fails inside a composite literal — a `float8`
-/// coordinate overflowing inside a `line`, or an `integer` element inside an
-/// `int[]` — the message names the component's type while the source states the
-/// outer type, so the check declines and no caret is attached. PostgreSQL does
-/// attach one.
+/// A *component* can fail inside a composite literal — a `float8` coordinate
+/// overflowing inside a `point`, or an `integer` element inside an `int[]` —
+/// and the message then names the component's type while the source states the
+/// outer one. Read such a literal only when no literal carries the value whole,
+/// so the reading adds carets and never takes one away, and only when the
+/// literal opens a container and bounds the value inside it. The stated type
+/// proves nothing there, so the call exclusion carries the whole weight:
+/// `JSON_VALUE('{"a": 1.234}', '$.a' RETURNING int ERROR ON ERROR)` fails on a
+/// component of a sound literal and stays undecorated, as PostgreSQL leaves it.
+///
+/// Known gap: a literal that writes whitespace before the container delimiter
+/// is not read as a container, and neither is a component the container itself
+/// rewrites before the input function reads it — array syntax strips the quotes
+/// from `'{"1e+500"}'`, so the value the message quotes is no longer bounded
+/// where the source writes it. PostgreSQL attaches a caret to both.
 fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
-    use crabka_pgparser::token::Token;
-
     // Every SQLSTATE an input function raises while parse analysis coerces a
     // written constant: 22P02 invalid_text_representation, 22003
     // numeric_value_out_of_range, 22007 invalid_datetime_format, 22008
@@ -14201,25 +14330,15 @@ fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
     let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
         return error;
     };
-    let positions: Vec<usize> = tokens
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (token, offset))| match token {
-            Token::StringLit(candidate)
-                if rejected.value.is_none_or(|value| candidate == value) =>
-            {
-                let coerced = match stated_literal_type(sql, &tokens, index) {
-                    Some(stated) => {
-                        rejected.expected.accepts(&stated)
-                            && (rejected.indirect_ok || !encloses_function_call(&tokens, index))
-                    }
-                    None => rejected.indirect_ok && !encloses_function_call(&tokens, index),
-                };
-                coerced.then(|| sql[..*offset].chars().count() + 1)
-            }
-            _ => None,
-        })
-        .collect();
+    let whole = blamed_literal_positions(sql, &tokens, &rejected, LiteralMatch::Whole);
+    // The component reading is a fallback rather than a competitor. Reading it
+    // only when nothing carries the value whole keeps every caret the whole
+    // reading finds today: it can never turn one candidate into two.
+    let positions = if whole.is_empty() {
+        blamed_literal_positions(sql, &tokens, &rejected, LiteralMatch::Component)
+    } else {
+        whole
+    };
     match positions.as_slice() {
         [position] => error.with_position(*position),
         _ => error,
@@ -21854,6 +21973,94 @@ mod session_conformance_tests {
             // A one-argument call on a *type* name is a coercion, and
             // PostgreSQL positions it like one.
             ("SELECT cidr('192.168.1.2/30')", "22P02", Some(13)),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("input error");
+            assert!(error.code == code, "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// A component that fails inside a composite literal is reported by the
+    /// component's own input function, which names the component's type while
+    /// the source states the outer one. The quoted value is then the only
+    /// thread back to the literal, so follow it — into a container, to a
+    /// component the container itself bounds, and only when no literal carries
+    /// the value whole.
+    #[tokio::test]
+    async fn a_failing_component_points_at_the_composite_literal() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE point_tbl (f1 point)")
+            .await
+            .expect("table");
+        for (sql, code, position) in [
+            // A `VALUES` item states no type of its own and takes one from the
+            // target column, and PostgreSQL still points at it.
+            (
+                "INSERT INTO point_tbl(f1) VALUES ('(10.0, 1e+500)')",
+                "22003",
+                Some(35),
+            ),
+            ("SELECT '(10.0, 1e+500)'::point", "22003", Some(8)),
+            ("SELECT point '(10.0, 1e+500)'", "22003", Some(14)),
+            // Every container spelling reads the same way: the braces of an
+            // array, the brackets of a range, and the geometric types.
+            ("SELECT '{2, 1e+500}'::float8[]", "22003", Some(8)),
+            (
+                "SELECT '{1, 99999999999999999999}'::int[]",
+                "22003",
+                Some(8),
+            ),
+            (
+                "SELECT '[1, 99999999999999999999)'::int4range",
+                "22003",
+                Some(8),
+            ),
+            ("SELECT '{1e+500,2,3}'::line", "22003", Some(8)),
+            ("SELECT '(1e+500,0),(0,0)'::box", "22003", Some(8)),
+            ("SELECT '<(1e+500,0),1>'::circle", "22003", Some(8)),
+            // The call receives a sound `json` value and fails on a component
+            // of it at execution time, so PostgreSQL blames no literal.
+            (
+                "SELECT JSON_VALUE('{\"a\": 1.234}', '$.a' RETURNING int ERROR ON ERROR)",
+                "22P02",
+                None,
+            ),
+            // A literal that opens with no container delimiter writes a scalar,
+            // whatever characters it goes on to contain.
+            (
+                "SELECT '(10.0, 1e+500)'::point, '1e+500 kg'",
+                "22003",
+                Some(8),
+            ),
+            // The `1e+500` inside `1e+5000` is no component of that array.
+            (
+                "SELECT '(10.0, 1e+500)'::point, '{1e+5000}'::text[]",
+                "22003",
+                Some(8),
+            ),
+            // Two containers write the value as a component, and the message
+            // does not say which of them the input function was reading.
+            (
+                "SELECT '(10.0, 1e+500)'::point, '{1e+500}'::text[]",
+                "22003",
+                None,
+            ),
+            // A literal that carries the value *whole* is read first, so the
+            // container standing beside it never becomes a second candidate.
+            (
+                "SELECT '100000'::int2, '{100000}'::text[]",
+                "22003",
+                Some(8),
+            ),
         ] {
             let error = session.simple_query(sql).await.expect_err("input error");
             assert!(error.code == code, "{sql}: {error:?}");

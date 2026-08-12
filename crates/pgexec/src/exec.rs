@@ -7443,20 +7443,99 @@ fn insert_source_rows(
             let read = write_ctx.read_ctx(ctes);
             let Relation { scope, rows } = crate::query::query_to_relation(&read, query)?;
             let target_idx = resolve_insert_targets(table, columns, scope.width())?;
+            // A column the feeding query left `unknown` goes back to being the
+            // literal it was written as, so `build_insert_row` types it against
+            // the target column exactly as it types a VALUES row. The flags are
+            // positional over the row, so they are used only when they span it:
+            // a relation of another width is one this walk cannot index, and
+            // typing the wrong column would be worse than typing none.
+            let unknown = unknown_literal_columns(query);
+            let unknown: &[bool] = if unknown.len() == scope.width() {
+                &unknown
+            } else {
+                &[]
+            };
             let rows = rows
                 .into_iter()
                 .map(|row| {
                     row.into_iter()
                         .zip(&scope.columns)
-                        .map(|(value, column)| Expr::Const {
-                            value,
-                            ty: column.ty,
+                        .enumerate()
+                        .map(|(index, (value, column))| match value {
+                            // Only a value the literal itself produced may go
+                            // back to being one, which is why the datum is
+                            // matched and not merely re-rendered.
+                            Datum::Text(text) if unknown.get(index).copied().unwrap_or(false) => {
+                                Expr::StringLiteral(text)
+                            }
+                            value => Expr::Const {
+                                value,
+                                ty: column.ty,
+                            },
                         })
                         .collect()
                 })
                 .collect();
             Ok((target_idx, rows))
         }
+    }
+}
+
+/// The output columns a query hands to an `INSERT` as PostgreSQL's `unknown`,
+/// one flag per column of the query's own target list.
+///
+/// An `INSERT … SELECT` is the one place `PostgreSQL` declines to resolve a
+/// query's unknown outputs to `text`. It analyses the feeding query with that
+/// resolution switched off, and then takes every target entry that is still an
+/// unknown constant *as the constant*, rather than as a reference to the
+/// query's column. The literal therefore arrives at the target list untyped and
+/// takes the target column's type, which is what makes `INSERT INTO point_tbl
+/// SELECT '(0,0)'` a point where `SELECT '(0,0)'` on its own is text. Without
+/// it, the two `INSERT` spellings of one row disagree: the `VALUES` form
+/// resolves the literal and the `SELECT` form is 42804.
+///
+/// What is left out is left out because `PostgreSQL` has already had to choose
+/// the column's type there, so nothing unknown survives to be re-typed:
+///
+/// * a set operation, whose column type is the common type of its branches and
+///   is `text` when every branch is unknown — `… SELECT '(0,0)' UNION ALL
+///   SELECT '(1,1)'` really is 42804;
+/// * a sub-select, a derived table or a `VALUES` relation, each of which has
+///   resolved its own unknown outputs to `text` at the boundary since
+///   `PostgreSQL` 10 — so `… SELECT * FROM (VALUES ('(0,0)')) v` is 42804 too;
+/// * anything that is not the bare literal: a cast, a function call, a column
+///   reference or a `CASE` all carry a type of their own.
+///
+/// `ORDER BY`, `LIMIT`, `OFFSET` and a `WITH` prefix wrap a select list without
+/// retyping it, so they are transparent and the list underneath still counts.
+///
+/// A `NULL` literal is unknown in `PostgreSQL` as well, and is deliberately not
+/// reported here: [`coerce`] already stores a `Datum::Null` into a column of
+/// any type, and sending it through [`resolve_unknown_literal`] instead would
+/// hand the target's input function an empty string to parse.
+///
+/// The vector is empty when no column qualifies, which includes every select
+/// list holding a `*`: a wildcard stands for as many columns as the relation
+/// beneath it has, and no walk of the list alone can count them. A wildcard is
+/// never unknown, so declining the whole list there costs nothing.
+fn unknown_literal_columns(query: &crabka_pgparser::ast::QueryExpr) -> Vec<bool> {
+    use crabka_pgparser::ast::{QueryBody, SelectItem, SetExpr};
+    let SetExpr::Query(body) = &query.body else {
+        return Vec::new();
+    };
+    match body {
+        QueryBody::Nested(nested) => unknown_literal_columns(nested),
+        QueryBody::Values(_) => Vec::new(),
+        QueryBody::Select(select) => select
+            .projection
+            .iter()
+            .map(|item| match item {
+                SelectItem::Expr { expr, .. } => Some(matches!(expr, Expr::StringLiteral(_))),
+                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => None,
+            })
+            .collect::<Option<Vec<bool>>>()
+            .filter(|columns| columns.contains(&true))
+            .unwrap_or_default(),
     }
 }
 
@@ -35376,5 +35455,332 @@ mod tests {
                     text_row(&["c", "t", "", "7"]),
                 ]
         );
+    }
+
+    /// Walk one engine's user-type oid counter past the oids the rest of this
+    /// binary's tests reach, then create the two user types the `unknown`
+    /// literal tests assign to.
+    ///
+    /// The registry a type *name* resolves through is process-wide, while every
+    /// engine allocates type oids from its own counter starting at the same
+    /// base. So the first user type of any two engines in this process claim
+    /// one oid, and whichever test creates its type last rebinds the other's
+    /// name to its own definition — a `CREATE DOMAIN posint` here resolving to
+    /// a neighbouring test's composite `pair`, and failing with `malformed
+    /// record literal`. That is a defect in the registry, and is documented on
+    /// `crabka_pgtypes::usertype::CatalogTypes` itself; until it is keyed by
+    /// catalog, a test that depends on a user type has to stay off the oids its
+    /// neighbours use.
+    async fn create_private_user_types(session: &mut SqlSession) {
+        for index in 0..8 {
+            run_s(session, &format!("CREATE DOMAIN oidburn{index} AS int4")).await;
+        }
+        run_s(session, "CREATE DOMAIN posint AS int4 CHECK (VALUE > 0)").await;
+        run_s(session, "CREATE TYPE mood AS ENUM ('sad', 'ok')").await;
+    }
+
+    /// The SQLSTATE and message one statement fails with, for a test that has a
+    /// session in hand.
+    async fn error_of(session: &mut SqlSession, sql: &str) -> (String, String) {
+        let error = session
+            .simple_query(sql)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{sql} must fail"));
+        (error.code, error.message)
+    }
+
+    /// `PostgreSQL` types an unadorned `'…'` `unknown`, and an `unknown` in the
+    /// target list of an `INSERT`'s feeding query takes the *target column's*
+    /// type, parsed by that type's input function. So `INSERT INTO t SELECT
+    /// '(0,0)'` stores a point, exactly as the `VALUES` spelling of the same row
+    /// does, and neither is the `text` that `SELECT '(0,0)'` alone produces.
+    ///
+    /// Every literal below is spelled so that its canonical rendering differs
+    /// from the text that was written, wherever the type allows one: a value
+    /// that had been stored as text would read back as the input text.
+    #[tokio::test]
+    async fn an_insert_select_resolves_a_bare_literal_against_the_target_column() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        create_private_user_types(&mut session).await;
+
+        // (column type, the literal written, what the column reads back as)
+        let cases: &[(&str, &str, &str)] = &[
+            ("point", "(0,0)", "(0,0)"),
+            // The input functions strip the padding, fold the spelling, order
+            // the corners and round to the column's scale; a text store could
+            // do none of it.
+            ("int4", " 42 ", "42"),
+            ("boolean", "yes", "t"),
+            ("date", "1997-02-10", "1997-02-10"),
+            ("interval", "1 day 2 hours", "1 day 02:00:00"),
+            ("box", "((0,0),(1,1))", "(1,1),(0,0)"),
+            (
+                "uuid",
+                "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11",
+                "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+            ),
+            ("numeric(4,2)", "1.005", "1.01"),
+            ("int4[]", "{1,2,3}", "{1,2,3}"),
+            ("int4range", "[1,4)", "[1,4)"),
+            ("jsonpath", "$.a", "$.\"a\""),
+            ("mood", "ok", "ok"),
+            // A domain literal is parsed by the base type's input function.
+            ("posint", " 5 ", "5"),
+        ];
+        for (index, (ty, literal, stored)) in cases.iter().enumerate() {
+            let table = format!("unk{index}");
+            run_s(&mut session, &format!("CREATE TABLE {table} (f1 {ty})")).await;
+            run_s(
+                &mut session,
+                &format!("INSERT INTO {table} SELECT '{literal}'"),
+            )
+            .await;
+            // The same row through the VALUES spelling, which already resolved
+            // the literal: the two paths must not disagree about one value.
+            run_s(
+                &mut session,
+                &format!("INSERT INTO {table} VALUES ('{literal}')"),
+            )
+            .await;
+            assert!(
+                text_rows_of(&mut session, &format!("SELECT f1 FROM {table}")).await
+                    == vec![text_row(&[stored]), text_row(&[stored])],
+                "{ty}"
+            );
+        }
+
+        // The upstream `gist` case this began as: one literal, a row per row of
+        // the feeding query.
+        run_s(&mut session, "CREATE TABLE point_gist_tbl (f1 point)").await;
+        run_s(
+            &mut session,
+            "INSERT INTO point_gist_tbl SELECT '(0,0)' FROM generate_series(0, 1000)",
+        )
+        .await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT count(*), min(f1 <-> '(3,4)'::point) FROM point_gist_tbl",
+            )
+            .await
+                == vec![text_row(&["1001", "5"])]
+        );
+    }
+
+    /// Only the literal itself is `unknown`. Everything else in a feeding
+    /// query's target list already carries a type, so assigning it to a column
+    /// of another type is still 42804 — the whole point of the `unknown` rule is
+    /// that it does not coerce a genuine `text` expression.
+    ///
+    /// A set operation and a derived table are the two that look like literals
+    /// and are not: `PostgreSQL` resolves an all-unknown set-op column to `text`
+    /// through `select_common_type`, and has coerced a sub-select's unknown
+    /// outputs to `text` at the boundary since PostgreSQL 10.
+    #[tokio::test]
+    async fn an_insert_select_leaves_a_typed_expression_typed() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE pt (f1 point)").await;
+        run_s(&mut session, "CREATE TABLE src (t text)").await;
+        run_s(&mut session, "INSERT INTO src VALUES ('(0,0)')").await;
+
+        let refused = [
+            // A genuine text expression.
+            "INSERT INTO pt SELECT t FROM src",
+            "INSERT INTO pt SELECT lower('(0,0)')",
+            // An explicit cast types the literal itself.
+            "INSERT INTO pt SELECT '(0,0)'::text",
+            "INSERT INTO pt SELECT CAST('(0,0)' AS text)",
+            // A CASE resolves its arms to a common type first.
+            "INSERT INTO pt SELECT CASE WHEN true THEN '(0,0)' END",
+            // A set operation.
+            "INSERT INTO pt SELECT '(0,0)' UNION ALL SELECT '(1,1)'",
+            "INSERT INTO pt SELECT '(0,0)' UNION SELECT '(1,1)'",
+            // A derived table, and the wildcard that reads one.
+            "INSERT INTO pt SELECT * FROM (VALUES ('(0,0)')) v",
+            "INSERT INTO pt SELECT * FROM src",
+        ];
+        for sql in refused {
+            assert!(
+                error_of(&mut session, sql).await
+                    == (
+                        "42804".to_string(),
+                        "column is of type point but expression is of type text".to_string(),
+                    ),
+                "{sql}"
+            );
+        }
+        assert!(
+            text_rows_of(&mut session, "SELECT f1 FROM pt").await
+                == Vec::<Vec<Option<String>>>::new()
+        );
+    }
+
+    /// The safety probe. Resolving the literal against the target column widens
+    /// what an `INSERT … SELECT` accepts, so every rule that used to stand
+    /// between a value and the table has to still stand: the input function's
+    /// own parse, the assignment-context length rule, a `CHECK`, a domain's
+    /// constraint, `NOT NULL`, and the range of the type.
+    ///
+    /// Each case is one row written two ways. The `VALUES` spelling has always
+    /// resolved the literal, so it is the oracle: the `SELECT` spelling must
+    /// fail with the same SQLSTATE and the same message, and write nothing.
+    #[tokio::test]
+    async fn an_insert_select_refuses_what_the_values_spelling_refuses() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        create_private_user_types(&mut session).await;
+        for ddl in [
+            "CREATE TABLE vc (f1 varchar(3))",
+            "CREATE TABLE chk (f1 int4 CHECK (f1 > 0))",
+            "CREATE TABLE dom (f1 posint)",
+            "CREATE TABLE nn (a int4, b int4 NOT NULL)",
+            "CREATE TABLE i4 (f1 int4)",
+            "CREATE TABLE en (f1 mood)",
+            "CREATE TABLE pt (f1 point)",
+            "CREATE TABLE nm (f1 numeric(4,2))",
+        ] {
+            run_s(&mut session, ddl).await;
+        }
+
+        // (table, the VALUES spelling, the SELECT spelling, SQLSTATE, message)
+        let cases: &[(&str, &str, &str, &str, &str)] = &[
+            // An assignment, so the over-long value is 22001 and NOT the silent
+            // truncation `'abcd'::varchar(3)` would have done.
+            (
+                "vc",
+                "INSERT INTO vc VALUES ('abcd')",
+                "INSERT INTO vc SELECT 'abcd'",
+                "22001",
+                "value too long for type character varying(3)",
+            ),
+            (
+                "chk",
+                "INSERT INTO chk VALUES ('-1')",
+                "INSERT INTO chk SELECT '-1'",
+                "23514",
+                "new row for relation \"chk\" violates check constraint \"chk_f1_check\"",
+            ),
+            // The literal is parsed by the domain's BASE type, which leaves the
+            // domain's own constraint to `coerce` — this proves `coerce` still
+            // runs on the resolved value.
+            (
+                "dom",
+                "INSERT INTO dom VALUES ('-1')",
+                "INSERT INTO dom SELECT '-1'",
+                "23514",
+                "value for domain posint violates check constraint \"posint_check\"",
+            ),
+            (
+                "nn",
+                "INSERT INTO nn (a, b) VALUES ('1', NULL)",
+                "INSERT INTO nn (a, b) SELECT '1', NULL",
+                "23502",
+                "null value in column \"b\" of relation \"nn\" violates not-null constraint",
+            ),
+            (
+                "i4",
+                "INSERT INTO i4 VALUES ('99999999999')",
+                "INSERT INTO i4 SELECT '99999999999'",
+                "22003",
+                "value \"99999999999\" is out of range for type integer",
+            ),
+            (
+                "nm",
+                "INSERT INTO nm VALUES ('123.45')",
+                "INSERT INTO nm SELECT '123.45'",
+                "22003",
+                "integer out of range",
+            ),
+            // Malformed input is the input function's own 22P02, never a silent
+            // accept and never the 42804 the unresolved literal used to give.
+            (
+                "en",
+                "INSERT INTO en VALUES ('bogus')",
+                "INSERT INTO en SELECT 'bogus'",
+                "22P02",
+                "invalid input value for enum mood: \"bogus\"",
+            ),
+            (
+                "pt",
+                "INSERT INTO pt VALUES ('asdfasdf')",
+                "INSERT INTO pt SELECT 'asdfasdf'",
+                "22P02",
+                "invalid input syntax for type point: \"asdfasdf\"",
+            ),
+            (
+                "i4",
+                "INSERT INTO i4 VALUES ('zz')",
+                "INSERT INTO i4 SELECT 'zz'",
+                "22P02",
+                "invalid input syntax for type integer: \"zz\"",
+            ),
+        ];
+        for (table, values, select, code, message) in cases {
+            let expected = ((*code).to_string(), (*message).to_string());
+            assert!(error_of(&mut session, values).await == expected, "{values}");
+            assert!(error_of(&mut session, select).await == expected, "{select}");
+            assert!(
+                text_rows_of(&mut session, &format!("SELECT count(*) FROM {table}")).await
+                    == vec![text_row(&["0"])],
+                "{select} wrote a row"
+            );
+        }
+    }
+
+    /// The resolution belongs to the source rows an `INSERT` builds, so it
+    /// reaches every flavour that takes its rows from a query: the plain
+    /// statement, `ON CONFLICT`, a partitioned parent that routes the row to a
+    /// leaf, and an automatically updatable view.
+    ///
+    /// `ORDER BY`, `LIMIT` and a `WITH` prefix wrap the target list without
+    /// retyping it, and a literal keeps its place among typed columns.
+    #[tokio::test]
+    async fn every_query_fed_insert_resolves_the_literal() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for ddl in [
+            "CREATE TABLE plain (k int4, f1 point)",
+            "CREATE TABLE oc (k int4 PRIMARY KEY, f1 point)",
+            "CREATE TABLE parts (k int4, f1 point) PARTITION BY RANGE (k)",
+            "CREATE TABLE parts_lo PARTITION OF parts FOR VALUES FROM (0) TO (10)",
+            "CREATE TABLE base (k int4, f1 point)",
+            "CREATE VIEW v AS SELECT * FROM base",
+        ] {
+            run_s(&mut session, ddl).await;
+        }
+
+        // (the statement, where its row lands)
+        let cases: &[(&str, &str)] = &[
+            ("INSERT INTO plain SELECT 1, '(0,0)'", "plain"),
+            // A clause that only wraps the target list is transparent.
+            ("INSERT INTO plain SELECT 2, '(0,0)' ORDER BY 1", "plain"),
+            ("INSERT INTO plain SELECT 3, '(0,0)' LIMIT 1", "plain"),
+            (
+                "INSERT INTO plain WITH c AS (SELECT 4) SELECT k, '(0,0)' FROM c AS c(k)",
+                "plain",
+            ),
+            (
+                "INSERT INTO oc SELECT 1, '(0,0)' ON CONFLICT (k) DO NOTHING",
+                "oc",
+            ),
+            ("INSERT INTO parts SELECT 1, '(0,0)'", "parts_lo"),
+            ("INSERT INTO v SELECT 1, '(0,0)'", "base"),
+        ];
+        for (sql, table) in cases {
+            run_s(&mut session, sql).await;
+            assert!(
+                text_rows_of(&mut session, &format!("SELECT f1 FROM {table}")).await
+                    == vec![text_row(&["(0,0)"])],
+                "{sql}"
+            );
+            run_s(&mut session, &format!("DELETE FROM {table}")).await;
+        }
     }
 }

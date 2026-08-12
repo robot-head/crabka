@@ -989,6 +989,8 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         Statement::RevokeTablePrivileges { .. } => "REVOKE",
         Statement::RevokeSchemaPrivileges { .. } => "REVOKE",
         Statement::ImportForeignSchema { .. } => "IMPORT FOREIGN SCHEMA",
+        Statement::Utility(parsed::UtilityStatement::CreateOperator(_)) => "CREATE OPERATOR",
+        Statement::Utility(parsed::UtilityStatement::DropOperator { .. }) => "DROP OPERATOR",
         Statement::Utility(parsed::UtilityStatement::TextSearch(ddl)) => match ddl {
             parsed::TextSearchDdl::Create {
                 kind: parsed::TextSearchObjectKind::Configuration,
