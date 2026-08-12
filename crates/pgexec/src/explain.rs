@@ -122,7 +122,10 @@ fn plan_query(query: &QueryExpr) -> PlanNode {
     let mut node = plan_set_expr(&query.body);
     if !query.order_by.is_empty() {
         node = PlanNode::new("Sort")
-            .detail("Sort Key", sort_key(&query.order_by))
+            .detail(
+                "Sort Key",
+                plan_sort_key(&query.order_by, body_projection(&query.body)),
+            )
             .with_child(node);
     }
     if query.limit.is_some() || query.offset.is_some() {
@@ -207,7 +210,10 @@ fn plan_select(select: &SelectStmt) -> PlanNode {
     }
     if !select.order_by.is_empty() {
         node = PlanNode::new("Sort")
-            .detail("Sort Key", sort_key(&select.order_by))
+            .detail(
+                "Sort Key",
+                plan_sort_key(&select.order_by, &select.projection),
+            )
             .with_child(node);
     }
     if select.limit.is_some() || select.offset.is_some() {
@@ -321,36 +327,157 @@ fn expr_list(exprs: &[Expr]) -> String {
         .join(", ")
 }
 
-fn sort_key(items: &[OrderItem]) -> String {
-    sort_key_with(items, true)
+/// The `Sort Key` of a `Sort` plan node.
+///
+/// A `Sort` evaluates nothing. `set_dummy_tlist_references` rewrites its target
+/// list into bare references to the node underneath, and `ruleutils` prints
+/// such a reference by deparsing whatever it points at — wrapped in
+/// parentheses, "because our caller probably assumed a Var is a simple
+/// expression" (`get_special_variable`). A reference that lands on a plain
+/// column *is* a simple expression and gets none. That is the whole rule, and
+/// it is why `Sort Key: id DESC` carries no parentheses while
+/// `Sort Key: (count(*))` carries a pair the expression never asked for.
+///
+/// The node that computes an expression — an `Aggregate`'s `Group Key` — prints
+/// it without the extra pair, which is why the two lines of one plan can differ
+/// by exactly one parenthesis.
+fn plan_sort_key(items: &[OrderItem], projection: &[SelectItem]) -> String {
+    items
+        .iter()
+        .map(|item| {
+            let target = sort_target(&item.expr, projection);
+            let mut key = match target {
+                Expr::Column { .. } => deparse_bare(target),
+                other => format!("({})", deparse_bare(other)),
+            };
+            key.push_str(&sort_order_suffix(item));
+            key
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What an `ORDER BY` item actually sorts on — `findTargetlistEntrySQL92`.
+///
+/// A bare name is an *output* column name before it is anything else: the
+/// SELECT list's aliases beat the FROM clause's columns, which is the one place
+/// `ORDER BY` reads differently from `GROUP BY`. A bare integer is a position in
+/// that same list. Everything else is an expression over the input and stands
+/// as written.
+///
+/// The name never survives into the plan either way — the sort clause points at
+/// a target-list entry, and the entry holds the expression — so `EXPLAIN` prints
+/// the expression and never the alias the query wrote.
+fn sort_target<'a>(item: &'a Expr, projection: &'a [SelectItem]) -> &'a Expr {
+    match item {
+        Expr::Column { table: None, name } => match output_column(projection, name) {
+            // A target that is the column of that same name says nothing the
+            // written reference does not, except a table qualifier — and this
+            // deparser prints a qualifier only where the query wrote one, while
+            // `EXPLAIN` prints one whenever the plan reads more than one
+            // relation. Substituting `SELECT t.a … ORDER BY a`'s target would
+            // add a qualifier to a single-relation plan, which is the case this
+            // module gets right today. Keep what was written.
+            Some(Expr::Column { name: column, .. }) if column == name => item,
+            Some(target) => target,
+            None => item,
+        },
+        Expr::IntLiteral(digits) => digits
+            .parse::<usize>()
+            .ok()
+            .and_then(|position| nth_output_column(projection, position))
+            .unwrap_or(item),
+        _ => item,
+    }
+}
+
+/// The target-list entry `name` names, if the SELECT list exposes one.
+///
+/// An entry's output name is its `AS` alias, or the column's own name when it
+/// is a bare column reference. A wildcard exposes names this module cannot see
+/// without the catalog, so a list holding one may fail to find a match that
+/// `PostgreSQL` would — which leaves the item deparsed as written, the reading
+/// this had before it could resolve anything.
+fn output_column<'a>(projection: &'a [SelectItem], name: &str) -> Option<&'a Expr> {
+    projection.iter().find_map(|item| match item {
+        SelectItem::Expr {
+            expr,
+            alias: Some(alias),
+        } if alias == name => Some(expr),
+        SelectItem::Expr { expr, alias: None } => match expr {
+            Expr::Column { name: column, .. } if column == name => Some(expr),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// The `position`'th output column, counting from one.
+///
+/// `None` when the list holds a wildcard, because then the positions this
+/// module can count are not the positions `PostgreSQL` counts.
+fn nth_output_column(projection: &[SelectItem], position: usize) -> Option<&Expr> {
+    if projection
+        .iter()
+        .any(|item| !matches!(item, SelectItem::Expr { .. }))
+    {
+        return None;
+    }
+    match projection.get(position.checked_sub(1)?)? {
+        SelectItem::Expr { expr, .. } => Some(expr),
+        _ => None,
+    }
+}
+
+/// The SELECT list an `ORDER BY` at this level resolves against. Empty for a
+/// set operation, whose output names are the leftmost branch's but whose
+/// expressions are not any one branch's.
+fn body_projection(body: &SetExpr) -> &[SelectItem] {
+    match body {
+        SetExpr::Query(QueryBody::Select(select)) => &select.projection,
+        SetExpr::Query(QueryBody::Nested(query)) => body_projection(&query.body),
+        SetExpr::Query(QueryBody::Values(_)) | SetExpr::SetOp { .. } => &[],
+    }
 }
 
 /// A sort-key list under an explicit qualification choice.
 ///
-/// This is the one place the direction and NULL-placement spelling lives, so an
-/// aggregate's own `ORDER BY` prints them exactly as a query-level `ORDER BY`
-/// does — which is what `PostgreSQL` does, both being `get_rule_orderby`.
+/// This is `get_rule_orderby`, which is what an *aggregate's* own `ORDER BY`
+/// deparses through. It is not the plan-node path: no target list stands
+/// between the aggregate and its sort expressions, so none of
+/// [`plan_sort_key`]'s parentheses apply here.
 fn sort_key_with(items: &[OrderItem], qualify: bool) -> String {
     items
         .iter()
         .map(|item| {
             let mut key = deparse_bare_with(&item.expr, qualify);
-            if !item.asc {
-                key.push_str(" DESC");
-            }
-            // PostgreSQL prints the NULLS clause only when it is not the default
-            // for the direction (NULLS LAST for ASC, NULLS FIRST for DESC).
-            if item.nulls_first == item.asc {
-                key.push_str(if item.nulls_first {
-                    " NULLS FIRST"
-                } else {
-                    " NULLS LAST"
-                });
-            }
+            key.push_str(&sort_order_suffix(item));
             key
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The direction and NULL-placement spelling that follows a sort key.
+///
+/// One place for both paths, so an aggregate's `ORDER BY` and a `Sort` node's
+/// key can never disagree about them — in `PostgreSQL` they are both
+/// `show_sortorder_options`'s wording.
+fn sort_order_suffix(item: &OrderItem) -> String {
+    let mut suffix = String::new();
+    if !item.asc {
+        suffix.push_str(" DESC");
+    }
+    // PostgreSQL prints the NULLS clause only when it is not the default for
+    // the direction (NULLS LAST for ASC, NULLS FIRST for DESC).
+    if item.nulls_first == item.asc {
+        suffix.push_str(if item.nulls_first {
+            " NULLS FIRST"
+        } else {
+            " NULLS LAST"
+        });
+    }
+    suffix
 }
 
 /// Deparse `expr` the way `PostgreSQL` prints a `Filter:` line: operator nodes
@@ -389,6 +516,30 @@ fn deparse_with(expr: &Expr, qualify: bool) -> String {
 /// `PostgreSQL` uses in `Group Key`/`Sort Key` lists.
 fn deparse_bare(expr: &Expr) -> String {
     deparse_bare_with(expr, true)
+}
+
+/// The operand of a `::` cast, parenthesised the way `get_coercion_expr` does.
+///
+/// `PostgreSQL` wraps a coercion's argument in parentheses unconditionally —
+/// `(a)::text`, `((a + b))::pg_lsn` — with one exception: a constant that is
+/// already the target type is printed by `get_const_expr` instead, which
+/// decorates it with `::type` itself and needs no wrapping. A literal is that
+/// constant, which is why the corpus has `'42'::bigint` and `NULL::integer`
+/// beside `(stringu1)::text`.
+fn cast_operand(expr: &Expr, qualify: bool) -> String {
+    let rendered = deparse_bare_with(expr, qualify);
+    if matches!(
+        expr,
+        Expr::IntLiteral(_)
+            | Expr::NumericLiteral(_)
+            | Expr::StringLiteral(_)
+            | Expr::BitStringLiteral(_)
+            | Expr::BoolLiteral(_)
+            | Expr::NullLiteral
+    ) {
+        return rendered;
+    }
+    format!("({rendered})")
 }
 
 /// A call rendered the ordinary way, as `name(args)` with the modifiers that
@@ -496,7 +647,7 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
             }
         }
         Expr::Func(call) => deparse_plain_call(call, qualify),
-        Expr::Cast { expr, ty } => format!("{}::{}", deparse_bare_with(expr, qualify), ty.name()),
+        Expr::Cast { expr, ty } => format!("{}::{}", cast_operand(expr, qualify), ty.name()),
         Expr::Unary { op, expr } => match op {
             UnaryOp::Neg => format!("-{}", deparse_bare_with(expr, qualify)),
             UnaryOp::Plus => format!("+{}", deparse_bare_with(expr, qualify)),
@@ -979,6 +1130,77 @@ mod tests {
             (
                 "SELECT * FROM d1 ORDER BY id DESC, s",
                 &["Sort", "  Sort Key: id DESC, s", "  ->  Seq Scan on d1"],
+            ),
+            // A `Sort` evaluates nothing, so its key is a reference to the node
+            // below and prints inside a pair of parentheses of its own — unless
+            // the reference lands on a plain column, as the two above do.
+            (
+                "SELECT * FROM d1 ORDER BY id + 1",
+                &["Sort", "  Sort Key: ((id + 1))", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT s FROM d1 ORDER BY lower(s)",
+                &["Sort", "  Sort Key: (lower(s))", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT * FROM d1 ORDER BY (id + 1) DESC NULLS LAST",
+                &[
+                    "Sort",
+                    "  Sort Key: ((id + 1)) DESC NULLS LAST",
+                    "  ->  Seq Scan on d1",
+                ],
+            ),
+            // `ORDER BY` names an output column before it names anything else,
+            // and the plan carries the expression the name stood for.
+            (
+                "SELECT id + 1 AS x FROM d1 ORDER BY x",
+                &["Sort", "  Sort Key: ((id + 1))", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT id AS x FROM d1 ORDER BY x",
+                &["Sort", "  Sort Key: id", "  ->  Seq Scan on d1"],
+            ),
+            // The written reference stands where the target adds only a
+            // qualifier: PostgreSQL prints one here only when the plan reads
+            // more than one relation, and this one reads d1 alone.
+            (
+                "SELECT d1.id FROM d1 ORDER BY id",
+                &["Sort", "  Sort Key: id", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT id, s FROM d1 ORDER BY 2",
+                &["Sort", "  Sort Key: s", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT count(*) FROM d1 ORDER BY count(*)",
+                &[
+                    "Sort",
+                    "  Sort Key: (count(*))",
+                    "  ->  Aggregate",
+                    "        ->  Seq Scan on d1",
+                ],
+            ),
+            // The `HashAggregate` computes the key, so it prints without the
+            // extra pair the `Sort` above it adds to the very same expression.
+            (
+                "SELECT DISTINCT id + 1 FROM d1 ORDER BY 1",
+                &[
+                    "Sort",
+                    "  Sort Key: ((id + 1))",
+                    "  ->  HashAggregate",
+                    "        Group Key: (id + 1)",
+                    "        ->  Seq Scan on d1",
+                ],
+            ),
+            // A cast parenthesises what it converts; a literal constant carries
+            // its own type decoration instead and is left alone.
+            (
+                "SELECT * FROM d1 WHERE id::text = 'a'",
+                &["Seq Scan on d1", "  Filter: ((id)::text = 'a'::text)"],
+            ),
+            (
+                "SELECT * FROM d1 ORDER BY (id)::text",
+                &["Sort", "  Sort Key: ((id)::text)", "  ->  Seq Scan on d1"],
             ),
             (
                 "SELECT * FROM d1 LIMIT 2 OFFSET 1",

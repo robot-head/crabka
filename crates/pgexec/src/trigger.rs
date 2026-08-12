@@ -920,7 +920,7 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
             "CREATE SEQUENCE"
         }
         Statement::CreateIndex { .. } => "CREATE INDEX",
-        Statement::AlterIndexTablespace { .. } => "ALTER INDEX",
+        Statement::AlterIndex { .. } => "ALTER INDEX",
         Statement::DropIndex { .. } => "DROP INDEX",
         Statement::CreateView { .. } => "CREATE VIEW",
         Statement::AlterView { .. } => "ALTER VIEW",

@@ -3828,14 +3828,39 @@ impl Parser {
     }
 
     fn alter_index(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::AlterIndexAction;
+
         self.expect_ident_eq("alter")?;
         self.expect(&Token::Keyword(Keyword::Index))?;
         let name = self.relation_ref()?;
+        if self.eat_ident_eq("reset") {
+            let start = self.peek_pos();
+            let params = self.storage_parameter_list()?;
+            crate::reloptions::validate_reset(&params)
+                .map_err(|error| ParseError::from_reloption(error, start))?;
+            return Ok(crate::ast::Statement::AlterIndex {
+                name,
+                action: AlterIndexAction::ResetStorageParameters(
+                    params.into_iter().map(|(key, _)| key).collect(),
+                ),
+            });
+        }
         self.expect(&Token::Keyword(Keyword::Set))?;
+        if *self.peek() == Token::LParen {
+            // The statement does not name the access method, so the whole index
+            // side of the catalog is in scope. That admits `fastupdate` on a
+            // btree, which `PostgreSQL` catches by reading `pg_class.relam`.
+            let params =
+                self.checked_storage_parameter_list(crate::reloptions::RelOptionTarget::AnyIndex)?;
+            return Ok(crate::ast::Statement::AlterIndex {
+                name,
+                action: AlterIndexAction::SetStorageParameters(params),
+            });
+        }
         self.expect_ident_eq("tablespace")?;
-        Ok(crate::ast::Statement::AlterIndexTablespace {
+        Ok(crate::ast::Statement::AlterIndex {
             name,
-            tablespace: self.expect_col_id()?,
+            action: AlterIndexAction::SetTablespace(self.expect_col_id()?),
         })
     }
 
@@ -6748,7 +6773,8 @@ impl Parser {
         })
     }
 
-    /// `CREATE TABLE [IF NOT EXISTS] name [(col, …)] AS <query> [WITH [NO] DATA]`.
+    /// `CREATE TABLE [IF NOT EXISTS] name [(col, …)] [WITH (…)] AS <query>
+    /// [WITH [NO] DATA]`.
     fn create_table_as(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Create))?;
@@ -6766,6 +6792,15 @@ impl Parser {
         } else {
             None
         };
+        // `create_as_target` carries the same `USING`/`WITH`/`TABLESPACE` tail a
+        // `CREATE TABLE` does, in that order, and the relation it builds is an
+        // ordinary heap table — so the option list is read against the same
+        // family. The `WITH` here can never be the query's `WITH`: that one
+        // follows `AS`.
+        self.table_access_method_clause()?;
+        if self.eat_keyword(Keyword::With) {
+            self.checked_storage_parameter_list(crate::reloptions::RelOptionTarget::Table)?;
+        }
         let tablespace = self
             .eat_ident_eq("tablespace")
             .then(|| self.expect_col_id())
@@ -6815,9 +6850,11 @@ impl Parser {
             let _access_method = self.expect_col_id()?;
         }
         // A reloption list, not the `WITH [NO] DATA` tail: that one closes the
-        // statement and this one is the only `WITH` that can precede `AS`.
+        // statement and this one is the only `WITH` that can precede `AS`. A
+        // materialized view is stored like a heap table and takes a heap
+        // table's options, which is what `heap_reloptions` gives `RELKIND_MATVIEW`.
         if self.eat_keyword(Keyword::With) {
-            self.skip_parenthesized_group()?;
+            self.checked_storage_parameter_list(crate::reloptions::RelOptionTarget::Table)?;
         }
         let tablespace = self
             .eat_ident_eq("tablespace")
@@ -6852,26 +6889,6 @@ impl Parser {
             with_data,
             tablespace,
         })
-    }
-
-    /// Consume a parenthesized group whose contents carry no meaning here,
-    /// balancing nested parentheses so a value that contains one cannot end the
-    /// group early.
-    fn skip_parenthesized_group(&mut self) -> Result<(), ParseError> {
-        let start = self.peek_pos();
-        self.expect(&Token::LParen)?;
-        let mut depth = 1usize;
-        while depth > 0 {
-            match self.bump() {
-                Token::LParen => depth += 1,
-                Token::RParen => depth -= 1,
-                Token::Eof => {
-                    return Err(ParseError::new("unterminated ( in option list", start));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
     }
 
     /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`.
@@ -7104,11 +7121,23 @@ impl Parser {
         let sharded = saw_sharded;
         self.table_access_method_clause()?;
         // PostgreSQL storage parameters (`WITH (fillfactor=100, ...)`) tune
-        // heap/TOAST behavior Crabka has no equivalent of: accept the standard
-        // `key [= value] [, ...]` shape and discard it. pgbench -i emits this
-        // clause on every CREATE TABLE.
+        // heap/TOAST behavior Crabka has no equivalent of, so the list is
+        // checked against the reloption catalog and then discarded: an option
+        // this engine cannot honour is still an option PostgreSQL either
+        // accepts or refuses, and refusing the same ones is the whole of the
+        // observable behaviour. pgbench -i emits this clause on every CREATE
+        // TABLE.
+        //
+        // `PARTITION BY` decides which catalog family applies. A partitioned
+        // table has no storage of its own, so it takes no storage parameters at
+        // all — and says so with a message that names no option.
         if self.eat_keyword(Keyword::With) {
-            self.storage_parameter_list()?;
+            let target = if partition_by.is_some() {
+                crate::reloptions::RelOptionTarget::PartitionedTable
+            } else {
+                crate::reloptions::RelOptionTarget::Table
+            };
+            self.checked_storage_parameter_list(target)?;
         } else if self.eat_ident_eq("without") {
             self.expect_ident_eq("oids")?;
         }
@@ -7873,6 +7902,26 @@ impl Parser {
 
     /// `( key [= value] [, …] )`: a storage-parameter list, accepted and
     /// discarded.
+    /// A `WITH (…)`/`SET (…)` list, validated against the reloption catalog for
+    /// `target`.
+    ///
+    /// `PostgreSQL` validates every one of these lists through the one table in
+    /// `reloptions.c`, so this is the only place a written option list is
+    /// admitted. The refusal is placed at the opening parenthesis: `PostgreSQL`
+    /// reports these from `DefineRelation`/`DefineIndex` rather than from the
+    /// grammar and so gives no cursor position at all, and the position this
+    /// error carries never reaches the wire.
+    fn checked_storage_parameter_list(
+        &mut self,
+        target: crate::reloptions::RelOptionTarget,
+    ) -> Result<Vec<(String, Option<String>)>, ParseError> {
+        let start = self.peek_pos();
+        let params = self.storage_parameter_list()?;
+        crate::reloptions::validate(target, &params)
+            .map_err(|error| ParseError::from_reloption(error, start))?;
+        Ok(params)
+    }
+
     fn storage_parameter_list(&mut self) -> Result<Vec<(String, Option<String>)>, ParseError> {
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
@@ -8134,7 +8183,14 @@ impl Parser {
             let _ = not;
         }
         if self.eat_keyword(Keyword::With) {
-            self.storage_parameter_list()?;
+            // The access method decides which options exist: `fillfactor` is a
+            // btree, hash, gist and spgist option but not a GIN or BRIN one,
+            // and `fastupdate` is GIN's alone. An unwritten `USING` is btree,
+            // which is what `DefineIndex` defaults to.
+            let method = method.as_deref().unwrap_or("btree");
+            let target = crate::reloptions::RelOptionTarget::for_index_method(method)
+                .unwrap_or(crate::reloptions::RelOptionTarget::AnyIndex);
+            self.checked_storage_parameter_list(target)?;
         }
         let tablespace = self
             .eat_ident_eq("tablespace")
@@ -17420,19 +17476,175 @@ mod tests {
     fn create_table_accepts_and_ignores_storage_parameters() {
         use assert2::assert;
         // The pgbench -i statement verbatim, plus shape variants: value-less
-        // params, namespaced params, string / float / negative / keyword-like
-        // values. All parse to the same CreateTable as without the clause.
+        // params, namespaced params, string / float / keyword-like values. All
+        // parse to the same CreateTable as without the clause.
         let cases = [
             "create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)",
             "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84)) WITH (autovacuum_enabled)",
             "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84)) WITH (toast.autovacuum_enabled = off, fillfactor = 70)",
-            "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84)) WITH (autovacuum_vacuum_scale_factor = 0.5, parallel_workers = -1, vacuum_index_cleanup = 'auto')",
+            "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84)) WITH (autovacuum_vacuum_scale_factor = 0.5, parallel_workers = 4, vacuum_index_cleanup = 'auto')",
         ];
         let bare = one(
             "CREATE TABLE pgbench_tellers (tid INT NOT NULL, bid INT, tbalance INT, filler CHAR(84))",
         );
         for sql in cases {
             assert!(one(sql) == bare, "case: {sql}");
+        }
+    }
+
+    /// A discarded option list is still a validated one: `PostgreSQL` refuses
+    /// the same names and the same values whether or not the engine below can
+    /// act on them.
+    #[test]
+    fn create_table_storage_parameters_are_checked_against_the_reloption_catalog() {
+        use assert2::assert;
+        let cases = [
+            (
+                "CREATE TABLE t (i INT) WITH (parallel_workers = -1)",
+                "value -1 out of bounds for option \"parallel_workers\"",
+                Some("Valid values are between \"0\" and \"1024\"."),
+            ),
+            (
+                "CREATE TABLE t (i INT) WITH (fillfactor = 2)",
+                "value 2 out of bounds for option \"fillfactor\"",
+                Some("Valid values are between \"10\" and \"100\"."),
+            ),
+            (
+                "CREATE TABLE t (i INT) WITH (not_existing_option = 2)",
+                "unrecognized parameter \"not_existing_option\"",
+                None,
+            ),
+            (
+                "CREATE TABLE t (i INT) WITH (not_existing_namespace.fillfactor = 2)",
+                "unrecognized parameter namespace \"not_existing_namespace\"",
+                None,
+            ),
+            (
+                // A quoted name keeps its case, and no option is spelled that
+                // way.
+                "CREATE TABLE t (i INT) WITH (\"Fillfactor\" = 10)",
+                "unrecognized parameter \"Fillfactor\"",
+                None,
+            ),
+            (
+                // A GIN option on a table.
+                "CREATE TABLE t (i INT) WITH (fastupdate = on)",
+                "unrecognized parameter \"fastupdate\"",
+                None,
+            ),
+            (
+                "CREATE TABLE t (i INT) PARTITION BY LIST (i) WITH (fillfactor = 100)",
+                "cannot specify storage parameters for a partitioned table",
+                None,
+            ),
+            (
+                "CREATE TABLE t (i INT) WITH (oids = true)",
+                "tables declared WITH OIDS are not supported",
+                None,
+            ),
+        ];
+        for (sql, message, detail) in cases {
+            let error = crate::parse(sql).expect_err(sql);
+            assert!(error.message == message, "{sql}");
+            assert!(error.detail() == detail, "{sql}");
+        }
+        // The spellings that stay legal.
+        for sql in [
+            "CREATE TABLE t (i INT) WITH (oids = false)",
+            "CREATE TABLE t (i INT) PARTITION BY LIST (i)",
+        ] {
+            assert!(crate::parse(sql).is_ok(), "{sql}");
+        }
+    }
+
+    /// `CREATE TABLE … AS` carries the same option tail as `CREATE TABLE`, and
+    /// reads it against the same family: the relation it builds is a heap
+    /// table. The `WITH` before `AS` is the option list; the one after the
+    /// query is `WITH [NO] DATA`.
+    #[test]
+    fn create_table_as_reads_its_option_list_against_the_heap_family() {
+        use assert2::assert;
+        let error = crate::parse("CREATE TABLE tas_case WITH (\"Fillfactor\" = 10) AS SELECT 1 a")
+            .expect_err("a quoted name keeps its case and matches no option");
+        assert!(error.message == "unrecognized parameter \"Fillfactor\"");
+        for sql in [
+            "CREATE TABLE t WITH (fillfactor = 10) AS SELECT 1 a",
+            "CREATE TABLE t USING heap WITH (autovacuum_enabled = off) AS SELECT 1 a",
+            "CREATE TABLE t AS WITH c AS (SELECT 1 a) SELECT a FROM c",
+            "CREATE TABLE t AS SELECT 1 a WITH NO DATA",
+        ] {
+            assert!(crate::parse(sql).is_ok(), "{sql}");
+        }
+    }
+
+    /// The access method decides which options exist, and `ALTER INDEX` names
+    /// none — so it admits every index option and `CREATE INDEX` does not.
+    #[test]
+    fn index_storage_parameters_are_checked_against_the_access_methods_options() {
+        use assert2::assert;
+        let refusals = [
+            (
+                "CREATE INDEX i ON t USING spgist (p) WITH (fillfactor = 9)",
+                "value 9 out of bounds for option \"fillfactor\"",
+                Some("Valid values are between \"10\" and \"100\"."),
+            ),
+            (
+                "CREATE INDEX i ON t USING spgist (p) WITH (fillfactor = 101)",
+                "value 101 out of bounds for option \"fillfactor\"",
+                Some("Valid values are between \"10\" and \"100\"."),
+            ),
+            (
+                "CREATE INDEX i ON t USING gist (p) WITH (buffering = invalid_value)",
+                "invalid value for enum option \"buffering\": invalid_value",
+                Some("Valid values are \"on\", \"off\", and \"auto\"."),
+            ),
+            (
+                // GIN has no fillfactor.
+                "CREATE INDEX i ON t USING gin (p) WITH (fillfactor = 50)",
+                "unrecognized parameter \"fillfactor\"",
+                None,
+            ),
+            (
+                // `fastupdate` is GIN's, and an unwritten USING is btree.
+                "CREATE INDEX i ON t (p) WITH (fastupdate = on)",
+                "unrecognized parameter \"fastupdate\"",
+                None,
+            ),
+            (
+                // An index takes no namespaced option at all.
+                "CREATE INDEX i ON t (p) WITH (toast.fillfactor = 50)",
+                "unrecognized parameter namespace \"toast\"",
+                None,
+            ),
+            (
+                "ALTER INDEX i SET (not_existing_option = 2)",
+                "unrecognized parameter \"not_existing_option\"",
+                None,
+            ),
+            (
+                "ALTER INDEX i RESET (fillfactor = 12)",
+                "RESET must not include values for parameters",
+                None,
+            ),
+        ];
+        for (sql, message, detail) in refusals {
+            let error = crate::parse(sql).expect_err(sql);
+            assert!(error.message == message, "{sql}");
+            assert!(error.detail() == detail, "{sql}");
+        }
+        for sql in [
+            "CREATE INDEX i ON t USING spgist (p) WITH (fillfactor = 75)",
+            "CREATE INDEX i ON t USING gist (p) WITH (buffering = on, fillfactor = 50)",
+            "CREATE INDEX i ON t USING brin (p) WITH (pages_per_range = 2)",
+            "CREATE INDEX i ON t USING gin (p) WITH (fastupdate = off)",
+            "CREATE INDEX i ON t (p) WITH (deduplicate_items = on)",
+            "ALTER INDEX i SET (fillfactor = 90)",
+            // The access method is not written, so a GIN option passes here.
+            "ALTER INDEX i SET (fastupdate = off)",
+            "ALTER INDEX i RESET (fillfactor)",
+            "ALTER INDEX i SET TABLESPACE ts",
+        ] {
+            assert!(crate::parse(sql).is_ok(), "{sql}");
         }
     }
 

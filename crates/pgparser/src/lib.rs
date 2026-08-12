@@ -9,6 +9,7 @@ pub mod error;
 pub mod lexer;
 pub mod parser;
 pub mod plpgsql;
+pub mod reloptions;
 pub mod token;
 
 pub use error::ParseError;

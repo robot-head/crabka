@@ -1495,7 +1495,9 @@ pub(crate) fn execute_ddl(
             }
             Ok((command("DROP INDEX"), ops))
         }
-        Statement::AlterIndexTablespace { name, tablespace } => {
+        Statement::AlterIndex { name, action } => {
+            use crabka_pgparser::ast::AlterIndexAction;
+
             let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?;
             if let Some(error) = system_catalog_wrong_kind(name) {
                 return Err(error);
@@ -1512,11 +1514,24 @@ pub(crate) fn execute_ddl(
                 return Err(error);
             }
             crabka_pgcatalog::get_index(kv, name)?;
-            let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
-            Ok((
-                command("ALTER INDEX"),
-                vec![crabka_pgcatalog::set_relation_tablespace_op(name, oid)],
-            ))
+            match action {
+                AlterIndexAction::SetTablespace(tablespace) => {
+                    let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
+                    Ok((
+                        command("ALTER INDEX"),
+                        vec![crabka_pgcatalog::set_relation_tablespace_op(name, oid)],
+                    ))
+                }
+                // The written options were checked against the reloption
+                // catalog at parse time. Crabka's index storage has no page
+                // fill to tune and no pending list to hold, so an accepted
+                // option changes nothing that a query can observe — which is
+                // also PostgreSQL's outcome for an index that has none.
+                AlterIndexAction::SetStorageParameters(_)
+                | AlterIndexAction::ResetStorageParameters(_) => {
+                    Ok((command("ALTER INDEX"), Vec::new()))
+                }
+            }
         }
         Statement::AlterView {
             name,
@@ -18043,6 +18058,21 @@ pub(crate) fn select_to_relation_with_ctes(
             scope: Scope::empty(),
             rows: vec![vec![]],
         }
+    } else if crate::grouping::is_degenerate_grouping(s) {
+        // A degenerate grouping query answers the same rows over any input, so
+        // it is answered over none: `create_degenerate_grouping_paths` throws
+        // the scan away rather than filter it, which is why
+        // `SELECT 1 FROM t WHERE 1/a = 1 HAVING 1 < 2` never divides by zero.
+        //
+        // The relation is still built, because everything the FROM clause
+        // raises is raised whether or not the plan reads it — a missing
+        // relation, a missing column, a policy, a privilege. Only its rows are
+        // dropped, and only the `WHERE` goes unevaluated. Nothing below has a
+        // second path for the empty input: an input relation that simply *is*
+        // empty already takes this one.
+        let mut relation = build_from(read_ctx, &s.from, None, None, None)?;
+        relation.rows.clear();
+        relation
     } else {
         // SP40 Task 14: when the FROM is EXACTLY one foreign base table, extract
         // `_partition`/`_offset` bounds from the WHERE and push them into the
@@ -19045,6 +19075,7 @@ fn virtual_catalog_rows(
             crate::catalog_rel::SessionIdent {
                 database: ctx.database(),
                 backend_pid: ctx.backend_pid,
+                style: ctx.output_style(),
             },
         ),
     }

@@ -269,7 +269,7 @@ const COMMAND_PROBES: &[CommandProbe] = &[
     CommandProbe {
         command: "ALTER INDEX",
         sql: "ALTER INDEX parser_commands_idx SET TABLESPACE pg_default",
-        expected_statement: "AlterIndexTablespace",
+        expected_statement: "AlterIndex",
         refusal: None,
     },
     CommandProbe {
@@ -1080,7 +1080,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         }
         Statement::CreateIndex { .. } => "CreateIndex",
         Statement::DropIndex { .. } => "DropIndex",
-        Statement::AlterIndexTablespace { .. } => "AlterIndexTablespace",
+        Statement::AlterIndex { .. } => "AlterIndex",
         Statement::AlterView { .. } => "AlterView",
         Statement::DropTable { names, .. }
             if names

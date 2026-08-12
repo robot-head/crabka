@@ -156,20 +156,36 @@ async fn an_ungrouped_having_prints_on_the_aggregate_node() {
 
 /// The modifiers reach a `Sort Key` too, which is rendered by a different
 /// caller of the same deparser.
+///
+/// The outer parentheses are the `Sort` node's own: it evaluates nothing, so
+/// its key is a reference to the aggregate below and prints wrapped. The
+/// aggregate's *inner* `ORDER BY` never picks them up, because no target list
+/// stands between the aggregate and its own sort expressions.
 #[tokio::test]
 async fn an_aggregate_in_order_by_carries_its_modifiers_into_the_sort_key() {
     let engine = fixture().await;
-    let lines = plan(
-        &engine,
-        "SELECT b FROM t GROUP BY b ORDER BY count(*) filter (where a > 0)",
-    )
-    .await;
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.trim() == "Sort Key: count(*) FILTER (WHERE (a > 0))"),
-        "{lines:?}"
-    );
+    let cases: &[(&str, &str)] = &[
+        (
+            "count(*) filter (where a > 0)",
+            "Sort Key: (count(*) FILTER (WHERE (a > 0)))",
+        ),
+        ("count(*)", "Sort Key: (count(*))"),
+        (
+            "string_agg(c, ',' ORDER BY a DESC)",
+            "Sort Key: (string_agg(c, ','::text ORDER BY a DESC))",
+        ),
+    ];
+    for (order_by, expected) in cases {
+        let lines = plan(
+            &engine,
+            &format!("SELECT b FROM t GROUP BY b ORDER BY {order_by}"),
+        )
+        .await;
+        assert!(
+            lines.iter().any(|line| line.trim() == *expected),
+            "{order_by}: {lines:?}"
+        );
+    }
 }
 
 // --------------------------------------------------------- shared machinery

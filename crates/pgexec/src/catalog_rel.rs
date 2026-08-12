@@ -758,6 +758,12 @@ pub(crate) struct SessionIdent<'a> {
     /// The querying session's backend id, which `pg_stat_activity` reports as
     /// its one row's `pid`.
     pub backend_pid: i32,
+    /// The session's text-output settings. A relation that answers a *deparsed*
+    /// definition — `pg_views`, `pg_matviews`, `pg_attrdef`, `pg_policies` —
+    /// prints its constants through their types' output functions, exactly as
+    /// `pg_get_viewdef` does, so `DateStyle` and `IntervalStyle` decide what
+    /// they say.
+    pub style: crabka_pgtypes::encoding::OutputStyle<'a>,
 }
 
 /// The relation's rows.
@@ -773,6 +779,7 @@ pub(crate) fn rows(
     let SessionIdent {
         database,
         backend_pid,
+        style,
     } = session;
     match name {
         "pg_aggregate" => pg_aggregate_rows(kv),
@@ -781,7 +788,7 @@ pub(crate) fn rows(
         "pg_amproc" => pg_amproc_rows(kv),
         "pg_language" => Ok(pg_language_rows()),
         "pg_proc" => crate::routine::pg_proc_rows(kv),
-        "pg_attrdef" => pg_attrdef_rows(kv),
+        "pg_attrdef" => pg_attrdef_rows(kv, style),
         "pg_authid" => pg_authid_rows(kv),
         "pg_cast" => Ok(pg_cast_rows()),
         "pg_collation" => Ok(pg_collation_rows()),
@@ -802,14 +809,14 @@ pub(crate) fn rows(
             "libnuma initialization failed or NUMA is not supported on this platform".into(),
         )),
         "pg_stat_activity" => Ok(pg_stat_activity_rows(database, backend_pid)),
-        "pg_policies" => pg_policies_rows(kv),
-        "pg_policy" => pg_policy_rows(kv),
-        "pg_matviews" => pg_matviews_rows(kv),
+        "pg_policies" => pg_policies_rows(kv, style),
+        "pg_policy" => pg_policy_rows(kv, style),
+        "pg_matviews" => pg_matviews_rows(kv, style),
         "pg_tables" => pg_tables_rows(kv),
         "pg_tablespace" => pg_tablespace_rows(kv),
         "pg_trigger" => pg_trigger_rows(kv),
-        "pg_views" => pg_views_rows(kv),
-        _ => information_schema_rows(kv, database, name),
+        "pg_views" => pg_views_rows(kv, style),
+        _ => information_schema_rows(kv, database, name, style),
     }
 }
 
@@ -1668,10 +1675,17 @@ fn pg_language_rows() -> Vec<Vec<Datum>> {
 /// body of `generated always as (…) stored` from. A column can carry only one
 /// of the two — `CREATE TABLE` refuses both together — so the pair is an
 /// either/or rather than two rows.
-fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn pg_attrdef_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     /// The source text `adbin` reports for one column, or `None` when the
     /// column has neither a default nor a generation expression.
-    fn source_text(kv: &dyn Kv, column: &crabka_pgcatalog::Column) -> Option<String> {
+    fn source_text(
+        kv: &dyn Kv,
+        column: &crabka_pgcatalog::Column,
+        style: crabka_pgtypes::encoding::OutputStyle<'_>,
+    ) -> Option<String> {
         if let Some(generated) = &column.generated {
             // Stored bare, as the catalog holds it. PostgreSQL's non-pretty
             // `pg_get_expr` wraps an operator expression in parens and its
@@ -1682,7 +1696,7 @@ fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         }
         let default = column.default.as_ref()?;
         Some(crate::catalog_fn::default_source_text(
-            kv, default, column.ty,
+            kv, default, column.ty, style,
         ))
     }
 
@@ -1692,7 +1706,7 @@ fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         let sources = table
             .columns
             .iter()
-            .map(|column| source_text(kv, column))
+            .map(|column| source_text(kv, column, style))
             .collect::<Vec<_>>();
         let keys = table
             .columns
@@ -2687,7 +2701,10 @@ fn pg_indexes_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// reading an empty array as "no role matches" is the inversion the whole
 /// default-deny fold exists to avoid, so the projection spells the convention
 /// out the way PostgreSQL stores it.
-fn pg_policy_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn pg_policy_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     let role_oids = role_oids(kv)?;
     let relation_oids = policy_relation_oids(kv)?;
     crabka_pgcatalog::policy::list_policies(kv)?
@@ -2711,8 +2728,8 @@ fn pg_policy_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 text(&policy.command.catalog_code().to_string()),
                 Datum::Bool(policy.permissive),
                 Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::Int4, roles)),
-                policy_qual(policy.using.as_deref()),
-                policy_qual(policy.with_check.as_deref()),
+                policy_qual(policy.using.as_deref(), style),
+                policy_qual(policy.with_check.as_deref(), style),
             ])
         })
         .collect()
@@ -2728,18 +2745,21 @@ fn pg_policy_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// is the wrong place to discover otherwise. Text that will not parse falls
 /// back to itself, so `pg_policy` answers a slightly unnormalized row rather
 /// than failing the whole scan and taking every unrelated policy down with it.
-fn policy_qual(source: Option<&str>) -> Datum {
+fn policy_qual(source: Option<&str>, style: crabka_pgtypes::encoding::OutputStyle<'_>) -> Datum {
     source.map_or(Datum::Null, |source| {
         crabka_pgparser::parser::parse_expression(source).map_or_else(
             |_| text(source),
-            |expr| text(&crate::viewdef::expression_text(&expr)),
+            |expr| text(&crate::viewdef::expression_text(&expr, style)),
         )
     })
 }
 
 /// `pg_policies`, the readable view over `pg_policy`: relation and role names
 /// instead of OIDs, and the command spelled as a word.
-fn pg_policies_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn pg_policies_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     let relation_oids = policy_relation_oids(kv)?;
     crabka_pgcatalog::policy::list_policies(kv)?
         .into_iter()
@@ -2770,8 +2790,8 @@ fn pg_policies_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                     },
                 )),
                 text(policy.command.keyword()),
-                policy_qual(policy.using.as_deref()),
-                policy_qual(policy.with_check.as_deref()),
+                policy_qual(policy.using.as_deref(), style),
+                policy_qual(policy.with_check.as_deref(), style),
             ])
         })
         .collect()
@@ -2825,7 +2845,10 @@ fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// so a matview and a view over the same query read identically — including
 /// after a `RENAME COLUMN`, because the deparser names output columns from the
 /// relation's own catalog column list rather than from the stored text.
-fn pg_matviews_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn pg_matviews_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     let indexed = crabka_pgcatalog::list_indexes(kv)?
         .into_iter()
         .map(|index| index.table)
@@ -2846,14 +2869,17 @@ fn pg_matviews_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Bool(indexed.contains(&table.name)),
                 Datum::Bool(matview.populated),
                 text(&crate::catalog_fn::materialized_definition_text(
-                    &table, false,
+                    &table, false, style,
                 )),
             ])
         })
         .collect()
 }
 
-fn pg_views_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn pg_views_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(crabka_pgcatalog::list_views(kv)?
         .into_iter()
         .map(|view| {
@@ -2861,7 +2887,9 @@ fn pg_views_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 text(&view.name.schema),
                 text(&view.name.name),
                 text(&view.owner),
-                text(&crate::catalog_fn::view_definition_text(&view, false)),
+                text(&crate::catalog_fn::view_definition_text(
+                    &view, false, style,
+                )),
             ]
         })
         .collect())
@@ -3022,13 +3050,14 @@ fn information_schema_rows(
     kv: &dyn Kv,
     database: &str,
     name: &str,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
         "information_schema.table_constraints" => table_constraint_rows(kv, database),
         "information_schema.key_column_usage" => key_column_usage_rows(kv, database),
         "information_schema.constraint_column_usage" => constraint_column_usage_rows(kv, database),
         "information_schema.referential_constraints" => referential_constraint_rows(kv, database),
-        "information_schema.views" => information_schema_view_rows(kv, database),
+        "information_schema.views" => information_schema_view_rows(kv, database, style),
         "information_schema.enabled_roles" => enabled_role_rows(kv),
         "information_schema.applicable_roles" => Ok(Vec::new()),
         "information_schema.sequences" => sequence_view_rows(kv, database),
@@ -3330,7 +3359,11 @@ fn column_usage_row(
 /// only about `INSERT`. Both pass `include_triggers = false`, because the
 /// standard's question is about the view definition rather than about what an
 /// `INSTEAD OF` trigger might do — the three `is_trigger_*` columns answer that.
-fn information_schema_view_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn information_schema_view_rows(
+    kv: &dyn Kv,
+    database: &str,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crate::viewwrite::{DELETE_EVENT, INSERT_EVENT, UPDATE_EVENT};
     const ROW_WRITABLE: i32 = UPDATE_EVENT | DELETE_EVENT;
     crabka_pgcatalog::list_views(kv)?
@@ -3362,7 +3395,9 @@ fn information_schema_view_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<D
             };
             let mut row = relation_identity(database, &view.name).to_vec();
             row.extend([
-                text(&crate::catalog_fn::view_definition_text(&view, false)),
+                text(&crate::catalog_fn::view_definition_text(
+                    &view, false, style,
+                )),
                 text(check_option),
                 text(yes_or_no(auto & ROW_WRITABLE == ROW_WRITABLE)),
                 text(yes_or_no(auto & INSERT_EVENT == INSERT_EVENT)),
@@ -3507,9 +3542,12 @@ mod tests {
     /// The reader a projection test stands in for: the engine's default
     /// database and no backend id.
     fn test_session() -> SessionIdent<'static> {
+        static UTC: std::sync::LazyLock<jiff::tz::TimeZone> =
+            std::sync::LazyLock::new(|| jiff::tz::TimeZone::UTC);
         SessionIdent {
             database: crate::exec::DEFAULT_DATABASE,
             backend_pid: 0,
+            style: crabka_pgtypes::encoding::OutputStyle::with_zone(&UTC),
         }
     }
 

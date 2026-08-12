@@ -2203,7 +2203,7 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
         Statement::Cluster(_) => "CLUSTER",
         Statement::CreateTable { .. } | Statement::CreateTableAs { .. } => "CREATE TABLE",
         Statement::CreateIndex { .. } => "CREATE INDEX",
-        Statement::AlterIndexTablespace { .. } => "ALTER INDEX",
+        Statement::AlterIndex { .. } => "ALTER INDEX",
         Statement::CreateView { .. } => "CREATE VIEW",
         Statement::AlterView { .. } => "ALTER VIEW",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
@@ -2300,7 +2300,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Cluster(_)
         | Statement::CreateTable { .. }
         | Statement::CreateIndex { .. }
-        | Statement::AlterIndexTablespace { .. }
+        | Statement::AlterIndex { .. }
         | Statement::AlterView { .. }
         | Statement::DropIndex { .. }
         | Statement::DropTable { .. }
@@ -6678,7 +6678,7 @@ impl SqlSession {
             Statement::Rollback { chain } => self.rollback_cmd(*chain).await,
             Statement::CreateTable { .. }
             | Statement::CreateIndex { .. }
-            | Statement::AlterIndexTablespace { .. }
+            | Statement::AlterIndex { .. }
             | Statement::AlterView { .. }
             | Statement::DropIndex { .. }
             | Statement::DropTable { .. }

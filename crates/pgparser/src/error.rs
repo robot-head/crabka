@@ -20,6 +20,12 @@ pub struct ParseError {
     /// The SQLSTATE this error maps to. Defaults to `"42601"` (`syntax_error`);
     /// `too_deep` sets it to `"54001"` (`statement_too_complex`).
     sqlstate: &'static str,
+    /// `PostgreSQL`'s DETAIL line, where the error has one. A rejected
+    /// reloption is the case that needs it: the message names the value and
+    /// the option, and the range it had to fall in is on the line below.
+    detail: Option<String>,
+    /// `PostgreSQL`'s HINT line, for the errors that offer a remedy.
+    hint: Option<&'static str>,
 }
 
 impl ParseError {
@@ -28,6 +34,8 @@ impl ParseError {
             message: format!("syntax error at position {position}: {}", message.into()),
             position,
             sqlstate: "42601",
+            detail: None,
+            hint: None,
         }
     }
 
@@ -40,7 +48,34 @@ impl ParseError {
             message: message.into(),
             position,
             sqlstate,
+            detail: None,
+            hint: None,
         }
+    }
+
+    /// The rejection [`crate::reloptions::validate`] built, placed at
+    /// `position`.
+    pub(crate) fn from_reloption(
+        error: crate::reloptions::RelOptionError,
+        position: usize,
+    ) -> Self {
+        Self {
+            message: error.message,
+            position,
+            sqlstate: error.sqlstate,
+            detail: error.detail,
+            hint: error.hint,
+        }
+    }
+
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
+    #[must_use]
+    pub fn hint(&self) -> Option<&'static str> {
+        self.hint
     }
 
     /// Builds a recursion-depth-limit error.
@@ -56,6 +91,8 @@ impl ParseError {
             message: "stack depth limit exceeded".to_string(),
             position,
             sqlstate: "54001",
+            detail: None,
+            hint: None,
         }
     }
 

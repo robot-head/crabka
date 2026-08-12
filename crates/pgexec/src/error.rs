@@ -927,7 +927,19 @@ impl ExecError {
                 PgError::error(command.sqlstate(), command.message())
             }
             ExecError::Remote(error) => error,
-            ExecError::Parse(e) => PgError::error(e.sqlstate(), e.to_string()),
+            // A rejected `WITH (…)` list is raised from the parser but worded
+            // the way `reloptions.c` words it, DETAIL and HINT included.
+            ExecError::Parse(e) => {
+                let rendered = PgError::error(e.sqlstate(), e.to_string());
+                let rendered = match e.detail() {
+                    Some(detail) => rendered.with_detail(detail),
+                    None => rendered,
+                };
+                match e.hint() {
+                    Some(hint) => rendered.with_hint(hint),
+                    None => rendered,
+                }
+            }
             ExecError::Catalog(e) => {
                 let rendered = PgError::error(e.sqlstate(), e.to_string());
                 // The only catalog error PostgreSQL gives a DETAIL of its own.

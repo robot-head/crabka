@@ -2519,6 +2519,18 @@ pub(crate) fn text_render(d: &Datum, tz: &jiff::tz::TimeZone) -> String {
         .expect("a Datum's text encoding is always valid UTF-8")
 }
 
+/// [`text_render`] in the session's output styles rather than the canonical
+/// ones. This is what a *user-visible* rendering wants: the deparser prints a
+/// stored constant through its type's output function exactly as `ruleutils.c`
+/// does, so `DateStyle` and `IntervalStyle` reach it.
+pub(crate) fn text_render_in(
+    d: &Datum,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    String::from_utf8(crabka_pgtypes::encoding::encode_text_in(d, style))
+        .expect("a Datum's text encoding is always valid UTF-8")
+}
+
 // ---- rounding helpers (SP33) ----
 
 /// Rounding-family value transform. `scale` is `Some` only for the two-arg

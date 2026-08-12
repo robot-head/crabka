@@ -460,7 +460,7 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
     // sees.
     let scope = ctx.resolution();
     match f {
-        ViewDef => view_def(kv, scope, vals),
+        ViewDef => view_def(kv, scope, vals, ctx.output_style()),
         // `pg_get_indexdef(oid, colno, pretty)` — the column number selects one
         // key expression and is not supported, but `pretty` changes the
         // relation's spelling and psql's `\d` passes it.
@@ -1798,7 +1798,12 @@ fn comment_datum(kv: &dyn Kv, kind: &str, object: CommentObject<'_>) -> Result<D
 /// The second argument is either the pretty-print flag or a wrap column. A wrap
 /// column implies pretty-printing, exactly as PostgreSQL's
 /// `pg_get_viewdef(oid, integer)` does.
-fn view_def(kv: &dyn Kv, scope: &ResolutionScope, vals: &[Datum]) -> Result<Datum, ExecError> {
+fn view_def(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    vals: &[Datum],
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Datum, ExecError> {
     let (pretty, wrap) = match vals.get(1) {
         None => (false, None),
         Some(Datum::Bool(flag)) => (*flag, None),
@@ -1814,12 +1819,14 @@ fn view_def(kv: &dyn Kv, scope: &ResolutionScope, vals: &[Datum]) -> Result<Datu
     // under "View definition:" for one — so it is tried before the literal
     // refusal, which is reserved for a relation kind that carries no query.
     if let Some(table) = lookup_materialized(kv, scope, &vals[0])? {
-        return Ok(Datum::Text(materialized_definition(&table, pretty, wrap)));
+        return Ok(Datum::Text(materialized_definition(
+            &table, pretty, wrap, style,
+        )));
     }
     let Some(view) = lookup_view(kv, scope, &vals[0])? else {
         return Ok(Datum::Text("Not a view".into()));
     };
-    Ok(Datum::Text(view_definition(&view, pretty, wrap)))
+    Ok(Datum::Text(view_definition(&view, pretty, wrap, style)))
 }
 
 /// Find the materialized view an oid or a name refers to, resolved exactly as
@@ -1883,8 +1890,12 @@ fn lookup_view(
 /// list. When `pretty` is false, operator expressions are fully parenthesized.
 /// For a stored definition that no longer parses, this function falls back to
 /// the source text, which is still a valid view definition.
-pub(crate) fn view_definition_text(view: &View, pretty: bool) -> String {
-    view_definition(view, pretty, None)
+pub(crate) fn view_definition_text(
+    view: &View,
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    view_definition(view, pretty, None, style)
 }
 
 /// The same rendering for a materialized view, whose definition and output
@@ -1901,8 +1912,9 @@ pub(crate) fn view_definition_text(view: &View, pretty: bool) -> String {
 pub(crate) fn materialized_definition_text(
     table: &crabka_pgcatalog::Table,
     pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) -> String {
-    materialized_definition(table, pretty, None)
+    materialized_definition(table, pretty, None, style)
 }
 
 /// [`materialized_definition_text`] with an explicit select-list wrap column.
@@ -1910,6 +1922,7 @@ fn materialized_definition(
     table: &crabka_pgcatalog::Table,
     pretty: bool,
     wrap: Option<usize>,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) -> String {
     let Some(matview) = &table.materialized else {
         return String::new();
@@ -1924,11 +1937,17 @@ fn materialized_definition(
         },
         pretty,
         wrap,
+        style,
     )
 }
 
 /// [`view_definition_text`] with an explicit select-list wrap column.
-fn view_definition(view: &View, pretty: bool, wrap: Option<usize>) -> String {
+fn view_definition(
+    view: &View,
+    pretty: bool,
+    wrap: Option<usize>,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
     let Ok(statements) = crabka_pgparser::parse(&view.definition) else {
         return format!("{};", view.definition.trim_end_matches(';'));
     };
@@ -1941,7 +1960,7 @@ fn view_definition(view: &View, pretty: bool, wrap: Option<usize>) -> String {
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
     let mut out = String::new();
-    crate::viewdef::write_query(&mut out, query, &names, pretty, wrap);
+    crate::viewdef::write_query(&mut out, query, &names, pretty, wrap, style);
     out.push(';');
     out
 }
@@ -2265,6 +2284,7 @@ pub(crate) fn default_source_text(
     kv: &dyn Kv,
     default: &crabka_pgcatalog::ColumnDefault,
     ty: ColumnType,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) -> String {
     match default {
         crabka_pgcatalog::ColumnDefault::NextVal(sequence) => {
@@ -2276,7 +2296,7 @@ pub(crate) fn default_source_text(
         crabka_pgcatalog::ColumnDefault::Value(Datum::Regclass(value)) => {
             let resolved = crate::exec::regclass_by_oid(kv, value.oid)
                 .unwrap_or_else(|_| crabka_pgtypes::RegclassValue::unresolved(value.oid));
-            crate::viewdef::const_text(&Datum::Regclass(resolved), ty)
+            crate::viewdef::const_text(&Datum::Regclass(resolved), ty, style)
         }
         // A bit-string default deparses with the *literal's* type, not the
         // column's. PostgreSQL wraps the assignment coercion around the Const
@@ -2293,9 +2313,11 @@ pub(crate) fn default_source_text(
             } else {
                 ColumnType::Bit(None)
             };
-            crate::viewdef::const_text(value, literal)
+            crate::viewdef::const_text(value, literal, style)
         }
-        crabka_pgcatalog::ColumnDefault::Value(value) => crate::viewdef::const_text(value, ty),
+        crabka_pgcatalog::ColumnDefault::Value(value) => {
+            crate::viewdef::const_text(value, ty, style)
+        }
     }
 }
 

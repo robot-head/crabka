@@ -248,7 +248,7 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::RevokeSchemaPrivileges { .. } => "REVOKE",
         Statement::GrantRoles { .. } => "GRANT ROLES",
         Statement::RevokeRoles { .. } => "REVOKE ROLES",
-        Statement::AlterIndexTablespace { .. } => "ALTER INDEX",
+        Statement::AlterIndex { .. } => "ALTER INDEX",
         Statement::AlterView { .. } => "ALTER VIEW",
         Statement::CreateMaterializedView { .. } => "CREATE MATERIALIZED VIEW",
         Statement::RefreshMaterializedView { .. } => "REFRESH MATERIALIZED VIEW",

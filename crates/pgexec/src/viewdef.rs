@@ -84,6 +84,12 @@ struct Ctx<'a> {
     /// the query holding it, and `pg_get_expr`, which never enters a `SELECT`,
     /// lays its sub-selects out at column zero.
     indent: usize,
+    /// The session's text-output settings. `get_const_expr` prints a constant
+    /// through its type's *output* function, so what a stored `interval`,
+    /// `date` or `timestamptz` constant deparses to depends on `IntervalStyle`,
+    /// `DateStyle` and `TimeZone` at the moment the definition is asked for —
+    /// not at the moment it was stored.
+    style: crabka_pgtypes::encoding::OutputStyle<'a>,
 }
 
 /// `ruleutils.c`'s `PRETTYINDENT_STD`: one nesting step.
@@ -137,6 +143,7 @@ pub(crate) fn write_query(
     names: &[String],
     pretty: bool,
     wrap: Option<usize>,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) {
     let ctx = Ctx {
         pretty,
@@ -146,6 +153,7 @@ pub(crate) fn write_query(
         colnames: true,
         window_calls: &[],
         indent: 0,
+        style,
     };
     write_query_at(out, query, names, ctx);
 }
@@ -231,7 +239,10 @@ fn write_with_clause(out: &mut String, query: &QueryExpr, ctx: Ctx<'_>) {
 /// the single relation the expression belongs to, which is why a column
 /// reference is bare at the top level and qualified only once a sub-select puts
 /// it a level down.
-pub(crate) fn expression_text(expr: &Expr) -> String {
+pub(crate) fn expression_text(
+    expr: &Expr,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
     expr_text(
         expr,
         Ctx {
@@ -242,6 +253,7 @@ pub(crate) fn expression_text(expr: &Expr) -> String {
             colnames: false,
             window_calls: &[],
             indent: 0,
+            style,
         },
     )
 }
@@ -1101,7 +1113,7 @@ fn expr_text(expr: &Expr, ctx: Ctx<'_>) -> String {
             }
             _ => quote_identifier(name),
         },
-        Expr::Const { value, ty } => const_text(value, *ty),
+        Expr::Const { value, ty } => const_text(value, *ty, ctx.style),
         Expr::Unary { op, expr } => unary_text(*op, expr, ctx),
         Expr::Binary { op, left, right } => ctx.paren(format!(
             "{} {} {}",
@@ -1499,6 +1511,9 @@ fn cast_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> String {
             )
         };
     }
+    if let Some(text) = resolved_literal_text(expr, ty, ctx) {
+        return text;
+    }
     let inner = expr_text(expr, ctx);
     let operand = if ctx.pretty || inner.starts_with('(') {
         inner
@@ -1506,6 +1521,75 @@ fn cast_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> String {
         format!("({inner})")
     };
     format!("{operand}::{}", ty.name())
+}
+
+/// `'…'::T`, printed the way `PostgreSQL` prints it: as one constant of type
+/// `T`, in `T`'s own output spelling.
+///
+/// `PostgreSQL` has no cast node here at all. `coerce_type` sees an `UNKNOWN`
+/// string `Const` and applies `T`'s **input** function on the spot, keeping a
+/// single `Const` of type `T`; `get_const_expr` later prints that constant
+/// through `T`'s **output** function. So the literal a view answers is the
+/// type's canonical spelling of the value rather than the text the query wrote
+/// — `INTERVAL '00:00'` reads back as `'@ 0'::interval` — and there is no
+/// `::text` step for it to pass through, because the string was never resolved
+/// to `text` in the first place. The same reasoning is already written out for
+/// the one type that had it hand-coded, in [`xml_construct_text`].
+///
+/// `None` keeps the cast rendering, for the three cases where evaluating the
+/// literal here would not answer what upstream's parse-time fold answered:
+///
+/// * a literal the type cannot read, which upstream would have rejected at
+///   `CREATE VIEW` time and gres apparently did not;
+/// * a length or precision modifier, which upstream applies as a separate
+///   coercion *around* the constant, leaving the constant itself untruncated;
+/// * a clock-relative spelling, which upstream froze when the view was created
+///   and this would re-read now.
+fn resolved_literal_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> Option<String> {
+    let Expr::StringLiteral(literal) = expr else {
+        return None;
+    };
+    if carries_modifier(ty) || reads_the_clock(literal, ty) {
+        return None;
+    }
+    let value = crate::eval::cast_value_in(&Datum::Text(literal.clone()), ty, ctx.style).ok()?;
+    Some(const_text(&value, ty, ctx.style))
+}
+
+/// Does `ty` carry a length or precision modifier?
+///
+/// `coerce_type` passes `-1` to the input function and lets a separate length
+/// coercion truncate afterwards, so the `Const` upstream prints still holds the
+/// whole literal. A domain is excluded outright rather than tested: resolving
+/// one runs its constraints, which is not something printing a definition may
+/// do.
+fn carries_modifier(ty: ColumnType) -> bool {
+    match ty {
+        ColumnType::Varchar(modifier) | ColumnType::Char(modifier) => modifier.is_some(),
+        ColumnType::Bit(modifier) | ColumnType::VarBit(modifier) => modifier.is_some(),
+        ColumnType::Numeric(modifier) => modifier.is_some(),
+        ColumnType::Domain(_) => true,
+        _ => false,
+    }
+}
+
+/// Is this one of the date/time spellings that reads the clock?
+///
+/// `PostgreSQL` reads it once, when the definition is stored, and the view is
+/// frozen at that instant ever after. This deparser runs when the definition is
+/// *asked for*, which is a different instant, so it leaves the word alone.
+fn reads_the_clock(literal: &str, ty: ColumnType) -> bool {
+    matches!(
+        ty,
+        ColumnType::Date
+            | ColumnType::Time
+            | ColumnType::Timetz
+            | ColumnType::Timestamp
+            | ColumnType::Timestamptz
+    ) && matches!(
+        literal.trim().to_ascii_lowercase().as_str(),
+        "now" | "today" | "tomorrow" | "yesterday"
+    )
 }
 
 /// A `CASE` expression, on its own indented lines exactly as PostgreSQL prints
@@ -1537,7 +1621,24 @@ fn case_text(
 
 /// A stored constant, in the `value::type` spelling PostgreSQL uses inside a
 /// stored rule or a column default.
-pub(crate) fn const_text(value: &Datum, ty: ColumnType) -> String {
+///
+/// `get_const_expr` renders the value through its type's *output* function, so
+/// `style` is the session's and not a canonical one: the same stored `interval`
+/// prints `00:00:00` under `IntervalStyle = postgres` and `@ 0` under
+/// `postgres_verbose`, and a `date` follows `DateStyle` the same way.
+///
+/// One place this is deliberately not `get_const_expr`: upstream decides
+/// whether to write `::type` from the *`Const`'s* type, and labels everything
+/// but `bool`, `int4` and an unqualified `numeric`. A stored default reaches
+/// here as a bare datum whose literal type is already lost, so a numeric one is
+/// written the way `PostgreSQL` writes the far commoner unlabelled case
+/// (`DEFAULT 9` on a `bigint` column is `9` there too, because the parser holds
+/// an `int4` `Const` under a hidden coercion).
+pub(crate) fn const_text(
+    value: &Datum,
+    ty: ColumnType,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
     match value {
         Datum::Null => format!("NULL::{}", ty.name()),
         Datum::Bool(flag) => (if *flag { "true" } else { "false" }).to_string(),
@@ -1548,7 +1649,7 @@ pub(crate) fn const_text(value: &Datum, ty: ColumnType) -> String {
         Datum::Float8(n) => n.to_string(),
         Datum::Numeric(n) => n.to_string(),
         other => {
-            let rendered = crate::func::text_render(other, &jiff::tz::TimeZone::UTC);
+            let rendered = crate::func::text_render_in(other, style);
             // `bit` is a reserved word, so `pg_get_expr` double-quotes it:
             // `'1001'::"bit"`, but plain `'1001'::bit varying`.
             let type_name = match ty {
@@ -1576,7 +1677,17 @@ mod tests {
     use crabka_pgcatalog::{Column, RelationName, View};
     use crabka_pgtypes::ColumnType;
 
-    use crate::catalog_fn::view_definition_text;
+    /// [`crate::catalog_fn::view_definition_text`] in a session that has left
+    /// every output style at its default. A test that needs a *non*-default one
+    /// names it, because that is the whole point of the setting.
+    fn view_definition_text(view: &View, pretty: bool) -> String {
+        let utc = jiff::tz::TimeZone::UTC;
+        crate::catalog_fn::view_definition_text(
+            view,
+            pretty,
+            crabka_pgtypes::encoding::OutputStyle::with_zone(&utc),
+        )
+    }
 
     fn view(definition: &str, columns: &[&str]) -> View {
         View {
@@ -1788,6 +1899,78 @@ mod tests {
         }
     }
 
+    /// A typed literal is one constant of that type, printed in the type's own
+    /// output spelling. Neither the `::text` of an unresolved string nor the
+    /// text the query wrote survives.
+    #[test]
+    fn a_typed_literal_prints_through_its_type() {
+        let cases: [(&str, &str); 7] = [
+            // `interval` normalizes: `00:00` is the zero interval, and the
+            // `postgres` style spells that `00:00:00`.
+            (
+                "SELECT f1 AT TIME ZONE INTERVAL '00:00' AS z FROM t",
+                " SELECT (f1 AT TIME ZONE '00:00:00'::interval) AS z\n   FROM t;",
+            ),
+            // The cast spelling of the same literal is the same node, so it
+            // reads back the same way.
+            (
+                "SELECT f1 AT TIME ZONE '00:00'::interval AS z FROM t",
+                " SELECT (f1 AT TIME ZONE '00:00:00'::interval) AS z\n   FROM t;",
+            ),
+            (
+                "SELECT '2022-12-01'::date AS z FROM t",
+                " SELECT '2022-12-01'::date AS z\n   FROM t;",
+            ),
+            // An identity cast is not a second resolution either.
+            (
+                "SELECT 'abcd'::text AS z FROM t",
+                " SELECT 'abcd'::text AS z\n   FROM t;",
+            ),
+            (
+                "SELECT '42'::bigint AS z FROM t",
+                " SELECT 42 AS z\n   FROM t;",
+            ),
+            (
+                "SELECT '\\x00'::bytea AS z FROM t",
+                " SELECT '\\x00'::bytea AS z\n   FROM t;",
+            ),
+            // A clock-relative spelling is frozen upstream when the view is
+            // created, so it is not re-read here.
+            (
+                "SELECT 'now'::timestamp AS z FROM t",
+                " SELECT ('now'::text)::timestamp without time zone AS z\n   FROM t;",
+            ),
+        ];
+        for (definition, expected) in cases {
+            let view = view(definition, &["z"]);
+            assert!(
+                view_definition_text(&view, false) == expected,
+                "{definition}"
+            );
+        }
+    }
+
+    /// The type's output function reads the session, so the same stored
+    /// interval has one spelling per `IntervalStyle` — which is why `pg_regress`
+    /// pins the setting and sees `'@ 0'::interval` where the default sees
+    /// `'00:00:00'::interval`.
+    #[test]
+    fn a_constant_deparses_in_the_sessions_output_style() {
+        let view = view(
+            "SELECT f1 AT TIME ZONE INTERVAL '00:00' AS z FROM t",
+            &["z"],
+        );
+        let utc = jiff::tz::TimeZone::UTC;
+        let verbose = crabka_pgtypes::encoding::OutputStyle {
+            interval_style: crabka_pgtypes::datetime::IntervalStyle::PostgresVerbose,
+            ..crabka_pgtypes::encoding::OutputStyle::with_zone(&utc)
+        };
+        assert!(
+            crate::catalog_fn::view_definition_text(&view, true, verbose)
+                == " SELECT (f1 AT TIME ZONE '@ 0'::interval) AS z\n   FROM t;"
+        );
+    }
+
     /// A sub-select carries parentheses the pretty flag does not remove:
     /// `get_sublink_expr` opens one unconditionally, and under an operator
     /// `isSimpleNode` adds the one the operator itself no longer supplies.
@@ -1944,7 +2127,9 @@ mod tests {
         ];
         for (source, expected) in cases {
             let expr = crabka_pgparser::parser::parse_expression(source).expect("parse");
-            assert!(super::expression_text(&expr) == expected, "{source}");
+            let utc = jiff::tz::TimeZone::UTC;
+            let style = crabka_pgtypes::encoding::OutputStyle::with_zone(&utc);
+            assert!(super::expression_text(&expr, style) == expected, "{source}");
         }
     }
 

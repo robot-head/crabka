@@ -490,6 +490,22 @@ pub enum AlterViewAction {
     ResetOptions(Vec<ViewOptionName>),
 }
 
+/// What one `ALTER INDEX` statement does. `PostgreSQL` allows a single
+/// subcommand per statement, as it does for `ALTER VIEW`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterIndexAction {
+    SetTablespace(String),
+    /// `SET (name = value, …)` — the index's storage parameters. The list has
+    /// already been checked against the reloption catalog, against *every*
+    /// index access method's options: the statement names no method, and the
+    /// one the index was built with is only in the catalog.
+    SetStorageParameters(Vec<(String, Option<String>)>),
+    /// `RESET (name, …)`. The names are unchecked, because `PostgreSQL` removes
+    /// them from the stored list and validates what is left — which is the only
+    /// way to clear an option the catalog no longer recognizes.
+    ResetStorageParameters(Vec<String>),
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -594,9 +610,10 @@ pub enum Statement {
         /// accepted as the explicit spelling of it.
         cascade: bool,
     },
-    AlterIndexTablespace {
+    /// `ALTER INDEX name <action>`.
+    AlterIndex {
         name: RelationRef,
-        tablespace: String,
+        action: AlterIndexAction,
     },
     /// `ALTER VIEW [IF EXISTS] name <action>`.
     AlterView {

@@ -110,6 +110,80 @@ pub(crate) fn is_grouping_query(s: &SelectStmt) -> bool {
     s.grouping.is_some() || crate::agg::is_aggregate_query(s) || mentions_grouping_call(s)
 }
 
+/// Is `s` a *degenerate* grouping query — one whose answer cannot depend on the
+/// rows its FROM clause produces?
+///
+/// `PostgreSQL`'s `is_degenerate_grouping` (`optimizer/plan/planner.c`) is a
+/// `HAVING` qual and/or grouping sets, with no aggregate and no `GROUP BY`.
+/// Such a query has exactly one group — or one per empty grouping set — and
+/// `create_degenerate_grouping_paths` answers it from a bare `Result` node,
+/// because "there cannot be any variables in either HAVING or the targetlist,
+/// so we actually do not need the FROM table at all". No variable can be there
+/// because with no `GROUP BY` and no aggregate to sit under, a column reference
+/// above the grouping is 42803.
+///
+/// That is what makes `SELECT 1 FROM t WHERE 1/a = 1 HAVING 1 < 2` answer one
+/// row instead of dividing by zero: the input is never read, so the `WHERE`
+/// over it is never evaluated.
+///
+/// This test is stricter than upstream's in one way. Rather than *rely* on the
+/// 42803 already having been raised, it requires every clause above the
+/// grouping to be visibly free of column references, of correlated subqueries
+/// and of window calls. A query that has earned the 42803 therefore keeps the
+/// scanning path — and keeps raising it — and so does anything this walk cannot
+/// see through.
+pub(crate) fn is_degenerate_grouping(s: &SelectStmt) -> bool {
+    if s.having.is_none() && s.grouping.is_none() {
+        return false;
+    }
+    if !s.group_by.is_empty() || !s.windows.is_empty() || !s.window_calls.is_empty() {
+        return false;
+    }
+    // `FOR UPDATE` locks the rows the scan returns, which is a side effect the
+    // elision would drop. `PostgreSQL` rejects the combination outright, so
+    // nothing is lost by declining it here.
+    if s.locking.is_some() {
+        return false;
+    }
+    let mut exprs: Vec<&Expr> = Vec::new();
+    for item in &s.projection {
+        match item {
+            SelectItem::Expr { expr, .. } => exprs.push(expr),
+            // `*` stands for the input columns themselves.
+            SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => return false,
+        }
+    }
+    exprs.extend(s.having.iter());
+    exprs.extend(s.order_by.iter().map(|item| &item.expr));
+    if let crabka_pgparser::ast::DistinctClause::On(keys) = &s.distinct {
+        exprs.extend(keys);
+    }
+    exprs.into_iter().all(reads_no_input)
+}
+
+/// Can `e` be evaluated without a row of the input relation?
+///
+/// The walk visits a subquery node without descending into it, which is exactly
+/// the granularity wanted: an uncorrelated subquery has already been folded to a
+/// constant by the time this runs, so one still standing may read the outer row.
+fn reads_no_input(e: &Expr) -> bool {
+    let mut reads = false;
+    visit_expr(e, &mut |node| {
+        reads |= match node {
+            // A window call stands in the tree as a placeholder column, so this
+            // arm covers one even before the `window_calls` test above.
+            Expr::Column { .. }
+            | Expr::ScalarSubquery(_)
+            | Expr::Exists(_)
+            | Expr::InSubquery { .. }
+            | Expr::Quantified { .. } => true,
+            Expr::Func(call) => crate::agg::is_aggregate_name(&call.name) || is_grouping_call(call),
+            _ => false,
+        };
+    });
+    !reads
+}
+
 /// Reject `GROUPING(…)` in a clause evaluated BELOW the grouping, where it has
 /// no meaning. `PostgreSQL` answers `42803` and names the clause.
 pub(crate) fn reject_misplaced_calls(s: &SelectStmt) -> Result<(), ExecError> {
