@@ -87,7 +87,7 @@ impl RegisterBrokerRecord {
                 for it in &self.end_points {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -103,7 +103,7 @@ impl RegisterBrokerRecord {
                 for it in &self.features {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

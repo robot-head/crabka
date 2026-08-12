@@ -8,12 +8,21 @@
 use std::{net::SocketAddr, time::Duration};
 
 use assert2::assert;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crabka_broker::{
     BootstrapMode, Broker, BrokerConfig, BrokerHandle,
     config::{InterBrokerCredentials, ListenerSpec},
 };
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
+
+fn oauth_token() -> String {
+    format!(
+        "{}.{}.",
+        URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#),
+        URL_SAFE_NO_PAD.encode(br#"{"sub":"broker","exp":4000000000}"#)
+    )
+}
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -171,6 +180,58 @@ async fn controller_listener_sasl_plaintext_two_broker_quorum() {
     b2.wait_until_brokers_registered(2).await;
     b1.shutdown().await;
     b2.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn controller_listener_oauthbearer_two_broker_quorum() {
+    init_tracing();
+    let (controller_addrs, [controller_0, controller_1]) = reserve_ctrl_listeners().await;
+    let voters = vec![(1, controller_addrs[0]), (2, controller_addrs[1])];
+    let dir0 = TempDir::new().unwrap();
+    let dir1 = TempDir::new().unwrap();
+    let token_dir = TempDir::new().unwrap();
+    let token_path = token_dir.path().join("oauth-token");
+    std::fs::write(&token_path, oauth_token()).unwrap();
+
+    let mut cfg0 = sasl_broker_config(
+        0,
+        data_listen_addr(),
+        (ListenerProtocol::SaslPlaintext, controller_addrs[0]),
+        &voters,
+        dir0.path(),
+        BootstrapMode::Bootstrap,
+        ("unused", "unused"),
+    );
+    let mut cfg1 = sasl_broker_config(
+        1,
+        data_listen_addr(),
+        (ListenerProtocol::SaslPlaintext, controller_addrs[1]),
+        &voters,
+        dir1.path(),
+        BootstrapMode::Bootstrap,
+        ("unused", "unused"),
+    );
+    for config in [&mut cfg0, &mut cfg1] {
+        config.enabled_sasl_mechanisms = vec![SaslMechanism::OAuthBearer];
+        config.plain_credentials.clear();
+        config.inter_broker_credentials = Some(InterBrokerCredentials::OAuthBearer {
+            token_path: token_path.clone(),
+        });
+    }
+
+    let join0 = tokio::spawn(async move {
+        Broker::start_with_controller_listener(cfg0, Some(controller_0)).await
+    });
+    let join1 = tokio::spawn(async move {
+        Broker::start_with_controller_listener(cfg1, Some(controller_1)).await
+    });
+    let broker0 = join0.await.expect("broker 0 task").expect("start broker 0");
+    let broker1 = join1.await.expect("broker 1 task").expect("start broker 1");
+
+    broker0.wait_until_brokers_registered(2).await;
+    broker1.wait_until_brokers_registered(2).await;
+    broker0.shutdown().await;
+    broker1.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

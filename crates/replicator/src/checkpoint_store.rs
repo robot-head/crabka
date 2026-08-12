@@ -12,7 +12,7 @@ use crabka_connect::{CheckpointStore, ConnectError, SourceOffset};
 use crate::config::{ClientResourcePolicy, ReplicatorRuntimePolicy};
 
 /// The internal compacted topic used to store replicator checkpoints.
-const STATE_TOPIC: &str = "crabka-replicator-offsets";
+pub(crate) const STATE_TOPIC: &str = "crabka-replicator-offsets";
 
 /// A [`CheckpointStore`] backed by a compacted internal Kafka topic on the
 /// target cluster.
@@ -29,6 +29,10 @@ pub struct InternalTopicCheckpointStore {
     security: Option<crabka_client_core::security::ClientSecurity>,
     client_resource_policy: ClientResourcePolicy,
     runtime_policy: ReplicatorRuntimePolicy,
+    /// Exactly-once sinks persist this checkpoint in the same transaction as
+    /// their target writes, so the runtime's subsequent save is only an
+    /// acknowledgement barrier.
+    sink_transaction: bool,
 }
 
 impl InternalTopicCheckpointStore {
@@ -113,7 +117,15 @@ impl InternalTopicCheckpointStore {
             security,
             client_resource_policy,
             runtime_policy,
+            sink_transaction: false,
         })
+    }
+
+    /// Let the target sink own checkpoint persistence inside its transaction.
+    #[must_use]
+    pub(crate) fn with_sink_transaction(mut self, enabled: bool) -> Self {
+        self.sink_transaction = enabled;
+        self
     }
 }
 
@@ -126,6 +138,9 @@ impl CheckpointStore for InternalTopicCheckpointStore {
         err,
     )]
     async fn save(&self, offset: &SourceOffset) -> Result<(), ConnectError> {
+        if self.sink_transaction {
+            return Ok(());
+        }
         let bytes = serde_json::to_vec(offset).map_err(|e| ConnectError::Offset(e.to_string()))?;
 
         self.producer

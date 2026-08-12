@@ -46,7 +46,7 @@ impl Encode for ListConfigResourcesRequest {
                 for it in &self.resource_types {
                     put_i8(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -126,12 +126,14 @@ mod tests {
             host: format!("broker-{id}"),
             port: 9092,
             rack: rack.map(str::to_string),
+            log_dirs: vec![],
             endpoints: vec![BrokerEndpoint {
                 name: "INTERNAL".into(),
                 host: format!("broker-{id}"),
                 port: 19092,
                 protocol: ListenerProtocol::Plaintext,
             }],
+            features: std::collections::BTreeMap::new(),
         }
     }
 }

@@ -87,7 +87,7 @@ impl Encode for MetadataResponse<'_> {
                 for it in &self.brokers {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 2 {
             if flex {
@@ -105,7 +105,7 @@ impl Encode for MetadataResponse<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if (8..=10).contains(&version) {
             put_i32(buf, self.cluster_authorized_operations);
@@ -459,7 +459,7 @@ impl Encode for MetadataResponseTopic<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 8 {
             put_i32(buf, self.topic_authorized_operations);
@@ -655,7 +655,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.replica_nodes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -663,7 +663,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.isr_nodes {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 5 {
             {
@@ -671,7 +671,7 @@ impl Encode for MetadataResponsePartition {
                 for it in &self.offline_replicas {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

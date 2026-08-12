@@ -54,7 +54,7 @@ impl Encode for DeleteGroupsRequest<'_> {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

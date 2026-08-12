@@ -58,7 +58,7 @@ impl Encode for DescribeTransactionsResponse<'_> {
                 for it in &self.transaction_states {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -220,7 +220,7 @@ impl<'a> TransactionState<'a> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -489,7 +489,7 @@ impl Encode for TopicData<'_> {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

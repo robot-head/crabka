@@ -64,7 +64,7 @@ impl Encode for AlterPartitionRequest {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -179,7 +179,7 @@ impl Encode for TopicData {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -293,7 +293,7 @@ impl Encode for PartitionData {
                 for it in &self.new_isr {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if version >= 3 {
             {
@@ -305,7 +305,7 @@ impl Encode for PartitionData {
                 for it in &self.new_isr_with_epochs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 1 {
             put_i8(buf, self.leader_recovery_state);

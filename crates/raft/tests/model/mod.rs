@@ -28,18 +28,24 @@ use stateright::{
 const NOW: SimInstant = SimInstant(0);
 
 /// Identifies a client request thread for the linearizability tester. Each
-/// `ClientAppend` uses a fresh id, so every "thread" has exactly one in-flight
+/// append uses a fresh id, so every "thread" has exactly one in-flight
 /// operation: one invoke and one return.
 pub type ClientId = u64;
+
+/// Stateless appenders are exchangeable in this model. Keeping a separate,
+/// tiny identity domain avoids accidentally treating an appender as the WAL
+/// voter with the same id.
+pub type AppenderId = u8;
+const APPENDER_COUNT: AppenderId = 2;
 
 /// Sequential reference model of the committed log. An append returns the
 /// assigned offset, and a read returns the committed value sequence.
 ///
 /// A committed Kafka log is an append-only sequence and not a single-value
 /// register, so this module defines its own `SequentialSpec` instead of a reuse
-/// of the built-in register. The linearization point of an append is the moment
-/// the value enters the committed prefix, that is when the leader's high
-/// watermark passes its offset.
+/// of the built-in register. A regular `KRaft` append linearizes when the high
+/// watermark passes its offset; a diskless append linearizes when a WAL
+/// majority has durably stored it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct KraftLogSpec {
     committed: Vec<u64>,
@@ -134,6 +140,12 @@ pub struct NodeModel {
     pub high_watermark: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CommitPoint {
+    KRaftHighWatermark,
+    WalQuorumDurable,
+}
+
 /// An in-flight message. The network is an unordered multiset of these.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Envelope {
@@ -154,9 +166,16 @@ pub struct ModelState {
     /// state.
     pub linz: LinearizabilityTester<ClientId, KraftLogSpec>,
     /// Client appends not yet observed as committed, keyed by the
-    /// leader-assigned offset they were written at. When the high watermark of
-    /// some node passes an offset, the model records that append's `on_return`.
-    pub pending: BTreeMap<i64, (ClientId, u64)>,
+    /// leader-assigned offset they were written at. Each entry names the
+    /// durability frontier that records its `on_return`.
+    pub pending: BTreeMap<i64, (ClientId, u64, CommitPoint)>,
+    /// Durable end offset on each diskless WAL member. A diskless append is
+    /// acknowledged only after the majority-th frontier passes its offset.
+    pub wal_frontiers: BTreeMap<NodeId, i64>,
+    /// Appender identities that have entered the history. The action generator
+    /// canonicalizes the first identity to zero, which is a symmetry reduction
+    /// over otherwise exchangeable stateless appenders.
+    pub appenders_seen: BTreeSet<AppenderId>,
     /// Authoritative committed client values, in commit order. It grows as
     /// appends commit, and the linearizability return values are checked
     /// against it.
@@ -187,7 +206,9 @@ pub enum ModelAction {
     ClientAppend(ClientId, u64),
     /// A diskless WAL appender connected to `via` reserves through the same
     /// ordered controller path, so the append still lands at the current leader.
-    AppendVia(NodeId, ClientId, u64),
+    AppendVia(AppenderId, ClientId, u64),
+    /// Persist the diskless WAL prefix through `end_offset` on one member.
+    WalFsync(NodeId, i64),
     /// Drops an in-flight message without a delivery. This models network
     /// loss.
     DropMsg(Envelope),
@@ -511,10 +532,31 @@ fn is_leader(n: &NodeModel) -> bool {
     n.machine.role().is_leader()
 }
 
-/// Records `on_return` for every pending append whose offset is now committed,
-/// that is every append the maximum high watermark across the nodes has passed.
-/// The returns are recorded in ascending offset order, which is the order in
-/// which the committed prefix grows.
+/// Select the one authority an appender would route to. During an election
+/// handoff the model can contain leaders from different epochs; the
+/// highest-epoch live leader is the current authority. Node id is only a stable
+/// tie-breaker, and election safety separately rejects two leaders in one
+/// epoch.
+fn live_authority(state: &ModelState) -> Option<NodeId> {
+    state
+        .nodes
+        .iter()
+        .filter(|(id, node)| is_leader(node) && !state.crashed.contains(*id))
+        .max_by_key(|(id, node)| (node.machine.quorum_state().leader_epoch, **id))
+        .map(|(&id, _)| id)
+}
+
+fn wal_quorum_frontier(state: &ModelState) -> i64 {
+    let mut frontiers: Vec<i64> = state.wal_frontiers.values().copied().collect();
+    frontiers.sort_unstable_by(|left, right| right.cmp(left));
+    let majority = frontiers.len() / 2 + 1;
+    frontiers.get(majority - 1).copied().unwrap_or(0)
+}
+
+/// Records `on_return` for the durable pending prefix. `KRaft` appends use the
+/// replicated high watermark; diskless appends use the independent WAL-quorum
+/// frontier. Looking only at the maximum HWM would acknowledge bytes held by a
+/// single node and make minority WAL loss disappear from this model.
 fn settle_committed(state: &mut ModelState) {
     let max_hwm = state
         .nodes
@@ -522,15 +564,20 @@ fn settle_committed(state: &mut ModelState) {
         .map(node_high_watermark)
         .max()
         .unwrap_or(0);
-    // Offsets strictly below the high-watermark are committed (HWM is one past
-    // the last committed offset).
-    let ready: Vec<i64> = state
-        .pending
-        .range(..max_hwm)
-        .map(|(&off, _)| off)
-        .collect();
+    let wal_frontier = wal_quorum_frontier(state);
+    let mut ready = Vec::new();
+    for (&offset, (_, _, commit_point)) in &state.pending {
+        let durable = match commit_point {
+            CommitPoint::KRaftHighWatermark => offset < max_hwm,
+            CommitPoint::WalQuorumDurable => offset < wal_frontier,
+        };
+        if !durable {
+            break;
+        }
+        ready.push(offset);
+    }
     for off in ready {
-        let (client, value) = state.pending.remove(&off).expect("pending entry exists");
+        let (client, value, _) = state.pending.remove(&off).expect("pending entry exists");
         state.committed.push(value);
         let _ = state
             .linz
@@ -566,6 +613,8 @@ impl Model for ConsensusModel {
             network: BTreeSet::new(),
             linz: LinearizabilityTester::new(KraftLogSpec::default()),
             pending: BTreeMap::new(),
+            wal_frontiers: self.voter_ids.iter().map(|&id| (id, 0)).collect(),
+            appenders_seen: BTreeSet::new(),
             committed: Vec::new(),
             appends_issued: 0,
             crashed: BTreeSet::new(),
@@ -611,6 +660,24 @@ impl Model for ConsensusModel {
         for &id in &state.crashed {
             actions.push(ModelAction::Recover(id));
         }
+        if self.enable_append_via
+            && let Some((&offset, _)) = state
+                .pending
+                .iter()
+                .find(|(_, (_, _, point))| *point == CommitPoint::WalQuorumDurable)
+        {
+            let end_offset = offset + 1;
+            // WAL members are exchangeable here: this focused config has no
+            // WAL-node crash action, and only the majority-th frontier is
+            // observed. Advance the first eligible label as a symmetry normal
+            // form instead of exploring every permutation of identical fsyncs.
+            if let Some(&id) = self.voter_ids.iter().find(|id| {
+                !state.crashed.contains(id)
+                    && state.wal_frontiers.get(id).copied().unwrap_or(0) < end_offset
+            }) {
+                actions.push(ModelAction::WalFsync(id, end_offset));
+            }
+        }
         // A client appends to the single current (live) leader (only when the
         // target is unambiguous and the append budget remains). A fresh client id
         // per append keeps every linearizability "thread" single-op.
@@ -620,16 +687,24 @@ impl Model for ConsensusModel {
             .filter(|(id, n)| is_leader(n) && !state.crashed.contains(*id))
             .map(|(&id, _)| id)
             .collect();
-        if leaders.len() == 1 && state.appends_issued < self.max_appends {
+        if state.appends_issued < self.max_appends {
             let client = ClientId::from(state.appends_issued) + 1;
             let value = u64::from(state.appends_issued) + 1;
             if self.enable_append_via {
-                for &id in &self.voter_ids {
-                    if !state.crashed.contains(&id) {
-                        actions.push(ModelAction::AppendVia(id, client, value));
-                    }
+                // Stateless appenders can enter through any live broker. Do
+                // not reintroduce the old `leaders.len() == 1` emission gate:
+                // routing resolves the highest-epoch live authority when the
+                // action executes, including during authority handoff.
+                if live_authority(state).is_some() {
+                    // Each append uses the next canonical appender label. This
+                    // represents every permutation of two exchangeable labels
+                    // while retaining the target concurrent-appender path.
+                    let appender = AppenderId::try_from(state.appends_issued)
+                        .expect("append bound fits the appender domain");
+                    debug_assert!(appender < APPENDER_COUNT);
+                    actions.push(ModelAction::AppendVia(appender, client, value));
                 }
-            } else {
+            } else if leaders.len() == 1 {
                 actions.push(ModelAction::ClientAppend(client, value));
             }
         }
@@ -701,18 +776,13 @@ impl Model for ConsensusModel {
                     .expect("leader exists")
                     .log
                     .append_in_epoch(epoch, 1);
-                state.pending.insert(offset, (client, value));
+                state
+                    .pending
+                    .insert(offset, (client, value, CommitPoint::KRaftHighWatermark));
                 state.appends_issued += 1;
             }
-            ModelAction::AppendVia(via, client, value) => {
-                if state.crashed.contains(&via) {
-                    return None;
-                }
-                let leader = state
-                    .nodes
-                    .iter()
-                    .find(|(id, n)| is_leader(n) && !state.crashed.contains(*id))
-                    .map(|(&id, _)| id)?;
+            ModelAction::AppendVia(appender, client, value) => {
+                let leader = live_authority(&state)?;
                 let epoch = state.nodes[&leader].machine.quorum_state().leader_epoch;
                 let offset = state.nodes[&leader].log.end_offset();
                 let _ = state
@@ -725,13 +795,24 @@ impl Model for ConsensusModel {
                     .expect("leader exists")
                     .log
                     .append_in_epoch(epoch, 1);
-                state.pending.insert(offset, (client, value));
+                state.appenders_seen.insert(appender);
+                state
+                    .pending
+                    .insert(offset, (client, value, CommitPoint::WalQuorumDurable));
                 state.appends_issued += 1;
             }
+            ModelAction::WalFsync(node, end_offset) => {
+                if state.crashed.contains(&node) {
+                    return None;
+                }
+                state
+                    .wal_frontiers
+                    .entry(node)
+                    .and_modify(|frontier| *frontier = (*frontier).max(end_offset));
+            }
         }
-        // After ANY transition, record `on_return` for appends whose offset is
-        // now committed (some node's high-watermark passed it). HWM advances on
-        // fetch deliveries, so commits land on later steps than the append.
+        // After any transition, return the contiguous prefix that crossed its
+        // configured durability boundary.
         settle_committed(&mut state);
         Some(state)
     }
@@ -765,6 +846,15 @@ impl Model for ConsensusModel {
             Property::always("linearizable", |_, s: &ModelState| {
                 s.linz.serialized_history().is_some()
             }),
+            Property::always("assigned_offsets_gap_free", |_, s: &ModelState| {
+                s.committed
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, value)| u64::try_from(offset + 1).is_ok_and(|v| *value == v))
+            }),
+            Property::always("committed_values_unique", |_, s: &ModelState| {
+                s.committed.iter().copied().collect::<BTreeSet<_>>().len() == s.committed.len()
+            }),
             // Anti-vacuity witness: a CLIENT append is actually committed.
             // Without this, `linearizable` could hold vacuously because no
             // client value ever committed (a control-record-only HWM advance
@@ -774,6 +864,14 @@ impl Model for ConsensusModel {
                 // config (election focus) satisfies this trivially.
                 m.max_appends == 0 || !s.committed.is_empty()
             }),
+            Property::sometimes(
+                "two_appenders_concurrent",
+                |m: &ConsensusModel, s: &ModelState| {
+                    !m.enable_append_via
+                        || (s.appenders_seen.len() == usize::from(APPENDER_COUNT)
+                            && s.pending.len() == usize::from(APPENDER_COUNT))
+                },
+            ),
             // Safety (Raft log matching): two logs may diverge only as an
             // uncommitted suffix — if they disagree on the epoch at some offset
             // `k`, they must not agree again at any later offset (equal entries

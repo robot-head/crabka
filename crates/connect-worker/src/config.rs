@@ -90,6 +90,9 @@ pub struct WorkerConfig {
     /// Kafka bootstrap address.
     #[arg(long, env = "CRABKA_KAFKA_BOOTSTRAP", value_parser = parse_non_empty)]
     pub kafka_bootstrap: String,
+    /// Confluent-compatible Schema Registry base URL.
+    #[arg(long, env = "CRABKA_SCHEMA_REGISTRY_URL", value_parser = parse_non_empty)]
+    pub schema_registry_url: String,
     /// Replicas used when the worker creates data and checkpoint topics.
     #[arg(long, env = "CRABKA_CONNECT_REPLICATION_FACTOR", default_value = "1")]
     pub replication_factor: ReplicationFactor,
@@ -234,6 +237,7 @@ impl WorkerConfig {
     #[must_use]
     pub fn postgres_source(&self) -> PostgresSourceConfig {
         PostgresSourceConfig {
+            schema_registry_url: self.schema_registry_url.clone(),
             database_url: self.postgres_url.clone(),
             slot_name: self.postgres_slot.clone(),
             publication_name: self.postgres_publication.clone(),
@@ -374,6 +378,7 @@ mod tests {
             "crabka-connect-worker",
             "--connector-id=orders",
             "--kafka-bootstrap=localhost:9092",
+            "--schema-registry-url=http://localhost:8081",
             "--postgres-url=postgres://secret@localhost/app",
             "--postgres-slot=orders",
             "--postgres-tables=orders,customers",

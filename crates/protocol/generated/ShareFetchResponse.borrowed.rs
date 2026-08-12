@@ -91,7 +91,7 @@ impl Encode for ShareFetchResponse<'_> {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -99,7 +99,7 @@ impl Encode for ShareFetchResponse<'_> {
                 for it in &self.node_endpoints {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -269,7 +269,7 @@ impl Encode for ShareFetchableTopicResponse<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -488,7 +488,7 @@ impl<'a> PartitionData<'a> {
                 for it in &self.acquired_records {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

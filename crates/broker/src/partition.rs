@@ -30,6 +30,26 @@ use tokio::{
 use crate::error::BrokerError;
 use crate::replica_state::ReplicaState;
 
+/// Immutable topic identity plus the leader generation allowed to mutate a
+/// follower log. A read guard over this value linearizes replication writes
+/// with [`Partition::install_leader_change`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplicationTarget {
+    pub(crate) topic_id: Option<uuid::Uuid>,
+    pub(crate) leader_node_id: crabka_raft::NodeId,
+    pub(crate) leader_epoch: crabka_metadata::LeaderEpoch,
+}
+
+pub(crate) fn initial_replication_target(
+    topic_id: Option<uuid::Uuid>,
+) -> Arc<tokio::sync::RwLock<ReplicationTarget>> {
+    Arc::new(tokio::sync::RwLock::new(ReplicationTarget {
+        topic_id,
+        leader_node_id: crabka_raft::NodeId(0),
+        leader_epoch: crabka_metadata::LeaderEpoch(0),
+    }))
+}
+
 /// Absolute record offset within a partition's log (base offset, log end
 /// offset, high watermark, truncation points, …). This is an alias only. It
 /// shows which `i64`s in signatures are offsets and not timestamps or counts.
@@ -218,6 +238,10 @@ pub struct Partition {
     /// Current `leader_epoch` from the metadata image. The broker stamps it on
     /// every appended batch and validates it on every follower Fetch.
     pub current_leader_epoch: Arc<AtomicI32>,
+    /// Serializes follower mutations against topic recreation and local
+    /// leader/epoch installation. Replication holds a read guard through the
+    /// writer acknowledgement; metadata reconciliation takes the write guard.
+    pub(crate) replication_target: Arc<tokio::sync::RwLock<ReplicationTarget>>,
     /// True for Slice 1 diskless partitions whose client-visible HW may only
     /// advance through the WAL durable-sync path.
     pub(crate) diskless: bool,
@@ -227,6 +251,32 @@ pub struct Partition {
 }
 
 impl Partition {
+    /// Hold the partition's metadata-transition barrier through one Produce.
+    /// A diskless nominal-leader promotion takes the matching write lock while
+    /// it hydrates the canonical log and rebuilds producer state, so no append
+    /// can race that publication boundary.
+    pub(crate) async fn lock_produce_transition(
+        &self,
+    ) -> tokio::sync::OwnedRwLockReadGuard<ReplicationTarget> {
+        self.replication_target.clone().read_owned().await
+    }
+
+    /// Lock this partition for a mutation from `expected`, rejecting a stale
+    /// task before it can enqueue work on the single writer.
+    pub(crate) async fn lock_replication_target(
+        &self,
+        expected: ReplicationTarget,
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<ReplicationTarget>, BrokerError> {
+        let current = self.replication_target.clone().read_owned().await;
+        if *current != expected {
+            return Err(BrokerError::Replication(format!(
+                "stale replication target: expected {expected:?}, current {:?}",
+                *current
+            )));
+        }
+        Ok(current)
+    }
+
     /// Next offset the underlying [`Log`] will assign. Cheap: takes the
     /// `Arc<Mutex<Log>>` briefly. Replicators call this before each Fetch
     /// to compute `fetch_offset`.
@@ -570,8 +620,86 @@ impl Partition {
     /// The method fires `hw_advance_notify` so waiting Produce gates can
     /// re-check.
     pub async fn install_leader_change(&self, new_leader: u64, new_epoch: i32) {
+        self.install_replication_target(None, new_leader, new_epoch)
+            .await;
+    }
+
+    /// Install the complete metadata identity used to fence follower writes.
+    /// `topic_id` is optional so callers that only process leader changes can
+    /// preserve an identity installed when the partition was materialized.
+    pub(crate) async fn install_replication_target(
+        &self,
+        topic_id: Option<uuid::Uuid>,
+        new_leader: u64,
+        new_epoch: i32,
+    ) {
+        // Reconciliation also runs for metadata-only changes such as an ISR
+        // update. Do not queue for the exclusive transition barrier when the
+        // target itself is unchanged: an acks=all Produce holds a read guard
+        // while it waits for that ISR update to advance the HW.
+        {
+            let current = self.replication_target.read().await;
+            if topic_id.is_none_or(|id| current.topic_id == Some(id))
+                && current.leader_node_id == crabka_raft::NodeId(new_leader)
+                && current.leader_epoch == crabka_metadata::LeaderEpoch(new_epoch)
+            {
+                return;
+            }
+        }
+        // Wait for any accepted follower mutation to finish before making the
+        // new local role visible. Conversely, a mutation that arrives after
+        // this write lock observes the new tuple and is fenced.
+        let target = self.replication_target.write().await;
+        self.publish_replication_target(target, topic_id, new_leader, new_epoch)
+            .await;
+    }
+
+    /// Serialize a local promotion with all follower mutations, prepare the
+    /// canonical log, and only then publish the new leader role.
+    ///
+    /// Produce admission also checks `current_leader`, so it cannot observe
+    /// the metadata promotion until `prepare` and producer-state recovery have
+    /// completed successfully.
+    pub(crate) async fn install_replication_target_after_log_prepare<T, F>(
+        &self,
+        topic_id: Option<uuid::Uuid>,
+        new_leader: u64,
+        new_epoch: i32,
+        prepare: impl FnOnce(&mut Log) -> Result<T, BrokerError>,
+        after_prepare: impl FnOnce(T) -> F,
+    ) -> Result<(), BrokerError>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        let target = self.replication_target.write().await;
+        let prepared = {
+            let mut log = self
+                .log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            prepare(&mut log)?
+        };
+        after_prepare(prepared).await;
+        self.publish_replication_target(target, topic_id, new_leader, new_epoch)
+            .await;
+        Ok(())
+    }
+
+    async fn publish_replication_target(
+        &self,
+        mut target: tokio::sync::RwLockWriteGuard<'_, ReplicationTarget>,
+        topic_id: Option<uuid::Uuid>,
+        new_leader: u64,
+        new_epoch: i32,
+    ) {
         let prev_leader = self.current_leader.swap(new_leader, Ordering::AcqRel);
         let prev_epoch = self.current_leader_epoch.swap(new_epoch, Ordering::AcqRel);
+        if let Some(topic_id) = topic_id {
+            target.topic_id = Some(topic_id);
+        }
+        target.leader_node_id = crabka_raft::NodeId(new_leader);
+        target.leader_epoch = crabka_metadata::LeaderEpoch(new_epoch);
+        drop(target);
         let leader_changed = prev_leader != new_leader || prev_epoch != new_epoch;
         let mut st = self.replica_state.lock().await;
         if leader_changed {
@@ -719,10 +847,78 @@ mod tests {
             hw_advance_notify,
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
         (p, dir)
+    }
+
+    #[tokio::test]
+    async fn replication_target_guard_fences_stale_generation_and_topic_identity() {
+        let (partition, _dir) = test_partition(Arc::new(Notify::new()));
+        let partition = Arc::new(partition);
+        let topic_id = uuid::Uuid::new_v4();
+        let current = ReplicationTarget {
+            topic_id: Some(topic_id),
+            leader_node_id: crabka_raft::NodeId(1),
+            leader_epoch: crabka_metadata::LeaderEpoch(7),
+        };
+        partition
+            .install_replication_target(current.topic_id, 1, 7)
+            .await;
+
+        for stale in [
+            ReplicationTarget {
+                leader_node_id: crabka_raft::NodeId(2),
+                ..current
+            },
+            ReplicationTarget {
+                leader_epoch: crabka_metadata::LeaderEpoch(6),
+                ..current
+            },
+            ReplicationTarget {
+                topic_id: Some(uuid::Uuid::new_v4()),
+                ..current
+            },
+        ] {
+            assert!(partition.lock_replication_target(stale).await.is_err());
+        }
+
+        let guard = partition
+            .lock_replication_target(current)
+            .await
+            .expect("current target");
+        let update = tokio::spawn({
+            let partition = partition.clone();
+            async move { partition.install_replication_target(None, 2, 8).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !update.is_finished(),
+            "leader install waits for mutation guard"
+        );
+        drop(guard);
+        update.await.expect("leader install");
+        assert!(partition.lock_replication_target(current).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn idempotent_replication_target_install_does_not_wait_for_produce_guard() {
+        let (partition, _dir) = test_partition(Arc::new(Notify::new()));
+        let topic_id = uuid::Uuid::new_v4();
+        partition
+            .install_replication_target(Some(topic_id), 1, 7)
+            .await;
+
+        let produce_guard = partition.lock_produce_transition().await;
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            partition.install_replication_target(Some(topic_id), 1, 7),
+        )
+        .await
+        .expect("unchanged target should not wait for the Produce read guard");
+        drop(produce_guard);
     }
 
     fn test_partition_with_writer() -> (Partition, tempfile::TempDir) {
@@ -763,6 +959,7 @@ mod tests {
             hw_advance_notify,
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
@@ -869,6 +1066,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
@@ -910,6 +1108,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
@@ -935,6 +1134,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
@@ -1142,6 +1342,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
@@ -1170,6 +1371,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
@@ -1200,6 +1402,7 @@ mod tests {
             hw_advance_notify: hw_advance_notify.clone(),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };
@@ -1302,6 +1505,7 @@ mod tests {
             hw_advance_notify: hw_advance_notify.clone(),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };

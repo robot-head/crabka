@@ -3,8 +3,8 @@
 //! `Kafka` is the parent and the coordinator. It owns the cluster-level
 //! `Service`, the `ConfigMap`, and the cluster-id `Secret`. It lists sibling
 //! `KafkaNodePool`s by label and aggregates their statuses. Broker
-//! `StatefulSet`s belong to the pool reconciler, and the Kafka reconciler must
-//! never touch `/statefulsets/`.
+//! `StatefulSet`s belong to the pool reconciler; the Kafka reconciler only
+//! lists them to gate CA rotation on observed rollout convergence.
 //!
 //! Request sequence on a fresh Kafka with no `spec.listeners` set, that is,
 //! the synthesized internal-default path:
@@ -12,9 +12,11 @@
 //!   2. GET   secrets/<name>-cluster-id         (-> 404)
 //!   3. POST  secrets                           (-> 201)
 //!   4. GET   kafkanodepools?labelSelector=...  (-> 200 `KafkaNodePoolList`)
-//!   5. PATCH configmaps/<name>-broker-config   (SSA, populated with per-broker TOML)
-//!   6. PATCH kafkanodepools/<pool>             (owner-ref adopt)
-//!   7. PATCH kafkas/<name>/status              (merge)
+//!   5. GET   statefulsets?labelSelector=...    (observed pool identity/rollout)
+//!   6. GET   pods?labelSelector=...            (surviving node-id identity)
+//!   7. PATCH configmaps/<name>-broker-config   (SSA, populated with per-broker TOML)
+//!   8. PATCH kafkanodepools/<pool>             (owner-ref adopt)
+//!   9. PATCH kafkas/<name>/status              (merge)
 //!
 //! The `ConfigMap` comes after the pool list because the operator derives one
 //! `broker-{id}.toml` key per pool. The operator must enumerate the pools
@@ -38,9 +40,10 @@ use serde_json::json;
 mod shared;
 
 use shared::{
-    MockRule, MockState, fake_configmap_body, fake_kafka_body, fake_pool_body, fake_pool_list_body,
-    fake_pool_list_item, fake_secret_body, fake_service_body, fixture_ctx, json_response,
-    mock_client, not_found_body,
+    MockRule, MockState,
+    fake_admin::{FakeAdminClient, RecordedCall},
+    fake_configmap_body, fake_kafka_body, fake_pool_body, fake_pool_list_body, fake_pool_list_item,
+    fake_secret_body, fake_service_body, fixture_ctx, json_response, mock_client, not_found_body,
 };
 
 fn kafka_cr(name: &str, namespace: &str) -> Kafka {
@@ -316,7 +319,35 @@ fn happy_path_rules(
             path_substr: format!("/namespaces/{namespace}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(pool_items)),
         },
-        // 13-14. Broker keystore — no pre-existing → operator creates.
+        // 13. LIST StatefulSets for observed rollout convergence.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{namespace}/statefulsets"),
+            response: json_response(
+                200,
+                &json!({
+                    "apiVersion": "apps/v1",
+                    "kind": "StatefulSetList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": []
+                }),
+            ),
+        },
+        // 14. LIST Pods so surviving ordinals continue to reserve node IDs.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{namespace}/pods"),
+            response: json_response(
+                200,
+                &json!({
+                    "apiVersion": "v1",
+                    "kind": "PodList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": []
+                }),
+            ),
+        },
+        // 15-16. Broker keystore — no pre-existing → operator creates.
         //   GET keystore → 404
         MockRule {
             method: Method::GET,
@@ -333,7 +364,7 @@ fn happy_path_rules(
             path_substr: format!("/secrets/{keystore_name}"),
             response: json_response(200, &fake_keystore_secret(&keystore_name)),
         },
-        // 15. PATCH configmap (per-broker TOML keys derived from the pool list).
+        // 17. PATCH configmap (per-broker TOML keys derived from the pool list).
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/configmaps/{cm_name}"),
@@ -405,25 +436,32 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     //   4-7. GET/PATCH cluster-ca key+cert (new CA generated)
     //   8-11. GET/PATCH clients-ca key+cert (new CA generated)
     //   12. GET kafkanodepools
-    //   13-14. GET/PATCH broker keystore
-    //   15. PATCH configmap
-    //   16. PATCH pool owner-ref
-    //   17. PATCH kafka status
+    //   13. GET statefulsets
+    //   14. GET pods
+    //   15-16. GET/PATCH broker keystore
+    //   17. PATCH configmap
+    //   18. PATCH pool owner-ref
+    //   19. PATCH kafka status
     assert!(
-        observed.len() == 17,
-        "expected exactly 17 requests (includes CA + keystore calls), \
+        observed.len() == 19,
+        "expected exactly 19 requests (includes CA + keystore calls), \
          saw {}: {:?}",
         observed.len(),
         methods_and_uris
     );
 
-    // No request must touch /statefulsets/ — that's the pool reconciler.
-    for (method, uri) in &methods_and_uris {
-        assert!(
-            !uri.contains("/statefulsets/"),
-            "Kafka reconciler must not touch statefulsets: {method} {uri}",
-        );
-    }
+    let statefulset_requests: Vec<_> = methods_and_uris
+        .iter()
+        .filter(|(_, uri)| uri.contains("/statefulsets"))
+        .collect();
+    assert!(statefulset_requests.len() == 1);
+    assert!(statefulset_requests[0].0 == Method::GET);
+    let pod_requests: Vec<_> = methods_and_uris
+        .iter()
+        .filter(|(_, uri)| uri.contains("/pods"))
+        .collect();
+    assert!(pod_requests.len() == 1);
+    assert!(pod_requests[0].0 == Method::GET);
 
     for (idx, want_method, want_substr, what) in [
         (
@@ -500,11 +538,11 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     );
 
     // Status patch is last.
-    check!(methods_and_uris[16].0 == Method::PATCH);
+    check!(methods_and_uris[18].0 == Method::PATCH);
     check!(
-        methods_and_uris[16].1.contains("/kafkas/demo/status"),
-        "step 17 should patch Kafka status: {}",
-        methods_and_uris[16].1
+        methods_and_uris[18].1.contains("/kafkas/demo/status"),
+        "step 19 should patch Kafka status: {}",
+        methods_and_uris[18].1
     );
 
     check!(
@@ -988,6 +1026,27 @@ async fn invalid_broker_tuning_sets_condition_and_skips_configmap() {
         },
         MockRule {
             method: Method::GET,
+            path_substr: "/secrets/demo-cluster-id".into(),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("secret not found"))
+                .expect("404 builds"),
+        },
+        MockRule {
+            method: Method::POST,
+            path_substr: "/namespaces/y/secrets".into(),
+            response: json_response(
+                201,
+                &fake_secret_body(
+                    "demo-cluster-id",
+                    "y",
+                    "00000000-0000-0000-0000-000000000000",
+                ),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
             path_substr: "/kafkas/demo/status".into(),
             response: json_response(200, &fake_kafka_body("demo", "y")),
         },
@@ -1122,6 +1181,98 @@ async fn kafka_metadata_version_too_high_blocks() {
     );
 
     check!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn kafka_metadata_version_downgrade_uses_safe_update_before_advancing_status() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test("demo", fake).await;
+    let mut kafka = kafka_cr_with_versions("demo", "y", "4.0.0", Some("3.7"));
+    kafka.status = Some(crabka_operator::crd::KafkaStatus {
+        metadata_version: Some("4.0".into()),
+        ..Default::default()
+    });
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    assert!(
+        calls.len() == 1,
+        "expected one UpdateFeatures call, got {calls:?}"
+    );
+    assert!(matches!(
+        &calls[0],
+        RecordedCall::UpdateMetadataVersion {
+            level: 19,
+            safe_downgrade: true,
+            ..
+        }
+    ));
+    let observed = state.take_observed();
+    let status = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).expect("status JSON");
+    assert!(
+        body["status"]["metadataVersion"] == json!("3.7"),
+        "body = {body}"
+    );
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn kafka_metadata_version_downgrade_rejection_holds_finalized_status() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    fake.lock()
+        .await
+        .inject_metadata_version_update_broker_error(
+            95,
+            "INVALID_UPDATE_VERSION",
+            Some("broker 3 lacks downgrade capability".into()),
+        );
+    ctx.insert_admin_client_for_test("demo", fake).await;
+    let mut kafka = kafka_cr_with_versions("demo", "y", "4.0.0", Some("3.7"));
+    kafka.status = Some(crabka_operator::crd::KafkaStatus {
+        metadata_version: Some("4.0".into()),
+        ..Default::default()
+    });
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let status = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).expect("status JSON");
+    assert!(
+        body["status"]["metadataVersion"] == json!("4.0"),
+        "body = {body}"
+    );
+    let condition = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|condition| condition["type"] == "KafkaVersionValid")
+        .expect("KafkaVersionValid");
+    assert!(condition["status"] == "False", "body = {body}");
+    assert!(
+        condition["reason"] == "MetadataVersionUpdateFailed",
+        "body = {body}"
+    );
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]

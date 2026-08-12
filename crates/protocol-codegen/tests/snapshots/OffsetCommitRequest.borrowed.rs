@@ -41,6 +41,7 @@ impl<'a> OffsetCommitRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequest {
         crate::owned::offset_commit_request::OffsetCommitRequest {
             group_id: (self.group_id).to_string(),
@@ -64,27 +65,27 @@ impl<'a> Encode for OffsetCommitRequest<'a> {
                 let () = put_compact_string(buf, self.group_id);
             } else {
                 let () = put_string(buf, self.group_id);
-            }
+            };
         }
         if version >= 1 {
-            put_i32(buf, self.generation_id_or_member_epoch)
+            put_i32(buf, self.generation_id_or_member_epoch);
         }
         if version >= 1 {
             if flex {
                 let () = put_compact_string(buf, self.member_id);
             } else {
                 let () = put_string(buf, self.member_id);
-            }
+            };
         }
         if version >= 7 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.group_instance_id);
             } else {
                 let () = put_nullable_string(buf, self.group_instance_id);
-            }
+            };
         }
         if (2..=4).contains(&version) {
-            put_i64(buf, self.retention_time_ms)
+            put_i64(buf, self.retention_time_ms);
         }
         if version >= 0 {
             {
@@ -92,7 +93,7 @@ impl<'a> Encode for OffsetCommitRequest<'a> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -217,6 +218,7 @@ impl<'a> OffsetCommitRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequestTopic {
         crate::owned::offset_commit_request::OffsetCommitRequestTopic {
             name: (self.name).to_string(),
@@ -234,10 +236,10 @@ impl<'a> Encode for OffsetCommitRequestTopic<'a> {
                 let () = put_compact_string(buf, self.name);
             } else {
                 let () = put_string(buf, self.name);
-            }
+            };
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -245,7 +247,7 @@ impl<'a> Encode for OffsetCommitRequestTopic<'a> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -342,6 +344,7 @@ impl<'a> OffsetCommitRequestPartition<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequestPartition {
         crate::owned::offset_commit_request::OffsetCommitRequestPartition {
             partition_index: (self.partition_index),
@@ -356,20 +359,20 @@ impl<'a> Encode for OffsetCommitRequestPartition<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset)
+            put_i64(buf, self.committed_offset);
         }
         if version >= 6 {
-            put_i32(buf, self.committed_leader_epoch)
+            put_i32(buf, self.committed_leader_epoch);
         }
         if version >= 0 {
             if flex {
                 let () = put_compact_nullable_string(buf, self.committed_metadata);
             } else {
                 let () = put_nullable_string(buf, self.committed_metadata);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -217,6 +217,28 @@ pub fn feature_registry() -> &'static [&'static dyn Feature] {
     REGISTRY
 }
 
+/// Supported feature ranges advertised by a Crabka broker or controller when
+/// it registers with the `KRaft` controller.
+#[must_use]
+pub fn supported_feature_ranges() -> BTreeMap<String, (i16, i16)> {
+    let mut ranges: BTreeMap<_, _> = feature_registry()
+        .iter()
+        .map(|feature| (feature.name().to_string(), feature.supported_range()))
+        .collect();
+    // Registration-only KIP-1155 capability signal. Keep it out of the
+    // finalizable feature registry: upstream has not assigned the KIP's
+    // promised metadata.version level, and inventing one would make
+    // ApiVersions claim support for an undefined metadata record format.
+    ranges.insert(
+        crate::metadata_version::METADATA_DOWNGRADE_CAPABILITY_FEATURE.into(),
+        (
+            crate::metadata_version::METADATA_DOWNGRADE_CAPABILITY_LEVEL,
+            crate::metadata_version::METADATA_DOWNGRADE_CAPABILITY_LEVEL,
+        ),
+    );
+    ranges
+}
+
 /// Look up a registered feature by name.
 #[must_use]
 pub fn feature(name: &str) -> Option<&'static dyn Feature> {
@@ -354,6 +376,19 @@ mod tests {
         ] {
             assert2::assert!(is_supported_level(name, level) == want);
         }
+    }
+
+    #[test]
+    fn downgrade_capability_is_registration_only() {
+        let ranges = supported_feature_ranges();
+        check!(
+            ranges.get(crate::metadata_version::METADATA_DOWNGRADE_CAPABILITY_FEATURE)
+                == Some(&(
+                    crate::metadata_version::METADATA_DOWNGRADE_CAPABILITY_LEVEL,
+                    crate::metadata_version::METADATA_DOWNGRADE_CAPABILITY_LEVEL,
+                ))
+        );
+        check!(feature(crate::metadata_version::METADATA_DOWNGRADE_CAPABILITY_FEATURE).is_none());
     }
 
     #[test]

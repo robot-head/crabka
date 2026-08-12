@@ -37,9 +37,9 @@ Run them with `cargo test -p crabka-broker --test jvm_acceptance -- --ignored`.
 The CI job `broker-jvm-acceptance` is the only place that runs them by
 default. On a contributor's machine, `cargo test` skips them.
 
-## ``
+## Windows validation
 
 Docker on Windows with the bridge-gateway pattern is not reliable. The
 JVM command-line tools also behave inconsistently under Docker Desktop
-on Windows. A `cfg` gate removes the test file on Windows. The whole
-file compiles to an empty test binary there.
+on Windows. The dedicated CI lane currently runs only on Ubuntu, so this
+acceptance path has no validated Windows CI or runtime result.

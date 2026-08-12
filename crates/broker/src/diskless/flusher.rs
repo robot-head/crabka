@@ -1,5 +1,7 @@
 //! Diskless WAL object-store flusher.
 
+#[cfg(any(test, feature = "test-helpers"))]
+use std::collections::HashMap;
 use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
@@ -29,6 +31,20 @@ use crate::{
     partition::Partition,
     partition_registry::PartitionRegistry,
 };
+
+#[cfg(any(test, feature = "test-helpers"))]
+static PUT_FAILURES: std::sync::LazyLock<std::sync::Mutex<HashMap<i32, u64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub(crate) fn put_failure_count(broker_id: i32) -> u64 {
+    *PUT_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&broker_id)
+        .unwrap_or(&0)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct FlushConfig {
@@ -201,13 +217,24 @@ pub(crate) async fn flush_once(
     }
     let object_key = format!("diskless-wal/{broker_id}/{}.ckwl", Uuid::new_v4());
     let object = builder.finish();
-    object_store
+    if let Err(error) = object_store
         .put(
             &Path::from(object_key.clone()),
             PutPayload::from(object.clone()),
         )
         .await
-        .map_err(|error| crate::error::BrokerError::Txn(format!("diskless wal put: {error}")))?;
+    {
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            let mut failures = PUT_FAILURES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *failures.entry(broker_id).or_default() += 1;
+        }
+        return Err(crate::error::BrokerError::Txn(format!(
+            "diskless wal put: {error}"
+        )));
+    }
 
     let entries = super::wal_object::parse_wal_object(&object)
         .map_err(|error| crate::error::BrokerError::Txn(error.to_string()))?

@@ -55,7 +55,7 @@ impl Encode for FetchResponse {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -174,7 +174,7 @@ impl Encode for FetchableTopicResponse {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -334,7 +334,7 @@ impl PartitionData {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }

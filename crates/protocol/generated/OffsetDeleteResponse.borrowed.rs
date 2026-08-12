@@ -60,7 +60,7 @@ impl Encode for OffsetDeleteResponse<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -168,7 +168,7 @@ impl Encode for OffsetDeleteResponseTopic<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

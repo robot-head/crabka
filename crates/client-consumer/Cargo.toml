@@ -22,9 +22,9 @@ default = []
 [dependencies]
 assert2 = { workspace = true }
 bon = { workspace = true }
-crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3.9", path = "../client-core", features = ["mock"] }
-crabka-ids = { version = "0.3.8", path = "../ids" }
+crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.4.0", path = "../client-core", features = ["mock"] }
+crabka-ids = { version = "0.4.0", path = "../ids" }
 crabka-units = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
@@ -35,9 +35,9 @@ futures-util = { workspace = true }
 refined_type = { workspace = true }
 
 [dev-dependencies]
-crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
-crabka-client-producer = { version = "0.3", path = "../client-producer" }
-crabka-security = { version = "0.3", path = "../security" }
+crabka-broker = { version = "0.4.0", path = "../broker", features = ["test-helpers"] }
+crabka-client-producer = { version = "0.4", path = "../client-producer" }
+crabka-security = { version = "0.4", path = "../security" }
 mutants = { workspace = true }
 stateright = { workspace = true }
 tempfile = { workspace = true }

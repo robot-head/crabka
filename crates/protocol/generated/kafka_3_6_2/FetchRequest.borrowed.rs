@@ -126,7 +126,7 @@ impl<'a> FetchRequest<'a> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -146,7 +146,7 @@ impl<'a> FetchRequest<'a> {
                 for it in &self.forgotten_topics_data {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -652,7 +652,7 @@ impl Encode for FetchTopic<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -927,7 +927,7 @@ impl Encode for ForgottenTopic<'_> {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

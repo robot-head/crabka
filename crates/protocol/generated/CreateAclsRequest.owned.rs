@@ -37,7 +37,7 @@ impl Encode for CreateAclsRequest {
                 for it in &self.creations {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

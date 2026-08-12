@@ -59,7 +59,7 @@ impl Encode for IncrementalAlterConfigsRequest<'_> {
                 for it in &self.resources {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_bool(buf, self.validate_only);
@@ -182,7 +182,7 @@ impl Encode for AlterConfigsResource<'_> {
                 for it in &self.configs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

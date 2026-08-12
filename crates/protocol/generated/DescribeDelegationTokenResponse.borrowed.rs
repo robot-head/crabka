@@ -62,7 +62,7 @@ impl Encode for DescribeDelegationTokenResponse<'_> {
                 for it in &self.tokens {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.throttle_time_ms);
@@ -266,7 +266,7 @@ impl<'a> DescribedDelegationToken<'a> {
                 for it in &self.renewers {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

@@ -35,8 +35,8 @@ pub struct KafkaTopicSpec {
     #[schemars(range(min = 1, max = 1_000_000))]
     pub partitions: i32,
 
-    /// Replication factor. The operator rejects changes with
-    /// `ImmutableFieldChanged` until partition reassignment lands.
+    /// Replication factor. The operator applies changes through Kafka
+    /// partition reassignment and reports `Reassigning` until it completes.
     #[schemars(range(min = 1, max = 1_000))]
     pub replicas: i32,
 

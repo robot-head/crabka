@@ -229,6 +229,31 @@ impl WalShardEngine {
         Offset(self.durable_watermark.load(Ordering::Acquire))
     }
 
+    /// Mark an adopted checkpointed follower prefix as locally durable.
+    /// Promotion has already fsynced and exact-validated this range against
+    /// the canonical log. A quorum watermark still advances only after enough
+    /// configured voters report the same frontier.
+    pub(crate) fn adopt_local_durable_prefix(
+        &self,
+        durable: Offset,
+        log_start: Offset,
+        log_end: Offset,
+    ) {
+        if !(log_start..=log_end).contains(&durable) {
+            return;
+        }
+        self.local_durable.fetch_max(durable.0, Ordering::AcqRel);
+        let me = self
+            .distributed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|quorum| quorum.me);
+        if let Some(me) = me {
+            self.record_durable_offset(me, durable, log_start, log_end);
+        }
+    }
+
     pub(crate) async fn wait_for_durable_advance(&self, after: Offset) -> Offset {
         loop {
             let advanced = self.durable_advanced.notified();
@@ -544,7 +569,7 @@ fn replica_end_offset(replica: &WalReplica) -> Offset {
 pub(super) struct BatchBytes {
     pub(super) base_offset: Offset,
     pub(super) last_offset: Offset,
-    verbatim: VerbatimBatch,
+    pub(super) verbatim: VerbatimBatch,
 }
 
 fn read_batches(
@@ -552,23 +577,41 @@ fn read_batches(
     start: Offset,
     target: Offset,
 ) -> Result<Vec<BatchBytes>, BrokerError> {
-    let raw = source
-        .lock()
+    let raw = source.lock().read_raw(
+        start,
+        target,
         // Replication must carry every batch in `start..target`, so the read
         // is uncapped.
-        .read_raw(start, target, ByteSize::from_bytes(u64::MAX))?;
+        ByteSize::from_bytes(u64::MAX),
+    )?;
     split_batches(&raw.bytes)
 }
 
-fn read_batches_exact(
+pub(super) fn read_batches_exact(
     source: &ShardLog,
+    start: Offset,
+    target: Offset,
+) -> Result<Vec<BatchBytes>, BrokerError> {
+    exact_batches(read_batches(source, start, target)?, start, target)
+}
+
+pub(super) fn read_log_batches_exact(
+    source: &Log,
+    start: Offset,
+    target: Offset,
+) -> Result<Vec<BatchBytes>, BrokerError> {
+    let raw = source.read_raw(start, target, ByteSize::from_bytes(u64::MAX))?;
+    exact_batches(split_batches(&raw.bytes)?, start, target)
+}
+
+fn exact_batches(
+    batches: Vec<BatchBytes>,
     start: Offset,
     target: Offset,
 ) -> Result<Vec<BatchBytes>, BrokerError> {
     if start == target {
         return Ok(Vec::new());
     }
-    let batches = read_batches(source, start, target)?;
     let first = batches.first().map(|batch| batch.base_offset);
     let end = batches
         .last()

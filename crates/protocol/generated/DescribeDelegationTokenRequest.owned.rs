@@ -39,7 +39,7 @@ impl Encode for DescribeDelegationTokenRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

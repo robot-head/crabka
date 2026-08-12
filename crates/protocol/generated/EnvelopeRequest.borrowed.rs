@@ -29,6 +29,7 @@ impl EnvelopeRequest<'_> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::envelope_request::EnvelopeRequest {
         crate::owned::envelope_request::EnvelopeRequest {
             request_data: Bytes::copy_from_slice(self.request_data),

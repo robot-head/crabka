@@ -43,7 +43,7 @@ impl Encode for ConsumerProtocolAssignment {
                 for it in &self.assigned_partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             if flex {
@@ -145,7 +145,7 @@ impl Encode for TopicPartition {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         Ok(())
     }

@@ -1,0 +1,38 @@
+{
+  "id": "queue_v1_1_acquire_error_shape",
+  "since": { "major": 1, "minor": 1 },
+  "steps": [
+    {
+      "name": "acquire without a group is invalid",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-invalid",
+        "group": "",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "queue group is required"
+        }
+      }
+    },
+    {
+      "name": "acquire without a topic is invalid",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "queue topic is required"
+        }
+      }
+    }
+  ]
+}

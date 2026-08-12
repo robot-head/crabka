@@ -39,9 +39,9 @@
 //!
 //! - `RegisterBroker`: Crabka stores a top-level `(host, port)` plus a
 //!   per-listener `endpoints` list; KIP-631 has only `end_points` (no
-//!   top-level host/port). The top-level pair is encoded as a synthetic
-//!   leading `end_points` entry (name `""`, `security_protocol` PLAINTEXT)
-//!   and split back out on decode; the real listeners follow. All the
+//!   top-level host/port). When listeners exist, their first entry supplies
+//!   the legacy top-level pair on decode. A legacy Crabka record with no
+//!   listeners uses one empty-name compatibility entry. All the
 //!   other KIP-631 extras (`incarnation_id`, `features`, `fenced`, …) are
 //!   defaulted on encode and dropped on decode. `broker_epoch` IS carried
 //!   (KIP-903 ISR fencing).
@@ -58,9 +58,17 @@ use crabka_protocol::{
         config_record::ConfigRecord,
         delegation_token_record::DelegationTokenRecord as KDelegationTokenRecord,
         feature_level_record::FeatureLevelRecord as KFeatureLevelRecord,
+        partition_change_record::PartitionChangeRecord as KPartitionChangeRecord,
         partition_record::PartitionRecord as KPartitionRecord,
         producer_ids_record::ProducerIdsRecord as KProducerIdsRecord,
-        register_broker_record::{BrokerEndpoint as KBrokerEndpoint, RegisterBrokerRecord},
+        register_broker_record::{
+            BrokerEndpoint as KBrokerEndpoint, BrokerFeature as KBrokerFeature,
+            RegisterBrokerRecord,
+        },
+        register_controller_record::{
+            ControllerEndpoint as KControllerEndpoint, ControllerFeature as KControllerFeature,
+            RegisterControllerRecord,
+        },
         remove_access_control_entry_record::RemoveAccessControlEntryRecord,
         remove_topic_record::RemoveTopicRecord,
         remove_user_scram_credential_record::RemoveUserScramCredentialRecord,
@@ -79,10 +87,11 @@ use crate::{
     acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType},
     records::{
         BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
-        DEFAULT_BROKER_CONFIG_NODE_ID, DelegationTokenRecord, DeleteScramCredentialRecord,
-        DeleteTopicRecord, FeatureLevelRecord, GroupConfigRecord, LeaderEpoch, MetadataRecord,
-        NodeId, PartitionRecord, ProducerIdsRecord, QuotaEntity, ScramCredentialRecord,
-        TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
+        ControllerRegistrationRecord, DEFAULT_BROKER_CONFIG_NODE_ID, DelegationTokenRecord,
+        DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, GroupConfigRecord,
+        LeaderEpoch, MetadataRecord, NodeId, PartitionDirAssignmentRecord, PartitionRecord,
+        ProducerIdsRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
+        UnregisterBrokerRecord,
     },
 };
 
@@ -399,18 +408,17 @@ pub fn to_kraft_records(
 /// the KIP-631 value byte blobs to put on the log — one per fanned-out record
 /// (most records yield one; whole-map configs yield one per key plus
 /// tombstones, and `V1DeleteAccessControlEntry` yields one per matched ACL).
-/// [`PartitionRecord`] is
-/// enveloped at apiVersion 1 so its KIP-858 `directories` survive; every other
-/// modeled record frames at apiVersion 0. Yields an empty `Vec` when a record
+/// Multi-version metadata records are framed at the version selected by the
+/// image's finalized `metadata.version`; every other modeled record frames at
+/// apiVersion 0. Yields an empty `Vec` when a record
 /// fans out to nothing (an empty config clear with no prior keys, or a
 /// delete-ACL filter matching nothing) — callers treat an all-empty batch as a
 /// committed no-op.
 ///
-/// apiVersion 0 is the "defaulted KIP-631 framing": the core fields Crabka
-/// populates all exist at v0, and the remaining higher-version KIP-631 extras
-/// such as broker incarnation, broker epoch, and partition ELR stay defaulted.
-/// [`PartitionRecord`] is the one exception, lifted to v1 to carry per-replica
-/// directory ids.
+/// A missing finalized metadata.version is treated as the latest supported
+/// level, matching standalone bootstrap. `Partition` and `PartitionChange` use
+/// v0, v1, or v2 at the Kafka KIP-858/KIP-966 boundaries. `RegisterBroker` uses v1,
+/// v2, or v3 at the migration/KIP-858 boundaries.
 ///
 /// # Errors
 /// Propagates [`to_kraft_records`] errors, plus [`TranslateError::Encode`] if
@@ -419,15 +427,51 @@ pub fn to_kraft_values(
     rec: &MetadataRecord,
     image: &MetadataImage,
 ) -> Result<Vec<Bytes>, TranslateError> {
+    let metadata_version = image
+        .finalized_metadata_version()
+        .unwrap_or(crate::metadata_version::METADATA_VERSION_MAX);
     to_kraft_records(rec, image)?
-        .iter()
-        .map(|kr| {
-            let version: i16 = match kr {
-                // KIP-858: directories field only present at v1+.
-                KraftMetadataRecord::Partition(_) | KraftMetadataRecord::RegisterBroker(_) => 1,
+        .into_iter()
+        .map(|mut kr| {
+            let version: i16 = match &kr {
+                KraftMetadataRecord::Partition(_) | KraftMetadataRecord::PartitionChange(_) => {
+                    match metadata_version {
+                        version if version >= crate::metadata_version::ELR_MIN_LEVEL => 2,
+                        version
+                            if version
+                                >= crate::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL =>
+                        {
+                            1
+                        }
+                        _ => 0,
+                    }
+                }
+                KraftMetadataRecord::RegisterBroker(_) => {
+                    if metadata_version >= crate::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL {
+                        3
+                    } else if metadata_version >= 8 {
+                        2
+                    } else {
+                        1
+                    }
+                }
                 // All other modeled record types frame at the defaulted v0.
                 _ => 0,
             };
+            // Tagged fields remain syntactically valid on older flexible
+            // record versions, so the generated encoder cannot by itself
+            // express the semantic version gate. Strip fields introduced by
+            // later RegisterBroker versions before encoding a downgraded
+            // image; otherwise a future Crabka reader would resurrect data
+            // that the target Kafka version was required to discard.
+            if let KraftMetadataRecord::RegisterBroker(register) = &mut kr {
+                if version < 3 {
+                    register.log_dirs.clear();
+                }
+                if version < 4 {
+                    register.cordoned_log_dirs = None;
+                }
+            }
             kr.encode_value(version)
                 .map_err(|e| TranslateError::Encode(e.to_string()))
         })
@@ -623,6 +667,11 @@ fn to_kraft_iter(
                 register_broker_to_kraft(b)?,
             )]
         }
+        MetadataRecord::V1ControllerRegistration(c) => {
+            vec![KraftMetadataRecord::RegisterController(
+                register_controller_to_kraft(c)?,
+            )]
+        }
         MetadataRecord::V1UnregisterBroker(u) => {
             vec![KraftMetadataRecord::UnregisterBroker(
                 KUnregisterBrokerRecord {
@@ -719,18 +768,13 @@ fn to_kraft_iter(
         MetadataRecord::V1FeaturesEpoch(_) => {
             vec![wincode_carrier(rec, PRIVATE_FEATURES_EPOCH_KEY)?]
         }
-        // KIP-858 directory-assignment delta. `PartitionChangeRecord` is not
-        // modeled in Crabka. It must stay a DELTA end-to-end: the apply path
-        // re-decodes committed KRaft values (`from_kraft_value`) and applies
-        // the decoded record, so materializing this into a full
-        // `PartitionRecord` here would decode back as a full-replace
-        // `V1Partition` and clobber any reassignment / ISR change committed
-        // between this record's encode and its apply. Instead it rides a
-        // Crabka-private `Unknown` carrier (like `V1FeaturesEpoch`), so it
-        // decodes back to `V1PartitionDirAssignment`
-        // and applies as a one-slot merge — genuinely order-independent.
-        MetadataRecord::V1PartitionDirAssignment(_) => {
-            vec![wincode_carrier(rec, PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY)?]
+        // KIP-858 directory-assignment delta. Kafka's standard
+        // PartitionChangeRecord carries the complete directories vector while
+        // leaving every unrelated partition field unset.
+        MetadataRecord::V1PartitionDirAssignment(r) => {
+            vec![KraftMetadataRecord::PartitionChange(
+                partition_dir_assignment_to_kraft(r, image)?,
+            )]
         }
         MetadataRecord::V1PartitionOffsetAdvance(_) => {
             vec![wincode_carrier(rec, PRIVATE_PARTITION_OFFSET_ADVANCE_KEY)?]
@@ -751,9 +795,6 @@ fn to_kraft_iter(
 /// KIP-631 `Unknown` envelope. NOT wire-faithful to a JVM peer — Crabka-only
 /// round-trip carriers.
 const PRIVATE_FEATURES_EPOCH_KEY: u32 = 1001;
-/// KIP-858 directory-assignment delta carried verbatim so it stays a
-/// one-slot merge on apply (never a full-`PartitionRecord` replace).
-const PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY: u32 = 1002;
 /// Diskless offset-advance delta carried verbatim so it stays a per-partition
 /// increment on apply (never a full-record replace).
 const PRIVATE_PARTITION_OFFSET_ADVANCE_KEY: u32 = 1003;
@@ -777,23 +818,40 @@ fn wincode_carrier(
 fn register_broker_to_kraft(
     b: &BrokerRegistrationRecord,
 ) -> Result<RegisterBrokerRecord, TranslateError> {
-    // The top-level (host, port) becomes a synthetic leading end_point so it
-    // survives the round-trip; the real listeners follow.
-    let mut end_points = Vec::with_capacity(b.endpoints.len() + 1);
-    end_points.push(KBrokerEndpoint {
-        host: b.host.clone(),
-        port: b.port,
-        ..Default::default()
-    });
-    for e in &b.endpoints {
-        end_points.push(KBrokerEndpoint {
-            name: e.name.clone(),
-            host: e.host.clone(),
-            port: e.port,
-            security_protocol: protocol_to_wire(e.protocol),
+    // A JVM broker expects every endpoint to carry a valid listener name.
+    // Encode the real listeners verbatim. Only old single-listener Crabka
+    // records need the empty-name compatibility carrier for their separate
+    // top-level host/port fields.
+    let end_points = if b.endpoints.is_empty() {
+        vec![KBrokerEndpoint {
+            host: b.host.clone(),
+            port: b.port,
             ..Default::default()
-        });
-    }
+        }]
+    } else {
+        b.endpoints
+            .iter()
+            .map(|e| KBrokerEndpoint {
+                name: e.name.clone(),
+                host: e.host.clone(),
+                port: e.port,
+                security_protocol: protocol_to_wire(e.protocol),
+                ..Default::default()
+            })
+            .collect()
+    };
+    let features = b
+        .features
+        .iter()
+        .map(
+            |(name, &(min_supported_version, max_supported_version))| KBrokerFeature {
+                name: name.clone(),
+                min_supported_version,
+                max_supported_version,
+                ..Default::default()
+            },
+        )
+        .collect();
     Ok(RegisterBrokerRecord {
         broker_id: i32::try_from(b.node_id.0).map_err(|_| TranslateError::Invalid {
             field: "broker_id",
@@ -801,12 +859,55 @@ fn register_broker_to_kraft(
         })?,
         rack: b.rack.clone(),
         end_points,
+        features,
+        log_dirs: b.log_dirs.iter().copied().map(to_kuuid).collect(),
         broker_epoch: b.broker_epoch,
         incarnation_id: to_kuuid(b.incarnation_id),
         // Crabka brokers are always-active; there is no fence/unfence lifecycle.
         // Emit false rather than the schema default (true) so JVM tools do not
         // interpret our brokers as fenced on startup.
         fenced: false,
+        ..Default::default()
+    })
+}
+
+fn register_controller_to_kraft(
+    controller: &ControllerRegistrationRecord,
+) -> Result<RegisterControllerRecord, TranslateError> {
+    let controller_id =
+        i32::try_from(controller.node_id.0).map_err(|_| TranslateError::Invalid {
+            field: "controller_id",
+            detail: format!("node_id {} exceeds i32", controller.node_id),
+        })?;
+    let end_points = controller
+        .endpoints
+        .iter()
+        .map(|endpoint| KControllerEndpoint {
+            name: endpoint.name.clone(),
+            host: endpoint.host.clone(),
+            port: endpoint.port,
+            security_protocol: protocol_to_wire(endpoint.protocol),
+            ..Default::default()
+        })
+        .collect();
+    let features = controller
+        .features
+        .iter()
+        .map(
+            |(name, &(min_supported_version, max_supported_version))| KControllerFeature {
+                name: name.clone(),
+                min_supported_version,
+                max_supported_version,
+                ..Default::default()
+            },
+        )
+        .collect();
+    Ok(RegisterControllerRecord {
+        controller_id,
+        incarnation_id: to_kuuid(controller.incarnation_id),
+        zk_migration_ready: controller.zk_migration_ready,
+        end_points,
+        features,
         ..Default::default()
     })
 }
@@ -832,16 +933,53 @@ fn partition_to_kraft(
         isr: cast(&p.isr, "partition isr")?,
         removing_replicas: cast(&p.removing_replicas, "partition removing_replicas")?,
         adding_replicas: cast(&p.adding_replicas, "partition adding_replicas")?,
-        leader: i32::try_from(p.leader.0).map_err(|_| TranslateError::Invalid {
-            field: "partition leader",
-            detail: format!("leader {} exceeds i32", p.leader),
-        })?,
+        leader: partition_leader_to_wire(p.leader, "partition leader")?,
         // Wire boundary: KRaft's KPartitionRecord carries leader epoch as a raw
         // int32, so unwrap the LeaderEpoch newtype here.
         leader_epoch: p.leader_epoch.get(),
         partition_epoch: p.partition_epoch,
         // KIP-858: per-replica log-directory assignment, carried at KRaft v1+.
         directories: p.directories.iter().map(|u| to_kuuid(*u)).collect(),
+        ..Default::default()
+    })
+}
+
+fn partition_dir_assignment_to_kraft(
+    assignment: &PartitionDirAssignmentRecord,
+    image: &MetadataImage,
+) -> Result<KPartitionChangeRecord, TranslateError> {
+    let topic = image
+        .topic(&assignment.topic)
+        .ok_or_else(|| TranslateError::UnknownTopicName(assignment.topic.clone()))?;
+    let partition = image
+        .partition(&assignment.topic, assignment.partition)
+        .ok_or_else(|| TranslateError::Invalid {
+            field: "partition directory assignment",
+            detail: format!(
+                "unknown partition {}-{}",
+                assignment.topic, assignment.partition
+            ),
+        })?;
+    let replica_slot = partition
+        .replicas
+        .iter()
+        .position(|replica| *replica == assignment.replica)
+        .ok_or_else(|| TranslateError::Invalid {
+            field: "partition directory assignment",
+            detail: format!(
+                "broker {} is not a replica of {}-{}",
+                assignment.replica, assignment.topic, assignment.partition
+            ),
+        })?;
+
+    let mut directories = partition.directories.clone();
+    directories.resize(partition.replicas.len(), uuid::Uuid::nil());
+    directories[replica_slot] = assignment.directory;
+
+    Ok(KPartitionChangeRecord {
+        partition_id: assignment.partition,
+        topic_id: to_kuuid(topic.topic_id),
+        directories: Some(directories.into_iter().map(to_kuuid).collect()),
         ..Default::default()
     })
 }
@@ -912,6 +1050,9 @@ pub fn from_kraft(
         KraftMetadataRecord::RegisterBroker(b) => Ok(MetadataRecord::V1BrokerRegistration(
             register_broker_from_kraft(b)?,
         )),
+        KraftMetadataRecord::RegisterController(c) => Ok(MetadataRecord::V1ControllerRegistration(
+            register_controller_from_kraft(c)?,
+        )),
         KraftMetadataRecord::UnregisterBroker(u) => {
             Ok(MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord {
                 node_id: node_id_from_wire(u.broker_id, "unregister broker id")?,
@@ -970,6 +1111,9 @@ pub fn from_kraft(
         KraftMetadataRecord::Partition(p) => {
             Ok(MetadataRecord::V1Partition(partition_from_kraft(p, image)?))
         }
+        KraftMetadataRecord::PartitionChange(p) => Ok(MetadataRecord::V1Partition(
+            partition_change_from_kraft(p, image)?,
+        )),
         KraftMetadataRecord::RemoveTopic(t) => {
             let id = from_kuuid(t.topic_id);
             let name = topic_name_for_id(image, id).ok_or(TranslateError::UnknownTopicId(id))?;
@@ -993,7 +1137,6 @@ pub fn from_kraft(
         // wincode body back to the original record.
         KraftMetadataRecord::Unknown { api_key, body, .. }
             if *api_key == PRIVATE_FEATURES_EPOCH_KEY
-                || *api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY
                 || *api_key == PRIVATE_PARTITION_OFFSET_ADVANCE_KEY =>
         {
             <serde_wincode::SerdeCompat<MetadataRecord>>::deserialize(body)
@@ -1006,10 +1149,10 @@ pub fn from_kraft(
 fn kraft_variant_name(rec: &KraftMetadataRecord) -> &'static str {
     match rec {
         KraftMetadataRecord::BrokerRegistrationChange(_) => "BrokerRegistrationChange",
+        KraftMetadataRecord::PartitionChange(_) => "PartitionChange",
         KraftMetadataRecord::NoOp(_) => "NoOp",
         KraftMetadataRecord::BeginTransaction(_) => "BeginTransaction",
         KraftMetadataRecord::EndTransaction(_) => "EndTransaction",
-        KraftMetadataRecord::RegisterController(_) => "RegisterController",
         KraftMetadataRecord::RemoveAccessControlEntry(_) => "RemoveAccessControlEntry",
         KraftMetadataRecord::Unknown { .. } => "Unknown",
         _ => "unmodeled",
@@ -1019,13 +1162,16 @@ fn kraft_variant_name(rec: &KraftMetadataRecord) -> &'static str {
 fn register_broker_from_kraft(
     b: &RegisterBrokerRecord,
 ) -> Result<BrokerRegistrationRecord, TranslateError> {
-    // The first end_point carries the synthetic top-level (host, port); the
-    // rest are the real per-listener endpoints.
-    let (host, port, rest) = match b.end_points.split_first() {
-        Some((head, rest)) => (head.host.clone(), head.port, rest),
+    // Older Crabka logs used an empty-name leading endpoint solely to carry
+    // the legacy top-level pair. New Crabka and JVM records contain only real
+    // listener endpoints; in that case the first endpoint supplies the
+    // legacy fields while every endpoint stays in the listener list.
+    let (host, port, endpoints_on_wire) = match b.end_points.split_first() {
+        Some((head, rest)) if head.name.is_empty() => (head.host.clone(), head.port, rest),
+        Some((head, _)) => (head.host.clone(), head.port, b.end_points.as_slice()),
         None => (String::new(), 0, &[][..]),
     };
-    let endpoints = rest
+    let endpoints = endpoints_on_wire
         .iter()
         .map(|e| {
             Ok(BrokerEndpoint {
@@ -1036,6 +1182,17 @@ fn register_broker_from_kraft(
             })
         })
         .collect::<Result<Vec<_>, TranslateError>>()?;
+    let features = b
+        .features
+        .iter()
+        .map(|feature| {
+            (
+                feature.name.clone(),
+                (feature.min_supported_version, feature.max_supported_version),
+            )
+        })
+        .collect();
+    let log_dirs = b.log_dirs.iter().copied().map(from_kuuid).collect();
     Ok(BrokerRegistrationRecord {
         node_id: node_id_from_wire(b.broker_id, "register broker id")?,
         broker_epoch: b.broker_epoch,
@@ -1044,6 +1201,42 @@ fn register_broker_from_kraft(
         port,
         rack: b.rack.clone(),
         endpoints,
+        log_dirs,
+        features,
+    })
+}
+
+fn register_controller_from_kraft(
+    controller: &RegisterControllerRecord,
+) -> Result<ControllerRegistrationRecord, TranslateError> {
+    let endpoints = controller
+        .end_points
+        .iter()
+        .map(|endpoint| {
+            Ok(BrokerEndpoint {
+                name: endpoint.name.clone(),
+                host: endpoint.host.clone(),
+                port: endpoint.port,
+                protocol: protocol_from_wire(endpoint.security_protocol)?,
+            })
+        })
+        .collect::<Result<Vec<_>, TranslateError>>()?;
+    let features = controller
+        .features
+        .iter()
+        .map(|feature| {
+            (
+                feature.name.clone(),
+                (feature.min_supported_version, feature.max_supported_version),
+            )
+        })
+        .collect();
+    Ok(ControllerRegistrationRecord {
+        node_id: node_id_from_wire(controller.controller_id, "controller id")?,
+        incarnation_id: from_kuuid(controller.incarnation_id),
+        zk_migration_ready: controller.zk_migration_ready,
+        endpoints,
+        features,
     })
 }
 
@@ -1081,7 +1274,7 @@ fn partition_from_kraft(
     Ok(PartitionRecord {
         topic,
         partition: p.partition_id,
-        leader: node_id_from_wire(p.leader, "partition leader")?,
+        leader: partition_leader_from_wire(p.leader, "partition leader")?,
         replicas: nodes(&p.replicas, "partition replica")?,
         isr: nodes(&p.isr, "partition ISR member")?,
         // Wire boundary: wrap the raw int32 leader epoch decoded off KRaft.
@@ -1092,6 +1285,103 @@ fn partition_from_kraft(
         // KIP-858: per-replica log-directory assignment, present at KRaft v1+.
         directories: p.directories.iter().map(|u| from_kuuid(*u)).collect(),
     })
+}
+
+fn partition_change_from_kraft(
+    change: &KPartitionChangeRecord,
+    image: &MetadataImage,
+) -> Result<PartitionRecord, TranslateError> {
+    let topic_id = from_kuuid(change.topic_id);
+    let topic =
+        topic_name_for_id(image, topic_id).ok_or(TranslateError::UnknownTopicId(topic_id))?;
+    let mut partition = image
+        .partition(&topic, change.partition_id)
+        .cloned()
+        .ok_or_else(|| TranslateError::Invalid {
+            field: "partition change",
+            detail: format!("unknown partition {topic}-{}", change.partition_id),
+        })?;
+
+    if change.leader_recovery_state != -1 {
+        return Err(TranslateError::Invalid {
+            field: "partition change leader recovery state",
+            detail: "Crabka does not yet model unclean-election recovery state".into(),
+        });
+    }
+    if change.eligible_leader_replicas.is_some() || change.last_known_elr.is_some() {
+        return Err(TranslateError::Invalid {
+            field: "partition change eligible leader replicas",
+            detail: "Crabka does not yet model KIP-966 eligible leader replicas".into(),
+        });
+    }
+
+    let nodes = |values: &[i32], field| {
+        values
+            .iter()
+            .map(|value| node_id_from_wire(*value, field))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    if let Some(replicas) = &change.replicas {
+        partition.replicas = nodes(replicas, "partition change replica")?;
+    }
+    if let Some(isr) = &change.isr {
+        partition.isr = nodes(isr, "partition change ISR member")?;
+    }
+    if let Some(removing) = &change.removing_replicas {
+        partition.removing_replicas = nodes(removing, "partition change removing replica")?;
+    }
+    if let Some(adding) = &change.adding_replicas {
+        partition.adding_replicas = nodes(adding, "partition change adding replica")?;
+    }
+    if change.leader != -2 {
+        partition.leader = partition_leader_from_wire(change.leader, "partition change leader")?;
+        partition.leader_epoch =
+            LeaderEpoch(partition.leader_epoch.get().checked_add(1).ok_or_else(|| {
+                TranslateError::Invalid {
+                    field: "partition change leader epoch",
+                    detail: "leader epoch overflow".into(),
+                }
+            })?);
+    }
+    if let Some(directories) = &change.directories {
+        if directories.len() != partition.replicas.len() {
+            return Err(TranslateError::Invalid {
+                field: "partition change directories",
+                detail: format!(
+                    "{} directories for {} replicas",
+                    directories.len(),
+                    partition.replicas.len()
+                ),
+            });
+        }
+        partition.directories = directories.iter().copied().map(from_kuuid).collect();
+    }
+    partition.partition_epoch =
+        partition
+            .partition_epoch
+            .checked_add(1)
+            .ok_or_else(|| TranslateError::Invalid {
+                field: "partition change partition epoch",
+                detail: "partition epoch overflow".into(),
+            })?;
+    Ok(partition)
+}
+
+fn partition_leader_to_wire(leader: NodeId, field: &'static str) -> Result<i32, TranslateError> {
+    if leader == NodeId(0) {
+        return Ok(-1);
+    }
+    i32::try_from(leader.0).map_err(|_| TranslateError::Invalid {
+        field,
+        detail: format!("leader {leader} exceeds i32"),
+    })
+}
+
+fn partition_leader_from_wire(value: i32, field: &'static str) -> Result<NodeId, TranslateError> {
+    if value == -1 {
+        return Ok(NodeId(0));
+    }
+    node_id_from_wire(value, field)
 }
 
 fn node_id_from_wire(value: i32, field: &'static str) -> Result<NodeId, TranslateError> {
@@ -1301,7 +1591,9 @@ mod tests {
                 host: "192.168.1.10".into(),
                 port: 9092,
                 rack: Some("us-east-1a".into()),
+                log_dirs: vec![],
                 endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
             }),
             &img(),
         );
@@ -1316,9 +1608,10 @@ mod tests {
                 node_id: NodeId(1),
                 broker_epoch: 7,
                 incarnation_id: uuid::Uuid::from_u128(0xfeedface_0000_0000_0000_000000000001),
-                host: "h".into(),
-                port: 9092,
+                host: "ext.example.com".into(),
+                port: 9093,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![
                     BrokerEndpoint {
                         name: "EXTERNAL".into(),
@@ -1333,6 +1626,7 @@ mod tests {
                         protocol: ListenerProtocol::Plaintext,
                     },
                 ],
+                features: std::collections::BTreeMap::new(),
             }),
             &img(),
         );
@@ -1347,12 +1641,14 @@ mod tests {
             host: "broker.local".into(),
             port: 9092,
             rack: None,
+            log_dirs: vec![],
             endpoints: vec![BrokerEndpoint {
                 name: "EXTERNAL".into(),
                 host: "ext.example.com".into(),
                 port: 9093,
                 protocol: ListenerProtocol::SaslSsl,
             }],
+            features: std::collections::BTreeMap::new(),
         });
 
         let KraftMetadataRecord::RegisterBroker(k) = to_kraft(&rec, &img()).unwrap() else {
@@ -1368,11 +1664,27 @@ mod tests {
                     .collect::<Vec<_>>(),
             ) == (
                 false,
-                vec![
-                    ("", protocol_to_wire(ListenerProtocol::Plaintext)),
-                    ("EXTERNAL", protocol_to_wire(ListenerProtocol::SaslSsl),),
-                ],
+                vec![("EXTERNAL", protocol_to_wire(ListenerProtocol::SaslSsl),)],
             )
+        );
+    }
+
+    #[test]
+    fn controller_registration_round_trips() {
+        round_trip(
+            &MetadataRecord::V1ControllerRegistration(ControllerRegistrationRecord {
+                node_id: NodeId(3),
+                incarnation_id: uuid::Uuid::from_u128(3),
+                zk_migration_ready: false,
+                endpoints: vec![BrokerEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "controller-3".into(),
+                    port: 9093,
+                    protocol: ListenerProtocol::Plaintext,
+                }],
+                features: std::collections::BTreeMap::from([("metadata.version".into(), (7, 25))]),
+            }),
+            &img(),
         );
     }
 
@@ -1387,10 +1699,55 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 9092,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
             }),
             &img(),
         );
+    }
+
+    #[test]
+    fn register_broker_log_dirs_follow_metadata_version_record_gate() {
+        let directory = uuid::Uuid::from_u128(0xD1);
+        let record = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+            node_id: NodeId(3),
+            broker_epoch: 5,
+            incarnation_id: uuid::Uuid::from_u128(3),
+            host: "127.0.0.1".into(),
+            port: 9092,
+            rack: None,
+            endpoints: vec![],
+            log_dirs: vec![directory],
+            features: std::collections::BTreeMap::new(),
+        });
+
+        let mut kip858_image = img();
+        kip858_image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: crate::metadata_version::METADATA_VERSION_FEATURE.into(),
+            level: crate::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL,
+        }));
+        let value = to_kraft_values(&record, &kip858_image).unwrap().remove(0);
+        let (wire, version) = KraftMetadataRecord::decode_value(&value).unwrap();
+        assert2::assert!(version == 3);
+        assert2::assert!(from_kraft(&wire, &kip858_image).unwrap() == record);
+
+        let mut pre_kip858_image = img();
+        pre_kip858_image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: crate::metadata_version::METADATA_VERSION_FEATURE.into(),
+            level: crate::metadata_version::DIRECTORY_ASSIGNMENT_MIN_LEVEL - 1,
+        }));
+        let value = to_kraft_values(&record, &pre_kip858_image)
+            .unwrap()
+            .remove(0);
+        let (wire, version) = KraftMetadataRecord::decode_value(&value).unwrap();
+        assert2::assert!(version == 2);
+        let MetadataRecord::V1BrokerRegistration(decoded) =
+            from_kraft(&wire, &pre_kip858_image).unwrap()
+        else {
+            panic!("expected broker registration")
+        };
+        assert2::assert!(decoded.log_dirs.is_empty());
     }
 
     #[test]
@@ -1439,9 +1796,77 @@ mod tests {
     }
 
     #[test]
-    fn negative_wire_partition_node_id_is_rejected() {
+    fn wire_partition_no_leader_sentinel_round_trips() {
         let mut image = img();
         let topic_id = uuid::Uuid::from_u128(100);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "leaderless-test".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        let record = KraftMetadataRecord::Partition(KPartitionRecord {
+            topic_id: to_kuuid(topic_id),
+            partition_id: 0,
+            leader: -1,
+            ..Default::default()
+        });
+
+        let decoded = from_kraft(&record, &image).unwrap();
+        let MetadataRecord::V1Partition(decoded) = decoded else {
+            panic!("expected partition")
+        };
+        assert2::assert!(decoded.leader == NodeId(0));
+
+        let encoded = to_kraft(&MetadataRecord::V1Partition(decoded), &image).unwrap();
+        let KraftMetadataRecord::Partition(encoded) = encoded else {
+            panic!("expected partition")
+        };
+        assert2::assert!(encoded.leader == -1);
+    }
+
+    #[test]
+    fn wire_partition_change_no_leader_updates_epochs() {
+        let mut image = img();
+        let topic_id = uuid::Uuid::from_u128(101);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "leaderless-change-test".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "leaderless-change-test".into(),
+            partition: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(7),
+            partition_epoch: 11,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+        }));
+        let change = KraftMetadataRecord::PartitionChange(KPartitionChangeRecord {
+            topic_id: to_kuuid(topic_id),
+            partition_id: 0,
+            leader: -1,
+            ..Default::default()
+        });
+
+        let decoded = from_kraft(&change, &image).unwrap();
+        let MetadataRecord::V1Partition(decoded) = decoded else {
+            panic!("expected partition")
+        };
+        assert2::assert!(decoded.leader == NodeId(0));
+        assert2::assert!(decoded.leader_epoch == LeaderEpoch(8));
+        assert2::assert!(decoded.partition_epoch == 12);
+    }
+
+    #[test]
+    fn negative_wire_partition_replica_is_rejected() {
+        let mut image = img();
+        let topic_id = uuid::Uuid::from_u128(102);
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: "negative-node-test".into(),
             topic_id,
@@ -1452,6 +1877,7 @@ mod tests {
             topic_id: to_kuuid(topic_id),
             partition_id: 0,
             leader: -1,
+            replicas: vec![-1],
             ..Default::default()
         });
 
@@ -1772,25 +2198,55 @@ mod tests {
     }
 
     #[test]
-    fn partition_dir_assignment_round_trips_via_private_carrier() {
-        // KIP-858 dir-assignment delta must STAY a delta through the KRaft log:
-        // it rides a Crabka-private `Unknown` carrier so it decodes back to
-        // `V1PartitionDirAssignment` and applies as a one-slot merge, rather
-        // than materializing to a full `PartitionRecord` that would clobber a
-        // concurrent reassignment on apply.
+    fn partition_dir_assignment_uses_standard_partition_change_record() {
+        let topic_id = uuid::Uuid::from_u128(0x00C0_FFEE);
+        let mut image = img();
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 3,
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2)],
+            leader_epoch: LeaderEpoch(4),
+            adding_replicas: vec![NodeId(3)],
+            removing_replicas: vec![],
+            directories: vec![uuid::Uuid::nil(); 3],
+            partition_epoch: 9,
+        }));
         let rec = MetadataRecord::V1PartitionDirAssignment(PartitionDirAssignmentRecord {
             topic: "t".into(),
             partition: 0,
             replica: NodeId(2),
             directory: uuid::Uuid::from_u128(0xAB),
         });
-        let k = to_kraft(&rec, &img()).unwrap();
-        assert2::assert!(matches!(
-            k,
-            crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
-                if api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY
-        ));
-        round_trip(&rec, &img());
+        let k = to_kraft(&rec, &image).unwrap();
+        let KraftMetadataRecord::PartitionChange(change) = &k else {
+            panic!("expected standard PartitionChangeRecord");
+        };
+        assert2::assert!(k.api_key() == 5);
+        assert2::assert!(change.isr.is_none());
+        assert2::assert!(change.replicas.is_none());
+        assert2::assert!(
+            change.directories.as_ref().unwrap()[1] == to_kuuid(uuid::Uuid::from_u128(0xAB))
+        );
+
+        let values = to_kraft_values(&rec, &image).unwrap();
+        let (decoded_wire, version) = KraftMetadataRecord::decode_value(&values[0]).unwrap();
+        assert2::assert!(version == 2);
+        let decoded = from_kraft(&decoded_wire, &image).unwrap();
+        image.apply(&decoded);
+        let partition = image.partition("t", 0).unwrap();
+        assert2::assert!(partition.directories[1] == uuid::Uuid::from_u128(0xAB));
+        assert2::assert!(partition.isr == vec![NodeId(1), NodeId(2)]);
+        assert2::assert!(partition.adding_replicas == vec![NodeId(3)]);
+        assert2::assert!(partition.leader_epoch == LeaderEpoch(4));
+        assert2::assert!(partition.partition_epoch == 10);
     }
 
     #[test]
@@ -2184,12 +2640,6 @@ mod tests {
                     crabka_protocol::owned::end_transaction_record::EndTransactionRecord::default(),
                 ),
                 "EndTransaction",
-            ),
-            (
-                KraftMetadataRecord::RegisterController(
-                    crabka_protocol::owned::register_controller_record::RegisterControllerRecord::default(),
-                ),
-                "RegisterController",
             ),
             (
                 KraftMetadataRecord::RemoveAccessControlEntry(

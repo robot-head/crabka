@@ -61,7 +61,10 @@ jobs:
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-oauth')) ||
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection'))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A cold melange build can exceed 30 minutes before the shared cache has
+    # been populated; leave enough time for that first build to finish and
+    # publish the image artifacts used by every downstream kind job.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7.0.0
@@ -104,6 +107,9 @@ jobs:
               --repository-append "$PWD/packages" \
               --keyring-append "$PWD/melange.rsa.pub"
           done
+      - name: Make melange cache readable by the cache action
+        if: ${{ always() }}
+        run: sudo chown -R "$(id -u):$(id -g)" .melange-cache
       - name: Upload image tarballs
         uses: actions/upload-artifact@v7
         with:
@@ -2178,12 +2184,10 @@ jobs:
   # reconcile (the previous `kubectl set env` flavour of this job
   # would clobber on the next reconcile).
   #
-  # The verification step is the smoke-only path: apply a KafkaUser with
-  # `authentication.type: delegation-token`, wait for `Ready=True`, then
-  # dump the materialized Secret and assert it carries the four expected
-  # keys (`token-id`, `hmac`, `password`, `sasl.jaas.config`). Producing
-  # against the broker with the token credentials is deferred to keep this
-  # job tightly scoped to the new operator-broker control-plane handshake.
+  # The verification path applies a KafkaUser with
+  # `authentication.type: delegation-token`, waits for `Ready=True`, checks
+  # the four expected Secret keys, then authenticates a JVM producer with the
+  # issued token and writes a record through the broker.
   # ─────────────────────────────────────────────────────────────────────────
   kind-kafkauser-delegation-token:
     needs: [build-images, changes]
@@ -2282,6 +2286,18 @@ jobs:
             delegationToken:
               secretKeyRef:
                 name: delegation-token-key
+            listeners:
+              - name: PLAIN
+                port: 9092
+                type: internal
+                tls: false
+              - name: token
+                port: 9094
+                type: internal
+                tls: false
+                authentication:
+                  type: scram-sha-256
+            interBrokerListenerName: PLAIN
           ---
           apiVersion: crabka.io/v1alpha1
           kind: KafkaNodePool
@@ -2324,6 +2340,13 @@ jobs:
           spec:
             authentication:
               type: delegation-token
+            authorization:
+              type: simple
+              acls:
+                - resource:
+                    type: topic
+                    name: delegation-token-test
+                  operations: [Describe, Write]
           EOF
 
       - name: Wait for KafkaUser alice Ready
@@ -2380,6 +2403,77 @@ jobs:
           fi
           echo "Secret + status both populated; delegation-token reconcile complete (token=$tid)."
 
+      - name: Verify delegation-token produce persists a record
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: delegation-token-producer
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -euo pipefail
+                        plain_bootstrap=demo-broker-headless.default.svc.cluster.local:9092
+                        token_bootstrap=demo-broker-headless.default.svc.cluster.local:9094
+                        topic=delegation-token-test
+                        expected=delegation-token-test-record
+                        /opt/kafka/bin/kafka-topics.sh \
+                          --bootstrap-server "$plain_bootstrap" \
+                          --create \
+                          --if-not-exists \
+                          --topic "$topic" \
+                          --partitions 1 \
+                          --replication-factor 1
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SASL_PLAINTEXT
+                        sasl.mechanism=SCRAM-SHA-256
+                        sasl.jaas.config=$(cat /etc/crabka/alice/sasl.jaas.config)
+                        acks=all
+                        enable.idempotence=false
+                        INNER
+                        echo "$expected" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server "$token_bootstrap" \
+                            --topic "$topic" \
+                            --producer.config /tmp/client.props
+                        observed=$(/opt/kafka/bin/kafka-console-consumer.sh \
+                          --bootstrap-server "$plain_bootstrap" \
+                          --topic "$topic" \
+                          --partition 0 \
+                          --from-beginning \
+                          --max-messages 1 \
+                          --timeout-ms 30000)
+                        if [ "$observed" != "$expected" ]; then
+                          echo "expected '$expected', observed '$observed'" >&2
+                          exit 1
+                        fi
+                    volumeMounts:
+                      - name: alice-secret
+                        mountPath: /etc/crabka/alice
+                        readOnly: true
+                volumes:
+                  - name: alice-secret
+                    secret:
+                      secretName: alice
+          EOF
+          kubectl wait job/delegation-token-producer -n default \
+            --for=condition=complete --timeout=120s || {
+            echo "::error::delegation-token producer did not complete successfully"
+            kubectl logs -n default -l job-name=delegation-token-producer --tail=100 || true
+            exit 1
+          }
+
       - name: Collect diagnostics on failure
         if: failure()
         run: |
@@ -2406,6 +2500,8 @@ jobs:
               | python3 -m json.tool 2>&1 || true
             echo "### broker logs"
             kubectl logs -n default demo-brokers-0 --tail=300 --all-containers || true
+            echo "### delegation-token producer logs"
+            kubectl logs -n default -l job-name=delegation-token-producer --tail=100 || true
           } > /tmp/dt-diag/diagnostics.md
 
       - name: Upload diagnostics

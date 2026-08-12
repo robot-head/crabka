@@ -44,7 +44,7 @@ impl Encode for SaslHandshakeResponse {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         Ok(())
     }

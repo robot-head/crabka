@@ -20,12 +20,12 @@ heap-profiling = ["crabka-telemetry/heap-profiling"]
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
-crabka-client-streams = { version = "0.3.9", path = "../client-streams" }
-crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
-crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
-crabka-schema-serde = { version = "0.3.9", path = "../schema-serde", features = ["protobuf"] }
-crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-client-streams = { version = "0.4.0", path = "../client-streams" }
+crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
+crabka-client-consumer = { version = "0.4.0", path = "../client-consumer" }
+crabka-schema-serde = { version = "0.4.0", path = "../schema-serde", features = ["protobuf"] }
+crabka-telemetry = { version = "0.4.0", path = "../telemetry" }
 crabka-units = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }

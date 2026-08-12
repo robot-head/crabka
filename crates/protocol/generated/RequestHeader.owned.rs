@@ -49,7 +49,7 @@ impl Encode for RequestHeader {
                 } else {
                     let () = put_nullable_string(buf, self.client_id.as_deref());
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

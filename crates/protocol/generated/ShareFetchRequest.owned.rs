@@ -125,7 +125,7 @@ impl ShareFetchRequest {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -145,7 +145,7 @@ impl ShareFetchRequest {
                 for it in &self.forgotten_topics_data {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -502,7 +502,7 @@ impl Encode for FetchTopic {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -597,7 +597,7 @@ impl Encode for FetchPartition {
                 for it in &self.acknowledgement_batches {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -699,7 +699,7 @@ impl Encode for AcknowledgementBatch {
                 for it in &self.acknowledge_types {
                     put_i8(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -794,7 +794,7 @@ impl Encode for ForgottenTopic {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

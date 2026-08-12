@@ -28,6 +28,7 @@ impl ConsumerProtocolAssignment<'_> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_protocol_assignment::ConsumerProtocolAssignment {
@@ -59,7 +60,7 @@ impl Encode for ConsumerProtocolAssignment<'_> {
                 for it in &self.assigned_partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             if flex {
@@ -186,7 +187,7 @@ impl Encode for TopicPartition<'_> {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         Ok(())
     }

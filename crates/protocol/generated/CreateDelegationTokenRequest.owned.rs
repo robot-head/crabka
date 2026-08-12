@@ -55,7 +55,7 @@ impl Encode for CreateDelegationTokenRequest {
                 for it in &self.renewers {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i64(buf, self.max_lifetime_ms);

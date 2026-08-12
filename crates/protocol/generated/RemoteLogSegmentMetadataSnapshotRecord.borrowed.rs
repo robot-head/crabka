@@ -38,6 +38,7 @@ impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::remote_log_segment_metadata_snapshot_record::RemoteLogSegmentMetadataSnapshotRecord{
         crate::owned::remote_log_segment_metadata_snapshot_record::RemoteLogSegmentMetadataSnapshotRecord {
             segment_id: (self.segment_id),
@@ -100,7 +101,7 @@ impl<'a> RemoteLogSegmentMetadataSnapshotRecord<'a> {
                 for it in &self.segment_leader_epochs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

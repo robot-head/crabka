@@ -66,7 +66,7 @@ impl Encode for CreateTopicsRequest<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.timeout_ms);
@@ -206,7 +206,7 @@ impl Encode for CreatableTopic<'_> {
                 for it in &self.assignments {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -214,7 +214,7 @@ impl Encode for CreatableTopic<'_> {
                 for it in &self.configs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -364,7 +364,7 @@ impl Encode for CreatableReplicaAssignment {
                 for it in &self.broker_ids {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

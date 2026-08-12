@@ -55,7 +55,7 @@ impl Encode for ElectLeadersRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i32(buf, self.timeout_ms);
@@ -170,7 +170,7 @@ impl Encode for TopicPartitions {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

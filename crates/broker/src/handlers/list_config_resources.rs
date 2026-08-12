@@ -204,7 +204,9 @@ mod tests {
                     host: "127.0.0.1".into(),
                     port: 9092,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }

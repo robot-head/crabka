@@ -1,0 +1,38 @@
+plugins {
+    `java-library`
+    kotlin("jvm") version "2.2.21"
+    application
+}
+
+repositories { mavenCentral() }
+
+dependencies {
+    implementation("com.connectrpc:connect-kotlin:0.8.2")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.22.0")
+    implementation("com.google.protobuf:protobuf-java:4.32.0")
+    implementation("com.squareup.okhttp3:okhttp:5.1.0")
+
+    testImplementation("com.squareup.okhttp3:mockwebserver3:5.1.0")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.14.0")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+sourceSets {
+    main {
+        java.srcDir("gen")
+        kotlin.srcDir("gen")
+    }
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+}
+
+application { mainClass.set("dev.crabka.sdk.AdapterMain") }
+
+tasks.test { useJUnitPlatform() }

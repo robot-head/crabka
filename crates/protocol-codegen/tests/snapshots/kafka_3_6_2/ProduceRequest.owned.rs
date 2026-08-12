@@ -37,13 +37,13 @@ impl Encode for ProduceRequest {
                 let () = put_compact_nullable_string(buf, self.transactional_id.as_deref());
             } else {
                 let () = put_nullable_string(buf, self.transactional_id.as_deref());
-            }
+            };
         }
         if version >= 0 {
-            put_i16(buf, self.acks)
+            put_i16(buf, self.acks);
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
             {
@@ -51,7 +51,7 @@ impl Encode for ProduceRequest {
                 for it in &self.topic_data {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -89,7 +89,7 @@ impl Encode for ProduceRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ProduceRequest {
+impl Decode<'_> for ProduceRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
@@ -155,7 +155,7 @@ impl Encode for TopicProduceData {
                 let () = put_compact_string(buf, &self.name);
             } else {
                 let () = put_string(buf, &self.name);
-            }
+            };
         }
         if version >= 0 {
             {
@@ -163,7 +163,7 @@ impl Encode for TopicProduceData {
                 for it in &self.partition_data {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -191,7 +191,7 @@ impl Encode for TopicProduceData {
         n
     }
 }
-impl<'de> Decode<'de> for TopicProduceData {
+impl Decode<'_> for TopicProduceData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
@@ -238,7 +238,7 @@ impl Encode for PartitionProduceData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.index)
+            put_i32(buf, self.index);
         }
         if version >= 0 {
             match &self.records {
@@ -258,7 +258,7 @@ impl Encode for PartitionProduceData {
                         let () = put_bytes(buf, &__rb_buf);
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -294,7 +294,7 @@ impl Encode for PartitionProduceData {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionProduceData {
+impl Decode<'_> for PartitionProduceData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();

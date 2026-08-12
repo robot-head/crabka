@@ -1,0 +1,21 @@
+{
+  "id": "stub_blob",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "blob put returns gated unimplemented",
+      "command": {
+        "cmd": "blob_put",
+        "key": "avatar.png",
+        "value_b64": "aW1hZ2U="
+      },
+      "expect": {
+        "error": {
+          "kind": "unimplemented",
+          "module": "blob",
+          "gated_on": "chapter-b-blob-api"
+        }
+      }
+    }
+  ]
+}

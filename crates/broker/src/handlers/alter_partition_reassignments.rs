@@ -399,7 +399,9 @@ mod tests {
                     host: "localhost".into(),
                     port: 9092,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }
@@ -492,7 +494,9 @@ mod tests {
                     host: "localhost".into(),
                     port: 9092,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 }),
                 MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                     node_id: NodeId(2),
@@ -501,7 +505,9 @@ mod tests {
                     host: "localhost".into(),
                     port: 9093,
                     rack: None,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 }),
                 MetadataRecord::V1Topic(TopicRecord {
                     name: "orders".into(),

@@ -502,13 +502,10 @@ async fn describe_cluster_lists_brokers() {
     check!(resp.controller_id == 1, "expected controller_id == 1");
 }
 
-/// KIP-919: `DescribeCluster` with `endpoint_type = 2` (CONTROLLERS) projects
-/// the `KRaft` voter set instead of the broker set, so an `AdminClient` can
-/// discover the controller quorum. On a 1-node cluster that voter set is the
-/// single bootstrap voter (id=1) advertised on its CONTROLLER listener
-/// endpoint. The response echoes `endpoint_type = 2`.
+/// KIP-919: a broker endpoint rejects a controller projection request. Clients
+/// must send `endpoint_type = 2` to a controller listener instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn describe_cluster_endpoint_type_controllers_lists_voters() {
+async fn describe_cluster_endpoint_type_controllers_is_rejected() {
     const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
     let cluster = start_n_node(1).await.expect("start_n_node");
     let (_, cfg, _dir) = &cluster[0];
@@ -521,28 +518,16 @@ async fn describe_cluster_endpoint_type_controllers_lists_voters() {
         })
         .await
         .expect("describe_cluster controllers");
-    check!(resp.error_code == 0, "describe_cluster error_code");
+    check!(
+        resp.error_code == crabka_broker::codes::MISMATCHED_ENDPOINT_TYPE,
+        "describe_cluster error_code"
+    );
     check!(
         resp.endpoint_type == ENDPOINT_TYPE_CONTROLLERS,
         "response echoes endpoint_type=2; got {}",
         resp.endpoint_type
     );
-    assert!(
-        resp.brokers.len() == 1,
-        "1-node quorum has exactly one controller voter; got {}",
-        resp.brokers.len()
-    );
-    check!(
-        resp.brokers[0].broker_id == 1,
-        "bootstrap voter id is 1; got {}",
-        resp.brokers[0].broker_id
-    );
-    check!(
-        !resp.brokers[0].host.is_empty() && resp.brokers[0].port > 0,
-        "controller endpoint host/port populated; got {}:{}",
-        resp.brokers[0].host,
-        resp.brokers[0].port
-    );
+    check!(resp.brokers.is_empty());
 }
 
 // ── DescribeQuorum (api_key 55, KIP-595) ───────────────────────────────────

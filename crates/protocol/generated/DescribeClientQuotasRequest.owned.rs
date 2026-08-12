@@ -39,7 +39,7 @@ impl Encode for DescribeClientQuotasRequest {
                 for it in &self.components {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_bool(buf, self.strict);

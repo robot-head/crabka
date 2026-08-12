@@ -808,6 +808,7 @@ impl Controller {
             shutdown.clone(),
             config.handshake.clone(),
             config.shard_router.clone(),
+            config.admin_router.clone(),
         ));
         info!(
             node_id = config.node_id.0,

@@ -1,0 +1,44 @@
+{
+  "id": "queue_v1_1_acquire_shape",
+  "since": { "major": 1, "minor": 1 },
+  "steps": [
+    {
+      "name": "publish queue record",
+      "command": {
+        "cmd": "publish",
+        "topic": "queue-acquire",
+        "value_b64": "d29yaw==",
+        "headers": [{ "name": "kind", "value_b64": "cXVldWU=" }]
+      },
+      "expect": {
+        "ok": { "deduplicated": false, "offset": 0, "partition": 0 }
+      }
+    },
+    {
+      "name": "acquire exposes queue response shape",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-acquire",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "ok": {
+          "session_id": "queue-session-1",
+          "messages": [
+            {
+              "message_id": "queue-acquire:0:0",
+              "topic": "queue-acquire",
+              "partition": 0,
+              "offset": 0,
+              "value_b64": "d29yaw==",
+              "headers": [{ "name": "kind", "value_b64": "cXVldWU=" }],
+              "delivery_count": 1
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

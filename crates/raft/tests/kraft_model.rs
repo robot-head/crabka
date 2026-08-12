@@ -84,9 +84,13 @@ fn three_voters_faults() {
 }
 
 #[test]
-fn three_voters_append_via_linearizable() {
+fn two_voters_append_via_linearizable() {
     run(
-        ConsensusModel::append_via(&[NodeId(1), NodeId(2), NodeId(3)], 2),
-        "three_voters_append_via_linearizable",
+        // The diskless linearizability leg deliberately uses the design's
+        // exhaustive tiny bound: two voters, two stateless appenders, and two
+        // appends. The separate crash model and 3-broker black-box gate cover
+        // minority WAL-node loss.
+        ConsensusModel::append_via(&[NodeId(1), NodeId(2)], 2),
+        "two_voters_append_via_linearizable",
     );
 }

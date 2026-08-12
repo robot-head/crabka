@@ -30,14 +30,14 @@ impl Encode for ApiVersionsRequest {
                 let () = put_compact_string(buf, &self.client_software_name);
             } else {
                 let () = put_string(buf, &self.client_software_name);
-            }
+            };
         }
         if version >= 3 {
             if flex {
                 let () = put_compact_string(buf, &self.client_software_version);
             } else {
                 let () = put_string(buf, &self.client_software_version);
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -61,7 +61,7 @@ impl Encode for ApiVersionsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ApiVersionsRequest {
+impl Decode<'_> for ApiVersionsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });

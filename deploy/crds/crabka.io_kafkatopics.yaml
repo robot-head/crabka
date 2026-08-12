@@ -46,8 +46,8 @@ spec:
                 type: boolean
               replicas:
                 description: |-
-                  Replication factor. The operator rejects changes with
-                  `ImmutableFieldChanged` until partition reassignment lands.
+                  Replication factor. The operator applies changes through Kafka
+                  partition reassignment and reports `Reassigning` until it completes.
                 format: int32
                 maximum: 1000.0
                 minimum: 1.0

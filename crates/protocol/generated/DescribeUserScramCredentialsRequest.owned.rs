@@ -39,7 +39,7 @@ impl Encode for DescribeUserScramCredentialsRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

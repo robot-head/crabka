@@ -30,9 +30,11 @@ pub struct KafkaSpec {
     /// `KRaft` metadata version, the runtime analog of
     /// `inter.broker.protocol.version`. When unset, it tracks the
     /// `major.minor` of `kafkaVersion`. When set, it pins the metadata version
-    /// for the safe two-step upgrade. The operator validates it against
-    /// `kafkaVersion` and the finalized `status.metadataVersion`. An invalid
-    /// value surfaces `KafkaVersionValid=False` and blocks the roll.
+    /// for a two-step upgrade or an online downgrade. The operator validates
+    /// it against `kafkaVersion`; changes on an existing cluster are finalized
+    /// through `UpdateFeatures`, with safe-downgrade semantics for a lower
+    /// target. Rejections surface `KafkaVersionValid=False` and leave
+    /// `status.metadataVersion` unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_version: Option<String>,
     /// Opaque broker properties, in `server.properties`-style key and value
@@ -1655,9 +1657,8 @@ pub struct KafkaStatus {
     /// Echo of `spec.kafkaVersion`, for observability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_version: Option<String>,
-    /// The operator-finalized metadata version. It advances only when the
-    /// version validation passes. It drives the downgrade-window check on the
-    /// next reconcile.
+    /// The operator-finalized metadata version. On an existing cluster it
+    /// advances only after `UpdateFeatures` accepts the requested level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_version: Option<String>,
 }

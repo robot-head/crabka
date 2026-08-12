@@ -117,6 +117,10 @@ mod tests {
         };
         assert!(lookup(METADATA_VERSION) == Some(expected));
         assert!(lookup("not.a.feature").is_none());
+        assert!(
+            lookup(crabka_metadata::metadata_version::METADATA_DOWNGRADE_CAPABILITY_FEATURE)
+                .is_none()
+        );
     }
 
     #[test]

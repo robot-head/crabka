@@ -69,7 +69,7 @@ impl Encode for AssignReplicasToDirsRequest {
                 for it in &self.directories {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -184,7 +184,7 @@ impl Encode for DirectoryData {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -284,7 +284,7 @@ impl Encode for TopicData {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

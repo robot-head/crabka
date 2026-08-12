@@ -155,7 +155,7 @@ impl StreamsGroupHeartbeatRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -174,7 +174,7 @@ impl StreamsGroupHeartbeatRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -193,7 +193,7 @@ impl StreamsGroupHeartbeatRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -240,7 +240,7 @@ impl StreamsGroupHeartbeatRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -259,7 +259,7 @@ impl StreamsGroupHeartbeatRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -278,7 +278,7 @@ impl StreamsGroupHeartbeatRequest {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         Ok(())
     }
@@ -899,7 +899,7 @@ impl Encode for Topology {
                 for it in &self.subtopologies {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -1003,7 +1003,7 @@ impl Encode for Subtopology {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -1015,7 +1015,7 @@ impl Encode for Subtopology {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -1027,7 +1027,7 @@ impl Encode for Subtopology {
                 for it in &self.state_changelog_topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -1043,7 +1043,7 @@ impl Encode for Subtopology {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -1055,7 +1055,7 @@ impl Encode for Subtopology {
                 for it in &self.repartition_source_topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -1063,7 +1063,7 @@ impl Encode for Subtopology {
                 for it in &self.copartition_groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -1326,7 +1326,7 @@ impl Encode for CopartitionGroup {
                 for it in &self.source_topics {
                     put_i16(buf, *it);
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -1334,7 +1334,7 @@ impl Encode for CopartitionGroup {
                 for it in &self.source_topic_regex {
                     put_i16(buf, *it);
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -1346,7 +1346,7 @@ impl Encode for CopartitionGroup {
                 for it in &self.repartition_source_topics {
                     put_i16(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

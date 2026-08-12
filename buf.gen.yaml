@@ -1,0 +1,20 @@
+version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/go:v1.36.10
+    out: sdks/go/gen
+    opt:
+      - paths=source_relative
+  - remote: buf.build/connectrpc/go:v1.18.1
+    out: sdks/go/gen
+    opt:
+      - paths=source_relative
+  - remote: buf.build/bufbuild/es:v2.9.0
+    out: sdks/ts/gen
+    opt:
+      - target=ts
+  - remote: buf.build/protocolbuffers/java:v32.0
+    out: sdks/java/gen
+  - remote: buf.build/connectrpc/kotlin:v0.8.2
+    out: sdks/java/gen
+  - remote: buf.build/protocolbuffers/cpp:v21.12
+    out: sdks/cpp/gen

@@ -222,11 +222,10 @@ pub enum NamingPolicy {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Delivery {
-    /// At-least-once delivery (supported from Slice 1).
+    /// At-least-once delivery.
     #[default]
     AtLeastOnce,
-    /// Exactly-once delivery, planned for Slice 3. Slice 1 validation rejects
-    /// it.
+    /// Exactly-once target writes and source checkpoints.
     ExactlyOnce,
 }
 
@@ -265,13 +264,12 @@ impl ReplicatorConfig {
         serde_yaml::from_str(s).map_err(|e| ReplicatorError::Config(e.to_string()))
     }
 
-    /// Validate a parsed config against Slice-1 constraints.
+    /// Validate a parsed config.
     ///
     /// # Errors
     ///
     /// Returns [`ReplicatorError::Config`] if:
     /// - A flow references an unknown cluster alias.
-    /// - A flow requests `exactly-once` delivery (not supported until Slice 3).
     pub fn validate(&self) -> Result<(), ReplicatorError> {
         for f in &self.flows {
             if !self.clusters.contains_key(&f.from) {
@@ -285,12 +283,6 @@ impl ReplicatorConfig {
                     "flow.to unknown cluster `{}`",
                     f.to
                 )));
-            }
-            if f.delivery == Delivery::ExactlyOnce {
-                return Err(ReplicatorError::Config(
-                    "delivery `exactly-once` is not supported until Slice 3; use `at-least-once`"
-                        .into(),
-                ));
             }
         }
         Ok(())
@@ -332,11 +324,11 @@ policies:
     }
 
     #[test]
-    fn rejects_eos_in_slice1() {
+    fn accepts_exactly_once_delivery() {
         let y = YAML.replace("delivery: at-least-once", "delivery: exactly-once");
         let cfg = ReplicatorConfig::from_yaml(&y).unwrap();
-        let err = cfg.validate().unwrap_err();
-        assert2::assert!(format!("{err}").contains("exactly-once"));
+        assert2::assert!(cfg.flows[0].delivery == Delivery::ExactlyOnce);
+        cfg.validate().unwrap();
     }
 
     #[test]

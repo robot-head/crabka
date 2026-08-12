@@ -39,7 +39,7 @@ impl Encode for ReadShareGroupStateResponse {
                 for it in &self.results {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -123,7 +123,7 @@ impl Encode for ReadStateResult {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -230,7 +230,7 @@ impl Encode for PartitionResult {
                 for it in &self.state_batches {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

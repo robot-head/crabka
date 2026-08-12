@@ -63,7 +63,7 @@ impl Encode for ListConfigResourcesResponse<'_> {
                 for it in &self.config_resources {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

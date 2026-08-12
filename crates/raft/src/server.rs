@@ -5,15 +5,14 @@
 //!
 //! Wire shape matches `crabka_client_core::Connection::raw_request`:
 //!
-//! - Request: `len(i32) | RequestHeader v2 (flexible) | body`
-//! - Response: `len(i32) | correlation_id(i32) | tagged_fields(0u8) | body`
+//! - Request: `len(i32) | RequestHeader v1/v2 | body`
+//! - Response: `len(i32) | ResponseHeader v0/v1 | body`
 //!
-//! `RequestHeader` v2 = `api_key(i16) api_version(i16) correlation_id(i32)
-//! client_id(NULLABLE_STRING) tagged_fields(varint=0)`. We parse and discard
-//! everything but `api_key`/`correlation_id` (the body is decoded by the
-//! engine's transport codec / the Crabka-private wire types).
+//! Both request headers begin with `api_key(i16) api_version(i16)
+//! correlation_id(i32) client_id(NULLABLE_STRING)`. Flexible APIs add tagged
+//! fields. The body is decoded by the selected controller or Admin handler.
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_ids::{ApiKey, ApiVersion};
@@ -25,6 +24,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
+
+mod registration;
 
 use crate::{
     error::RaftError,
@@ -41,6 +42,13 @@ use crate::{
 /// Kafka request-header `correlation_id`, echoed back in the response header.
 type CorrelationId = i32;
 
+struct ConnectionContext {
+    peer: SocketAddr,
+    principal: Option<crabka_security::Principal>,
+    authenticated_via_token: bool,
+    cluster_alter_authorized: bool,
+}
+
 /// Kafka's `ApiVersions` API key. The controller TCP listener answers this
 /// because `crabka_client_core::Connection::connect` performs an `ApiVersions`
 /// handshake before any other request.
@@ -50,10 +58,13 @@ const API_KEY_API_VERSIONS: i16 = 18;
 /// max in the `api_keys` table and the clamp applied to the response body codec
 /// (JVM controllers dial at v4; Crabka's own client at v0).
 const API_VERSIONS_MAX_VERSION: i16 = 4;
+/// First `ApiVersions` response version where JVM clients accept a zero minimum
+/// for `kraft.version`.
+const KRAFT_ZERO_MIN_API_VERSION: i16 = 4;
 
 /// `DescribeCluster` (KIP-919) — served on the controller listener so an
 /// `AdminClient` bootstrapped with `--bootstrap-controller` can discover the
-/// quorum's controller (or broker) endpoints directly from the leader.
+/// quorum's controller endpoints directly from the leader.
 const API_KEY_DESCRIBE_CLUSTER: i16 = 60;
 const API_KEY_DESCRIBE_QUORUM: i16 = 55;
 const API_KEY_ADD_RAFT_VOTER: i16 = 80;
@@ -80,6 +91,7 @@ pub(crate) async fn run(
     shutdown: CancellationToken,
     handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
     shard_router: Option<Arc<dyn crate::RaftShardRouter>>,
+    admin_router: Option<Arc<dyn crate::ControllerAdminRouter>>,
 ) {
     match listener.local_addr() {
         Ok(addr) => info!(%addr, "controller listener started"),
@@ -95,6 +107,7 @@ pub(crate) async fn run(
                         let shutdown = shutdown.clone();
                         let handshake = handshake.clone();
                         let shard_router = shard_router.clone();
+                        let admin_router = admin_router.clone();
                         tokio::spawn(async move {
                             let connection = if let Some(hs) = handshake {
                                 match hs.upgrade(stream).await {
@@ -107,6 +120,8 @@ pub(crate) async fn run(
                             } else {
                                 crate::RaftConnection {
                                     stream: Box::new(stream) as Box<dyn crate::DuplexStream>,
+                                    principal: None,
+                                    authenticated_via_token: false,
                                     cluster_alter_authorized: true,
                                 }
                             };
@@ -115,7 +130,13 @@ pub(crate) async fn run(
                                 engine,
                                 shutdown,
                                 shard_router,
-                                connection.cluster_alter_authorized,
+                                admin_router,
+                                ConnectionContext {
+                                    peer,
+                                    principal: connection.principal,
+                                    authenticated_via_token: connection.authenticated_via_token,
+                                    cluster_alter_authorized: connection.cluster_alter_authorized,
+                                },
                             ).await {
                                 error!(%peer, error = %e, "controller connection error");
                             }
@@ -135,7 +156,8 @@ async fn handle_conn<S>(
     engine: KraftController,
     shutdown: CancellationToken,
     shard_router: Option<Arc<dyn crate::RaftShardRouter>>,
-    cluster_alter_authorized: bool,
+    admin_router: Option<Arc<dyn crate::ControllerAdminRouter>>,
+    context: ConnectionContext,
 ) -> Result<(), RaftError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -143,8 +165,8 @@ where
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
-            res = read_one_request(&mut stream) => {
-                let (api_key_n, api_version, correlation_id, body) = match res {
+            res = read_one_request(&mut stream, admin_router.as_deref()) => {
+                let (api_key_n, api_version, correlation_id, client_id, body, response_flexible) = match res {
                     Ok(v) => v,
                     Err(e) => {
                         // Treat peer EOF as a clean shutdown of this conn.
@@ -166,8 +188,12 @@ where
                     // are flexible (compact array). Crabka's own client asks at
                     // v0; the JVM controller asks at v4. The generated codec
                     // speaks the raw `int16`, so unwrap the version here.
-                    let kraft_version = engine.current_image().kraft_version();
-                    let resp = api_versions_response_body(api_version.get(), kraft_version);
+                    let image = engine.current_image();
+                    let resp = api_versions_response_body(
+                        api_version.get(),
+                        &image,
+                        admin_router.as_deref(),
+                    );
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
@@ -193,7 +219,7 @@ where
                         API_KEY_ADD_RAFT_VOTER
                             | API_KEY_REMOVE_RAFT_VOTER
                             | API_KEY_UPDATE_RAFT_VOTER
-                    ) && !cluster_alter_authorized
+                    ) && !context.cluster_alter_authorized
                     {
                         let resp = kip853_authorization_failure(
                             api_key_n.0,
@@ -212,11 +238,64 @@ where
                     write_response(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
+                if registration::is_controller_api(api_key_n.0) {
+                    let resp = registration::dispatch(
+                        api_key_n.0,
+                        api_version.get(),
+                        &body,
+                        &engine,
+                        context.cluster_alter_authorized,
+                    )
+                    .await?;
+                    write_response(&mut stream, correlation_id, resp).await?;
+                    continue;
+                }
+                if !is_native_raft_api(api_key_n.0)
+                    && let Some(router) = admin_router.as_deref()
+                    && let Some(response) = router
+                        .route(crate::ControllerAdminRequest {
+                            api_key: api_key_n.get(),
+                            api_version: api_version.get(),
+                            correlation_id,
+                            client_id,
+                            body: body.clone(),
+                            peer: context.peer,
+                            principal: context.principal.clone(),
+                            authenticated_via_token: context.authenticated_via_token,
+                        })
+                        .await?
+                {
+                    write_response_frame(
+                        &mut stream,
+                        correlation_id,
+                        response.body,
+                        response.flexible,
+                    )
+                    .await?;
+                    continue;
+                }
                 let resp = dispatch_with_router(api_key_n, body, &engine, shard_router.as_deref()).await?;
-                write_response(&mut stream, correlation_id, resp).await?;
+                write_response_frame(&mut stream, correlation_id, resp, response_flexible).await?;
             }
         }
     }
+}
+
+/// APIs owned by the Raft listener itself rather than its KIP-919 Admin
+/// extension. These must reach `dispatch_with_router` even while the broker-side
+/// Admin router is not bound yet: private `SubmitChange` is used during broker
+/// self-registration.
+fn is_native_raft_api(api_key: i16) -> bool {
+    matches!(
+        api_key,
+        api_key::FETCH
+            | api_key::VOTE
+            | api_key::BEGIN_QUORUM_EPOCH
+            | api_key::END_QUORUM_EPOCH
+            | api_key::FETCH_SNAPSHOT
+            | API_KEY_SUBMIT_CHANGE
+            | API_KEY_METADATA_FETCH
+    )
 }
 
 fn is_eof(e: &RaftError) -> bool {
@@ -241,9 +320,61 @@ fn require_remaining(available: usize, required: usize) -> Result<(), RaftError>
     }
 }
 
+fn request_is_flexible(
+    api_key: i16,
+    version: i16,
+    admin_router: Option<&dyn crate::ControllerAdminRouter>,
+) -> bool {
+    use crabka_protocol::owned::{
+        add_raft_voter_request, api_versions_request, begin_quorum_epoch_request,
+        broker_heartbeat_request, broker_registration_request, controller_registration_request,
+        describe_cluster_request, describe_quorum_request, end_quorum_epoch_request, fetch_request,
+        fetch_snapshot_request, remove_raft_voter_request, update_raft_voter_request, vote_request,
+    };
+
+    let flexible_min = match api_key {
+        api_versions_request::API_KEY => Some(api_versions_request::FLEXIBLE_MIN),
+        fetch_request::API_KEY => Some(fetch_request::FLEXIBLE_MIN),
+        vote_request::API_KEY => Some(vote_request::FLEXIBLE_MIN),
+        begin_quorum_epoch_request::API_KEY => Some(begin_quorum_epoch_request::FLEXIBLE_MIN),
+        end_quorum_epoch_request::API_KEY => Some(end_quorum_epoch_request::FLEXIBLE_MIN),
+        fetch_snapshot_request::API_KEY => Some(fetch_snapshot_request::FLEXIBLE_MIN),
+        describe_quorum_request::API_KEY => Some(describe_quorum_request::FLEXIBLE_MIN),
+        describe_cluster_request::API_KEY => Some(describe_cluster_request::FLEXIBLE_MIN),
+        broker_registration_request::API_KEY => Some(broker_registration_request::FLEXIBLE_MIN),
+        broker_heartbeat_request::API_KEY => Some(broker_heartbeat_request::FLEXIBLE_MIN),
+        controller_registration_request::API_KEY => {
+            Some(controller_registration_request::FLEXIBLE_MIN)
+        }
+        add_raft_voter_request::API_KEY => Some(add_raft_voter_request::FLEXIBLE_MIN),
+        remove_raft_voter_request::API_KEY => Some(remove_raft_voter_request::FLEXIBLE_MIN),
+        update_raft_voter_request::API_KEY => Some(update_raft_voter_request::FLEXIBLE_MIN),
+        API_KEY_SUBMIT_CHANGE | API_KEY_METADATA_FETCH => Some(i16::MIN),
+        _ => admin_router.and_then(|router| {
+            router
+                .api_versions()
+                .iter()
+                .find(|api| api.api_key == api_key)
+                .map(|api| api.flexible_min)
+        }),
+    };
+    flexible_min.is_some_and(|minimum| version >= minimum)
+}
+
 async fn read_one_request<S>(
     stream: &mut S,
-) -> Result<(ApiKey, ApiVersion, CorrelationId, Bytes), RaftError>
+    admin_router: Option<&dyn crate::ControllerAdminRouter>,
+) -> Result<
+    (
+        ApiKey,
+        ApiVersion,
+        CorrelationId,
+        Option<String>,
+        Bytes,
+        bool,
+    ),
+    RaftError,
+>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -266,23 +397,40 @@ where
     let api_version = ApiVersion(cur.get_i16());
     let correlation_id = cur.get_i32();
 
-    // Skip client_id: NULLABLE_STRING (i16 length + bytes; -1 = null).
+    // Decode client_id: NULLABLE_STRING (i16 length + bytes; -1 = null).
     require_remaining(cur.remaining(), 2)?;
     let cs_len = cur.get_i16();
-    if let Ok(n @ 1..) = usize::try_from(cs_len) {
-        require_remaining(cur.remaining(), n)?;
-        cur.advance(n);
-    }
-    // tagged_fields: single varint zero.
-    if cur.has_remaining() && cur[0] == 0 {
-        cur.advance(1);
+    let client_id = match cs_len {
+        -1 => None,
+        0.. => {
+            let n = usize::try_from(cs_len).expect("non-negative i16 fits usize");
+            require_remaining(cur.remaining(), n)?;
+            let (raw, rest) = cur.split_at(n);
+            cur = rest;
+            Some(
+                std::str::from_utf8(raw)
+                    .map_err(crabka_protocol::ProtocolError::InvalidUtf8)?
+                    .to_owned(),
+            )
+        }
+        _ => {
+            return Err(RaftError::Protocol(
+                crabka_protocol::ProtocolError::InvalidValue("client id length below -1"),
+            ));
+        }
+    };
+    let response_flexible = request_is_flexible(api_key_n.get(), api_version.get(), admin_router);
+    if response_flexible {
+        crabka_protocol::tagged_fields::read_tagged_fields(&mut cur, |_tag, _payload| Ok(false))?;
     }
 
     Ok((
         api_key_n,
         api_version,
         correlation_id,
+        client_id,
         Bytes::copy_from_slice(cur),
+        response_flexible,
     ))
 }
 
@@ -348,7 +496,11 @@ where
 /// `throttle_time_ms(i32)`, response-level `tagged(0)`. Per the documented Kafka
 /// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
 /// so this is written via [`write_response_no_tagged_fields`].
-fn api_versions_response_body(req_version: i16, kraft_version: u16) -> Bytes {
+fn api_versions_response_body(
+    req_version: i16,
+    image: &crabka_metadata::MetadataImage,
+    admin_router: Option<&dyn crate::ControllerAdminRouter>,
+) -> Bytes {
     use crabka_protocol::{
         Encode,
         owned::api_versions_response::{
@@ -371,29 +523,74 @@ fn api_versions_response_body(req_version: i16, kraft_version: u16) -> Bytes {
         (API_KEY_ADD_RAFT_VOTER, 1),
         (API_KEY_REMOVE_RAFT_VOTER, 0),
         (API_KEY_UPDATE_RAFT_VOTER, 0),
+        registration::SUPPORTED_APIS[0],
+        registration::SUPPORTED_APIS[1],
+        registration::SUPPORTED_APIS[2],
     ];
-    let resp = ApiVersionsResponse {
-        api_keys: KEYS
-            .iter()
-            .map(|&(api_key, max_version)| ApiVersionEntry {
-                api_key,
-                max_version,
+    let mut api_keys: Vec<ApiVersionEntry> = KEYS
+        .iter()
+        .map(|&(api_key, max_version)| ApiVersionEntry {
+            api_key,
+            max_version,
+            ..Default::default()
+        })
+        .collect();
+    if let Some(router) = admin_router {
+        api_keys.extend(router.api_versions().iter().map(|version| ApiVersionEntry {
+            api_key: version.api_key,
+            min_version: version.min_version,
+            max_version: version.max_version,
+            ..Default::default()
+        }));
+    }
+    api_keys.sort_unstable_by_key(|version| version.api_key);
+
+    // `Admin::describeFeatures` is carried by ApiVersions. Keep the
+    // controller-listener view on the same metadata registry and live
+    // finalized image as the broker listener, including kraft.version's
+    // v4-only zero minimum compatibility rule.
+    let supported_features = crabka_metadata::feature_registry()
+        .iter()
+        .map(|feature| {
+            let (minimum, maximum) = feature.supported_range();
+            SupportedFeatureKey {
+                name: feature.name().into(),
+                min_version: if feature.name()
+                    == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE
+                    && req_version >= KRAFT_ZERO_MIN_API_VERSION
+                {
+                    minimum
+                } else {
+                    minimum.max(1)
+                },
+                max_version: maximum,
                 ..Default::default()
-            })
-            .collect(),
-        supported_features: vec![SupportedFeatureKey {
-            name: crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE.into(),
-            min_version: 0,
-            max_version: 1,
+            }
+        })
+        .collect();
+    let mut finalized_features: Vec<_> = image
+        .finalized_features()
+        .iter()
+        .map(|(name, level)| FinalizedFeatureKey {
+            name: name.clone(),
+            min_version_level: *level,
+            max_version_level: *level,
             ..Default::default()
-        }],
-        finalized_features_epoch: 0,
-        finalized_features: vec![FinalizedFeatureKey {
-            name: crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE.into(),
-            min_version_level: i16::try_from(kraft_version).unwrap_or(i16::MAX),
-            max_version_level: i16::try_from(kraft_version).unwrap_or(i16::MAX),
-            ..Default::default()
-        }],
+        })
+        .collect();
+    let kraft_version = i16::try_from(image.kraft_version()).unwrap_or(i16::MAX);
+    finalized_features.push(FinalizedFeatureKey {
+        name: crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE.into(),
+        min_version_level: kraft_version,
+        max_version_level: kraft_version,
+        ..Default::default()
+    });
+
+    let resp = ApiVersionsResponse {
+        api_keys,
+        supported_features,
+        finalized_features_epoch: image.finalized_features_epoch(),
+        finalized_features,
         ..Default::default()
     };
     // JVM dials at v4 (flexible); Crabka's own client at v0 (non-flexible). The
@@ -992,9 +1189,9 @@ async fn dispatch_metadata_fetch(
 /// Serve `DescribeCluster` (60, KIP-919) on the controller listener from the
 /// controller's metadata image. `endpoint_type=2` (CONTROLLERS) projects the
 /// voter set so a `--bootstrap-controller` `AdminClient` can discover the
-/// quorum; otherwise the registered brokers are returned. The controller
-/// listener carries no principal/ACL context (it is the inter-node trust
-/// boundary, like `metadata_fetch`), so there is no auth gate.
+/// quorum. Other endpoint types are rejected with KIP-919's
+/// `MISMATCHED_ENDPOINT_TYPE`. Any configured authentication is terminated by
+/// the controller-listener handshake before the Raft image projection.
 // The broker-id `i32::try_from(node_id).unwrap_or(-1)` overflow fallback is
 // unreachable: the metadata layer rejects registering a `node_id` exceeding
 // `i32::MAX` (BrokerRegistrationRecord encode validation), so the `-1` sentinel
@@ -1030,19 +1227,6 @@ async fn describe_cluster_response_body(
             )
         })
         .collect();
-    // Broker endpoints: each registered broker's inter-broker host/port.
-    let brokers: Vec<(i32, String, i32, Option<String>)> = image
-        .brokers()
-        .map(|b| {
-            (
-                i32::try_from(b.node_id.0).unwrap_or(-1),
-                b.host.clone(),
-                i32::from(b.port),
-                b.rack.clone(),
-            )
-        })
-        .collect();
-
     let controller_id: i32 = engine
         .quorum_state()
         .await
@@ -1055,7 +1239,6 @@ async fn describe_cluster_response_body(
         version,
         req.endpoint_type,
         &voters,
-        &brokers,
         &image.cluster_id().to_string(),
         controller_id,
     )?)
@@ -1067,7 +1250,6 @@ fn build_describe_cluster_body(
     version: i16,
     endpoint_type: i8,
     voters: &[(i32, String, i32)],
-    brokers: &[(i32, String, i32, Option<String>)],
     cluster_id: &str,
     controller_id: i32,
 ) -> Result<Bytes, crabka_protocol::ProtocolError> {
@@ -1077,8 +1259,9 @@ fn build_describe_cluster_body(
     };
 
     const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
-    let entries: Vec<DescribeClusterBroker> = if endpoint_type == ENDPOINT_TYPE_CONTROLLERS {
-        voters
+    const MISMATCHED_ENDPOINT_TYPE: i16 = 114;
+    let (error_code, error_message, entries) = if endpoint_type == ENDPOINT_TYPE_CONTROLLERS {
+        let entries = voters
             .iter()
             .map(|(id, host, port)| DescribeClusterBroker {
                 broker_id: *id,
@@ -1086,25 +1269,21 @@ fn build_describe_cluster_body(
                 port: *port,
                 ..Default::default()
             })
-            .collect()
+            .collect();
+        (0, None, entries)
     } else {
-        brokers
-            .iter()
-            .map(|(id, host, port, rack)| DescribeClusterBroker {
-                broker_id: *id,
-                host: host.clone(),
-                port: *port,
-                rack: rack.clone(),
-                ..Default::default()
-            })
-            .collect()
+        (
+            MISMATCHED_ENDPOINT_TYPE,
+            Some("controller listener requires endpoint_type=CONTROLLERS".into()),
+            Vec::new(),
+        )
     };
 
-    // Only the non-default fields are set; error_code (0), error_message (None),
-    // throttle_time_ms (0), and cluster_authorized_operations (i32::MIN — "not
-    // present"; the controller listener has no ACL context) fall through to
-    // `Default`. Specifying them explicitly would just be equivalent-mutant noise.
+    // Throttle time and cluster_authorized_operations keep their protocol
+    // defaults; the endpoint-specific fields are explicit in both branches.
     let resp = DescribeClusterResponse {
+        error_code,
+        error_message,
         endpoint_type,
         cluster_id: cluster_id.to_string(),
         controller_id,
@@ -1120,7 +1299,7 @@ fn build_describe_cluster_body(
 mod tests {
     use assert2::check;
     use bytes::{BufMut, Bytes};
-    use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
+    use crabka_metadata::{FeatureLevelRecord, MetadataRecord, NodeId, TopicRecord};
     use crabka_protocol::Decode;
     use crabka_units::prelude::{Time, TimeExt as _, millis, secs};
     use tokio::io::AsyncWriteExt;
@@ -1134,6 +1313,24 @@ mod tests {
 
     /// How long a test waits for a leader to appear.
     const TEST_LEADER_DEADLINE: Time = secs(5);
+
+    #[test]
+    fn private_startup_apis_bypass_the_admin_extension() {
+        for api_key in [
+            api_key::FETCH,
+            api_key::VOTE,
+            api_key::BEGIN_QUORUM_EPOCH,
+            api_key::END_QUORUM_EPOCH,
+            api_key::FETCH_SNAPSHOT,
+            API_KEY_SUBMIT_CHANGE,
+            API_KEY_METADATA_FETCH,
+        ] {
+            assert2::assert!(is_native_raft_api(api_key));
+        }
+        assert2::assert!(!is_native_raft_api(
+            crabka_protocol::owned::create_topics_request::API_KEY
+        ));
+    }
 
     fn length_prefixed(frame: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(frame.len() + 4);
@@ -1342,7 +1539,7 @@ mod tests {
             ),
             (
                 "null client id with no body",
-                raw_request_frame(ApiKey(52), ApiVersion(2), 123, -1, &[], &[]),
+                raw_request_frame(ApiKey(52), ApiVersion(2), 123, -1, &[], &[0]),
                 b"".as_slice(),
             ),
         ];
@@ -1352,12 +1549,31 @@ mod tests {
                 client.write_all(&frame).await.unwrap();
             });
 
-            let (api_key, api_version, correlation_id, body) =
-                super::read_one_request(&mut server).await.expect("decode");
+            let (api_key, api_version, correlation_id, client_id, body, flexible) =
+                super::read_one_request(&mut server, None)
+                    .await
+                    .expect("decode");
 
             check!(
-                (api_key, api_version, correlation_id, body.as_ref())
-                    == (ApiKey(52), ApiVersion(2), 123, want_body),
+                (
+                    api_key,
+                    api_version,
+                    correlation_id,
+                    client_id.as_deref(),
+                    body.as_ref(),
+                    flexible,
+                ) == (
+                    ApiKey(52),
+                    ApiVersion(2),
+                    123,
+                    if case.starts_with("null") {
+                        None
+                    } else {
+                        Some("raft-client")
+                    },
+                    want_body,
+                    true,
+                ),
                 "case: {case}"
             );
             writer.await.unwrap();
@@ -1403,7 +1619,7 @@ mod tests {
                 client.write_all(&frame).await.unwrap();
             });
 
-            let err = super::read_one_request(&mut server)
+            let err = super::read_one_request(&mut server, None)
                 .await
                 .expect_err("short frame");
 
@@ -1418,11 +1634,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_one_request_keeps_nonzero_tagged_byte_as_body() {
+    async fn read_one_request_keeps_nonflexible_body_prefix() {
         let (mut client, mut server) = tokio::io::duplex(128);
         let frame = raw_request_frame(
-            ApiKey(52),
-            ApiVersion(2),
+            ApiKey(53),
+            ApiVersion(0),
             123,
             0,
             &[],
@@ -1432,9 +1648,12 @@ mod tests {
             client.write_all(&frame).await.unwrap();
         });
 
-        let (_, _, _, body) = super::read_one_request(&mut server).await.expect("decode");
+        let (_, _, _, _, body, flexible) = super::read_one_request(&mut server, None)
+            .await
+            .expect("decode");
 
         assert2::assert!(body.as_ref() == &[1, b'p', b'a', b'y']);
+        assert2::assert!(!flexible);
         writer.await.unwrap();
     }
 
@@ -1718,8 +1937,13 @@ mod tests {
     #[test]
     fn api_versions_body_advertises_kip595_set_both_shapes() {
         use crabka_protocol::{Decode, owned::api_versions_response::ApiVersionsResponse};
+        let mut image = crabka_metadata::MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.into(),
+            level: 24,
+        }));
         for req_v in [0i16, 4i16] {
-            let body = super::api_versions_response_body(req_v, 0);
+            let body = super::api_versions_response_body(req_v, &image, None);
             let v = req_v.clamp(0, 4);
             let mut cur = &body[..];
             let resp = ApiVersionsResponse::decode(&mut cur, v).expect("decode body");
@@ -1727,7 +1951,7 @@ mod tests {
             assert2::assert!(resp.error_code == 0);
             let keys: std::collections::BTreeSet<i16> =
                 resp.api_keys.iter().map(|k| k.api_key).collect();
-            for want in [1i16, 18, 52, 53, 54, 59] {
+            for want in [1i16, 18, 52, 53, 54, 59, 62, 63, 70] {
                 assert2::assert!(keys.contains(&want));
             }
             let vote = resp.api_keys.iter().find(|k| k.api_key == 52).unwrap();
@@ -1739,13 +1963,30 @@ mod tests {
                     .find(|feature| feature.name == "kraft.version")
                     .expect("kraft.version support");
                 assert2::assert!((kraft.min_version, kraft.max_version) == (0, 1));
-                assert2::assert!(resp.finalized_features[0].max_version_level == 0);
+                let metadata = resp
+                    .supported_features
+                    .iter()
+                    .find(|feature| feature.name == "metadata.version")
+                    .expect("metadata.version support");
+                assert2::assert!((metadata.min_version, metadata.max_version) == (7, 25));
+                let finalized_metadata = resp
+                    .finalized_features
+                    .iter()
+                    .find(|feature| feature.name == "metadata.version")
+                    .expect("metadata.version finalized");
+                assert2::assert!(
+                    (
+                        finalized_metadata.min_version_level,
+                        finalized_metadata.max_version_level
+                    ) == (24, 24)
+                );
+                assert2::assert!(resp.finalized_features_epoch == image.finalized_features_epoch());
             }
         }
     }
 
     #[test]
-    fn describe_cluster_body_projects_controllers_and_brokers() {
+    fn describe_cluster_body_projects_controllers_and_rejects_brokers() {
         use crabka_protocol::{
             Decode,
             owned::{
@@ -1755,7 +1996,8 @@ mod tests {
         };
 
         // DescribeCluster (60) is advertised so clients negotiate it (KIP-919).
-        let av = super::api_versions_response_body(4, 1);
+        let image = crabka_metadata::MetadataImage::new(Uuid::nil());
+        let av = super::api_versions_response_body(4, &image, None);
         let mut cur = &av[..];
         let avr = ApiVersionsResponse::decode(&mut cur, 4).unwrap();
         assert2::assert!(avr.api_keys.iter().any(|k| k.api_key == 60));
@@ -1764,18 +2006,10 @@ mod tests {
             (1i32, "c1".to_string(), 9093i32),
             (2, "c2".to_string(), 9093),
         ];
-        let brokers = vec![(
-            10i32,
-            "b10".to_string(),
-            9092i32,
-            Some("rack-a".to_string()),
-        )];
-
         for version in [1i16, 2] {
             // endpoint_type = CONTROLLERS (2) → voter projection.
             let body =
-                super::build_describe_cluster_body(version, 2, &voters, &brokers, "clusterX", 1)
-                    .unwrap();
+                super::build_describe_cluster_body(version, 2, &voters, "clusterX", 1).unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
             assert2::assert!(cur.is_empty());
@@ -1791,25 +2025,23 @@ mod tests {
                 ) == (2, "clusterX", 1, vec![(1, "c1", 9093), (2, "c2", 9093)])
             );
 
-            // endpoint_type = BROKERS (1) → broker projection (rack preserved).
+            // endpoint_type = BROKERS (1) is the wrong listener surface.
             let body =
-                super::build_describe_cluster_body(version, 1, &voters, &brokers, "clusterX", 1)
-                    .unwrap();
+                super::build_describe_cluster_body(version, 1, &voters, "clusterX", 1).unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
             check!(
                 (
+                    resp.error_code,
                     resp.endpoint_type,
-                    resp.brokers
-                        .iter()
-                        .map(|broker| (
-                            broker.broker_id,
-                            broker.host.as_str(),
-                            broker.port,
-                            broker.rack.as_deref(),
-                        ))
-                        .collect::<Vec<_>>(),
-                ) == (1, vec![(10, "b10", 9092, Some("rack-a"))])
+                    resp.brokers.is_empty(),
+                    resp.error_message.as_deref(),
+                ) == (
+                    114,
+                    1,
+                    true,
+                    Some("controller listener requires endpoint_type=CONTROLLERS"),
+                )
             );
         }
     }

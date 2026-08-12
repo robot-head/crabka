@@ -42,7 +42,7 @@ impl Encode for ConsumerGroupDescribeRequest {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             put_bool(buf, self.include_authorized_operations);

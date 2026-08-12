@@ -18,8 +18,8 @@ categories = ["algorithms", "database-implementations"]
 workspace = true
 
 [dependencies]
-crabka-gres-control = { version = "0.3.8", path = "../gres-control" }
-crabka-gres-substrate = { version = "0.3.9", path = "../gres-substrate" }
+crabka-gres-control = { version = "0.4.0", path = "../gres-control" }
+crabka-gres-substrate = { version = "0.4.0", path = "../gres-substrate" }
 crabka-units = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 

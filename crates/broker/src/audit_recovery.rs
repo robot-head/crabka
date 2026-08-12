@@ -103,6 +103,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            replication_target: crate::partition::initial_replication_target(None),
             diskless: false,
             writer_handle: Arc::new(Mutex::new(Some(writer))),
         };

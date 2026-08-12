@@ -41,9 +41,8 @@ subsystems on the broker side:
 | **E. PLAIN-with-OAuth-token** | `enablePlain`, `tokenEndpointUri` | PLAIN authenticator path that validates the password as a bearer token (call token endpoint with client-credentials to mint one, then verify) — for clients that can't speak OAUTHBEARER. | ❌ not in any roadmap slice yet |
 | **F. Claim enrichments** | `groupsClaim`, `groupsClaimDelimiter`, `fallbackUserNameClaim`, `fallbackUserNamePrefix`, `validTokenType`, `customClaimCheck` (JsonPath), `jwksMinRefreshPauseSeconds`, `jwksExpirySeconds`, `jwksIgnoreKeyUse` | Groups extractor that surfaces into a future principal-builder, fallback claim chain, `typ` header validation, expression-language claim check, JWKS pause/expiry policies, `use=sig` filter toggle | ❌ deferred from 49b |
 
-Three Strimzi fields are out of scope at the broker level entirely and
-will not have parity slices: `serverBearerTokenLocation` (inter-broker
-bearer-token file — Crabka uses mTLS for inter-broker, not OAuth), `enableMetrics`
+Two Strimzi fields are out of scope at the broker level entirely and
+will not have parity slices: `enableMetrics`
 (redundant — Crabka's metrics exporter covers SASL counters generically),
 and the deprecated dual `clientAudience`/`validAudience` pair (Crabka exposes
 just `validAudience`).
@@ -83,9 +82,11 @@ field parity, and the operator's OAuth surface is complete.
   credentials generated). Slice 50 adds `tls-external` to Crabka's
   `KafkaUser` enum and that's the OAuth user model going forward. No
   future slice will introduce a separate `oauth` user type.
-- **Inter-broker OAuth.** Crabka uses mTLS for inter-broker (slice 30) and
-  has no plan to support OAUTHBEARER for inter-broker traffic. Strimzi's
-  `serverBearerTokenLocation` will never have a parity slice.
+- **Inter-broker OAuth.** `inter_broker_credentials.type = "oauth-bearer"`
+  points at a bearer-token file. The outbound client re-reads it for each new
+  inter-broker or controller-listener connection, and the controller listener
+  validates it through the same broker-global OAuth validator as data-plane
+  clients.
 - **Delegation tokens.** Slice 51 in the operator roadmap. Independent of
   this umbrella; runs on its own track.
 - **GSSAPI / Kerberos.** Slice 52, optional, only-if-user-demand. Outside

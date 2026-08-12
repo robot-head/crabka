@@ -185,6 +185,17 @@ impl<C: BrokerConnector> BrokerPool<C> {
         self.evict_bootstrap();
     }
 
+    /// Replace bootstrap addresses and discard every connection and advertised
+    /// broker address learned from stale metadata.
+    pub fn rebootstrap(&self, bootstrap: Vec<SocketAddr>) {
+        self.by_id.clear();
+        self.by_addr.clear();
+        match self.bootstrap.write() {
+            Ok(mut guard) => *guard = bootstrap,
+            Err(poisoned) => *poisoned.into_inner() = bootstrap,
+        }
+    }
+
     /// Get-or-connect to the first reachable bootstrap address. The bootstrap
     /// connection is cached under the synthetic broker id `-1`.
     #[tracing::instrument(level = "debug", skip_all, err)]
@@ -260,6 +271,22 @@ impl<C: BrokerConnector> BrokerPool<C> {
     #[must_use]
     pub fn knows_broker(&self, broker_id: i32) -> bool {
         self.by_addr.contains_key(&broker_id)
+    }
+
+    /// Return the broker ids from the most recent usable metadata.
+    ///
+    /// The deterministic order keeps metadata failover predictable. Callers
+    /// use this list to exhaust the last-known cluster before deciding that a
+    /// fresh bootstrap is required.
+    #[must_use]
+    pub fn broker_ids(&self) -> Vec<i32> {
+        let mut ids = self
+            .by_addr
+            .iter()
+            .map(|entry| *entry.key())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     /// Close every open connection in the pool. Consumes the pool.
@@ -563,6 +590,47 @@ mod tests {
         let second = pool.bootstrap_connection().await.unwrap();
         assert!(second.addr == addr(2222));
         assert!(dials.load(Ordering::Relaxed) == 2);
+    }
+
+    #[tokio::test]
+    async fn rebootstrap_discards_stale_connections_and_broker_addresses() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let pool = BrokerPool::with_connector(
+            vec![addr(1111)],
+            CountingConnector {
+                dials: dials.clone(),
+                fail: vec![],
+            },
+            ClientDnsTimeout::default(),
+        );
+        pool.by_addr.insert(3, addr(3333));
+        let held_broker = pool.get(3).await.unwrap();
+        let _ = pool.bootstrap_connection().await.unwrap();
+
+        pool.rebootstrap(vec![addr(2222)]);
+
+        assert!(!pool.knows_broker(3));
+        assert!(pool.by_id.is_empty());
+        assert!(Arc::strong_count(&held_broker) == 1);
+        let fresh = pool.bootstrap_connection().await.unwrap();
+        assert!(fresh.addr == addr(2222));
+        assert!(dials.load(Ordering::Relaxed) == 3);
+    }
+
+    #[test]
+    fn broker_ids_are_sorted_and_exclude_the_bootstrap_connection() {
+        let pool = BrokerPool::with_connector(
+            vec![addr(1111)],
+            CountingConnector {
+                dials: Arc::new(AtomicUsize::new(0)),
+                fail: vec![],
+            },
+            ClientDnsTimeout::default(),
+        );
+        pool.by_addr.insert(9, addr(9999));
+        pool.by_addr.insert(2, addr(2222));
+
+        assert!(pool.broker_ids() == vec![2, 9]);
     }
 
     #[tokio::test]

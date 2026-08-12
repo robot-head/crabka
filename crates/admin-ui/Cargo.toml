@@ -29,9 +29,9 @@ crabka-units = { workspace = true }
 anyhow.workspace = true
 axum = { workspace = true, features = ["json", "query"] }
 clap = { workspace = true, features = ["derive", "env"] }
-crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
-crabka-client-core = { version = "0.3.9", path = "../client-core" }
-crabka-security = { version = "0.3.9", path = "../security" }
+crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
+crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-security = { version = "0.4.0", path = "../security" }
 dioxus = { version = "=0.7.10", default-features = false, features = ["fullstack", "html", "macro", "router", "server", "signals"] }
 dioxus-ssr = "=0.7.10"
 serde = { workspace = true, features = ["derive"] }

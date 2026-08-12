@@ -1,7 +1,8 @@
 //! `ListTransactions` (`api_key=66`, KIP-664). Admin RPC that returns
 //! a summary of every transaction the broker's coordinator is currently
 //! tracking. Each summary is a `(transactional_id, producer_id, state)`
-//! triple. The request can carry optional state and producer-id filters.
+//! triple. The request can carry optional state, producer-id, duration, and
+//! transactional-id-pattern filters.
 //!
 //! ## ACL
 //!
@@ -25,6 +26,7 @@ use crabka_protocol::{
         list_transactions_response::{ListTransactionsResponse, TransactionState},
     },
 };
+use java_regex::{PatternSyntaxError, Regex};
 
 use crate::{
     authorizer::{AuthorizationRequest, AuthorizationResult},
@@ -62,6 +64,23 @@ fn txn_state_str(s: TxnState) -> &'static str {
     }
 }
 
+/// Kafka's duration filter is a strict lower bound: a transaction whose age
+/// equals the filter is excluded. Any negative value disables the filter.
+fn matches_duration_filter(start_ms: i64, now_ms: i64, duration_filter: i64) -> bool {
+    duration_filter < 0 || now_ms.saturating_sub(start_ms) > duration_filter
+}
+
+/// Java's `Matcher.matches()` requires the pattern to match the complete
+/// transactional id.
+fn compile_transactional_id_pattern(
+    pattern: Option<&str>,
+) -> Result<Option<Regex>, PatternSyntaxError> {
+    pattern
+        .filter(|pattern| !pattern.is_empty())
+        .map(Regex::new)
+        .transpose()
+}
+
 #[tracing::instrument(
     name = "handle_list_transactions",
     level = "info",
@@ -79,6 +98,29 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = ListTransactionsRequest::decode(&mut cur, version)?;
 
+    // v0/v1 decode this field as `None`; v2 null and empty values both disable
+    // the filter. Kafka returns a top-level INVALID_REGULAR_EXPRESSION rather
+    // than treating malformed syntax as a pattern that matches nothing.
+    let transactional_id_pattern =
+        match compile_transactional_id_pattern(req.transactional_id_pattern.as_deref()) {
+            Ok(pattern) => pattern,
+            Err(error) => {
+                tracing::debug!(
+                    pattern = req.transactional_id_pattern.as_deref().unwrap_or_default(),
+                    %error,
+                    "invalid ListTransactions transactional-id pattern"
+                );
+                return crate::handlers::encode_response(
+                    &ListTransactionsResponse {
+                        throttle_time_ms: 0,
+                        error_code: codes::INVALID_REGULAR_EXPRESSION,
+                        ..Default::default()
+                    },
+                    version,
+                );
+            }
+        };
+
     let image = broker.controller.current_image();
 
     // Snapshot every coordinator-local txn entry.
@@ -88,6 +130,7 @@ pub(crate) async fn handle(
         req.state_filters.iter().cloned().collect();
     let pid_filter: std::collections::HashSet<i64> =
         req.producer_id_filters.iter().copied().collect();
+    let now_ms = crate::txn::util::now_millis();
 
     // KIP-664: if filtered states include a string the broker doesn't
     // recognize, surface it in `unknown_state_filters` so the client
@@ -113,6 +156,19 @@ pub(crate) async fn handle(
         // Producer-id filter: same semantics — empty means no filter. The
         // wire filter set is raw `i64`; unwrap the entry's `ProducerId` to match.
         if !pid_filter.is_empty() && !pid_filter.contains(&entry.producer_id.get()) {
+            continue;
+        }
+        // DurationFilter is present from v1. Decoding older versions supplies
+        // the protocol default (-1), which disables this strict lower bound.
+        if !matches_duration_filter(entry.start_ms, now_ms, req.duration_filter) {
+            continue;
+        }
+        // TransactionalIdPattern is present from v2. Null/empty values compile
+        // to `None`, while a non-empty pattern is a full-string match.
+        if transactional_id_pattern
+            .as_ref()
+            .is_some_and(|pattern| !pattern.matches(&entry.transactional_id))
+        {
             continue;
         }
         // ACL: per-tid `Describe` on `TransactionalId`. Silent filter on
@@ -177,19 +233,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn duration_filter_is_a_strict_lower_bound() {
+        let now_ms = 10_000;
+        let cases = [
+            ("negative disables", 20_000, -2, true),
+            ("older", 8_999, 1_000, true),
+            ("equal", 9_000, 1_000, false),
+            ("newer", 9_001, 1_000, false),
+            ("future", 11_000, 0, false),
+        ];
+
+        for (name, start_ms, filter, expected) in cases {
+            assert!(
+                matches_duration_filter(start_ms, now_ms, filter) == expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn transactional_id_pattern_is_optional_and_matches_the_whole_id() {
+        let cases = [
+            (None, "anything", true),
+            (Some(""), "anything", true),
+            (Some("txn-.*"), "txn-alpha", true),
+            (Some("txn-.*"), "prefix-txn-alpha", false),
+            (Some("txn|txn-long"), "txn-long", true),
+        ];
+
+        for (pattern, transactional_id, expected) in cases {
+            let compiled = compile_transactional_id_pattern(pattern).expect("valid pattern");
+            let matches = compiled
+                .as_ref()
+                .is_none_or(|pattern| pattern.matches(transactional_id));
+            assert!(
+                matches == expected,
+                "{pattern:?} against {transactional_id}"
+            );
+        }
+        assert!(
+            compile_transactional_id_pattern(Some("(?=txn-).*"))
+                .unwrap()
+                .unwrap()
+                .matches("txn-alpha")
+        );
+        assert!(
+            compile_transactional_id_pattern(Some(r"(txn)-\1"))
+                .unwrap()
+                .unwrap()
+                .matches("txn-txn")
+        );
+        assert!(compile_transactional_id_pattern(Some("(unclosed")).is_err());
+    }
+
     crate::test_support::wire_helpers!(
         ListTransactionsRequest,
         ListTransactionsResponse,
         client_id = "admin-client"
     );
 
-    /// The producer-id filter keeps entries whose pid IS in the filter set.
-    /// The test seeds a single txn whose pid matches the filter, and the
-    /// handler returns that entry. A deleted `!` in
-    /// `!pid_filter.contains(..)` would invert the guard and drop the
-    /// matching entry instead.
+    /// Seed one transaction and exercise the filters through their actual wire
+    /// versions. This also protects the producer-id filter from being inverted.
     #[tokio::test]
-    async fn producer_id_filter_keeps_matching_pid() {
+    async fn filters_follow_wire_versions_and_keep_matching_entries() {
         use crabka_log::ProducerId;
 
         use crate::txn::state::TxnEntry;
@@ -251,6 +358,41 @@ mod tests {
             pids == vec![100],
             "pid filter must keep the matching entry, got {pids:?}"
         );
+
+        let cases: [(i16, i64, Option<&str>, &[i64]); 4] = [
+            // v0 omits both newer fields, even when the in-memory request sets
+            // DurationFilter.
+            (0, i64::MAX, None, &[100]),
+            // v1 carries DurationFilter and this transaction is not old enough
+            // to exceed the maximum threshold.
+            (1, i64::MAX, None, &[]),
+            // v2 carries TransactionalIdPattern and uses full-string matching.
+            (2, -1, Some("txn-list-.*"), &[100]),
+            (2, -1, Some("list"), &[]),
+        ];
+        for (version, duration_filter, pattern, expected_pids) in cases {
+            let req = ListTransactionsRequest {
+                producer_id_filters: vec![100],
+                duration_filter,
+                transactional_id_pattern: pattern.map(str::to_owned),
+                ..Default::default()
+            };
+            let req = encode_request(&req, version);
+            let bytes = handle(&broker, version, 123, &req, &ctx)
+                .await
+                .expect("handle");
+            let resp = decode_response(&bytes, version);
+            let pids: Vec<i64> = resp
+                .transaction_states
+                .iter()
+                .map(|state| state.producer_id)
+                .collect();
+            assert!(
+                pids == expected_pids,
+                "version {version}, pattern {pattern:?}"
+            );
+        }
+
         broker_handle.shutdown().await;
     }
 
@@ -285,6 +427,35 @@ mod tests {
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
         assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_pattern_is_rejected_only_when_present_on_the_wire() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        for (version, expected_error) in [(1, codes::NONE), (2, codes::INVALID_REGULAR_EXPRESSION)]
+        {
+            let req = encode_request(
+                &ListTransactionsRequest {
+                    transactional_id_pattern: Some("(unclosed".into()),
+                    ..Default::default()
+                },
+                version,
+            );
+            let bytes = handle(&broker, version, 123, &req, &ctx)
+                .await
+                .expect("handle");
+            let response = decode_response(&bytes, version);
+            assert!(response.error_code == expected_error, "version {version}");
+            assert!(response.transaction_states.is_empty(), "version {version}");
+        }
+
         broker_handle.shutdown().await;
     }
 }

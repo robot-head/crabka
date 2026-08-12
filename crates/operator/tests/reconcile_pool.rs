@@ -3,10 +3,12 @@
 //!
 //! Happy-path request sequence on a fresh pool:
 //!   1. GET   kafkas/<parent>                  (-> 200 parent Kafka)
-//!   2. GET   statefulsets/<parent>-<pool>     (pre-apply; monotonic-storage check)
-//!   3. PATCH statefulsets/<parent>-<pool>     (SSA)
-//!   4. GET   statefulsets/<parent>-<pool>     (post-apply status read)
-//!   5. PATCH kafkanodepools/<pool>/status     (merge)
+//!   2. LIST  kafkanodepools                   (topology / bootstrap selection)
+//!   3. GET   secrets/<parent>-cluster-id      (bootstrap + per-node identities)
+//!   4. GET   statefulsets/<parent>-<pool>     (pre-apply; monotonic-storage check)
+//!   5. PATCH statefulsets/<parent>-<pool>     (SSA)
+//!   6. GET   statefulsets/<parent>-<pool>     (post-apply status read)
+//!   7. PATCH kafkanodepools/<pool>/status     (merge)
 //!
 //! Validation-failure paths short-circuit to step 5 (or skip step 1
 //! entirely when the cluster label is missing). Monotonic-
@@ -59,6 +61,15 @@ fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> 
 }
 
 fn dynamic_secret_body(parent: &str, pool: &str, namespace: &str) -> serde_json::Value {
+    dynamic_secret_body_for_ids(parent, pool, namespace, &[(0, DIRECTORY_ID)])
+}
+
+fn dynamic_secret_body_for_ids(
+    parent: &str,
+    pool: &str,
+    namespace: &str,
+    directory_ids: &[(i32, uuid::Uuid)],
+) -> serde_json::Value {
     use base64::Engine as _;
 
     let mut secret = fake_secret_body(
@@ -75,11 +86,52 @@ fn dynamic_secret_body(parent: &str, pool: &str, namespace: &str) -> serde_json:
     data.insert("quorumBootstrapNodeId".into(), encode("0"));
     data.insert("quorumBootstrapPool".into(), encode(pool));
     data.insert("quorumBootstrapInitialized".into(), encode("true"));
-    data.insert(
-        "quorumDirectoryId-0".into(),
-        encode(&DIRECTORY_ID.to_string()),
-    );
+    for (node_id, directory_id) in directory_ids {
+        data.insert(
+            format!("quorumDirectoryId-{node_id}"),
+            encode(&directory_id.to_string()),
+        );
+    }
     secret
+}
+
+fn empty_statefulset_list_rule() -> MockRule {
+    MockRule {
+        method: Method::GET,
+        path_substr: "/statefulsets?".into(),
+        response: json_response(
+            200,
+            &serde_json::json!({
+                "apiVersion": "apps/v1",
+                "kind": "StatefulSetList",
+                "metadata": { "resourceVersion": "1" },
+                "items": [],
+            }),
+        ),
+    }
+}
+
+fn pod_list_rule(namespace: &str, names: &[&str]) -> MockRule {
+    MockRule {
+        method: Method::GET,
+        path_substr: "/pods?".into(),
+        response: json_response(
+            200,
+            &serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "PodList",
+                "metadata": { "resourceVersion": "1" },
+                "items": names
+                    .iter()
+                    .map(|name| serde_json::json!({
+                        "apiVersion": "v1",
+                        "kind": "Pod",
+                        "metadata": { "name": name, "namespace": namespace },
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        ),
+    }
 }
 
 fn dynamic_quorum_rules(parent: &str, pool: &str, namespace: &str) -> Vec<MockRule> {
@@ -93,6 +145,8 @@ fn dynamic_quorum_rules(parent: &str, pool: &str, namespace: &str) -> Vec<MockRu
                 &fake_pool_list_body(&[fake_pool_body(pool, namespace, parent)]),
             ),
         },
+        empty_statefulset_list_rule(),
+        pod_list_rule(namespace, &[]),
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{parent}-cluster-id"),
@@ -254,6 +308,421 @@ async fn pool_applies_statefulset_with_pool_name() {
 }
 
 #[tokio::test]
+async fn multi_replica_pool_reconcile_renders_all_ordinals() {
+    let parent = "demo";
+    let pool_name = "controllers";
+    let namespace = "y";
+    let sts_name = format!("{parent}-{pool_name}");
+    let directory_ids = [
+        (0, DIRECTORY_ID),
+        (1, uuid::Uuid::from_u128(2)),
+        (2, uuid::Uuid::from_u128(3)),
+    ];
+    let secret = dynamic_secret_body_for_ids(parent, pool_name, namespace, &directory_ids);
+    let mut sibling = fake_pool_body(pool_name, namespace, parent);
+    sibling["spec"]["roles"] = serde_json::json!(["Controller"]);
+    sibling["spec"]["replicas"] = serde_json::json!(3);
+    let mut rules = vec![MockRule {
+        method: Method::GET,
+        path_substr: format!("/kafkas/{parent}"),
+        response: json_response(200, &fake_parent_kafka_body(parent, namespace)),
+    }];
+    rules.push(MockRule {
+        method: Method::GET,
+        path_substr: "/kafkanodepools?".into(),
+        response: json_response(200, &fake_pool_list_body(&[sibling])),
+    });
+    rules.push(empty_statefulset_list_rule());
+    rules.push(pod_list_rule(namespace, &[]));
+    for _ in 0..=3 {
+        rules.push(MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &secret),
+        });
+    }
+    rules.extend([
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("first reconcile, no live STS"))
+                .expect("404 builds"),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, namespace, 3, None)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, namespace, 3, None)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, namespace, parent)),
+        },
+    ]);
+    let (ctx, state) = build_ctx(namespace, rules);
+    let mut pool = pool_cr(pool_name, namespace, Some(parent), 3);
+    pool.spec.roles = vec![NodeRole::Controller];
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let request = state
+        .take_observed()
+        .into_iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request.uri().to_string().contains("/statefulsets/")
+        })
+        .expect("StatefulSet patch");
+    let body: serde_json::Value = serde_json::from_slice(request.body()).unwrap();
+    assert!(body["spec"]["replicas"] == 3);
+    assert!(
+        body["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .expect("broker env")
+            .iter()
+            .any(|env| { env["name"] == "CRABKA_PROCESS_ROLES" && env["value"] == "controller" })
+    );
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn controller_scale_down_removes_highest_voter_before_pods() {
+    use crabka_client_admin::{MetadataQuorum, QuorumReplica};
+
+    let parent = "demo";
+    let pool_name = "controllers";
+    let namespace = "y";
+    let sts_name = format!("{parent}-{pool_name}");
+    let directory_ids = [
+        (0, DIRECTORY_ID),
+        (1, uuid::Uuid::from_u128(2)),
+        (2, uuid::Uuid::from_u128(3)),
+        (3, uuid::Uuid::from_u128(4)),
+    ];
+    let secret = dynamic_secret_body_for_ids(parent, pool_name, namespace, &directory_ids);
+    let mut sibling = fake_pool_body(pool_name, namespace, parent);
+    sibling["spec"]["roles"] = serde_json::json!(["Controller"]);
+    sibling["spec"]["replicas"] = serde_json::json!(2);
+    let mut rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, namespace)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkanodepools?".into(),
+            response: json_response(200, &fake_pool_list_body(&[sibling])),
+        },
+        empty_statefulset_list_rule(),
+        pod_list_rule(namespace, &[]),
+    ];
+    for _ in 0..4 {
+        rules.push(MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &secret),
+        });
+    }
+    rules.extend([
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, namespace, 4, Some(4))),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, namespace, parent)),
+        },
+    ]);
+    let state = MockState::new(rules);
+    let ctx = fixture_ctx(mock_client(&state, namespace), namespace);
+    let admin = Arc::new(tokio::sync::Mutex::new(
+        shared::fake_admin::FakeAdminClient::new(),
+    ));
+    admin.lock().await.set_metadata_quorum(MetadataQuorum {
+        leader_id: 0,
+        leader_epoch: 1,
+        high_watermark: 1,
+        voters: directory_ids
+            .into_iter()
+            .map(|(node_id, directory_id)| QuorumReplica {
+                node_id,
+                directory_id,
+                log_end_offset: 1,
+                last_fetch_timestamp: -1,
+                last_caught_up_timestamp: -1,
+            })
+            .collect(),
+        observers: Vec::new(),
+    });
+    ctx.insert_admin_client_for_test(parent, admin.clone())
+        .await;
+    let mut pool = pool_cr(pool_name, namespace, Some(parent), 2);
+    pool.spec.roles = vec![NodeRole::Controller];
+
+    reconcile(Arc::new(pool), Arc::new(ctx)).await.unwrap();
+
+    let calls = admin.lock().await.calls();
+    assert!(matches!(
+        calls.as_slice(),
+        [
+            shared::fake_admin::RecordedCall::DescribeMetadataQuorum,
+            shared::fake_admin::RecordedCall::RemoveRaftVoter {
+                node_id: 3,
+                directory_id,
+                ..
+            }
+        ] if *directory_id == uuid::Uuid::from_u128(4)
+    ));
+    let observed = state.take_observed();
+    assert!(observed.iter().all(|request| {
+        !(request.method() == Method::PATCH && request.uri().to_string().contains("/statefulsets/"))
+    }));
+    let status = observed
+        .iter()
+        .find(|request| request.uri().to_string().contains("/status"))
+        .expect("scale-down status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    assert!(body["status"]["conditions"][0]["reason"] == "QuorumScaleDownInProgress");
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn concurrent_shrink_and_add_cannot_reuse_live_statefulset_node_ids() {
+    let parent = "demo";
+    let namespace = "y";
+    let mut shrinking = fake_pool_body("controllers", namespace, parent);
+    shrinking["spec"]["roles"] = serde_json::json!(["Controller"]);
+    shrinking["spec"]["replicas"] = serde_json::json!(1);
+    let mut added = fake_pool_body("brokers", namespace, parent);
+    added["spec"]["roles"] = serde_json::json!(["Broker"]);
+    added["spec"]["nodeIdStart"] = serde_json::json!(2);
+    let mut live = fake_sts_body("demo-controllers", namespace, 1, Some(1));
+    live["metadata"]["labels"] = serde_json::json!({
+        "app.kubernetes.io/instance": parent,
+        "app.kubernetes.io/name": "crabka-broker",
+        "crabka.io/pool": "controllers",
+    });
+    live["metadata"]["annotations"] = serde_json::json!({
+        "crabka.io/node-id-start": "0",
+        "crabka.io/process-roles": "controller",
+    });
+    live["status"]["replicas"] = serde_json::json!(3);
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, namespace)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkanodepools?".into(),
+            response: json_response(200, &fake_pool_list_body(&[shrinking, added])),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/statefulsets?".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "apps/v1",
+                    "kind": "StatefulSetList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": [live],
+                }),
+            ),
+        },
+        pod_list_rule(namespace, &[]),
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/kafkanodepools/brokers/status".into(),
+            response: json_response(200, &fake_pool_body("brokers", namespace, parent)),
+        },
+    ];
+    let (ctx, state) = build_ctx(namespace, rules);
+    let mut pool = pool_cr("brokers", namespace, Some(parent), 1);
+    pool.spec.roles = vec![NodeRole::Broker];
+    pool.spec.node_id_start = 2;
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let status = observed
+        .iter()
+        .find(|request| request.uri().to_string().contains("/status"))
+        .expect("topology status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    assert!(body["status"]["conditions"][0]["reason"] == "NodeIdRangeOverlap");
+    assert!(observed.iter().all(|request| {
+        request.method() != Method::PATCH || !request.uri().to_string().contains("/statefulsets/")
+    }));
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn broker_only_pool_waits_for_controller_pool() {
+    let parent = "demo";
+    let namespace = "y";
+    let mut controller = fake_pool_body("controllers", namespace, parent);
+    controller["spec"]["roles"] = serde_json::json!(["Controller"]);
+    controller["spec"]["nodeIdStart"] = serde_json::json!(10);
+    let mut broker = fake_pool_body("brokers", namespace, parent);
+    broker["spec"]["roles"] = serde_json::json!(["Broker"]);
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, namespace)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkanodepools?".into(),
+            response: json_response(200, &fake_pool_list_body(&[controller, broker])),
+        },
+        empty_statefulset_list_rule(),
+        pod_list_rule(namespace, &[]),
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/kafkanodepools/brokers/status".into(),
+            response: json_response(200, &fake_pool_body("brokers", namespace, parent)),
+        },
+    ];
+    let (ctx, state) = build_ctx(namespace, rules);
+    let mut pool = pool_cr("brokers", namespace, Some(parent), 1);
+    pool.spec.roles = vec![NodeRole::Broker];
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let status = observed
+        .iter()
+        .find(|request| request.uri().to_string().contains("/status"))
+        .expect("status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    assert!(body["status"]["conditions"][0]["reason"] == "WaitingForControllers");
+    assert!(
+        observed
+            .iter()
+            .all(|request| request.method() != Method::PATCH
+                || !request.uri().to_string().contains("/statefulsets/"))
+    );
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn broker_only_pool_becomes_ready_without_joining_quorum() {
+    let parent = "demo";
+    let namespace = "y";
+    let pool_name = "brokers";
+    let sts_name = format!("{parent}-{pool_name}");
+    let secret =
+        dynamic_secret_body_for_ids(parent, "controllers", namespace, &[(10, DIRECTORY_ID)]);
+    let mut controller = fake_pool_body("controllers", namespace, parent);
+    controller["spec"]["roles"] = serde_json::json!(["Controller"]);
+    controller["status"]["replicas"] = serde_json::json!(1);
+    controller["status"]["readyReplicas"] = serde_json::json!(1);
+    controller["status"]["conditions"] = serde_json::json!([{
+        "type": "Ready",
+        "status": "True",
+        "reason": "Available",
+        "message": "controller quorum member is ready",
+        "lastTransitionTime": "2026-08-11T00:00:00Z"
+    }]);
+    let mut broker = fake_pool_body(pool_name, namespace, parent);
+    broker["spec"]["roles"] = serde_json::json!(["Broker"]);
+    broker["spec"]["nodeIdStart"] = serde_json::json!(10);
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, namespace)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkanodepools?".into(),
+            response: json_response(200, &fake_pool_list_body(&[controller, broker])),
+        },
+        empty_statefulset_list_rule(),
+        pod_list_rule(namespace, &[]),
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &secret),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &secret),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("first reconcile, no live STS"))
+                .expect("404 builds"),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, Some(1))),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, Some(1))),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, namespace, parent)),
+        },
+    ];
+    let (ctx, state) = build_ctx(namespace, rules);
+    let mut pool = pool_cr(pool_name, namespace, Some(parent), 1);
+    pool.spec.roles = vec![NodeRole::Broker];
+    pool.spec.node_id_start = 10;
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let sts_patch = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request.uri().to_string().contains("/statefulsets/")
+        })
+        .expect("broker StatefulSet patch");
+    let body: serde_json::Value = serde_json::from_slice(sts_patch.body()).unwrap();
+    assert!(
+        body["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .expect("broker env")
+            .iter()
+            .any(|env| { env["name"] == "CRABKA_PROCESS_ROLES" && env["value"] == "broker" })
+    );
+    let status = observed
+        .iter()
+        .find(|request| request.uri().to_string().contains("/status"))
+        .expect("ready status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    assert!(body["status"]["conditions"][0]["status"] == "True");
+    assert!(body["status"]["conditions"][0]["reason"] == "Available");
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
 async fn pool_status_ready_when_sts_ready() {
     use crabka_client_admin::{MetadataQuorum, QuorumReplica};
 
@@ -326,6 +795,16 @@ async fn deleting_pool_removes_exact_committed_voter() {
         },
         MockRule {
             method: Method::GET,
+            path_substr: format!("/statefulsets/{parent}-{pool_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("StatefulSet absent"))
+                .expect("404 builds"),
+        },
+        pod_list_rule(ns, &[]),
+        MockRule {
+            method: Method::GET,
             path_substr: format!("/secrets/{parent}-cluster-id"),
             response: json_response(200, &dynamic_secret_body(parent, pool_name, ns)),
         },
@@ -382,6 +861,105 @@ async fn deleting_pool_removes_exact_committed_voter() {
 }
 
 #[tokio::test]
+async fn deleting_pool_finishes_observed_downscale_voters_before_pods() {
+    use crabka_client_admin::{MetadataQuorum, QuorumReplica};
+
+    let parent = "demo";
+    let pool_name = "controllers";
+    let ns = "y";
+    let directory_ids = [
+        (0, DIRECTORY_ID),
+        (1, uuid::Uuid::from_u128(2)),
+        (2, uuid::Uuid::from_u128(3)),
+        (10, uuid::Uuid::from_u128(11)),
+    ];
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{parent}-{pool_name}"),
+            response: json_response(
+                200,
+                &fake_sts_body(&format!("{parent}-{pool_name}"), ns, 1, Some(1)),
+            ),
+        },
+        pod_list_rule(
+            ns,
+            &[
+                "demo-controllers-0",
+                "demo-controllers-1",
+                "demo-controllers-2",
+            ],
+        ),
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(
+                200,
+                &dynamic_secret_body_for_ids(parent, pool_name, ns, &directory_ids),
+            ),
+        },
+    ];
+    let state = MockState::new(rules);
+    let ctx = fixture_ctx(mock_client(&state, ns), ns);
+    let admin = Arc::new(tokio::sync::Mutex::new(
+        shared::fake_admin::FakeAdminClient::new(),
+    ));
+    admin.lock().await.set_metadata_quorum(MetadataQuorum {
+        leader_id: 0,
+        leader_epoch: 3,
+        high_watermark: 7,
+        voters: directory_ids
+            .into_iter()
+            .map(|(node_id, directory_id)| QuorumReplica {
+                node_id,
+                directory_id,
+                log_end_offset: 7,
+                last_fetch_timestamp: -1,
+                last_caught_up_timestamp: -1,
+            })
+            .collect(),
+        observers: Vec::new(),
+    });
+    ctx.insert_admin_client_for_test(parent, admin.clone())
+        .await;
+    let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
+    pool.spec.roles = vec![NodeRole::Controller];
+    pool.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        "2026-08-08T00:00:00Z".parse().unwrap(),
+    ));
+
+    reconcile(Arc::new(pool), Arc::new(ctx)).await.unwrap();
+
+    let calls = admin.lock().await.calls();
+    assert!(matches!(
+        calls.as_slice(),
+        [
+            shared::fake_admin::RecordedCall::DescribeMetadataQuorum,
+            shared::fake_admin::RecordedCall::RemoveRaftVoter {
+                node_id: 2,
+                directory_id,
+                ..
+            }
+        ] if *directory_id == uuid::Uuid::from_u128(3)
+    ));
+    let observed = state.take_observed();
+    assert!(observed.iter().all(|request| {
+        !(request.method() == Method::PATCH
+            && (request.uri().to_string().contains("/statefulsets/")
+                || request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/kafkanodepools/{pool_name}"))))
+    }));
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
 async fn deleting_last_voter_keeps_finalizer_and_reports_blocked() {
     use crabka_client_admin::{MetadataQuorum, QuorumReplica};
 
@@ -394,6 +972,16 @@ async fn deleting_last_voter_keeps_finalizer_and_reports_blocked() {
             path_substr: format!("/kafkas/{parent}"),
             response: json_response(200, &fake_parent_kafka_body(parent, ns)),
         },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{parent}-{pool_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("StatefulSet absent"))
+                .expect("404 builds"),
+        },
+        pod_list_rule(ns, &[]),
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{parent}-cluster-id"),
@@ -484,7 +1072,7 @@ async fn parent_deletion_releases_pool_finalizer_without_dismantling_quorum() {
 }
 
 #[tokio::test]
-async fn pool_validation_rejects_replicas_two() {
+async fn pool_validation_rejects_zero_replicas() {
     // Validation runs before any I/O against parent / STS. Only the
     // status patch should fire.
     let rules = vec![MockRule {
@@ -493,7 +1081,7 @@ async fn pool_validation_rejects_replicas_two() {
         response: json_response(200, &fake_pool_body("brokers", "y", "demo")),
     }];
     let (ctx, state) = build_ctx("y", rules);
-    let pool = pool_cr("brokers", "y", Some("demo"), 2);
+    let pool = pool_cr("brokers", "y", Some("demo"), 0);
 
     reconcile(Arc::new(pool), ctx).await.unwrap();
 
@@ -526,7 +1114,7 @@ async fn pool_validation_rejects_replicas_two() {
     for (field, want) in [
         ("type", "Ready"),
         ("status", "False"),
-        ("reason", "UnsupportedReplicaCount"),
+        ("reason", "InvalidReplicaCount"),
     ] {
         assert!(cond[field] == want, "field {field}; body = {body}");
     }

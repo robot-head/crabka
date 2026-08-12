@@ -121,6 +121,8 @@ struct StartConfig {
     request_timeout: Time,
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     frame_max: crabka_client_core::ClientFrameMax,
+    metadata_recovery_strategy: crabka_client_core::MetadataRecoveryStrategy,
+    metadata_recovery_rebootstrap_trigger: Time,
     leave_group_timeout: Time,
     client_rack: Option<String>,
     security: Option<crabka_client_core::security::ClientSecurity>,
@@ -692,6 +694,10 @@ impl Consumer {
         #[builder(default = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)]
         dispatch_queue_capacity: usize,
         #[builder(default = crabka_client_core::DEFAULT_CLIENT_FRAME_MAX)] frame_max: ByteSize,
+        #[builder(default)]
+        metadata_recovery_strategy: crabka_client_core::MetadataRecoveryStrategy,
+        #[builder(default = crabka_client_core::DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER)]
+        metadata_recovery_rebootstrap_trigger: Time,
         #[builder(default = DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)] leave_group_timeout: Time,
         #[builder(into)] client_rack: Option<String>,
         security: Option<crabka_client_core::security::ClientSecurity>,
@@ -739,6 +745,12 @@ impl Consumer {
                 .map_err(ConsumerError::RebalanceFailed)?;
         let frame_max = crabka_client_core::ClientFrameMax::try_from(frame_max)
             .map_err(ConsumerError::RebalanceFailed)?;
+        let metadata_recovery_rebootstrap_trigger =
+            crabka_client_core::MetadataRecoveryRebootstrapTrigger::new(
+                metadata_recovery_rebootstrap_trigger,
+            )
+            .map_err(ConsumerError::RebalanceFailed)?
+            .time();
 
         let config = StartConfig {
             bootstrap,
@@ -761,6 +773,8 @@ impl Consumer {
             request_timeout,
             dispatch_queue_capacity,
             frame_max,
+            metadata_recovery_strategy,
+            metadata_recovery_rebootstrap_trigger,
             leave_group_timeout: Time::from_std(leave_group_timeout.duration()),
             client_rack,
             security,
@@ -852,6 +866,8 @@ impl Consumer {
             request_timeout,
             dispatch_queue_capacity,
             frame_max,
+            metadata_recovery_strategy,
+            metadata_recovery_rebootstrap_trigger,
             client_rack,
             security,
             ..
@@ -863,6 +879,8 @@ impl Consumer {
             .request_timeout(request_timeout)
             .dispatch_queue_capacity(dispatch_queue_capacity.get())
             .frame_max(frame_max.size())
+            .metadata_recovery_strategy(metadata_recovery_strategy)
+            .metadata_recovery_rebootstrap_trigger(metadata_recovery_rebootstrap_trigger)
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -1233,6 +1251,8 @@ async fn spawn_consumer(
         request_timeout,
         dispatch_queue_capacity,
         frame_max,
+        metadata_recovery_strategy,
+        metadata_recovery_rebootstrap_trigger,
         leave_group_timeout,
         client_rack,
         security,
@@ -1267,6 +1287,8 @@ async fn spawn_consumer(
         .request_timeout(request_timeout)
         .dispatch_queue_capacity(dispatch_queue_capacity.get())
         .frame_max(frame_max.size())
+        .metadata_recovery_strategy(metadata_recovery_strategy)
+        .metadata_recovery_rebootstrap_trigger(metadata_recovery_rebootstrap_trigger)
         .maybe_security(security.clone())
         .build()
         .await?;

@@ -36,6 +36,7 @@ impl<'a> RequestHeader<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::request_header::RequestHeader {
         crate::owned::request_header::RequestHeader {
             request_api_key: (self.request_api_key),
@@ -53,13 +54,13 @@ impl<'a> Encode for RequestHeader<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.request_api_key)
+            put_i16(buf, self.request_api_key);
         }
         if version >= 0 {
-            put_i16(buf, self.request_api_version)
+            put_i16(buf, self.request_api_version);
         }
         if version >= 0 {
-            put_i32(buf, self.correlation_id)
+            put_i32(buf, self.correlation_id);
         }
         if version >= 1 {
             {
@@ -69,7 +70,7 @@ impl<'a> Encode for RequestHeader<'a> {
                 } else {
                     let () = put_nullable_string(buf, self.client_id);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

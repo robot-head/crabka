@@ -25,7 +25,7 @@ tracing-opentelemetry = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
+crabka-pgparser = { version = "0.4.0", path = "../pgparser" }
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }

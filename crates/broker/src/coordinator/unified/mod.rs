@@ -2170,7 +2170,9 @@ mod tests {
                     host: format!("broker-{node_id}"),
                     port: 9092,
                     rack,
+                    log_dirs: vec![],
                     endpoints: vec![],
+                    features: std::collections::BTreeMap::new(),
                 },
             ));
         }

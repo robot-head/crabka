@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-admin-ui"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert2",
@@ -2261,8 +2261,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-app-sdk"
+version = "0.4.0"
+dependencies = [
+ "assert2",
+ "base64 0.23.1",
+ "bytes",
+ "crabka-sdk-conformance",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "protox",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "crabka-audit"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -2288,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-authz"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-metadata",
@@ -2300,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-bench-driver"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert2",
@@ -2338,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-blockstore"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "assert2",
@@ -2366,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-broker"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -2402,6 +2423,7 @@ dependencies = [
  "dashmap",
  "exponential-backoff",
  "futures-util",
+ "java_regex",
  "jsonpath-rust",
  "ktls",
  "lru 0.18.2",
@@ -2451,14 +2473,14 @@ dependencies = [
 
 [[package]]
 name = "crabka-broker-test-helpers"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "crabka-broker",
 ]
 
 [[package]]
 name = "crabka-cli"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "clap",
@@ -2487,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-admin"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2514,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-consumer"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bon",
@@ -2541,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-core"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2563,6 +2585,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.20",
@@ -2575,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-producer"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2601,7 +2624,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-streams"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2642,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-compression"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bytes",
@@ -2663,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-connect"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2681,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-connect-derive"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-connect",
@@ -2695,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-connect-postgres"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2715,11 +2738,12 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
 name = "crabka-connect-worker"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert2",
@@ -2734,6 +2758,7 @@ dependencies = [
  "crabka-connect",
  "crabka-connect-postgres",
  "crabka-replicator",
+ "crabka-schema-registry",
  "crabka-security",
  "crabka-units",
  "prometheus-client",
@@ -2752,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-docgen"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert2",
@@ -2769,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2814,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres-activator"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -2838,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres-balancer"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-gres-control",
@@ -2850,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres-conformance"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bytes",
@@ -2875,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres-control"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bytes",
@@ -2900,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres-fdw"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "apache-avro",
  "assert2",
@@ -2935,7 +2960,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres-loadtest"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert2",
@@ -2966,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres-ranges"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -3007,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-gres-substrate"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3050,11 +3075,12 @@ dependencies = [
 
 [[package]]
 name = "crabka-grpc-gateway"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "apache-avro",
  "arc-swap",
+ "arrow",
  "assert2",
  "async-stream",
  "async-trait",
@@ -3070,6 +3096,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-client-streams",
  "crabka-ids",
  "crabka-metadata",
  "crabka-protocol",
@@ -3077,6 +3104,7 @@ dependencies = [
  "crabka-telemetry",
  "crabka-units",
  "dashmap",
+ "datafusion",
  "derive_more",
  "futures-util",
  "hex",
@@ -3115,7 +3143,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-ids"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "derive_more",
@@ -3125,7 +3153,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-integration-tests"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "axum",
@@ -3138,6 +3166,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-log",
+ "crabka-metadata",
  "crabka-observability",
  "crabka-protocol",
  "crabka-raft",
@@ -3150,6 +3179,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde_json",
  "snap",
+ "stateright",
  "tempfile",
  "testcontainers",
  "tokio",
@@ -3163,7 +3193,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-kafka-tap"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-ids",
@@ -3171,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-kraft-core"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bytes",
@@ -3186,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-log"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bytes",
@@ -3212,7 +3242,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-log-iobench"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bytes",
@@ -3226,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-logfmt"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "serde_json",
@@ -3236,7 +3266,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-logql"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "base64 0.23.1",
@@ -3255,7 +3285,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-metadata"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bytes",
@@ -3277,7 +3307,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-metrics"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "assert2",
@@ -3328,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-metrics-service"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3366,7 +3396,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-object-store"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3381,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-observability"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3428,7 +3458,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-operator"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert2",
@@ -3495,7 +3525,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-pgcatalog"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-pgkv",
@@ -3509,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-pgexec"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3545,7 +3575,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-pgkv"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-pgtypes",
@@ -3562,7 +3592,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-pgmvcc"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-pgkv",
@@ -3574,7 +3604,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-pgparser"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-pgtypes",
@@ -3585,7 +3615,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-pgtypes"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bigdecimal",
@@ -3597,7 +3627,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-pgwire"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3627,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-playground"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "console_error_panic_hook",
@@ -3640,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-pprof"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "addr2line 0.27.1",
  "arrow",
@@ -3668,7 +3698,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-profiles"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "assert2",
@@ -3724,7 +3754,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-promql"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "assert2",
@@ -3759,7 +3789,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-protocol"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arbitrary",
  "assert2",
@@ -3783,7 +3813,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-protocol-codegen"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "prettyplease 0.3.0",
@@ -3797,10 +3827,11 @@ dependencies = [
 
 [[package]]
 name = "crabka-raft"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "crabka-client-core",
  "crabka-ids",
@@ -3808,6 +3839,7 @@ dependencies = [
  "crabka-log",
  "crabka-metadata",
  "crabka-protocol",
+ "crabka-security",
  "crabka-units",
  "crabka-verified",
  "dashmap",
@@ -3829,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-rebalancer"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3872,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-records-legacy"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "bytes",
@@ -3888,14 +3920,18 @@ dependencies = [
 
 [[package]]
 name = "crabka-remote-storage"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
+ "base64 0.23.1",
  "bytes",
  "crabka-ids",
+ "crabka-log",
  "crabka-object-store",
+ "crabka-protocol",
  "crabka-units",
  "object_store",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3905,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-remote-storage-topic"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3931,7 +3967,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-replicator"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert2",
@@ -3966,7 +4002,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-schema-registry"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -4021,7 +4057,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-schema-serde"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "apache-avro",
  "assert2",
@@ -4041,8 +4077,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-sdk-conformance"
+version = "0.4.0"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "clap",
+ "crabka-authz",
+ "crabka-broker",
+ "crabka-client-admin",
+ "crabka-grpc-gateway",
+ "crabka-units",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "crabka-security"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "assert2",
@@ -4079,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-telemetry"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "axum",
@@ -4107,7 +4165,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-throttle"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-units",
@@ -4120,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-trace-context"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-pgparser",
@@ -4136,7 +4194,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-traceql"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "assert2",
@@ -4157,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-traces"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -4221,7 +4279,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-units"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "num-traits",
@@ -4234,7 +4292,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-verified"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "creusot-std",
@@ -4243,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-voters"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "crabka-ids",
@@ -7727,6 +7785,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "java_regex"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f3b3ff81a66205722b636dae12fc5cb2e77147569e8968f38a1d73b2b05fbe6"
+dependencies = [
+ "unicode-blocks",
+ "unicode-general-category",
+ "unicode-properties",
+ "unicode-script",
+]
+
+[[package]]
 name = "jemalloc_pprof"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9261,7 +9331,7 @@ dependencies = [
 
 [[package]]
 name = "observability-demo-app"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "assert2",
  "axum",
@@ -14784,6 +14854,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
+name = "unicode-blocks"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328edfd6d0bb91a22e592bed3a3b54c7b1f5c92a517f5a7aca24a2caef10c363"
+
+[[package]]
 name = "unicode-general-category"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14818,6 +14894,12 @@ checksum = "4b6f4888ebc23094adfb574fdca9fdc891826287a6397d2cd28802ffd6f20c76"
 dependencies = [
  "unicode-segmentation",
 ]
+
+[[package]]
+name = "unicode-script"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
 
 [[package]]
 name = "unicode-segmentation"

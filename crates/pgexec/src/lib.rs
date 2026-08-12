@@ -37,7 +37,7 @@
 //! its own, which a session takes once per block of ids rather than once per
 //! `CREATE TABLE`.
 
-#![doc(html_root_url = "https://docs.rs/crabka-pgexec/0.3.9")]
+#![doc(html_root_url = "https://docs.rs/crabka-pgexec/0.4.0")]
 
 mod agg;
 mod array_fn;

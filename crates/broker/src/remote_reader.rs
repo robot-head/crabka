@@ -4,11 +4,12 @@
 //! [`RemoteLogMetadataManager`] pair. It serves `Fetch` and `ListOffsets`
 //! requests for offsets that have no local copy any more.
 //!
-//! The RSM SPI is synchronous and blocking. This module therefore wraps every
-//! byte-range read and index read in `tokio::task::spawn_blocking`, so the
-//! broker's reactor never stalls on remote-tier I/O. The pure index-decode
-//! helpers mirror `crabka_log::index::{OffsetIndex,TimeIndex}::lookup` against
-//! the Kafka-format index bytes that the copy path wrote verbatim.
+//! The RSM and RLMM SPIs are synchronous and blocking. This module therefore
+//! wraps byte-range reads, index reads, and `ListOffsets` metadata scans in
+//! `tokio::task::spawn_blocking`, so those remote-tier operations do not stall
+//! the broker's reactor. The pure index-decode helpers mirror
+//! `crabka_log::index::{OffsetIndex,TimeIndex}::lookup` against the Kafka-format
+//! index bytes that the copy path wrote verbatim.
 
 use std::sync::Arc;
 
@@ -93,6 +94,14 @@ pub(crate) struct AbortedTxnEntry {
 pub(crate) struct RemoteReader {
     pub(crate) rsm: Arc<dyn RemoteStorageManager>,
     pub(crate) rlmm: Arc<dyn RemoteLogMetadataManager>,
+}
+
+/// The last offset durably copied to the remote tier and the leader epoch
+/// that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TieredOffset {
+    pub(crate) offset: LogOffset,
+    pub(crate) leader_epoch: LeaderEpoch,
 }
 
 impl RemoteReader {
@@ -243,11 +252,11 @@ impl RemoteReader {
     /// Returns the lowest `start_offset` across the finished segments for
     /// `tp`, or `None` when no finished segment exists. It drives
     /// `ListOffsets` EARLIEST below `local_log_start_offset()`.
-    pub(crate) fn earliest_offset(
+    pub(crate) async fn earliest_offset(
         &self,
         tp: &TopicIdPartition,
     ) -> Result<Option<LogOffset>, RemoteStorageError> {
-        let listed = self.rlmm.list_remote_log_segments(tp)?;
+        let listed = self.list_remote_log_segments_blocking(tp).await?;
         Ok(listed
             .into_iter()
             .filter(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
@@ -255,38 +264,99 @@ impl RemoteReader {
             .min())
     }
 
-    /// Returns the smallest absolute offset whose record timestamp is
-    /// `>= target_timestamp`, across the finished remote segments. It walks
-    /// the segments oldest first, finds the first one whose
-    /// `max_timestamp >= target_timestamp`, fetches that segment's time index,
-    /// and returns `start_offset + relative_offset_for_timestamp`. It returns
-    /// `None` when no finished remote segment qualifies.
+    /// Returns the highest offset held by a finished remote segment and the
+    /// leader epoch that owns that offset. In-progress copies are invisible.
+    pub(crate) async fn latest_tiered_offset(
+        &self,
+        tp: &TopicIdPartition,
+    ) -> Result<Option<TieredOffset>, RemoteStorageError> {
+        let listed = self.list_remote_log_segments_blocking(tp).await?;
+        let Some(metadata) = listed
+            .into_iter()
+            .filter(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
+            .max_by_key(RemoteLogSegmentMetadata::end_offset)
+        else {
+            return Ok(None);
+        };
+        let offset = metadata.end_offset();
+        let Some(leader_epoch) = metadata
+            .segment_leader_epochs()
+            .iter()
+            .filter(|(_, start)| **start <= offset)
+            .max_by_key(|(_, start)| **start)
+            .map(|(epoch, _)| *epoch)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(TieredOffset {
+            offset,
+            leader_epoch,
+        }))
+    }
+
+    /// Returns the smallest absolute offset and its record timestamp where the
+    /// timestamp is `>= target_timestamp`, across the finished remote segments.
+    /// The sparse time index supplies a scan floor; the exact answer comes from
+    /// decoding records from the corresponding offset-index position.
     pub(crate) async fn offset_for_timestamp(
         &self,
         tp: &TopicIdPartition,
         target_timestamp: TimestampMs,
-    ) -> Result<Option<LogOffset>, RemoteStorageError> {
-        let mut listed = self.rlmm.list_remote_log_segments(tp)?;
+    ) -> Result<Option<(LogOffset, TimestampMs)>, RemoteStorageError> {
+        let mut listed = self.list_remote_log_segments_blocking(tp).await?;
         listed.retain(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished);
         listed.sort_by_key(RemoteLogSegmentMetadata::start_offset);
 
-        let Some(metadata) = listed
+        for metadata in listed
             .into_iter()
-            .find(|md| md.max_timestamp_ms() >= target_timestamp)
-        else {
-            return Ok(None);
-        };
+            // `-1` is the persisted unknown-max sentinel for a sealed segment
+            // opened without a tail scan. It must remain scan-eligible for a
+            // positive timestamp lookup after broker restart.
+            .filter(|md| md.max_timestamp_ms() == -1 || md.max_timestamp_ms() >= target_timestamp)
+        {
+            let (time_index_bytes, offset_index_bytes) = tokio::try_join!(
+                self.fetch_index_blocking(metadata.clone(), IndexType::Timestamp),
+                self.fetch_index_blocking(metadata.clone(), IndexType::Offset),
+            )?;
+            let scan_rel = relative_offset_floor_for_timestamp(
+                parse_time_index(&time_index_bytes)?,
+                target_timestamp,
+            );
+            let start_position =
+                position_for_relative_offset(parse_offset_index(&offset_index_bytes)?, scan_rel);
+            // ponytail: one tail read keeps the scan exact; switch to bounded,
+            // batch-aligned windows only if remote segment profiling requires it.
+            let data = self
+                .fetch_log_blocking(metadata.clone(), start_position, None)
+                .await?;
+            let scan_offset = metadata
+                .start_offset()
+                .checked_add(i64::from(scan_rel))
+                .ok_or_else(|| corrupt_log("timestamp-index offset overflow"))?;
+            if let Some(found) =
+                first_record_at_or_after_timestamp(&data, scan_offset, target_timestamp)?
+            {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
+    }
 
-        let index_bytes = self
-            .fetch_index_blocking(metadata.clone(), IndexType::Timestamp)
-            .await?;
-        let entries = parse_time_index(&index_bytes)?;
-        let Some(rel) = relative_offset_for_timestamp(entries, target_timestamp) else {
-            // No entry past the target — the first record in the segment is
-            // the conservative answer.
-            return Ok(Some(metadata.start_offset()));
-        };
-        Ok(Some(metadata.start_offset() + i64::from(rel)))
+    async fn list_remote_log_segments_blocking(
+        &self,
+        tp: &TopicIdPartition,
+    ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
+        let rlmm = self.rlmm.clone();
+        let tp = tp.clone();
+        match tokio::task::spawn_blocking(move || rlmm.list_remote_log_segments(&tp)).await {
+            Ok(result) => result,
+            Err(error) => {
+                warn!(error = %error, "remote-reader: list_remote_log_segments task panicked");
+                Err(RemoteStorageError::Io(std::io::Error::other(
+                    "list_remote_log_segments task panicked",
+                )))
+            }
+        }
     }
 
     async fn fetch_index_blocking(
@@ -364,6 +434,13 @@ fn corrupt_index(kind: &str) -> RemoteStorageError {
     ))
 }
 
+fn corrupt_log(detail: impl std::fmt::Display) -> RemoteStorageError {
+    RemoteStorageError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("corrupt remote log bytes: {detail}"),
+    ))
+}
+
 /// Borrows Kafka's `OffsetIndex` on-disk format as a zero-copy
 /// `&[OffsetIndexEntry]`, at 8 bytes per entry: rel u32 BE, then pos u32 BE.
 /// It ignores trailing bytes that do not complete an 8-byte entry. The result
@@ -423,17 +500,60 @@ pub(crate) fn txn_overlaps(
     entry.start_offset.get() <= to_offset && entry.last_offset.get() >= from_offset
 }
 
-/// Returns the relative offset of the first entry whose `ts >= target_ts`, or
-/// `None` when no entry qualifies.
+/// Returns a safe relative-offset floor for an exact timestamp scan.
+///
+/// The last entry strictly below `target_ts` is used rather than an entry at
+/// or above it: a sparse index entry is only a seek hint and may follow the
+/// earliest qualifying record. Non-increasing relative offsets mark trailing
+/// preallocation padding and end the usable index.
 #[must_use]
-pub(crate) fn relative_offset_for_timestamp(
+pub(crate) fn relative_offset_floor_for_timestamp(
     entries: &[TimeIndexEntry],
     target_ts: TimestampMs,
-) -> Option<RelativeOffset> {
-    entries
-        .iter()
-        .find(|e| e.timestamp.get() >= target_ts)
-        .map(|e| e.relative_offset.get())
+) -> RelativeOffset {
+    let mut floor = 0;
+    let mut previous_relative_offset = None;
+    for entry in entries {
+        let relative_offset = entry.relative_offset.get();
+        if previous_relative_offset.is_some_and(|previous| relative_offset <= previous)
+            || entry.timestamp.get() >= target_ts
+        {
+            break;
+        }
+        floor = relative_offset;
+        previous_relative_offset = Some(relative_offset);
+    }
+    floor
+}
+
+/// Decodes remote log batches and returns the earliest record at or after both
+/// `floor_offset` and `target_timestamp`.
+pub(crate) fn first_record_at_or_after_timestamp(
+    data: &[u8],
+    floor_offset: LogOffset,
+    target_timestamp: TimestampMs,
+) -> Result<Option<(LogOffset, TimestampMs)>, RemoteStorageError> {
+    let mut cur = data;
+    while !cur.is_empty() {
+        let batch = RecordBatch::decode(&mut cur).map_err(corrupt_log)?;
+        for record in &batch.records {
+            let offset = batch
+                .base_offset
+                .checked_add(i64::from(record.offset_delta))
+                .ok_or_else(|| corrupt_log("record offset overflow"))?;
+            if offset < floor_offset {
+                continue;
+            }
+            let timestamp = batch
+                .base_timestamp
+                .checked_add(record.timestamp_delta)
+                .ok_or_else(|| corrupt_log("record timestamp overflow"))?;
+            if timestamp >= target_timestamp {
+                return Ok(Some((offset, timestamp)));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Decodes batches from `data` and returns the first one whose last offset is
@@ -537,21 +657,27 @@ mod tests {
     }
 
     #[test]
-    fn relative_offset_for_timestamp_returns_first_ge() {
+    fn timestamp_floor_stays_before_sparse_match() {
         let entries = time_entries(&[(1_000, 0), (2_000, 10), (3_000, 20)]);
-        let cases: [(&[TimeIndexEntry], i64, Option<u32>); 4] = [
-            (&entries, 1_000, Some(0)),  // exact match
-            (&entries, 1_500, Some(10)), // between → next
-            (&entries, 4_000, None),     // after last
-            (&[], 1_000, None),          // empty
+        let cases: [(&[TimeIndexEntry], i64, u32); 4] = [
+            (&entries, 1_000, 0), // exact match scans from the segment start
+            (&entries, 1_500, 0), // between entries scans from the lower hint
+            (&entries, 4_000, 20),
+            (&[], 1_000, 0),
         ];
         for (entries, ts, want) in cases {
             assert!(
-                relative_offset_for_timestamp(entries, ts) == want,
+                relative_offset_floor_for_timestamp(entries, ts) == want,
                 "ts {ts} entries_len {}",
                 entries.len()
             );
         }
+    }
+
+    #[test]
+    fn timestamp_floor_ignores_trailing_index_padding() {
+        let entries = time_entries(&[(1_000, 0), (2_000, 10), (0, 0), (0, 0)]);
+        assert!(relative_offset_floor_for_timestamp(&entries, 3_000) == 10);
     }
 
     #[test]
@@ -773,6 +899,33 @@ mod tests {
         batch
     }
 
+    fn timestamped_batch_at(
+        base_offset: i64,
+        timestamps: &[i64],
+        value_byte: u8,
+    ) -> crabka_protocol::records::RecordBatch {
+        use bytes::Bytes;
+
+        let base_timestamp = timestamps.first().copied().unwrap_or_default();
+        crabka_protocol::records::RecordBatch {
+            base_offset,
+            last_offset_delta: i32::try_from(timestamps.len().saturating_sub(1)).unwrap(),
+            base_timestamp,
+            max_timestamp: timestamps.iter().copied().max().unwrap_or_default(),
+            records: timestamps
+                .iter()
+                .enumerate()
+                .map(|(offset_delta, timestamp)| Record {
+                    timestamp_delta: timestamp - base_timestamp,
+                    offset_delta: i32::try_from(offset_delta).unwrap(),
+                    value: Some(Bytes::from(vec![value_byte; 4])),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     fn offset_index_bytes(entries: &[(u32, u32)]) -> Vec<u8> {
         let mut buf = Vec::new();
         for (relative_offset, position) in entries {
@@ -797,12 +950,14 @@ mod tests {
         path
     }
 
-    fn sparse_remote_segment_reader() -> (RemoteReader, tempfile::TempDir) {
+    fn sparse_remote_segment_reader_with_max_timestamp(
+        max_timestamp_ms: i64,
+    ) -> (RemoteReader, tempfile::TempDir) {
         let source_dir = tempfile::tempdir().unwrap();
         let remote_dir = tempfile::tempdir().unwrap();
 
-        let first = test_batch_at(10, 4, b'a');
-        let second = test_batch_at(14, 3, b'b');
+        let first = timestamped_batch_at(10, &[1_000, 1_100, 1_600, 1_700], b'a');
+        let second = timestamped_batch_at(14, &[2_000, 2_200, 2_400], b'b');
         let mut log_bytes = bytes::BytesMut::new();
         first.encode(&mut log_bytes).unwrap();
         let second_position = u32::try_from(log_bytes.len()).unwrap();
@@ -818,7 +973,7 @@ mod tests {
         let time_index_path = write_test_file(
             source_dir.path(),
             "00000000000000000010.timeindex",
-            &time_index_bytes(&[(1_000, 0), (2_000, 4)]),
+            &time_index_bytes(&[(1_700, 0), (2_400, 4)]),
         );
 
         let rsm: Arc<dyn RemoteStorageManager> =
@@ -830,9 +985,9 @@ mod tests {
             id.clone(),
             10,
             16,
-            2_000,
+            max_timestamp_ms,
             1,
-            2_000,
+            2_400,
             crabka_remote_storage::RemoteLogSegmentDetails::new(
                 i32::try_from(log_bytes.len()).unwrap_or(i32::MAX),
                 RemoteLogSegmentState::CopySegmentStarted,
@@ -854,7 +1009,7 @@ mod tests {
         rlmm.update_remote_log_segment_metadata(
             crabka_remote_storage::RemoteLogSegmentMetadataUpdate {
                 remote_log_segment_id: id,
-                event_timestamp_ms: 2_000,
+                event_timestamp_ms: 2_400,
                 custom_metadata: None,
                 state: RemoteLogSegmentState::CopySegmentFinished,
                 broker_id: 1,
@@ -863,6 +1018,10 @@ mod tests {
         .unwrap();
 
         (RemoteReader::new(rsm, rlmm), remote_dir)
+    }
+
+    fn sparse_remote_segment_reader() -> (RemoteReader, tempfile::TempDir) {
+        sparse_remote_segment_reader_with_max_timestamp(2_400)
     }
 
     /// Builds a log rolled into several sealed segments under `dir`, then
@@ -1214,7 +1373,7 @@ mod tests {
         let exports = log.tierable_segments();
         // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
         let expected = exports.iter().map(|e| e.base_offset.0).min().unwrap();
-        let got = reader.earliest_offset(&tp()).unwrap();
+        let got = reader.earliest_offset(&tp()).await.unwrap();
         assert!(got == Some(expected));
     }
 
@@ -1226,7 +1385,146 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let reader = RemoteReader::new(rsm, rlmm);
-        assert!(reader.earliest_offset(&tp()).unwrap() == None);
+        assert!(reader.earliest_offset(&tp()).await.unwrap() == None);
+    }
+
+    #[tokio::test]
+    async fn latest_tiered_offset_uses_highest_finished_segment_and_its_epoch() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let (reader, log) = populated_reader(log_dir.path(), remote_dir.path());
+        let expected = log
+            .tierable_segments()
+            .iter()
+            .map(|segment| segment.last_offset.0)
+            .max()
+            .unwrap();
+
+        let started_id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
+        reader
+            .rlmm
+            .add_remote_log_segment_metadata(
+                RemoteLogSegmentMetadata::new(
+                    started_id,
+                    expected + 1,
+                    expected + 100,
+                    0,
+                    1,
+                    0,
+                    crabka_remote_storage::RemoteLogSegmentDetails::new(
+                        1,
+                        RemoteLogSegmentState::CopySegmentStarted,
+                        BTreeMap::from([(LeaderEpoch(7), expected + 1)]),
+                    ),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let got = reader
+            .latest_tiered_offset(&tp())
+            .await
+            .unwrap()
+            .expect("finished segments exist");
+        assert!(
+            got == TieredOffset {
+                offset: expected,
+                leader_epoch: LeaderEpoch(0),
+            }
+        );
+    }
+
+    struct SlowListRlmm {
+        reactor_ticked: Arc<std::sync::atomic::AtomicBool>,
+        observed_tick: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl RemoteLogMetadataManager for SlowListRlmm {
+        fn add_remote_log_segment_metadata(
+            &self,
+            _metadata: RemoteLogSegmentMetadata,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+
+        fn update_remote_log_segment_metadata(
+            &self,
+            _update: crabka_remote_storage::RemoteLogSegmentMetadataUpdate,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+
+        fn remote_log_segment_metadata(
+            &self,
+            _topic_id_partition: &TopicIdPartition,
+            _leader_epoch: LeaderEpoch,
+            _offset: i64,
+        ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            Ok(None)
+        }
+
+        fn highest_offset_for_epoch(
+            &self,
+            _topic_id_partition: &TopicIdPartition,
+            _leader_epoch: LeaderEpoch,
+        ) -> Result<Option<i64>, RemoteStorageError> {
+            Ok(None)
+        }
+
+        fn list_remote_log_segments(
+            &self,
+            _topic_id_partition: &TopicIdPartition,
+        ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.observed_tick.store(
+                self.reactor_ticked
+                    .load(std::sync::atomic::Ordering::Acquire),
+                std::sync::atomic::Ordering::Release,
+            );
+            Ok(Vec::new())
+        }
+
+        fn list_remote_log_segments_by_epoch(
+            &self,
+            _topic_id_partition: &TopicIdPartition,
+            _leader_epoch: LeaderEpoch,
+        ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            Ok(Vec::new())
+        }
+
+        fn put_remote_partition_delete_metadata(
+            &self,
+            _metadata: crabka_remote_storage::RemotePartitionDeleteMetadata,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metadata_listing_does_not_block_the_reactor() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let reactor_ticked = Arc::new(AtomicBool::new(false));
+        let observed_tick = Arc::new(AtomicBool::new(false));
+        let tick = reactor_ticked.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tick.store(true, Ordering::Release);
+        });
+        let remote_dir = tempfile::tempdir().unwrap();
+        let reader = RemoteReader::new(
+            Arc::new(LocalTieredStorage::new(remote_dir.path())),
+            Arc::new(SlowListRlmm {
+                reactor_ticked,
+                observed_tick: observed_tick.clone(),
+            }),
+        );
+
+        assert!(reader.earliest_offset(&tp()).await.unwrap() == None);
+        assert!(
+            observed_tick.load(Ordering::Acquire),
+            "the current-thread reactor must run while the blocking RLMM call is in flight"
+        );
     }
 
     #[tokio::test]
@@ -1248,20 +1546,46 @@ mod tests {
         // The first finished segment is the lowest-base one.
         // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
         let expected = exports.iter().map(|e| e.base_offset.0).min().unwrap();
-        assert!(got == expected);
+        assert!(got == (expected, 0));
     }
 
     #[tokio::test]
-    async fn offset_for_timestamp_adds_relative_offset_to_segment_start() {
+    async fn offset_for_timestamp_scans_before_sparse_ceiling() {
+        let (reader, _remote_dir) = sparse_remote_segment_reader();
+
+        let got = reader
+            .offset_for_timestamp(&tp(), 1_500)
+            .await
+            .unwrap()
+            .expect("timestamp 1500 has a remote match");
+
+        assert!(got == (12, 1_600));
+    }
+
+    #[tokio::test]
+    async fn offset_for_timestamp_returns_exact_indexed_record_timestamp() {
         let (reader, _remote_dir) = sparse_remote_segment_reader();
 
         let got = reader
             .offset_for_timestamp(&tp(), 2_000)
             .await
             .unwrap()
-            .expect("timestamp 2000 is indexed");
+            .expect("timestamp 2000 has an exact record match");
 
-        assert!(got == 14);
+        assert!(got == (14, 2_000));
+    }
+
+    #[tokio::test]
+    async fn offset_for_timestamp_scans_segment_with_unknown_max_timestamp() {
+        let (reader, _remote_dir) = sparse_remote_segment_reader_with_max_timestamp(-1);
+
+        let got = reader
+            .offset_for_timestamp(&tp(), 2_000)
+            .await
+            .unwrap()
+            .expect("the unknown max sentinel must not suppress an exact remote scan");
+
+        assert!(got == (14, 2_000));
     }
 
     #[tokio::test]
@@ -1350,7 +1674,7 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> = Arc::new(NotReadyRlmm);
         let reader = RemoteReader::new(rsm, rlmm);
-        let err = reader.earliest_offset(&tp()).unwrap_err();
+        let err = reader.earliest_offset(&tp()).await.unwrap_err();
         assert!(matches!(err, RemoteStorageError::NotReady { .. }));
     }
 
@@ -1482,7 +1806,7 @@ mod tests {
         // Unowned partition (never assigned) → the list path treats it as a
         // genuine miss: empty, not an error.
         assert!(
-            reader.earliest_offset(&not_owned).unwrap() == None,
+            reader.earliest_offset(&not_owned).await.unwrap() == None,
             "unassigned partition is an empty list-path result, not NotReady"
         );
 
@@ -1491,7 +1815,7 @@ mod tests {
         // ready (Some) terminal state.
         assign_and_wait_ready(&m, mp_owned, &owned).await;
         assert!(
-            reader.earliest_offset(&owned).unwrap() == Some(0),
+            reader.earliest_offset(&owned).await.unwrap() == Some(0),
             "owned + caught up → real earliest from the remote tier"
         );
 
@@ -1499,7 +1823,7 @@ mod tests {
         // broker no longer owns it), NOT a stale segment.
         m.reconcile_assignment(&[]).await;
         assert!(
-            reader.earliest_offset(&owned).unwrap() == None,
+            reader.earliest_offset(&owned).await.unwrap() == None,
             "removed partition's list path returns empty, not stale segments"
         );
 

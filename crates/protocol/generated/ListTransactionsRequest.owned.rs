@@ -56,7 +56,7 @@ impl Encode for ListTransactionsRequest {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -68,7 +68,7 @@ impl Encode for ListTransactionsRequest {
                 for it in &self.producer_id_filters {
                     put_i64(buf, *it);
                 }
-            }
+            };
         }
         if version >= 1 {
             put_i64(buf, self.duration_filter);

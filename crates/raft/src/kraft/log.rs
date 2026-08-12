@@ -24,6 +24,7 @@ pub struct KraftLog {
 }
 
 const HIGH_WATERMARK_FILE: &str = "high-watermark.checkpoint";
+const LOG_START_OFFSET_FILE: &str = "log-start-offset.checkpoint";
 
 impl KraftLog {
     /// Opens or creates the metadata log under `dir/@metadata-0`.
@@ -35,7 +36,17 @@ impl KraftLog {
         let hwm_path = dir.as_ref().join(HIGH_WATERMARK_FILE);
         let log_dir = dir.as_ref().join("@metadata-0");
         std::fs::create_dir_all(&log_dir).map_err(crabka_log::LogError::Io)?;
-        let log = Log::open(&log_dir, LogConfig::default())?;
+        let mut log = Log::open(&log_dir, LogConfig::default())?;
+        if let Some(log_start_offset) =
+            std::fs::read_to_string(dir.as_ref().join(LOG_START_OFFSET_FILE))
+                .ok()
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .map(Offset)
+            && log_start_offset > log.log_start_offset()
+            && log_start_offset <= log.log_end_offset()
+        {
+            log.set_log_start_offset(log_start_offset)?;
+        }
         let hwm = std::fs::read_to_string(&hwm_path)
             .ok()
             .and_then(|value| value.trim().parse::<i64>().ok())
@@ -148,6 +159,20 @@ impl KraftLog {
         Ok(())
     }
 
+    /// Persist the current logical log start so prefix pruning survives a
+    /// process restart even when it advances inside the active segment.
+    ///
+    /// # Errors
+    /// Returns [`RaftError`] if the checkpoint write fails.
+    pub fn persist_log_start_offset(&self) -> Result<(), RaftError> {
+        std::fs::write(
+            self.hwm_path.with_file_name(LOG_START_OFFSET_FILE),
+            self.log.log_start_offset().0.to_string(),
+        )
+        .map_err(crabka_log::LogError::Io)?;
+        Ok(())
+    }
+
     /// Prunes the committed prefix below `end_offset`: it advances the
     /// log-start pointer and trims the now-dead segments. This is a no-op when
     /// `end_offset` is at or below the current log start. The leader calls it
@@ -157,10 +182,12 @@ impl KraftLog {
     /// Returns [`RaftError`] if the underlying log operations fail.
     pub fn prune_to(&mut self, end_offset: Offset) -> Result<(), RaftError> {
         if end_offset <= self.log.log_start_offset() {
+            self.persist_log_start_offset()?;
             return Ok(());
         }
         self.log.set_log_start_offset(end_offset)?;
         self.log.trim_to_offset(end_offset)?;
+        self.persist_log_start_offset()?;
         Ok(())
     }
 
@@ -173,6 +200,7 @@ impl KraftLog {
     /// Returns [`RaftError`] if the underlying reset fails.
     pub fn install_snapshot(&mut self, end_offset: Offset) -> Result<(), RaftError> {
         self.log.reset_to(end_offset)?;
+        self.persist_log_start_offset()?;
         self.hwm = end_offset;
         self.persist_hwm();
         Ok(())

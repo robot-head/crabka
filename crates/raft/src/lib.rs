@@ -52,7 +52,7 @@
 //! [`RaftError::Unsupported`]. Mixed JVM and Crabka controller quorums are
 //! outside this crate's compatibility target.
 
-#![doc(html_root_url = "https://docs.rs/crabka-raft/0.3.9")]
+#![doc(html_root_url = "https://docs.rs/crabka-raft/0.4.0")]
 
 mod config;
 mod controller;
@@ -73,8 +73,9 @@ mod types;
 mod wire;
 
 pub use config::{
-    BootstrapMode, ControllerConfig, ControllerFetchMissLimit, MetadataRaftCommandQueueCapacity,
-    MetadataRaftFetchMax, RaftShardRouter, ShardRouteFuture,
+    BootstrapMode, ControllerAdminRequest, ControllerAdminResponse, ControllerAdminRouteFuture,
+    ControllerAdminRouter, ControllerApiVersion, ControllerConfig, ControllerFetchMissLimit,
+    MetadataRaftCommandQueueCapacity, MetadataRaftFetchMax, RaftShardRouter, ShardRouteFuture,
 };
 pub use controller::{
     Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice, metadata_log_nonempty,

@@ -149,7 +149,7 @@ impl<'a> JoinGroupResponse<'a> {
                 for it in &self.members {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         Ok(())
     }

@@ -25,7 +25,7 @@
 //!
 //! The broker rejects unknown keys with `INVALID_CONFIG`.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use crabka_log::LogConfig;
 use crabka_units::{
@@ -95,6 +95,13 @@ pub(crate) const DELETE_RETENTION_MS: &str = "delete.retention.ms";
 /// buckets. Unset topics resolve to [`DEFAULT_QOS_TIER`].
 pub(crate) const QOS_TIER: &str = "qos.tier";
 pub(crate) const DEFAULT_QOS_TIER: &str = "default";
+
+/// KIP-1075: server-side deadline for remote `ListOffsets` work when an older
+/// request does not carry `timeout_ms`. Kafka exposes this as a dynamic broker
+/// config and defaults it to 30 seconds.
+pub(crate) const REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS: &str =
+    "remote.list.offsets.request.timeout.ms";
+pub(crate) const DEFAULT_REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Kafka sentinel for `retention.ms` / `retention.bytes`: `-1` means
 /// unlimited retention, and is the lowest legal value.
@@ -283,6 +290,39 @@ pub(crate) fn resolve_unclean_leader_election_enabled(
     topic: &str,
 ) -> bool {
     topic_or_cluster_default(image, topic, UNCLEAN_LEADER_ELECTION_ENABLE) == Some("true")
+}
+
+/// Parse KIP-1075's dynamic broker timeout.
+pub(crate) fn parse_remote_list_offsets_timeout(value: &str) -> Result<Duration, String> {
+    let millis = value
+        .parse::<i32>()
+        .map_err(|_| format!("{REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS} must be a positive int"))?;
+    if millis <= 0 {
+        return Err(format!(
+            "{REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS} must be in 1..={}",
+            i32::MAX
+        ));
+    }
+    Ok(Duration::from_millis(
+        u64::try_from(millis).expect("positive i32 fits u64"),
+    ))
+}
+
+/// Resolve the per-broker KIP-1075 timeout over the cluster default.
+pub(crate) fn resolve_remote_list_offsets_timeout(
+    image: &crabka_metadata::MetadataImage,
+    node_id: crabka_metadata::NodeId,
+) -> Duration {
+    image
+        .broker_config(node_id)
+        .and_then(|configs| configs.get(REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS))
+        .or_else(|| {
+            image
+                .default_broker_config()
+                .and_then(|configs| configs.get(REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS))
+        })
+        .and_then(|value| parse_remote_list_offsets_timeout(value).ok())
+        .unwrap_or(DEFAULT_REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT)
 }
 
 /// Merge `overrides` over `base` and return a fresh `LogConfig` to push

@@ -55,7 +55,7 @@ impl Encode for DescribeConfigsRequest<'_> {
                 for it in &self.resources {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 1 {
             put_bool(buf, self.include_synonyms);
@@ -194,7 +194,7 @@ impl Encode for DescribeConfigsResource<'_> {
                         }
                     }
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

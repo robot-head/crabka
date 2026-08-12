@@ -218,6 +218,18 @@ impl KafkaUserStatusWriter for KubeKafkaUserStatusWriter {
 #[derive(Debug, Clone)]
 pub(crate) struct ReconcileOutcome {
     pub action: Action,
+    /// Token conditions carried into shared ACL and quota reconciliation.
+    /// They reflect the last pending state when this pass changed credentials,
+    /// or the stable Ready state for a healthy no-op. `None` means token
+    /// reconciliation failed and the caller must return the supplied action.
+    pub conditions: Option<Vec<KafkaCondition>>,
+    /// Token-lifecycle deadline before the controller applies its shorter
+    /// external-drift polling interval. Present only on success.
+    pub token_requeue: Option<Time>,
+    /// Whether this pass already published aggregate readiness as pending.
+    /// The shared access phase uses this to avoid a redundant pending patch
+    /// while still assigning a fresh transition time to the final Ready state.
+    pub pending_published: bool,
 }
 
 /// Top-level reconcile entry point.
@@ -250,7 +262,17 @@ pub(crate) async fn reconcile(
     {
         Ok(v) => v,
         Err(e) => {
-            return on_admin_error(obj, &name, e, "DescribeDelegationToken", users, config).await;
+            let prior_conditions = existing_token_conditions(obj);
+            return on_admin_error(
+                &name,
+                e,
+                "DescribeDelegationToken",
+                users,
+                config,
+                prior_conditions.as_deref(),
+                prior_conditions.is_some(),
+            )
+            .await;
         }
     };
     // Prefer the persisted token_id from status; else fall back to the
@@ -264,25 +286,42 @@ pub(crate) async fn reconcile(
         .or_else(|| existing.first().cloned());
 
     let decision = decide(auth, matching.as_ref(), now_ms);
+    let mut pending_conditions = None;
 
     // 2. Drive the decision. Each arm yields the live token + its
     //    expiry-driven requeue cadence.
     let (token, requeue): (DelegationToken, Time) = match decision {
-        ReconcileDecision::Create => match issue_new_token(&name, auth, admin).await {
-            Ok(t) => {
-                let r = compute_requeue(
-                    &t,
-                    auth,
-                    now_ms,
-                    config.delegation_token_min_requeue,
-                    config.delegation_token_max_requeue,
-                );
-                (t, r)
+        ReconcileDecision::Create => {
+            let prior = obj
+                .status
+                .as_ref()
+                .map_or(&[][..], |status| status.conditions.as_slice());
+            pending_conditions = Some(publish_token_pending(&name, users, prior, false).await?);
+            match issue_new_token(&name, auth, admin).await {
+                Ok(t) => {
+                    let r = compute_requeue(
+                        &t,
+                        auth,
+                        now_ms,
+                        config.delegation_token_min_requeue,
+                        config.delegation_token_max_requeue,
+                    );
+                    (t, r)
+                }
+                Err(e) => {
+                    return on_admin_error(
+                        &name,
+                        e,
+                        "CreateDelegationToken",
+                        users,
+                        config,
+                        pending_conditions.as_deref(),
+                        false,
+                    )
+                    .await;
+                }
             }
-            Err(e) => {
-                return on_admin_error(obj, &name, e, "CreateDelegationToken", users, config).await;
-            }
-        },
+        }
         ReconcileDecision::NoOp => {
             let t = matching.expect("NoOp implies existing token");
             let r = compute_requeue(
@@ -308,8 +347,18 @@ pub(crate) async fn reconcile(
                     (renewed, r)
                 }
                 Err(e) => {
-                    return on_admin_error(obj, &name, e, "RenewDelegationToken", users, config)
-                        .await;
+                    let live_conditions =
+                        conditions_with_history(obj, &existing_token, auth, now_ms);
+                    return on_admin_error(
+                        &name,
+                        e,
+                        "RenewDelegationToken",
+                        users,
+                        config,
+                        Some(&live_conditions),
+                        true,
+                    )
+                    .await;
                 }
             }
         }
@@ -317,8 +366,20 @@ pub(crate) async fn reconcile(
             let existing_token = matching.expect("Cycle implies existing token");
             // Expire the old, then create the new. KIP-48 has no
             // in-place renewer-set mutation API, so we must cycle.
+            let live_conditions = conditions_with_history(obj, &existing_token, auth, now_ms);
+            pending_conditions =
+                Some(publish_token_pending(&name, users, &live_conditions, true).await?);
             if let Err(e) = admin.expire_delegation_token(&existing_token.hmac).await {
-                return on_admin_error(obj, &name, e, "ExpireDelegationToken", users, config).await;
+                return on_admin_error(
+                    &name,
+                    e,
+                    "ExpireDelegationToken",
+                    users,
+                    config,
+                    Some(&live_conditions),
+                    true,
+                )
+                .await;
             }
             match issue_new_token(&name, auth, admin).await {
                 Ok(t) => {
@@ -332,24 +393,57 @@ pub(crate) async fn reconcile(
                     (t, r)
                 }
                 Err(e) => {
-                    return on_admin_error(obj, &name, e, "CreateDelegationToken", users, config)
-                        .await;
+                    return on_admin_error(
+                        &name,
+                        e,
+                        "CreateDelegationToken",
+                        users,
+                        config,
+                        pending_conditions.as_deref(),
+                        false,
+                    )
+                    .await;
                 }
             }
         }
     };
 
-    // 3. Write the Secret with the live token credentials.
-    let secret = build_secret(obj, &token)?;
-    secrets.apply(&secret).await?;
+    let mut conditions = conditions_with_history(obj, &token, auth, now_ms);
+    if pending_conditions.is_none() && !status_has_current_ready_token(obj, &token) {
+        pending_conditions = Some(publish_token_pending(&name, users, &conditions, true).await?);
+    }
+    if let Some(published) = pending_conditions.as_ref() {
+        conditions = inherit_published_ready(&conditions, published);
+    }
 
-    // 4. Patch status: token IDs + conditions.
-    let conds = compute_conditions(&token, auth, now_ms, /*issued_ok=*/ true, None);
-    let body = build_status_patch(&token, &conds);
-    users.patch_status(&name, body).await?;
+    // 3. Persist the token identity before exposing its Secret. A cycle may
+    // already have expired the previous token, so status must identify the
+    // replacement even if the Secret write fails. Include pending conditions
+    // atomically whenever this pass changed credentials.
+    let identity_body = build_token_identity_patch(&token, pending_conditions.as_deref());
+    users.patch_status(&name, identity_body).await?;
+
+    // 4. Write the Secret with the live token credentials. Readiness has
+    // already moved to pending whenever this token is new to the status.
+    let secret = build_secret(obj, &token)?;
+    if let Err(error) = secrets.apply(&secret).await {
+        let failed = replace_ready_condition(
+            pending_conditions.as_deref().unwrap_or(&conditions),
+            "False",
+            "SecretWriteFailed",
+            &error.to_string(),
+        );
+        users
+            .patch_status(&name, build_failure_status_patch(&failed))
+            .await?;
+        return Err(error);
+    }
 
     Ok(ReconcileOutcome {
         action: Action::requeue(requeue.to_std()),
+        conditions: Some(conditions),
+        token_requeue: Some(requeue),
+        pending_published: pending_conditions.is_some(),
     })
 }
 
@@ -475,10 +569,10 @@ pub(crate) fn compute_requeue(
 /// - `TokenIssued = True` on the success path with reason `Issued`.
 /// - `TokenIssued = False` on the error path with the reason from §2.5 of
 ///   the spec.
-/// - `Ready = True` on the success path with reason `TokenReady`. The
-///   reconcile loop calls this function only after it wrote the Secret, so
-///   `Ready = True` is the aggregator from §2.4 of the spec:
-///   `TokenIssued=True AND Secret exists`.
+/// - `Ready = True` in the returned success conditions with reason
+///   `TokenReady`. The token reconciler persists the same conditions with
+///   `Ready=False/AccessPending`; its caller publishes the final Ready value
+///   only after ACL and quota reconciliation succeeds.
 /// - `Ready = False` on the error path with the same reason as
 ///   `TokenIssued`. `kubectl describe kafkauser` then shows the correlated
 ///   cause, and the reader does not have to compare two conditions.
@@ -500,7 +594,7 @@ pub(crate) fn compute_conditions(
             "Ready",
             "True",
             "TokenReady",
-            "delegation token issued and Secret in sync",
+            "delegation token, Secret, ACLs, and quotas in sync",
         ));
         out.push(condition(
             "TokenIssued",
@@ -534,32 +628,192 @@ pub(crate) fn compute_conditions(
     out
 }
 
-/// Builds the merge-patch JSON body for `KafkaUserStatus` after a
-/// reconcile that succeeded.
-///
-/// The body sets only the delegation-token fields and the two new
-/// conditions. It does not touch the other status fields, which the shared
-/// SCRAM and TLS path manages.
-pub(crate) fn build_status_patch(
-    token: &DelegationToken,
+/// Replaces the aggregate `Ready` condition while retaining token-specific
+/// conditions and their transition timestamps.
+pub(crate) fn replace_ready_condition(
     conditions: &[KafkaCondition],
-) -> serde_json::Value {
-    json!({
-        "status": {
-            "conditions": conditions,
-            "username": token.owner.name,
-            "secret": token.owner.name,
-            "delegationTokenId": token.token_id,
-            "delegationTokenExpiryTimestampMs": token.expiry_timestamp_ms,
-            "delegationTokenMaxTimestampMs": token.max_timestamp_ms,
+    status: &str,
+    reason: &str,
+    message: &str,
+) -> Vec<KafkaCondition> {
+    replace_condition(conditions, "Ready", status, reason, message)
+}
+
+fn replace_condition(
+    conditions: &[KafkaCondition],
+    type_: &str,
+    status: &str,
+    reason: &str,
+    message: &str,
+) -> Vec<KafkaCondition> {
+    let mut updated = conditions.to_vec();
+    let mut replacement = condition(type_, status, reason, message);
+    if let Some(existing) = updated.iter_mut().find(|item| item.type_ == type_) {
+        if existing.status == replacement.status {
+            replacement
+                .last_transition_time
+                .clone_from(&existing.last_transition_time);
         }
-    })
+        *existing = replacement;
+    } else if type_ == "Ready" {
+        updated.insert(0, replacement);
+    } else {
+        updated.push(replacement);
+    }
+    updated
+}
+
+/// Replaces `Ready` after a known false-to-true transition. Unlike
+/// [`replace_ready_condition`], this always assigns a new transition time.
+pub(crate) fn transition_ready_condition(
+    conditions: &[KafkaCondition],
+    status: &str,
+    reason: &str,
+    message: &str,
+) -> Vec<KafkaCondition> {
+    let mut updated = conditions.to_vec();
+    let ready = condition("Ready", status, reason, message);
+    if let Some(existing) = updated.iter_mut().find(|item| item.type_ == "Ready") {
+        *existing = ready;
+    } else {
+        updated.insert(0, ready);
+    }
+    updated
+}
+
+fn conditions_with_history(
+    obj: &KafkaUser,
+    token: &DelegationToken,
+    auth: &DelegationTokenAuth,
+    now_ms: i64,
+) -> Vec<KafkaCondition> {
+    let mut conditions = compute_conditions(token, auth, now_ms, true, None);
+    let Some(status) = obj.status.as_ref() else {
+        return conditions;
+    };
+    for current in &mut conditions {
+        if current.type_ == "Ready" {
+            if let Some(previous) = status
+                .conditions
+                .iter()
+                .find(|previous| previous.type_ == "Ready")
+            {
+                *current = previous.clone();
+            }
+            continue;
+        }
+        if let Some(previous) = status
+            .conditions
+            .iter()
+            .find(|previous| previous.type_ == current.type_ && previous.status == current.status)
+        {
+            current.last_transition_time = previous.last_transition_time.clone();
+        }
+    }
+    conditions
+}
+
+fn inherit_published_ready(
+    conditions: &[KafkaCondition],
+    published: &[KafkaCondition],
+) -> Vec<KafkaCondition> {
+    let Some(ready) = published.iter().find(|item| item.type_ == "Ready") else {
+        return conditions.to_vec();
+    };
+    let mut updated = conditions.to_vec();
+    if let Some(current) = updated.iter_mut().find(|item| item.type_ == "Ready") {
+        *current = ready.clone();
+    } else {
+        updated.insert(0, ready.clone());
+    }
+    updated
+}
+
+fn status_has_current_ready_token(obj: &KafkaUser, token: &DelegationToken) -> bool {
+    let Some(status) = obj.status.as_ref() else {
+        return false;
+    };
+    status.delegation_token_id.as_deref() == Some(token.token_id.as_str())
+        && status.delegation_token_expiry_timestamp_ms == Some(token.expiry_timestamp_ms)
+        && status.delegation_token_max_timestamp_ms == Some(token.max_timestamp_ms)
+        && status.observed_generation == obj.metadata.generation
+        && status.conditions.iter().any(|item| {
+            item.type_ == "Ready" && item.status == "True" && item.reason == "TokenReady"
+        })
+        && status
+            .conditions
+            .iter()
+            .any(|item| item.type_ == "TokenIssued" && item.status == "True")
+}
+
+async fn publish_token_pending(
+    name: &str,
+    users: &dyn KafkaUserStatusWriter,
+    prior_conditions: &[KafkaCondition],
+    token_live: bool,
+) -> Result<Vec<KafkaCondition>, ReconcileError> {
+    let mut conditions = replace_ready_condition(
+        prior_conditions,
+        "False",
+        "TokenPending",
+        "delegation-token credential and access reconciliation pending",
+    );
+    if !token_live {
+        conditions = replace_condition(
+            &conditions,
+            "TokenIssued",
+            "False",
+            "TokenPending",
+            "delegation token not yet issued",
+        );
+        conditions.retain(|item| item.type_ != "TokenExpiring");
+    }
+    users
+        .patch_status(name, build_failure_status_patch(&conditions))
+        .await?;
+    Ok(conditions)
+}
+
+/// Returns the last token-specific conditions only when status proves a token
+/// was previously issued. This lets transient Describe/connect failures mark
+/// aggregate readiness false without claiming that the persisted token and
+/// Secret disappeared.
+pub(crate) fn existing_token_conditions(obj: &KafkaUser) -> Option<Vec<KafkaCondition>> {
+    let status = obj.status.as_ref()?;
+    status.delegation_token_id.as_ref()?;
+    if !status
+        .conditions
+        .iter()
+        .any(|item| item.type_ == "TokenIssued" && item.status == "True")
+    {
+        return None;
+    }
+    Some(status.conditions.clone())
+}
+
+/// Builds a narrow merge patch for live token identity. Conditions are
+/// deliberately omitted so a healthy no-op reconcile does not flap Ready.
+pub(crate) fn build_token_identity_patch(
+    token: &DelegationToken,
+    conditions: Option<&[KafkaCondition]>,
+) -> serde_json::Value {
+    let mut status = json!({
+        "username": token.owner.name,
+        "secret": token.owner.name,
+        "delegationTokenId": token.token_id,
+        "delegationTokenExpiryTimestampMs": token.expiry_timestamp_ms,
+        "delegationTokenMaxTimestampMs": token.max_timestamp_ms,
+    });
+    if let Some(conditions) = conditions {
+        status["conditions"] = json!(conditions);
+    }
+    json!({ "status": status })
 }
 
 /// Builds the merge-patch JSON body for a failure path.
 ///
-/// The body patches only the `TokenIssued = False` condition, because
-/// there are no token fields to report.
+/// The body patches only conditions; token identity fields remain intact when
+/// a transient failure occurs after issuance.
 pub(crate) fn build_failure_status_patch(conditions: &[KafkaCondition]) -> serde_json::Value {
     json!({
         "status": {
@@ -578,13 +832,14 @@ pub(crate) fn build_failure_status_patch(conditions: &[KafkaCondition]) -> serde
 /// - `65` `AUTHORIZATION_FAILED`   → `OperatorNotSuperUser`, 5m backoff.
 /// - other broker error            → `BrokerError`, 5m backoff.
 /// - transport / connect / protocol → `Transport`, 5m backoff.
-async fn on_admin_error(
-    _obj: &KafkaUser,
+pub(crate) async fn on_admin_error(
     name: &str,
     err: AdminError,
     op: &'static str,
     users: &dyn KafkaUserStatusWriter,
     config: &OperatorConfig,
+    prior_conditions: Option<&[KafkaCondition]>,
+    token_live: bool,
 ) -> Result<ReconcileOutcome, ReconcileError> {
     let (reason, message, requeue): (&'static str, String, Time) = match &err {
         AdminError::Broker { code, .. } if *code == CODE_INVALID_REQUEST => (
@@ -623,17 +878,25 @@ async fn on_admin_error(
         ),
     };
 
-    // Both `Ready` and `TokenIssued` flip to `False` with the same reason —
-    // the aggregator and the underlying cause share a root, so they should
-    // share a story in `kubectl describe`.
-    let conds = vec![
-        condition("Ready", "False", reason, &message),
-        condition("TokenIssued", "False", reason, &message),
-    ];
+    let mut conds = replace_ready_condition(
+        prior_conditions.unwrap_or_default(),
+        "False",
+        reason,
+        &message,
+    );
+    // A transient failure must not claim that a previously issued token
+    // vanished. Keep its issue and expiry-horizon conditions intact.
+    if !token_live {
+        conds = replace_condition(&conds, "TokenIssued", "False", reason, &message);
+        conds.retain(|item| item.type_ != "TokenExpiring");
+    }
     let body = build_failure_status_patch(&conds);
     users.patch_status(name, body).await?;
     Ok(ReconcileOutcome {
         action: Action::requeue(requeue.to_std()),
+        conditions: None,
+        token_requeue: None,
+        pending_published: false,
     })
 }
 
@@ -713,7 +976,7 @@ mod tests {
     use super::*;
     use crate::{
         config::OperatorConfig,
-        crd::{Authentication, KafkaUserSpec},
+        crd::{Authentication, KafkaUserSpec, KafkaUserStatus},
     };
 
     #[derive(Parser)]
@@ -964,6 +1227,17 @@ mod tests {
         }
     }
 
+    struct FailingSecretWriter;
+
+    #[async_trait]
+    impl SecretWriter for FailingSecretWriter {
+        async fn apply(&self, _secret: &Secret) -> Result<(), ReconcileError> {
+            Err(ReconcileError::Malformed(
+                "forced Secret write failure".into(),
+            ))
+        }
+    }
+
     #[derive(Default)]
     struct RecordingStatusWriter {
         patches: StdMutex<Vec<(String, serde_json::Value)>>,
@@ -1019,7 +1293,7 @@ mod tests {
             .expect("reconcile should succeed");
         // Action is requeue (we don't inspect the exact duration; that's
         // compute_requeue's job, separately covered).
-        let _ = out.action;
+        let _ = &out.action;
 
         // Admin calls: Describe (empty result) → Create.
         let calls = admin.calls();
@@ -1049,29 +1323,45 @@ mod tests {
         assert!(jaas.contains("tokenauth=\"true\""), "jaas: {jaas}");
         assert!(jaas.contains("ScramLoginModule"), "jaas: {jaas}");
 
-        // Status patch carries delegationTokenId + TokenIssued condition.
+        // Readiness moves to pending before token creation; the second patch
+        // persists identity without overwriting those conditions.
         let patches = users.patches.lock().unwrap();
-        assert!(patches.len() == 1);
-        let (name, body) = &patches[0];
+        assert!(patches.len() == 2);
+        let pending = patches[0].1["status"]["conditions"]
+            .as_array()
+            .expect("pending conditions");
+        assert!(pending.iter().any(|condition| condition["type"] == "Ready"
+            && condition["status"] == "False"
+            && condition["reason"] == "TokenPending"));
+        let (name, body) = &patches[1];
         assert!(name == "alice");
         let status = body.get("status").unwrap();
         assert!(status.get("delegationTokenId").is_some());
         assert!(status.get("delegationTokenExpiryTimestampMs").is_some());
-        let conds = status.get("conditions").unwrap().as_array().unwrap();
         assert!(
-            conds
+            status["conditions"]
+                .as_array()
+                .expect("identity pending conditions")
                 .iter()
-                .any(|c| c["type"] == "TokenIssued" && c["status"] == "True"),
-            "missing TokenIssued=True: {conds:?}",
+                .any(|condition| condition["type"] == "Ready"
+                    && condition["status"] == "False"
+                    && condition["reason"] == "TokenPending")
         );
-        // Ready=True is the spec §2.4 aggregator (TokenIssued AND Secret
-        // exists) — required for the kind e2e's
-        // `kubectl wait --for=condition=Ready` to ever return.
+        let ready_conditions = out
+            .conditions
+            .as_ref()
+            .expect("successful token reconcile returns final conditions");
         assert!(
-            conds.iter().any(|c| c["type"] == "Ready"
-                && c["status"] == "True"
-                && c["reason"] == "TokenReady"),
-            "missing Ready=True/TokenReady: {conds:?}",
+            ready_conditions
+                .iter()
+                .any(|condition| condition.type_ == "TokenIssued" && condition.status == "True")
+        );
+        assert!(
+            ready_conditions
+                .iter()
+                .any(|condition| condition.type_ == "Ready"
+                    && condition.status == "False"
+                    && condition.reason == "TokenPending")
         );
     }
 
@@ -1120,9 +1410,149 @@ mod tests {
             "expected Describe+Renew on the existing hmac, got: {calls:?}",
         );
 
-        // Secret + status both patched.
+        // Secret plus pending and identity status patches.
         check!(secrets.applied.lock().unwrap().len() == 1);
-        check!(users.patches.lock().unwrap().len() == 1);
+        check!(users.patches.lock().unwrap().len() == 2);
+    }
+
+    #[tokio::test]
+    async fn healthy_noop_preserves_condition_transition_times() {
+        let admin = MockDelegationTokenAdmin::new();
+        let token = token_with(1_000_000_000, vec![]);
+        admin.tokens.lock().unwrap().push(token.clone());
+        let secrets = RecordingSecretWriter::default();
+        let users = RecordingStatusWriter::default();
+        let auth_cfg = DelegationTokenAuth::default();
+        let mut obj = user("alice", auth_cfg.clone());
+        obj.status = Some(KafkaUserStatus {
+            observed_generation: obj.metadata.generation,
+            delegation_token_id: Some(token.token_id.clone()),
+            delegation_token_expiry_timestamp_ms: Some(token.expiry_timestamp_ms),
+            delegation_token_max_timestamp_ms: Some(token.max_timestamp_ms),
+            conditions: vec![
+                KafkaCondition {
+                    type_: "Ready".into(),
+                    status: "True".into(),
+                    reason: "TokenReady".into(),
+                    message: "delegation token, Secret, ACLs, and quotas in sync".into(),
+                    last_transition_time: "2026-01-01T00:00:00Z".into(),
+                },
+                KafkaCondition {
+                    type_: "TokenIssued".into(),
+                    status: "True".into(),
+                    reason: "Issued".into(),
+                    message: "delegation token in sync".into(),
+                    last_transition_time: "2026-01-02T00:00:00Z".into(),
+                },
+                KafkaCondition {
+                    type_: "TokenExpiring".into(),
+                    status: "False".into(),
+                    reason: "Healthy".into(),
+                    message: "expiry comfortably outside renewal horizon".into(),
+                    last_transition_time: "2026-01-03T00:00:00Z".into(),
+                },
+            ],
+            ..Default::default()
+        });
+
+        let out = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0, &config())
+            .await
+            .unwrap();
+
+        assert!(!out.pending_published);
+        assert!(users.patches.lock().unwrap().len() == 1);
+        let conditions = out.conditions.expect("successful no-op conditions");
+        assert!(conditions[0].last_transition_time == "2026-01-01T00:00:00Z");
+        assert!(conditions[1].last_transition_time == "2026-01-02T00:00:00Z");
+        assert!(conditions[2].last_transition_time == "2026-01-03T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn cycle_marks_not_ready_before_secret_failure() {
+        let admin = MockDelegationTokenAdmin::new();
+        let old = token_with(1_000_000_000, vec![kp("User", "old-renewer")]);
+        admin.tokens.lock().unwrap().push(old.clone());
+        let users = RecordingStatusWriter::default();
+        let auth_cfg = auth(vec!["User:new-renewer"], None);
+        let mut obj = user("alice", auth_cfg.clone());
+        obj.status = Some(KafkaUserStatus {
+            delegation_token_id: Some(old.token_id.clone()),
+            delegation_token_expiry_timestamp_ms: Some(old.expiry_timestamp_ms),
+            delegation_token_max_timestamp_ms: Some(old.max_timestamp_ms),
+            conditions: vec![
+                condition("Ready", "True", "TokenReady", "previously reconciled"),
+                condition("TokenIssued", "True", "Issued", "token exists"),
+                condition("TokenExpiring", "False", "Healthy", "token healthy"),
+            ],
+            ..Default::default()
+        });
+
+        let error = reconcile(
+            &obj,
+            &auth_cfg,
+            &admin,
+            &FailingSecretWriter,
+            &users,
+            0,
+            &config(),
+        )
+        .await
+        .expect_err("forced Secret failure must escape");
+        assert!(error.to_string().contains("forced Secret write failure"));
+
+        let calls = admin.calls();
+        assert!(matches!(
+            calls.as_slice(),
+            [
+                MockCall::Describe { .. },
+                MockCall::Expire { .. },
+                MockCall::Create { .. },
+            ]
+        ));
+        let patches = users.patches.lock().unwrap();
+        assert!(patches.len() == 3);
+        let pending_conditions = patches[0].1["status"]["conditions"]
+            .as_array()
+            .expect("pending conditions");
+        assert!(
+            pending_conditions
+                .iter()
+                .any(|condition| condition["type"] == "Ready"
+                    && condition["status"] == "False"
+                    && condition["reason"] == "TokenPending")
+        );
+        assert!(
+            pending_conditions.iter().any(
+                |condition| condition["type"] == "TokenIssued" && condition["status"] == "True"
+            )
+        );
+        let identity = &patches[1].1["status"];
+        let replacement_id = identity["delegationTokenId"]
+            .as_str()
+            .expect("replacement token id");
+        assert!(replacement_id != old.token_id);
+        assert!(
+            identity["conditions"]
+                .as_array()
+                .expect("identity pending conditions")
+                .iter()
+                .any(|condition| condition["type"] == "Ready" && condition["status"] == "False")
+        );
+        let failure_conditions = patches[2].1["status"]["conditions"]
+            .as_array()
+            .expect("Secret failure conditions");
+        assert!(
+            failure_conditions
+                .iter()
+                .any(|condition| condition["type"] == "Ready"
+                    && condition["status"] == "False"
+                    && condition["reason"] == "SecretWriteFailed")
+        );
+        assert!(
+            failure_conditions.iter().any(
+                |condition| condition["type"] == "TokenIssued" && condition["status"] == "True"
+            )
+        );
     }
 
     // --- failure-path coverage (§2.5) ------------------------------------
@@ -1163,6 +1593,48 @@ mod tests {
             .expect("Ready present");
         assert!(ready["status"] == "False");
         assert!(ready["reason"] == "OperatorNotSuperUser");
+    }
+
+    #[tokio::test]
+    async fn describe_failure_preserves_existing_token_conditions() {
+        let mut admin = MockDelegationTokenAdmin::new();
+        admin.force_broker_error = Some(CODE_DELEGATION_TOKEN_AUTHORIZATION_FAILED);
+        let secrets = RecordingSecretWriter::default();
+        let users = RecordingStatusWriter::default();
+        let auth_cfg = DelegationTokenAuth::default();
+        let mut obj = user("alice", auth_cfg.clone());
+        obj.status = Some(KafkaUserStatus {
+            delegation_token_id: Some("persisted-token".into()),
+            conditions: vec![
+                condition("Ready", "True", "TokenReady", "previously reconciled"),
+                condition("TokenIssued", "True", "Issued", "token exists"),
+                condition("TokenExpiring", "False", "Healthy", "token healthy"),
+            ],
+            ..Default::default()
+        });
+
+        reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0, &config())
+            .await
+            .unwrap();
+
+        let patches = users.patches.lock().unwrap();
+        let conditions = patches[0].1["status"]["conditions"]
+            .as_array()
+            .expect("conditions array");
+        assert!(conditions.iter().any(|item| item["type"] == "Ready"
+            && item["status"] == "False"
+            && item["reason"] == "OperatorNotSuperUser"));
+        assert!(
+            conditions
+                .iter()
+                .any(|item| item["type"] == "TokenIssued" && item["status"] == "True")
+        );
+        assert!(
+            conditions
+                .iter()
+                .any(|item| item["type"] == "TokenExpiring"),
+            "transient lifecycle failure must retain token horizon status",
+        );
     }
 
     #[tokio::test]

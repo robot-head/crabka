@@ -53,7 +53,7 @@ impl Encode for AlterReplicaLogDirsRequest<'_> {
                 for it in &self.dirs {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -154,7 +154,7 @@ impl Encode for AlterReplicaLogDir<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -265,7 +265,7 @@ impl Encode for AlterReplicaLogDirTopic<'_> {
                 for it in &self.partitions {
                     put_i32(buf, *it);
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

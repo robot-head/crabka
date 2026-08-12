@@ -2,7 +2,7 @@ package:
   name: crabka
   version: 0.1.1
   epoch: 0
-  description: Crabka server binaries (broker, CLI, operator, schema-registry, Connect worker, bench driver)
+  description: Crabka server binaries (broker, CLI, operator, gateway, schema-registry, Connect worker, bench driver)
   copyright:
     - license: Apache-2.0
 
@@ -54,14 +54,17 @@ pipeline:
       fi
       cargo build --release \
         -p crabka-broker -p crabka-cli -p crabka-operator \
-        -p crabka-schema-registry -p crabka-connect-worker -p crabka-bench-driver \
+        -p crabka-grpc-gateway -p crabka-schema-registry \
+        -p crabka-connect-worker -p crabka-bench-driver \
         -p crabka-gres -p crabka-gres-activator \
         --bin crabka-broker --bin crabka --bin crabka-operator \
-        --bin crabka-schema-registry --bin crabka-connect-worker \
+        --bin crabka-grpc-gateway --bin crabka-schema-registry \
+        --bin crabka-connect-worker \
         --bin crabka-bench-driver --bin crabka-bench-report \
         --bin crabka-gres --bin crabka-gres-activator
       mkdir -p dist
-      for bin in crabka-broker crabka crabka-operator crabka-schema-registry \
+      for bin in crabka-broker crabka crabka-operator crabka-grpc-gateway \
+                 crabka-schema-registry \
                  crabka-connect-worker crabka-bench-driver crabka-bench-report \
                  crabka-gres crabka-gres-activator; do
         install -m 0755 "$target/release/$bin" "dist/$bin"
@@ -80,6 +83,12 @@ subpackages:
     pipeline:
       - runs: |
           install -D -m 0755 dist/crabka-operator "${{targets.subpkgdir}}/usr/bin/crabka-operator"
+
+  - name: crabka-grpc-gateway
+    description: Connect-RPC and HTTP gateway for Crabka topics
+    pipeline:
+      - runs: |
+          install -D -m 0755 dist/crabka-grpc-gateway "${{targets.subpkgdir}}/usr/bin/crabka-grpc-gateway"
 
   - name: crabka-schema-registry
     description: Confluent Schema Registry-compatible service for Crabka

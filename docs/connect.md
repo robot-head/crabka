@@ -7,6 +7,9 @@ supports PostgreSQL sources only.
 ## Prerequisites
 
 - Install the Crabka operator and the `KafkaConnector` CRD.
+- Run a Confluent-compatible Schema Registry reachable at
+  `spec.schemaRegistryUrl`. The worker registers its CDC key and value schemas
+  there before connecting to PostgreSQL.
 - In the connector namespace, provide a ready `Kafka` named by the
   `crabka.io/cluster` label. It must expose an internal TLS listener with TLS
   client authentication; the operator creates the connector's `KafkaUser` and

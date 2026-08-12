@@ -1,0 +1,22 @@
+{
+  "id": "queue_v1_1_lock_duration_error_shape",
+  "since": { "major": 1, "minor": 1 },
+  "steps": [
+    {
+      "name": "non-default lock duration is unsupported",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-lock-duration",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 1000
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "queue lock_duration_ms must be 30000; per-acquire lock durations are not supported"
+        }
+      }
+    }
+  ]
+}

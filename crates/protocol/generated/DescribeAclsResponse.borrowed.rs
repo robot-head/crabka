@@ -74,7 +74,7 @@ impl Encode for DescribeAclsResponse<'_> {
                 for it in &self.resources {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -231,7 +231,7 @@ impl Encode for DescribeAclsResource<'_> {
                 for it in &self.acls {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

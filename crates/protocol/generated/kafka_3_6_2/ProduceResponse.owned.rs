@@ -39,7 +39,7 @@ impl Encode for ProduceResponse {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 1 {
             put_i32(buf, self.throttle_time_ms);
@@ -143,7 +143,7 @@ impl Encode for TopicProduceResponse {
                 for it in &self.partition_responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -271,7 +271,7 @@ impl Encode for PartitionProduceResponse {
                 for it in &self.record_errors {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 8 {
             if flex {

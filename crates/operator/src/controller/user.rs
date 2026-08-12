@@ -45,8 +45,8 @@ use crate::{
         user_tls,
     },
     crd::{
-        AclOp, AclPatternType, AclPermission, AclResourceKind, Authentication, Kafka, KafkaUser,
-        KafkaUserAuthorization as Authorization,
+        AclOp, AclPatternType, AclPermission, AclResourceKind, Authentication, Kafka,
+        KafkaCondition, KafkaUser, KafkaUserAuthorization as Authorization,
     },
 };
 
@@ -221,8 +221,18 @@ struct UserSyncContext<'a> {
     quota_username: &'a str,
     tls_not_after: Option<String>,
     prior_tls_principal: &'a Option<String>,
+    token_access: Option<TokenAccessState>,
 }
 
+struct TokenAccessState {
+    token_requeue: Time,
+    conditions: Vec<KafkaCondition>,
+    pending_published: bool,
+}
+
+// The linear RPC pipeline keeps each operation beside its distinct cleanup and
+// status semantics; splitting it would duplicate the admin-lock state machine.
+#[allow(clippy::too_many_lines)]
 async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, ReconcileError> {
     let UserSyncContext {
         obj,
@@ -235,76 +245,111 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
         quota_username,
         tls_not_after,
         prior_tls_principal,
+        token_access,
     } = sync;
+    let mut token_access = token_access;
     // Open admin for ACL + quota reconciliation (steps 8 + 9). Common
     // to both auth arms.
     let admin_handle = match ctx.admin_client_for(cluster, bootstrap).await {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
+            if token_access.is_some() {
+                return user_access_broker_error(
+                    user_api,
+                    name,
+                    obj,
+                    e,
+                    "Connect",
+                    ctx.config.controller_error_requeue,
+                    token_access.as_ref(),
+                )
+                .await;
+            }
             return Ok(common::requeue(ctx.config.controller_error_requeue));
         }
     };
     let mut admin = admin_handle.lock().await;
+    // 8. Reconcile ACLs only when authorization is explicitly managed. An
+    // absent block leaves broker ACLs untouched; `simple: { acls: [] }` is
+    // the explicit request to remove every ACL for this principal.
+    if obj.spec.authorization.is_some() {
+        let desired: BTreeSet<AclEntry> =
+            expand_spec_acls(obj.spec.authorization.as_ref(), principal)
+                .into_iter()
+                .collect();
+        let filter = AclEntryFilter {
+            principal: Some(principal.to_string()),
+            ..Default::default()
+        };
+        let current_vec = match admin.describe_acls(&filter).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "DescribeAcls failure");
+                let is_transport = matches!(e, AdminError::Transport(_));
+                drop(admin);
+                if is_transport {
+                    ctx.drop_admin_client(cluster).await;
+                }
+                if token_access.is_some() {
+                    return user_access_broker_error(
+                        user_api,
+                        name,
+                        obj,
+                        e,
+                        "DescribeAcls",
+                        ctx.config.controller_error_requeue,
+                        token_access.as_ref(),
+                    )
+                    .await;
+                }
+                return Ok(common::requeue(ctx.config.controller_error_requeue));
+            }
+        };
+        let current: BTreeSet<AclEntry> = current_vec.into_iter().collect();
+        let (additions, deletions) = diff_acls(&current, &desired);
+        if !additions.is_empty() || !deletions.is_empty() {
+            ensure_token_access_pending(user_api, name, token_access.as_mut()).await?;
+        }
 
-    // 8. Reconcile ACLs
-    let desired: BTreeSet<AclEntry> = expand_spec_acls(obj.spec.authorization.as_ref(), principal)
-        .into_iter()
-        .collect();
-    let filter = AclEntryFilter {
-        principal: Some(principal.to_string()),
-        ..Default::default()
-    };
-    let current_vec = match admin.describe_acls(&filter).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "DescribeAcls failure");
+        if !additions.is_empty()
+            && let Err(e) = apply_create_acls(&mut admin, &additions).await
+        {
             let is_transport = matches!(e, AdminError::Transport(_));
             drop(admin);
             if is_transport {
                 ctx.drop_admin_client(cluster).await;
             }
-            return Ok(common::requeue(ctx.config.controller_error_requeue));
+            return user_access_broker_error(
+                user_api,
+                name,
+                obj,
+                e,
+                "CreateAcls",
+                ctx.config.controller_error_requeue,
+                token_access.as_ref(),
+            )
+            .await;
         }
-    };
-    let current: BTreeSet<AclEntry> = current_vec.into_iter().collect();
-    let (additions, deletions) = diff_acls(&current, &desired);
-
-    if !additions.is_empty()
-        && let Err(e) = apply_create_acls(&mut admin, &additions).await
-    {
-        let is_transport = matches!(e, AdminError::Transport(_));
-        drop(admin);
-        if is_transport {
-            ctx.drop_admin_client(cluster).await;
+        if !deletions.is_empty()
+            && let Err(e) = apply_delete_acls(&mut admin, &deletions).await
+        {
+            let is_transport = matches!(e, AdminError::Transport(_));
+            drop(admin);
+            if is_transport {
+                ctx.drop_admin_client(cluster).await;
+            }
+            return user_access_broker_error(
+                user_api,
+                name,
+                obj,
+                e,
+                "DeleteAcls",
+                ctx.config.controller_error_requeue,
+                token_access.as_ref(),
+            )
+            .await;
         }
-        return user_broker_error(
-            user_api,
-            name,
-            obj,
-            e,
-            "CreateAcls",
-            ctx.config.controller_error_requeue,
-        )
-        .await;
-    }
-    if !deletions.is_empty()
-        && let Err(e) = apply_delete_acls(&mut admin, &deletions).await
-    {
-        let is_transport = matches!(e, AdminError::Transport(_));
-        drop(admin);
-        if is_transport {
-            ctx.drop_admin_client(cluster).await;
-        }
-        return user_broker_error(
-            user_api,
-            name,
-            obj,
-            e,
-            "DeleteAcls",
-            ctx.config.controller_error_requeue,
-        )
-        .await;
     }
 
     // 9. Reconcile quotas. `spec.quotas == None` leaves the
@@ -324,10 +369,25 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
                 if is_transport {
                     ctx.drop_admin_client(cluster).await;
                 }
+                if token_access.is_some() {
+                    return user_access_broker_error(
+                        user_api,
+                        name,
+                        obj,
+                        e,
+                        "DescribeClientQuotas",
+                        ctx.config.controller_error_requeue,
+                        token_access.as_ref(),
+                    )
+                    .await;
+                }
                 return Ok(common::requeue(ctx.config.controller_error_requeue));
             }
         };
         let ops = crabka_client_admin::diff_user_quotas(&current, &desired);
+        if !ops.is_empty() {
+            ensure_token_access_pending(user_api, name, token_access.as_mut()).await?;
+        }
         if !ops.is_empty()
             && let Err(e) = apply_alter_user_quotas(&mut admin, quota_username, &ops).await
         {
@@ -336,13 +396,14 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
             if is_transport {
                 ctx.drop_admin_client(cluster).await;
             }
-            return user_broker_error(
+            return user_access_broker_error(
                 user_api,
                 name,
                 obj,
                 e,
                 "AlterClientQuotas",
                 ctx.config.controller_error_requeue,
+                token_access.as_ref(),
             )
             .await;
         }
@@ -350,6 +411,31 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
     } else {
         false
     };
+
+    // Delegation-token reconciliation already wrote its token identity and
+    // chose an expiry-driven requeue. Publish aggregate readiness together
+    // with the shared access fields now that ACLs and quotas are in sync.
+    if let Some(token) = token_access {
+        let final_conditions = if token.pending_published {
+            user_delegation_token::transition_ready_condition(
+                &token.conditions,
+                "True",
+                "TokenReady",
+                "delegation token, Secret, ACLs, and quotas in sync",
+            )
+        } else {
+            user_delegation_token::replace_ready_condition(
+                &token.conditions,
+                "True",
+                "TokenReady",
+                "delegation token, Secret, ACLs, and quotas in sync",
+            )
+        };
+        patch_access_status(user_api, name, obj, quotas_in_sync, &final_conditions).await?;
+        return Ok(common::requeue(
+            token.token_requeue.min(ctx.config.controller_drift_requeue),
+        ));
+    }
 
     let is_scram_sha512 = matches!(&obj.spec.authentication, Authentication::ScramSha512(_));
     let is_scram_sha256 = matches!(&obj.spec.authentication, Authentication::ScramSha256(_));
@@ -392,17 +478,16 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
     // `tls-external` users have no operator-owned credential to rotate,
     // but ACLs + quotas can drift externally — keep the per-minute
     // requeue to detect that (same cadence as SCRAM, different reason).
-    // Delegation-token users do not reach this match — that
-    // arm returns its renew-driven `Action` earlier (see the
-    // `Authentication::DelegationToken(dt)` arm above).
+    // Delegation-token users do not reach this match: after common ACL/quota
+    // reconciliation they return the token's expiry-driven action above.
     let requeue = match &obj.spec.authentication {
         Authentication::ScramSha512(_)
         | Authentication::ScramSha256(_)
         | Authentication::TlsExternal => ctx.config.controller_drift_requeue,
         Authentication::Tls(_) => ctx.config.user_tls_drift_requeue,
-        Authentication::DelegationToken(_) => unreachable!(
-            "delegation-token arm returns early after user_delegation_token::reconcile",
-        ),
+        Authentication::DelegationToken(_) => {
+            unreachable!("delegation-token arm returns after common access reconciliation")
+        }
     };
     Ok(common::requeue(requeue))
 }
@@ -531,6 +616,9 @@ async fn prepare_user(obj: &KafkaUser, ctx: &Context) -> Result<UserPreparation,
     })))
 }
 
+// Credential branches share lifecycle state that feeds the common access
+// pipeline; keeping the dispatch linear makes those handoffs explicit.
+#[allow(clippy::too_many_lines)]
 async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let PreparedUser {
         namespace: ns,
@@ -579,6 +667,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
     // cert Secret. No broker call needed — the broker learns the user
     // from the certificate at mTLS handshake time.
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+    let mut token_access = None;
     let tls_not_after: Option<String> = match &obj.spec.authentication {
         Authentication::ScramSha512(_) | Authentication::ScramSha256(_) => {
             // SCRAM-SHA-256 + SCRAM-SHA-512 share the
@@ -672,31 +761,13 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
             None
         }
         Authentication::Tls(tls_auth) => {
-            let ca_outcome = match crate::controller::cluster_ca::reconcile_ca(
-                &secret_api,
-                &kafka,
-                crate::controller::cluster_ca::WhichCa::Clients,
-                false,
-                false,
-                true,
-                time::OffsetDateTime::now_utc(),
-            )
-            .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::warn!(error = %e, %cluster, "clients CA reconcile failed");
-                    return Ok(common::requeue(ctx.config.controller_error_requeue));
-                }
-            };
-            // Sign user certs with the clients CA's active signer (the
-            // first block of the trust bundle, paired with the active key).
-            let ca = ca_outcome.signing_material;
             let cert_status =
-                match user_tls::ensure_user_cert_secret(&secret_api, &obj, &ca, tls_auth).await {
+                match user_tls::reconcile_user_cert_secret(&secret_api, &obj, &kafka, tls_auth)
+                    .await
+                {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::warn!(error = %e, %name, "ensure_user_cert_secret failed");
+                        tracing::warn!(error = %e, %name, "TLS credential reconcile failed");
                         return Ok(common::requeue(ctx.config.controller_error_requeue));
                     }
                 };
@@ -722,27 +793,33 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
         // `impl` block in `user_delegation_token.rs`), so we hand the
         // handle in as `&dyn DelegationTokenAdmin`.
         //
-        // The module's `reconcile` returns an `Action` on its own —
-        // computed from the live token's `expiry_timestamp_ms` minus
-        // the spec's `renew_before_expiry` — so this arm bypasses
-        // the trailing ACL/quota reconciliation block by returning
-        // early. (ACLs + quotas for delegation-token users are reached
-        // on the next requeue: `reconcile` here returns just the
-        // credential-side `Action`; the ACL/quota side would otherwise
-        // need a second admin-client lock under the held mutex.)
+        // The module's `reconcile` returns an expiry-driven `Action` and
+        // writes token-specific status. Preserve that action while still
+        // running the shared ACL/quota reconciliation below.
         Authentication::DelegationToken(dt) => {
-            let admin_handle = match ctx.admin_client_for(&cluster, &bootstrap).await {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
-                    return Ok(common::requeue(ctx.config.controller_error_requeue));
-                }
-            };
             let secret_writer = KubeSecretWriter {
                 api: secret_api.clone(),
             };
             let user_writer = KubeKafkaUserStatusWriter {
                 api: user_api.clone(),
+            };
+            let admin_handle = match ctx.admin_client_for(&cluster, &bootstrap).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
+                    let prior_conditions = user_delegation_token::existing_token_conditions(&obj);
+                    let out = user_delegation_token::on_admin_error(
+                        &name,
+                        e,
+                        "Connect",
+                        &user_writer,
+                        &ctx.config,
+                        prior_conditions.as_deref(),
+                        prior_conditions.is_some(),
+                    )
+                    .await?;
+                    return Ok(out.action);
+                }
             };
             let now_ms = chrono::Utc::now().timestamp_millis();
             let out = user_delegation_token::reconcile(
@@ -755,13 +832,17 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                 &ctx.config,
             )
             .await?;
-            // ACL + quota reconciliation for delegation-token users
-            // happens in a follow-up reconcile pass — the token
-            // module's `reconcile` already wrote the credential Secret
-            // and patched status, and the operator's per-user requeue
-            // will pick up ACL drift on the next pass. Return early
-            // with the renew-driven `Action`.
-            return Ok(out.action);
+            let pending_published = out.pending_published;
+            let (Some(conditions), Some(token_requeue)) = (out.conditions, out.token_requeue)
+            else {
+                return Ok(out.action);
+            };
+            token_access = Some(TokenAccessState {
+                token_requeue,
+                conditions,
+                pending_published,
+            });
+            None
         }
     };
 
@@ -776,6 +857,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
         quota_username: &quota_username,
         tls_not_after,
         prior_tls_principal: &prior_tls_principal,
+        token_access,
     })
     .await
 }
@@ -868,6 +950,66 @@ async fn user_broker_error(
     )
     .await?;
     Ok(common::requeue(error_requeue))
+}
+
+async fn user_access_broker_error(
+    api: &Api<KafkaUser>,
+    name: &str,
+    obj: &KafkaUser,
+    err: AdminError,
+    op: &str,
+    error_requeue: Time,
+    token_access: Option<&TokenAccessState>,
+) -> Result<Action, ReconcileError> {
+    if let Some(token) = token_access {
+        tracing::warn!(error = %err, operation = op,
+            "delegation-token access reconciliation failed");
+        let detail = match &err {
+            AdminError::Broker { code, name, .. } => format!("{op}: {name} ({code})"),
+            other => format!("{op}: {other}"),
+        };
+        let reason = token_access_error_reason(&err);
+        let conditions = user_delegation_token::replace_ready_condition(
+            &token.conditions,
+            "False",
+            reason,
+            &detail,
+        );
+        patch_token_access_failure_status(api, name, &conditions).await?;
+        return Ok(common::requeue(error_requeue.min(token.token_requeue)));
+    }
+    user_broker_error(api, name, obj, err, op, error_requeue).await
+}
+
+fn token_access_error_reason(err: &AdminError) -> &'static str {
+    if matches!(err, AdminError::Broker { .. }) {
+        "BrokerError"
+    } else {
+        "Transport"
+    }
+}
+
+async fn ensure_token_access_pending(
+    api: &Api<KafkaUser>,
+    name: &str,
+    token_access: Option<&mut TokenAccessState>,
+) -> Result<(), ReconcileError> {
+    let Some(token) = token_access else {
+        return Ok(());
+    };
+    if token.pending_published {
+        return Ok(());
+    }
+    let conditions = user_delegation_token::replace_ready_condition(
+        &token.conditions,
+        "False",
+        "AccessPending",
+        "delegation token issued; ACL and quota reconciliation pending",
+    );
+    patch_token_access_failure_status(api, name, &conditions).await?;
+    token.conditions = conditions;
+    token.pending_published = true;
+    Ok(())
 }
 
 /// Builds an `AclEntryFilter` that matches exactly one `AclEntry`.
@@ -1250,6 +1392,48 @@ async fn patch_status(
     Ok(())
 }
 
+async fn patch_access_status(
+    api: &Api<KafkaUser>,
+    name: &str,
+    obj: &KafkaUser,
+    quotas_in_sync: bool,
+    conditions: &[KafkaCondition],
+) -> Result<(), ReconcileError> {
+    let body = json!({
+        "status": {
+            "conditions": conditions,
+            "observedGeneration": obj.meta().generation,
+            "quotasInSync": quotas_in_sync,
+        }
+    });
+    let params = PatchParams {
+        field_manager: Some(FIELD_MANAGER.into()),
+        ..Default::default()
+    };
+    api.patch_status(name, &params, &Patch::Merge(&body))
+        .await?;
+    Ok(())
+}
+
+async fn patch_token_access_failure_status(
+    api: &Api<KafkaUser>,
+    name: &str,
+    conditions: &[KafkaCondition],
+) -> Result<(), ReconcileError> {
+    let body = json!({
+        "status": {
+            "conditions": conditions,
+        }
+    });
+    let params = PatchParams {
+        field_manager: Some(FIELD_MANAGER.into()),
+        ..Default::default()
+    };
+    api.patch_status(name, &params, &Patch::Merge(&body))
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
@@ -1277,6 +1461,20 @@ mod tests {
     fn principal_uses_user_prefix_for_scram() {
         let scram = Authentication::ScramSha512(crate::crd::ScramSha512Auth::default());
         assert!(principal_for("alice", &scram) == "User:alice");
+    }
+
+    #[test]
+    fn delegation_token_access_errors_classify_only_broker_responses_as_broker_errors() {
+        assert!(token_access_error_reason(&AdminError::Connect { tried: 2 }) == "Transport");
+        assert!(token_access_error_reason(&AdminError::NotControllerExhausted) == "Transport");
+        assert!(
+            token_access_error_reason(&AdminError::Broker {
+                api: "CreateAcls",
+                code: 29,
+                name: "TOPIC_AUTHORIZATION_FAILED",
+                message: None,
+            }) == "BrokerError"
+        );
     }
 
     #[test]

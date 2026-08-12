@@ -63,7 +63,7 @@ impl Encode for DescribeShareGroupOffsetsResponse<'_> {
                 for it in &self.groups {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -179,7 +179,7 @@ impl Encode for DescribeShareGroupOffsetsResponseGroup<'_> {
                 for it in &self.topics {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i16(buf, self.error_code);
@@ -334,7 +334,7 @@ impl Encode for DescribeShareGroupOffsetsResponseTopic<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

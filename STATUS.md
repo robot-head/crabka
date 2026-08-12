@@ -1576,29 +1576,25 @@ Kafka client for ApiVersions.
   analog of the ZK-era `inter.broker.protocol.version`; there is no
   `inter.broker.protocol.version` / `log.message.format.version` lineage.
   When unset it tracks `kafkaVersion`'s `major.minor`; when set it pins the
-  metadata version for the safe two-step upgrade.
+  metadata version for a two-step upgrade or an online downgrade. On an
+  existing cluster the operator applies a change through `UpdateFeatures`;
+  a lower target uses safe-downgrade semantics.
 - New `crabka_operator::version` module: `KafkaVersion::parse` (tolerates
   `X`, `X.Y`, `X.Y.Z`, and `X.Y-IVn` IBP suffixes), `(major,minor)`
   metadata-key comparison, and `evaluate(kafka_version, spec_metadata,
-  finalized_metadata)`. Invariant on success: `binary >= resolved metadata
-  >= finalized metadata` — the two inequalities are the downgrade window.
-  Reasons: `InvalidVersion`, `MetadataVersionTooHigh` (metadata newer than
-  binary), `MetadataVersionDowngrade` (metadata below the finalized value,
-  incl. a binary downgrade that drags a default-tracked metadata below
-  finalized). `finalized` is read from `status.metadataVersion` on the
-  watched object — no extra API request.
+  finalized_metadata)`. The resolved metadata version cannot exceed the
+  binary, and online downgrades cannot cross the `3.7-IV0` floor. Reasons:
+  `InvalidVersion`, `MetadataVersionTooHigh`, and `MetadataVersionTooLow`.
+  `finalized` is read from `status.metadataVersion` on the watched object.
 - New `KafkaVersionValid` status condition + `KafkaStatus.kafkaVersion`
   (echo) and `KafkaStatus.metadataVersion` (operator-finalized; advances
-  only when valid, holds the last value on rejection — drives the
-  downgrade-window check next reconcile). On a validation failure the
-  operator does not inject the new metadata version, does not advance the
-  config hash, and does not finalize — "surface the error and wait".
-- `metadata.version` is injected into each `broker-{id}.toml`
-  `[server_properties]` (operator-owned key; operator value wins). An
-  *explicit* `spec.metadataVersion` pin participates in the slice-21 config
-  hash (so a pin change rolls); a *defaulted* metadata version does not (a
-  binary bump rolls via the pod-template image change), which preserves the
-  slice-24 empty-hash collapse.
+  only after validation and, for an existing cluster, an accepted
+  `UpdateFeatures` response; it holds the last value on rejection). On a
+  validation or feature-update failure the operator does not advance status.
+- `metadata.version` is not rendered into `broker-{id}.toml`. Fresh storage is
+  seeded by the format init container; existing clusters are changed through
+  `UpdateFeatures`. An *explicit* `spec.metadataVersion` pin participates in
+  the slice-21 config hash; a defaulted version does not.
 - **Ordered, one-node-at-a-time rollout** across pools via a new pure
   `common::plan_rollout(pools_in_order, desired) -> per-pool target hash`.
   `adopt_pools` now sorts pools by `(node_id_start, name)`, reads each
@@ -1609,17 +1605,11 @@ Kafka client for ApiVersions.
   controller quorum needs all controllers up together, so gating initial
   creation would deadlock. The owner-ref is still patched to every pool
   every reconcile, so the request shape is identical to slice 21.
-- Tests: 17 new `version` unit tests; 8 new `plan_rollout` unit tests; 3
+- Tests: version unit tests; 8 new `plan_rollout` unit tests; 3
   new CRD round-trip tests; 2 new `combined_config_hash`/`render_configmap`
-  unit tests; 2 new `reconcile_kafka` integration tests (metadata.version
-  rendered + status/condition echo; too-high pin rejected without injecting
-  or finalizing). Operator suite green (lib 319); clippy `-D warnings`
-  clean; fmt clean; CRD YAML regenerated.
-- kind-e2e: a new probe in the `kind` job asserts the default
-  `metadata.version` is rendered into the broker config, then that an
-  invalid (too-high) `metadataVersion` pin surfaces
-  `KafkaVersionValid=False reason=MetadataVersionTooHigh` without writing
-  the rejected value or rolling the pod.
+  unit tests; reconcile integration covers fresh finalization, too-high
+  rejection, safe downgrade, and broker rejection with status held. CRD YAML
+  is regenerated with the current contract.
 - Broker-side `metadata.version` feature-level enforcement
   (`UpdateFeatures` handler) is now IMPLEMENTED (no longer deferred) — see
   *Slice — Broker runtime `metadata.version` enforcement (KIP-584/778)*
@@ -1779,9 +1769,9 @@ Kafka client for ApiVersions.
   - **Same-key cert renewal** (automatic on expiry, or
     `crabka.io/force-renew-ca`): re-sign the CA cert reusing the existing
     key with a fresh `validityDays`, prepend it to the bundle, prune
-    expired anchors. One ordered roll distributes the new bundle; broker
-    leafs are untouched (same key → same SPKI → existing leafs still
-    chain). New `crabka_security::ca::renew_cluster_ca` /
+    expired anchors. The cluster CA rolls while the clients CA hot-reloads;
+    broker and user leafs are untouched (same key → same SPKI → existing
+    leafs still chain). New `crabka_security::ca::renew_cluster_ca` /
     `renew_clients_ca`.
   - **Cluster-CA key replacement** (`crabka.io/force-replace-ca-key`): a
     staged three-phase machine — `key-replace-trust` (generate new
@@ -1791,6 +1781,11 @@ Kafka client for ApiVersions.
     cert to the front, reissue every broker leaf with the new key, roll)
     → prune the old anchor (roll back to a single-cert bundle, `idle`).
     Each phase advances only once the prior roll has converged.
+  - **Clients-CA key replacement**
+    (`crabka.io/force-replace-clients-ca-key`): the same trust-first staged
+    machine, with every operator-managed TLS `KafkaUser` Secret re-signed
+    after promotion. A generation marker is written only after the complete
+    user batch; partial failures retry without pruning the old trust anchor.
 - The whole decision is a pure function `plan_ca_rotation(state, inputs)`
   (mirrors `version::evaluate` / `logging::resolve_logging`), so the
   staged machine is exhaustively unit-testable despite the FIFO
@@ -1799,34 +1794,34 @@ Kafka client for ApiVersions.
 - "No roll in flight" (the convergence gate) is computed from pool state
   alone: every `KafkaNodePool` carries the same non-empty
   `crabka.io/config-hash` label AND is Ready.
-- The config-hash already hashes `ca.crt`; making it a bundle means the
-  hash now covers the whole cluster-CA trust set for free — adding /
-  promoting / pruning an anchor rolls the cluster, while same-key leaf
-  renewal (slice-33 hot-reload) does not. (Clients-CA cert is NOT in the
-  hash; its truststore is hot-reloaded.)
+- The config hash covers the whole cluster-CA trust set. During clients-CA
+  key replacement it also covers the clients trust bundle, giving that flow
+  an acknowledged trust-distribution roll before user certificates switch
+  signers. Idle clients-CA same-key renewal remains hot-reload-only.
 - Triggers are one-shot `Kafka` CR annotations (`force-renew-ca`,
-  `force-replace-ca-key`), stripped after they're consumed. The slice-30
+  `force-replace-ca-key`, `force-replace-clients-ca-key`), stripped after
+  they're consumed. The slice-30
   `ca-renewal-check` CronJob no longer sets `CaRotationRequired`; for an
   operator-managed CA within `renewalDays` it now stamps a one-shot
   `crabka.io/ca-renew-after` annotation that nudges the reconciler, and
   emits a Normal `CaRenewalScheduled` Event. BYO CAs are still never
   rotated (a forced rotation is refused with a `CaRotation` condition +
   Warning Event).
-- New `CaRotation` status condition (driven by the cluster CA):
+- New `CaRotation` status condition (driven by the active CA rotation):
   `False/Idle`, `True/RenewingCert`, `True/DistributingTrust`,
-  `True/PromotingKey`, `False/ByoCaImmutable`,
-  `False/ClientsCaKeyReplaceUnsupported`. `CertificateAuthorityStatus`
+  `True/PromotingKey`, `False/ByoCaImmutable`. `CertificateAuthorityStatus`
   gains `certGeneration`, `keyGeneration`, `rotationPhase`,
   `trustAnchors`.
-- Clients-CA *key* replacement is deferred (it additionally needs
-  re-signing every KafkaUser mTLS cert, owned by the slice-37
-  controller); the clients CA gets the bundle + same-key renewal +
-  auto-prune only.
+- Clients-CA promotion bulk-reissues each live TLS `KafkaUser`, verifies
+  existing certificate signatures on retry, and waits for both the leaf
+  generation marker and pool convergence before pruning old trust.
 - Tests: +4 `crabka_security::ca` unit tests (renew reuses key,
   preserves subject incl. `OU=cluster`, extends validity, leaf-still-
-  chains) + 16 `controller::cluster_ca` rotation unit tests (bundle
+  chains) + 17 `controller::cluster_ca` rotation unit tests (bundle
   helpers, full `plan_ca_rotation` decision table, same-key renewal
-  chaining) + new `reconcile_ca_rotation` integration tests; slice-30 BYO
+  chaining) + four `reconcile_ca_rotation` integration tests, including
+  clients-CA trust staging and cryptographically verified user reissue;
+  slice-30 BYO
   test + the `ca_renewal_cronjob` flag test updated for the new nudge
   behaviour. Operator lib tests, full operator suite, security suite
   green; clippy `-D warnings` + fmt clean; CRD YAML regenerated (only the
@@ -1982,11 +1977,12 @@ Kafka client for ApiVersions.
   `sub`, 30s skew) is consulted only when `OAUTHBEARER` is in
   `enabled_sasl_mechanisms` (handshake won't advertise it otherwise);
   `[oauthbearer]` TOML section in `FileConfig` (principal/scope claim names,
-  required scope, clock-skew ms). Outbound paths (`network/client.rs`
-  inter-broker, `raft_handshake.rs` controller listener) return an explicit
-  "OAUTHBEARER not supported" error — it is a client mechanism, not an
-  inter-broker one. The SCRAM-only credential-byte helpers fold the
-  non-SCRAM mechanism into the `UNKNOWN` (0) arm.
+  required scope, clock-skew ms). Outbound inter-broker and controller-listener
+  paths support token-file credentials through the shared client-core RFC 7628
+  exchange; the token file is re-read for every new connection, and the
+  controller listener uses the broker OAuth validator. The SCRAM-only
+  credential-byte helpers fold the non-SCRAM mechanism into the `UNKNOWN` (0)
+  arm.
 - Tests: +13 security unit (parser happy/malformed, validator
   accept/expired/future-iat/signed/missing-exp/missing-principal/
   required-scope string+array/custom-claim, error JSON shape); +6 broker
@@ -2000,8 +1996,9 @@ Kafka client for ApiVersions.
   Workspace clippy `-D warnings` + fmt clean.
 - Out of scope (deferred): JWKS / signed-JWT validation (49b); token
   re-authentication + `session_lifetime_ms` expiry, KIP-368 (49b);
-  OAUTHBEARER for inter-broker / controller listeners; `KafkaUser` OAuth +
-  `Kafka.spec` listener OAuth config (operator slice 50).
+  `KafkaUser` OAuth + `Kafka.spec` listener OAuth config (operator slice 50).
+  Outbound inter-broker/controller OAUTHBEARER subsequently shipped; see the
+  wiring note above.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-sasl-oauthbearer-49-design.md`].
 
@@ -2060,8 +2057,9 @@ Kafka client for ApiVersions.
 - Out of scope (deferred): KIP-368 token re-authentication +
   `session_lifetime_ms` connection expiry (49c); opaque-token introspection
   (RFC 7662); custom CA trust / mTLS to the JWKS endpoint (webpki/Mozilla roots
-  only); RS384/512, ES384/512, PS256; OAUTHBEARER for inter-broker / controller
-  listeners; `KafkaUser` OAuth + `Kafka.spec` listener OAuth config (slice 50).
+  only); RS384/512, ES384/512, PS256; `KafkaUser` OAuth + `Kafka.spec` listener
+  OAuth config (slice 50). Outbound inter-broker/controller OAUTHBEARER later
+  shipped through the shared client-core SASL path.
 - No JVM acceptance test: the JVM unsecured login module mints only `alg:none`
   tokens, and a signed-token JVM test needs a live OAuth server; the slice-49
   unsecured JVM test still covers the wire handshake, and the signature path is
@@ -4600,7 +4598,7 @@ introspection metadata).
   marks next-gen.
 - 5 new error codes added to `crates/broker/src/codes.rs`:
   `COORDINATOR_LOAD_IN_PROGRESS` (14), `FENCED_MEMBER_EPOCH` (110),
-  `UNSUPPORTED_ASSIGNOR` (111), `UNRELEASED_INSTANCE_ID` (114),
+  `UNSUPPORTED_ASSIGNOR` (112), `UNRELEASED_INSTANCE_ID` (111),
   `UNKNOWN_SUBSCRIPTION_ID` (117).
 - New broker config struct `NextGenConfig` exposed via
   `BrokerConfig.next_gen_consumer_group` — fields:
@@ -5179,10 +5177,10 @@ introspection metadata).
   epoch instead of the copy-time epoch after failover; fixed with an
   epoch-fallback scan in `remote_reader.rs`. The JVM multi-broker variant is
   `#[ignore]`d for macOS CI (advertised-address resolution blocks in Docker on macOS).
-- **Deliberate non-goal.** The `__remote_log_metadata` event codec is NOT
-  byte-compatible with the JVM's `RemoteLogMetadataSerde`. A mixed JVM+Crabka
-  tiered cluster sharing the internal topic is unsupported. Real clusters run
-  a single RLMM implementation, making this a non-issue in practice.
+- **JVM-byte-compatible metadata records.** The `__remote_log_metadata` event
+  codec matches the JVM's `RemoteLogMetadataSerde`; the owned codec and golden
+  differential vectors live in `crates/remote-storage-topic/src/serde.rs` and
+  `crates/remote-storage-topic/tests/jvm_serde_golden.rs`.
 - **Kafka-faithful epoch resolution landed.** `LeaderEpochCheckpoint::epoch_for_offset`
   now drives remote-read epoch resolution: `try_remote_read` resolves the epoch
   that *owned* the fetch offset from the local leader-epoch checkpoint (retained
@@ -5380,3 +5378,94 @@ introspection metadata).
   (share/streams level-0 omitted). Full affected-crate suites green;
   `cargo clippy --all-targets` + `cargo fmt --all --check` clean.
 - README KIP-1022 row flipped to ✅.
+
+## Slice — KIP-919 controller Admin bootstrap and routing (2026-08-12)
+
+- Controller and broker listeners now enforce `DescribeCluster.endpoint_type`:
+  controller endpoints serve `CONTROLLERS`, broker endpoints serve `BROKERS`,
+  and the wrong surface returns `MISMATCHED_ENDPOINT_TYPE` (114).
+- `crabka-client-admin` exposes controller-bootstrap constructors that discover
+  the active voter through `DescribeCluster`, preserve security/options across
+  reconnects, and rebootstrap through the configured controller addresses.
+- The controller listener advertises and dispatches KIP-919's supported Admin
+  subset through the broker's existing handler registry, preserving one
+  implementation for ACL, config, quota, reassignment, feature, SCRAM,
+  delegation-token, and broker-unregistration behavior.
+- Controller `ApiVersions` reports the live supported/finalized feature image
+  for `describeFeatures`; native controller-bootstrap calls reject APIs absent
+  from that negotiated surface with `UNSUPPORTED_ENDPOINT_TYPE` (115) without
+  dropping the active-controller connection.
+- Behavioral coverage includes native bootstrap discovery, wrong-endpoint
+  rejection on both listener types, unsupported-API rejection, and a live
+  controller-listener `DescribeConfigs` round trip against a real broker.
+
+## Slice — proposed KIP-1155 metadata-version downgrade safety (2026-08-12)
+
+- `UpdateFeatures` now distinguishes upgrade, safe downgrade, and unsafe
+  downgrade semantics. A safe metadata-version downgrade is rejected when the
+  target record versions would discard modeled state; an unsafe downgrade
+  emits explicit cleanup records first and always emits the final
+  `metadata.version` record last. The current loss projection covers SCRAM
+  credentials, delegation tokens, broker log-directory IDs, and partition
+  directory assignments at their real metadata-version boundaries.
+- Online downgrades have a `3.7-IV0` floor and validate the target range against
+  every registered broker and controller. Every quorum voter must have a
+  controller registration before the operation can proceed.
+- KIP-1155 remains under discussion and has not assigned the metadata-version
+  level that signals downgrade support. Crabka therefore advertises
+  `crabka.metadata.downgrade=1` only in broker/controller registration records;
+  it does not extend the canonical `metadata.version` range and does not expose
+  the marker through `ApiVersions` or `UpdateFeatures`.
+- Replaying a committed downgrade on any quorum node immediately serializes the
+  image at the target record versions, decodes those exact snapshot bytes into
+  a fresh image, installs that rebuilt image, and only then prunes the covered
+  log prefix. This makes the required snapshot reload a real state boundary,
+  including on followers, rather than a checkpoint filename side effect.
+- A failed mandatory downgrade checkpoint is fail-closed: the lower-version
+  image is not published, the operation stays pending and retries on every
+  engine wake-up, and restart replay rediscovers any committed downgrade left
+  in the unpruned log before the controller is exposed.
+- The mixed Kafka harness explicitly treats Kafka 4.0 as pre-KIP-1155: both
+  safe and unsafe downgrade requests must return `INVALID_UPDATE_VERSION` for
+  its missing registration capability and must leave finalized and directory
+  metadata unchanged. A successful mixed-JVM software downgrade is deliberately
+  deferred until an upstream Kafka release assigns and advertises the proposed
+  capability; no synthetic Kafka metadata-version level is used.
+- The operator applies an existing cluster's requested metadata-version change
+  through the default plaintext internal broker listener. Lower targets use
+  safe-downgrade mode; broker rejection surfaces `KafkaVersionValid=False` and
+  leaves `status.metadataVersion` at its previously confirmed value. Loading
+  TLS/SASL credentials for operator Admin RPCs on secured internal listeners
+  remains an operator-wide limitation.
+
+## Messaging gateway, typed filters, application SDKs, and diskless Slice 6d (2026-08-12)
+
+- The gateway preserves ordered Kafka headers, including duplicate keys and
+  null values, across Send, Subscribe, webhook ingress, and outbound delivery.
+  CloudEvents 1.0 binary and structured modes use that same lossless shape in
+  both directions and reject malformed or batch bindings explicitly.
+- `SubscribeAck` is now authoritative in explicit-ack mode: commits advance
+  only through the contiguous per-topic-partition frontier. Filtered records
+  close known gaps, while an ack above an unacknowledged delivery cannot skip
+  it. Plaintext gateway serving accepts both HTTP/1.1 and HTTP/2 prior
+  knowledge (h2c), enabling bidirectional Connect streams without TLS.
+- The share-group coordinator owner publishes fleet-complete backlog by
+  resolving each data-partition leader, probing remote leaders without a
+  payload, and pruning stale ownership/group/topic series. A checked-in KEDA
+  Prometheus `ScaledObject` consumes the resulting
+  `crabka_broker_share_group_backlog` gauge.
+- Topic subscription filters are server-enforced SQL boolean expressions.
+  Registry-decoded Avro and Protobuf rows are bridged through Arrow and
+  evaluated by DataFusion with nested/repeated fields, enum symbols, schema
+  caching/evolution, and byte-exact delivery of the original Kafka value.
+- The application contract is implemented in Go, TypeScript, Java, Rust, and
+  C++. One versioned conformance harness checks messaging, CloudEvents,
+  headers, filters, queues, auth/error shape, and deliberate stubs through
+  mock and live-compatible adapters; each language has its own CI workflow.
+- Diskless Slices 1–6d are implemented through the bounded M3 proof gate. The
+  Creusot handoff kernel, exhaustive crash and Raft/WAL models, and a live
+  three-broker RF=3 fault harness cover concurrent appenders, quorum durability,
+  object-PUT failure/retry, minority WAL-node loss, authority handoff,
+  gap-free/linearizable acknowledged history, Rust readback, and JVM byte-exact
+  replay. M4 production latency, transfer-cost, and operator-elasticity claims
+  remain release gates.

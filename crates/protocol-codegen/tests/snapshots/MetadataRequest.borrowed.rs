@@ -37,6 +37,7 @@ impl<'a> MetadataRequest<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_request::MetadataRequest {
         crate::owned::metadata_request::MetadataRequest {
             topics: (self.topics).as_ref().map(|v| v.iter().map(|it| it.to_owned()).collect()),
@@ -72,16 +73,16 @@ impl<'a> Encode for MetadataRequest<'a> {
                         it.encode(buf, version)?;
                     }
                 }
-            }
+            };
         }
         if version >= 4 {
-            put_bool(buf, self.allow_auto_topic_creation)
+            put_bool(buf, self.allow_auto_topic_creation);
         }
         if (8..=10).contains(&version) {
-            put_bool(buf, self.include_cluster_authorized_operations)
+            put_bool(buf, self.include_cluster_authorized_operations);
         }
         if version >= 8 {
-            put_bool(buf, self.include_topic_authorized_operations)
+            put_bool(buf, self.include_topic_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -96,7 +97,7 @@ impl<'a> Encode for MetadataRequest<'a> {
             n += if version >= 1 {
                 {
                     let opt: Option<&Vec<_>> = (self.topics).as_ref();
-                    let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex);
+                    let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
                     let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
                     prefix + body
                 }
@@ -212,6 +213,7 @@ impl<'a> MetadataRequestTopic<'a> {
     /// # Panics
     ///
     /// Panics if a records field contains an invalid encoded record batch.
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::metadata_request::MetadataRequestTopic {
         crate::owned::metadata_request::MetadataRequestTopic {
             topic_id: (self.topic_id),
@@ -224,7 +226,7 @@ impl<'a> Encode for MetadataRequestTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             if version >= 10 {
@@ -239,7 +241,7 @@ impl<'a> Encode for MetadataRequestTopic<'a> {
                 } else {
                     let () = put_string(buf, (self.name).unwrap_or(""));
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

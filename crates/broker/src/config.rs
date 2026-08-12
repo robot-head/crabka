@@ -84,6 +84,9 @@ pub enum InterBrokerCredentials {
         service_name: String,
         kdc_url: String,
     },
+    /// SASL/OAUTHBEARER. The token file is read on every new outbound
+    /// connection so credential rotation does not require a broker restart.
+    OAuthBearer { token_path: PathBuf },
 }
 
 impl InterBrokerCredentials {
@@ -94,6 +97,7 @@ impl InterBrokerCredentials {
             Self::Plain { .. } => SaslMechanism::Plain,
             Self::Scram { mechanism, .. } => *mechanism,
             Self::Gssapi { .. } => SaslMechanism::Gssapi,
+            Self::OAuthBearer { .. } => SaslMechanism::OAuthBearer,
         }
     }
 }
@@ -1305,14 +1309,12 @@ impl BrokerConfig {
         }
 
         // Inter-broker listener must exist.
-        if !listeners
+        let inter_broker_listener = listeners
             .iter()
-            .any(|l| l.name == self.inter_broker_listener_name)
-        {
-            return Err(BrokerError::InvalidInterBrokerListener {
+            .find(|listener| listener.name == self.inter_broker_listener_name)
+            .ok_or_else(|| BrokerError::InvalidInterBrokerListener {
                 name: self.inter_broker_listener_name.clone(),
-            });
-        }
+            })?;
 
         // Every SASL listener requires at least one mechanism. Per-listener
         // sasl_mechanisms wins over the broker-wide default.
@@ -1358,6 +1360,7 @@ impl BrokerConfig {
                 name: "controller".into(),
             });
         }
+        self.validate_outbound_sasl(inter_broker_listener)?;
         self.validate_positive_runtime_scalars()?;
         self.validate_additional_runtime_scalars()?;
         self.record_decompression_policy()?;
@@ -1493,6 +1496,51 @@ impl BrokerConfig {
             config.validate()?;
         }
         self.validate_leader_rebalance()
+    }
+
+    fn validate_outbound_sasl(&self, inter_broker: &ListenerSpec) -> Result<(), BrokerError> {
+        let Some(credentials) = self.inter_broker_credentials.as_ref() else {
+            return Ok(());
+        };
+        let mechanism = credentials.mechanism();
+
+        if inter_broker.protocol.requires_sasl() {
+            let enabled = inter_broker
+                .sasl_mechanisms
+                .as_deref()
+                .unwrap_or(&self.enabled_sasl_mechanisms);
+            if !enabled.contains(&mechanism) {
+                return Err(BrokerError::InvalidRuntimeConfig(format!(
+                    "inter-broker credential mechanism {} is not enabled on listener {}",
+                    mechanism.wire_name(),
+                    inter_broker.name
+                )));
+            }
+        }
+        if self.controller_listener_protocol.requires_sasl()
+            && !self.enabled_sasl_mechanisms.contains(&mechanism)
+        {
+            return Err(BrokerError::InvalidRuntimeConfig(format!(
+                "inter-broker credential mechanism {} is not enabled on the controller listener",
+                mechanism.wire_name()
+            )));
+        }
+        if let InterBrokerCredentials::OAuthBearer { token_path } = credentials {
+            let token = std::fs::read(token_path).map_err(|error| {
+                BrokerError::InvalidRuntimeConfig(format!(
+                    "cannot read inter-broker OAUTHBEARER token {}: {error}",
+                    token_path.display()
+                ))
+            })?;
+            let token = token.trim_ascii();
+            if token.is_empty() || token.contains(&b'\x01') {
+                return Err(BrokerError::InvalidRuntimeConfig(
+                    "inter-broker OAUTHBEARER token must be non-empty and contain no RFC 7628 separator"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Builds the validated Kafka record decompression policy.
@@ -3188,6 +3236,94 @@ mod tests {
             c.validate(),
             Err(BrokerError::SaslListenerNoMechanisms { .. })
         ));
+    }
+
+    #[test]
+    fn outbound_oauthbearer_credentials_validate_for_data_and_controller_listeners() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "header.payload.\n").unwrap();
+        let credentials = Some(InterBrokerCredentials::OAuthBearer { token_path });
+        let data_listener = ListenerSpec {
+            name: "OAUTH".into(),
+            bind_addr: "127.0.0.1:9094".parse().unwrap(),
+            advertised: "broker:9094".into(),
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls_config: None,
+            sasl_mechanisms: Some(vec![SaslMechanism::OAuthBearer]),
+        };
+        let data = BrokerConfig {
+            listeners: vec![data_listener],
+            inter_broker_listener_name: "OAUTH".into(),
+            inter_broker_credentials: credentials.clone(),
+            ..BrokerConfig::default()
+        };
+        assert!(data.validate().is_ok());
+
+        let controller = BrokerConfig {
+            controller_listener_protocol: ListenerProtocol::SaslPlaintext,
+            enabled_sasl_mechanisms: vec![SaslMechanism::OAuthBearer],
+            inter_broker_credentials: credentials,
+            ..BrokerConfig::default()
+        };
+        assert!(controller.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_outbound_credential_mechanism_not_enabled_on_sasl_targets() {
+        let data = BrokerConfig {
+            listeners: vec![ListenerSpec {
+                name: "INTERNAL".into(),
+                bind_addr: "127.0.0.1:9094".parse().unwrap(),
+                advertised: "broker:9094".into(),
+                protocol: ListenerProtocol::SaslPlaintext,
+                tls_config: None,
+                sasl_mechanisms: Some(vec![SaslMechanism::Plain]),
+            }],
+            inter_broker_listener_name: "INTERNAL".into(),
+            inter_broker_credentials: Some(InterBrokerCredentials::OAuthBearer {
+                token_path: "/unused/token".into(),
+            }),
+            ..BrokerConfig::default()
+        };
+        let error = data
+            .validate()
+            .expect_err("data-listener mechanism mismatch is rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("not enabled on listener INTERNAL")
+        );
+
+        let controller = BrokerConfig {
+            controller_listener_protocol: ListenerProtocol::SaslPlaintext,
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+            inter_broker_credentials: Some(InterBrokerCredentials::OAuthBearer {
+                token_path: "/unused/token".into(),
+            }),
+            ..BrokerConfig::default()
+        };
+        let error = controller
+            .validate()
+            .expect_err("controller-listener mechanism mismatch is rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("not enabled on the controller listener")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_outbound_oauthbearer_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "\n").unwrap();
+        let c = BrokerConfig {
+            inter_broker_credentials: Some(InterBrokerCredentials::OAuthBearer { token_path }),
+            ..BrokerConfig::default()
+        };
+        let error = c.validate().expect_err("empty OAuth token is rejected");
+        assert!(error.to_string().contains("token must be non-empty"));
     }
 
     #[test]

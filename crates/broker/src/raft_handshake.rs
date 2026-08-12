@@ -39,8 +39,8 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 
 use crate::network::auth::{
-    ConnectionAuth, SaslExchange, handle_authenticate_gssapi, handle_authenticate_plain,
-    handle_authenticate_scram, handle_handshake, is_pre_auth_allowed,
+    ConnectionAuth, SaslExchange, handle_authenticate_gssapi, handle_authenticate_oauthbearer,
+    handle_authenticate_plain, handle_authenticate_scram, handle_handshake, is_pre_auth_allowed,
 };
 
 /// Late-bound handle to the broker's [`ControllerHandle`].
@@ -70,6 +70,8 @@ pub struct BrokerRaftHandshake {
     pub plain_credentials: HashMap<String, String>,
     pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
     pub gssapi: Option<crabka_security::gssapi::GssapiConfig>,
+    pub oauthbearer_validator: crabka_security::OAuthBearerValidator,
+    pub oauthbearer_max_session_lifetime: Option<crabka_units::Time>,
     pub protocol: ListenerProtocol,
     pub controller: ControllerHandleArc,
     /// Maximum Kafka handshake frame body accepted before authentication.
@@ -200,14 +202,20 @@ impl RaftListenerHandshake for BrokerRaftHandshake {
         //    authenticated identity to authorize at this layer — we do not
         //    extract an mTLS client-cert principal here — so the
         //    CLUSTER_ACTION gate is skipped for it (an unusual config).
+        let mut principal = None;
+        let mut authenticated_via_token = false;
         let mut cluster_alter_authorized = true;
         if self.protocol.requires_sasl() {
-            let principal = run_inbound_sasl(&mut *stream, self).await?;
-            self.authorize_cluster_action(&principal, &peer)?;
-            cluster_alter_authorized = self.authorize_cluster_alter(&principal, &peer)?;
+            let (authenticated, via_token) = run_inbound_sasl(&mut *stream, self).await?;
+            self.authorize_cluster_action(&authenticated, &peer)?;
+            cluster_alter_authorized = self.authorize_cluster_alter(&authenticated, &peer)?;
+            principal = Some(authenticated);
+            authenticated_via_token = via_token;
         }
         Ok(RaftConnection {
             stream,
+            principal,
+            authenticated_via_token,
             cluster_alter_authorized,
         })
     }
@@ -221,14 +229,15 @@ impl RaftListenerHandshake for BrokerRaftHandshake {
 /// `network::auth::ConnectionAuth`, carries continuation state across SCRAM
 /// rounds.
 ///
-/// The function returns the authenticated [`Principal`] once
+/// The function returns the authenticated [`Principal`] and whether a
+/// delegation token supplied the credential once
 /// `auth.is_authenticated()` holds, so that `upgrade` can authorize it. It
 /// returns `Err(...)` if the peer sent an unexpected frame or the auth
 /// failed.
 async fn run_inbound_sasl(
     stream: &mut dyn DuplexStream,
     cfg: &BrokerRaftHandshake,
-) -> Result<crabka_security::Principal, RaftHandshakeError> {
+) -> Result<(crabka_security::Principal, bool), RaftHandshakeError> {
     let mut auth = pre_auth_state();
     loop {
         let (api_key, api_version, corr_id, body) =
@@ -287,13 +296,20 @@ async fn run_inbound_sasl(
                         })?;
                         handle_authenticate_scram(&req, &mut auth, controller.as_ref())
                     }
-                    // The controller listener authenticates peer brokers, not
-                    // token-bearing clients; OAUTHBEARER is a client mechanism
-                    // and is not offered for inter-broker auth.
                     SaslMechanism::OAuthBearer => {
-                        return Err(RaftHandshakeError::Sasl(
-                            "OAUTHBEARER is not supported on the controller listener".into(),
-                        ));
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |duration| {
+                                i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+                            });
+                        handle_authenticate_oauthbearer(
+                            &req,
+                            &mut auth,
+                            &cfg.oauthbearer_validator,
+                            now_ms,
+                            cfg.oauthbearer_max_session_lifetime,
+                        )
+                        .await
                     }
                     SaslMechanism::Gssapi => {
                         let config = cfg.gssapi.as_ref().ok_or_else(|| {
@@ -312,28 +328,27 @@ async fn run_inbound_sasl(
                         "authenticate error_code={error_code}"
                     )));
                 }
-                if auth.is_authenticated() {
-                    // Hand the authenticated principal back to `upgrade` for
-                    // the CLUSTER_ACTION authorization gate (H-1).
-                    let principal = auth.principal().cloned().ok_or_else(|| {
-                        RaftHandshakeError::Sasl(
-                            "authenticated connection missing principal".into(),
-                        )
-                    })?;
-                    return Ok(principal);
+                if let ConnectionAuth::Authenticated {
+                    principal,
+                    authenticated_via_token,
+                    ..
+                } = &auth
+                {
+                    return Ok((principal.clone(), *authenticated_via_token));
                 }
-                // SCRAM second round: loop and read the next
-                // SaslAuthenticate frame. Sanity-check we're still
-                // mid-SCRAM and not stuck in a bad state.
+                // Multi-round mechanisms and the RFC 7628 rejection exchange
+                // loop for the next `SaslAuthenticate` frame.
                 debug_assert!(
                     matches!(
                         auth,
                         ConnectionAuth::Negotiating {
-                            exchange: SaslExchange::Scram(_),
+                            exchange: SaslExchange::Scram(_)
+                                | SaslExchange::OAuthBearerFailed
+                                | SaslExchange::Gssapi(_),
                             ..
                         }
                     ),
-                    "expected SCRAM continuation after non-authenticated success"
+                    "expected SASL continuation after non-authenticated success"
                 );
             }
             other => {
@@ -580,6 +595,8 @@ mod tests {
             plain_credentials,
             enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
             gssapi: None,
+            oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            oauthbearer_max_session_lifetime: None,
             protocol: ListenerProtocol::SaslPlaintext,
             controller: Arc::new(OnceCell::new()),
             max_frame_bytes: 4096,
@@ -636,6 +653,8 @@ mod tests {
             plain_credentials: HashMap::new(),
             enabled_sasl_mechanisms: vec![],
             gssapi: None,
+            oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            oauthbearer_max_session_lifetime: None,
             protocol: ListenerProtocol::Plaintext,
             controller: Arc::new(OnceCell::new()),
             max_frame_bytes: 4096,
@@ -667,6 +686,8 @@ mod tests {
             plain_credentials: HashMap::new(),
             enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
             gssapi: None,
+            oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            oauthbearer_max_session_lifetime: None,
             protocol: ListenerProtocol::SaslPlaintext,
             controller: controller_cell,
             max_frame_bytes: 4096,
@@ -953,9 +974,10 @@ mod tests {
         // error_code 0.
         assert!(authenticate[0..7] == [0, 0, 0, 3, 0, 0, 0]);
 
-        let principal = server.await.expect("server task").expect("authenticated");
+        let (principal, via_token) = server.await.expect("server task").expect("authenticated");
         assert!(principal.name == "broker");
         assert!(principal.auth_method == crabka_security::AuthMethod::SaslPlain);
+        assert!(!via_token);
     }
 
     #[tokio::test]

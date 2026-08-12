@@ -1,18 +1,27 @@
 //! Fleet-complete KIP-932 backlog sampling for Prometheus/KEDA.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use crabka_client_core::ConnectionOptions;
 use crabka_ids::PartitionIndex;
 use crabka_metadata::NodeId;
-use crabka_protocol::owned::list_offsets_request::{
-    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
+use crabka_protocol::{
+    owned::{
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        fetch_response::FetchResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
 use crabka_security::ListenerProtocol;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    coordinator::{GroupCoordinator, bootstrap::OFFSETS_TOPIC},
+    codes,
+    coordinator::{GroupCoordinator, bootstrap::OFFSETS_TOPIC, partitioner},
     metadata_source::MetadataSource,
     metrics::{BrokerMetrics, ShareGroupLabel},
     network::client::InterBrokerClient,
@@ -53,18 +62,20 @@ impl BacklogPoller {
                 tokio::select! {
                     () = self.shutdown.cancelled() => break,
                     _ = interval.tick() => {
-                        let is_group_coordinator = self.is_group_coordinator();
                         let groups = self.coordinator.share_group_ids();
+                        let image = self.metadata.current_image();
+                        prune_stale(
+                            &self.metrics,
+                            &mut last,
+                            &image,
+                            self.node_id,
+                            &groups,
+                        );
                         tracing::debug!(
-                            is_group_coordinator,
                             groups = groups.len(),
                             "sampling share-group backlog",
                         );
-                        if !is_group_coordinator {
-                            clear(&self.metrics, &mut last);
-                            continue;
-                        }
-                        match self.snapshot(groups).await {
+                        match self.snapshot(&image, groups).await {
                             Ok(next) => {
                                 tracing::debug!(samples = next.len(), "share-group backlog sample complete");
                                 replace(&self.metrics, &mut last, next);
@@ -78,17 +89,17 @@ impl BacklogPoller {
         });
     }
 
-    fn is_group_coordinator(&self) -> bool {
-        self.metadata
-            .current_image()
-            .partitions_of(OFFSETS_TOPIC)
-            .any(|partition| partition.leader == self.node_id)
-    }
-
-    async fn snapshot(&self, groups: Vec<String>) -> Result<HashMap<ShareGroupLabel, i64>, String> {
-        let image = self.metadata.current_image();
+    async fn snapshot(
+        &self,
+        image: &crabka_metadata::MetadataImage,
+        groups: Vec<String>,
+    ) -> Result<HashMap<ShareGroupLabel, i64>, String> {
         let mut snapshot = HashMap::new();
         for group_id in groups {
+            if !owns_group(image, self.node_id, &group_id) {
+                tracing::debug!(%group_id, "skipping share group owned by another coordinator");
+                continue;
+            }
             let Some(state) = self.coordinator.share_state_partition_metadata(&group_id) else {
                 tracing::debug!(%group_id, "share group has no partition metadata");
                 continue;
@@ -110,7 +121,7 @@ impl BacklogPoller {
                         .await
                         .map_err(|error| error.to_string())?
                         .map_or(-1, |state| state.start_offset.0);
-                    let (hwm, log_start) = self.offsets(&image, &topic, partition).await?;
+                    let (hwm, log_start) = self.offsets(image, &topic, partition).await?;
                     snapshot.insert(
                         ShareGroupLabel {
                             group_id: group_id.clone(),
@@ -172,51 +183,106 @@ impl BacklogPoller {
             .connect_as_connection(host, port, self.listener_protocol, "localhost", options)
             .await
             .map_err(|error| error.to_string())?;
-        let request = |timestamp| ListOffsetsRequest {
+        let partition_metadata = image
+            .partition(topic, partition)
+            .ok_or_else(|| format!("missing metadata for {topic}-{partition}"))?;
+        let topic_id = image
+            .topic(topic)
+            .ok_or_else(|| format!("missing topic metadata for {topic}"))?
+            .topic_id;
+        let request = FetchRequest {
             replica_id: -1,
+            max_wait_ms: 0,
+            min_bytes: 0,
+            max_bytes: 0,
             isolation_level: 0,
-            topics: vec![ListOffsetsTopic {
-                name: topic.to_owned(),
-                partitions: vec![ListOffsetsPartition {
-                    partition_index: partition,
-                    current_leader_epoch: -1,
-                    timestamp,
+            topics: vec![FetchTopic {
+                topic: topic.to_owned(),
+                topic_id: WireUuid(*topic_id.as_bytes()),
+                partitions: vec![FetchPartition {
+                    partition,
+                    current_leader_epoch: partition_metadata.leader_epoch.0,
+                    // A consumer Fetch reports the committed high watermark and
+                    // log start even when it returns no records. Asking beyond
+                    // the end keeps this metadata probe payload-free.
+                    fetch_offset: i64::MAX,
+                    partition_max_bytes: 0,
                     ..Default::default()
                 }],
                 ..Default::default()
             }],
             ..Default::default()
         };
-        let earliest = connection
-            .send(request(-2))
-            .await
-            .map_err(|error| error.to_string())?;
-        let latest = connection
-            .send(request(-1))
+        let response: FetchResponse = connection
+            .send(request)
             .await
             .map_err(|error| error.to_string())?;
         connection.close();
-        let offset =
-            |response: &crabka_protocol::owned::list_offsets_response::ListOffsetsResponse,
-             kind: &str|
-             -> Result<i64, String> {
-                let result = response
-                    .topics
-                    .first()
-                    .and_then(|topic| topic.partitions.first())
-                    .ok_or_else(|| {
-                        format!("empty ListOffsets({kind}) response for {topic}-{partition}")
-                    })?;
-                if result.error_code != 0 {
-                    return Err(format!(
-                        "ListOffsets({kind}) {topic}-{partition} returned code {}",
-                        result.error_code
-                    ));
-                }
-                Ok(result.offset)
-            };
-        Ok((offset(&latest, "latest")?, offset(&earliest, "earliest")?))
+        fetch_offsets(&response, topic, WireUuid(*topic_id.as_bytes()), partition)
     }
+}
+
+fn owns_group(image: &crabka_metadata::MetadataImage, node_id: NodeId, group_id: &str) -> bool {
+    let partition = partitioner::partition_for_group(image, group_id);
+    image
+        .partition(OFFSETS_TOPIC, partition)
+        .is_some_and(|record| record.leader == node_id)
+}
+
+fn fetch_offsets(
+    response: &FetchResponse,
+    topic: &str,
+    topic_id: WireUuid,
+    partition: i32,
+) -> Result<(i64, i64), String> {
+    if response.error_code != codes::NONE {
+        return Err(format!(
+            "Fetch metadata probe {topic}-{partition} returned top-level code {}",
+            response.error_code
+        ));
+    }
+    let result = response
+        .responses
+        .iter()
+        .find(|row| row.topic_id == topic_id || row.topic == topic)
+        .and_then(|row| {
+            row.partitions
+                .iter()
+                .find(|row| row.partition_index == partition)
+        })
+        .ok_or_else(|| format!("empty Fetch metadata response for {topic}-{partition}"))?;
+    if result.error_code != codes::NONE {
+        return Err(format!(
+            "Fetch metadata probe {topic}-{partition} returned code {}",
+            result.error_code
+        ));
+    }
+    if result.log_start_offset < 0 || result.high_watermark < result.log_start_offset {
+        return Err(format!(
+            "Fetch metadata probe {topic}-{partition} returned invalid offsets: high watermark {}, log start {}",
+            result.high_watermark, result.log_start_offset
+        ));
+    }
+    Ok((result.high_watermark, result.log_start_offset))
+}
+
+fn prune_stale(
+    metrics: &BrokerMetrics,
+    last: &mut HashMap<ShareGroupLabel, i64>,
+    image: &crabka_metadata::MetadataImage,
+    node_id: NodeId,
+    groups: &[String],
+) {
+    let groups: HashSet<&str> = groups.iter().map(String::as_str).collect();
+    last.retain(|label, _| {
+        let current = groups.contains(label.group_id.as_str())
+            && owns_group(image, node_id, &label.group_id)
+            && image.topic(&label.topic).is_some();
+        if !current {
+            metrics.share_group_backlog.remove(label);
+        }
+        current
+    });
 }
 
 fn replace(
@@ -242,7 +308,55 @@ fn clear(metrics: &BrokerMetrics, last: &mut HashMap<ShareGroupLabel, i64>) {
 
 #[cfg(test)]
 mod tests {
-    use super::effective_backlog;
+    use std::collections::HashMap;
+
+    use crabka_ids::LeaderEpoch;
+    use crabka_metadata::{MetadataImage, MetadataRecord, NodeId, PartitionRecord, TopicRecord};
+    use crabka_protocol::{
+        owned::fetch_response::{FetchResponse, FetchableTopicResponse, PartitionData},
+        primitives::uuid::Uuid as WireUuid,
+    };
+
+    use super::{effective_backlog, fetch_offsets, owns_group, prune_stale, replace};
+    use crate::{
+        coordinator::{bootstrap::OFFSETS_TOPIC, partitioner},
+        metrics::{BrokerMetrics, ShareGroupLabel},
+    };
+
+    fn routing_image() -> MetadataImage {
+        let mut image = MetadataImage::default();
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: OFFSETS_TOPIC.into(),
+            topic_id: uuid::Uuid::from_u128(1),
+            partitions: 2,
+            replication_factor: 1,
+        }));
+        for (partition, leader) in [(0, NodeId(1)), (1, NodeId(2))] {
+            image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: OFFSETS_TOPIC.into(),
+                partition,
+                leader,
+                replicas: vec![leader],
+                isr: vec![leader],
+                leader_epoch: LeaderEpoch(7),
+                ..Default::default()
+            }));
+        }
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "work".into(),
+            topic_id: uuid::Uuid::from_u128(2),
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image
+    }
+
+    fn group_for_partition(partition: i32) -> String {
+        (0..100)
+            .map(|i| format!("group-{i}"))
+            .find(|group| partitioner::partition_for_group_with_count(group, 2) == partition)
+            .expect("both offsets partitions receive a group")
+    }
 
     #[test]
     fn backlog_uses_spso_or_log_start_and_never_goes_negative() {
@@ -251,5 +365,80 @@ mod tests {
         assert_eq!(effective_backlog(100, 100, 0), 0);
         assert_eq!(effective_backlog(100, 120, 0), 0);
         assert_eq!(effective_backlog(110, 0, 100), 10);
+    }
+
+    #[test]
+    fn ownership_is_checked_for_each_groups_offsets_partition() {
+        let image = routing_image();
+        let on_zero = group_for_partition(0);
+        let on_one = group_for_partition(1);
+
+        assert!(owns_group(&image, NodeId(1), &on_zero));
+        assert!(!owns_group(&image, NodeId(1), &on_one));
+        assert!(owns_group(&image, NodeId(2), &on_one));
+        assert!(!owns_group(&image, NodeId(2), &on_zero));
+    }
+
+    #[test]
+    fn remote_offsets_are_the_fetch_high_watermark_not_log_end() {
+        let topic_id = WireUuid([9; 16]);
+        let response = FetchResponse {
+            responses: vec![FetchableTopicResponse {
+                topic_id,
+                partitions: vec![PartitionData {
+                    partition_index: 3,
+                    high_watermark: 7,
+                    log_start_offset: 2,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(fetch_offsets(&response, "work", topic_id, 3), Ok((7, 2)));
+    }
+
+    #[test]
+    fn zero_is_published_then_departed_series_are_removed() {
+        let metrics = BrokerMetrics::new();
+        let label = ShareGroupLabel {
+            group_id: "workers".into(),
+            topic: "work".into(),
+            partition: 0,
+        };
+        let mut last = HashMap::new();
+
+        replace(&metrics, &mut last, HashMap::from([(label.clone(), 0)]));
+        assert_eq!(
+            metrics
+                .share_group_backlog
+                .get(&label)
+                .map(|gauge| gauge.get()),
+            Some(0)
+        );
+
+        replace(&metrics, &mut last, HashMap::new());
+        assert!(metrics.share_group_backlog.get(&label).is_none());
+        assert!(last.is_empty());
+    }
+
+    #[test]
+    fn ownership_loss_prunes_a_stale_series_before_sampling() {
+        let image = routing_image();
+        let metrics = BrokerMetrics::new();
+        let group_id = group_for_partition(1);
+        let label = ShareGroupLabel {
+            group_id: group_id.clone(),
+            topic: "work".into(),
+            partition: 0,
+        };
+        metrics.share_group_backlog.get_or_create(&label).set(11);
+        let mut last = HashMap::from([(label.clone(), 11)]);
+
+        prune_stale(&metrics, &mut last, &image, NodeId(1), &[group_id]);
+
+        assert!(last.is_empty());
+        assert!(metrics.share_group_backlog.get(&label).is_none());
     }
 }

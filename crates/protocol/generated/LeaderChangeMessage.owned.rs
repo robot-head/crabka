@@ -40,7 +40,7 @@ impl Encode for LeaderChangeMessage {
                 for it in &self.voters {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -48,7 +48,7 @@ impl Encode for LeaderChangeMessage {
                 for it in &self.granting_voters {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

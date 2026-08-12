@@ -384,12 +384,18 @@ fn validate_spec(spec: &KafkaConnectorSpec) -> Result<(), String> {
     for (path, value) in [
         ("spec.databaseUrl.name", spec.database_url.name.as_str()),
         ("spec.databaseUrl.key", spec.database_url.key.as_str()),
+        ("spec.schemaRegistryUrl", spec.schema_registry_url.as_str()),
         ("spec.slot", spec.slot.as_str()),
         ("spec.publication", spec.publication.as_str()),
     ] {
         if value.trim().is_empty() {
             return Err(format!("{path} must not be empty"));
         }
+    }
+    let registry_url = reqwest::Url::parse(&spec.schema_registry_url)
+        .map_err(|error| format!("spec.schemaRegistryUrl: {error}"))?;
+    if !matches!(registry_url.scheme(), "http" | "https") {
+        return Err("spec.schemaRegistryUrl must use http or https".into());
     }
     if spec.tables.is_empty() {
         return Err("spec.tables must contain at least one table".into());
@@ -564,6 +570,10 @@ fn render_deployment(
     let mut env = vec![
         value_env("CRABKA_CONNECTOR_ID", &name),
         value_env("CRABKA_KAFKA_BOOTSTRAP", bootstrap),
+        value_env(
+            "CRABKA_SCHEMA_REGISTRY_URL",
+            &connector.spec.schema_registry_url,
+        ),
         value_env(
             "CRABKA_CONNECT_REPLICATION_FACTOR",
             replication_factor.to_string(),
@@ -751,6 +761,7 @@ mod tests {
                     name: "database".into(),
                     key: "url".into(),
                 },
+                schema_registry_url: "http://schema-registry:8081".into(),
                 slot: "orders_crabka".into(),
                 publication: "crabka_connect".into(),
                 schema: Some("public".into()),
@@ -811,6 +822,7 @@ mod tests {
             for (name, value) in [
                 ("CRABKA_CONNECTOR_ID", "orders"),
                 ("CRABKA_KAFKA_BOOTSTRAP", "demo:9093"),
+                ("CRABKA_SCHEMA_REGISTRY_URL", "http://schema-registry:8081"),
                 ("CRABKA_CONNECT_REPLICATION_FACTOR", "3"),
                 ("CRABKA_POSTGRES_TABLES", "orders,customers"),
                 ("CRABKA_CONNECT_BATCH_SIZE", "100"),
@@ -849,6 +861,9 @@ mod tests {
         spec.database_url.key.clear();
         assert!(validate_spec(&spec).is_err());
         spec.database_url.key = "url".into();
+        spec.schema_registry_url = "not a url".into();
+        assert!(validate_spec(&spec).is_err());
+        spec.schema_registry_url = "http://schema-registry:8081".into();
         spec.tables = vec!["audit.orders".into()];
         assert!(validate_spec(&spec).is_err());
     }

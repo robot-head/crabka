@@ -24,7 +24,7 @@ arrow = { workspace = true }
 bytes = { workspace = true }
 parquet = { workspace = true }
 datafusion = { workspace = true }
-crabka-object-store = { version = "0.3.8", path = "../object-store" }
+crabka-object-store = { version = "0.4.0", path = "../object-store" }
 crabka-units = { workspace = true }
 object_store = { workspace = true }
 url = { workspace = true }

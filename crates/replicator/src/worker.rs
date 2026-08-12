@@ -17,7 +17,7 @@ use tracing::warn;
 
 use crate::{
     checkpoint_store::InternalTopicCheckpointStore,
-    config::{ClientResourcePolicy, NamingPolicy, PolicyConfig, ReplicatorRuntimePolicy},
+    config::{ClientResourcePolicy, Delivery, NamingPolicy, PolicyConfig, ReplicatorRuntimePolicy},
     record::ReplicatedRecord,
     selector::Selector,
     sink::{SinkParams, TargetSink},
@@ -45,6 +45,8 @@ pub struct FlowWorkerParams {
     pub target_alias: String,
     /// How source topics are renamed on the target.
     pub naming: NamingPolicy,
+    /// Delivery guarantee for target writes and source checkpoints.
+    pub delivery: Delivery,
     /// Already-resolved source topic list. The supervisor resolves the selectors.
     pub topics: Vec<String>,
     /// Source partition count by selected topic.
@@ -155,6 +157,7 @@ impl FlowWorker {
             p.security_source.clone(),
             p.client_resource_policy,
             &p.runtime_policy,
+            p.delivery,
         )
         .await?;
 
@@ -162,7 +165,9 @@ impl FlowWorker {
             SinkParams {
                 target_bootstrap: p.target_bootstrap.clone(),
                 source_alias: p.source_alias.clone(),
+                flow_name: p.flow_name.clone(),
                 naming: p.naming,
+                delivery: p.delivery,
                 target_zones: p.target_zones.clone(),
                 policies: p.policies.clone(),
                 security: p.security_target.clone(),
@@ -180,7 +185,8 @@ impl FlowWorker {
             p.client_resource_policy,
             p.runtime_policy.clone(),
         )
-        .await?;
+        .await?
+        .with_sink_transaction(p.delivery == Delivery::ExactlyOnce);
 
         let runtime = ConnectorRuntime::<(), ReplicatedRecord>::new()
             .add_source(source)
@@ -316,6 +322,7 @@ mod tests {
             source_alias: "us-east".into(),
             target_alias: "eu-west".into(),
             naming: crate::config::NamingPolicy::Default,
+            delivery: crate::config::Delivery::AtLeastOnce,
             topics: vec!["orders".to_string()],
             source_partition_counts: [("orders".to_string(), 3)].into(),
             target_zones: vec!["us".into()],

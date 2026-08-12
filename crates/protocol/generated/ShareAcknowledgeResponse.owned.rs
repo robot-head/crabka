@@ -59,7 +59,7 @@ impl Encode for ShareAcknowledgeResponse {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -67,7 +67,7 @@ impl Encode for ShareAcknowledgeResponse {
                 for it in &self.node_endpoints {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -221,7 +221,7 @@ impl Encode for ShareAcknowledgeTopicResponse {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

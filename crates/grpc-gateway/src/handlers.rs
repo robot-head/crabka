@@ -169,7 +169,7 @@ pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRe
         headers: r
             .headers
             .into_iter()
-            .map(|(k, v)| (k, bytes::Bytes::from(v)))
+            .map(|header| (header.key, header.value.map(bytes::Bytes::from)))
             .collect(),
         partition: r.partition,
         timestamp_ms: r.timestamp_ms,

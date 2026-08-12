@@ -4,10 +4,10 @@
 //! `SaslHandshake` + `SaslAuthenticate` exchange over any
 //! `AsyncRead + AsyncWrite` stream. That stream can be a plaintext
 //! `TcpStream`, a `tokio_rustls` TLS stream, or an in-process duplex for
-//! tests. It supports three mechanisms: PLAIN with one round-trip,
-//! SCRAM-SHA-256/512 with two round-trips and server-final verification, and
-//! GSSAPI with multi-round AP-REQ / AP-REP plus RFC 4752 security-layer
-//! negotiation.
+//! tests. It supports PLAIN with one round-trip, SCRAM-SHA-256/512 with two
+//! round-trips and server-final verification, OAUTHBEARER with the RFC 7628
+//! success/failure exchange, and GSSAPI with multi-round AP-REQ / AP-REP plus
+//! RFC 4752 security-layer negotiation.
 //!
 //! This is the shared implementation the broker's inter-broker dialer
 //! and the public clients both call. The only difference is the
@@ -70,6 +70,9 @@ pub enum SaslCredentials {
         service_name: String,
         kdc_url: String,
     },
+    /// SASL/OAUTHBEARER: a file containing an RFC 6750 bearer token. The file
+    /// is read for every new connection so token rotation needs no restart.
+    OAuthBearer { token_path: PathBuf },
 }
 
 impl SaslCredentials {
@@ -80,6 +83,7 @@ impl SaslCredentials {
             Self::Plain { .. } => SaslMechanism::Plain,
             Self::Scram { mechanism, .. } => *mechanism,
             Self::Gssapi { .. } => SaslMechanism::Gssapi,
+            Self::OAuthBearer { .. } => SaslMechanism::OAuthBearer,
         }
     }
 }
@@ -157,7 +161,60 @@ where
             )
             .await
         }
+        SaslCredentials::OAuthBearer { token_path } => {
+            let token = tokio::fs::read(token_path).await.map_err(|error| {
+                OutboundSaslError::Sasl(format!(
+                    "cannot read OAUTHBEARER token {}: {error}",
+                    token_path.display()
+                ))
+            })?;
+            run_oauthbearer_client(stream, token.trim_ascii(), &mut corr_id, policy).await
+        }
     }
+}
+
+/// Run the RFC 7628 OAUTHBEARER client exchange.
+///
+/// Success is one `SaslAuthenticate` round with empty server `auth_bytes`.
+/// On rejection the server returns RFC 7628 error JSON with `error_code = 0`;
+/// the client must send a single `\x01` final message before surfacing the
+/// authentication failure.
+async fn run_oauthbearer_client<S>(
+    stream: &mut S,
+    token: &[u8],
+    corr_id: &mut i32,
+    policy: SaslPolicy<'_>,
+) -> Result<(), OutboundSaslError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
+{
+    if token.is_empty() || token.contains(&b'\x01') {
+        return Err(OutboundSaslError::Sasl(
+            "OAUTHBEARER token must be non-empty and contain no RFC 7628 separator".into(),
+        ));
+    }
+
+    let mut initial = Vec::with_capacity(token.len() + 20);
+    initial.extend_from_slice(b"n,,\x01auth=Bearer ");
+    initial.extend_from_slice(token);
+    initial.extend_from_slice(b"\x01\x01");
+
+    let response = send_sasl_authenticate(stream, initial, corr_id, policy).await?;
+    if response.error_code != 0 {
+        return Err(OutboundSaslError::Sasl(format!(
+            "SaslAuthenticate(OAUTHBEARER) error_code={} error_message={:?}",
+            response.error_code, response.error_message
+        )));
+    }
+    if response.auth_bytes.is_empty() {
+        return Ok(());
+    }
+
+    let final_response = send_sasl_authenticate(stream, vec![b'\x01'], corr_id, policy).await?;
+    Err(OutboundSaslError::Sasl(format!(
+        "SaslAuthenticate(OAUTHBEARER) rejected bearer token (final error_code={})",
+        final_response.error_code
+    )))
 }
 
 /// Send `SaslHandshakeRequest v1` with the wire name for `mechanism`,
@@ -598,6 +655,117 @@ mod tests {
         timeout(Duration::from_secs(1), server_task)
             .await
             .expect("server observed both SASL client frames")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn outbound_oauthbearer_sends_rfc7628_initial_response_and_rereads_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        for token in ["header.payload.", "rotated.token."] {
+            std::fs::write(&token_path, format!("{token}\n")).unwrap();
+            let expected = format!("n,,\x01auth=Bearer {token}\x01\x01").into_bytes();
+            let (mut client, mut server) = tokio::io::duplex(8192);
+            let server_task = tokio::spawn(async move {
+                let mut handshake = BytesMut::new();
+                SaslHandshakeResponse {
+                    error_code: 0,
+                    ..Default::default()
+                }
+                .encode(&mut handshake, 1)
+                .unwrap();
+                let request = reply_frame(&mut server, &handshake, false).await;
+                let mut body = request_body(&request, false);
+                let decoded = SaslHandshakeRequest::decode(&mut body, 1).unwrap();
+                check!(decoded.mechanism == "OAUTHBEARER");
+
+                let mut authenticate = BytesMut::new();
+                SaslAuthenticateResponse {
+                    error_code: 0,
+                    auth_bytes: bytes::Bytes::new(),
+                    session_lifetime_ms: 60_000,
+                    ..Default::default()
+                }
+                .encode(&mut authenticate, 2)
+                .unwrap();
+                let request = reply_frame(&mut server, &authenticate, true).await;
+                let decoded = decode_sasl_authenticate_frame!(request, 2);
+                check!(decoded.auth_bytes.as_ref() == expected);
+            });
+
+            let credentials = SaslCredentials::OAuthBearer {
+                token_path: token_path.clone(),
+            };
+            outbound_sasl(
+                &mut client,
+                &credentials,
+                "localhost",
+                TEST_CLIENT_ID,
+                ClientFrameMax::default(),
+            )
+            .await
+            .expect("OAUTHBEARER outbound handshake completes");
+            timeout(Duration::from_secs(1), server_task)
+                .await
+                .expect("server observed OAUTHBEARER frames")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_oauthbearer_completes_rfc7628_rejection_exchange() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "invalid").unwrap();
+        let (mut client, mut server) = tokio::io::duplex(8192);
+        let server_task = tokio::spawn(async move {
+            let mut handshake = BytesMut::new();
+            SaslHandshakeResponse {
+                error_code: 0,
+                ..Default::default()
+            }
+            .encode(&mut handshake, 1)
+            .unwrap();
+            let _ = reply_frame(&mut server, &handshake, false).await;
+
+            let mut challenge = BytesMut::new();
+            SaslAuthenticateResponse {
+                error_code: 0,
+                auth_bytes: bytes::Bytes::from_static(br#"{"status":"invalid_token"}"#),
+                ..Default::default()
+            }
+            .encode(&mut challenge, 2)
+            .unwrap();
+            let first = reply_frame(&mut server, &challenge, true).await;
+            let _ = decode_sasl_authenticate_frame!(first, 2);
+
+            let mut rejected = BytesMut::new();
+            SaslAuthenticateResponse {
+                error_code: 58,
+                error_message: Some("oauthbearer token rejected".into()),
+                ..Default::default()
+            }
+            .encode(&mut rejected, 2)
+            .unwrap();
+            let final_request = reply_frame(&mut server, &rejected, true).await;
+            let decoded = decode_sasl_authenticate_frame!(final_request, 3);
+            check!(decoded.auth_bytes.as_ref() == b"\x01");
+        });
+
+        let credentials = SaslCredentials::OAuthBearer { token_path };
+        let error = outbound_sasl(
+            &mut client,
+            &credentials,
+            "localhost",
+            TEST_CLIENT_ID,
+            ClientFrameMax::default(),
+        )
+        .await
+        .expect_err("invalid bearer token is rejected");
+        check!(error.to_string().contains("final error_code=58"));
+        timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server observed RFC 7628 final message")
             .unwrap();
     }
 

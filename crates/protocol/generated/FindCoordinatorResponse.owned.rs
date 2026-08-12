@@ -70,7 +70,7 @@ impl Encode for FindCoordinatorResponse {
                 for it in &self.coordinators {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

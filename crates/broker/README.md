@@ -40,6 +40,22 @@ broker.shutdown().await;
 # }
 ```
 
+For OAUTHBEARER on inter-broker and controller-listener connections, enable
+`OAUTHBEARER` on the corresponding SASL listeners and point the shared
+outbound credentials at a token file:
+
+```toml
+controller_listener_protocol = "SaslPlaintext"
+
+[inter_broker_credentials]
+type = "oauth-bearer"
+token_path = "/var/run/secrets/crabka/inter-broker-token"
+```
+
+The broker validates the file at startup and re-reads it for every new
+connection, so replacing the mounted token rotates credentials without a
+broker restart. Inbound validation uses the existing `[oauthbearer]` policy.
+
 ## Documentation
 
 Read the API documentation on [docs.rs/crabka-broker](https://docs.rs/crabka-broker). The repository README contains the project-wide setup, development, and release notes.

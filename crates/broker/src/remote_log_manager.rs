@@ -1672,12 +1672,11 @@ mod tests {
         // All segments are gone from the cache.
         assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
         // The remote directory for this partition is empty (or absent).
-        // LocalTieredStorage layout: <remote_dir>/<topic_id>/<partition>/.
-        let part_dir = remote_dir.path().join(tp().topic_id.to_string()).join("0");
-        if part_dir.exists() {
-            let entries: Vec<_> = std::fs::read_dir(&part_dir).unwrap().collect();
-            assert!(entries.is_empty(), "stray remote files: {entries:?}");
-        }
+        // Kafka LocalTieredStorage layout:
+        // <remote_dir>/<topic>-<partition>-<topic_id_base64>/.
+        let part_dir = remote_dir.path().join("orders-0-AAAAAAAAAAAAAAAAAAAAAQ");
+        let entries: Vec<_> = std::fs::read_dir(&part_dir).unwrap().collect();
+        assert!(entries.is_empty(), "stray remote files: {entries:?}");
         let dump = rlmm_impl.export();
         let partition = dump
             .partitions

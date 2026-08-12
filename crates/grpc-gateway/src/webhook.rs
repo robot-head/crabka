@@ -25,7 +25,7 @@ use axum::{
     Extension, Json, Router,
     body::Bytes,
     extract::{Path, Request},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -37,6 +37,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
+    ce_translate::{self, IngressMode},
     codec::{CodecError, SchemaSelector},
     error::GatewayError,
     handlers::anonymous_principal,
@@ -184,27 +185,37 @@ pub async fn webhook_handler(
         None => None,
     };
 
-    // 7. Build the transport-agnostic record. When the endpoint is bound to a
-    //    schema subject, produce the body as a STRUCTURED record: the produce
-    //    path's codec validates+serializes the JSON against the subject's schema
-    //    and Confluent-frames it. Without a registry (`RawCodec`), the structured
-    //    body's JSON passes through unchanged, so this is inert.
-    let body_structured = cfg.schema_subject.as_ref().map(|subject| {
-        (
-            body.clone(),
-            SchemaSelector {
-                subject: Some(subject.clone()),
-                id: None,
-                format: cfg.schema_format,
-            },
-        )
-    });
+    // 7. Translate CloudEvents after signature and source extraction, both of
+    //    which deliberately operate on the original HTTP headers/body.
+    let translated = match translate_cloudevent_ingress(&headers, &body) {
+        Ok(translated) => translated,
+        Err(status) => {
+            metrics().record_webhook_in("bad_request");
+            return status.into_response();
+        }
+    };
+    // CloudEvents are already protocol-bound bytes and must bypass Confluent
+    // schema framing. Existing non-CE schema-bound webhooks remain unchanged.
+    let body_structured = if translated.is_cloud_event {
+        None
+    } else {
+        cfg.schema_subject.as_ref().map(|subject| {
+            (
+                translated.value.clone(),
+                SchemaSelector {
+                    subject: Some(subject.clone()),
+                    id: None,
+                    format: cfg.schema_format,
+                },
+            )
+        })
+    };
     let rec = GatewayRecord {
         topic: cfg.target_topic.clone(),
         key: key.map(|k| Bytes::from(k.into_bytes())),
-        value: body,
+        value: translated.value,
         body_structured,
-        headers: vec![],
+        headers: translated.headers,
         partition: None,
         timestamp_ms: None,
         idempotency_key,
@@ -257,12 +268,20 @@ pub async fn produce_handler(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
+    let translated = match translate_cloudevent_ingress(&headers, &body) {
+        Ok(translated) => translated,
+        Err(status) => {
+            metrics().record_webhook_in("bad_request");
+            return status.into_response();
+        }
+    };
+
     let rec = GatewayRecord {
         topic,
         key: None,
-        value: body,
+        value: translated.value,
         body_structured: None,
-        headers: vec![],
+        headers: translated.headers,
         partition: None,
         timestamp_ms: None,
         idempotency_key,
@@ -284,6 +303,59 @@ fn needs_json(cfg: &crate::webhook_config::CompiledWebhook) -> bool {
     let json_src = |src: &Source| matches!(src, Source::JsonPath(_));
     cfg.idempotency_source.as_ref().is_some_and(json_src)
         || cfg.key_source.as_ref().is_some_and(json_src)
+}
+
+struct TranslatedIngress {
+    headers: Vec<(String, Option<Bytes>)>,
+    value: Bytes,
+    is_cloud_event: bool,
+}
+
+fn translate_cloudevent_ingress(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<TranslatedIngress, StatusCode> {
+    let media_type = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok());
+    let has_ce_header = headers.keys().any(|name| name.as_str().starts_with("ce-"));
+
+    match ce_translate::detect_content_mode(media_type, has_ce_header) {
+        IngressMode::Batch => Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        IngressMode::NotCloudEvent => Ok(TranslatedIngress {
+            headers: Vec::new(),
+            value: body.clone(),
+            is_cloud_event: false,
+        }),
+        IngressMode::Binary => {
+            let translated = ce_translate::http_headers_to_kafka(headers)
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            ce_translate::validate_binary_required(&translated)
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            Ok(TranslatedIngress {
+                headers: translated
+                    .into_iter()
+                    .map(|(key, value)| (key, Some(value)))
+                    .collect(),
+                value: body.clone(),
+                is_cloud_event: true,
+            })
+        }
+        IngressMode::Structured => {
+            let event =
+                serde_json::from_slice::<Value>(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+            ce_translate::validate_structured_json(&event).map_err(|_| StatusCode::BAD_REQUEST)?;
+            let content_type = media_type.unwrap_or("application/cloudevents+json");
+            Ok(TranslatedIngress {
+                headers: vec![(
+                    "content-type".to_owned(),
+                    Some(Bytes::copy_from_slice(content_type.as_bytes())),
+                )],
+                value: body.clone(),
+                is_cloud_event: true,
+            })
+        }
+    }
 }
 
 /// Produce the record and map [`GatewayError`] variants to HTTP status codes.
@@ -506,6 +578,115 @@ mod tests {
 
     async fn oneshot(router: Router, req: Request<Body>) -> axum::http::Response<Body> {
         router.oneshot(req).await.unwrap()
+    }
+
+    #[test]
+    fn binary_cloudevent_translation_maps_headers_and_preserves_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("ce-id", "event-1".parse().expect("header value"));
+        headers.insert("ce-source", "/tests".parse().expect("header value"));
+        headers.insert("ce-type", "example.created".parse().expect("header value"));
+        headers.insert("ce-specversion", "1.0".parse().expect("header value"));
+        headers.insert(
+            "content-type",
+            "application/avro".parse().expect("header value"),
+        );
+        let body = Bytes::from_static(b"opaque-data");
+
+        let translated =
+            translate_cloudevent_ingress(&headers, &body).expect("binary CE translates");
+
+        assert2::assert!(translated.value == body);
+        assert2::assert!(translated.is_cloud_event);
+        assert2::assert!(
+            translated
+                .headers
+                .contains(&("ce_id".to_owned(), Some(Bytes::from_static(b"event-1"))))
+        );
+        assert2::assert!(translated.headers.contains(&(
+            "content-type".to_owned(),
+            Some(Bytes::from_static(b"application/avro"))
+        )));
+    }
+
+    #[test]
+    fn structured_cloudevent_translation_is_verbatim() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/cloudevents+json; charset=UTF-8"
+                .parse()
+                .expect("header value"),
+        );
+        let body = Bytes::from_static(
+            br#"{ "specversion":"1.0", "id":"event-1", "source":"/tests", "type":"example.created", "data":{"n":7} }"#,
+        );
+
+        let translated =
+            translate_cloudevent_ingress(&headers, &body).expect("structured CE translates");
+
+        assert2::assert!(translated.value == body);
+        assert2::assert!(
+            translated.headers
+                == vec![(
+                    "content-type".to_owned(),
+                    Some(Bytes::from_static(
+                        b"application/cloudevents+json; charset=UTF-8"
+                    ))
+                )]
+        );
+    }
+
+    #[test]
+    fn non_cloudevent_translation_is_unchanged() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/json".parse().expect("header value"),
+        );
+        let body = Bytes::from_static(br#"{"plain":true}"#);
+
+        let translated =
+            translate_cloudevent_ingress(&headers, &body).expect("plain request translates");
+
+        assert2::assert!(translated.value == body);
+        assert2::assert!(translated.headers.is_empty());
+        assert2::assert!(!translated.is_cloud_event);
+    }
+
+    #[tokio::test]
+    async fn invalid_and_batch_cloudevents_return_binding_statuses() {
+        let cases = [
+            (
+                Request::post("/v1/produce/events")
+                    .header("ce-source", "/tests")
+                    .header("ce-type", "example.created")
+                    .header("ce-specversion", "1.0")
+                    .body(Body::from("data"))
+                    .expect("request"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Request::post("/v1/produce/events")
+                    .header("content-type", "application/cloudevents+json")
+                    .body(Body::from("not-json"))
+                    .expect("request"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Request::post("/v1/produce/events")
+                    .header("content-type", "application/cloudevents-batch+json")
+                    .body(Body::from("[]"))
+                    .expect("request"),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ),
+        ];
+
+        for (request, expected) in cases {
+            let state = state_with_webhooks(HashMap::new()).await;
+            let response = oneshot(webhook_router(state), request).await;
+            assert2::assert!(response.status() == expected);
+        }
     }
 
     // -----------------------------------------------------------------------

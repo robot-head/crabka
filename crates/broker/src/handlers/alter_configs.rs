@@ -416,7 +416,9 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 9092,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: Vec::new(),
+                features: std::collections::BTreeMap::new(),
             },
         ));
         image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
@@ -494,7 +496,9 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 9092,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: Vec::new(),
+                features: std::collections::BTreeMap::new(),
             },
         ));
 

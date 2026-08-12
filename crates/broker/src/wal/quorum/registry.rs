@@ -29,6 +29,8 @@ pub(crate) struct WalShardRegistry {
     local_node_id: crabka_raft::NodeId,
     engines: DashMap<ShardId, Arc<WalShardEngine>>,
     placements: RwLock<HashMap<ShardId, Vec<crabka_raft::NodeId>>>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    follower_fetchers: DashMap<ShardId, std::collections::BTreeSet<crabka_raft::NodeId>>,
 }
 
 impl WalShardRegistry {
@@ -38,6 +40,8 @@ impl WalShardRegistry {
             local_node_id,
             engines: DashMap::new(),
             placements: RwLock::new(HashMap::new()),
+            #[cfg(any(test, feature = "test-helpers"))]
+            follower_fetchers: DashMap::new(),
         }
     }
 
@@ -70,7 +74,7 @@ impl WalShardRegistry {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub(crate) fn placement(&self, shard_id: ShardId) -> Option<Vec<crabka_raft::NodeId>> {
         self.placements
@@ -80,10 +84,41 @@ impl WalShardRegistry {
             .cloned()
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn follower_fetcher_count(&self, shard_id: ShardId) -> usize {
+        self.follower_fetchers
+            .get(&shard_id)
+            .map_or(0, |fetchers| fetchers.len())
+    }
+
     pub(crate) fn get(&self, shard_id: ShardId) -> Option<Arc<WalShardEngine>> {
         self.engines
             .get(&shard_id)
             .map(|entry| entry.value().clone())
+    }
+
+    #[must_use]
+    pub(crate) fn local_node_id(&self) -> crabka_raft::NodeId {
+        self.local_node_id
+    }
+
+    #[must_use]
+    pub(crate) fn local_is_leader(&self, shard_id: ShardId) -> bool {
+        self.placements
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&shard_id)
+            .and_then(|voters| voters.first())
+            == Some(&self.local_node_id)
+    }
+
+    #[must_use]
+    pub(crate) fn local_is_voter(&self, shard_id: ShardId) -> bool {
+        self.placements
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&shard_id)
+            .is_some_and(|voters| voters.contains(&self.local_node_id))
     }
 
     pub(crate) fn remove(&self, shard_id: ShardId) -> Option<Arc<WalShardEngine>> {
@@ -131,6 +166,11 @@ impl WalShardRegistry {
         if !authorized {
             return Some(Ok(unknown_shard_fetch_response(request.group)));
         }
+        #[cfg(any(test, feature = "test-helpers"))]
+        self.follower_fetchers
+            .entry(shard)
+            .or_default()
+            .insert(request.from);
         let Some(engine) = self.get(shard) else {
             return Some(Ok(unknown_shard_fetch_response(request.group)));
         };

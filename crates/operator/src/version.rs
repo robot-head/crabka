@@ -10,7 +10,8 @@
 //! `UpdateFeatures` handler and in a fail-fast range guard. It reads the
 //! value that `crabka format --release-version` seeded. The operator owns
 //! the safety of the upgrade window. The binary must always be
-//! `>= resolved metadata >= finalized metadata`.
+//! `>= resolved metadata`; online downgrades are bounded by the broker's
+//! `3.7-IV0` floor and finalized through `UpdateFeatures`.
 
 /// A parsed Kafka version.
 ///
@@ -91,8 +92,6 @@ pub enum VersionReason {
     MetadataVersionTooHigh,
     /// The resolved metadata version is below the broker's supported floor.
     MetadataVersionTooLow,
-    /// The resolved metadata version is older than the finalized one.
-    MetadataVersionDowngrade,
 }
 
 impl VersionReason {
@@ -122,11 +121,9 @@ pub enum VersionOutcome {
 /// `spec_metadata_version` against the metadata version that the operator
 /// finalized in `status.metadataVersion`.
 ///
-/// On success this invariant holds:
-/// `binary >= resolved metadata >= finalized metadata`. The two
-/// inequalities define the downgrade window. A binary can never drop below
-/// the finalized metadata version, and the metadata version never goes
-/// backward.
+/// On success the binary is at least as new as the resolved metadata version.
+/// A requested downgrade is accepted only at the online downgrade floor; the
+/// broker performs the all-node capability and state-safety checks.
 #[must_use]
 pub fn evaluate(
     kafka_version: &str,
@@ -186,16 +183,21 @@ pub fn evaluate(
         };
     }
 
-    if let Some(finalized_raw) = finalized_metadata_version
-        && let Ok(finalized) = KafkaVersion::parse(finalized_raw)
-        && resolved.metadata_key() < finalized.metadata_key()
+    let finalized =
+        finalized_metadata_version.and_then(|version| KafkaVersion::parse(version).ok());
+    if finalized.is_some_and(|finalized| resolved.metadata_key() < finalized.metadata_key())
+        && crabka_metadata::metadata_version::from_version_string(&resolved.short()).is_some_and(
+            |target| {
+                target.feature_level()
+                    < crabka_metadata::metadata_version::ONLINE_DOWNGRADE_MIN_LEVEL
+            },
+        )
     {
         return VersionOutcome::Invalid {
-            reason: VersionReason::MetadataVersionDowngrade,
+            reason: VersionReason::MetadataVersionTooLow,
             message: format!(
-                "metadata.version {} is older than the finalized {}; metadata.version cannot be downgraded",
-                resolved.short(),
-                finalized.short()
+                "online metadata.version downgrade to {} is below the supported floor (3.7-IV0)",
+                resolved.short()
             ),
         };
     }
@@ -291,30 +293,24 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_metadata_downgrade_rejected() {
-        // Finalized at 3.7; pinning back to 3.6 is forbidden.
-        let out = evaluate("3.7.0", Some("3.6"), Some("3.7"));
-        match out {
-            VersionOutcome::Invalid { reason, .. } => {
-                assert!(reason == VersionReason::MetadataVersionDowngrade);
+    fn evaluate_online_metadata_downgrade_ok() {
+        let out = evaluate("4.0.0", Some("3.7"), Some("4.0"));
+        assert!(
+            out == VersionOutcome::Valid {
+                resolved_metadata: "3.7".into()
             }
-            other @ VersionOutcome::Valid { .. } => {
-                panic!("expected MetadataVersionDowngrade, got {other:?}")
-            }
-        }
+        );
     }
 
     #[test]
-    fn evaluate_binary_downgrade_below_finalized_rejected() {
-        // Finalized at 3.7, default-tracking; downgrading the binary to 3.6
-        // drags the resolved metadata to 3.6 < finalized 3.7.
-        let out = evaluate("3.6.0", None, Some("3.7"));
+    fn evaluate_online_metadata_downgrade_below_floor_rejected() {
+        let out = evaluate("4.0.0", Some("3.6"), Some("4.0"));
         match out {
             VersionOutcome::Invalid { reason, .. } => {
-                assert!(reason == VersionReason::MetadataVersionDowngrade);
+                assert!(reason == VersionReason::MetadataVersionTooLow);
             }
             other @ VersionOutcome::Valid { .. } => {
-                panic!("expected MetadataVersionDowngrade, got {other:?}")
+                panic!("expected MetadataVersionTooLow, got {other:?}")
             }
         }
     }

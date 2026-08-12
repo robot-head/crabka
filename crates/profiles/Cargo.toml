@@ -51,14 +51,14 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 url = { workspace = true }
-crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
-crabka-pprof = { path = "../pprof", version = "0.3.7" }
-crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
-crabka-client-producer = { path = "../client-producer", version = "0.3.9" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.3.9" }
-crabka-client-admin = { path = "../client-admin", version = "0.3.9" }
-crabka-client-core = { path = "../client-core", version = "0.3.9" }
-crabka-broker = { path = "../broker", version = "0.3.8" }
+crabka-blockstore = { path = "../blockstore", version = "0.4.0" }
+crabka-pprof = { path = "../pprof", version = "0.4.0" }
+crabka-telemetry = { path = "../telemetry", version = "0.4.0" }
+crabka-client-producer = { path = "../client-producer", version = "0.4.0" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.4.0" }
+crabka-client-admin = { path = "../client-admin", version = "0.4.0" }
+crabka-client-core = { path = "../client-core", version = "0.4.0" }
+crabka-broker = { path = "../broker", version = "0.4.0" }
 crabka-units = { workspace = true }
 refined_type = { workspace = true }
 
@@ -79,4 +79,4 @@ reqwest = { workspace = true, features = ["json"] }
 testcontainers = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }
-crabka-pprof = { path = "../pprof", version = "0.3.7" }
+crabka-pprof = { path = "../pprof", version = "0.4.0" }

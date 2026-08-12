@@ -51,6 +51,7 @@ pub(super) fn is_known_broker_config(name: &str) -> bool {
             | crate::throttle::ALTER_LOG_DIRS_THROTTLED_RATE_KEY
             | config_keys::UNCLEAN_LEADER_ELECTION_ENABLE
             | config_keys::UNCLEAN_RECOVERY_STRATEGY
+            | config_keys::REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS
     )
 }
 
@@ -78,6 +79,9 @@ pub(super) fn validate_broker_config_value(name: &str, value: &str) -> Result<()
             .map_err(|e| format!("invalid rate: {e}")),
         config_keys::UNCLEAN_LEADER_ELECTION_ENABLE | config_keys::UNCLEAN_RECOVERY_STRATEGY => {
             config_keys::validate_topic_config(name, value)
+        }
+        config_keys::REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS => {
+            config_keys::parse_remote_list_offsets_timeout(value).map(|_| ())
         }
         _ => Err(format!("unknown broker config {name}")),
     }
@@ -517,6 +521,9 @@ mod tests {
         assert!(is_known_broker_config(
             config_keys::UNCLEAN_RECOVERY_STRATEGY
         ));
+        assert!(is_known_broker_config(
+            config_keys::REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS
+        ));
     }
 
     #[test]
@@ -538,6 +545,23 @@ mod tests {
             validate_broker_config_value(crate::throttle::LEADER_THROTTLED_RATE_KEY, "1024")
                 .is_ok()
         );
+        assert!(
+            validate_broker_config_value(
+                config_keys::REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS,
+                "30000"
+            )
+            .is_ok()
+        );
+        for invalid in ["", "0", "-1", "2147483648", "not-a-number"] {
+            assert!(
+                validate_broker_config_value(
+                    config_keys::REMOTE_LIST_OFFSETS_REQUEST_TIMEOUT_MS,
+                    invalid
+                )
+                .is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     // ── handle_broker_scoped unit tests ─────────────────────────────────────
@@ -557,7 +581,9 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 9092,
                 rack: None,
+                log_dirs: vec![],
                 endpoints: vec![],
+                features: std::collections::BTreeMap::new(),
             },
         ));
         img

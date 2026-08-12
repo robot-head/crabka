@@ -94,7 +94,7 @@ impl Encode for AlterPartitionReassignmentsResponse<'_> {
                 for it in &self.responses {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -244,7 +244,7 @@ impl Encode for ReassignableTopicResponse<'_> {
                 for it in &self.partitions {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -79,7 +79,7 @@ impl Encode for DelegationTokenRecord<'_> {
                         let () = put_string(buf, it);
                     }
                 }
-            }
+            };
         }
         if version >= 0 {
             put_i64(buf, self.issue_timestamp);

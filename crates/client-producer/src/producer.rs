@@ -41,7 +41,7 @@ use crate::{
     partitioner::UniformStickyPartitioner,
     record::{ProducerRecord, RecordMetadata},
     sender::DrainIntent,
-    transactional::{OwnedTransaction, Transaction, TxnState},
+    transactional::{OwnedTransaction, PreparedTransactionState, Transaction, TxnState},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +158,7 @@ pub struct Producer {
     pub(crate) sender_handle: Option<JoinHandle<()>>,
     pub(crate) transactional_id: Option<String>,
     pub(crate) transaction_timeout_ms: i32,
+    pub(crate) two_phase_commit_enabled: bool,
     pub(crate) init_retry_timeout: Time,
     pub(crate) init_retry_backoff: Time,
     pub(crate) init_max_backoff: Time,
@@ -169,6 +170,11 @@ pub struct Producer {
     /// because `Drop` cannot await its async mutex.
     pub(crate) txn_recovery_required: Arc<AtomicBool>,
     pub(crate) txn_recovery_generation: Arc<AtomicU64>,
+    /// Odd values identify a live transaction guard; resolving or abandoning
+    /// that guard advances the counter to the following even value. Keeping
+    /// the generation on each guard prevents an old prepared guard from
+    /// poisoning a later transaction when it is eventually dropped.
+    pub(crate) txn_guard_generation: Arc<AtomicU64>,
     /// Cached connection to the transaction coordinator broker.
     /// `init_transactions` fills it, and begin, commit and abort reuse it.
     pub(crate) txn_coord_client: Mutex<Option<Client>>,
@@ -176,6 +182,11 @@ pub struct Producer {
     /// flow. `init_transactions` sets it, and the sender reads it when it
     /// builds transactional `ProduceRequest`s.
     pub(crate) txn_pid_epoch: Arc<Mutex<(i64, i16)>>,
+    /// Identity of the transaction that was prepared locally or recovered via
+    /// `InitProducerId(keepPreparedTxn=true)`. Recovery deliberately keeps this
+    /// separate from `txn_pid_epoch`, which is the newly staged identity used
+    /// to send `EndTxn`.
+    pub(crate) prepared_transaction_state: Arc<Mutex<Option<PreparedTransactionState>>>,
 }
 
 impl Producer {
@@ -264,10 +275,11 @@ impl Producer {
         err,
     )]
     pub async fn begin_transaction(&self) -> Result<Transaction<'_>, ProducerError> {
-        self.begin_transaction_state().await?;
+        let guard_generation = self.begin_transaction_state().await?;
         Ok(Transaction {
             producer: self,
             finished: false,
+            guard_generation,
         })
     }
 
@@ -294,14 +306,15 @@ impl Producer {
     pub async fn begin_transaction_owned(
         self: Arc<Self>,
     ) -> Result<OwnedTransaction, ProducerError> {
-        self.begin_transaction_state().await?;
+        let guard_generation = self.begin_transaction_state().await?;
         Ok(OwnedTransaction {
             producer: self,
             finished: false,
+            guard_generation,
         })
     }
 
-    async fn begin_transaction_state(&self) -> Result<(), ProducerError> {
+    async fn begin_transaction_state(&self) -> Result<u64, ProducerError> {
         if self.transactional_id.is_none() {
             return Err(ProducerError::NotTransactional);
         }
@@ -312,12 +325,100 @@ impl Producer {
         match *state {
             TxnState::Ready => {
                 *state = TxnState::InTransaction;
-                Ok(())
+                Ok(self
+                    .txn_guard_generation
+                    .fetch_add(1, Ordering::AcqRel)
+                    .wrapping_add(1))
             }
             _ => Err(ProducerError::InvalidTransactionState(
                 "begin_transaction must be called after init_transactions and not while another txn is in flight",
             )),
         }
+    }
+
+    /// Flushes the current transaction and locks it against further writes.
+    ///
+    /// The returned identity has a stable Kafka-compatible string form and can
+    /// be persisted by an external transaction coordinator. After this method
+    /// succeeds, only commit, abort, or [`complete_transaction`] may finish the
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — 2PC is disabled or no
+    ///   transaction is currently in flight.
+    /// - [`ProducerError::FlushTimeout`] — pending records did not flush before
+    ///   the configured deadline; the transaction remains open and can retry.
+    ///
+    /// [`complete_transaction`]: Self::complete_transaction
+    pub async fn prepare_transaction(&self) -> Result<PreparedTransactionState, ProducerError> {
+        if self.transactional_id.is_none() {
+            return Err(ProducerError::NotTransactional);
+        }
+        if !self.two_phase_commit_enabled {
+            return Err(ProducerError::InvalidTransactionState(
+                "prepare_transaction requires transaction_two_phase_commit_enable=true",
+            ));
+        }
+        if self.transaction_recovery_required() {
+            return Err(ProducerError::RecoveryRequired);
+        }
+
+        {
+            let mut state = self.txn_state.lock().await;
+            if *state != TxnState::InTransaction {
+                return Err(ProducerError::InvalidTransactionState(
+                    "prepare_transaction must follow begin_transaction",
+                ));
+            }
+            *state = TxnState::Preparing;
+        }
+
+        if let Err(error) = self.flush().await {
+            *self.txn_state.lock().await = TxnState::InTransaction;
+            return Err(error);
+        }
+
+        let (producer_id, producer_epoch) = *self.txn_pid_epoch.lock().await;
+        let Ok(prepared) = PreparedTransactionState::new(producer_id, producer_epoch) else {
+            *self.txn_state.lock().await = TxnState::InTransaction;
+            return Err(ProducerError::InvalidTransactionState(
+                "transaction coordinator returned an invalid producer identity",
+            ));
+        };
+        *self.prepared_transaction_state.lock().await = Some(prepared);
+        *self.txn_state.lock().await = TxnState::Prepared;
+        self.resolve_transaction_guard();
+        Ok(prepared)
+    }
+
+    /// Completes the current prepared transaction.
+    ///
+    /// A token matching the prepared transaction commits it. A stale, empty,
+    /// or otherwise different token aborts it, so recovery never commits work
+    /// that belongs to another producer incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProducerError::InvalidTransactionState`] unless a local
+    /// [`prepare_transaction`] or
+    /// [`init_transactions_with_keep_prepared`](Self::init_transactions_with_keep_prepared)
+    /// established a prepared transaction. Other failures are the same as
+    /// committing or aborting a normal transaction.
+    ///
+    /// [`prepare_transaction`]: Self::prepare_transaction
+    pub async fn complete_transaction(
+        &self,
+        prepared: PreparedTransactionState,
+    ) -> Result<(), ProducerError> {
+        if *self.txn_state.lock().await != TxnState::Prepared {
+            return Err(ProducerError::InvalidTransactionState(
+                "complete_transaction requires a prepared transaction",
+            ));
+        }
+        let current = *self.prepared_transaction_state.lock().await;
+        self.end_transaction(current == Some(prepared)).await
     }
 
     /// Finish the current transaction. This flushes all in-flight records,
@@ -352,7 +453,8 @@ impl Producer {
         self.flush().await?;
 
         let mut state = self.txn_state.lock().await;
-        if !matches!(*state, TxnState::InTransaction) {
+        let previous_state = *state;
+        if !matches!(previous_state, TxnState::InTransaction | TxnState::Prepared) {
             return Err(ProducerError::InvalidTransactionState(
                 "commit/abort_transaction must follow begin_transaction",
             ));
@@ -362,12 +464,13 @@ impl Producer {
 
         // 2. Retrieve the cached coordinator connection.
         let coord_guard = self.txn_coord_client.lock().await;
-        let coord = coord_guard
-            .as_ref()
-            .ok_or(ProducerError::InvalidTransactionState(
+        let Some(coord) = coord_guard.as_ref().cloned() else {
+            drop(coord_guard);
+            *self.txn_state.lock().await = previous_state;
+            return Err(ProducerError::InvalidTransactionState(
                 "no txn coordinator cached — did init_transactions succeed?",
-            ))?
-            .clone();
+            ));
+        };
         drop(coord_guard);
 
         let (pid, epoch) = *self.txn_pid_epoch.lock().await;
@@ -407,19 +510,22 @@ impl Producer {
                 if resp.producer_id >= 0 {
                     *self.txn_pid_epoch.lock().await = (resp.producer_id, resp.producer_epoch);
                 }
+                *self.prepared_transaction_state.lock().await = None;
                 *state = TxnState::Ready;
+                self.resolve_transaction_guard();
                 Ok(())
             }
             47 /* INVALID_PRODUCER_EPOCH */ => {
                 *state = TxnState::Fenced;
+                self.resolve_transaction_guard();
                 Err(ProducerError::FencedProducer)
             }
             51 /* CONCURRENT_TRANSACTIONS */ => {
-                *state = TxnState::InTransaction; // Caller can retry.
+                *state = previous_state; // Caller can retry the same decision.
                 Err(ProducerError::ConcurrentTransactions)
             }
             other => {
-                *state = TxnState::Ready;
+                *state = previous_state;
                 Err(ProducerError::Server(other))
             }
         }
@@ -454,66 +560,141 @@ impl Producer {
         err,
     )]
     pub async fn init_transactions(&self) -> Result<(), ProducerError> {
+        self.init_transactions_with_keep_prepared(false).await
+    }
+
+    /// Initializes the producer and optionally preserves an ongoing prepared
+    /// transaction from an earlier producer incarnation.
+    ///
+    /// When `keep_prepared` is `true` and the broker reports an ongoing
+    /// transaction, the producer enters the prepared state. The only allowed
+    /// transaction-ending operations are commit, abort, and
+    /// [`complete_transaction`](Self::complete_transaction). The broker returns
+    /// both identities: the original identity becomes the persisted comparison
+    /// token, while the newly staged identity is used for the eventual `EndTxn`.
+    ///
+    /// # Errors
+    ///
+    /// The errors are the same as [`init_transactions`](Self::init_transactions).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(
+            transactional_id = self.transactional_id.as_deref(),
+            keep_prepared,
+            coordinator = tracing::field::Empty,
+            producer_id = tracing::field::Empty,
+            producer_epoch = tracing::field::Empty,
+            error_code = tracing::field::Empty,
+        ),
+        err,
+    )]
+    pub async fn init_transactions_with_keep_prepared(
+        &self,
+        keep_prepared: bool,
+    ) -> Result<(), ProducerError> {
         let Some(tid) = self.transactional_id.as_deref() else {
             return Err(ProducerError::NotTransactional);
         };
 
-        let mut state = self.txn_state.lock().await;
-        if !matches!(
-            *state,
-            TxnState::Uninitialized
-                | TxnState::Ready
-                | TxnState::Fenced
-                | TxnState::RecoveryRequired
-        ) && !self.transaction_recovery_required()
-        {
-            return Err(ProducerError::InvalidTransactionState(
-                "init_transactions called while a transaction is in flight",
-            ));
-        }
+        let previous_state = {
+            let mut state = self.txn_state.lock().await;
+            if !matches!(
+                *state,
+                TxnState::Uninitialized
+                    | TxnState::Ready
+                    | TxnState::Fenced
+                    | TxnState::RecoveryRequired
+            ) && !self.transaction_recovery_required()
+            {
+                return Err(ProducerError::InvalidTransactionState(
+                    "init_transactions called while a transaction is in flight",
+                ));
+            }
+            let previous_state = *state;
+            *state = TxnState::Initializing;
+            previous_state
+        };
 
-        let coord_addr = self.find_txn_coordinator(tid).await?;
-        tracing::Span::current().record("coordinator", coord_addr.as_str());
+        let initialized = async {
+            let coord_addr = self.find_txn_coordinator(tid).await?;
+            tracing::Span::current().record("coordinator", coord_addr.as_str());
 
-        let coord = Client::builder()
-            .bootstrap(coord_addr)
-            .client_id(self.client_id.clone())
-            .maybe_security(self.security.clone())
-            .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
-            .frame_max(self.frame_max.size())
-            .request_timeout(self.request_timeout)
-            .build()
+            let coord = Client::builder()
+                .bootstrap(coord_addr)
+                .client_id(self.client_id.clone())
+                .maybe_security(self.security.clone())
+                .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
+                .frame_max(self.frame_max.size())
+                .request_timeout(self.request_timeout)
+                .build()
+                .await?;
+
+            let response = init_producer_id_with_retry(
+                &coord,
+                InitProducerIdRequest {
+                    transactional_id: Some(tid.to_owned()),
+                    transaction_timeout_ms: self.transaction_timeout_ms,
+                    enable2_pc: self.two_phase_commit_enabled,
+                    keep_prepared_txn: keep_prepared,
+                    ..Default::default()
+                },
+                self.init_retry_timeout,
+                self.init_retry_backoff,
+                self.init_max_backoff,
+            )
             .await?;
-
-        let resp = init_producer_id_with_retry(
-            &coord,
-            InitProducerIdRequest {
-                transactional_id: Some(tid.to_owned()),
-                transaction_timeout_ms: self.transaction_timeout_ms,
-                ..Default::default()
-            },
-            self.init_retry_timeout,
-            self.init_retry_backoff,
-            self.init_max_backoff,
-        )
-        .await?;
+            Ok::<_, ProducerError>((coord, response))
+        }
+        .await;
+        let (coord, resp) = match initialized {
+            Ok(initialized) => initialized,
+            Err(error) => {
+                *self.txn_state.lock().await = previous_state;
+                return Err(error);
+            }
+        };
 
         tracing::Span::current().record("error_code", resp.error_code);
         match resp.error_code {
             0 => {
+                let recovered = if keep_prepared && resp.ongoing_txn_producer_id >= 0 {
+                    let Ok(recovered) = PreparedTransactionState::new(
+                        resp.ongoing_txn_producer_id,
+                        resp.ongoing_txn_producer_epoch,
+                    ) else {
+                        *self.txn_state.lock().await = previous_state;
+                        return Err(ProducerError::InvalidTransactionState(
+                            "transaction coordinator returned an invalid ongoing identity",
+                        ));
+                    };
+                    Some(recovered)
+                } else {
+                    None
+                };
                 tracing::Span::current().record("producer_id", resp.producer_id);
                 tracing::Span::current().record("producer_epoch", resp.producer_epoch);
                 *self.txn_pid_epoch.lock().await = (resp.producer_id, resp.producer_epoch);
                 *self.txn_coord_client.lock().await = Some(coord);
-                *state = TxnState::Ready;
+                *self.prepared_transaction_state.lock().await = recovered;
+                *self.txn_state.lock().await = if recovered.is_some() {
+                    TxnState::Prepared
+                } else {
+                    TxnState::Ready
+                };
                 self.txn_recovery_required.store(false, Ordering::Release);
+                self.resolve_transaction_guard();
                 Ok(())
             }
             47 /* INVALID_PRODUCER_EPOCH */ => {
-                *state = TxnState::Fenced;
+                *self.txn_state.lock().await = TxnState::Fenced;
+                self.resolve_transaction_guard();
                 Err(ProducerError::FencedProducer)
             }
-            other => Err(ProducerError::Server(other)),
+            other => {
+                *self.txn_state.lock().await = previous_state;
+                Err(ProducerError::Server(other))
+            }
         }
     }
 
@@ -599,6 +780,14 @@ impl Producer {
             .as_deref()
             .ok_or(ProducerError::NotTransactional)?
             .to_string();
+        if matches!(
+            *self.txn_state.lock().await,
+            TxnState::Preparing | TxnState::Prepared
+        ) {
+            return Err(ProducerError::InvalidTransactionState(
+                "send_offsets_to_transaction is not allowed after prepare_transaction",
+            ));
+        }
         let offsets_vec: Vec<_> = offsets.into_iter().collect();
         tracing::Span::current().record("offset_count", offsets_vec.len());
 
@@ -701,6 +890,33 @@ impl Producer {
         self.txn_recovery_required.load(Ordering::Acquire)
     }
 
+    pub(crate) fn abandon_transaction_guard(&self, generation: u64) {
+        if self
+            .txn_guard_generation
+            .compare_exchange(
+                generation,
+                generation.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.require_transaction_recovery();
+        }
+    }
+
+    fn resolve_transaction_guard(&self) {
+        let generation = self.txn_guard_generation.load(Ordering::Acquire);
+        if generation % 2 == 1 {
+            let _ = self.txn_guard_generation.compare_exchange(
+                generation,
+                generation.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
+
     #[allow(dead_code)] // wired by sender on INVALID_PRODUCER_EPOCH; kept for symmetry
     pub(crate) fn fence(&self) {
         self.state
@@ -772,12 +988,31 @@ impl Producer {
         );
 
         let timestamp = record.timestamp_ms.unwrap_or_else(current_millis);
-        let transaction_generation = match self.transaction_generation_for_send().await {
-            Ok(generation) => generation,
-            Err(error) => {
-                let (tx, rx) = oneshot::channel();
-                let _ = tx.send(Err(error));
-                return rx;
+        // Keep the state lock until the record is registered and appended.
+        // `prepare_transaction` takes the same lock before it flushes, so it
+        // cannot race past a send that has already joined this transaction.
+        let transaction_state = if self.transactional_id.is_some() {
+            Some(self.txn_state.lock().await)
+        } else {
+            None
+        };
+        let transaction_generation = if self.transaction_recovery_required() {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Err(ProducerError::RecoveryRequired));
+            return rx;
+        } else {
+            match transaction_state.as_deref() {
+                Some(TxnState::InTransaction) => {
+                    Some(self.txn_recovery_generation.load(Ordering::Acquire))
+                }
+                Some(TxnState::Preparing | TxnState::Prepared) => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = tx.send(Err(ProducerError::InvalidTransactionState(
+                        "send is not allowed after prepare_transaction",
+                    )));
+                    return rx;
+                }
+                _ => None,
             }
         };
         if transaction_generation.is_some()
@@ -805,21 +1040,9 @@ impl Producer {
             timestamp,
             transaction_generation,
         );
+        drop(transaction_state);
         wake_sender_after_append(&self.wake_tx, self.linger, wakes_sender);
         rx
-    }
-
-    async fn transaction_generation_for_send(&self) -> Result<Option<u64>, ProducerError> {
-        if self.transactional_id.is_none() {
-            return Ok(None);
-        }
-        if self.transaction_recovery_required() {
-            return Err(ProducerError::RecoveryRequired);
-        }
-        if *self.txn_state.lock().await != TxnState::InTransaction {
-            return Ok(None);
-        }
-        Ok(Some(self.txn_recovery_generation.load(Ordering::Acquire)))
     }
 
     /// Resolve the destination partition for a record. It hashes the key when

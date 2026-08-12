@@ -70,7 +70,7 @@ impl Encode for UpdateFeaturesRequest<'_> {
                 for it in &self.feature_updates {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 1 {
             put_bool(buf, self.validate_only);

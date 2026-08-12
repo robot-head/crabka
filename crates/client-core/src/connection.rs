@@ -402,6 +402,16 @@ impl Connection {
         Ok(conn)
     }
 
+    /// Return the peer-advertised version range for `api_key`.
+    ///
+    /// Higher-level clients use this to distinguish an API that is absent
+    /// from a listener's surface from one whose advertised versions merely do
+    /// not overlap their codec range.
+    #[must_use]
+    pub fn advertised_api_range(&self, api_key: i16) -> Option<(i16, i16)> {
+        self.inner.versions.broker_range(api_key)
+    }
+
     /// Send a typed request and await the typed response.
     ///
     /// This method negotiates the version from the broker-advertised table

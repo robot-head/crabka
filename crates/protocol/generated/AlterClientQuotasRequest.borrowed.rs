@@ -54,7 +54,7 @@ impl Encode for AlterClientQuotasRequest<'_> {
                 for it in &self.entries {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             put_bool(buf, self.validate_only);
@@ -160,7 +160,7 @@ impl Encode for EntryData<'_> {
                 for it in &self.entity {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if version >= 0 {
             {
@@ -168,7 +168,7 @@ impl Encode for EntryData<'_> {
                 for it in &self.ops {
                     it.encode(buf, version)?;
                 }
-            }
+            };
         }
         if flex {
             let tagged = WriteTaggedFields::new();

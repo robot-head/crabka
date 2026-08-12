@@ -1,4 +1,4 @@
-//! `Metadata` (`api_key=3`). It returns all registered brokers and the
+//! `Metadata` (`api_key=3`). It returns registered broker endpoints and the
 //! partitions of the requested topics, or of all topics when `topics` is
 //! `None`.
 //!
@@ -27,11 +27,7 @@ use crate::{
     handlers::authorized_operations::authorized_operations_bits,
 };
 
-// ACL preamble + asymmetric loop
-// Handler is wholly sync but we keep the
-// `async fn` shape so it mirrors the other inline-intercept handlers
-// (produce/fetch/etc) and lets future Metadata work (e.g. waiting on
-// topic creation) add `.await`s without changing the signature.
+// ACL preamble + asymmetric loop.
 #[tracing::instrument(
     name = "handle_metadata",
     level = "info",
@@ -39,7 +35,7 @@ use crate::{
     fields(api = "Metadata", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -114,14 +110,19 @@ pub(crate) fn handle(
         candidate_topics.iter().map(String::as_str),
     );
 
-    // Brokers: enumerate all registered nodes from the metadata image.
+    // Brokers: enumerate registered nodes from the metadata image. Keep
+    // endpoint discovery separate from replica-placement eligibility: a
+    // partition can still name a fenced/dead broker as leader until failover
+    // commits, and clients need its endpoint to route or receive the broker's
+    // protocol error. DescribeCluster v2 exposes authoritative fencing state
+    // to placement clients.
     // Each broker's `host:port` is projected from the endpoint matching the
     // listener this request arrived on (Kafka returns the connection
     // listener's advertised address), falling back to the inter-broker
     // endpoint when the connection listener isn't recorded on that broker.
-    let brokers: Vec<MetadataResponseBroker> = image
+    let brokers = image
         .brokers()
-        .map(|b| project_broker(b, ctx.connection_listener_name, &inter_broker_name))
+        .map(|broker| project_broker(broker, ctx.connection_listener_name, &inter_broker_name))
         .collect();
 
     let topics_out = build_topic_rows(
@@ -386,7 +387,9 @@ mod tests {
             host: "legacy-host".to_string(),
             port: 1000,
             rack: Some("rack-a".to_string()),
+            log_dirs: vec![],
             endpoints,
+            features: std::collections::BTreeMap::new(),
         }
     }
 

@@ -1,0 +1,15 @@
+{
+  "next_gen_consumer_group": {
+    "error_code": 69,
+    "group_id": "g-next",
+    "group_state": "Dead",
+    "members": [],
+    "protocol_data": "",
+    "protocol_type": ""
+  },
+  "provenance": {
+    "api_key": 15,
+    "image": "mirror.gcr.io/apache/kafka:4.0.0",
+    "note": "Real Apache Kafka next-generation consumer-group DescribeGroups authority capture."
+  }
+}

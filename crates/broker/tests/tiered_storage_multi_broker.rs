@@ -232,9 +232,9 @@ async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
         .unwrap_or_default()
 }
 
-/// Counts the files named `log` anywhere under `root`. Each one is the
-/// `LocalTieredStorage` segment-bytes object of a copied segment. This is the
-/// same helper as in `tiered_storage_topic_rlmm.rs`.
+/// Counts current `*.log` files and legacy files named `log` under `root`.
+/// Each one is the `LocalTieredStorage` segment-bytes object of a copied
+/// segment. This is the same helper as in `tiered_storage_topic_rlmm.rs`.
 fn count_remote_log_files(root: &std::path::Path) -> usize {
     fn walk(dir: &std::path::Path, count: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -244,7 +244,9 @@ fn count_remote_log_files(root: &std::path::Path) -> usize {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, count);
-            } else if path.file_name().and_then(|n| n.to_str()) == Some("log") {
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("log")
+                || path.file_name().and_then(|name| name.to_str()) == Some("log")
+            {
                 *count += 1;
             }
         }

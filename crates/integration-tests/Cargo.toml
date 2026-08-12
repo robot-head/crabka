@@ -1,6 +1,6 @@
 [package]
 name = "crabka-integration-tests"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2024"
 license.workspace = true
 publish = false
@@ -12,19 +12,21 @@ assert2 = { workspace = true }
 axum = { workspace = true, features = ["json"] }
 bon = { workspace = true }
 bytes = { workspace = true }
-crabka-broker = { path = "../broker", version = "0.3.8", features = ["test-helpers"] }
-crabka-raft = { path = "../raft", version = "0.3.8" }
-crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
-crabka-client-admin = { path = "../client-admin", version = "0.3.9" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.3.9" }
-crabka-client-producer = { path = "../client-producer", version = "0.3.9" }
-crabka-client-core = { path = "../client-core", version = "0.3.9" }
-crabka-observability = { path = "../observability", version = "0.3.7" }
-crabka-protocol = { path = "../protocol", version = "0.3.9", default-features = false }
-crabka-security = { path = "../security", version = "0.3.9" }
+crabka-broker = { path = "../broker", version = "0.4.0", features = ["test-helpers"] }
+crabka-raft = { path = "../raft", version = "0.4.0" }
+crabka-blockstore = { path = "../blockstore", version = "0.4.0" }
+crabka-client-admin = { path = "../client-admin", version = "0.4.0" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.4.0" }
+crabka-client-producer = { path = "../client-producer", version = "0.4.0" }
+crabka-client-core = { path = "../client-core", version = "0.4.0" }
+crabka-observability = { path = "../observability", version = "0.4.0" }
+crabka-protocol = { path = "../protocol", version = "0.4.0", default-features = false }
+crabka-security = { path = "../security", version = "0.4.0" }
 crabka-units = { workspace = true }
-crabka-log = { path = "../log", version = "0.3.9" }
+crabka-log = { path = "../log", version = "0.4.0" }
+crabka-metadata = { path = "../metadata", version = "0.4.0" }
 serde_json = { workspace = true }
+stateright = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
