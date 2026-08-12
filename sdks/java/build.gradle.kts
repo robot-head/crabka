@@ -13,7 +13,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.1.0")
 
     testImplementation("com.squareup.okhttp3:mockwebserver3:5.1.0")
-    testImplementation("org.junit.jupiter:junit-jupiter:5.14.0")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.14.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
