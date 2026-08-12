@@ -466,3 +466,49 @@ async fn configuration_and_dictionary_ddl_is_durable_and_catalog_visible() {
         .await
         .expect("rename and drop text-search objects");
 }
+
+/// `json_to_tsvector` refuses a document whose escapes do not decode.
+///
+/// Upstream's `iterate_json_values` builds its lexer with `need_escapes`, so
+/// the document is validated before any lexeme is produced. gres decoded
+/// without validating, which put a `\u0000` or a dropped unpaired surrogate
+/// into a stored `tsvector` -- the same corruption the `json` accessors were
+/// closed against, reached through the one entry point that was missed.
+///
+/// The well-formed case is here too: a fix that refused every document would
+/// satisfy the first two assertions and break the function.
+#[tokio::test]
+async fn json_to_tsvector_validates_the_documents_escapes() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let client = connect_to(&engine).await;
+
+    let nul = client
+        .simple_query(
+            r#"SELECT json_to_tsvector('english', json '{"a": "one \u0000 two"}', '["string"]'::jsonb)"#,
+        )
+        .await
+        .expect_err("a NUL escape must be refused");
+    assert!(nul.code().map(|c| c.code().to_owned()) == Some("22P05".to_owned()));
+
+    let orphan = client
+        .simple_query(
+            r#"SELECT json_to_tsvector('english', json '{"a": "one \ud800 two"}', '["string"]'::jsonb)"#,
+        )
+        .await
+        .expect_err("an unpaired surrogate must be refused");
+    assert!(orphan.code().map(|c| c.code().to_owned()) == Some("22P02".to_owned()));
+
+    // A well-formed document still produces its lexemes, and the escape is
+    // decoded on the way: `caf\u00e9` has to reach the parser as `café` for
+    // the english configuration to stem it to one token.
+    assert_eq!(
+        scalar(
+            &client,
+            r#"SELECT json_to_tsvector('english', json '{"a": "caf\u00e9 cats"}', '["string"]'::jsonb)"#,
+        )
+        .await,
+        Some("'café':1 'cat':2".to_owned())
+    );
+}

@@ -331,6 +331,13 @@ fn json_to_vector(
         _ => return Err(undefined_function(&fc.name)),
     };
     let filter = JsonTextFilter::parse(filter)?;
+    // `iterate_json_values` builds its lexer with `need_escapes`, so a document
+    // whose escapes do not decode is refused before any lexeme is produced.
+    // Without this the decode still happens -- `collect_json_document_text`
+    // reaches `json::as_text` -- and a `\u0000` or an unpaired surrogate lands
+    // in a stored `tsvector`, which is the corruption the other eleven `json`
+    // entry points were closed against.
+    crabka_pgtypes::json::validate_escapes(document)?;
     let mut pieces = Vec::new();
     collect_json_document_text(document, filter, &mut pieces);
     Ok(Datum::TsVector(vector_from_pieces(
