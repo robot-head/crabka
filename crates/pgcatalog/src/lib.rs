@@ -338,6 +338,60 @@ pub enum ExclusionOperator {
     Overlaps,
 }
 
+/// When a constraint is checked, as `pg_constraint`'s `condeferrable` and
+/// `condeferred` pair spells it.
+///
+/// `condeferred` without `condeferrable` is not a state `PostgreSQL` can be in,
+/// so the two columns are one value here and the impossible pair cannot be
+/// written down.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConstraintDeferral {
+    /// `NOT DEFERRABLE` — checked as each row is written.
+    #[default]
+    Immediate,
+    /// `DEFERRABLE INITIALLY IMMEDIATE` — checked once at the end of the
+    /// statement, and `SET CONSTRAINTS … DEFERRED` may move it to `COMMIT`.
+    Deferrable,
+    /// `DEFERRABLE INITIALLY DEFERRED` — checked at `COMMIT`.
+    Deferred,
+}
+
+impl ConstraintDeferral {
+    /// The value the `[NOT] DEFERRABLE` / `INITIALLY …` tail of a constraint
+    /// spells. `INITIALLY DEFERRED` implies `DEFERRABLE`, which the grammar
+    /// already guarantees.
+    #[must_use]
+    pub fn of(deferrable: bool, initially_deferred: bool) -> Self {
+        match (deferrable, initially_deferred) {
+            (_, true) => Self::Deferred,
+            (true, false) => Self::Deferrable,
+            (false, false) => Self::Immediate,
+        }
+    }
+
+    /// May `SET CONSTRAINTS` move this constraint's check point?
+    #[must_use]
+    pub fn is_deferrable(self) -> bool {
+        self != Self::Immediate
+    }
+
+    /// Does the constraint start each transaction deferred?
+    #[must_use]
+    pub fn initially_deferred(self) -> bool {
+        self == Self::Deferred
+    }
+
+    /// The `(condeferrable, condeferred)` pair, in catalog column order.
+    #[must_use]
+    pub fn columns(self) -> (bool, bool) {
+        match self {
+            Self::Immediate => (false, false),
+            Self::Deferrable => (true, false),
+            Self::Deferred => (true, true),
+        }
+    }
+}
+
 /// Secondary-index catalog definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Index {
@@ -361,6 +415,10 @@ pub struct Index {
     /// `CLUSTER … USING` and `ALTER TABLE … CLUSTER ON` clear it from the
     /// relation's other indexes as they set it here.
     pub clustered: bool,
+    /// When the `PRIMARY KEY` or `UNIQUE` constraint this index enforces is
+    /// checked. Always [`ConstraintDeferral::Immediate`] for an index that
+    /// backs no constraint: `CREATE INDEX` has no deferrability to write.
+    pub deferral: ConstraintDeferral,
 }
 
 impl Index {
@@ -405,6 +463,8 @@ pub struct NewIndex {
     pub constraint: Option<IndexConstraint>,
     /// See [`Index::without_overlaps`].
     pub without_overlaps: bool,
+    /// See [`Index::deferral`].
+    pub deferral: ConstraintDeferral,
 }
 
 const INDEX_EXPRESSION_PREFIX: &str = "\0expr:";
@@ -3513,6 +3573,7 @@ pub fn create_index_with_method_ops(
         constraint: None,
         without_overlaps: false,
         clustered: false,
+        deferral: ConstraintDeferral::Immediate,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3567,6 +3628,7 @@ pub fn create_index_on_table_ops(
         constraint: None,
         without_overlaps: false,
         clustered: false,
+        deferral: ConstraintDeferral::Immediate,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3625,6 +3687,7 @@ pub fn create_constraint_index_ops(
         constraint: new_index.constraint.clone(),
         without_overlaps: new_index.without_overlaps,
         clustered: false,
+        deferral: new_index.deferral,
     };
     let value = serialize_index(&index);
     let ops = vec![
@@ -3733,6 +3796,7 @@ pub fn create_indexes_on_table_ops(
             constraint: new_index.constraint.clone(),
             without_overlaps: new_index.without_overlaps,
             clustered: false,
+            deferral: new_index.deferral,
         };
         let value = serialize_index(&index);
         ops.push(WriteOp::Put {
@@ -6734,6 +6798,7 @@ mod tests {
                 method: IndexMethod::Btree,
                 constraint: Some(IndexConstraint::PrimaryKey),
                 without_overlaps: false,
+                deferral: ConstraintDeferral::Immediate,
             },
         )
         .expect("index ops");
@@ -7845,6 +7910,7 @@ mod tests {
             constraint: None,
             without_overlaps: false,
             clustered: false,
+            deferral: ConstraintDeferral::Immediate,
         };
         assert_eq!(
             get_index(&kv, &rel("users_name_idx")).expect("index"),

@@ -2071,10 +2071,18 @@ fn constraint_def(
         } else {
             ""
         };
-        return Ok(Datum::Text(format!(
+        let mut definition = format!(
             "{keyword} ({}{temporal})",
             quoted_column_list(&index.columns)
-        )));
+        );
+        let (deferrable, initially_deferred) = index.deferral.columns();
+        if deferrable {
+            definition.push_str(" DEFERRABLE");
+        }
+        if initially_deferred {
+            definition.push_str(" INITIALLY DEFERRED");
+        }
+        return Ok(Datum::Text(definition));
     }
     if let Some(definition) = foreign_key_constraint_def(kv, scope, wanted)? {
         return Ok(Datum::Text(definition));

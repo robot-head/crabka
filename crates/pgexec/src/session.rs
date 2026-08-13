@@ -6240,6 +6240,7 @@ impl SqlSession {
             Some(names) => {
                 let catalog = crabka_pgcatalog::list_foreign_keys(self.catalog_kv.as_ref())?;
                 let triggers = crabka_pgcatalog::trigger::list_triggers(self.catalog_kv.as_ref())?;
+                let indexes = crabka_pgcatalog::list_indexes(self.catalog_kv.as_ref())?;
                 let mut store = self.deferred_constraints();
                 for name in names {
                     let mut found = false;
@@ -6250,6 +6251,24 @@ impl SqlSession {
                             )));
                         }
                         store.modes_mut().set_one(fk.table_id, &fk.name, deferred);
+                        found = true;
+                    }
+                    // A `PRIMARY KEY` or `UNIQUE` constraint is named here by
+                    // the index that enforces it, which carries the constraint
+                    // name. An index that backs no constraint is not a
+                    // constraint and is not resolvable.
+                    for index in indexes
+                        .iter()
+                        .filter(|index| index.constraint.is_some() && index.name == *name)
+                    {
+                        if !index.deferral.is_deferrable() {
+                            return Err(ExecError::WrongObjectType(format!(
+                                "constraint \"{name}\" is not deferrable"
+                            )));
+                        }
+                        store
+                            .modes_mut()
+                            .set_one(index.table_id, &index.name, deferred);
                         found = true;
                     }
                     for trigger in triggers
@@ -6276,7 +6295,8 @@ impl SqlSession {
         }
         if !deferred {
             let checks = self.deferred_constraints().take_immediate();
-            self.drain_deferred_checks_now(checks).await?;
+            let unique = self.deferred_constraints().take_immediate_unique();
+            self.drain_deferred_checks_now(checks, unique).await?;
             let mut ready = Vec::new();
             let mut still_deferred = Vec::new();
             let pending = std::mem::take(&mut self.deferred_after_triggers);
@@ -6307,8 +6327,9 @@ impl SqlSession {
     async fn drain_deferred_checks_now(
         &self,
         checks: Vec<crate::fk::PendingCheck>,
+        unique: Vec<crate::fk::PendingUniqueCheck>,
     ) -> Result<(), ExecError> {
-        if checks.is_empty() {
+        if checks.is_empty() && unique.is_empty() {
             return Ok(());
         }
         let TxnState::InTransaction(txn) = &self.state else {
@@ -6319,7 +6340,7 @@ impl SqlSession {
         let xid = txn
             .xid
             .expect("a statement that deferred a check modified rows, which allocates the xid");
-        let mut ops = self.deferred_check_ops(txn, xid, checks).await?;
+        let mut ops = self.deferred_check_ops(txn, xid, checks, unique).await?;
         if ops.is_empty() {
             return Ok(());
         }
@@ -6340,6 +6361,7 @@ impl SqlSession {
         txn: &TxnCtx,
         xid: u64,
         checks: Vec<crate::fk::PendingCheck>,
+        unique: Vec<crate::fk::PendingUniqueCheck>,
     ) -> Result<Vec<WriteOp>, ExecError> {
         let stored = if txn.repeatable_read {
             txn.global_snapshot.as_ref()
@@ -6365,6 +6387,10 @@ impl SqlSession {
             prune_horizon: None,
             ctes: &ctes,
         });
+        // The uniqueness rechecks run first: they produce no ops of their own,
+        // so a violation there leaves nothing half-applied for the referential
+        // drain to have to unwind.
+        crate::exec::drain_deferred_unique_checks(&write_ctx, &unique)?;
         crate::exec::drain_deferred_fk_checks(&write_ctx, checks).await
     }
 
@@ -7216,7 +7242,8 @@ impl SqlSession {
         xid: u64,
     ) -> Result<Vec<WriteOp>, ExecError> {
         let checks = self.deferred_constraints().take_all();
-        self.deferred_check_ops(ctx, xid, checks).await
+        let unique = self.deferred_constraints().take_all_unique();
+        self.deferred_check_ops(ctx, xid, checks, unique).await
     }
 
     async fn commit_reserved_block(
@@ -9484,7 +9511,7 @@ impl SqlSession {
             let pending = std::mem::take(&mut self.pending_after_triggers);
             for pending in pending {
                 let deferred = pending.constraint
-                    && self.deferred_constraints().modes().is_trigger_deferred(
+                    && self.deferred_constraints().modes().is_named_deferred(
                         pending.table_id,
                         &pending.name,
                         pending.deferrable,

@@ -21,11 +21,11 @@ use crabka_pgtypes::{
 };
 
 use crate::{
-    CheckConstraint, Column, ColumnDefault, ExclusionOperator, ForeignDataWrapper, ForeignKey,
-    ForeignServer, ForeignTableMeta, GeneratedColumn, GeneratedKind, HashSharding, IdentityKind,
-    Index, IndexConstraint, IndexMethod, IndexPlacement, MatchType, MaterializedView,
-    ReferentialAction, Sequence, ShardingStrategy, TableOptions, UserMapping, View,
-    ViewCheckOption, ViewOptions,
+    CheckConstraint, Column, ColumnDefault, ConstraintDeferral, ExclusionOperator,
+    ForeignDataWrapper, ForeignKey, ForeignServer, ForeignTableMeta, GeneratedColumn,
+    GeneratedKind, HashSharding, IdentityKind, Index, IndexConstraint, IndexMethod, IndexPlacement,
+    MatchType, MaterializedView, ReferentialAction, Sequence, ShardingStrategy, TableOptions,
+    UserMapping, View, ViewCheckOption, ViewOptions,
 };
 
 /// Everything [`deserialize_schema`] recovers from a stored table schema:
@@ -58,7 +58,7 @@ const TABLE_OPTION_KNOWN: u8 =
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 6;
+const INDEX_VERSION: u8 = 7;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
@@ -71,6 +71,9 @@ const INDEX_CONSTRAINT_NONE: u8 = 0;
 const INDEX_CONSTRAINT_PRIMARY_KEY: u8 = 1;
 const INDEX_CONSTRAINT_UNIQUE: u8 = 2;
 const INDEX_CONSTRAINT_EXCLUSION: u8 = 3;
+const INDEX_DEFERRAL_IMMEDIATE: u8 = 0;
+const INDEX_DEFERRAL_DEFERRABLE: u8 = 1;
+const INDEX_DEFERRAL_DEFERRED: u8 = 2;
 const EXCLUSION_OPERATOR_EQUAL: u8 = 0;
 const EXCLUSION_OPERATOR_OVERLAPS: u8 = 1;
 const FOREIGN_KEY_VERSION: u8 = 1;
@@ -1385,6 +1388,11 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
     });
     out.push(u8::from(index.without_overlaps));
     out.push(u8::from(index.clustered));
+    out.push(match index.deferral {
+        ConstraintDeferral::Immediate => INDEX_DEFERRAL_IMMEDIATE,
+        ConstraintDeferral::Deferrable => INDEX_DEFERRAL_DEFERRABLE,
+        ConstraintDeferral::Deferred => INDEX_DEFERRAL_DEFERRED,
+    });
     out.push(match &index.constraint {
         None => INDEX_CONSTRAINT_NONE,
         Some(IndexConstraint::PrimaryKey) => INDEX_CONSTRAINT_PRIMARY_KEY,
@@ -1485,6 +1493,16 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
             )));
         }
     };
+    let deferral = match take_u8(&mut cur)? {
+        INDEX_DEFERRAL_IMMEDIATE => ConstraintDeferral::Immediate,
+        INDEX_DEFERRAL_DEFERRABLE => ConstraintDeferral::Deferrable,
+        INDEX_DEFERRAL_DEFERRED => ConstraintDeferral::Deferred,
+        tag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index deferral tag {tag}"
+            )));
+        }
+    };
     let constraint = match take_u8(&mut cur)? {
         INDEX_CONSTRAINT_NONE => None,
         INDEX_CONSTRAINT_PRIMARY_KEY => Some(IndexConstraint::PrimaryKey),
@@ -1546,6 +1564,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         constraint,
         without_overlaps,
         clustered,
+        deferral,
     })
 }
 
@@ -3219,6 +3238,7 @@ mod tests {
                 constraint: None,
                 without_overlaps: false,
                 clustered: false,
+                deferral: ConstraintDeferral::Immediate,
             };
             assert_eq!(
                 deserialize_index(&serialize_index(&index)).expect("index decode"),
@@ -3241,6 +3261,7 @@ mod tests {
             ])),
             without_overlaps: false,
             clustered: false,
+            deferral: ConstraintDeferral::Immediate,
         };
         assert_eq!(
             deserialize_index(&serialize_index(&exclusion)).expect("exclusion index decode"),
@@ -3263,6 +3284,7 @@ mod tests {
             constraint: Some(IndexConstraint::PrimaryKey),
             without_overlaps: true,
             clustered: false,
+            deferral: ConstraintDeferral::Immediate,
         };
         assert_eq!(
             deserialize_index(&serialize_index(&temporal)).expect("temporal index decode"),
@@ -3291,11 +3313,44 @@ mod tests {
                     constraint: None,
                     without_overlaps,
                     clustered,
+                    deferral: ConstraintDeferral::Immediate,
                 };
                 let decoded =
                     deserialize_index(&serialize_index(&index)).expect("clustered index decode");
                 assert!(decoded == index, "{clustered} {without_overlaps}");
             }
+        }
+    }
+
+    /// A `UNIQUE`/`PRIMARY KEY` constraint's deferrability decides when the key
+    /// is checked, so it has to survive the wire format with the three shapes
+    /// `condeferrable`/`condeferred` can take and no fourth.
+    #[test]
+    fn the_constraint_deferral_round_trips_through_the_index_record() {
+        use assert2::assert;
+
+        for deferral in [
+            ConstraintDeferral::Immediate,
+            ConstraintDeferral::Deferrable,
+            ConstraintDeferral::Deferred,
+        ] {
+            let index = Index {
+                id: 12,
+                name: "unique_tbl_i_key".into(),
+                table: RelationName::public("unique_tbl"),
+                table_id: 6,
+                columns: vec!["i".into()],
+                unique: true,
+                placement: IndexPlacement::Local,
+                method: IndexMethod::Btree,
+                constraint: Some(IndexConstraint::Unique),
+                without_overlaps: false,
+                clustered: false,
+                deferral,
+            };
+            let decoded =
+                deserialize_index(&serialize_index(&index)).expect("deferrable index decode");
+            assert!(decoded == index, "{deferral:?}");
         }
     }
 

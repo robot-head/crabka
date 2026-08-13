@@ -1425,6 +1425,7 @@ pub(crate) fn execute_ddl(
                     constraint: None,
                     clustered: false,
                     without_overlaps: false,
+                    deferral: crabka_pgcatalog::ConstraintDeferral::Immediate,
                 };
                 let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
                 ops.extend(local_index_backfill_ops(
@@ -2162,11 +2163,20 @@ fn resolve_relation_tablespace_oid(kv: &dyn Kv, name: &str) -> Result<u32, ExecE
     })
 }
 
+/// The check point the `[NOT] DEFERRABLE` / `INITIALLY …` tail of a constraint
+/// asks for.
+fn constraint_deferral(
+    attributes: crabka_pgparser::ast::ConstraintAttributes,
+) -> crabka_pgcatalog::ConstraintDeferral {
+    crabka_pgcatalog::ConstraintDeferral::of(attributes.deferrable, attributes.initially_deferred)
+}
+
 fn create_table_constraint_index(
     table_name: &crabka_pgcatalog::RelationName,
     columns: &[String],
     primary_key: bool,
     without_overlaps: bool,
+    deferral: crabka_pgcatalog::ConstraintDeferral,
 ) -> crabka_pgcatalog::NewIndex {
     let suffix = if primary_key { "pkey" } else { "key" };
     // The relation's own name, never its qualified spelling: `PostgreSQL` names
@@ -2196,6 +2206,7 @@ fn create_table_constraint_index(
             crabka_pgcatalog::IndexConstraint::Unique
         }),
         without_overlaps,
+        deferral,
     }
 }
 
@@ -3324,6 +3335,12 @@ struct StatementWrites {
     /// and drained once, after the `WITH` list AND the body, because
     /// `PostgreSQL` treats the whole command as one trigger-firing unit.
     fk_checks: crate::fk::FkCheckQueue,
+    /// The uniqueness rechecks a `DEFERRABLE` `PRIMARY KEY` or `UNIQUE`
+    /// constraint owes, appended as each row claims its key and drained once
+    /// the whole command is done — which is the check point `DEFERRABLE
+    /// INITIALLY IMMEDIATE` names, and the moment an `INITIALLY DEFERRED` one
+    /// is promoted to the transaction's queue.
+    unique_checks: Vec<crate::fk::PendingUniqueCheck>,
     /// The relations a `TRUNCATE` is emptying, empty for every other statement.
     ///
     /// `TRUNCATE` desugars to one unfiltered `DELETE` per relation, and those
@@ -3801,7 +3818,119 @@ pub(crate) async fn drain_deferred_fk_checks(
         staged: &staged_kv,
         indexes: HashMap::new(),
     };
-    crate::fk::drain_deferred_checks(&exec, write_ctx, &mut cascade, checks).await
+    let ops = crate::fk::drain_deferred_checks(&exec, write_ctx, &mut cascade, checks).await?;
+    drop(cascade);
+    // A referential action can put a row onto a DEFERRABLE key, and this is the
+    // last check point the transaction has, so those are judged here rather
+    // than queued for a statement that will never come. The overlay already
+    // holds the action's own ops: the drain folds them in as it runs.
+    let queued = std::mem::take(&mut writes.unique_checks);
+    settle_unique_checks(write_ctx, &staged_kv, queued, None)?;
+    Ok(ops)
+}
+
+/// Settle the uniqueness rechecks this command queued for its `DEFERRABLE`
+/// keys.
+///
+/// This is the check point `PostgreSQL` gives a `DEFERRABLE INITIALLY
+/// IMMEDIATE` constraint: the end of the statement, once every row it wrote
+/// exists. `UPDATE unique_tbl SET i = i + 1` therefore succeeds, because by the
+/// time the first row's new key is judged, the row that used to hold it has
+/// moved on.
+///
+/// A constraint that is deferred right now — declared `INITIALLY DEFERRED`, or
+/// moved there by `SET CONSTRAINTS` — is promoted to the transaction's queue
+/// instead, and `COMMIT` runs it. Outside a transaction block there is nowhere
+/// to promote to and nothing a later statement could repair, so everything runs
+/// here.
+fn drain_statement_unique_checks(
+    write_ctx: &WriteContext<'_>,
+    writes: &mut StatementWrites,
+    staged: &[crabka_pgkv::WriteOp],
+) -> Result<(), ExecError> {
+    if writes.unique_checks.is_empty() {
+        return Ok(());
+    }
+    let queued = std::mem::take(&mut writes.unique_checks);
+    let staged_kv = StagedKv::new(write_ctx.kv, staged);
+    let mut store = write_ctx.take_deferred_fk();
+    let outcome = settle_unique_checks(write_ctx, &staged_kv, queued, store.as_mut());
+    // The store goes back whatever the outcome: a failed check aborts the
+    // transaction, and the teardown is what discards the queue.
+    write_ctx.restore_deferred_fk(store);
+    outcome
+}
+
+/// Run each queued check whose constraint is checked now, and hand the rest to
+/// the transaction's queue. Stops at the first violation, as `PostgreSQL`'s
+/// after-trigger queue does.
+fn settle_unique_checks(
+    write_ctx: &WriteContext<'_>,
+    staged: &StagedKv<'_>,
+    queued: Vec<crate::fk::PendingUniqueCheck>,
+    mut store: Option<&mut crate::fk::DeferredConstraints>,
+) -> Result<(), ExecError> {
+    for check in queued {
+        let deferred = store
+            .as_ref()
+            .is_some_and(|store| store.modes().is_index_deferred(&check.index));
+        if let (true, Some(store)) = (deferred, store.as_mut()) {
+            store.defer_unique(check);
+        } else {
+            run_unique_recheck(write_ctx, staged, &check)?;
+        }
+    }
+    Ok(())
+}
+
+/// Run the uniqueness rechecks a transaction deferred, at `COMMIT` or at
+/// `SET CONSTRAINTS … IMMEDIATE`.
+///
+/// Every earlier statement's rows are in the KV under this transaction's xid by
+/// now, so the drain reads storage directly. That is what makes
+/// `INSERT; DELETE; COMMIT` succeed under a deferred key.
+///
+/// # Errors
+///
+/// Reports the 23505 of the first key that two live rows still hold.
+pub(crate) fn drain_deferred_unique_checks(
+    write_ctx: &WriteContext<'_>,
+    checks: &[crate::fk::PendingUniqueCheck],
+) -> Result<(), ExecError> {
+    for check in checks {
+        run_unique_recheck(write_ctx, write_ctx.kv, check)?;
+    }
+    Ok(())
+}
+
+/// Prove that the row a deferred check names still holds its key alone.
+///
+/// Three of the four outcomes are silence. The relation may have been dropped,
+/// in which case `PostgreSQL` drops the queued events with it. The row may no
+/// longer hold the key, having been deleted or moved onto another one, in which
+/// case the event has nothing left to prove. Or it may hold the key by itself,
+/// which is the constraint being satisfied.
+fn run_unique_recheck(
+    write_ctx: &WriteContext<'_>,
+    kv: &dyn Kv,
+    check: &crate::fk::PendingUniqueCheck,
+) -> Result<(), ExecError> {
+    let Ok(table) = crabka_pgcatalog::get_table(write_ctx.catalog_kv, &check.table) else {
+        return Ok(());
+    };
+    let holders = probe_unique_key(write_ctx, kv, &table, &check.index, &check.values)?;
+    if !holders.iter().any(|holder| holder.rowid == check.rowid) {
+        return Ok(());
+    }
+    if holders.len() > 1 {
+        return Err(unique_violation(
+            write_ctx,
+            &table,
+            &check.index,
+            &check.values,
+        ));
+    }
+    Ok(())
 }
 
 /// The column a referential action names by ordinal. The ordinals come from the
@@ -3881,6 +4010,7 @@ async fn execute_write_with_ctes(
     let (outcome, mut ops) = execute_write_parts(write_ctx, ctes, stmt, writes).await?;
     let fk_ops = drain_statement_fk_checks(write_ctx, writes, &ops).await?;
     ops.extend(fk_ops);
+    drain_statement_unique_checks(write_ctx, writes, &ops)?;
     for (table, event, updated) in statement_triggers.iter().rev() {
         crate::trigger::fire_statement(
             write_ctx.catalog_kv,
@@ -7949,6 +8079,7 @@ pub(crate) async fn execute_copy_write(
     // row is staged — the same timing an `INSERT` of the same rows would give.
     let fk_ops = drain_statement_fk_checks(write_ctx, &mut writes, &ops).await?;
     ops.extend(fk_ops);
+    drain_statement_unique_checks(write_ctx, &mut writes, &ops)?;
     crate::trigger::fire_statement(
         catalog_kv,
         &table,
@@ -9547,6 +9678,22 @@ async fn enforce_unique_local_index(
         // SQL unique ignores NULLs: nothing to enforce, so no key lock either.
         return Ok(());
     }
+    if index.deferral.is_deferrable() {
+        // A DEFERRABLE constraint is not checked as the row is written: this
+        // key may be one another row of the same statement is about to give up,
+        // and under `INITIALLY DEFERRED` a later statement may still repair it.
+        // The key lock is taken here all the same — the entry is in the KV from
+        // here on, so a concurrent writer of the same key must still queue
+        // behind this transaction's outcome.
+        acquire_unique_key_lock(write_ctx, table, index, &values).await?;
+        writes.unique_checks.push(crate::fk::PendingUniqueCheck {
+            table: table.name.clone(),
+            index: index.clone(),
+            rowid,
+            values,
+        });
+        return Ok(());
+    }
     // The claim spans the whole statement, so a `WITH` item and the body cannot
     // both write the same key.
     let pending_key = (index.id, values.clone());
@@ -9596,6 +9743,19 @@ async fn lock_and_probe_unique_key(
     index: &crabka_pgcatalog::Index,
     values: &[Datum],
 ) -> Result<Vec<ScannedRow>, ExecError> {
+    acquire_unique_key_lock(write_ctx, table, index, values).await?;
+    let mvcc = write_ctx.mvcc_read();
+    probe_unique_key(write_ctx, mvcc.kv, table, index, values)
+}
+
+/// The lock half of [`lock_and_probe_unique_key`], for the deferrable path,
+/// which claims the key now and proves it holds it alone later.
+async fn acquire_unique_key_lock(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    values: &[Datum],
+) -> Result<(), ExecError> {
     write_ctx
         .lockmgr
         .acquire_key_as(
@@ -9607,11 +9767,26 @@ async fn lock_and_probe_unique_key(
             write_ctx.lock_wait_cap,
         )
         .await
-        .map_err(lock_acquire_error)?;
+        .map_err(lock_acquire_error)
+}
+
+/// The probe half: the rows that hold `values` on `index` right now, read
+/// through `kv`.
+///
+/// `kv` is a parameter rather than `write_ctx.kv` because the deferred recheck
+/// reads a view with the statement's pending batch layered over the store,
+/// exactly as the referential drain does.
+fn probe_unique_key(
+    write_ctx: &WriteContext<'_>,
+    kv: &dyn Kv,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    values: &[Datum],
+) -> Result<Vec<ScannedRow>, ExecError> {
     let mvcc = write_ctx.mvcc_read();
     let current_visibility = all_committed_snapshot();
     let probe = MvccReadContext {
-        kv: mvcc.kv,
+        kv,
         global: mvcc.global,
         global_snapshot: &current_visibility,
         snapshot: &current_visibility,
@@ -9703,6 +9878,33 @@ fn resolve_arbiter_indexes(
                 table: table.name.to_string(),
             }),
     }
+    .and_then(|arbiters| reject_deferrable_arbiter(table, &arbiters).map(|()| arbiters))
+}
+
+/// `ON CONFLICT` cannot arbitrate on a `DEFERRABLE` key.
+///
+/// Speculative insertion decides the row's fate before the statement ends,
+/// which is earlier than a deferrable constraint is willing to answer, so
+/// `ExecCheckIndexConstraints` refuses instead of guessing. The refusal covers
+/// a bare `DO NOTHING` too, whose arbiter set is every unique index the
+/// relation has.
+fn reject_deferrable_arbiter(
+    table: &Table,
+    arbiters: &[crabka_pgcatalog::Index],
+) -> Result<(), ExecError> {
+    let Some(index) = arbiters.iter().find(|index| index.deferral.is_deferrable()) else {
+        return Ok(());
+    };
+    Err(ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "55000",
+            "ON CONFLICT does not support deferrable unique constraints/exclusion constraints as \
+             arbiters",
+        )
+        .with_schema(table.name.schema.clone())
+        .with_table(table.name.name.clone())
+        .with_constraint(index.name.clone()),
+    ))
 }
 
 /// What one `VALUES` row of an `INSERT … ON CONFLICT` should do, decided by
@@ -20849,7 +21051,12 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 // an exclusion constraint that also happens to be catalogued as
                 // a primary key or a unique constraint.
                 Datum::Bool(index.exclusion_operators().is_some()),
-                Datum::Bool(true),
+                // `indimmediate`: false for a `DEFERRABLE` key, whose check
+                // waits for the end of the statement at the earliest. This is
+                // the column that says an index is not continuously unique,
+                // which is why `REPLICA IDENTITY USING INDEX` and a foreign
+                // key's referent both read it rather than `pg_constraint`.
+                Datum::Bool(!index.deferral.is_deferrable()),
                 // `indisclustered`: the index a bare `CLUSTER <table>` reorders
                 // the heap by, set by `CLUSTER … USING` and by
                 // `ALTER TABLE … CLUSTER ON`.
@@ -24282,6 +24489,7 @@ fn create_table_definition(
                     method: index.method,
                     constraint: Some(constraint),
                     without_overlaps: index.without_overlaps,
+                    deferral: index.deferral,
                 });
             }
         }
@@ -24326,6 +24534,7 @@ fn create_table_definition(
                         std::slice::from_ref(&column.name),
                         true,
                         false,
+                        constraint_deferral(constraint.attributes),
                     ));
                 }
                 crabka_pgparser::ast::ColumnConstraintKind::Unique { .. } => {
@@ -24335,6 +24544,7 @@ fn create_table_definition(
                         std::slice::from_ref(&column.name),
                         false,
                         false,
+                        constraint_deferral(constraint.attributes),
                     ));
                 }
                 // A column-level REFERENCES is a one-column FOREIGN KEY, named
@@ -24383,6 +24593,7 @@ fn create_table_definition(
                     key,
                     true,
                     *without_overlaps,
+                    constraint_deferral(constraint.attributes),
                 ));
             }
             crabka_pgparser::ast::TableConstraintKind::Unique {
@@ -24399,6 +24610,7 @@ fn create_table_definition(
                     key,
                     false,
                     *without_overlaps,
+                    constraint_deferral(constraint.attributes),
                 ));
             }
             crabka_pgparser::ast::TableConstraintKind::ForeignKey {
@@ -24885,9 +25097,10 @@ fn named_constraint_index(
     columns: &[String],
     primary_key: bool,
     without_overlaps: bool,
+    deferral: crabka_pgcatalog::ConstraintDeferral,
 ) -> crabka_pgcatalog::NewIndex {
     let mut index =
-        create_table_constraint_index(table_name, columns, primary_key, without_overlaps);
+        create_table_constraint_index(table_name, columns, primary_key, without_overlaps, deferral);
     if let Some(name) = explicit {
         index.name = name.to_string();
     }
@@ -24936,6 +25149,7 @@ fn exclusion_constraint_index(
         method: crabka_pgcatalog::IndexMethod::Gist,
         constraint: Some(crabka_pgcatalog::IndexConstraint::Exclusion(operators)),
         without_overlaps: false,
+        deferral: crabka_pgcatalog::ConstraintDeferral::Immediate,
     })
 }
 
@@ -26638,6 +26852,7 @@ fn alter_table_action_ops(
                                 columns: std::slice::from_ref(&column.name),
                                 primary_key,
                                 without_overlaps: false,
+                                deferral: constraint_deferral(constraint.attributes),
                             },
                             &build,
                         )?;
@@ -26958,6 +27173,7 @@ fn alter_table_action_ops(
                         columns,
                         primary_key: true,
                         without_overlaps: *without_overlaps,
+                        deferral: constraint_deferral(constraint.attributes),
                     },
                     &build,
                 )
@@ -26976,6 +27192,7 @@ fn alter_table_action_ops(
                         columns,
                         primary_key: false,
                         without_overlaps: *without_overlaps,
+                        deferral: constraint_deferral(constraint.attributes),
                     },
                     &build,
                 )
@@ -27697,6 +27914,8 @@ struct AddConstraintIndex<'a> {
     primary_key: bool,
     /// `WITHOUT OVERLAPS` was written on the last key column.
     without_overlaps: bool,
+    /// The check point the constraint's `[NOT] DEFERRABLE` tail asks for.
+    deferral: crabka_pgcatalog::ConstraintDeferral,
 }
 
 fn add_constraint_index(
@@ -27711,6 +27930,7 @@ fn add_constraint_index(
         columns,
         primary_key,
         without_overlaps,
+        deferral,
     } = *request;
     // One constraint namespace per relation: an explicit name a CHECK on this
     // table already holds is 42710, whatever kind the new constraint is.
@@ -27767,8 +27987,13 @@ fn add_constraint_index(
         }
     }
     let rows = state.live_rows(kv, ctx)?;
-    let mut new_index =
-        create_table_constraint_index(&state.table.name, columns, primary_key, without_overlaps);
+    let mut new_index = create_table_constraint_index(
+        &state.table.name,
+        columns,
+        primary_key,
+        without_overlaps,
+        deferral,
+    );
     if let Some(name) = name {
         new_index.name = name.to_string();
     }
@@ -34853,6 +35078,7 @@ mod tests {
                     constraint: constraint.then_some(crabka_pgcatalog::IndexConstraint::Unique),
                     without_overlaps: false,
                     clustered: false,
+                    deferral: crabka_pgcatalog::ConstraintDeferral::Immediate,
                 },
             )
             .collect();

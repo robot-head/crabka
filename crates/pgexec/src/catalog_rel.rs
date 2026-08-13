@@ -21,8 +21,8 @@
 use std::collections::BTreeMap;
 
 use crabka_pgcatalog::{
-    Column, CommentObject, ForeignKeyId, IndexConstraint, MatchType, ReferentialAction,
-    RelationName, Table,
+    Column, CommentObject, ConstraintDeferral as Deferral, ForeignKeyId, IndexConstraint,
+    MatchType, ReferentialAction, RelationName, Table,
 };
 use crabka_pgkv::Kv;
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
@@ -2389,7 +2389,7 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             conkey: Some(conkey),
             conbin: Datum::Null,
             validated: true,
-            deferral: Deferral::Immediate,
+            deferral: index.deferral,
             conperiod: index.without_overlaps,
             referent: Referent::default(),
         }));
@@ -2433,11 +2433,7 @@ fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError
             conkey: Some(attnums(&child, &foreign_key.columns)?),
             conbin: Datum::Null,
             validated: foreign_key.validated,
-            deferral: match (foreign_key.deferrable, foreign_key.initially_deferred) {
-                (_, true) => Deferral::Deferred,
-                (true, false) => Deferral::Deferrable,
-                (false, false) => Deferral::Immediate,
-            },
+            deferral: Deferral::of(foreign_key.deferrable, foreign_key.initially_deferred),
             conperiod: false,
             referent: Referent {
                 confrelid: table_relation_oid(foreign_key.referenced_table_id)?,
@@ -2579,31 +2575,6 @@ struct ConstraintRow<'a> {
     /// instead of synthesizing a `PRIMARY KEY, btree (…)` line.
     conperiod: bool,
     referent: Referent,
-}
-
-/// When a constraint is checked, as the `condeferrable`/`condeferred` pair
-/// spells it. `condeferred` without `condeferrable` is not a state
-/// `PostgreSQL` can be in, so the two are one value here.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Deferral {
-    /// `NOT DEFERRABLE` — checked at the end of every statement.
-    Immediate,
-    /// `DEFERRABLE INITIALLY IMMEDIATE` — per-statement, but `SET CONSTRAINTS`
-    /// may move it.
-    Deferrable,
-    /// `DEFERRABLE INITIALLY DEFERRED` — checked at `COMMIT`.
-    Deferred,
-}
-
-impl Deferral {
-    /// The `(condeferrable, condeferred)` pair, in catalog column order.
-    fn columns(self) -> (bool, bool) {
-        match self {
-            Self::Immediate => (false, false),
-            Self::Deferrable => (true, false),
-            Self::Deferred => (true, true),
-        }
-    }
 }
 
 /// The `conf*` columns, which only a `FOREIGN KEY` fills in. [`Default`] is
@@ -3117,13 +3088,14 @@ fn table_constraint_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>,
             IndexConstraint::Unique => "UNIQUE",
             IndexConstraint::Exclusion(_) => "EXCLUDE",
         };
+        let (deferrable, initially_deferred) = index.deferral.columns();
         rows.push(table_constraint_row(
             database,
             &index.name,
             &index.table,
             constraint_type,
-            false,
-            false,
+            deferrable,
+            initially_deferred,
         ));
     }
     for table in crabka_pgcatalog::list_tables(kv)? {
@@ -3138,8 +3110,6 @@ fn table_constraint_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>,
             ));
         }
     }
-    // A foreign key is the one constraint kind crabka can defer, so it is the
-    // one that reports anything but NO/NO.
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
         rows.push(table_constraint_row(
             database,
@@ -3713,6 +3683,7 @@ mod tests {
                 placement: IndexPlacement::Local,
                 constraint,
                 without_overlaps: false,
+                deferral: crabka_pgcatalog::ConstraintDeferral::Immediate,
             },
         )
         .expect("index ops");
