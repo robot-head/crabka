@@ -17,7 +17,9 @@ use crabka_pgkv::KvError;
 use crabka_pgtypes::{
     ColumnType, Datum,
     numeric::Typmod,
-    usertype::{CompositeField, DomainBody, DomainCheck, RangeBody, UserType, UserTypeBody},
+    usertype::{
+        BaseBody, CompositeField, DomainBody, DomainCheck, RangeBody, UserType, UserTypeBody,
+    },
 };
 
 use crate::{
@@ -425,6 +427,10 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Domain(domain) => {
             out.push(type_tag::USER);
             out.extend_from_slice(&domain.oid.to_be_bytes());
+        }
+        ColumnType::Base(base) => {
+            out.push(type_tag::USER);
+            out.extend_from_slice(&base.oid.to_be_bytes());
         }
     }
 }
@@ -2026,6 +2032,16 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
                 write_str(&mut out, &check.expr);
             }
         }
+        UserTypeBody::Shell => out.push(USER_TYPE_SHELL),
+        UserTypeBody::Base(base) => {
+            out.push(USER_TYPE_BASE);
+            write_type(&mut out, base.representation);
+            write_str(&mut out, &base.input);
+            write_str(&mut out, &base.output);
+            write_str(&mut out, &base.category);
+            out.push(u8::from(base.preferred));
+            write_str(&mut out, &base.delimiter);
+        }
     }
     out.push(USER_TYPE_IDENTITY_V2);
     write_str(&mut out, &ty.schema);
@@ -2130,6 +2146,23 @@ pub(crate) fn deserialize_user_type_with(
                 checks,
             })
         }
+        USER_TYPE_SHELL => UserTypeBody::Shell,
+        USER_TYPE_BASE => {
+            let representation = read_type_with(&mut cur, resolve_user_type)?;
+            let input = read_string(&mut cur)?;
+            let output = read_string(&mut cur)?;
+            let category = read_string(&mut cur)?;
+            let preferred = take_u8(&mut cur)? != 0;
+            let delimiter = read_string(&mut cur)?;
+            UserTypeBody::Base(BaseBody {
+                representation,
+                input,
+                output,
+                category,
+                preferred,
+                delimiter,
+            })
+        }
         other => {
             return Err(KvError::CorruptRow(format!("unknown user type kind {other}")).into());
         }
@@ -2225,6 +2258,10 @@ const USER_TYPE_COMPOSITE: u8 = 1;
 const USER_TYPE_ENUM: u8 = 2;
 const USER_TYPE_DOMAIN: u8 = 3;
 const USER_TYPE_RANGE: u8 = 4;
+/// `CREATE TYPE name;` — a shell, with no body at all.
+const USER_TYPE_SHELL: u8 = 5;
+/// `CREATE TYPE name (INPUT = …, OUTPUT = …)` — a user-defined base type.
+const USER_TYPE_BASE: u8 = 6;
 const USER_TYPE_IDENTITY_V1: u8 = 1;
 const USER_TYPE_IDENTITY_V2: u8 = 2;
 

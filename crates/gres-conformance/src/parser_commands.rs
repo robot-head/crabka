@@ -1103,6 +1103,8 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::AlterSchema { .. } => "AlterSchema",
         Statement::DropSchema { .. } => "DropSchema",
         Statement::CreateType { .. } => "CreateType",
+        Statement::CreateCast { .. } => "CreateCast",
+        Statement::DropCast { .. } => "DropCast",
         Statement::AlterType { .. } => "AlterType",
         Statement::DropType { .. } => "DropType",
         Statement::CreateDomain { .. } => "CreateDomain",

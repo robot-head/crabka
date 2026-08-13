@@ -1186,6 +1186,20 @@ pub enum Statement {
         if_exists: bool,
         cascade: bool,
     },
+    /// `CREATE CAST (source AS target) …`.
+    CreateCast {
+        source: ColumnType,
+        target: ColumnType,
+        method: CastMethod,
+        context: CastContext,
+    },
+    /// `DROP CAST [IF EXISTS] (source AS target) [CASCADE | RESTRICT]`.
+    DropCast {
+        source: ColumnType,
+        target: ColumnType,
+        if_exists: bool,
+        cascade: bool,
+    },
     /// P5/D6/D8: utility statements whose whole payload is their identity.
     Utility(UtilityStatement),
 }
@@ -1205,8 +1219,67 @@ pub enum CreateTypeDefinition {
         collation: Option<String>,
         multirange_type_name: Option<RelationRef>,
     },
+    /// `CREATE TYPE name (option = value, …)`: a user-defined base type. The
+    /// options are carried through verbatim, in written order, because which of
+    /// them a given server honours is the executor's business, not the
+    /// grammar's.
+    Base(Vec<BaseTypeOption>),
     /// A bare `CREATE TYPE name` — a shell type.
     Shell,
+}
+
+/// One `option = value` pair of a base-type `CREATE TYPE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseTypeOption {
+    /// The option name, lowercased (`input`, `output`, `like`,
+    /// `internallength`, …).
+    pub name: String,
+    pub value: BaseTypeOptionValue,
+}
+
+/// The right-hand side of a base-type option, matching `PostgreSQL`'s `def_arg`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseTypeOptionValue {
+    /// A bare or qualified name: a function name, a type name, `double`, `main`.
+    Name(String),
+    /// A string literal.
+    Str(String),
+    /// A signed integer literal.
+    Int(i64),
+    /// `TRUE` / `FALSE`.
+    Bool(bool),
+    /// The keyword `NONE`.
+    None,
+    /// The option was written with no `=` at all (`PASSEDBYVALUE`), which
+    /// `PostgreSQL` records as a null `DefElem.arg`. Distinct from the `NONE`
+    /// keyword, which is a written value.
+    Omitted,
+}
+
+/// How a `CREATE CAST` performs the conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CastMethod {
+    /// `WITH FUNCTION name(argtype, …)`: the named routine does the work. The
+    /// argument types are the names `PostgreSQL` spells back, so a built-in
+    /// written `int4` is recorded as `integer`. An empty list is the
+    /// no-parentheses spelling, which names the routine alone.
+    WithFunction { name: String, args: Vec<String> },
+    /// `WITHOUT FUNCTION`: the two types share a physical representation and
+    /// the value passes through unchanged.
+    WithoutFunction,
+    /// `WITH INOUT`: the source's output function feeds the target's input one.
+    WithInout,
+}
+
+/// `pg_cast.castcontext`: where the cast may be applied implicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastContext {
+    /// The default: only an explicit `CAST`/`::` invokes it.
+    Explicit,
+    /// `AS ASSIGNMENT`: also invoked when storing into a target column.
+    Assignment,
+    /// `AS IMPLICIT`: invoked anywhere a conversion is needed.
+    Implicit,
 }
 
 /// One field of a `CREATE TYPE … AS (…)` composite.
@@ -4434,13 +4507,30 @@ pub struct RoutineArg {
 /// cannot resolve. The parser carries those names through as
 /// [`RoutineType::Named`], and the catalog resolves them when the routine is
 /// created.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RoutineType {
     /// The resolved built-in type, absent when the name is not a built-in.
     pub resolved: Option<ColumnType>,
     /// The type name as `PostgreSQL` spells it back.
     pub name: String,
+    /// One-based character offset of the type name in the statement text, when
+    /// this type was written in a signature rather than synthesised.
+    ///
+    /// `CREATE FUNCTION f(shell_type)` reports `NOTICE: argument type … is only
+    /// a shell` with the `LINE`/caret context a client draws from the error
+    /// position, so the offset has to survive parsing. Excluded from equality:
+    /// two signatures naming the same types are the same signature wherever
+    /// they were written.
+    pub location: Option<usize>,
 }
+
+impl PartialEq for RoutineType {
+    fn eq(&self, other: &Self) -> bool {
+        self.resolved == other.resolved && self.name == other.name
+    }
+}
+
+impl Eq for RoutineType {}
 
 impl RoutineType {
     /// A built-in type resolved by the parser.
@@ -4449,6 +4539,7 @@ impl RoutineType {
         Self {
             resolved: Some(ty),
             name,
+            location: None,
         }
     }
 
@@ -4458,7 +4549,15 @@ impl RoutineType {
         Self {
             resolved: None,
             name,
+            location: None,
         }
+    }
+
+    /// The same type, remembering where it was written.
+    #[must_use]
+    pub const fn at(mut self, location: usize) -> Self {
+        self.location = Some(location);
+        self
     }
 }
 

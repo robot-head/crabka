@@ -62,8 +62,25 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // `PostgreSQL` coerces through the base and then applies the domain's
         // constraints. This arm must come first so a domain never falls into
         // the string rules below on the strength of its *name*.
+        // A cast the user declared reaches whatever pair it names, and it is
+        // consulted before the built-in rules only for the pairs those rules
+        // would otherwise resolve by name — a user type has no such name.
+        _ if crate::usercast::any_declared()
+            && crate::usercast::is_declared(from.oid(), to.oid()) =>
+        {
+            true
+        }
         (ColumnType::Domain(d), _) => cast_allowed(*d.base, to),
         (_, ColumnType::Domain(d)) => cast_allowed(from, *d.base),
+        // A user-defined base type inherits *nothing*. `CREATE TYPE … (LIKE =
+        // float4)` copies float4's storage, not its conversions, so the only
+        // route in or out is a `CREATE CAST` the user wrote — which lives in
+        // the catalog and is resolved a rung up, in the executor. This arm has
+        // to precede the string fall-throughs below, or `xfloat4::text` would
+        // be promised here and then fail at conversion.
+        (ColumnType::Base(_), _) | (_, ColumnType::Base(_)) => {
+            crate::usercast::is_declared(from.oid(), to.oid())
+        }
         // Composite → composite is allowed whenever the field lists line up;
         // the field-wise check happens at conversion, so the plan-time answer
         // is "yes, a record coercion exists".
@@ -1316,14 +1333,20 @@ fn i4_from_f64(f: f64) -> Result<Datum, TypeError> {
     }
 }
 
-/// `float8 → int8`: round half-to-even then range-check; non-finite / out of
-/// range is 22003.
+/// `float8 → int8` (PostgreSQL `dtoi8`/`ftoi8`): round half-to-even then
+/// range-check; non-finite / out of range is 22003 `bigint out of range`.
+///
+/// The range test is **half-open**, exactly as `FLOAT8_FITS_IN_INT64` is:
+/// `i64::MAX` has no `f64` image, so `i64::MAX as f64` rounds *up* to 2⁶³ and an
+/// inclusive test would admit 2⁶³ and then saturate the `as i64` cast back down
+/// to `i64::MAX` — turning an overflow into a plausible wrong answer.
 fn i8_from_f64(f: f64) -> Result<Datum, TypeError> {
     let r = f.round_ties_even();
-    if r.is_finite() && (i64::MIN as f64..=i64::MAX as f64).contains(&r) {
+    let min = i64::MIN as f64;
+    if r >= min && r < -min {
         Ok(Datum::Int8(r as i64))
     } else {
-        Err(TypeError::Overflow)
+        Err(TypeError::out_of_range_for("bigint"))
     }
 }
 
@@ -2721,10 +2744,31 @@ mod tests {
             cast(&Datum::Float8(f64::NAN), ColumnType::Int4, &tz),
             Err(TypeError::Overflow)
         ));
-        assert!(matches!(
-            cast(&Datum::Float8(f64::INFINITY), ColumnType::Int8, &tz),
-            Err(TypeError::Overflow)
-        ));
+        // `int8` reports its own width, not `integer out of range`.
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let error = cast(&Datum::Float8(value), ColumnType::Int8, &tz).expect_err("i8 range");
+            assert!(error.sqlstate() == "22003");
+            assert!(error.to_string() == "bigint out of range");
+        }
+        // 2⁶³ has an exact `f64` (and `f32`) image but no `i64` one, so the
+        // range test has to be half-open: `9223372036854775807::float4` rounds
+        // *up* to 2⁶³ and PostgreSQL rejects it rather than saturating.
+        for value in [9.223_372_036_854_776e18_f64, -9.223_38e18] {
+            let error = cast(&Datum::Float8(value), ColumnType::Int8, &tz).expect_err("i8 range");
+            assert!(error.to_string() == "bigint out of range");
+        }
+        let error = cast(&Datum::Float4(9.223_372e18), ColumnType::Int8, &tz).expect_err("f4 i8");
+        assert!(error.to_string() == "bigint out of range");
+        // The largest `f64` strictly below 2⁶³ still converts.
+        assert!(
+            cast(
+                &Datum::Float8(9.223_372_036_854_775e18),
+                ColumnType::Int8,
+                &tz
+            )
+            .expect("in range")
+                == Datum::Int8(9_223_372_036_854_774_784)
+        );
     }
 
     // ---- bool ↔ int4 ----

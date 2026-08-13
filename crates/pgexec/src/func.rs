@@ -445,6 +445,15 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
             require_arity(fc, n == 1 || n == 2)?;
+            // The `bytea` trims are two-argument only: PostgreSQL declares no
+            // default byte set, because "whitespace" is a property of text.
+            if is_bytea_subject(&args[0], scope)? {
+                if n != 2 {
+                    return Err(undefined_function_spelled(&fc.name, args, scope));
+                }
+                require_bytea(&args[1], scope)?;
+                return Ok(ColumnType::Bytea);
+            }
             for a in args {
                 require_text(a, scope)?;
             }
@@ -452,6 +461,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::Substr => {
             require_arity(fc, n == 2 || n == 3)?;
+            // `substring(bytea, int [, int])` is byte-indexed and has no
+            // pattern form, so its count arguments are always integers.
+            if is_bytea_subject(&args[0], scope)? {
+                for a in &args[1..] {
+                    require_int(a, scope)?;
+                }
+                return Ok(ColumnType::Bytea);
+            }
             // `substring(bit, int [, int])` is a distinct function returning
             // `bit`; it has no pattern form, so the count arguments are always
             // integers.
@@ -486,6 +503,13 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
                     require_int(a, scope)?;
                 }
                 return Ok(ColumnType::Bit(None));
+            }
+            if is_bytea_subject(&args[0], scope)? {
+                require_bytea(&args[1], scope)?;
+                for a in &args[2..] {
+                    require_int(a, scope)?;
+                }
+                return Ok(ColumnType::Bytea);
             }
             require_text(&args[0], scope)?;
             require_text(&args[1], scope)?;
@@ -715,7 +739,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             Ok(ColumnType::Text)
         }
         ScalarFunc::Reverse | ScalarFunc::Initcap => {
+            // The arity check has to come first: a match guard reading
+            // `args[0]` would index an empty slice for a bare `reverse()`.
             require_arity(fc, n == 1)?;
+            // `reverse` has a `bytea` overload and `initcap` does not — case is
+            // meaningless over bytes.
+            if f == ScalarFunc::Reverse && is_bytea_subject(&args[0], scope)? {
+                return Ok(ColumnType::Bytea);
+            }
             require_text(&args[0], scope)?;
             Ok(ColumnType::Text)
         }
@@ -726,6 +757,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             if crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[0], scope)?)
                 || crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[1], scope)?)
             {
+                return Ok(ColumnType::Int4);
+            }
+            // `position(bytea, bytea)` counts bytes, and either argument being
+            // `bytea` selects it — the other side's `unknown` literal then
+            // coerces to `bytea` rather than to `text`.
+            if is_bytea_subject(&args[0], scope)? || is_bytea_subject(&args[1], scope)? {
+                require_bytea(&args[0], scope)?;
+                require_bytea(&args[1], scope)?;
                 return Ok(ColumnType::Int4);
             }
             require_text(&args[0], scope)?;
@@ -1437,6 +1476,15 @@ fn eval_eager(
         ScalarFunc::MultirangePredicate => eval_multirange_predicate(&fc.name, vals),
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
             require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
+            if let Datum::Bytea(bytes) = &vals[0] {
+                let ends = match f {
+                    ScalarFunc::Ltrim => crate::bytea_fn::TrimEnds::Leading,
+                    ScalarFunc::Rtrim => crate::bytea_fn::TrimEnds::Trailing,
+                    _ => crate::bytea_fn::TrimEnds::Both,
+                };
+                let set = bytea_arg(&vals[1], ctx)?;
+                return Ok(crate::bytea_fn::trim(bytes, &set, ends));
+            }
             let s = text_arg(&vals[0])?;
             // The optional second argument is the set of characters to strip
             // (default: ASCII/Unicode whitespace).
@@ -1458,6 +1506,15 @@ fn eval_eager(
                     Some(c) => Some(bit_index(c)?),
                 };
                 return crate::bit_fn::substring(bits, start, count);
+            }
+            // Byte-indexed, and reached only when the plan gate saw a known
+            // `bytea` — so no multi-byte character can be split by accident.
+            if let Datum::Bytea(bytes) = &vals[0] {
+                let count = match vals.get(2) {
+                    None => None,
+                    Some(c) => Some(int_arg(c)?),
+                };
+                return crate::bytea_fn::substring(bytes, int_arg(&vals[1])?, count);
             }
             let s = text_arg(&vals[0])?;
             // The pattern forms, distinguished at runtime the same way the plan
@@ -1490,6 +1547,16 @@ fn eval_eager(
                     Some(c) => Some(bit_index(c)?),
                 };
                 return crate::bit_fn::overlay(bits, &vals[1], start, count);
+            }
+            if let Datum::Bytea(bytes) = &vals[0] {
+                let replacement = bytea_arg(&vals[1], ctx)?;
+                let start = int_arg(&vals[2])?;
+                let count = match vals.get(3) {
+                    Some(c) => int_arg(c)?,
+                    // The default replaces exactly as many bytes as it inserts.
+                    None => i64::try_from(replacement.len()).unwrap_or(i64::MAX),
+                };
+                return crate::bytea_fn::overlay(bytes, &replacement, start, count);
             }
             let s = text_arg(&vals[0])?;
             let replacement = text_arg(&vals[1])?;
@@ -1677,6 +1744,9 @@ fn eval_eager(
         }
         ScalarFunc::Reverse => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::Bytea(bytes) = &vals[0] {
+                return Ok(Datum::Bytea(bytes.iter().rev().copied().collect()));
+            }
             Ok(Datum::Text(text_arg(&vals[0])?.chars().rev().collect()))
         }
         ScalarFunc::Initcap => {
@@ -1689,6 +1759,10 @@ fn eval_eager(
                 && let Some(found) = crate::bit_fn::position(&vals[0], &vals[1])?
             {
                 return Ok(Datum::Int4(found));
+            }
+            if matches!(&vals[0], Datum::Bytea(_)) || matches!(&vals[1], Datum::Bytea(_)) {
+                let (haystack, needle) = (bytea_arg(&vals[0], ctx)?, bytea_arg(&vals[1], ctx)?);
+                return Ok(Datum::Int4(crate::bytea_fn::position(&haystack, &needle)));
             }
             Ok(Datum::Int4(strpos(
                 text_arg(&vals[0])?,
@@ -2021,6 +2095,25 @@ pub(crate) fn no_matching_function() -> ExecError {
 /// column.
 fn require_text(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     if crate::eval::infer_type(arg, scope)?.is_string() {
+        Ok(())
+    } else {
+        Err(no_matching_function())
+    }
+}
+
+/// Does this argument select the `bytea` overload of a name `text` also owns?
+///
+/// Only a *known* `bytea` does. An `unknown` literal must not: `substr('abc',
+/// 2)` has to stay the text call, and PostgreSQL resolves it that way because
+/// `text` is the preferred type of the string category.
+fn is_bytea_subject(arg: &Expr, scope: &Scope) -> Result<bool, ExecError> {
+    Ok(crate::eval::infer_type(arg, scope)? == ColumnType::Bytea)
+}
+
+/// Require an argument the `bytea` overload accepts: `bytea` itself, or an
+/// `unknown` literal that the coercion will run `byteain` over.
+fn require_bytea(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
+    if is_unknown_literal(arg) || crate::eval::infer_type(arg, scope)? == ColumnType::Bytea {
         Ok(())
     } else {
         Err(no_matching_function())
@@ -2508,6 +2601,25 @@ fn nullable_text_arg(d: &Datum) -> Result<&str, ExecError> {
 fn text_arg(d: &Datum) -> Result<&str, ExecError> {
     match d {
         Datum::Text(s) => Ok(s),
+        other => Err(type_error("function", other)),
+    }
+}
+
+/// A `bytea` argument's bytes.
+///
+/// The plan gate lets an `unknown` literal stand where a `bytea` is wanted,
+/// exactly as PostgreSQL's coercion does, and such a literal reaches evaluation
+/// still spelled as text. Running `byteain` over it here is what makes
+/// `btrim(b, '\x00')` agree with `btrim(b, '\x00'::bytea)` — reading the
+/// literal's own UTF-8 bytes instead would silently trim four ASCII characters
+/// rather than one NUL.
+fn bytea_arg<'a>(d: &'a Datum, ctx: &EvalCtx) -> Result<std::borrow::Cow<'a, [u8]>, ExecError> {
+    match d {
+        Datum::Bytea(bytes) => Ok(std::borrow::Cow::Borrowed(bytes)),
+        Datum::Text(_) => match crabka_pgtypes::cast::cast(d, ColumnType::Bytea, &ctx.time_zone)? {
+            Datum::Bytea(bytes) => Ok(std::borrow::Cow::Owned(bytes)),
+            _ => unreachable!("a cast to bytea yields bytea"),
+        },
         other => Err(type_error("function", other)),
     }
 }

@@ -530,6 +530,14 @@ fn eval_depth_inner(
                 }
                 _ => v,
             };
+            // A cast the user declared with `CREATE CAST` is the only route in
+            // or out of a user-defined base type, and the built-in conversion
+            // table below knows nothing about it.
+            if crabka_pgtypes::usercast::any_declared()
+                && let Some(coerced) = crate::usercast::coerce_declared(expr, *ty, &v, scope, ctx)?
+            {
+                return Ok(coerced);
+            }
             cast_operand(&v, *ty, ctx)
         }
         // `ARRAY[e1, e2, …]`: every element is coerced to the constructor's
@@ -702,6 +710,19 @@ pub(crate) fn eval_like(
 ) -> Result<Datum, ExecError> {
     if s.is_null() || pat.is_null() || escape.is_some_and(Datum::is_null) {
         return Ok(Datum::Null);
+    }
+    // `bytea` has a `~~` of its own, matched byte by byte. It has no
+    // case-insensitive or `SIMILAR TO` form, so only plain `LIKE` routes here;
+    // the other two fall through and report the type mismatch.
+    if matches!(kind, MatchKind::Like)
+        && let (Datum::Bytea(subject), Datum::Bytea(pattern)) = (s, pat)
+    {
+        let escape = match escape {
+            Some(e) => crate::pattern::escape_byte(e)?,
+            None => Some(b'\\'),
+        };
+        let m = crate::bytea_fn::like_match(subject, pattern, escape)?;
+        return Ok(Datum::Bool(m ^ negated));
     }
     let escape = match escape {
         Some(e) => crate::pattern::escape_char(e)?,

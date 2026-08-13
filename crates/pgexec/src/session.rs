@@ -2208,6 +2208,8 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
         Statement::AlterView { .. } => "ALTER VIEW",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
         Statement::CreateType { .. } => "CREATE TYPE",
+        Statement::CreateCast { .. } => "CREATE CAST",
+        Statement::DropCast { .. } => "DROP CAST",
         Statement::CreateDomain { .. } => "CREATE DOMAIN",
         Statement::AlterTable { .. } => "ALTER TABLE",
         Statement::DropTable { .. } => "DROP TABLE",
@@ -2349,6 +2351,8 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::CreateType { .. }
         | Statement::AlterType { .. }
         | Statement::DropType { .. }
+        | Statement::CreateCast { .. }
+        | Statement::DropCast { .. }
         | Statement::CreateDomain { .. }
         | Statement::AlterDomain { .. }
         | Statement::DropDomain { .. }
@@ -3127,6 +3131,12 @@ impl SqlSession {
         if let Err(error) = crate::usertype::hydrate(catalog_kv.as_ref()) {
             tracing::warn!(?error, "could not load user-defined types from the catalog");
         }
+        // A declared cast is invisible to plan-time legality for the same
+        // reason a type name is invisible to the parser, and needs the same
+        // process-wide publication before this session plans anything.
+        if let Err(error) = crate::usercast::hydrate(catalog_kv.as_ref()) {
+            tracing::warn!(?error, "could not load user-defined casts from the catalog");
+        }
         let (notice_tx, notice_rx) = mpsc::channel(4096);
         Self {
             kv,
@@ -3368,6 +3378,12 @@ impl SqlSession {
             .ok()
             .and_then(|setting| setting.parse().ok())
             .unwrap_or(1);
+        // `bytea_output` is validated to one of these two spellings when it is
+        // set, so an unrecognised value can only mean the GUC is unset.
+        let bytea_output = match self.guc.effective("bytea_output").as_deref() {
+            Ok("escape") => crabka_pgtypes::encoding::ByteaOutput::Escape,
+            _ => crabka_pgtypes::encoding::ByteaOutput::Hex,
+        };
         crate::clock::EvalCtx {
             now,
             stmt_now,
@@ -3376,6 +3392,7 @@ impl SqlSession {
             date_style,
             interval_style,
             extra_float_digits,
+            bytea_output,
             current_user: self.current_role.clone(),
             session_user: self.session_user.clone(),
             backend_pid: self.backend_pid,
@@ -6764,6 +6781,10 @@ impl SqlSession {
         | Statement::CreateType { .. }
         | Statement::AlterType { .. }
         | Statement::DropType { .. }
+        // A cast names two types and is dropped with them, so it rides the
+        // same catalog-lock + `execute_ddl` + commit path they do.
+        | Statement::CreateCast { .. }
+        | Statement::DropCast { .. }
         | Statement::CreateDomain { .. }
         | Statement::AlterDomain { .. }
         | Statement::DropDomain { .. }
@@ -8908,6 +8929,10 @@ impl SqlSession {
 
     async fn run_ddl(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let fires_event_triggers = !crate::trigger::event_trigger_ddl_is_excluded(stmt);
+        let publishes_user_casts = matches!(
+            stmt,
+            Statement::CreateCast { .. } | Statement::DropCast { .. } | Statement::DropType { .. }
+        );
         let publishes_user_types = matches!(
             stmt,
             Statement::CreateType { .. }
@@ -9064,6 +9089,9 @@ impl SqlSession {
         };
         let inheritance_notices =
             crate::exec::inheritance_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
+        // Computed before the statement runs: a `CREATE TYPE` that completes a
+        // shell, and a `CREATE FUNCTION` that names one, both change the answer.
+        let shell_notices = crate::routine::shell_type_notices(&*self.catalog_kv, stmt);
         // Computed before the drop runs, while the dependents still exist.
         let cascade_notice =
             crate::exec::cascade_drop_notice(&*self.catalog_kv, &resolution, stmt)?;
@@ -9220,6 +9248,9 @@ impl SqlSession {
                 "merging multiple inherited definitions of column \"{column}\""
             )))?;
         }
+        for notice in shell_notices {
+            self.plpgsql_notice(notice)?;
+        }
         if let Some((message, detail)) = cascade_notice {
             let notice = PgError::notice(message);
             self.plpgsql_notice(match detail {
@@ -9240,6 +9271,9 @@ impl SqlSession {
                 .filter(|ty| changed.contains(&ty.oid))
                 .collect::<Vec<_>>();
             crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
+        }
+        if publishes_user_casts {
+            crate::usercast::publish(&*self.catalog_kv)?;
         }
         Ok(result)
     }
@@ -12390,7 +12424,7 @@ fn decode_bound_param(
 /// Decode one binary-format value of type `ty`: a bind parameter's body, or one
 /// element inside a binary array parameter (the two share PostgreSQL's `*_recv`
 /// representations exactly, which is why array decoding recurses through here).
-fn decode_binary_value(
+pub(crate) fn decode_binary_value(
     value: &[u8],
     ty: ColumnType,
     time_zone: &jiff::tz::TimeZone,
@@ -12704,6 +12738,10 @@ fn decode_binary_value(
         // A domain's binary representation is its base type's, so it decodes as
         // the base and picks up its constraints on assignment.
         ColumnType::Domain(domain) => decode_binary_value(value, *domain.base, time_zone),
+        // A user-defined base type is *defined* as its representation type's
+        // bytes, so `recv` is the representation's `recv` — which is exactly
+        // what makes a `WITHOUT FUNCTION` cast between the two a no-op.
+        ColumnType::Base(base) => decode_binary_value(value, *base.representation, time_zone),
         // `record_recv` and `enum_recv` are not implemented: a binary composite
         // parameter carries per-field type oids crabka would have to resolve
         // against its own type catalog, and mis-decoding one would be a silent

@@ -35,6 +35,8 @@ fn bit_func(name: &str) -> Option<BitFunc> {
     Some(match name {
         "get_bit" => BitFunc::GetBit,
         "set_bit" => BitFunc::SetBit,
+        "get_byte" => BitFunc::GetByte,
+        "set_byte" => BitFunc::SetByte,
         "bit_count" => BitFunc::BitCount,
         // `varbit(x)` is the function-call spelling of a cast to `bit varying`.
         // The matching `bit(x)` is deliberately absent: `bit` is a reserved
@@ -54,6 +56,12 @@ enum BitFunc {
     GetBit,
     /// `set_bit(bit, int, int)`.
     SetBit,
+    /// `get_byte(bytea, int)` — byte `n`, counting from zero. Unlike the rest
+    /// of this enum it has no `bit` overload; it sits here because a caller
+    /// looking for `get_bit` expects to find it beside its sibling.
+    GetByte,
+    /// `set_byte(bytea, int, int)`.
+    SetByte,
     /// `bit_count(bit)` — how many bits are set, as a `bigint`.
     BitCount,
     /// `varbit(bit varying)` / `"bit"(bit)` — the function-call cast spelling.
@@ -83,6 +91,21 @@ pub(crate) fn bit_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colum
             require_integer(fc, args, 1, scope)?;
             require_integer(fc, args, 2, scope)?;
             Ok(subject)
+        }
+        // `get_byte`/`set_byte` are declared over `bytea` only — a bit string
+        // has no byte addressing — so they take the narrower gate.
+        BitFunc::GetByte => {
+            require_arity(fc, args.len() == 2)?;
+            require_bytea(fc, args, scope)?;
+            require_integer(fc, args, 1, scope)?;
+            Ok(ColumnType::Int4)
+        }
+        BitFunc::SetByte => {
+            require_arity(fc, args.len() == 3)?;
+            require_bytea(fc, args, scope)?;
+            require_integer(fc, args, 1, scope)?;
+            require_integer(fc, args, 2, scope)?;
+            Ok(ColumnType::Bytea)
         }
         BitFunc::BitCount => {
             require_arity(fc, args.len() == 1)?;
@@ -130,6 +153,18 @@ pub(crate) fn eval_bit(
             Ok(Datum::BitString(
                 bits.set_bit(int_arg(&values[1])?, int_arg(&values[2])?)?,
             ))
+        }
+        BitFunc::GetByte => {
+            require_arity(fc, values.len() == 2)?;
+            byte_get_byte(bytea_arg(fc, &values[0])?, int64_arg(&values[1])?)
+        }
+        BitFunc::SetByte => {
+            require_arity(fc, values.len() == 3)?;
+            byte_set_byte(
+                bytea_arg(fc, &values[0])?,
+                int64_arg(&values[1])?,
+                int_arg(&values[2])?,
+            )
         }
         BitFunc::BitCount => {
             require_arity(fc, values.len() == 1)?;
@@ -281,6 +316,18 @@ fn require_bit(fc: &FuncCall, args: &[Expr], scope: &Scope) -> Result<(), ExecEr
 /// `bytea` forms index from the LEAST significant bit of each byte and take a
 /// `bigint` index. The declared subject type is returned so `set_bit` can report
 /// the right result type.
+/// Require the `bytea` the byte-addressing functions are declared over. An
+/// `unknown` literal is accepted here rather than 42725, because `bytea` is the
+/// only candidate and PostgreSQL's coercion has nothing to choose between.
+fn require_bytea(fc: &FuncCall, args: &[Expr], scope: &Scope) -> Result<(), ExecError> {
+    if crate::eval::is_unknown_literal(&args[0])
+        || subject_type(&args[0], scope)? == ColumnType::Bytea
+    {
+        return Ok(());
+    }
+    Err(undefined_function_spelled(&fc.name, args, scope))
+}
+
 fn require_bit_or_bytea(
     fc: &FuncCall,
     args: &[Expr],
@@ -354,6 +401,43 @@ fn byte_set_bit(bytes: &[u8], index: i64, value: i32) -> Result<Datum, ExecError
         *byte &= !mask;
     }
     Ok(Datum::Bytea(out))
+}
+
+/// `byteaGetByte` — the unsigned value of byte `index`, counting from zero.
+fn byte_get_byte(bytes: &[u8], index: i64) -> Result<Datum, ExecError> {
+    let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+    if index < 0 || index >= len {
+        return Err(byte_index_out_of_range(index, len));
+    }
+    let byte = bytes[usize::try_from(index).expect("checked against the length")];
+    Ok(Datum::Int4(i32::from(byte)))
+}
+
+/// `byteaSetByte`. PostgreSQL assigns the `int` straight into a `char` slot
+/// rather than range-checking it, so the value wraps to its low eight bits and
+/// `set_byte(b, 0, 256)` writes a zero.
+fn byte_set_byte(bytes: &[u8], index: i64, value: i32) -> Result<Datum, ExecError> {
+    let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+    if index < 0 || index >= len {
+        return Err(byte_index_out_of_range(index, len));
+    }
+    let mut out = bytes.to_vec();
+    out[usize::try_from(index).expect("checked against the length")] =
+        u8::try_from(value.rem_euclid(256)).expect("a remainder mod 256 is a byte");
+    Ok(Datum::Bytea(out))
+}
+
+/// A `bytea` argument's value. The plan gate has already refused every other
+/// type, so this only ever reports a bug.
+fn bytea_arg<'a>(fc: &FuncCall, value: &'a Datum) -> Result<&'a [u8], ExecError> {
+    match value {
+        Datum::Bytea(bytes) => Ok(bytes),
+        other => Err(ExecError::UndefinedFunction(format!(
+            "function {}({}) does not exist",
+            fc.name,
+            other.column_type().map_or("unknown", ColumnType::name)
+        ))),
+    }
 }
 
 fn byte_index_out_of_range(index: i64, bits: i64) -> ExecError {
@@ -599,7 +683,14 @@ mod tests {
     /// a syntax error, and this lexer cannot tell it from the quoted `"bit"(x)`.
     #[test]
     fn owns_only_the_bit_only_function_names() {
-        for name in ["get_bit", "set_bit", "bit_count", "varbit"] {
+        for name in [
+            "get_bit",
+            "set_bit",
+            "get_byte",
+            "set_byte",
+            "bit_count",
+            "varbit",
+        ] {
             assert!(is_bit_func(name), "{name}");
         }
         for name in [

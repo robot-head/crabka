@@ -124,7 +124,9 @@ fn numeric_as_f64(d: &Datum) -> Option<f64> {
 fn float_arith(x: f64, y: f64, op: fn(f64, f64) -> f64) -> Result<Datum, TypeError> {
     let r = op(x, y);
     if r.is_infinite() && x.is_finite() && y.is_finite() {
-        return Err(TypeError::Overflow);
+        // `float8_pl` and its siblings all raise `value out of range: overflow`
+        // through `float_overflow_error`, never the `int4` wording.
+        return Err(TypeError::float_overflow());
     }
     Ok(Datum::Float8(r))
 }
@@ -476,19 +478,21 @@ pub fn div(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     // `float4 / float4` stays single-precision; a zero divisor is 22012 here
     // exactly as it is one rung down.
     if let (Datum::Float4(x), Datum::Float4(y)) = (a, b) {
-        if *y == 0.0 {
+        if *y == 0.0 && !x.is_nan() {
             return Err(TypeError::DivisionByZero);
         }
         return float4_arith(*x, *y, |x, y| x / y);
     }
     // SP30: float division — a zero divisor (incl. `-0.0`) is 22012, like PG.
+    // A `NaN` dividend is the one exception `float4_div`/`float8_div` carve out:
+    // `NaN / 0` is `NaN`, not a division-by-zero.
     if is_float(a) || is_float(b) {
         let (Some(x), Some(y)) = (as_f64(a), as_f64(b)) else {
             return Err(TypeError::TypeMismatch {
                 message: "operator requires numeric operands".into(),
             });
         };
-        if y == 0.0 {
+        if y == 0.0 && !x.is_nan() {
             return Err(TypeError::DivisionByZero);
         }
         return float_arith(x, y, |x, y| x / y);
@@ -1491,10 +1495,20 @@ mod tests {
             Datum::Null
         );
         // finite × finite overflowing to infinity is 22003; an infinite operand
-        // propagates Infinity without error.
+        // propagates Infinity without error. The message is `float8_mul`'s, not
+        // `int4`'s.
+        let overflow = mul(&Datum::Float8(1e308), &Datum::Float8(1e308)).expect_err("overflow");
+        assert!(overflow.sqlstate() == "22003");
+        assert!(overflow.to_string() == "value out of range: overflow");
+        // `NaN / 0` is `NaN`, the one dividend `float8_div` lets past its
+        // zero-divisor guard.
         assert!(matches!(
-            mul(&Datum::Float8(1e308), &Datum::Float8(1e308)),
-            Err(TypeError::Overflow)
+            div(&Datum::Float8(f64::NAN), &Datum::Float8(0.0)),
+            Ok(Datum::Float8(result)) if result.is_nan()
+        ));
+        assert!(matches!(
+            div(&Datum::Float4(f32::NAN), &Datum::Float4(0.0)),
+            Ok(Datum::Float4(result)) if result.is_nan()
         ));
         assert_eq!(
             mul(&Datum::Float8(f64::INFINITY), &Datum::Float8(2.0)).expect("ok"),

@@ -237,6 +237,8 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::Call { .. } => "CALL",
         Statement::DoBlock { .. } => "DO",
         Statement::CreateType { .. } => "CREATE TYPE",
+        Statement::CreateCast { .. } => "CREATE CAST",
+        Statement::DropCast { .. } => "DROP CAST",
         Statement::AlterType { .. } => "ALTER TYPE",
         Statement::DropType { .. } => "DROP TYPE",
         Statement::CreateDomain { .. } => "CREATE DOMAIN",

@@ -24,6 +24,7 @@ pub mod range;
 pub mod string;
 pub mod sysid;
 pub mod text_search;
+pub mod usercast;
 pub mod usertype;
 pub mod uuid;
 pub mod xml;

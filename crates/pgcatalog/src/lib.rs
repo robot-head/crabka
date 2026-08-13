@@ -5808,7 +5808,7 @@ pub fn hydrate_user_types(kv: &dyn Kv) -> Result<Vec<UserType>, CatalogError> {
 }
 
 fn hydrated_column_type(types: &BTreeMap<u32, UserType>, oid: u32) -> Option<ColumnType> {
-    types.get(&oid).map(UserType::column_type).or_else(|| {
+    types.get(&oid).and_then(UserType::column_type).or_else(|| {
         types
             .get(&oid.checked_sub(3)?)?
             .multirange_type()
@@ -6353,7 +6353,9 @@ mod tests {
             schema: PUBLIC_SCHEMA.into(),
             name: "local_domain_missing_base".into(),
             body: UserTypeBody::Domain(DomainBody {
-                base: foreign.column_type(),
+                base: foreign
+                    .column_type()
+                    .expect("a composite always has a column type"),
                 not_null: false,
                 default: None,
                 checks: Vec::new(),
@@ -8423,4 +8425,146 @@ mod tests {
         assert!(version.ends_with(", 64-bit"));
         assert!(version.contains(") on "));
     }
+}
+
+/// One `CREATE CAST` conversion, as `pg_cast` records it.
+///
+/// `castsource`/`casttarget` are the identity: `PostgreSQL`'s only unique index
+/// on `pg_cast` is the type pair, so a second `CREATE CAST` over the same pair
+/// is a duplicate-object error rather than a second row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserCast {
+    /// `pg_cast.oid`. Allocated in creation order, which is the order
+    /// `PostgreSQL` reports a cascade in and the only reason it is stored.
+    pub oid: u32,
+    /// `pg_cast.castsource`.
+    pub source: u32,
+    /// `pg_cast.casttarget`.
+    pub target: u32,
+    /// `pg_cast.castmethod`: `b` binary-coercible, `f` via a function, `i` via
+    /// the source's output and the target's input function.
+    pub method: char,
+    /// `pg_cast.castcontext`: `e` explicit, `a` assignment, `i` implicit.
+    pub context: char,
+    /// `pg_cast.castfunc`'s routine name, empty for a `WITHOUT FUNCTION` or
+    /// `WITH INOUT` cast.
+    pub function: String,
+}
+
+/// Serialize a cast: `oid | method | context | function`.
+#[must_use]
+pub fn serialize_user_cast(cast: &UserCast) -> Vec<u8> {
+    let mut out = cast.oid.to_be_bytes().to_vec();
+    out.push(u8::try_from(cast.method).unwrap_or(b'b'));
+    out.push(u8::try_from(cast.context).unwrap_or(b'e'));
+    out.extend_from_slice(cast.function.as_bytes());
+    out
+}
+
+/// The first oid a user-declared cast takes. Above every built-in `pg_cast`
+/// row, which `crabka_pgexec::builtin_casts` numbers from 10000.
+pub const FIRST_USER_CAST_OID: u32 = 200_000;
+
+/// The write batch that records a cast, with its oid drawn from the durable
+/// counter.
+///
+/// # Errors
+///
+/// Returns storage or corruption errors from the catalog KV seam.
+///
+/// # Panics
+///
+/// If a four-byte slice does not fit a `u32`, which the length check above
+/// already established.
+pub fn create_user_cast_ops(kv: &dyn Kv, cast: &UserCast) -> Result<Vec<WriteOp>, CatalogError> {
+    let oid = match kv.get(&key::meta_next_cast_oid_key())? {
+        Some(bytes) => u32::from_be_bytes(
+            bytes
+                .get(..4)
+                .ok_or_else(|| KvError::CorruptRow("truncated next cast oid".into()))?
+                .try_into()
+                .expect("four bytes fit u32"),
+        ),
+        None => FIRST_USER_CAST_OID,
+    };
+    let cast = UserCast {
+        oid,
+        ..cast.clone()
+    };
+    Ok(vec![
+        WriteOp::Put {
+            key: key::meta_next_cast_oid_key(),
+            value: oid.saturating_add(1).to_be_bytes().to_vec(),
+        },
+        WriteOp::Put {
+            key: key::cast_key(cast.source, cast.target),
+            value: serialize_user_cast(&cast),
+        },
+    ])
+}
+
+/// The write batch that forgets a cast.
+#[must_use]
+pub fn drop_user_cast_ops(source: u32, target: u32) -> Vec<WriteOp> {
+    vec![WriteOp::Delete {
+        key: key::cast_key(source, target),
+    }]
+}
+
+/// Read one cast by its type pair.
+///
+/// # Errors
+///
+/// Returns storage or corruption errors from the catalog KV seam.
+pub fn get_user_cast(kv: &dyn Kv, source: u32, target: u32) -> Result<Option<UserCast>, KvError> {
+    let Some(bytes) = kv.get(&key::cast_key(source, target))? else {
+        return Ok(None);
+    };
+    decode_user_cast(source, target, &bytes).map(Some)
+}
+
+/// Every user-defined cast, in creation (oid) order — the order `PostgreSQL`
+/// reports a cascade in.
+///
+/// # Errors
+///
+/// Returns storage or corruption errors from the catalog KV seam.
+///
+/// # Panics
+///
+/// If a four-byte slice does not fit a `u32`, which the key-width check above
+/// already established.
+pub fn list_user_casts(kv: &dyn Kv) -> Result<Vec<UserCast>, KvError> {
+    let prefix = key::cast_prefix();
+    let mut casts = Vec::new();
+    for (stored_key, bytes) in kv.scan_prefix(&prefix)? {
+        let suffix = stored_key
+            .strip_prefix(prefix.as_slice())
+            .ok_or_else(|| KvError::CorruptRow("cast key lost its prefix".into()))?;
+        let pair: [u8; 8] = suffix
+            .try_into()
+            .map_err(|_| KvError::CorruptRow("cast key is not a type pair".into()))?;
+        let source = u32::from_be_bytes(pair[..4].try_into().expect("four bytes fit u32"));
+        let target = u32::from_be_bytes(pair[4..].try_into().expect("four bytes fit u32"));
+        casts.push(decode_user_cast(source, target, &bytes)?);
+    }
+    casts.sort_by_key(|cast| cast.oid);
+    Ok(casts)
+}
+
+fn decode_user_cast(source: u32, target: u32, bytes: &[u8]) -> Result<UserCast, KvError> {
+    let corrupt = || KvError::CorruptRow("truncated cast record".into());
+    let (oid, rest) = bytes.split_at_checked(4).ok_or_else(corrupt)?;
+    let oid = u32::from_be_bytes(oid.try_into().expect("four bytes fit u32"));
+    let (&method, rest) = rest.split_first().ok_or_else(corrupt)?;
+    let (&context, function) = rest.split_first().ok_or_else(corrupt)?;
+    Ok(UserCast {
+        oid,
+        source,
+        target,
+        method: char::from(method),
+        context: char::from(context),
+        function: String::from_utf8(function.to_vec())
+            .map_err(|_| KvError::CorruptRow("cast function name is not UTF-8".into()))?,
+    })
 }

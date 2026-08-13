@@ -129,6 +129,49 @@ impl DomainRef {
     }
 }
 
+/// A user-defined base type: a [`UserTypeRef`] plus the type whose physical
+/// representation it borrows.
+///
+/// `CREATE TYPE … (LIKE = float4)` copies `float4`'s `typlen`, `typbyval` and
+/// `typalign`, which is `PostgreSQL`'s way of saying "the same bytes". gres holds
+/// that literally: a value of the base type is a `Datum` of `representation`.
+/// The base type is still a *distinct* type — it inherits none of the
+/// representation type's casts or operators, and the only way between the two
+/// is a `CREATE CAST … WITHOUT FUNCTION` declared by hand.
+#[derive(Debug, Clone, Copy, Eq)]
+pub struct BaseRef {
+    /// The base type's `pg_type.oid`.
+    pub oid: u32,
+    /// The base type's `pg_type.typname`, interned.
+    pub name: &'static str,
+    /// The type supplying `typlen`/`typbyval`/`typalign`, and so the `Datum`
+    /// shape a value of this type is carried in.
+    pub representation: &'static ColumnType,
+}
+
+impl PartialEq for BaseRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.oid == other.oid
+    }
+}
+
+impl std::hash::Hash for BaseRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.oid.hash(state);
+    }
+}
+
+impl BaseRef {
+    /// The base type as a plain [`UserTypeRef`].
+    #[must_use]
+    pub fn as_ref(self) -> UserTypeRef {
+        UserTypeRef {
+            oid: self.oid,
+            name: self.name,
+        }
+    }
+}
+
 /// One attribute of a composite type (`pg_attribute`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeField {
@@ -159,6 +202,39 @@ pub enum UserTypeBody {
     Range(RangeBody),
     /// `CREATE DOMAIN … AS base …` — `pg_type.typtype = 'd'`.
     Domain(DomainBody),
+    /// `CREATE TYPE name;` with nothing after the name — a *shell*.
+    ///
+    /// A shell is a placeholder that carries a name and an oid and nothing
+    /// else: `pg_type.typtype = 'p'`, `typisdefined = false`. It exists to
+    /// break the cycle in a base type's definition, where the type's I/O
+    /// functions must name the type and the type must name its I/O functions.
+    /// A shell has no values and no [`ColumnType`], so it can be named in a
+    /// routine signature and nowhere else.
+    Shell,
+    /// `CREATE TYPE name (INPUT = …, OUTPUT = …, …)` — a user-defined base
+    /// type, `pg_type.typtype = 'b'`.
+    Base(BaseBody),
+}
+
+/// A user-defined base type's definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseBody {
+    /// The type whose `typlen`/`typbyval`/`typalign` this one copies, which is
+    /// what `LIKE = T` selects. A value of the base type is held in this type's
+    /// `Datum`, so the two are the same bytes — which is the whole content of
+    /// binary coercibility between them.
+    pub representation: ColumnType,
+    /// `pg_type.typinput`: the routine that parses the external text form.
+    pub input: String,
+    /// `pg_type.typoutput`.
+    pub output: String,
+    /// `pg_type.typcategory`, the one-character class `format_type` and the
+    /// preference rules read.
+    pub category: String,
+    /// `pg_type.typispreferred`.
+    pub preferred: bool,
+    /// `pg_type.typdelim`, the array element separator.
+    pub delimiter: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,11 +296,15 @@ impl UserType {
         }
     }
 
-    /// This type as a [`ColumnType`].
+    /// This type as a [`ColumnType`], or `None` for a shell.
+    ///
+    /// A shell is the one user type with no value representation at all, so it
+    /// has no `ColumnType`. Returning `None` is what keeps `CREATE TABLE t (c
+    /// shell)` and `'x'::shell` from finding a type to use.
     #[must_use]
-    pub fn column_type(&self) -> ColumnType {
+    pub fn column_type(&self) -> Option<ColumnType> {
         let qualified_name = self.qualified_name();
-        match &self.body {
+        Some(match &self.body {
             UserTypeBody::Composite(_) => ColumnType::Record(Some(self.type_ref())),
             UserTypeBody::Enum(_) => ColumnType::Enum(self.type_ref()),
             UserTypeBody::Range(range) => ColumnType::Range(RangeRef {
@@ -237,13 +317,19 @@ impl UserType {
                 name: intern(&qualified_name),
                 base: leak_column_type(domain.base),
             }),
-        }
+            UserTypeBody::Base(base) => ColumnType::Base(BaseRef {
+                oid: self.oid,
+                name: intern(&qualified_name),
+                representation: leak_column_type(base.representation),
+            }),
+            UserTypeBody::Shell => return None,
+        })
     }
 
     /// The automatically-created multirange companion of a range type.
     #[must_use]
     pub fn multirange_type(&self) -> Option<ColumnType> {
-        let ColumnType::Range(range) = self.column_type() else {
+        let Some(ColumnType::Range(range)) = self.column_type() else {
             return None;
         };
         Some(ColumnType::Multirange(MultirangeRef {
@@ -285,7 +371,17 @@ impl UserType {
             UserTypeBody::Enum(_) => "e",
             UserTypeBody::Range(_) => "r",
             UserTypeBody::Domain(_) => "d",
+            // A shell is `TYPTYPE_PSEUDO` until the base type completes it,
+            // exactly as `TypeShellMake` leaves it.
+            UserTypeBody::Shell => "p",
+            UserTypeBody::Base(_) => "b",
         }
+    }
+
+    /// Whether this type is a shell: named, but with no definition yet.
+    #[must_use]
+    pub const fn is_shell(&self) -> bool {
+        matches!(self.body, UserTypeBody::Shell)
     }
 
     /// The composite's fields, or `None` when this is not a composite.
@@ -623,7 +719,7 @@ impl CatalogTypes {
     #[must_use]
     pub fn column_type_for_name(&self, name: &str) -> Option<ColumnType> {
         if let Some(ty) = self.lookup(name) {
-            return Some(ty.column_type());
+            return ty.column_type();
         }
         let guard = self.index.read().expect("user type registry is healthy");
         let oid = *guard
@@ -642,7 +738,7 @@ impl CatalogTypes {
     #[must_use]
     pub fn column_type_for_name_in(&self, schema: &str, name: &str) -> Option<ColumnType> {
         if let Some(ty) = self.lookup_in(schema, name) {
-            return Some(ty.column_type());
+            return ty.column_type();
         }
         let guard = self.index.read().expect("user type registry is healthy");
         let oid = *guard
@@ -656,7 +752,7 @@ impl CatalogTypes {
     #[must_use]
     pub fn column_type_for_oid(&self, oid: u32) -> Option<ColumnType> {
         if let Some(ty) = self.lookup_oid(oid) {
-            return Some(ty.column_type());
+            return ty.column_type();
         }
         self.lookup_oid(oid.checked_sub(3)?)?.multirange_type()
     }
@@ -1047,8 +1143,11 @@ mod tests {
         assert!(found.fields().expect("composite").len() == 1);
         assert!(found.labels().is_none());
         assert!(found.domain().is_none());
-        assert!(column_type_for_name("ut_reg_composite") == Some(found.column_type()));
-        assert!(matches!(found.column_type(), ColumnType::Record(Some(_))));
+        assert!(column_type_for_name("ut_reg_composite") == found.column_type());
+        assert!(matches!(
+            found.column_type(),
+            Some(ColumnType::Record(Some(_)))
+        ));
         unregister("ut_reg_composite");
         assert!(lookup("ut_reg_composite").is_none());
     }
@@ -1068,7 +1167,7 @@ mod tests {
                 }],
             }),
         );
-        let ColumnType::Domain(domain) = registered.column_type() else {
+        let Some(ColumnType::Domain(domain)) = registered.column_type() else {
             panic!("a domain resolves to ColumnType::Domain");
         };
         assert!(*domain.base == ColumnType::Numeric(None));
@@ -1280,8 +1379,9 @@ mod tests {
         );
         assert!(first_enum.oid == second_enum.oid);
 
-        let first_leaked = first.leak_column_type(first_enum.column_type());
-        let second_leaked = second.leak_column_type(second_enum.column_type());
+        let enum_type = |ty: &UserType| ty.column_type().expect("an enum has a column type");
+        let first_leaked = first.leak_column_type(enum_type(&first_enum));
+        let second_leaked = second.leak_column_type(enum_type(&second_enum));
 
         // Equal by the oid-only comparison, which is exactly the trap.
         assert!(first_leaked == second_leaked);
@@ -1298,7 +1398,7 @@ mod tests {
         // Within one catalog the cache still dedups to a single pointer.
         assert!(std::ptr::eq(
             first_leaked,
-            first.leak_column_type(first_enum.column_type())
+            first.leak_column_type(enum_type(&first_enum))
         ));
     }
 

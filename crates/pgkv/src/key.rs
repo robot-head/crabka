@@ -487,6 +487,34 @@ pub fn user_type_prefix() -> Vec<u8> {
     system_prefix("usertype")
 }
 
+/// Key for a `CREATE CAST` conversion: `/0/cast/<source oid><target oid>`,
+/// both big-endian.
+///
+/// `pg_cast` is keyed on the ordered type pair upstream too — `castsource` and
+/// `casttarget` carry the only unique index on the catalog — so the pair *is*
+/// the identity and no oid counter is needed to find a row again.
+#[must_use]
+pub fn cast_key(source: u32, target: u32) -> Vec<u8> {
+    let mut k = cast_prefix();
+    k.extend_from_slice(&source.to_be_bytes());
+    k.extend_from_slice(&target.to_be_bytes());
+    k
+}
+
+/// Shared prefix for every user-defined cast, for the catalog scan.
+#[must_use]
+pub fn cast_prefix() -> Vec<u8> {
+    system_prefix("cast")
+}
+
+/// Key for the global next-cast-oid counter: `/0/meta/next_cast_oid`.
+#[must_use]
+pub fn meta_next_cast_oid_key() -> Vec<u8> {
+    let mut k = system_prefix("meta");
+    k.extend_from_slice(b"next_cast_oid");
+    k
+}
+
 /// Key for the global next-user-type-oid counter: `/0/meta/next_type_oid`.
 #[must_use]
 pub fn meta_next_type_oid_key() -> Vec<u8> {

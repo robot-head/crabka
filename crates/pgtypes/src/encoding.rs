@@ -24,6 +24,24 @@ pub struct OutputStyle<'a> {
     pub date_style: crate::datetime::DateStyle,
     pub date_order: crate::datetime::DateOrder,
     pub interval_style: crate::datetime::IntervalStyle,
+    /// `bytea_output`, which decides which of `byteaout`'s two spellings a
+    /// `bytea` renders in.
+    pub bytea_output: ByteaOutput,
+}
+
+/// The `bytea_output` GUC: which spelling `byteaout` produces.
+///
+/// Both are accepted on input regardless of the setting, so this affects
+/// reading a value back and nothing else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ByteaOutput {
+    /// `\x` followed by two lowercase hex digits per byte. PostgreSQL's default
+    /// since 9.0.
+    #[default]
+    Hex,
+    /// The pre-9.0 spelling: printable ASCII as itself, a backslash doubled,
+    /// and everything else as a three-digit octal escape.
+    Escape,
 }
 
 impl<'a> OutputStyle<'a> {
@@ -39,6 +57,7 @@ impl<'a> OutputStyle<'a> {
             date_style: crate::datetime::DateStyle::default(),
             date_order: crate::datetime::DateOrder::default(),
             interval_style: crate::datetime::IntervalStyle::default(),
+            bytea_output: ByteaOutput::default(),
         }
     }
 }
@@ -156,16 +175,38 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Interval(i) => {
             crate::datetime::interval_to_text_in(*i, style.interval_style).into_bytes()
         }
-        // SP40: PostgreSQL `byteaout` hex format: `\x` + lowercase hex digits.
-        Datum::Bytea(b) => {
-            let mut out = Vec::with_capacity(2 + b.len() * 2);
-            out.extend_from_slice(b"\\x");
-            for byte in b {
-                out.push(b"0123456789abcdef"[usize::from(*byte >> 4)]);
-                out.push(b"0123456789abcdef"[usize::from(*byte & 0xf)]);
+        // SP40: PostgreSQL `byteaout`, in whichever of its two spellings
+        // `bytea_output` selects.
+        Datum::Bytea(b) => match style.bytea_output {
+            ByteaOutput::Hex => {
+                let mut out = Vec::with_capacity(2 + b.len() * 2);
+                out.extend_from_slice(b"\\x");
+                for byte in b {
+                    out.push(b"0123456789abcdef"[usize::from(*byte >> 4)]);
+                    out.push(b"0123456789abcdef"[usize::from(*byte & 0xf)]);
+                }
+                out
             }
-            out
-        }
+            ByteaOutput::Escape => {
+                let mut out = Vec::with_capacity(b.len());
+                for byte in b {
+                    match byte {
+                        b'\\' => out.extend_from_slice(b"\\\\"),
+                        // Printable ASCII passes through; everything else,
+                        // control bytes and the whole high half alike, becomes
+                        // a three-digit octal escape.
+                        0x20..=0x7e => out.push(*byte),
+                        _ => {
+                            out.push(b'\\');
+                            out.push(b'0' + (byte >> 6));
+                            out.push(b'0' + ((byte >> 3) & 7));
+                            out.push(b'0' + (byte & 7));
+                        }
+                    }
+                }
+                out
+            }
+        },
         // `json_out`: the bytes `json_in` accepted, unchanged.
         Datum::Json(text) => text.clone().into_bytes(),
         // `xml_out` is *not* the identity: it re-renders the XML declaration,

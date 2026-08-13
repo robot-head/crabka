@@ -589,6 +589,20 @@ pub(crate) fn execute_ddl(
             *cascade,
             false,
         ),
+        // T5: a user-declared cast. `usercast` owns the physical-compatibility
+        // rules and the conversion; only the routing is here.
+        Statement::CreateCast {
+            source,
+            target,
+            method,
+            context,
+        } => crate::usercast::create_cast(kv, *source, *target, method, *context),
+        Statement::DropCast {
+            source,
+            target,
+            if_exists,
+            ..
+        } => crate::usercast::drop_cast(kv, *source, *target, *if_exists),
         Statement::CreateDomain {
             name,
             base,
@@ -9479,6 +9493,22 @@ pub(crate) fn cascade_drop_notice(
             let mut lines = Vec::new();
             for schema in names {
                 lines.extend(schema_cascade_lines(kv, resolution, schema)?);
+            }
+            return Ok(cascade_notice(lines));
+        }
+        // `DROP TYPE … CASCADE` names the routines whose signatures used the
+        // type and the casts that had it at either end, both in creation order,
+        // exactly as `performDeletion` walks `pg_depend`.
+        Statement::DropType {
+            names,
+            cascade: true,
+            ..
+        } => {
+            let mut lines = Vec::new();
+            for reference in names {
+                lines.extend(crate::usertype::type_cascade_lines(
+                    kv, resolution, reference,
+                )?);
             }
             return Ok(cascade_notice(lines));
         }
@@ -21130,6 +21160,9 @@ fn attribute_storage(ty: ColumnType) -> &'static str {
         // class, which is the rule PostgreSQL's `CREATE DOMAIN` copies.
         C::Enum(_) => "p",
         C::Domain(domain) => attribute_storage(*domain.base),
+        // `LIKE = T` copies `T`'s `typlen`/`typbyval`/`typalign`, and
+        // `typstorage` follows the same physical layout.
+        C::Base(base) => attribute_storage(*base.representation),
     }
 }
 
@@ -21271,20 +21304,31 @@ fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 i32::try_from(domain.base.oid()).unwrap_or(0),
                 builtin_type_category(domain.base),
             ),
+            // `TypeShellMake` writes the pseudo-type class and a four-byte
+            // `typlen` — not 0, which `type_sanity` reads as a corrupt row.
+            usertype::UserTypeBody::Shell => (0, 0, "P"),
+            usertype::UserTypeBody::Base(base) => (0, 0, base.category.as_str()),
+        };
+        // A shell is the one user type with no `ColumnType`, and `TypeShellMake`
+        // gives it `sizeof(int32)` regardless.
+        let shell_typlen = 4;
+        let delimiter = match &ty.body {
+            usertype::UserTypeBody::Base(base) => base.delimiter.clone(),
+            _ => ",".to_string(),
         };
         rows.push(vec![
             int(i32::try_from(ty.oid).unwrap_or(0)),
             text(&ty.name),
-            int(i32::from(column_type.type_size())),
+            int(column_type.map_or(shell_typlen, |ty| i32::from(ty.type_size()))),
             text(category),
             int(crate::catalog_rel::namespace_oid(&ty.schema)),
             int(typrelid),
             text(ty.typtype()),
-            text(","),
+            text(&delimiter),
             int(0),
             int(0),
             int(typbasetype),
-            int(text_collation_oid(column_type)),
+            int(column_type.map_or(0, text_collation_oid)),
         ]);
         if let (Some((schema, name)), Some(multirange)) =
             (ty.multirange_identity(), ty.multirange_type())
@@ -21328,7 +21372,7 @@ fn pg_range_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 
 /// The `pg_type.typcategory` of a built-in type, for the domain rows that
 /// inherit their base type's category.
-fn builtin_type_category(base: crabka_pgtypes::ColumnType) -> &'static str {
+pub(crate) fn builtin_type_category(base: crabka_pgtypes::ColumnType) -> &'static str {
     builtin_type_rows()
         .iter()
         .find(|row| u32::try_from(row.oid) == Ok(base.oid()))
@@ -22780,6 +22824,14 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
 /// the array of the `json` input alias). Array types are base types like their
 /// elements (`typtype` 'b'), in category 'A', variable length, and they carry
 /// the element's oid in `typelem`.
+/// `pg_type.typname` for a built-in oid.
+pub(crate) fn builtin_type_name(oid: u32) -> Option<&'static str> {
+    builtin_type_rows()
+        .iter()
+        .find(|row| u32::try_from(row.oid) == Ok(oid))
+        .map(|row| row.name)
+}
+
 fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     static ROWS: std::sync::LazyLock<Vec<BuiltinTypeRow>> = std::sync::LazyLock::new(|| {
         let mut rows = scalar_type_rows().to_vec();
@@ -31128,6 +31180,258 @@ mod tests {
         assert!(
             text_rows_of(&mut session, "SELECT k, \"K\" FROM v").await
                 == vec![text_row(&["1", "one"])]
+        );
+    }
+
+    /// The `float4` regression suite builds a type from scratch to read a
+    /// `float4`'s bit pattern: a shell, an I/O pair bound to the built-in
+    /// `int4in`/`int4out`, a base type completing the shell, and two
+    /// binary-coercible casts. `1::xfloat4::float4` then has to be the float
+    /// whose *bits* are 1, not the float 1.
+    #[tokio::test]
+    async fn a_shell_completed_by_a_base_type_reinterprets_its_bits() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        // The shell exists, and taking the name twice is 42710.
+        run_s(&mut session, "CREATE TYPE xfloat4").await;
+        assert!(sqlstate_of(&mut session, "CREATE TYPE xfloat4").await == "42710");
+        // A shell has no values: it resolves in a routine signature and nowhere
+        // else, so it can never reach a column or an expression.
+        assert!(sqlstate_of(&mut session, "CREATE TABLE t (c xfloat4)").await == "42704");
+
+        let mut notices = session.take_notices().expect("notice receiver");
+        run_s(
+            &mut session,
+            "create function xfloat4in(cstring) returns xfloat4 \
+             immutable strict language internal as 'int4in'",
+        )
+        .await;
+        // A shell named as the *return* type has no parse location, so the
+        // notice carries no position; an argument type does, so it does.
+        let notice = notices.try_recv().expect("return shell notice");
+        assert!(notice.message == "return type xfloat4 is only a shell");
+        assert!(
+            notice
+                .diagnostics
+                .as_ref()
+                .and_then(|d| d.position)
+                .is_none()
+        );
+        run_s(
+            &mut session,
+            "create function xfloat4out(xfloat4) returns cstring \
+             immutable strict language internal as 'int4out'",
+        )
+        .await;
+        let notice = notices.try_recv().expect("argument shell notice");
+        assert!(notice.message == "argument type xfloat4 is only a shell");
+        // `create function xfloat4out(` is 27 characters, so the argument type
+        // starts at the 28th — the column the client draws its caret under.
+        assert!(notice.diagnostics.as_ref().and_then(|d| d.position) == Some(28));
+        run_s(
+            &mut session,
+            "CREATE TYPE xfloat4 (input = xfloat4in, output = xfloat4out, like = float4)",
+        )
+        .await;
+
+        // Before any cast is declared the type is an island: nothing converts.
+        assert!(sqlstate_of(&mut session, "SELECT 1::xfloat4").await == "42846");
+
+        run_s(
+            &mut session,
+            "CREATE CAST (xfloat4 AS float4) WITHOUT FUNCTION",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE CAST (integer AS xfloat4) WITHOUT FUNCTION",
+        )
+        .await;
+        // A declared cast is visible in `pg_cast`, so the catalog and the cast
+        // path agree about what conversions exist.
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT castcontext, castmethod FROM pg_cast \
+                 WHERE castsource = 23 AND casttarget = \
+                 (SELECT oid FROM pg_type WHERE typname = 'xfloat4')"
+            )
+            .await
+                == vec![text_row(&["e", "b"])]
+        );
+
+        // The bit patterns from `float4.sql`: the smallest subnormals, and one
+        // ordinary value.
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT 1::xfloat4::float4, 2::xfloat4::float4, 1065353216::xfloat4::float4"
+            )
+            .await
+                == vec![text_row(&["1e-45", "3e-45", "1"])]
+        );
+        // And the round trip back out through `float4send` is the input word.
+        assert!(
+            text_rows_of(&mut session, "SELECT float4send(8388608::xfloat4::float4)").await
+                == vec![text_row(&["\\x00800000"])]
+        );
+
+        // The I/O pair and the casts depend on the type. Dropping it without
+        // CASCADE is 2BP01, and with CASCADE it names every one of them, in
+        // creation order.
+        assert!(sqlstate_of(&mut session, "DROP TYPE xfloat4").await == "2BP01");
+        run_s(&mut session, "DROP TYPE xfloat4 CASCADE").await;
+        let notice = notices.try_recv().expect("cascade notice");
+        assert!(notice.message == "drop cascades to 4 other objects");
+        assert!(
+            notice
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.detail.as_deref())
+                == Some(
+                    "drop cascades to function xfloat4in(cstring)\n\
+                     drop cascades to function xfloat4out(xfloat4)\n\
+                     drop cascades to cast from xfloat4 to real\n\
+                     drop cascades to cast from integer to xfloat4"
+                )
+        );
+        // Nothing is left behind: the name is free and the casts are gone.
+        run_s(&mut session, "CREATE TYPE xfloat4").await;
+        assert!(sqlstate_of(&mut session, "DROP CAST (xfloat4 AS float4)").await == "42704");
+    }
+
+    /// `CREATE CAST … WITHOUT FUNCTION` is a claim that two types are the same
+    /// bytes, and PostgreSQL checks it crudely rather than taking the word for
+    /// it. Every refusal below is one of `CreateCast`'s.
+    #[tokio::test]
+    async fn a_binary_cast_is_refused_when_the_types_are_not_the_same_bytes() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TYPE colour AS ENUM ('red', 'green')").await;
+        run_s(
+            &mut session,
+            "CREATE DOMAIN small AS int4 CHECK (VALUE < 10)",
+        )
+        .await;
+        run_s(&mut session, "CREATE TYPE pair AS (a int4, b int4)").await;
+
+        for (sql, message) in [
+            (
+                "CREATE CAST (int4 AS int8) WITHOUT FUNCTION",
+                "source and target data types are not physically compatible",
+            ),
+            (
+                "CREATE CAST (int4 AS text) WITHOUT FUNCTION",
+                "source and target data types are not physically compatible",
+            ),
+            (
+                "CREATE CAST (colour AS int4) WITHOUT FUNCTION",
+                "enum data types are not binary-compatible",
+            ),
+            (
+                "CREATE CAST (small AS int4) WITHOUT FUNCTION",
+                "domain data types must not be marked binary-compatible",
+            ),
+            // A composite is varlena, so PostgreSQL's physical check catches it
+            // before the composite check ever runs.
+            (
+                "CREATE CAST (pair AS int4) WITHOUT FUNCTION",
+                "source and target data types are not physically compatible",
+            ),
+            (
+                "CREATE CAST (int4 AS int4) WITHOUT FUNCTION",
+                "source data type and target data type are the same",
+            ),
+        ] {
+            let (state, reported) = error_of(&mut session, sql).await;
+            assert!(state == "42P17", "{sql}");
+            assert!(reported == message, "{sql}");
+        }
+
+        // A recorded cast is unique on its type pair, and a second one is 42710.
+        run_s(&mut session, "CREATE CAST (int4 AS date) WITHOUT FUNCTION").await;
+        assert!(
+            sqlstate_of(&mut session, "CREATE CAST (int4 AS date) WITHOUT FUNCTION").await
+                == "42710"
+        );
+        // Dropping it takes the conversion away again.
+        run_s(&mut session, "DROP CAST (int4 AS date)").await;
+        assert!(sqlstate_of(&mut session, "DROP CAST (int4 AS date)").await == "42704");
+        run_s(&mut session, "DROP CAST IF EXISTS (int4 AS date)").await;
+    }
+
+    /// A cast gres cannot perform is refused outright rather than recorded and
+    /// left inert, which is the difference between an unsupported feature and a
+    /// catalog that lies.
+    #[tokio::test]
+    async fn a_cast_gres_cannot_perform_is_refused_not_recorded() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE CAST (int4 AS text) WITH FUNCTION int4out(int4)",
+            "CREATE CAST (int4 AS text) WITH INOUT",
+        ] {
+            assert!(sqlstate_of(&mut session, sql).await == "0A000", "{sql}");
+            // Nothing was written, so the pair is still free.
+            assert!(
+                sqlstate_of(&mut session, "DROP CAST (int4 AS text)").await == "42704",
+                "{sql}"
+            );
+        }
+    }
+
+    /// `CREATE TYPE name (…)` needs both I/O functions, and gres additionally
+    /// needs a `LIKE` — it holds a base type's values in the representation
+    /// type's form and has no opaque byte image to fall back on.
+    #[tokio::test]
+    async fn a_base_type_needs_its_io_pair_and_a_representation() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TYPE t").await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION t_in(cstring) RETURNS t LANGUAGE internal AS 'int4in'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION t_out(t) RETURNS cstring LANGUAGE internal AS 'int4out'",
+        )
+        .await;
+
+        let (state, message) = error_of(&mut session, "CREATE TYPE t (output = t_out)").await;
+        assert!(state == "42P17");
+        assert!(message == "type input function must be specified");
+        let (state, message) = error_of(&mut session, "CREATE TYPE t (input = t_in)").await;
+        assert!(state == "42P17");
+        assert!(message == "type output function must be specified");
+        // No `LIKE`, and an `INTERNALLENGTH` gres has no value for, are both
+        // 0A000 rather than a type that exists and cannot hold anything.
+        assert!(
+            sqlstate_of(&mut session, "CREATE TYPE t (input = t_in, output = t_out)").await
+                == "0A000"
+        );
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "CREATE TYPE t (input = t_in, output = t_out, internallength = 24)"
+            )
+            .await
+                == "0A000"
+        );
+        // An I/O function that does not exist is 42883.
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "CREATE TYPE t (input = nosuch_in, output = t_out, like = float4)"
+            )
+            .await
+                == "42883"
         );
     }
 

@@ -13,12 +13,14 @@ use std::collections::HashSet;
 use crabka_pgcatalog::RelationName;
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{
-    AlterDomainAction, AlterTypeAction, CompositeFieldDef, CreateTypeDefinition, DomainConstraint,
-    EnumValuePosition,
+    AlterDomainAction, AlterTypeAction, BaseTypeOption, BaseTypeOptionValue, CompositeFieldDef,
+    CreateTypeDefinition, DomainConstraint, EnumValuePosition,
 };
 use crabka_pgtypes::{
     ColumnType, Datum,
-    usertype::{self, CompositeField, DomainBody, DomainCheck, RangeBody, UserType, UserTypeBody},
+    usertype::{
+        self, BaseBody, CompositeField, DomainBody, DomainCheck, RangeBody, UserType, UserTypeBody,
+    },
 };
 use crabka_pgwire::engine::QueryResult;
 
@@ -44,8 +46,8 @@ pub fn hydrate(kv: &dyn Kv) -> Result<(), ExecError> {
 ///
 /// # Errors
 ///
-/// 42710 when the name is taken, 0A000 for the shell and range forms, and
-/// 42P16/42701 for a malformed composite.
+/// 42710 when the name is taken, 0A000 for a base type gres cannot represent,
+/// and 42P16/42701 for a malformed composite.
 pub fn create_type(
     kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -79,12 +81,9 @@ pub fn create_type(
                 multirange_name: Some(companion),
             })
         }
-        CreateTypeDefinition::Shell => {
-            return Err(ExecError::Unsupported(
-                "CREATE TYPE without a definition (a shell type) is not supported: shell types \
-                 exist only to be completed by a C-language base type"
-                    .into(),
-            ));
+        CreateTypeDefinition::Shell => UserTypeBody::Shell,
+        CreateTypeDefinition::Base(options) => {
+            return create_base_type(kv, name, options);
         }
     };
     register(kv, name, body, "CREATE TYPE")
@@ -135,6 +134,149 @@ pub fn create_domain(
         }
     }
     register(kv, name, UserTypeBody::Domain(body), "CREATE DOMAIN")
+}
+
+/// `CREATE TYPE name (INPUT = …, OUTPUT = …, LIKE = …)` — a user-defined base
+/// type, completing a shell of the same name when one is already there.
+///
+/// gres represents a base type's values in the `Datum` of the type `LIKE`
+/// names, so `LIKE` is *required* here even though PostgreSQL treats it as one
+/// way of several to describe the layout. `INTERNALLENGTH = 24` with no `LIKE`
+/// describes a byte image gres has no value for, and inventing an opaque one
+/// would buy a `CREATE TYPE` that succeeds and a first `SELECT` that cannot.
+///
+/// # Errors
+///
+/// 42P17 when `INPUT` or `OUTPUT` is missing, 42710 when the name is taken by
+/// a defined type, and 0A000 for an option gres cannot honour.
+fn create_base_type(
+    kv: &dyn Kv,
+    name: &RelationName,
+    options: &[BaseTypeOption],
+) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
+    let mut input = None;
+    let mut output = None;
+    let mut representation = None;
+    let mut category = None;
+    let mut preferred = false;
+    let mut delimiter = ",".to_string();
+    for option in options {
+        match option.name.as_str() {
+            "input" => input = Some(option_name(option)?),
+            "output" => output = Some(option_name(option)?),
+            "like" => representation = Some(option_type(option)?),
+            "category" => category = Some(option_char(option)?),
+            "preferred" => preferred = option_bool(option)?,
+            "delimiter" => delimiter = option_string(option)?,
+            // Every remaining option describes a layout, a companion routine or
+            // an element type that gres has nowhere to put. Refusing is the
+            // whole difference between "not supported" and a type that exists
+            // but misbehaves.
+            other => {
+                return Err(ExecError::Unsupported(format!(
+                    "type attribute \"{other}\" is not supported: gres builds a base type only \
+                     from LIKE, INPUT, OUTPUT, CATEGORY, PREFERRED and DELIMITER"
+                )));
+            }
+        }
+    }
+    let input = input.ok_or_else(|| {
+        ExecError::InvalidObjectDefinition("type input function must be specified".into())
+    })?;
+    let output = output.ok_or_else(|| {
+        ExecError::InvalidObjectDefinition("type output function must be specified".into())
+    })?;
+    let Some(representation) = representation else {
+        return Err(ExecError::Unsupported(
+            "CREATE TYPE needs LIKE = <type>: gres holds a base type's values in the \
+             representation type's form, and has no opaque byte image to fall back on"
+                .into(),
+        ));
+    };
+    require_routine(kv, &input)?;
+    require_routine(kv, &output)?;
+    // `DefineType` starts every base type at `TYPCATEGORY_USER` and only the
+    // `CATEGORY` option moves it. `LIKE` copies the layout, never the category.
+    let category = category.unwrap_or_else(|| "U".to_string());
+    let body = UserTypeBody::Base(BaseBody {
+        representation,
+        input,
+        output,
+        category,
+        preferred,
+        delimiter,
+    });
+    // A shell of this name is the two-phase definition closing: keep the oid,
+    // because the I/O functions created in between already name it.
+    let shell = crabka_pgcatalog::list_user_types(kv)?
+        .into_iter()
+        .find(|ty| ty.schema == name.schema && ty.name == name.name && ty.is_shell());
+    let Some(shell) = shell else {
+        return register(kv, name, body, "CREATE TYPE");
+    };
+    let completed = UserType { body, ..shell };
+    Ok((
+        QueryResult::Command {
+            tag: "CREATE TYPE".to_string(),
+        },
+        crabka_pgcatalog::put_user_type_ops(kv, &completed)?,
+    ))
+}
+
+/// The routine a `INPUT =` / `OUTPUT =` option names must already exist.
+fn require_routine(kv: &dyn Kv, name: &str) -> Result<(), ExecError> {
+    if crate::routine::is_user_routine(kv, name) {
+        return Ok(());
+    }
+    Err(ExecError::UndefinedFunction(format!(
+        "function {name} does not exist"
+    )))
+}
+
+fn option_name(option: &BaseTypeOption) -> Result<String, ExecError> {
+    match &option.value {
+        BaseTypeOptionValue::Name(name) => Ok(name.clone()),
+        BaseTypeOptionValue::Str(text) => Ok(text.clone()),
+        _ => Err(malformed_option(option, "a function name")),
+    }
+}
+
+fn option_type(option: &BaseTypeOption) -> Result<ColumnType, ExecError> {
+    let BaseTypeOptionValue::Name(name) = &option.value else {
+        return Err(malformed_option(option, "a type name"));
+    };
+    ColumnType::from_sql_name(name)
+        .ok_or_else(|| ExecError::UndefinedObject(format!("type \"{name}\" does not exist")))
+}
+
+fn option_string(option: &BaseTypeOption) -> Result<String, ExecError> {
+    match &option.value {
+        BaseTypeOptionValue::Str(text) => Ok(text.clone()),
+        BaseTypeOptionValue::Name(name) => Ok(name.clone()),
+        _ => Err(malformed_option(option, "a string")),
+    }
+}
+
+fn option_char(option: &BaseTypeOption) -> Result<String, ExecError> {
+    let text = option_string(option)?;
+    if text.chars().count() == 1 {
+        Ok(text)
+    } else {
+        Err(malformed_option(option, "a single character"))
+    }
+}
+
+fn option_bool(option: &BaseTypeOption) -> Result<bool, ExecError> {
+    match &option.value {
+        BaseTypeOptionValue::Bool(value) => Ok(*value),
+        // `PASSEDBYVALUE` and friends are written bare, which reads as true.
+        BaseTypeOptionValue::Omitted => Ok(true),
+        _ => Err(malformed_option(option, "a boolean")),
+    }
+}
+
+fn malformed_option(option: &BaseTypeOption, wanted: &str) -> ExecError {
+    ExecError::InvalidObjectDefinition(format!("type attribute \"{}\" needs {wanted}", option.name))
 }
 
 /// `PostgreSQL` names an unnamed domain constraint `<domain>_check`, then
@@ -683,17 +825,43 @@ pub fn drop_types(
                 ),
             )));
         }
+        // A routine that names the type in its signature, and a cast that names
+        // it at either end, both depend on it. Leaving either behind would be
+        // worse than refusing the drop: a routine whose argument type no longer
+        // resolves, or a `pg_cast` row pointing at a vanished oid.
+        let routines = dependent_routines(kv, &ty)?;
+        let casts = dependent_casts(kv, ty.oid)?;
+        if !cascade && let Some(routine) = routines.first() {
+            return Err(dependency_refusal(
+                name,
+                &format!("function {} depends on type {name}", routine.identity()),
+            ));
+        }
+        if !cascade && let Some(cast) = casts.first() {
+            return Err(dependency_refusal(
+                name,
+                &format!("{} depends on type {name}", cast_dependency_line(cast)),
+            ));
+        }
         if !cascade && let Some(user) = column_using_type(kv, &ty)? {
-            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
-                "2BP01",
-                format!(
-                    "cannot drop type {name} because other objects depend on it\nDETAIL:  \
-                     column {user} depends on type {name}"
-                ),
-            )));
+            return Err(dependency_refusal(
+                name,
+                &format!("column {user} depends on type {name}"),
+            ));
         }
         for dependent in dependents.into_iter().rev() {
             ops.extend(crabka_pgcatalog::drop_user_type_ops(kv, &dependent)?);
+        }
+        for routine in &routines {
+            ops.extend(crabka_pgcatalog::routine::drop_routine_ops(
+                &routine.identity(),
+            ));
+        }
+        for cast in &casts {
+            ops.extend(crabka_pgcatalog::drop_user_cast_ops(
+                cast.source,
+                cast.target,
+            ));
         }
         ops.extend(crabka_pgcatalog::drop_user_type_ops(kv, &ty)?);
     }
@@ -703,6 +871,115 @@ pub fn drop_types(
         },
         ops,
     ))
+}
+
+/// The `drop cascades to …` lines a `DROP TYPE … CASCADE` of `reference`
+/// reports: its dependent types, then the routines that name it, then the
+/// casts that have it at either end.
+///
+/// Computed before the drop runs, while the dependents are still there.
+///
+/// # Errors
+///
+/// Propagates catalog read errors. A name that resolves to no type reports
+/// nothing — the drop itself raises the 42704.
+pub(crate) fn type_cascade_lines(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<Vec<String>, ExecError> {
+    let Ok(name) = resolve_relation(kv, resolution, reference, SchemaDisposition::Reference) else {
+        return Ok(Vec::new());
+    };
+    let Some(ty) = crabka_pgcatalog::get_user_type(kv, &name)? else {
+        return Ok(Vec::new());
+    };
+    let mut lines: Vec<String> = dependent_user_types(kv, ty.oid)?
+        .iter()
+        .map(|dependent| format!("drop cascades to type {}", dependent.qualified_name()))
+        .collect();
+    lines.extend(
+        dependent_routines(kv, &ty)?
+            .iter()
+            .map(|routine| format!("drop cascades to function {}", routine.identity())),
+    );
+    lines.extend(
+        dependent_casts(kv, ty.oid)?
+            .iter()
+            .map(|cast| format!("drop cascades to {}", cast_dependency_line(cast))),
+    );
+    Ok(lines)
+}
+
+/// PostgreSQL's 2BP01 for a drop that would orphan something, with the one
+/// dependency it names first.
+fn dependency_refusal(name: &RelationName, detail: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "2BP01",
+        format!("cannot drop type {name} because other objects depend on it\nDETAIL:  {detail}"),
+    ))
+}
+
+/// Every routine whose signature names `ty`, in oid order — which is creation
+/// order, and so the order PostgreSQL reports the cascade in.
+///
+/// A routine names a type by *name*, not by oid, because a shell type has no
+/// [`ColumnType`] to compare and its I/O pair is exactly the dependency that
+/// matters here.
+pub(crate) fn dependent_routines(
+    kv: &dyn Kv,
+    ty: &UserType,
+) -> Result<Vec<crabka_pgcatalog::routine::Routine>, ExecError> {
+    let wanted = ty.qualified_name();
+    let mut found: Vec<crabka_pgcatalog::routine::Routine> =
+        crabka_pgcatalog::routine::list_routines(kv)?
+            .into_iter()
+            .filter(|routine| routine_names_type(routine, &wanted))
+            .collect();
+    found.sort_by_key(|routine| routine.oid);
+    Ok(found)
+}
+
+fn routine_names_type(routine: &crabka_pgcatalog::routine::Routine, wanted: &str) -> bool {
+    let names = |ty: &crabka_pgcatalog::routine::RoutineType| ty.name == wanted;
+    routine.params.iter().any(|param| names(&param.ty))
+        || match &routine.result {
+            crabka_pgcatalog::routine::RoutineResult::Type { ty, .. } => names(ty),
+            crabka_pgcatalog::routine::RoutineResult::Table(columns) => {
+                columns.iter().any(|(_, ty)| names(ty))
+            }
+            crabka_pgcatalog::routine::RoutineResult::Unspecified => false,
+        }
+}
+
+/// Every declared cast with `oid` at either end, in the order they were
+/// recorded — which the `(source, target)` key gives for free only by pair, so
+/// the catalog scan order is what PostgreSQL's oid order approximates.
+fn dependent_casts(kv: &dyn Kv, oid: u32) -> Result<Vec<crabka_pgcatalog::UserCast>, ExecError> {
+    Ok(crabka_pgcatalog::list_user_casts(kv)?
+        .into_iter()
+        .filter(|cast| cast.source == oid || cast.target == oid)
+        .collect())
+}
+
+/// `cast from xfloat4 to real`, the way `getObjectDescription` spells a cast.
+pub(crate) fn cast_dependency_line(cast: &crabka_pgcatalog::UserCast) -> String {
+    format!(
+        "cast from {} to {}",
+        type_name_for_oid(cast.source),
+        type_name_for_oid(cast.target)
+    )
+}
+
+/// The name `format_type` gives an oid: `real` for `float4`, and the type's own
+/// name for a user type.
+fn type_name_for_oid(oid: u32) -> String {
+    if let Some(ty) = usertype::column_type_for_oid(oid) {
+        return ty.name().to_string();
+    }
+    crate::exec::builtin_type_name(oid)
+        .and_then(ColumnType::from_sql_name)
+        .map_or_else(|| format!("type {oid}"), |ty| ty.name().to_string())
 }
 
 fn dependent_user_types(kv: &dyn Kv, root_oid: u32) -> Result<Vec<UserType>, ExecError> {
@@ -726,7 +1003,9 @@ fn user_type_references_any(ty: &UserType, oids: &HashSet<u32>) -> bool {
             .any(|field| column_type_references_any(field.ty, oids)),
         UserTypeBody::Range(range) => column_type_references_any(range.subtype, oids),
         UserTypeBody::Domain(domain) => column_type_references_any(domain.base, oids),
-        UserTypeBody::Enum(_) => false,
+        UserTypeBody::Base(base) => column_type_references_any(base.representation, oids),
+        // A shell names nothing, which is the point of it.
+        UserTypeBody::Enum(_) | UserTypeBody::Shell => false,
     }
 }
 
@@ -1078,7 +1357,9 @@ mod tests {
             &kv,
             &RelationName::public("cascade_composite_range_test"),
             UserTypeBody::Range(RangeBody {
-                subtype: composite.column_type(),
+                subtype: composite
+                    .column_type()
+                    .expect("a composite always has a column type"),
                 collation: None,
                 multirange_schema: None,
                 multirange_name: None,
@@ -1123,7 +1404,9 @@ mod tests {
             &kv,
             &RelationName::public("recursive_composite_range_test"),
             UserTypeBody::Range(RangeBody {
-                subtype: composite.column_type(),
+                subtype: composite
+                    .column_type()
+                    .expect("a composite always has a column type"),
                 collation: None,
                 multirange_schema: None,
                 multirange_name: None,
@@ -1137,7 +1420,9 @@ mod tests {
             &RelationName::new(&composite.schema, &composite.name),
             &AlterTypeAction::AddAttribute(CompositeFieldDef {
                 name: "recursive".into(),
-                ty: range.column_type(),
+                ty: range
+                    .column_type()
+                    .expect("a range always has a column type"),
                 collation: None,
             }),
         )

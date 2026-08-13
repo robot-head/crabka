@@ -3480,6 +3480,7 @@ impl Parser {
                     Token::Keyword(Keyword::Schema) => emitted(I::DropSchema, self.drop_schema()),
                     Token::Ident(s) if s == "type" => emitted(I::DropType, self.drop_type()),
                     Token::Ident(s) if s == "domain" => emitted(I::DropDomain, self.drop_domain()),
+                    Token::Keyword(Keyword::Cast) => emitted(I::DropCast, self.drop_cast()),
                     _ => emitted(I::DropTable, self.drop_table()),
                 }
             }
@@ -5437,6 +5438,7 @@ impl Parser {
             Token::Keyword(Keyword::Schema) => emitted(I::CreateSchema, self.create_schema()),
             Token::Ident(s) if s == "type" => emitted(I::CreateType, self.create_type()),
             Token::Ident(s) if s == "domain" => emitted(I::CreateDomain, self.create_domain()),
+            Token::Keyword(Keyword::Cast) => emitted(I::CreateCast, self.create_cast()),
             Token::Ident(s)
                 if s == "operator"
                     && matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(next) if next == "class") =>
@@ -10072,18 +10074,23 @@ impl Parser {
         Ok(Some(self.routine_type()?))
     }
 
-    /// `CREATE TYPE name [ AS { (field type, …) | ENUM (…) | RANGE (…) } ]`.
+    /// `CREATE TYPE name [ (option = value, …) | AS { (field type, …) |
+    /// ENUM (…) | RANGE (…) } ]`.
     fn create_type(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::CreateTypeDefinition;
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect_ident_eq("type")?;
         let name = self.relation_ref()?;
         if !self.eat_keyword(Keyword::As) {
-            // A bare `CREATE TYPE name` is a shell type.
-            return Ok(crate::ast::Statement::CreateType {
-                name,
-                definition: CreateTypeDefinition::Shell,
-            });
+            // Without `AS`, a `(` opens the base type's definition list and
+            // nothing at all is a shell type. The `AS` is what tells the two
+            // parenthesised forms apart, exactly as `gram.y` does.
+            let definition = if *self.peek() == Token::LParen {
+                CreateTypeDefinition::Base(self.base_type_definition()?)
+            } else {
+                CreateTypeDefinition::Shell
+            };
+            return Ok(crate::ast::Statement::CreateType { name, definition });
         }
         if self.eat_ident_eq("enum") {
             return Ok(crate::ast::Statement::CreateType {
@@ -10162,6 +10169,100 @@ impl Parser {
         Ok(crate::ast::Statement::CreateType {
             name,
             definition: CreateTypeDefinition::Composite(fields),
+        })
+    }
+
+    /// `(option [= value] [, …])`: the definition list of a base-type
+    /// `CREATE TYPE`.
+    ///
+    /// `PostgreSQL` spells it `definition: '(' def_list ')'`, and `def_list` is
+    /// one-or-more, so an empty list is a syntax error there and here. Which
+    /// options are meaningful — and which combinations are contradictory — is
+    /// the executor's to decide; the grammar keeps every pair in written order.
+    fn base_type_definition(&mut self) -> Result<Vec<crate::ast::BaseTypeOption>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut options = vec![self.base_type_option()?];
+        while self.eat_comma() {
+            options.push(self.base_type_option()?);
+        }
+        self.expect(&Token::RParen)?;
+        Ok(options)
+    }
+
+    /// One `def_elem`: `ColLabel '=' def_arg` or a bare `ColLabel`.
+    ///
+    /// The name is a `ColLabel`, so every keyword may be one — `LIKE` and
+    /// `DEFAULT` both name base-type options. `PostgreSQL` records an omitted
+    /// value as a null `DefElem.arg`, which is how `PASSEDBYVALUE` is written.
+    fn base_type_option(&mut self) -> Result<crate::ast::BaseTypeOption, ParseError> {
+        let name = self.expect_col_label()?.to_ascii_lowercase();
+        let value = if self.eat_token(&Token::Eq) {
+            self.base_type_option_value()?
+        } else {
+            crate::ast::BaseTypeOptionValue::Omitted
+        };
+        Ok(crate::ast::BaseTypeOption { name, value })
+    }
+
+    /// A `def_arg`: a name, a string literal, a signed integer, or one of the
+    /// words `TRUE`/`FALSE`/`NONE`.
+    ///
+    /// `PostgreSQL` hands all three of those words on as names and leaves
+    /// `defGetBoolean` to read them later. They are typed here instead, because
+    /// the executor wants `PREFERRED = true` and a type called `true` to be
+    /// different things.
+    fn base_type_option_value(&mut self) -> Result<crate::ast::BaseTypeOptionValue, ParseError> {
+        use crate::ast::BaseTypeOptionValue as Value;
+
+        if let Token::StringLit(text) = self.peek() {
+            let text = text.clone();
+            self.bump();
+            return Ok(Value::Str(text));
+        }
+        if matches!(self.peek(), Token::Plus | Token::Minus | Token::IntLit(_)) {
+            return Ok(Value::Int(self.signed_integer_literal()?));
+        }
+        // Quoting strips a word of every keyword property, so `"none"` names
+        // whatever the catalog calls `none` and is never the grammar's NONE.
+        let quoted = self.peek_is_quoted_ident();
+        let written = self.def_arg_name()?;
+        if quoted {
+            return Ok(Value::Name(written));
+        }
+        Ok(match written.as_str() {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            "none" => Value::None,
+            _ => Value::Name(written),
+        })
+    }
+
+    /// `PostgreSQL`'s `SignedIconst`: an integer literal with an optional sign.
+    fn signed_integer_literal(&mut self) -> Result<i64, ParseError> {
+        let position = self.peek_pos();
+        let negative = match self.peek() {
+            Token::Minus => {
+                self.bump();
+                true
+            }
+            Token::Plus => {
+                self.bump();
+                false
+            }
+            _ => false,
+        };
+        let Token::IntLit(digits) = self.bump() else {
+            return Err(ParseError::new("expected an integer literal", position));
+        };
+        // Signing the text rather than the value keeps `-9223372036854775808`,
+        // whose magnitude alone does not fit, in range.
+        let signed = if negative {
+            format!("-{digits}")
+        } else {
+            digits.clone()
+        };
+        signed.parse().map_err(|_| {
+            ParseError::new_sqlstate("22003", format!("integer out of range: {signed}"), position)
         })
     }
 
@@ -10295,6 +10396,97 @@ impl Parser {
         }
         let cascade = self.eat_drop_behavior();
         Ok((names, if_exists, cascade))
+    }
+
+    /// `CREATE CAST (source AS target) { WITH FUNCTION sig | WITHOUT FUNCTION |
+    /// WITH INOUT } [AS ASSIGNMENT | AS IMPLICIT]`.
+    fn create_cast(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::CastMethod;
+
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect(&Token::Keyword(Keyword::Cast))?;
+        let (source, target) = self.cast_type_pair()?;
+        let method = if self.eat_keyword(Keyword::With) {
+            if self.eat_ident_eq("inout") {
+                CastMethod::WithInout
+            } else {
+                self.expect_ident_eq("function")?;
+                let signature = self.routine_signature()?;
+                CastMethod::WithFunction {
+                    name: signature.name,
+                    // The no-parentheses spelling of `function_with_argtypes`
+                    // names the routine alone, and arrives as an empty list.
+                    args: signature
+                        .args
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|arg| arg.ty.name)
+                        .collect(),
+                }
+            }
+        } else {
+            self.expect_ident_eq("without")?;
+            self.expect_ident_eq("function")?;
+            CastMethod::WithoutFunction
+        };
+        let context = self.cast_context()?;
+        Ok(crate::ast::Statement::CreateCast {
+            source,
+            target,
+            method,
+            context,
+        })
+    }
+
+    /// `DROP CAST [IF EXISTS] (source AS target) [CASCADE | RESTRICT]`.
+    fn drop_cast(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect(&Token::Keyword(Keyword::Cast))?;
+        let if_exists = self.eat_if_exists();
+        let (source, target) = self.cast_type_pair()?;
+        let cascade = self.eat_drop_behavior();
+        Ok(crate::ast::Statement::DropCast {
+            source,
+            target,
+            if_exists,
+            cascade,
+        })
+    }
+
+    /// `(source AS target)`: the operand pair both cast statements name. Each
+    /// side is an ordinary `Typename`, so a user-defined type resolves the same
+    /// way it does in `CREATE DOMAIN`.
+    fn cast_type_pair(
+        &mut self,
+    ) -> Result<(crabka_pgtypes::ColumnType, crabka_pgtypes::ColumnType), ParseError> {
+        self.expect(&Token::LParen)?;
+        let source = self.parse_type_name()?;
+        self.expect(&Token::Keyword(Keyword::As))?;
+        let target = self.parse_type_name()?;
+        self.expect(&Token::RParen)?;
+        Ok((source, target))
+    }
+
+    /// `cast_context: AS ASSIGNMENT | AS IMPLICIT | <empty>`.
+    fn cast_context(&mut self) -> Result<crate::ast::CastContext, ParseError> {
+        use crate::ast::CastContext;
+
+        if !self.eat_keyword(Keyword::As) {
+            return Ok(CastContext::Explicit);
+        }
+        if self.eat_ident_eq("assignment") {
+            return Ok(CastContext::Assignment);
+        }
+        if self.eat_ident_eq("implicit") {
+            return Ok(CastContext::Implicit);
+        }
+        Err(ParseError::new(
+            format!(
+                "expected ASSIGNMENT or IMPLICIT after AS, found {:?}",
+                self.peek()
+            ),
+            self.peek_pos(),
+        ))
     }
 
     /// `CREATE DOMAIN name [AS] base [DEFAULT e] [[NOT] NULL] [CHECK (…)] …`.
@@ -13911,8 +14103,10 @@ impl Parser {
     fn routine_type(&mut self) -> Result<crate::ast::RoutineType, ParseError> {
         use crate::ast::RoutineType;
         let start = self.pos;
+        // One-based, as `PostgreSQL` reports every error position.
+        let location = self.peek_pos() + 1;
         if let Ok(ty) = self.parse_type_name() {
-            return Ok(RoutineType::builtin(ty, ty.name().to_string()));
+            return Ok(RoutineType::builtin(ty, ty.name().to_string()).at(location));
         }
         self.pos = start;
         let mut name = self.routine_name()?;
@@ -13926,7 +14120,7 @@ impl Parser {
             self.expect(&Token::RBracket)?;
             name.push_str("[]");
         }
-        Ok(RoutineType::named(name))
+        Ok(RoutineType::named(name).at(location))
     }
 
     /// Is the current token a word that ends a routine parameter?
@@ -16674,6 +16868,249 @@ mod tests {
                 ..
             } if name == "C"
         ));
+    }
+
+    /// The `CreateTypeDefinition` a `CREATE TYPE` produces.
+    fn create_type_definition(sql: &str) -> crate::ast::CreateTypeDefinition {
+        match one(sql) {
+            Statement::CreateType { definition, .. } => definition,
+            other => panic!("expected CREATE TYPE, got {other:?}: {sql}"),
+        }
+    }
+
+    /// One `option = value` pair, written the way the test reads.
+    fn base_option(
+        name: &str,
+        value: crate::ast::BaseTypeOptionValue,
+    ) -> crate::ast::BaseTypeOption {
+        crate::ast::BaseTypeOption {
+            name: name.to_string(),
+            value,
+        }
+    }
+
+    /// `AS` is the whole of what tells `CREATE TYPE`'s parenthesised forms
+    /// apart: with it the list is a composite's fields, without it the list is
+    /// a base type's options, and with neither the statement is a shell type.
+    #[test]
+    fn create_type_without_as_is_a_shell_or_a_base_type() {
+        use assert2::assert;
+
+        use crate::ast::{BaseTypeOptionValue as Value, CreateTypeDefinition};
+
+        assert!(create_type_definition("create type xfloat4") == CreateTypeDefinition::Shell);
+        assert!(
+            create_type_definition(
+                "create type xfloat4 (input = xfloat4in, output = xfloat4out, like = float4)"
+            ) == CreateTypeDefinition::Base(vec![
+                base_option("input", Value::Name("xfloat4in".into())),
+                base_option("output", Value::Name("xfloat4out".into())),
+                base_option("like", Value::Name("float4".into())),
+            ])
+        );
+        // The same parenthesis after `AS` is still a composite's field list.
+        assert!(matches!(
+            create_type_definition("create type t as (a int4)"),
+            CreateTypeDefinition::Composite(fields) if fields.len() == 1
+        ));
+    }
+
+    /// The two base types `create_type.sql` declares, whose option lists cover
+    /// every `def_arg` shape the regression suite writes.
+    #[test]
+    fn base_type_definitions_carry_every_def_arg_shape() {
+        use assert2::assert;
+
+        use crate::ast::{BaseTypeOptionValue as Value, CreateTypeDefinition};
+
+        let cases: &[(&str, CreateTypeDefinition)] = &[
+            (
+                "CREATE TYPE widget (internallength = 24, input = widget_in, output = \
+                 widget_out, typmod_in = numerictypmodin, typmod_out = numerictypmodout, \
+                 alignment = double)",
+                CreateTypeDefinition::Base(vec![
+                    base_option("internallength", Value::Int(24)),
+                    base_option("input", Value::Name("widget_in".into())),
+                    base_option("output", Value::Name("widget_out".into())),
+                    base_option("typmod_in", Value::Name("numerictypmodin".into())),
+                    base_option("typmod_out", Value::Name("numerictypmodout".into())),
+                    base_option("alignment", Value::Name("double".into())),
+                ]),
+            ),
+            (
+                "CREATE TYPE city_budget (internallength = 16, input = int44in, output = \
+                 int44out, element = int4, category = 'x', preferred = true)",
+                CreateTypeDefinition::Base(vec![
+                    base_option("internallength", Value::Int(16)),
+                    base_option("input", Value::Name("int44in".into())),
+                    base_option("output", Value::Name("int44out".into())),
+                    base_option("element", Value::Name("int4".into())),
+                    base_option("category", Value::Str("x".into())),
+                    base_option("preferred", Value::Bool(true)),
+                ]),
+            ),
+            // `PASSEDBYVALUE` is written with no `=` at all, which PostgreSQL
+            // records as a null argument — not as the NONE keyword.
+            (
+                "CREATE TYPE t (passedbyvalue, internallength = variable, receive = none, \
+                 collatable = FALSE, delimiter = ',', default = -1, input = pg_catalog.int4in)",
+                CreateTypeDefinition::Base(vec![
+                    base_option("passedbyvalue", Value::Omitted),
+                    base_option("internallength", Value::Name("variable".into())),
+                    base_option("receive", Value::None),
+                    base_option("collatable", Value::Bool(false)),
+                    base_option("delimiter", Value::Str(",".into())),
+                    base_option("default", Value::Int(-1)),
+                    base_option("input", Value::Name("pg_catalog.int4in".into())),
+                ]),
+            ),
+            // Quoting strips a word of every keyword property and keeps its
+            // case, on both sides of the `=`; an unquoted word is folded down.
+            (
+                "CREATE TYPE t (\"Input\" = \"MyFunc\", LIKE = FLOAT4)",
+                CreateTypeDefinition::Base(vec![
+                    base_option("input", Value::Name("MyFunc".into())),
+                    base_option("like", Value::Name("float4".into())),
+                ]),
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(create_type_definition(sql) == *expected, "{sql}");
+        }
+    }
+
+    /// `definition: '(' def_list ')'` has a one-or-more `def_list`, so the
+    /// empty list `PostgreSQL` refuses is refused here too.
+    #[test]
+    fn create_type_rejects_an_empty_definition_list() {
+        use assert2::assert;
+
+        assert!(parse("CREATE TYPE t ()").is_err());
+    }
+
+    /// The `CreateCast` statement a `CREATE CAST` produces.
+    fn create_cast(sql: &str) -> Statement {
+        match one(sql) {
+            statement @ Statement::CreateCast { .. } => statement,
+            other => panic!("expected CREATE CAST, got {other:?}: {sql}"),
+        }
+    }
+
+    #[test]
+    fn create_cast_parses_every_method_and_context() {
+        use assert2::assert;
+
+        use crate::ast::{CastContext, CastMethod};
+
+        let cases: &[(&str, CastMethod, CastContext)] = &[
+            (
+                "create cast (int4 as text) without function",
+                CastMethod::WithoutFunction,
+                CastContext::Explicit,
+            ),
+            (
+                "create cast (int4 as text) without function as assignment",
+                CastMethod::WithoutFunction,
+                CastContext::Assignment,
+            ),
+            (
+                "create cast (int4 as text) with inout as implicit",
+                CastMethod::WithInout,
+                CastContext::Implicit,
+            ),
+            (
+                // A built-in argument type is spelled back the way every other
+                // routine signature spells it, so `int4` is recorded `integer`.
+                "create cast (int4 as text) with function xfloat4out(int4)",
+                CastMethod::WithFunction {
+                    name: "xfloat4out".into(),
+                    args: vec!["integer".into()],
+                },
+                CastContext::Explicit,
+            ),
+            (
+                "create cast (int4 as text) with function xfloat4out(int4, text) as assignment",
+                CastMethod::WithFunction {
+                    name: "xfloat4out".into(),
+                    args: vec!["integer".into(), "text".into()],
+                },
+                CastContext::Assignment,
+            ),
+            (
+                // `function_with_argtypes` also has a no-parentheses spelling,
+                // which names the routine and leaves the list empty.
+                "create cast (int4 as text) with function xfloat4out",
+                CastMethod::WithFunction {
+                    name: "xfloat4out".into(),
+                    args: Vec::new(),
+                },
+                CastContext::Explicit,
+            ),
+        ];
+        for (sql, method, context) in cases {
+            assert!(
+                create_cast(sql)
+                    == Statement::CreateCast {
+                        source: ColumnType::Int4,
+                        target: ColumnType::Text,
+                        method: method.clone(),
+                        context: *context,
+                    },
+                "{sql}"
+            );
+        }
+
+        // `AS` must introduce one of the two contexts PostgreSQL names.
+        assert!(parse("create cast (int4 as text) without function as sometimes").is_err());
+    }
+
+    #[test]
+    fn drop_cast_parses_if_exists_and_drop_behaviour() {
+        use assert2::assert;
+
+        // (SQL, if_exists, cascade)
+        let cases: &[(&str, bool, bool)] = &[
+            ("drop cast (int4 as text)", false, false),
+            ("drop cast (int4 as text) restrict", false, false),
+            ("drop cast (int4 as text) cascade", false, true),
+            ("drop cast if exists (int4 as text)", true, false),
+            ("drop cast if exists (int4 as text) cascade", true, true),
+        ];
+        for (sql, if_exists, cascade) in cases {
+            assert!(
+                one(sql)
+                    == Statement::DropCast {
+                        source: ColumnType::Int4,
+                        target: ColumnType::Text,
+                        if_exists: *if_exists,
+                        cascade: *cascade,
+                    },
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn cast_ddl_carries_its_own_command_identity() {
+        use assert2::assert;
+
+        use crate::command::CommandIdentity;
+
+        let cases: &[(&str, CommandIdentity)] = &[
+            (
+                "create cast (int4 as text) without function",
+                CommandIdentity::CreateCast,
+            ),
+            ("drop cast (int4 as text)", CommandIdentity::DropCast),
+        ];
+        for (sql, expected) in cases {
+            let parsed =
+                parse_with_command_identities(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+            assert!(parsed.len() == 1, "{sql}");
+            assert!(parsed[0].1 == *expected, "{sql}");
+        }
+        assert!(CommandIdentity::CreateCast.name() == "CREATE CAST");
+        assert!(CommandIdentity::DropCast.name() == "DROP CAST");
     }
 
     #[test]

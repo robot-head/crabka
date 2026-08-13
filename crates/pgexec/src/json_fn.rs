@@ -3378,6 +3378,9 @@ fn datum_text(d: &Datum, ctx: &EvalCtx) -> String {
         date_order: ctx.date_order,
         interval_style: ctx.interval_style,
         extra_float_digits: ctx.extra_float_digits,
+        // A `bytea` inside JSON is rendered by `byteaout` like any other, so it
+        // follows `bytea_output` even though the date spelling is pinned above.
+        bytea_output: ctx.bytea_output,
     };
     String::from_utf8(crabka_pgtypes::encoding::encode_text_in(d, style))
         .expect("a Datum's text encoding is always valid UTF-8")

@@ -7,7 +7,7 @@
 
 use crate::{
     numeric::{NumericValue, Typmod},
-    usertype::{DomainRef, MultirangeRef, RangeRef, UserTypeRef},
+    usertype::{BaseRef, DomainRef, MultirangeRef, RangeRef, UserTypeRef},
 };
 
 /// PostgreSQL type OIDs (from pg_type.dat) for the slice's types.
@@ -418,7 +418,10 @@ impl ElemType {
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
-            | ColumnType::Domain(_) => return None,
+            | ColumnType::Domain(_)
+            // A user-defined base type gets no array companion, for the same
+            // reason a composite, an enum and a domain get none.
+            | ColumnType::Base(_) => return None,
             ColumnType::Range(range) => {
                 let elem = ElemType::Range(range);
                 if elem.array_oid() == 0 {
@@ -610,7 +613,7 @@ impl ElemType {
             *cursor = rest;
             let oid = u32::from_be_bytes(bytes.try_into().ok()?);
             return match ColumnType::builtin_range(oid)
-                .or_else(|| crate::usertype::lookup_oid(oid).map(|ty| ty.column_type()))?
+                .or_else(|| crate::usertype::lookup_oid(oid).and_then(|ty| ty.column_type()))?
             {
                 ColumnType::Range(range) => Some(ElemType::Range(range)),
                 _ => None,
@@ -873,6 +876,11 @@ pub enum ColumnType {
     /// base type's values; what the domain adds is the constraint check on
     /// assignment and cast, and the type it reports.
     Domain(DomainRef),
+    /// `CREATE TYPE name (INPUT = …, OUTPUT = …, LIKE = …)` — a user-defined
+    /// base type. Values are held in the representation type's `Datum`, which
+    /// is what `LIKE` selects; the base type adds a distinct identity, its own
+    /// I/O pair, and no automatic conversion to or from anything.
+    Base(BaseRef),
 }
 
 impl ColumnType {
@@ -1163,6 +1171,7 @@ impl ColumnType {
             ColumnType::Range(range) => range.oid,
             ColumnType::Multirange(multirange) => multirange.oid,
             ColumnType::Domain(domain) => domain.oid,
+            ColumnType::Base(base) => base.oid,
         }
     }
 
@@ -1236,6 +1245,7 @@ impl ColumnType {
             ColumnType::Range(range) => range.name,
             ColumnType::Multirange(multirange) => multirange.name,
             ColumnType::Domain(domain) => domain.name,
+            ColumnType::Base(base) => base.name,
         }
     }
 
@@ -1308,6 +1318,8 @@ impl ColumnType {
             ColumnType::Range(_) | ColumnType::Multirange(_) => -1,
             // A domain has its base type's storage.
             ColumnType::Domain(domain) => domain.base.type_size(),
+            // `LIKE = float4` copies `float4`'s `typlen`, which is what this is.
+            ColumnType::Base(base) => base.representation.type_size(),
         }
     }
 

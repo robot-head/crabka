@@ -488,7 +488,74 @@ fn resolve_type(
     {
         return Ok(RoutineType::named(lowered));
     }
+    // A shell type resolves nowhere else — it has no `ColumnType`, so the
+    // parser could not have resolved it — but a routine signature is precisely
+    // what a shell exists to be named in. `CREATE TYPE xfloat4;` then
+    // `xfloat4in(cstring) RETURNS xfloat4` is the two-phase definition every
+    // base type needs, and refusing here would close it before it opened.
+    if shell_type_named(kv, &lowered) {
+        return Ok(RoutineType::named(lowered));
+    }
     Err(undefined_type(&ty.name, quoted))
+}
+
+/// The `NOTICE`s `CREATE FUNCTION` emits when its signature names a shell type.
+///
+/// PostgreSQL reports the two ends differently, and the difference is not
+/// cosmetic: an argument type carries a parse location, so the client draws a
+/// `LINE`/caret under it, while the return type is resolved by
+/// `compute_return_type`, which has none.
+///
+/// Computed from the statement before it runs, like every other precomputed
+/// notice, because a shell that the statement itself completes would no longer
+/// be one afterwards. A catalog read that fails reports no shell rather than
+/// failing the statement: the notice is advisory, and the DDL itself will
+/// raise whatever the same failed read causes there.
+pub(crate) fn shell_type_notices(
+    kv: &dyn Kv,
+    stmt: &crabka_pgparser::ast::Statement,
+) -> Vec<crabka_pgwire::error::PgError> {
+    use crabka_pgparser::ast::{RoutineReturn, Statement};
+    let Statement::CreateRoutine(create) = stmt else {
+        return Vec::new();
+    };
+    let mut notices = Vec::new();
+    if let RoutineReturn::Type { ty, .. } = &create.returns
+        && shell_type_named(kv, &ty.name.to_ascii_lowercase())
+    {
+        notices.push(crabka_pgwire::error::PgError::notice(format!(
+            "return type {} is only a shell",
+            ty.name
+        )));
+    }
+    for arg in &create.args {
+        if !shell_type_named(kv, &arg.ty.name.to_ascii_lowercase()) {
+            continue;
+        }
+        let notice = crabka_pgwire::error::PgError::notice(format!(
+            "argument type {} is only a shell",
+            arg.ty.name
+        ));
+        notices.push(match arg.ty.location {
+            Some(location) => notice.with_position(location),
+            None => notice,
+        });
+    }
+    notices
+}
+
+/// Whether `name` is a registered shell type, matched the way a routine
+/// signature resolves: unqualified names come from `public`.
+pub(crate) fn shell_type_named(kv: &dyn Kv, name: &str) -> bool {
+    let (schema, bare) = match name.split_once('.') {
+        Some((schema, bare)) => (schema, bare),
+        None => (crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA, name),
+    };
+    crabka_pgcatalog::list_user_types(kv).is_ok_and(|types| {
+        types
+            .iter()
+            .any(|ty| ty.is_shell() && ty.schema == schema && ty.name == bare)
+    })
 }
 
 /// The routine kind a `CREATE`/`DROP`/`ALTER` spelling selects.

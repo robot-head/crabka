@@ -790,7 +790,7 @@ pub(crate) fn rows(
         "pg_proc" => crate::routine::pg_proc_rows(kv),
         "pg_attrdef" => pg_attrdef_rows(kv, style),
         "pg_authid" => pg_authid_rows(kv),
-        "pg_cast" => Ok(pg_cast_rows()),
+        "pg_cast" => pg_cast_rows(kv),
         "pg_collation" => Ok(pg_collation_rows()),
         "pg_constraint" => pg_constraint_rows(kv),
         "pg_conversion" => Ok(pg_conversion_rows()),
@@ -876,8 +876,11 @@ fn builtin_pg_aggregate_rows() -> Vec<Vec<Datum>> {
         .collect()
 }
 
-fn pg_cast_rows() -> Vec<Vec<Datum>> {
-    crate::builtin_casts::BUILTIN_CASTS
+/// `pg_cast`: the generated built-in rows, then whatever `CREATE CAST`
+/// recorded. A declared cast that the cast path honours but `pg_cast` does not
+/// show would be a catalog that disagrees with the engine.
+fn pg_cast_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows: Vec<Vec<Datum>> = crate::builtin_casts::BUILTIN_CASTS
         .iter()
         .map(|&(oid, source, target, function, context, method)| {
             vec![
@@ -889,7 +892,20 @@ fn pg_cast_rows() -> Vec<Vec<Datum>> {
                 text(method),
             ]
         })
-        .collect()
+        .collect();
+    for cast in crabka_pgcatalog::list_user_casts(kv)? {
+        rows.push(vec![
+            int(i32::try_from(cast.oid).unwrap_or(0)),
+            int(i32::try_from(cast.source).unwrap_or(0)),
+            int(i32::try_from(cast.target).unwrap_or(0)),
+            // `WITHOUT FUNCTION` is the only method gres records, so `castfunc`
+            // is always 0 — exactly what PostgreSQL writes for a binary cast.
+            int(0),
+            text(&cast.context.to_string()),
+            text(&cast.method.to_string()),
+        ]);
+    }
+    Ok(rows)
 }
 
 fn pg_conversion_rows() -> Vec<Vec<Datum>> {

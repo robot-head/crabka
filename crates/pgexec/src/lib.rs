@@ -54,6 +54,7 @@ mod builtin_operators;
 mod builtin_opfamilies;
 mod builtin_proc_descriptions;
 mod builtin_procs;
+mod bytea_fn;
 mod catalog_fn;
 mod catalog_rel;
 pub mod clock;
@@ -123,6 +124,7 @@ pub mod timestamp_txn;
 mod trigger;
 pub mod ts_gc;
 mod useragg;
+mod usercast;
 mod useroperator;
 mod usertype;
 mod values;
@@ -2053,6 +2055,7 @@ impl SqlEngine {
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             extra_float_digits: 1,
+            bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             // No connection was ever opened for this write, so there is no
