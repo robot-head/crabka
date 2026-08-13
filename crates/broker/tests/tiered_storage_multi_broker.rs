@@ -12,8 +12,8 @@
 //! - a **shared** `Local` remote-storage backend, the same temp dir, on all
 //!   three
 //! - topic-backed RLMM. All clients bootstrap to broker 1's loopback port with
-//!   `num_partitions=1, replication=1`, so all metadata lives on broker 1's
-//!   partition 0.
+//!   `num_partitions=1, replication=3`, so topic creation waits until every
+//!   broker is registered and broker 1 deterministically leads partition 0.
 //!
 //! The test needs a **3-broker quorum**. After it kills the partition leader,
 //! broker 1, the surviving quorum of 2 out of 3 is still a majority and can
@@ -139,14 +139,15 @@ async fn start_three_tiered_brokers() -> (
             cfg.remote_log_manager_interval = crabka_units::secs(1);
             // RLMM: all 3 brokers bootstrap into broker 1's loopback.
             // num_partitions=1 keeps all metadata on a single partition.
-            // replication=1: partition 0 lives exclusively on broker 1.
+            // replication=3 prevents the topic from being created before all
+            // brokers are registered; sorted placement makes broker 1 leader.
             // Broker 2's RLMM consumer reads CopySegment events from broker 1
             // before broker 1 dies; the cached metadata is then used for remote
             // reads from the survivor.
             cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
                 bootstrap: format!("127.0.0.1:{}", client_addrs[0].port()),
                 num_partitions: 1,
-                replication: 1,
+                replication: 3,
                 snapshot_interval: crabka_units::hours(1),
                 snapshot_dir: std::path::PathBuf::new(), // derived from log_dir
                 security: None,
@@ -464,7 +465,7 @@ async fn produce_and_await_remote_segments(admin: &Client, remote_dir: &std::pat
 
 /// In-process multi-broker tiered metadata-sharing proof.
 ///
-/// Three brokers share a `Local` remote tier and a topic-backed RLMM with rf=2
+/// Three brokers share a `Local` remote tier and a topic-backed RLMM with rf=3
 /// metadata replication. Broker 1 leads the rf=2 user partition and runs the
 /// RLM copy task. Broker 2 only consumes `__remote_log_metadata` to learn the
 /// segment locations. After broker 1 shuts down, the surviving 2-out-of-3
@@ -524,7 +525,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
     produce_and_await_remote_segments(&admin, remote_dir.path()).await;
 
     // Give the RLMM time to propagate CopySegment metadata to the follower via
-    // __remote_log_metadata (rf=2).  Interval=1s → 8 ticks plus consume latency.
+    // __remote_log_metadata (rf=3).  Interval=1s → 8 ticks plus consume latency.
     // intentional: the follower's RLMM consumer catching up on
     // __remote_log_metadata has no metadata-image/metric signal to await;
     // wait a fixed propagation window before killing the leader.
@@ -596,7 +597,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
         served >= RECORDS,
         "expected >= {RECORDS} records served by the surviving broker via the remote tier; \
          got {served}. The survivor (broker{follower_node_id}) should have learned segment \
-         locations from __remote_log_metadata (rf=2) without having run the copy task itself."
+         locations from __remote_log_metadata (rf=3) without having run the copy task itself."
     );
 
     // Shut down surviving brokers.
