@@ -13,9 +13,9 @@ tools/check-pg-compat-matrix.sh
 
 ## Current G-1/G-2 baseline
 
-The authoritative PostgreSQL 18.4 core-schedule score is **44 / 231 exact in
+The authoritative PostgreSQL 18.4 core-schedule score is **46 / 231 exact in
 serial**, under the runner's explicit 20 MiB blocking-query memory policy,
-leaving 187 failures across **117,554 changed lines**. Both PostgreSQL
+leaving 185 failures across **115,371 changed lines**. Both PostgreSQL
 self-checks pass 231 / 231, Gres completes all 231 files, and the
 infrastructure report is empty. The checked-in floor in
 [`pg-regress-baseline.json`](../crates/gres-conformance/pg-regress-baseline.json)
@@ -25,22 +25,22 @@ file longer than recorded.
 Parallel mode has not been re-measured since the type-input wave; its last
 certified figure was 22 / 231 at 177,530 changed lines.
 
-### What the remaining 117,554 lines are
+### What the remaining 115,371 lines are
 
 Classified per changed line, not per file — a file is not "an EXPLAIN problem"
 because one hunk of it prints a plan:
 
 ```text
-data / other output                73,012   66.4%
-EXPLAIN / plan text                15,448   14.1%
-other ERROR: line                   7,287    6.6%
-missing object or function          5,745    5.2%
-DETAIL / HINT / LINE / CONTEXT      4,531    4.1%
-syntax error                        2,957    2.7%
-deliberate: refused by design         904    0.8%
+data / other output                71,299   66.0%
+EXPLAIN / plan text                15,436   14.3%
+other ERROR: line                   7,200    6.7%
+missing object or function          5,670    5.3%
+DETAIL / HINT / LINE / CONTEXT      4,491    4.2%
+syntax error                        2,970    2.8%
+deliberate: refused by design         933    0.9%
 ```
 
-**Only 0.8% of the gap is refused by design.** That is the honest answer to
+**Only 0.9% of the gap is refused by design.** That is the honest answer to
 "how much of this is a design difference": almost none of it. The rows that
 say so out loud — `database lifecycle is managed by tenant provisioning`,
 partial indexes, foreign-data wrappers — total 904 lines.
