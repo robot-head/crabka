@@ -26,6 +26,15 @@ concurrency:
 permissions:
   contents: read
 
+# Fetch git dependencies with the system `git` client, not the libgit2 client
+# cargo links in. See the long note on this setting in `ci.yml`: libgit2 failed
+# twice in 24 days inside the `datafusion` git pin's test-data submodules, with
+# "the SSL certificate is invalid; class=Ssl (16)", and cargo's own diagnostic
+# recommends this switch. The cargo jobs below all resolve the workspace, so
+# any of them can hit that clone.
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   metrics-differential:
     runs-on: ubuntu-latest
@@ -47,7 +56,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: metrics-differential
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          # Pinned, not `@latest`: see the note in `ci.yml`. A moving test
+          # runner is a silent change to how the suite is selected and retried.
+          tool: cargo-nextest@0.9.143
       # The in-process Crabka server binds the host; the Grafana container dials
       # it back via the advertised `host.docker.internal` datasource URL. On
       # Linux runners the host has no such resolution, so add it (same trick the

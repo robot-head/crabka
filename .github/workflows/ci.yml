@@ -21,6 +21,31 @@ concurrency:
 env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Fetch git dependencies with the system `git` client instead of the libgit2
+  # client that cargo links in.
+  #
+  # `crates/blockstore` pins `datafusion` to an apache/datafusion `main`
+  # revision. That repository carries three test-data submodules
+  # (parquet-testing, arrow-testing and datafusion-testing, about 340 MB
+  # together). Cargo clones all three. Nothing in this workspace reads them,
+  # but cargo gives no way to skip the submodules of a git dependency:
+  # measured against cargo 1.97.1 on 2026-08-13, `submodule.<name>.update =
+  # none` in the git config has no effect, and neither does this setting --
+  # both configurations still walk into the submodule.
+  #
+  # Measured on 2026-08-13 over 1000 ci runs (2026-07-21 to 2026-08-13, 27,606
+  # jobs): that clone failed twice, and both failures came out of libgit2's own
+  # TLS stack -- "failed to fetch submodule `parquet-testing` ... the SSL
+  # certificate is invalid; class=Ssl (16)" (jobs 93943447635 and
+  # 94016371154). Cargo's own diagnostic recommends this switch. The system git
+  # client uses the OS CA bundle and its own transport, so it does not share
+  # that failure. This takes one client out of the path. It is not a retry, and
+  # it does not help when GitHub itself is unreachable.
+  #
+  # One expected cost, once: Swatinem/rust-cache hashes the CARGO_* environment
+  # into its cache key, so the first run after this lands misses every rust
+  # cache and rebuilds it. That is the same cost as one Cargo.lock bump.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   changes:
@@ -356,9 +381,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}-rust
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      # cargo-llvm-cov and cargo-nextest are pinned here and below, not left
+      # on `@latest`.
+      #
+      # The `taiki-e/install-action@cargo-llvm-cov` tag is a moving tag. It
+      # installs whatever version the action calls latest on the day the job
+      # runs. Coverage is a gate in this workflow (a codecov flag per job), so
+      # a silent cargo-llvm-cov upgrade can move the numbers with no commit to
+      # point at. These pins name the versions CI already installed on
+      # 2026-08-12. Renovate bumps them like any other dependency.
+      #
+      # The pin does NOT protect against a GitHub CDN outage, and it is not
+      # meant to. install-action downloads the release tarball either way, and
+      # it already retries hard: an outer 10-attempt loop around `curl
+      # --retry 10`. In job 94246482239 on 2026-08-12 that spent 66 s on 503
+      # answers before it gave up with curl exit 56. The action's default
+      # `fallback: cargo-binstall` did not help, because the fallback only
+      # runs when the tool or the version is absent from the action's
+      # manifest, never on a download failure. An actions/cache layer was
+      # measured and left out: that download failed once in 27,606 ci jobs
+      # over 24 days, and the install itself takes 211 ms, so a cache would
+      # add a round trip and save nothing.
+      - uses: taiki-e/install-action@v2
         if: matrix.os == 'ubuntu-latest'
-      - uses: taiki-e/install-action@nextest
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
       # rustfmt runs on nightly so `format_code_in_doc_comments` (unstable, set in
       # rustfmt.toml) formats the code inside rustdoc examples too. Run this once
       # on Linux: `cargo fmt --all` can exceed Windows' process command-line limit
@@ -435,12 +485,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: jvm-differential
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
+          # `cache: gradle` keys a cache of ~/.gradle on tools/oracle's build
+          # scripts and wrapper properties, so a warm run downloads neither the
+          # Gradle distribution nor the oracle's Maven dependencies. Without
+          # it, every run of this job re-downloads both, and that download is
+          # the same single point of failure the pinned tool installs above
+          # describe: on 2026-08-12 it died twice with "curl: (56) Connection
+          # died, tried 5 times before giving up" (jobs 94269069069 and
+          # 94273891809), before a line of Rust or Java was compiled.
+          # `.github/workflows/sdk-java.yml` already caches this way.
+          cache: gradle
       - run: (cd tools/oracle && ./gradlew installDist --no-daemon)
       # Select the JVM-oracle targets explicitly. A workspace-wide
       # `--include-ignored` sweep also runs thousands of ordinary tests and
@@ -725,8 +786,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-core-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Client core integration coverage
         run: |
           mkdir -p coverage
@@ -765,8 +827,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: log-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Log integration coverage
         run: |
           mkdir -p coverage
@@ -807,8 +870,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-consumer-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Client consumer integration coverage
         run: |
           mkdir -p coverage
@@ -850,8 +914,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-streams-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
@@ -926,8 +991,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: grpc-gateway-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: gRPC gateway integration coverage
         run: |
           mkdir -p coverage
@@ -972,8 +1038,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: schema-registry-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Schema registry integration coverage
         run: |
           mkdir -p coverage
@@ -1019,8 +1086,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: traces-conformance
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: TraceQL conformance gate coverage
         run: |
           mkdir -p coverage
@@ -1075,7 +1143,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-conformance
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
       - name: Configure end-to-end coverage instrumentation
         run: |
           cargo llvm-cov show-env --sh > "$RUNNER_TEMP/cargo-llvm-cov-env.sh"
@@ -1300,8 +1370,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-integration
-      - uses: taiki-e/install-action@nextest
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Gres engine integration coverage
         run: |
           # Range process tests launch the service as a subprocess; nextest
@@ -1378,8 +1449,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: workspace-integration-${{ matrix.shard }}
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Build subprocess dependencies
         run: cargo build --locked -p crabka-cli --bin crabka -p crabka-gres --bin crabka-gres
       - name: Workspace integration coverage (shard ${{ matrix.shard }}/2)
@@ -1435,8 +1507,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: admin-ui-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Admin UI integration coverage
         run: |
           mkdir -p coverage
@@ -1528,8 +1601,9 @@ jobs:
       # inside containers resolve the same name via `--add-host`). The
       # host itself has no such resolution on Linux runners, so add it.
       - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Preload Docker images
         run: |
           docker pull mirror.gcr.io/confluentinc/cp-kafka:6.1.1
@@ -1601,8 +1675,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: broker-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Broker + client-admin integration coverage
         run: |
           mkdir -p coverage
@@ -1650,8 +1725,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: operator-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Operator reconcile integration coverage
         run: |
           mkdir -p coverage
@@ -1715,7 +1791,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: metrics-conformance
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
       - name: PromQL conformance gate
         run: cargo nextest run -p crabka-promql --profile ci --test conformance
       - name: Upload conformance report

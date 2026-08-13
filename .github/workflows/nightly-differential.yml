@@ -24,6 +24,15 @@ concurrency:
 permissions:
   contents: read
 
+# Fetch git dependencies with the system `git` client, not the libgit2 client
+# cargo links in. See the long note on this setting in `ci.yml`: libgit2 failed
+# twice in 24 days inside the `datafusion` git pin's test-data submodules, with
+# "the SSL certificate is invalid; class=Ssl (16)", and cargo's own diagnostic
+# recommends this switch. The cargo jobs below all resolve the workspace, so
+# any of them can hit that clone.
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   nightly:
     # The JVM-protocol differential sweep is scheduled/manual only; the
@@ -48,6 +57,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          # Cache ~/.gradle so a warm run downloads neither the Gradle
+          # distribution nor the oracle's Maven dependencies. That download is
+          # a network fetch before any compilation, and in ci.yml's
+          # jvm-differential job it died twice on 2026-08-12 with "curl: (56)
+          # Connection died". `sdk-java.yml` already caches this way.
+          cache: gradle
       - name: Build JVM oracle
         run: (cd tools/oracle && ./gradlew installDist --no-daemon)
       - name: Run parameterised differential sweep (release profile)
