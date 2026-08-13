@@ -606,7 +606,7 @@ jobs:
       CRABKA_GRES_SHARDED_CONFORMANCE_MODE: live
     services:
       postgres:
-        image: postgres:18
+        image: postgres:18.4
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -1040,7 +1040,7 @@ jobs:
           fail_ci_if_error: false
 
   # Crabka Gres conformance gate: build the vendored Postgres-compatible engine,
-  # run psql smoke coverage, then diff against a postgres:18 oracle with the
+  # run psql smoke coverage, then diff against a postgres:18.4 oracle with the
   # checked-in parity baseline. The parity reports are uploaded for triage.
   gres-conformance:
     needs: changes
@@ -1049,7 +1049,7 @@ jobs:
     timeout-minutes: 90
     services:
       oracle:
-        image: postgres:18
+        image: postgres:18.4
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
