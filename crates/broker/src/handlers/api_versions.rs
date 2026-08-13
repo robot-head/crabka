@@ -129,7 +129,7 @@ pub(crate) fn handle(
     let metrics = broker.metrics.clone();
     let image = broker.controller.current_image();
     let expected_cluster_id = image.cluster_id().to_string();
-    let expected_node_id = broker.config.broker_id;
+    let expected_node_id = i32::try_from(broker.config.node_id.0).ok();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ApiVersionsRequest::decode(&mut cur, version)?;
@@ -144,7 +144,7 @@ pub(crate) fn handle(
                 (None, -1) => None,
                 (Some(_), -1) | (None, _) => Some(codes::INVALID_REQUEST),
                 (Some(cluster_id), node_id)
-                    if cluster_id != &expected_cluster_id || node_id != expected_node_id =>
+                    if cluster_id != &expected_cluster_id || Some(node_id) != expected_node_id =>
                 {
                     Some(codes::REBOOTSTRAP_REQUIRED)
                 }
@@ -451,10 +451,12 @@ mod tests {
 
     #[tokio::test]
     async fn handle_applies_kip1242_routing_checks() {
-        let (broker_handle, _dir) = start_broker().await;
+        let (broker_handle, _dir) =
+            crate::test_support::start_broker_with(|cfg| cfg.broker_id = 42).await;
         let broker = broker_handle.broker_arc_for_test();
         let cluster_id = broker.controller.current_image().cluster_id().to_string();
-        let node_id = broker.config.broker_id;
+        let node_id = i32::try_from(broker.config.node_id.0).expect("node id fits Kafka wire");
+        assert!(node_id != broker.config.broker_id);
 
         for (request_cluster_id, request_node_id, expected_error) in [
             (None, -1, codes::NONE),
