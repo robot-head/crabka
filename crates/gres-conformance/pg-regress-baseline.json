@@ -121,10 +121,10 @@
       "sha256": "1139e1dc36e0bc28ba4779053dd212fac60477028c7b2fb91ab7f723238d685d"
     },
     "copy": {
-      "changed_lines": 51,
+      "changed_lines": 45,
       "expected": "copy.out",
-      "hunks": 6,
-      "sha256": "a5dcc2b683691b3733c30e486e1b214c2ca59fbb31a11729be4f78eb39caac4e"
+      "hunks": 5,
+      "sha256": "6c555f759c9eb9098f4a18615f72430fc569dee796624288404d8d2712b291ac"
     },
     "copy2": {
       "changed_lines": 506,
@@ -918,12 +918,6 @@
       "hunks": 10,
       "sha256": "c4a9ab36c52e87c7c1214d0a37f20df661b138d3619931daafe2d97175f58ac9"
     },
-    "tid": {
-      "changed_lines": 49,
-      "expected": "tid.out",
-      "hunks": 1,
-      "sha256": "27b617e84397e2641361788681b553fe8b05f6a6c47985f3e17c589fcdbf0710"
-    },
     "tidrangescan": {
       "changed_lines": 94,
       "expected": "tidrangescan.out",
@@ -1087,7 +1081,7 @@
       "sha256": "fba8d9ee23aaaa7ceebd026299b8d3cfcd1e9c96bc65a2b2f62bcd3bc100337c"
     }
   },
-  "passed": 50,
+  "passed": 51,
   "postgres_tag": "REL_18_4",
   "schedule": [
     "test_setup",
