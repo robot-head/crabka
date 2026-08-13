@@ -1,0 +1,42 @@
+# Cargo settings for this workspace. CI and local builds both read this file.
+
+# Fetch git dependencies with the system `git` client. Do not use the libgit2
+# client that cargo links in.
+#
+# `crates/blockstore` pins `datafusion` to an apache/datafusion `main`
+# revision. That repository carries three test-data submodules
+# (parquet-testing, arrow-testing and datafusion-testing, about 340 MB
+# together). Cargo clones all three. Nothing in this workspace reads them.
+# Cargo gives no way to skip the submodules of a git dependency: measured
+# against cargo 1.97.1 on 2026-08-13, `submodule.<name>.update = none` in the
+# git config has no effect, and neither does the setting below. Both
+# configurations still walk into the submodules.
+#
+# Measured on 2026-08-13 over 1000 ci runs (2026-07-21 to 2026-08-13, 27,606
+# jobs): that clone failed twice. Both failures came out of libgit2's own TLS
+# stack -- "failed to fetch submodule `parquet-testing` ... the SSL
+# certificate is invalid; class=Ssl (16)" (jobs 93943447635 and 94016371154).
+# Cargo's own diagnostic recommends this switch. Cargo prints two more lines,
+# `revision not found` and `network failure seems to have happened`. Those are
+# the generic wrapper around the TLS error. Read alone, they point at a GitHub
+# outage. There was none: the same runner had cloned this repository over
+# HTTPS ninety seconds earlier.
+#
+# The system git client uses the OS CA bundle and its own transport. It does
+# not share that failure. This setting removes one client from the path. It is
+# not a retry. It does not help if GitHub itself is unreachable.
+#
+# Why a config file and not a `CARGO_NET_GIT_FETCH_WITH_CLI` variable in each
+# workflow. Both work. This file is better for three reasons:
+#
+#   * `Swatinem/rust-cache` hashes the `CARGO_*` environment into its cache
+#     key. The variable therefore costs one cold rust-cache run in every
+#     workflow that sets it. This file does not change that key.
+#   * Local `cargo build` reads this file. A developer then gets the same
+#     fetch path as the runners.
+#   * One place to change, not thirteen workflow files.
+#
+# Read the two failures above before you delete this. The workflows no longer
+# set the variable, so there is no second copy.
+[net]
+git-fetch-with-cli = true

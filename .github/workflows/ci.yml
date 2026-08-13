@@ -8,9 +8,24 @@ permissions:
   contents: read
 
 # Cancel superseded PR runs; let pushes to main run to completion.
+#
+# The flag must stay conditional. `cancel-in-progress: true` cancels main too,
+# because the group key only separates main from the PR refs -- it does not
+# exempt it. Measured on 2026-08-13 over the last 500 ci runs (2026-08-02 to
+# 2026-08-13): 67 of them were pushes to main, and 28 of those 67 were
+# cancelled. Every cancelled main run is a commit with no coverage report,
+# because `codecov.yml` waits for all 18 uploads. `codecov/project` then has no
+# base to compare a later PR against, and fails that PR for a reason that has
+# nothing to do with its code.
+#
+# `github.ref != 'refs/heads/main'` is the whole predicate, because this
+# workflow has exactly two triggers: `pull_request` (ref `refs/pull/N/merge`)
+# and `push` to main. No tag and no release branch runs it -- confirmed over
+# the same 500 runs, where every push event was on main. Widen this expression
+# if a trigger is ever added.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Coverage builds with full DWARF debuginfo (debug=2) produce enormous
 # `-C instrument-coverage` test binaries that exhaust the runner's disk ("No
@@ -18,34 +33,17 @@ concurrency:
 # source-based coverage maps regions via the embedded `__llvm_covmap` sections,
 # NOT DWARF, so dropping to line tables roughly halves the binaries without
 # changing coverage results. (`line-tables-only` keeps file:line in backtraces.)
+#
+# These two stay environment variables on purpose. They fix a CI-only disk
+# problem. The same `[profile]` keys in `/.cargo/config.toml` would change
+# every local `cargo build` as well, which is not wanted. The git-fetch
+# setting is the other way round, so it lives in that file and not here. The
+# note there records the two libgit2 TLS failures behind it, and why a config
+# file costs less than a `CARGO_*` variable that `Swatinem/rust-cache` hashes
+# into its cache key.
 env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
-  # Fetch git dependencies with the system `git` client instead of the libgit2
-  # client that cargo links in.
-  #
-  # `crates/blockstore` pins `datafusion` to an apache/datafusion `main`
-  # revision. That repository carries three test-data submodules
-  # (parquet-testing, arrow-testing and datafusion-testing, about 340 MB
-  # together). Cargo clones all three. Nothing in this workspace reads them,
-  # but cargo gives no way to skip the submodules of a git dependency:
-  # measured against cargo 1.97.1 on 2026-08-13, `submodule.<name>.update =
-  # none` in the git config has no effect, and neither does this setting --
-  # both configurations still walk into the submodule.
-  #
-  # Measured on 2026-08-13 over 1000 ci runs (2026-07-21 to 2026-08-13, 27,606
-  # jobs): that clone failed twice, and both failures came out of libgit2's own
-  # TLS stack -- "failed to fetch submodule `parquet-testing` ... the SSL
-  # certificate is invalid; class=Ssl (16)" (jobs 93943447635 and
-  # 94016371154). Cargo's own diagnostic recommends this switch. The system git
-  # client uses the OS CA bundle and its own transport, so it does not share
-  # that failure. This takes one client out of the path. It is not a retry, and
-  # it does not help when GitHub itself is unreachable.
-  #
-  # One expected cost, once: Swatinem/rust-cache hashes the CARGO_* environment
-  # into its cache key, so the first run after this lands misses every rust
-  # cache and rebuilds it. That is the same cost as one Cargo.lock bump.
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   changes:

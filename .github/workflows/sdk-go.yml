@@ -13,15 +13,6 @@ concurrency:
   group: sdk-go-${{ github.ref }}
   cancel-in-progress: true
 
-# Fetch git dependencies with the system `git` client, not the libgit2 client
-# cargo links in. See the long note on this setting in `ci.yml`: libgit2 failed
-# twice in 24 days inside the `datafusion` git pin's test-data submodules, with
-# "the SSL certificate is invalid; class=Ssl (16)", and cargo's own diagnostic
-# recommends this switch. The cargo jobs below all resolve the workspace, so
-# any of them can hit that clone.
-env:
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-
 jobs:
   sdk-go:
     runs-on: ubuntu-latest

@@ -1,6 +1,10 @@
 target/
-.cargo/config.toml
 **/*.rs.bk
+
+# `/.cargo/config.toml` is TRACKED, and was ignored here until 2026-08-13. It
+# holds the git-fetch setting that thirteen workflow files used to repeat. Do
+# not ignore it again. An ignored config file never reaches the runners, so
+# the setting stops working with nothing to show for it.
 
 # Bazel convenience symlinks + local user settings
 /bazel-*
