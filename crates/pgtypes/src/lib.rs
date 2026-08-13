@@ -21,6 +21,7 @@ pub mod network;
 pub mod numeric;
 pub mod ops;
 pub mod range;
+pub mod shortest_dec;
 pub mod string;
 pub mod sysid;
 pub mod text_search;

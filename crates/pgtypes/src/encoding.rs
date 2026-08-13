@@ -307,14 +307,12 @@ pub const JSONB_BINARY_VERSION: u8 = 1;
 /// Version byte used by PostgreSQL's `jsonpath_send`/`jsonpath_recv` format.
 pub const JSONPATH_BINARY_VERSION: u8 = 1;
 
-/// Lay out a float the way `printf %g` does, which is what PostgreSQL's
-/// `float8out`/`float4out` produce: fixed-point while the decimal exponent is
-/// in `-4 .. digits`, scientific outside it with a signed two-digit exponent
-/// (`1e+16`, `1e-05`), and no trailing zeros either way.
+/// Lay out a float the way `printf %g` does: fixed-point while the decimal
+/// exponent is in `-4 .. digits`, scientific outside it with a signed
+/// two-digit exponent (`1e+16`, `1e-05`), and no trailing zeros either way.
 ///
-/// `shortest` supplies the `extra_float_digits >= 1` spelling — the shortest
-/// decimal that round-trips — as a `(mantissa, exponent)` pair plus its
-/// fixed-point layout, because Rust already computes both.
+/// Only the `extra_float_digits <= 0` path comes through here. The default
+/// path is Ryu's own layout, in [`crate::shortest_dec`].
 fn layout_g(mantissa: &str, exponent: i32, fixed: &str, digits: i32) -> String {
     if (-4..digits).contains(&exponent) {
         return fixed.to_string();
@@ -368,8 +366,9 @@ const FLOAT4_DIG: i32 = 6;
 
 /// PostgreSQL `float8out`. The IEEE specials are spelled exactly as PostgreSQL
 /// does (`Infinity`/`-Infinity`/`NaN`). `extra_float_digits >= 1` — the default
-/// since PG 12 — uses the shortest round-tripping decimal; `<= 0` rounds to
-/// `DBL_DIG + extra_float_digits` significant digits.
+/// since PG 12 — takes PostgreSQL's own Ryu spelling from
+/// [`crate::shortest_dec`]; `<= 0` rounds to `DBL_DIG + extra_float_digits`
+/// significant digits.
 fn encode_float8_text(f: f64, extra_float_digits: i32) -> String {
     if f.is_nan() {
         return "NaN".to_string();
@@ -383,14 +382,7 @@ fn encode_float8_text(f: f64, extra_float_digits: i32) -> String {
             usize::try_from(FLOAT8_DIG + extra_float_digits).unwrap_or(1),
         );
     }
-    let scientific = format!("{f:e}");
-    let (mantissa, exponent) = scientific
-        .split_once('e')
-        .expect("Rust's LowerExp always emits an `e`");
-    let exponent: i32 = exponent
-        .parse()
-        .expect("Rust's LowerExp exponent is a decimal integer");
-    layout_g(mantissa, exponent, &format!("{f}"), FLOAT8_DIG)
+    crate::shortest_dec::float8_shortest(f)
 }
 
 /// PostgreSQL `float4out`, the `f32` counterpart of [`encode_float8_text`].
@@ -407,14 +399,7 @@ fn encode_float4_text(f: f32, extra_float_digits: i32) -> String {
             usize::try_from(FLOAT4_DIG + extra_float_digits).unwrap_or(1),
         );
     }
-    let scientific = format!("{f:e}");
-    let (mantissa, exponent) = scientific
-        .split_once('e')
-        .expect("Rust's LowerExp always emits an `e`");
-    let exponent: i32 = exponent
-        .parse()
-        .expect("Rust's LowerExp exponent is a decimal integer");
-    layout_g(mantissa, exponent, &format!("{f}"), FLOAT4_DIG)
+    crate::shortest_dec::float4_shortest(f)
 }
 
 /// PostgreSQL binary-format encoding of a (non-null) value.
