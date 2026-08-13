@@ -657,7 +657,13 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
             ) {
                 return Err(unsupported_field(field, "date"));
             }
-            match non_finite_field(unit, crabka_pgtypes::datetime::date_infinite_sign(*d)) {
+            match non_finite_field(
+                unit,
+                field,
+                crabka_pgtypes::datetime::date_infinite_sign(*d),
+                NonFiniteKind::Datetime,
+                "date",
+            )? {
                 NonFinite::Value(text) => return Ok(Some(text)),
                 NonFinite::Null => return Ok(None),
                 NonFinite::Finite => {}
@@ -676,7 +682,13 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
             extract_from_datetime(unit, dt, None, "date").map(Some)
         }
         Datum::Timestamp(dt) => {
-            match non_finite_field(unit, crabka_pgtypes::datetime::timestamp_infinite_sign(*dt)) {
+            match non_finite_field(
+                unit,
+                field,
+                crabka_pgtypes::datetime::timestamp_infinite_sign(*dt),
+                NonFiniteKind::Datetime,
+                "timestamp without time zone",
+            )? {
                 NonFinite::Value(text) => return Ok(Some(text)),
                 NonFinite::Null => return Ok(None),
                 NonFinite::Finite => {}
@@ -686,8 +698,11 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
         Datum::Timestamptz(ts) => {
             match non_finite_field(
                 unit,
+                field,
                 crabka_pgtypes::datetime::timestamptz_infinite_sign(*ts),
-            ) {
+                NonFiniteKind::Datetime,
+                "timestamp with time zone",
+            )? {
                 NonFinite::Value(text) => return Ok(Some(text)),
                 NonFinite::Null => return Ok(None),
                 NonFinite::Finite => {}
@@ -702,7 +717,13 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
             extract_from_datetime(unit, dt, Some(off_secs), "timestamp with time zone").map(Some)
         }
         Datum::Interval(iv) => {
-            match non_finite_field(unit, iv.infinite_sign()) {
+            match non_finite_field(
+                unit,
+                field,
+                iv.infinite_sign(),
+                NonFiniteKind::Interval,
+                "interval",
+            )? {
                 NonFinite::Value(text) => return Ok(Some(text)),
                 NonFinite::Null => return Ok(None),
                 NonFinite::Finite => {}
@@ -717,21 +738,74 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
     }
 }
 
-/// The value of `unit` for a non-finite source, or `None` when the source is
-/// finite. PostgreSQL splits the units in two. The *monotonic* ones, which only
-/// grow with the value, become `Infinity`/`-Infinity`. The *oscillating* ones
-/// (month, day, hour, …) have no limit and become NULL. A unit with no meaning
-/// at all for the type is still an error.
-fn non_finite_field(unit: &str, sign: i32) -> NonFinite {
+/// Which of PostgreSQL's two non-finite unit tables `unit` is looked up in.
+///
+/// The two disagree about `hour` and `day`. An infinite *interval* is a length,
+/// so its hours and days grow with it and are `Infinity`; an infinite
+/// *timestamp* is a moment, and the hour and day of a moment beyond the
+/// calendar are the clock and calendar fields it does not have, so they are
+/// NULL.
+///
+/// Neither table is derivable from that reading alone. `week` of an interval is
+/// `days / 7`, yet upstream calls `day` monotonic and `week` oscillating, so an
+/// infinite interval answers `Infinity` for its days and NULL for its weeks.
+/// Both lists are therefore transcribed from upstream rather than reasoned out,
+/// and `expected/interval.out` pins every cell of both.
+#[derive(Clone, Copy)]
+enum NonFiniteKind {
+    /// `date`, `timestamp` and `timestamptz`. PostgreSQL's
+    /// `NonFiniteTimestampTzPart` and the matching switch in `extract_date`.
+    Datetime,
+    /// `interval`. PostgreSQL's `NonFiniteIntervalPart`.
+    Interval,
+}
+
+/// The value of `unit` for a non-finite source, or [`NonFinite::Finite`] when
+/// the source is finite. PostgreSQL splits the units in two. The *monotonic*
+/// ones, which only grow with the value, become `Infinity`/`-Infinity`. The
+/// *oscillating* ones have no limit and become NULL. A unit the type has no
+/// value for is 0A000, the same error the finite path raises for it, because
+/// otherwise an infinite input would answer where a finite one refuses.
+fn non_finite_field(
+    unit: &str,
+    field: &str,
+    sign: i32,
+    kind: NonFiniteKind,
+    type_name: &str,
+) -> Result<NonFinite, ExecError> {
     if sign == 0 {
-        return NonFinite::Finite;
+        return Ok(NonFinite::Finite);
     }
-    let infinity = if sign > 0 { "Infinity" } else { "-Infinity" };
-    match unit {
-        "year" | "isoyear" | "decade" | "century" | "millennium" | "julian" | "epoch" => {
-            NonFinite::Value(infinity.to_string())
-        }
-        _ => NonFinite::Null,
+    let monotonic = match kind {
+        NonFiniteKind::Datetime => matches!(
+            unit,
+            "year" | "isoyear" | "decade" | "century" | "millennium" | "julian" | "epoch"
+        ),
+        // No `isoyear` or `julian`: an interval has no ISO week year and sits
+        // on no Julian day, so those are 0A000 for it, finite or not.
+        NonFiniteKind::Interval => matches!(
+            unit,
+            "hour" | "day" | "year" | "decade" | "century" | "millennium" | "epoch"
+        ),
+    };
+    if monotonic {
+        let infinity = if sign > 0 { "Infinity" } else { "-Infinity" };
+        return Ok(NonFinite::Value(infinity.to_string()));
+    }
+    let oscillating = match kind {
+        // Every remaining unit `canonical_unit` accepts is a clock, calendar or
+        // zone field of the moment, and PostgreSQL lists all of them as
+        // oscillating, so nothing reaches its `default:` arm from here.
+        NonFiniteKind::Datetime => true,
+        NonFiniteKind::Interval => matches!(
+            unit,
+            "microseconds" | "milliseconds" | "second" | "minute" | "week" | "month" | "quarter"
+        ),
+    };
+    if oscillating {
+        Ok(NonFinite::Null)
+    } else {
+        Err(unsupported_field(field, type_name))
     }
 }
 
@@ -882,7 +956,18 @@ fn extract_from_interval(unit: &str, field: &str, iv: Interval) -> Result<String
         "century" => int_str(months / 1200),
         "decade" => int_str(months / 120),
         "year" => int_str(months / 12),
-        "quarter" => int_str((months % 12) / 3 + 1),
+        // Every field of a negative interval is the negation of the same field
+        // of the sign-reversed interval, and `(months % 12) / 3 + 1` breaks
+        // that rule: the `+ 1` is a quarter ordinal, so it has to move to the
+        // far side of the negation rather than ride along inside it. `@ 3 mons
+        // ago` is quarter -2, not 0, and `@ 34 years ago` is -1, not 1.
+        // `interval_part` reads the sign off the months field for the same
+        // reason: the remainder alone cannot supply it once it is zero.
+        "quarter" => int_str(if months >= 0 {
+            (months % 12) / 3 + 1
+        } else {
+            -((-months % 12) / 3 + 1)
+        }),
         "month" => int_str(months % 12),
         "day" => int_str(i64::from(iv.days)),
         // `interval_part`'s DTK_WEEK is `tm_mday / 7` -- the days field alone,
@@ -1562,6 +1647,141 @@ mod tests {
         )
         .expect_err("date_trunc must still refuse week for an interval");
         assert!(format!("{refused:?}").contains("not supported for type interval"));
+    }
+
+    /// The whole non-finite unit table for `interval`, both signs.
+    ///
+    /// This is not derivable from a rule: `day` is `Infinity` while `week` is
+    /// NULL, and `hour` is `Infinity` while `minute` is NULL. Every entry is
+    /// the cell `expected/interval.out` prints on its `infinity` and
+    /// `-infinity` rows, so the two twelve-row EXTRACT matrices hold only if
+    /// this table does.
+    #[test]
+    fn extract_from_an_infinite_interval_splits_growing_units_from_cycling_ones() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (unit, monotonic) in [
+            ("hour", true),
+            ("day", true),
+            ("year", true),
+            ("decade", true),
+            ("century", true),
+            ("millennium", true),
+            ("epoch", true),
+            ("microseconds", false),
+            ("milliseconds", false),
+            ("second", false),
+            ("minute", false),
+            ("week", false),
+            ("month", false),
+            ("quarter", false),
+        ] {
+            for (literal, sign) in [("infinity", "Infinity"), ("-infinity", "-Infinity")] {
+                let got = ev(&format!("extract({unit} from INTERVAL '{literal}')"), &ctx);
+                let want = if monotonic { num(sign) } else { Datum::Null };
+                assert!(got == want, "extract({unit} from INTERVAL '{literal}')");
+            }
+        }
+        // `date_part` reaches the same table and renders it as float8.
+        assert!(ev("date_part('day', INTERVAL 'infinity')", &ctx) == Datum::Float8(f64::INFINITY));
+        assert!(ev("date_part('week', INTERVAL '-infinity')", &ctx) == Datum::Null);
+    }
+
+    /// A unit an interval has no value for is 0A000 whether or not the interval
+    /// is finite. PostgreSQL says so explicitly at `NonFiniteIntervalPart`: an
+    /// infinite input must not answer where a finite one refuses. `isoyear` and
+    /// `julian` are the trap, because they *are* monotonic for a timestamp.
+    #[test]
+    fn an_infinite_interval_refuses_the_units_a_finite_one_refuses() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for unit in ["isoyear", "julian", "dow", "isodow", "doy", "timezone"] {
+            for literal in ["infinity", "-infinity", "10 days"] {
+                let err = crate::eval::eval(
+                    &crabka_pgparser::parser::parse_expr_for_test(&format!(
+                        "extract({unit} from INTERVAL '{literal}')"
+                    ))
+                    .expect("parse"),
+                    &Scope::empty(),
+                    &[],
+                    &ctx,
+                )
+                .expect_err("interval has no value for this unit")
+                .into_pg();
+                assert!(err.code == "0A000", "extract({unit} from '{literal}')");
+                assert!(err.message == format!("unit \"{unit}\" not supported for type interval"));
+            }
+        }
+    }
+
+    /// An infinite *timestamp* keeps the other table: `hour` and `day` are NULL
+    /// there, because they are the clock and calendar fields of a moment that
+    /// has none. Splitting the interval table must not drag this one with it.
+    #[test]
+    fn extract_from_an_infinite_timestamp_keeps_hour_and_day_null() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for source in ["TIMESTAMP", "TIMESTAMPTZ"] {
+            for unit in ["hour", "day", "week", "month", "quarter", "minute", "doy"] {
+                let got = ev(&format!("extract({unit} from {source} 'infinity')"), &ctx);
+                assert!(got == Datum::Null, "extract({unit} from {source})");
+            }
+            for unit in [
+                "year",
+                "isoyear",
+                "decade",
+                "century",
+                "millennium",
+                "epoch",
+            ] {
+                let got = ev(&format!("extract({unit} from {source} '-infinity')"), &ctx);
+                assert!(got == num("-Infinity"), "extract({unit} from {source})");
+            }
+        }
+        assert!(ev("extract(day from DATE 'infinity')", &ctx) == Datum::Null);
+        assert!(ev("extract(julian from DATE 'infinity')", &ctx) == num("Infinity"));
+        // A `date` has no clock at all, so `hour` stays 0A000 rather than
+        // becoming NULL: that refusal runs before the non-finite table.
+        let refused = crate::eval::eval(
+            &crabka_pgparser::parser::parse_expr_for_test("extract(hour from DATE 'infinity')")
+                .expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx,
+        )
+        .expect_err("a date has no hour")
+        .into_pg();
+        assert!(refused.code == "0A000");
+    }
+
+    /// `EXTRACT(QUARTER FROM interval)` negates as a whole for a negative
+    /// interval, so `@ 3 mons ago` is -2 rather than the 0 that
+    /// `(months % 12) / 3 + 1` gives. Every value is the cell the second
+    /// twelve-row matrix in `expected/interval.out` prints.
+    #[test]
+    fn extract_quarter_from_a_negative_interval_negates_the_whole_ordinal() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (literal, quarter) in [
+            ("1 min", "1"),
+            ("3 mons", "2"),
+            ("5 mons", "2"),
+            ("6 years", "1"),
+            ("34 years", "1"),
+            ("1 min ago", "1"),
+            ("3 mons ago", "-2"),
+            ("5 mons ago", "-2"),
+            ("5 mons 12 hours ago", "-2"),
+            ("6 years ago", "-1"),
+            ("34 years ago", "-1"),
+        ] {
+            let got = ev(&format!("extract(quarter from INTERVAL '{literal}')"), &ctx);
+            assert!(got == num(quarter), "extract(quarter from '{literal}')");
+        }
     }
 
     #[test]
