@@ -283,10 +283,10 @@
       "sha256": "055a06aef38a9ca7cd4cbb233f839b8665fd6ac724a6709f1a6419e14f6b0eff"
     },
     "equivclass": {
-      "changed_lines": 380,
+      "changed_lines": 374,
       "expected": "equivclass.out",
-      "hunks": 18,
-      "sha256": "27b863cd9cb554e203b88f5c9ddf38525ed1ff1811fc5207cd27bed2c159f582"
+      "hunks": 13,
+      "sha256": "6c5b3abcbe0865b8334ee3ba8ee30f83af84447e59db1eaa3c857f53295fcfe2"
     },
     "errors": {
       "changed_lines": 207,
