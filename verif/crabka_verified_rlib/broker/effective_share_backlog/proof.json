@@ -1,0 +1,15 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_effective_share_backlog": {
+        "prover": "alt-ergo",
+        "time": 0.01
+      },
+      "vc_saturating_sub": {
+        "prover": "alt-ergo",
+        "time": 0.01
+      }
+    }
+  }
+}
