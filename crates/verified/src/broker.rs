@@ -23,18 +23,17 @@ pub struct FetchVisibility {
 
 /// Compute Kafka's consumer/follower Fetch visibility window.
 #[requires(0 <= log_start@ && log_start@ <= hw@ && hw@ <= log_end@)]
-#[requires(read_committed ==> !is_follower)]
 #[ensures(result.out_of_range == (fetch_offset@ < log_start@))]
 #[ensures(result.empty == (!(fetch_offset@ < log_start@)
     && fetch_offset@ >= if is_follower { log_end@ } else { hw@ }))]
-#[ensures(result.effective_lso@ == if read_committed {
+#[ensures(result.effective_lso@ == if read_committed && !is_follower {
     if lso@ < hw@ { lso@ } else { hw@ }
 } else { lso@ })]
-#[ensures(result.read_committed_aborts == read_committed)]
+#[ensures(result.read_committed_aborts == (read_committed && !is_follower))]
 #[ensures(result.response_hw@ == if is_follower { log_end@ } else { hw@ })]
-#[ensures(result.response_lso@ == if is_follower { log_end@ } else if read_committed {
+#[ensures(result.response_lso@ == if read_committed && !is_follower {
     if lso@ < hw@ { lso@ } else { hw@ }
-} else { hw@ })]
+} else if is_follower { log_end@ } else { hw@ })]
 #[ensures(result.limit_offset@ == if is_follower { log_end@ } else if read_committed {
     if lso@ < hw@ { lso@ } else { hw@ }
 } else { hw@ })]

@@ -60,8 +60,7 @@ let fetch_visibility [#"/workspace/crabka/crates/verified/src/broker.rs" 42 0 50
   (return (x: t_FetchVisibility)) =
 {[@stop_split] [@expl:fetch_visibility requires] ([@stop_split] [@expl:fetch_visibility requires #0] [%#sbroker'2] 0
       <= Int64.to_int log_start
-    /\ Int64.to_int log_start <= Int64.to_int hw /\ Int64.to_int hw <= Int64.to_int log_end)
-  /\ ([@stop_split] [@expl:fetch_visibility requires #1] [%#sbroker'3] read_committed -> not is_follower)}
+    /\ Int64.to_int log_start <= Int64.to_int hw /\ Int64.to_int hw <= Int64.to_int log_end)}
   (! bb0
   [ bb0 = any [ br0 -> {is_follower = false} (! bb2) | br1 -> {is_follower} (! bb1) ]
   | bb1 = s0 [ s0 = [ &upper_bound <- log_end ] s1 | s1 = bb3 ]
@@ -124,23 +123,20 @@ let fetch_visibility [#"/workspace/crabka/crates/verified/src/broker.rs" 42 0 50
       = (not Int64.to_int fetch_offset < Int64.to_int log_start
       /\ ge_log_Int (Int64.to_int fetch_offset) (if is_follower then Int64.to_int log_end else Int64.to_int hw)))
     /\ ([@stop_split] [@expl:fetch_visibility ensures #2] [%#sbroker'6] Int64.to_int result.effective_lso
-      = (if read_committed then
+      = (if read_committed /\ not is_follower then
         if Int64.to_int lso < Int64.to_int hw then Int64.to_int lso else Int64.to_int hw
       else
         Int64.to_int lso
       ))
-    /\ ([@stop_split] [@expl:fetch_visibility ensures #3] [%#sbroker'7] result.read_committed_aborts = read_committed)
+    /\ ([@stop_split] [@expl:fetch_visibility ensures #3] [%#sbroker'7] result.read_committed_aborts
+      = (read_committed /\ not is_follower))
     /\ ([@stop_split] [@expl:fetch_visibility ensures #4] [%#sbroker'8] Int64.to_int result.response_hw
       = (if is_follower then Int64.to_int log_end else Int64.to_int hw))
     /\ ([@stop_split] [@expl:fetch_visibility ensures #5] [%#sbroker'9] Int64.to_int result.response_lso
-      = (if is_follower then
-        Int64.to_int log_end
-      else
-        if read_committed then
+      = (if read_committed /\ not is_follower then
           if Int64.to_int lso < Int64.to_int hw then Int64.to_int lso else Int64.to_int hw
         else
-          Int64.to_int hw
-
+          if is_follower then Int64.to_int log_end else Int64.to_int hw
       ))
     /\ ([@stop_split] [@expl:fetch_visibility ensures #6] [%#sbroker'10] Int64.to_int result.limit_offset
     = (if is_follower then
