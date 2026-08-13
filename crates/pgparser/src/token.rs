@@ -143,6 +143,13 @@ pub enum Token {
     /// lexeme. `.5` and `2.` stay a single `FloatLit`.
     Dot,
     Eq,
+    /// `=>` — the label separator of a named function argument (`f(x => 1)`).
+    ///
+    /// `PostgreSQL` reserves the spelling for this one purpose: `CREATE
+    /// OPERATOR =>` is refused, so no user operator can ever claim it. The
+    /// token therefore never has to compete with an infix `=` followed by a
+    /// prefix `>`, which is not a reading `PostgreSQL` allows.
+    NamedArg,
     Ne,
     Lt,
     Le,

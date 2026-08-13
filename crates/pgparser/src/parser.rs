@@ -1894,18 +1894,15 @@ impl Parser {
             let mut named: Vec<(String, Expr)> = Vec::new();
             if *self.peek() != Token::RParen {
                 loop {
-                    // `name := value` — a labeled argument. `ident : =` cannot begin
-                    // an expression, so recognizing it here cannot change how any
+                    // `name := value` and `name => value` — a labeled argument.
+                    // Neither `ident : =` nor `ident =>` can begin an
+                    // expression, so recognizing them here cannot change how any
                     // statement that parses today is read.
-                    if let (Token::Ident(label), Token::Colon, Token::Eq) = (
-                        self.peek().clone(),
-                        self.peek2().clone(),
-                        self.peek3().clone(),
-                    ) {
-                        self.bump();
-                        self.bump();
-                        self.bump();
-                        named.push((label.to_ascii_lowercase(), self.expr(0)?));
+                    if let Some((label, width)) = self.peek_named_argument_label() {
+                        for _ in 0..width {
+                            self.bump();
+                        }
+                        named.push((label, self.expr(0)?));
                     } else {
                         args.push(self.expr(0)?);
                     }
@@ -2959,6 +2956,26 @@ impl Parser {
         }
     }
 
+    /// The label of a named argument at the cursor, with the number of tokens
+    /// the label and its separator occupy.
+    ///
+    /// `PostgreSQL` spells the separator two ways, `name := value` and `name =>
+    /// value`, and gives them one meaning. Neither opens an expression, so a
+    /// call that parses today cannot be re-read by this test.
+    fn peek_named_argument_label(&self) -> Option<(String, usize)> {
+        let Token::Ident(label) = self.peek() else {
+            return None;
+        };
+        let label = label.to_ascii_lowercase();
+        if *self.peek2() == Token::NamedArg {
+            return Some((label, 2));
+        }
+        if *self.peek2() == Token::Colon && *self.peek3() == Token::Eq {
+            return Some((label, 3));
+        }
+        None
+    }
+
     /// Turn labeled arguments into the positional tail the call needs.
     ///
     /// Only the functions whose parameter names are known here can take them.
@@ -3899,9 +3916,7 @@ impl Parser {
             });
         }
         let table = self.relation_ref()?;
-        if *self.peek() == Token::Star {
-            self.bump();
-        }
+        self.eat_inheritance_star();
         let mut actions = vec![self.alter_table_action()?];
         // Only the ALTER-subcommand form takes a comma list; RENAME and the
         // ownership/schema movers are standalone in PostgreSQL's grammar too.
@@ -4418,6 +4433,9 @@ impl Parser {
         if self.eat_keyword(Keyword::With) {
             return true;
         }
+        if self.eat_role_password() {
+            return true;
+        }
         let Token::Ident(word) = self.peek() else {
             return false;
         };
@@ -4441,6 +4459,34 @@ impl Parser {
         };
         *field = Some(value);
         self.bump();
+        true
+    }
+
+    /// Consume `[ENCRYPTED | UNENCRYPTED] PASSWORD { 'secret' | NULL }`, if that
+    /// is what the cursor is on.
+    ///
+    /// The secret is read and dropped. Crabka authenticates no one, so it holds
+    /// no `rolpassword`, and `CREATE ROLE … PASSWORD` has always been accepted
+    /// on those terms. `ALTER ROLE … PASSWORD` is the same statement about the
+    /// same column and is read the same way. `ENCRYPTED` is `PostgreSQL`'s
+    /// no-op spelling of the default.
+    fn eat_role_password(&mut self) -> bool {
+        let offset =
+            usize::from(self.peek_ident_eq("encrypted") || self.peek_ident_eq("unencrypted"));
+        if !matches!(self.peek_n(offset), Token::Ident(word) if word == "password") {
+            return false;
+        }
+        // The secret is a string, or the `NULL` that clears it. Anything else
+        // is not this option, and is left for the caller to report.
+        if !matches!(
+            self.peek_n(offset + 1),
+            Token::StringLit(_) | Token::Keyword(Keyword::Null)
+        ) {
+            return false;
+        }
+        for _ in 0..=offset + 1 {
+            self.bump();
+        }
         true
     }
 
@@ -5923,9 +5969,7 @@ impl Parser {
         loop {
             self.eat_ident_eq("only");
             tables.push(self.relation_ref()?);
-            if *self.peek() == Token::Star {
-                self.bump();
-            }
+            self.eat_inheritance_star();
             if self.eat_comma() {
                 continue;
             }
@@ -6158,6 +6202,7 @@ impl Parser {
         loop {
             let only = self.eat_only();
             let name = self.relation_ref()?;
+            self.eat_inheritance_star();
             let columns = if *self.peek() == Token::LParen {
                 Some(self.parse_ident_list()?)
             } else {
@@ -6604,6 +6649,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Update))?;
         let only = self.eat_only();
         let table = self.relation_ref()?;
+        self.eat_inheritance_star();
         let alias = self.opt_dml_target_alias()?;
         self.expect(&Token::Keyword(Keyword::Set))?;
         let assignments = self.assignment_list(&table.name)?;
@@ -6645,6 +6691,21 @@ impl Parser {
         // Quoting strips a word of every keyword property, so `UPDATE "only"`
         // updates the table called `only` and never sets the flag.
         if self.peek_ident_eq("only") && !self.peek_is_quoted_ident() && self.peek_n_is_col_id(1) {
+            self.bump();
+            return true;
+        }
+        false
+    }
+
+    /// The optional `*` after a relation name, `PostgreSQL`'s `extended_relation_expr`.
+    ///
+    /// `t*` asks for the relation and its inheritance children. That has been
+    /// the default since `PostgreSQL` 7.1, so the suffix carries no information
+    /// beyond the absence of `ONLY` and is consumed and dropped. `true` is
+    /// returned so a caller that also accepts a parenthesised argument list can
+    /// tell that the name was a relation and not a function.
+    fn eat_inheritance_star(&mut self) -> bool {
+        if *self.peek() == Token::Star {
             self.bump();
             return true;
         }
@@ -6748,6 +6809,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::From))?;
         let only = self.eat_only();
         let table = self.relation_ref()?;
+        self.eat_inheritance_star();
         let alias = self.opt_dml_target_alias()?;
         let using = if self.eat_keyword(Keyword::Using) {
             self.parse_from()?
@@ -6777,6 +6839,7 @@ impl Parser {
         self.expect_ident_eq("merge")?;
         self.expect(&Token::Keyword(Keyword::Into))?;
         let table = self.relation_ref()?;
+        self.eat_inheritance_star();
         let alias = self.opt_dml_target_alias()?;
         self.expect(&Token::Keyword(Keyword::Using))?;
         let source = if *self.peek() == Token::LParen {
@@ -7101,9 +7164,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Table))?;
         let only = self.eat_only();
         let name = self.relation_ref()?;
-        if *self.peek() == Token::Star {
-            self.bump();
-        }
+        self.eat_inheritance_star();
         Ok(SelectStmt {
             projection: vec![SelectItem::Wildcard],
             from: vec![TableExpr::Table {
@@ -8521,11 +8582,31 @@ impl Parser {
             }
             self.bump();
         }
-        let mut object_name = self.expect_object_name()?;
+        // `COMMENT ON OPERATOR ###### (…)` names an operator, and an operator's
+        // name is one run of operator characters however the lexer split it.
+        // `OPERATOR CLASS`/`OPERATOR FAMILY` name an identifier instead, so the
+        // operator reading is taken only when the name starts with an operator
+        // character at all.
+        let mut object_name = if object_kind == "operator"
+            && !longest_operator(&self.source[self.peek_pos()..]).is_empty()
+        {
+            self.operator_symbol()?
+        } else {
+            self.expect_object_name()?
+        };
         if *self.peek() == Token::Dot {
             self.bump();
             object_name.push('.');
-            object_name.push_str(&self.expect_col_id()?);
+            // A qualified operator is `schema.<symbol>`, and the symbol obeys
+            // the same run rule as an unqualified one.
+            if object_kind == "operator"
+                && !longest_operator(&self.source[self.peek_pos()..]).is_empty()
+            {
+                let symbol = self.operator_symbol()?;
+                object_name.push_str(&symbol);
+            } else {
+                object_name.push_str(&self.expect_col_id()?);
+            }
         }
         // A routine signature: COMMENT ON FUNCTION f(int) IS …
         if *self.peek() == Token::LParen {
@@ -9453,7 +9534,9 @@ impl Parser {
                 self.eat_keyword(Keyword::With);
                 options.start = Some(self.expect_i64("START value")?);
             } else if self.eat_ident_eq("increment") {
-                self.expect_keyword_or_ident(Keyword::By, "by")?;
+                // `INCREMENT BY n` and `INCREMENT n` are the same option;
+                // PostgreSQL's grammar makes the `BY` a noise word.
+                self.eat_keyword(Keyword::By);
                 options.increment = Some(self.expect_i64("INCREMENT value")?);
             } else if self.eat_ident_eq("minvalue") {
                 options.min = Some(self.expect_i64("MINVALUE")?);
@@ -9481,7 +9564,9 @@ impl Parser {
                 // clamps to int8 either way.
                 self.parse_type_name()?;
             } else if self.eat_ident_eq("owned") {
-                self.expect_ident_eq("by")?;
+                // `BY` lexes as a keyword here, so the word has to be matched
+                // both ways.
+                self.expect_keyword_or_ident(Keyword::By, "by")?;
                 if !self.eat_ident_eq("none") {
                     self.expect_col_id()?;
                     if *self.peek() == Token::Dot {
@@ -10889,15 +10974,11 @@ impl Parser {
         })
     }
 
-    /// One `[ONLY] name [*]` entry of a `TRUNCATE` list. The trailing `*` is
-    /// `PostgreSQL`'s explicit spelling of the default (descend into children)
-    /// and carries no information beyond the absence of `ONLY`.
+    /// One `[ONLY] name [*]` entry of a `TRUNCATE` list.
     fn truncate_target(&mut self) -> Result<crate::ast::TruncateTarget, ParseError> {
         let only = self.eat_only();
         let name = self.relation_ref()?;
-        if *self.peek() == Token::Star {
-            self.bump();
-        }
+        self.eat_inheritance_star();
         Ok(crate::ast::TruncateTarget { name, only })
     }
 
@@ -12288,22 +12369,38 @@ impl Parser {
         }
     }
 
-    /// `SELECT … INTO <table>` — record the target so [`Parser::query_statement`]
-    /// can hand back a `CREATE TABLE … AS`. `TEMP`/`TEMPORARY` names the
-    /// session's temporary namespace, exactly as it does on the `CREATE`
-    /// spelling; `UNLOGGED` is accepted and ignored, there being one storage
-    /// class here.
+    /// `SELECT … INTO [ TEMP | TEMPORARY | UNLOGGED ] [ TABLE ] <table>` — record
+    /// the target so [`Parser::query_statement`] can hand back a `CREATE TABLE …
+    /// AS`. `TEMP`/`TEMPORARY` names the session's temporary namespace, exactly
+    /// as it does on the `CREATE` spelling; `UNLOGGED` is accepted and ignored,
+    /// there being one storage class here. `LOCAL` and `GLOBAL` may qualify the
+    /// temporary spelling, and `PostgreSQL` gives both the same meaning.
     fn opt_select_into(&mut self) -> Result<(), ParseError> {
         if !self.eat_keyword(Keyword::Into) {
             return Ok(());
         }
-        // `TEMP`, `TEMPORARY` and `UNLOGGED` are unreserved, so each is the
-        // target's own name unless a name still follows it: `SELECT 1 INTO temp`
-        // creates a table called `temp`.
-        let names_follow = self.peek_n_is_col_id(1);
-        let temporary =
-            names_follow && (self.eat_ident_eq("temporary") || self.eat_ident_eq("temp"));
-        let _unlogged = !temporary && names_follow && self.eat_ident_eq("unlogged");
+        // `TEMP`, `TEMPORARY`, `UNLOGGED`, `LOCAL` and `GLOBAL` are all
+        // unreserved, so each is the target's own name unless a name still
+        // follows it: `SELECT 1 INTO temp` creates a table called `temp`.
+        // `TABLE` is reserved, so where it appears it is always the noise word
+        // and never the name.
+        let persistence_follows =
+            self.peek_n_is_col_id(1) || *self.peek_n(1) == Token::Keyword(Keyword::Table);
+        let scoped_temporary = persistence_follows
+            && matches!(
+                self.peek(),
+                Token::Keyword(Keyword::Local | Keyword::Global)
+            )
+            && (self.peek2_ident_eq("temporary") || self.peek2_ident_eq("temp"));
+        if scoped_temporary {
+            self.bump();
+            self.bump();
+        }
+        let temporary = scoped_temporary
+            || (persistence_follows
+                && (self.eat_ident_eq("temporary") || self.eat_ident_eq("temp")));
+        let _unlogged = !temporary && persistence_follows && self.eat_ident_eq("unlogged");
+        self.eat_keyword(Keyword::Table);
         self.select_into_temporary = temporary;
         let name = self.relation_ref()?;
         if self.select_into.replace(name).is_some() {
@@ -13000,10 +13097,14 @@ impl Parser {
         }
         let only = self.eat_only();
         let name = self.relation_ref()?;
+        // `t*` names a relation, so the function branch below is out of reach
+        // once the suffix has been seen: `f*(x)` is not a call in PostgreSQL
+        // either.
+        let star = self.eat_inheritance_star();
         // `ident (` in FROM position is a set-returning function call
         // (`unnest(tags) AS u(tag)`), never a table. A qualified call keeps its
         // dotted spelling, which is how function lookup names it.
-        if *self.peek() == Token::LParen {
+        if !star && *self.peek() == Token::LParen {
             return self.table_function(name.to_string(), lateral);
         }
         if lateral {
@@ -24582,6 +24683,146 @@ mod q1_statement_completeness_tests {
         ));
     }
 
+    /// `PostgreSQL`'s `extended_relation_expr` lets any relation reference carry
+    /// a trailing `*`, which asks for the relation together with its
+    /// inheritance children. That has been the default since 7.1, so `t*` and
+    /// `t` mean the same thing and have to parse to the same statement.
+    #[test]
+    fn a_trailing_star_on_a_relation_name_means_what_the_bare_name_means() {
+        for (starred, bare) in [
+            ("SELECT * FROM a_star*", "SELECT * FROM a_star"),
+            (
+                "SELECT class, a FROM a_star* x WHERE x.a < 100",
+                "SELECT class, a FROM a_star x WHERE x.a < 100",
+            ),
+            (
+                "SELECT * FROM a_star* JOIN b ON a_star.a = b.a",
+                "SELECT * FROM a_star JOIN b ON a_star.a = b.a",
+            ),
+            ("SELECT sum(a) FROM a_star*", "SELECT sum(a) FROM a_star"),
+            ("TABLE a_star*", "TABLE a_star"),
+            ("UPDATE a_star* SET a = 1", "UPDATE a_star SET a = 1"),
+            ("DELETE FROM a_star*", "DELETE FROM a_star"),
+            (
+                "MERGE INTO a_star* USING b ON a_star.a = b.a WHEN MATCHED THEN DELETE",
+                "MERGE INTO a_star USING b ON a_star.a = b.a WHEN MATCHED THEN DELETE",
+            ),
+            ("TRUNCATE a_star*", "TRUNCATE a_star"),
+            ("LOCK TABLE a_star*", "LOCK TABLE a_star"),
+            (
+                "ALTER TABLE a_star* RENAME COLUMN a TO aa",
+                "ALTER TABLE a_star RENAME COLUMN a TO aa",
+            ),
+            ("VACUUM a_star*", "VACUUM a_star"),
+            ("ANALYZE a_star*", "ANALYZE a_star"),
+        ] {
+            assert!(one(starred) == one(bare), "{starred}");
+        }
+    }
+
+    /// The star names a relation, so it closes the door on the FROM-position
+    /// function call that a bare name would still admit. `PostgreSQL` refuses
+    /// `f*(1)` too.
+    #[test]
+    fn a_starred_name_is_never_a_function_call() {
+        assert!(parse("SELECT * FROM generate_series*(1, 3)").is_err());
+    }
+
+    /// `OptTempTableName` puts an optional `TABLE` noise word after every
+    /// persistence spelling, and lets `LOCAL`/`GLOBAL` qualify the temporary
+    /// one. All of it is unreserved except `TABLE`, so each word is still the
+    /// target's own name when no name follows it.
+    #[test]
+    fn select_into_takes_every_target_spelling() {
+        fn target(sql: &str) -> (String, bool) {
+            let Statement::CreateTableAs {
+                name, temporary, ..
+            } = one(sql)
+            else {
+                panic!("expected SELECT INTO: {sql}");
+            };
+            (name.name, temporary)
+        }
+        for (sql, expected) in [
+            ("SELECT 1 AS a INTO t", ("t", false)),
+            ("SELECT 1 AS a INTO TABLE t", ("t", false)),
+            ("SELECT 1 AS a INTO TEMP t", ("t", true)),
+            ("SELECT 1 AS a INTO TEMP TABLE t", ("t", true)),
+            ("SELECT 1 AS a INTO TEMPORARY TABLE t", ("t", true)),
+            ("SELECT 1 AS a INTO LOCAL TEMP TABLE t", ("t", true)),
+            ("SELECT 1 AS a INTO LOCAL TEMPORARY t", ("t", true)),
+            ("SELECT 1 AS a INTO GLOBAL TEMP TABLE t", ("t", true)),
+            ("SELECT 1 AS a INTO GLOBAL TEMPORARY t", ("t", true)),
+            ("SELECT 1 AS a INTO UNLOGGED TABLE t", ("t", false)),
+            ("SELECT 1 AS a INTO UNLOGGED t", ("t", false)),
+            // Each unreserved word is the name itself when nothing follows it.
+            ("SELECT 1 AS a INTO temp", ("temp", false)),
+            ("SELECT 1 AS a INTO temporary", ("temporary", false)),
+            ("SELECT 1 AS a INTO unlogged", ("unlogged", false)),
+            ("SELECT 1 AS a INTO local", ("local", false)),
+            ("SELECT 1 AS a INTO global", ("global", false)),
+        ] {
+            assert!(target(sql) == (expected.0.to_string(), expected.1), "{sql}");
+        }
+    }
+
+    /// `BY` is a noise word in `INCREMENT BY n` and a required one in `OWNED
+    /// BY`, and it lexes as a keyword in both places.
+    #[test]
+    fn sequence_options_read_by_as_postgres_reads_it() {
+        assert!(
+            one("CREATE SEQUENCE s INCREMENT 2") == one("CREATE SEQUENCE s INCREMENT BY 2"),
+            "INCREMENT BY is a noise word"
+        );
+        for sql in [
+            "CREATE SEQUENCE s OWNED BY t.c",
+            "CREATE SEQUENCE s OWNED BY NONE",
+            "CREATE SEQUENCE s INCREMENT -1 OWNED BY t.c",
+        ] {
+            assert!(parse(sql).is_ok(), "{sql}");
+        }
+    }
+
+    /// `PASSWORD` is a role option on `ALTER ROLE` exactly as it is on `CREATE
+    /// ROLE`, so it has to satisfy the "at least one option" rule on its own.
+    #[test]
+    fn alter_role_takes_a_password_the_way_create_role_does() {
+        for sql in [
+            "ALTER ROLE r PASSWORD 'secret'",
+            "ALTER ROLE r PASSWORD NULL",
+            "ALTER ROLE r ENCRYPTED PASSWORD 'secret'",
+            "ALTER ROLE r UNENCRYPTED PASSWORD 'secret'",
+            "ALTER USER r PASSWORD 'secret'",
+            "ALTER ROLE r LOGIN PASSWORD 'secret'",
+            "CREATE ROLE r PASSWORD 'secret'",
+        ] {
+            assert!(parse(sql).is_ok(), "{sql}");
+        }
+        // The secret is dropped, so the statement carries the same options a
+        // bare attribute change would.
+        assert!(one("ALTER ROLE r LOGIN PASSWORD 'secret'") == one("ALTER ROLE r LOGIN"));
+        // The word stays unreserved, so a role may be called `password` and the
+        // option word after it is still read as the option.
+        assert!(parse("ALTER ROLE password PASSWORD 'secret'").is_ok());
+        // `PASSWORD` without a secret is not this option, so the statement
+        // keeps failing the "at least one option" rule.
+        assert!(parse("ALTER ROLE r PASSWORD").is_err());
+    }
+
+    /// `PostgreSQL` spells a named argument's separator `:=` and `=>`, and gives
+    /// the two spellings one meaning.
+    #[test]
+    fn a_named_argument_takes_either_separator() {
+        assert!(
+            one("SELECT make_interval(days => 3)") == one("SELECT make_interval(days := 3)"),
+            "=> and := name the same argument"
+        );
+        assert!(
+            one("SELECT make_interval(3, mins => 4)") == one("SELECT make_interval(3, mins := 4)"),
+            "a labeled argument may follow positional ones"
+        );
+    }
+
     #[test]
     fn table_statement_is_select_star_from_name() {
         for sql in [
@@ -26080,6 +26321,38 @@ mod operator_tests {
                 parse_with_command_identities(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
             assert!(parsed.len() == 1, "{sql}");
             assert!(parsed[0].1 == expected, "{sql}");
+        }
+    }
+    /// `COMMENT ON OPERATOR` names an operator, so the name obeys the same run
+    /// rule the rest of the operator grammar obeys. `######` is one name, not
+    /// the three tokens the lexer's own table splits it into.
+    #[test]
+    fn comment_on_operator_reads_the_whole_operator_name() {
+        for (sql, expected) in [
+            (
+                "COMMENT ON OPERATOR ###### (NONE, int4) IS 'bad prefix'",
+                "######",
+            ),
+            ("COMMENT ON OPERATOR === (int4, int4) IS 'x'", "==="),
+            (
+                "COMMENT ON OPERATOR public.=== (int4, int4) IS 'x'",
+                "public.===",
+            ),
+            ("COMMENT ON OPERATOR = (int4, int4) IS 'x'", "="),
+        ] {
+            let Statement::Comment {
+                object_kind,
+                object_name,
+                ..
+            } = parse(sql)
+                .unwrap_or_else(|error| panic!("{sql}: {error}"))
+                .pop()
+                .expect("one statement")
+            else {
+                panic!("not a COMMENT: {sql}");
+            };
+            assert!(object_kind == "operator", "{sql}");
+            assert!(object_name == expected, "{sql}");
         }
     }
 }

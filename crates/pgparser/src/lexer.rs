@@ -953,6 +953,10 @@ fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
         b'~' if next_is(b'=') => (Token::Same, 2),
         b'~' if next_is(b'*') => (Token::TildeCi, 2),
         b'~' => (Token::Tilde, 1),
+        // `=>` before `=`. PostgreSQL's scanner returns EQUALS_GREATER for it
+        // and refuses to let any user operator take the spelling, so the
+        // two-byte reading is the only one.
+        b'=' if next_is(b'>') => (Token::NamedArg, 2),
         b'<' if next_is(b'=') => (Token::Le, 2),
         b'>' if next_is(b'=') => (Token::Ge, 2),
         b'<' if next_is(b'>') => (Token::Ne, 2),
@@ -1475,6 +1479,9 @@ mod tests {
             ("a||/b", &[Token::CubeRoot, Token::Ident("b".into())]),
             ("a^b", &[Token::Caret, Token::Ident("b".into())]),
             ("a%b", &[Token::Percent, Token::Ident("b".into())]),
+            ("a=b", &[Token::Eq, Token::Ident("b".into())]),
+            ("a=>b", &[Token::NamedArg, Token::Ident("b".into())]),
+            ("a>b", &[Token::Gt, Token::Ident("b".into())]),
         ];
         for (sql, tail) in cases {
             let mut expected = vec![Token::Ident("a".into())];
