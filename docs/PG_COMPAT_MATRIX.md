@@ -15,7 +15,7 @@ tools/check-pg-compat-matrix.sh
 
 The authoritative PostgreSQL 18.4 core-schedule score is **46 / 231 exact in
 serial**, under the runner's explicit 20 MiB blocking-query memory policy,
-leaving 185 failures across **115,371 changed lines**. Both PostgreSQL
+leaving 185 failures across **114,393 changed lines**. Both PostgreSQL
 self-checks pass 231 / 231, Gres completes all 231 files, and the
 infrastructure report is empty. The checked-in floor in
 [`pg-regress-baseline.json`](../crates/gres-conformance/pg-regress-baseline.json)
@@ -25,20 +25,27 @@ file longer than recorded.
 Parallel mode has not been re-measured since the type-input wave; its last
 certified figure was 22 / 231 at 177,530 changed lines.
 
-### What the remaining 115,371 lines are
+### What the remaining 114,393 lines are
 
 Classified per changed line, not per file — a file is not "an EXPLAIN problem"
 because one hunk of it prints a plan:
 
 ```text
-data / other output                71,299   66.0%
-EXPLAIN / plan text                15,436   14.3%
-other ERROR: line                   7,200    6.7%
-missing object or function          5,670    5.3%
-DETAIL / HINT / LINE / CONTEXT      4,491    4.2%
-syntax error                        2,970    2.8%
-deliberate: refused by design         933    0.9%
+data / other output                78,087   68.3%
+EXPLAIN / plan text                15,436   13.5%
+other ERROR: line                   7,085    6.2%
+missing object or function          5,553    4.9%
+DETAIL / HINT / LINE / CONTEXT      4,391    3.8%
+syntax error                        2,851    2.5%
+deliberate: refused by design         985    0.9%
 ```
+
+Counting rule, because getting it wrong is easy and quiet: a changed line is
+any in-hunk line starting with `+` or `-`, and **only the two file headers
+(`--- /path`, `+++ /path`) are excluded**. Filtering every line that starts
+with `---` also drops a removed psql underline row (`-` followed by dashes),
+which undercounts by about 6%. An earlier revision of this table did exactly
+that.
 
 **Only 0.9% of the gap is refused by design.** That is the honest answer to
 "how much of this is a design difference": almost none of it. The rows that
