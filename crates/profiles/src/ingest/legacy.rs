@@ -1190,9 +1190,11 @@ mod tests {
 
     #[tokio::test]
     async fn decode_multipart_pprof_profile_part() {
-        let query = parse_ingest_query("name=myapp{env=\"prod\"}&format=pprof").unwrap();
+        let query =
+            parse_ingest_query("name=myapp{env=\"prod\"}&format=pprof&sampleRate=7").unwrap();
         let boundary = "test-boundary";
         let pprof = crate::wire::test_fixtures::cpu_profile_pprof_bytes();
+        let original_period = PprofProfile::decode(&pprof).unwrap().inner().period;
         let mut body = Vec::new();
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"profile\"\r\n");
@@ -1212,6 +1214,7 @@ mod tests {
         check!(raw.labels.get("__name__") == Some("myapp"));
         check!(raw.labels.get("env") == Some("prod"));
         check!(raw.profile.sample_types()[0].0 == "cpu");
+        check!(raw.profile.inner().period == original_period);
     }
 
     #[tokio::test]

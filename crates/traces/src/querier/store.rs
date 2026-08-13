@@ -3148,17 +3148,23 @@ mod tests {
                 span_attrs,
                 events: vec![],
                 links: vec![],
-                instrumentation_scope: String::new(),
-                instrumentation_version: String::new(),
+                instrumentation_scope: "otel-rust".into(),
+                instrumentation_version: "1.2.3".into(),
             }
         };
         let root = mk(
             1,
             None,
-            vec![KeyValue {
-                key: "http.method".into(),
-                value: SAttr::Str("GET".into()),
-            }],
+            vec![
+                KeyValue {
+                    key: "http.method".into(),
+                    value: SAttr::Str("GET".into()),
+                },
+                KeyValue {
+                    key: format!("{INSTRUMENTATION_ATTR_PREFIX}library"),
+                    value: SAttr::Str("otel".into()),
+                },
+            ],
             Some("1.2.3"),
         );
         let child = mk(2, Some(1), vec![], None);
@@ -3176,6 +3182,7 @@ mod tests {
             &[
                 matcher(MatchScope::Span, "http.method"),
                 matcher(MatchScope::Resource, "service.version"),
+                matcher(MatchScope::Instrumentation, "library"),
             ],
         )
         .unwrap();
@@ -3210,9 +3217,52 @@ mod tests {
                 "attr.service.version",
                 vec![None, Some("1.2.3".to_string())],
             ),
+            (
+                "instrumentation library",
+                "attr.__instrumentation.library",
+                vec![None, Some("otel".to_string())],
+            ),
         ] {
             assert2::assert!(sorted(column) == expected);
         }
+
+        let matches = |key: &str, value: &str| {
+            instrumentation_matches(
+                out,
+                0,
+                &SpanMatcher {
+                    scope: MatchScope::Instrumentation,
+                    key: key.into(),
+                    op: MatchCmp::Eq,
+                    value: MatchValue::Str(value.into()),
+                    negated: false,
+                },
+            )
+            .unwrap()
+        };
+        assert2::assert!(matches("name", "otel-rust"));
+        assert2::assert!(matches("version", "1.2.3"));
+        assert2::assert!(matches("library", "otel"));
+        assert2::assert!(!matches("name", "other"));
+
+        let mut values = BTreeSet::new();
+        collect_attribute_tag_values(out, "http.method", "service.version", &mut values).unwrap();
+        assert2::assert!(
+            values
+                == BTreeSet::from([
+                    ("string".into(), "1.2.3".into()),
+                    ("string".into(), "GET".into()),
+                ])
+        );
+        values.clear();
+        collect_attribute_tag_values(
+            out,
+            "instrumentation.library",
+            &format!("{INSTRUMENTATION_ATTR_PREFIX}library"),
+            &mut values,
+        )
+        .unwrap();
+        assert2::assert!(values == BTreeSet::from([("string".into(), "otel".into())]));
     }
 
     #[tokio::test]

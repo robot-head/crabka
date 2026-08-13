@@ -20951,6 +20951,33 @@ mod tests {
         assert_eq!(ingest_tenant(&empty), "unknown");
     }
 
+    #[tokio::test]
+    async fn unavailable_query_authorizer_fails_closed() {
+        let result = UnavailableQueryAuthorizer.check("tenant-a").await;
+
+        assert2::assert!(matches!(
+            result,
+            Err(QueryAuthorizationError::Unavailable { tenant, .. }) if tenant == "tenant-a"
+        ));
+    }
+
+    #[test]
+    fn service_readiness_requires_wal_and_authorization() {
+        assert2::assert!(ServiceReadiness::ready().is_ready());
+
+        let readiness = ServiceReadiness::deferred_querier();
+        assert2::assert!(!readiness.is_ready());
+        readiness.wal_connected.store(true, AtomicOrdering::SeqCst);
+        assert2::assert!(!readiness.is_ready());
+        readiness.wal_connected.store(false, AtomicOrdering::SeqCst);
+        readiness
+            .authorization_connected
+            .store(true, AtomicOrdering::SeqCst);
+        assert2::assert!(!readiness.is_ready());
+        readiness.wal_connected.store(true, AtomicOrdering::SeqCst);
+        assert2::assert!(readiness.is_ready());
+    }
+
     #[derive(Clone)]
     struct RecordingObjectStore {
         inner: Arc<object_store::memory::InMemory>,

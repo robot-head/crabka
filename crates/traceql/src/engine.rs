@@ -2814,6 +2814,13 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn compare_span_identities_reads_every_trace_and_span_id() {
+        let identities = compare_span_identities(&[dictionary_metric_batch()]).unwrap();
+
+        assert!(identities == HashSet::from([([1; 16], [1; 8]), ([2; 16], [2; 8])]));
+    }
+
     #[tokio::test]
     async fn search_selector_returns_matching_trace() {
         let e = engine();

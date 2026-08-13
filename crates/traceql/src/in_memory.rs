@@ -2441,6 +2441,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tag_values_separates_span_resource_and_instrumentation_attributes() {
+        let mut input = span(
+            1,
+            None,
+            "root",
+            vec![
+                ("library".into(), AttrValue::Str("span".into())),
+                (
+                    "__instrumentation.library".into(),
+                    AttrValue::Str("instrumentation".into()),
+                ),
+            ],
+        );
+        input.instrumentation_name = "tracer".into();
+        let mut store = InMemorySpanStore::new();
+        store.push_trace("t", "service", "root", vec![input]);
+
+        let span_values = store
+            .tag_values("t", "span.library", 0, 10_000)
+            .await
+            .unwrap();
+        let instrumentation_values = store
+            .tag_values("t", "instrumentation.library", 0, 10_000)
+            .await
+            .unwrap();
+        let resource_values = store
+            .tag_values("t", "resource.library", 0, 10_000)
+            .await
+            .unwrap();
+
+        assert!(
+            span_values
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "span".into(),
+                }]
+        );
+        assert!(
+            instrumentation_values
+                == vec![
+                    TypedValue {
+                        type_: "string".into(),
+                        value: "instrumentation".into(),
+                    },
+                    TypedValue {
+                        type_: "string".into(),
+                        value: "span".into(),
+                    },
+                ]
+        );
+        assert!(resource_values.is_empty());
+    }
+
+    #[tokio::test]
     async fn tag_values_empty_for_unknown_tag() {
         assert!(tag_values_for("does.not.exist").await.is_empty());
     }

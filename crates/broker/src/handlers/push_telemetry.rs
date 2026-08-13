@@ -284,9 +284,13 @@ mod tests {
     use crabka_compression::CompressionType;
     use crabka_protocol::{owned::push_telemetry_response, primitives::uuid::Uuid as ProtoUuid};
     use crabka_units::{bytes, fraction, gibibytes};
-    use opentelemetry_proto::tonic::metrics::v1::{
-        Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
-        ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
+    use opentelemetry_proto::tonic::{
+        common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
+        metrics::v1::{
+            Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
+            ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
+        },
+        resource::v1::Resource,
     };
     use prost::Message as _;
     use uuid::Uuid;
@@ -519,6 +523,58 @@ mod tests {
         assert!(points[2].metric == "latency.ms", "{points:?}");
         assert!(
             matches!(points[2].value, PointValue::Histogram { count: 3, sum, .. } if (sum - 9.5).abs() < f64::EPSILON)
+        );
+    }
+
+    fn string_attribute(key: &str, value: &str) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(value.into())),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn flatten_for_prometheus_sanitizes_and_deduplicates_attribute_labels() {
+        let mut point = number_point(number_data_point::Value::AsInt(1));
+        point.attributes = vec![string_attribute("dup.key", "point")];
+        let md = MetricsData {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![
+                        string_attribute("9bad-key", "resource"),
+                        string_attribute("dup.key", "resource"),
+                    ],
+                    ..Default::default()
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: Some(InstrumentationScope {
+                        attributes: vec![string_attribute("dup.key", "scope")],
+                        ..Default::default()
+                    }),
+                    metrics: vec![Metric {
+                        name: "requests".into(),
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![point],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let points = flatten_for_prometheus(&md, "instance", "client");
+
+        assert!(
+            points[0].attributes
+                == vec![
+                    ("_9bad_key".into(), "resource".into()),
+                    ("dup_key".into(), "point".into()),
+                ]
         );
     }
 }

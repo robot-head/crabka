@@ -3808,6 +3808,73 @@ overrides:
         );
     }
 
+    fn otlp_test_span() -> SpanRef {
+        SpanRef {
+            span_id: [1; 8],
+            parent_span_id: Some([2; 8]),
+            name: "operation".into(),
+            kind: 2,
+            nested_set_left: 1,
+            nested_set_right: 2,
+            nested_set_parent: 0,
+            start_time_unix_nano: 1_000,
+            duration: nanos(50),
+            status_code: 1,
+            status_message: String::new(),
+            instrumentation_name: "tracer".into(),
+            instrumentation_version: "1.2.3".into(),
+            resource_attributes: Vec::new(),
+            attributes: vec![
+                ("http.method".into(), AttrValue::Str("GET".into())),
+                (
+                    format!("{}library", crabka_traceql::INSTRUMENTATION_ATTR_PREFIX),
+                    AttrValue::Str("otel".into()),
+                ),
+            ],
+            events: Vec::new(),
+            links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn otlp_projection_preserves_scope_span_timing_and_attributes() {
+        let span = otlp_test_span();
+        let projected = otlp_scope_spans([9; 16], vec![&span]);
+        let scope = projected[0].scope.as_ref().unwrap();
+        let otlp_span = &projected[0].spans[0];
+
+        check!(scope.name == "tracer");
+        check!(scope.version == "1.2.3");
+        check!(scope.attributes.len() == 1);
+        check!(scope.attributes[0].key == "library");
+        check!(
+            scope.attributes[0]
+                .value
+                .as_ref()
+                .and_then(|value| value.value.as_ref())
+                == Some(&OtlpValue::StringValue("otel".into()))
+        );
+        check!(otlp_span.end_time_unix_nano == 1_050);
+        check!(otlp_span.attributes.len() == 1);
+        check!(otlp_span.attributes[0].key == "http.method");
+    }
+
+    #[test]
+    fn otlp_projection_omits_empty_scope_and_keeps_name_only_scope() {
+        let mut empty = otlp_test_span();
+        empty.instrumentation_name.clear();
+        empty.instrumentation_version.clear();
+        empty.attributes.clear();
+        assert2::assert!(otlp_scope_spans([9; 16], vec![&empty])[0].scope.is_none());
+
+        empty.instrumentation_name = "tracer".into();
+        let projected = otlp_scope_spans([9; 16], vec![&empty]);
+        let scope = projected[0].scope.as_ref().unwrap();
+        assert2::assert!(scope.name == "tracer");
+        assert2::assert!(scope.version.is_empty());
+        assert2::assert!(scope.attributes.is_empty());
+    }
+
     #[test]
     fn trace_json_projects_repeated_resource_attributes_as_arrays() {
         let trace = TraceSpans {

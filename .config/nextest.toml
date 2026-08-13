@@ -12,6 +12,7 @@ consumer-cooperative-rebalance = { max-threads = 1 }
 gres-fdw = { max-threads = 2 }
 gres-ranges-process = { max-threads = 2 }
 gres-substrate = { max-threads = 2 }
+grafana-e2e = { max-threads = 1 }
 schema-registry-fixed-port-captures = { max-threads = 1 }
 
 [[profile.default.overrides]]
@@ -38,6 +39,10 @@ threads-required = 'num-test-threads'
 filter = 'package(crabka-integration-tests) & binary(consumer_cooperative_rebalance)'
 test-group = 'consumer-cooperative-rebalance'
 threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+filter = 'package(crabka-integration-tests) & binary(grafana_e2e)'
+test-group = 'grafana-e2e'
 
 [[profile.default.overrides]]
 filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
@@ -83,6 +88,10 @@ threads-required = 'num-test-threads'
 filter = 'package(crabka-integration-tests) & binary(consumer_cooperative_rebalance)'
 test-group = 'consumer-cooperative-rebalance'
 threads-required = 'num-test-threads'
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-integration-tests) & binary(grafana_e2e)'
+test-group = 'grafana-e2e'
 
 [[profile.ci.overrides]]
 filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
