@@ -9819,11 +9819,11 @@ impl Parser {
         loop {
             let member = if self.eat_ident_eq("operator") {
                 let number = self.expect_u16("operator number")?;
-                let position = self.peek_pos();
-                let token = self.bump();
-                let operator = operator_spelling(&token)
-                    .ok_or_else(|| ParseError::new("expected operator name", position))?
-                    .to_string();
+                // PostgreSQL reads `any_operator` here, so the member may name a
+                // user-defined symbol. A symbol like `===` is several tokens, so
+                // it has to be sliced out of the source the way `CREATE OPERATOR`
+                // slices it rather than read one token at a time.
+                let operator = self.operator_name()?.to_string();
                 if *self.peek() != Token::LParen {
                     return Err(ParseError::new_sqlstate(
                         "42601",

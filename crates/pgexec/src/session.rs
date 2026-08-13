@@ -5678,17 +5678,25 @@ impl SqlSession {
                     &method,
                     *kind,
                 )?;
-                let owner = match kind {
-                    OperatorObjectKind::Class => {
-                        crabka_pgcatalog::get_operator_class(&*self.catalog_kv, &old_name, &method)
-                            .map(|object| object.owner)
+                let builtin = builtin_operator_object_oid(&old_name, &method, *kind);
+                let (object_oid, owner) = match builtin {
+                    Some(oid) => (oid, crate::catalog_fn::OBJECT_OWNER.to_string()),
+                    None => match kind {
+                        OperatorObjectKind::Class => crabka_pgcatalog::get_operator_class(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &method,
+                        )
+                        .map(|object| (object.oid, object.owner)),
+                        OperatorObjectKind::Family => crabka_pgcatalog::get_operator_family(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &method,
+                        )
+                        .map(|object| (object.oid, object.owner)),
                     }
-                    OperatorObjectKind::Family => {
-                        crabka_pgcatalog::get_operator_family(&*self.catalog_kv, &old_name, &method)
-                            .map(|object| object.owner)
-                    }
-                }
-                .map_err(|_| operator_object_missing(*kind, &name.name, &method))?;
+                    .map_err(|_| operator_object_missing(*kind, &name.name, &method))?,
+                };
                 let superuser =
                     self.current_role == self.authenticated_user || self.current_role == "postgres";
                 let member_action = matches!(
@@ -5728,11 +5736,6 @@ impl SqlSession {
                             "must be superuser to alter an operator family",
                         )));
                     }
-                    let family = crabka_pgcatalog::get_operator_family(
-                        &*self.catalog_kv,
-                        &old_name,
-                        &method,
-                    )?;
                     let mut catalog_members = Vec::with_capacity(members.len());
                     let mut identities = std::collections::HashSet::new();
                     for member in members {
@@ -5925,21 +5928,20 @@ impl SqlSession {
                         if !identities.insert(identity) {
                             return Err(operator_family_member_repeated(identity));
                         }
-                        if crabka_pgcatalog::operator_family_member_exists(
-                            &*self.catalog_kv,
-                            family.oid,
-                            identity,
-                        )? {
-                            return Err(operator_family_member_duplicate(
+                        if builtin_operator_family_member_exists(object_oid, identity)
+                            || crabka_pgcatalog::operator_family_member_exists(
+                                &*self.catalog_kv,
+                                object_oid,
                                 identity,
-                                &family.name.name,
-                            ));
+                            )?
+                        {
+                            return Err(operator_family_member_duplicate(identity, &old_name.name));
                         }
                         catalog_members.push(catalog_member);
                     }
                     let ops = crabka_pgcatalog::add_operator_family_members_ops(
                         &*self.catalog_kv,
-                        &family,
+                        object_oid,
                         &catalog_members,
                     )?;
                     self.commit_catalog(ops).await?;
@@ -5954,11 +5956,6 @@ impl SqlSession {
                             "must be superuser to alter an operator family",
                         )));
                     }
-                    let family = crabka_pgcatalog::get_operator_family(
-                        &*self.catalog_kv,
-                        &old_name,
-                        &method,
-                    )?;
                     let members = members
                         .iter()
                         .map(|member| match member {
@@ -5985,21 +5982,44 @@ impl SqlSession {
                     for member in &members {
                         if !crabka_pgcatalog::operator_family_member_exists(
                             &*self.catalog_kv,
-                            family.oid,
+                            object_oid,
                             *member,
                         )? {
-                            return Err(operator_family_member_missing(*member, &family.name.name));
+                            // A member of the built-in fixture is present but
+                            // not removable, which is a different answer from
+                            // "there is no such member".
+                            if builtin_operator_family_member_exists(object_oid, *member) {
+                                return Err(ExecError::Unsupported(format!(
+                                    "operator family \"{}\" is built into this catalog and its \
+                                     own members cannot be dropped",
+                                    old_name.name
+                                )));
+                            }
+                            return Err(operator_family_member_missing(*member, &old_name.name));
                         }
                     }
                     let ops = crabka_pgcatalog::drop_operator_family_members_ops(
                         &*self.catalog_kv,
-                        &family,
+                        object_oid,
                         &members,
                     )?;
                     self.commit_catalog(ops).await?;
                     return Ok(QueryResult::Command {
                         tag: "ALTER OPERATOR FAMILY".into(),
                     });
+                }
+                // Members attach to a built-in family by oid, so they need no
+                // row for it. Renaming, reowning or moving one would, and the
+                // built-in fixture is not writable.
+                if builtin.is_some() {
+                    return Err(ExecError::Unsupported(format!(
+                        "operator {} \"{}\" is built into this catalog and cannot be renamed, reowned or moved",
+                        match kind {
+                            OperatorObjectKind::Class => "class",
+                            OperatorObjectKind::Family => "family",
+                        },
+                        old_name.name
+                    )));
                 }
                 let target_name = match action {
                     OperatorObjectAlterAction::RenameTo(new_name) => {
@@ -13940,10 +13960,126 @@ fn resolve_operator_object_name(
         }) {
             return Ok(name.clone());
         }
+        // The families and classes PostgreSQL ships live in `pg_catalog` and
+        // have no row of their own, so the search path has to reach them from
+        // the built-in fixture instead of from the listing above.
+        if schema == crate::search_path::PG_CATALOG {
+            let builtin = crabka_pgcatalog::RelationName::new(schema, reference.name.clone());
+            if builtin_operator_object_oid(&builtin, method, kind).is_some() {
+                return Ok(builtin);
+            }
+        }
     }
     Ok(crabka_pgcatalog::RelationName::public(
         reference.name.clone(),
     ))
+}
+
+/// Whether the built-in `pg_amop`/`pg_amproc` fixture already fills a family's
+/// slot.
+///
+/// `pg_amop` is unique on (family, left type, right type, strategy) and
+/// `pg_amproc` on (family, left type, right type, number), so a slot the
+/// fixture fills is taken even though no KV row records it. Without this an
+/// `ADD` against a built-in family writes a second row into a slot that already
+/// has one, and the catalog reports both.
+fn builtin_operator_family_member_exists(
+    family_oid: u32,
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+) -> bool {
+    let Ok(family) = i32::try_from(family_oid) else {
+        return false;
+    };
+    let matches = |left: i32,
+                   right: i32,
+                   number: u16,
+                   candidate_left: i32,
+                   candidate_right: i32,
+                   candidate_number: i16| {
+        left == candidate_left
+            && right == candidate_right
+            && i16::try_from(number) == Ok(candidate_number)
+    };
+    match member {
+        crabka_pgcatalog::OperatorFamilyMemberKey::Operator {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => {
+            let (Ok(left), Ok(right)) =
+                (i32::try_from(left_type_oid), i32::try_from(right_type_oid))
+            else {
+                return false;
+            };
+            crate::builtin_amop::BUILTIN_AMOP.iter().any(
+                |(_, candidate_family, candidate_left, candidate_right, strategy, ..)| {
+                    *candidate_family == family
+                        && matches(
+                            left,
+                            right,
+                            number,
+                            *candidate_left,
+                            *candidate_right,
+                            *strategy,
+                        )
+                },
+            )
+        }
+        crabka_pgcatalog::OperatorFamilyMemberKey::Function {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => {
+            let (Ok(left), Ok(right)) =
+                (i32::try_from(left_type_oid), i32::try_from(right_type_oid))
+            else {
+                return false;
+            };
+            crate::builtin_amproc::BUILTIN_AMPROC.iter().any(
+                |(_, candidate_family, candidate_left, candidate_right, candidate_number, _)| {
+                    *candidate_family == family
+                        && matches(
+                            left,
+                            right,
+                            number,
+                            *candidate_left,
+                            *candidate_right,
+                            *candidate_number,
+                        )
+                },
+            )
+        }
+    }
+}
+
+/// The oid of a `pg_catalog` operator family or class that `PostgreSQL` ships.
+///
+/// A built-in operator object is a fixture row, not a catalog row, so nothing
+/// in the KV answers for it. `ALTER OPERATOR FAMILY` still has to find one:
+/// PostgreSQL's own `equivclass` test hangs cross-type members off the built-in
+/// `integer_ops`, and refusing that is the difference between "the family does
+/// not exist" and the truth, which is that it exists and is not writable here.
+fn builtin_operator_object_oid(
+    name: &crabka_pgcatalog::RelationName,
+    method: &str,
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+) -> Option<u32> {
+    if name.schema != crate::search_path::PG_CATALOG {
+        return None;
+    }
+    let oid = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Family => {
+            crate::catalog_rel::builtin_operator_family_oid(method, &name.name)?
+        }
+        crabka_pgparser::ast::OperatorObjectKind::Class => {
+            let method_oid = crate::catalog_rel::access_method_oid(method)?;
+            crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+                .iter()
+                .find(|class| class.2 == name.name && class.1 == method_oid)
+                .map(|class| class.0)?
+        }
+    };
+    u32::try_from(oid).ok()
 }
 
 fn resolve_ordering_family_oid(
@@ -23282,6 +23418,199 @@ mod session_conformance_tests {
             )
             .await
                 == "0"
+        );
+    }
+
+    /// PostgreSQL's own `equivclass` test builds a deliberately incomplete
+    /// cross-type family by hanging members off the *built-in* `integer_ops`,
+    /// so a built-in family has to be a legal `ALTER` target even though it has
+    /// no catalog row of its own — only a fixture entry.
+    /// The alias type, its cast and its cross-type `=`, exactly as
+    /// PostgreSQL's `equivclass` builds them.
+    async fn int8_alias_fixture(session: &mut SqlSession) {
+        for sql in [
+            "CREATE TYPE int8alias1",
+            "CREATE FUNCTION int8alias1in(cstring) RETURNS int8alias1 \
+             STRICT IMMUTABLE LANGUAGE internal AS 'int8in'",
+            "CREATE FUNCTION int8alias1out(int8alias1) RETURNS cstring \
+             STRICT IMMUTABLE LANGUAGE internal AS 'int8out'",
+            "CREATE TYPE int8alias1 (input = int8alias1in, output = int8alias1out, like = int8)",
+            "CREATE FUNCTION int8alias1eq(int8, int8alias1) RETURNS bool \
+             STRICT IMMUTABLE LANGUAGE internal AS 'int8eq'",
+            "CREATE OPERATOR = (procedure = int8alias1eq, leftarg = int8, \
+             rightarg = int8alias1, restrict = eqsel, join = eqjoinsel, merges)",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_built_in_operator_family_accepts_members() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        int8_alias_fixture(&mut session).await;
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree ADD \
+                 OPERATOR 3 = (int8, int8alias1)",
+            )
+            .await
+            .expect("add a member to a built-in family");
+        // 1976 is `pg_catalog.integer_ops` for btree and 403 is btree. The row
+        // has to land *in* the built-in family, carry that family's access
+        // method rather than a zero, and name the user-defined operator rather
+        // than falling back to oid 0.
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop a, pg_catalog.pg_opfamily f, \
+                      pg_catalog.pg_operator o \
+                 WHERE a.amopfamily = f.oid AND a.amopopr = o.oid \
+                   AND f.opfname = 'integer_ops' AND f.oid = 1976 \
+                   AND a.amopstrategy = 3 AND a.amopmethod = 403 \
+                   AND a.amoplefttype = 'int8'::regtype \
+                   AND a.amoprighttype = 'int8alias1'::regtype \
+                   AND o.oprname = '=' AND o.oprright = 'int8alias1'::regtype",
+            )
+            .await
+                == "1"
+        );
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree DROP \
+                 OPERATOR 3 (int8, int8alias1)",
+            )
+            .await
+            .expect("drop the added member");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop \
+                 WHERE amopfamily = 1976 AND amopstrategy = 3 \
+                   AND amoprighttype = 'int8alias1'::regtype",
+            )
+            .await
+                == "0"
+        );
+    }
+
+    /// The fixture rows are the built-in family's real members, so a slot one of
+    /// them fills is taken. Reading only the durable rows lets a second row into
+    /// the same slot, and `pg_amop` then reports both.
+    #[tokio::test]
+    async fn a_built_in_family_slot_is_occupied_by_its_fixture() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let operator = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree ADD OPERATOR 1 < (int4, int2)",
+            )
+            .await
+            .expect_err("strategy 1 for (int4, int2) is a built-in member");
+        assert!(
+            operator.message
+                == "operator 1(integer,smallint) already exists in operator family \"integer_ops\"",
+            "{}",
+            operator.message
+        );
+        let function = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree ADD \
+                 FUNCTION 1 btint42cmp(int4, int2)",
+            )
+            .await
+            .expect_err("support function 1 for (int4, int2) is a built-in member");
+        assert!(
+            function.message
+                == "function 1(integer,smallint) already exists in operator family \"integer_ops\"",
+            "{}",
+            function.message
+        );
+        // Only one row, so the fixture was consulted rather than duplicated.
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop \
+                 WHERE amopfamily = 1976 AND amopstrategy = 1 \
+                   AND amoplefttype = 'int4'::regtype AND amoprighttype = 'int2'::regtype",
+            )
+            .await
+                == "1"
+        );
+        let dropped = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree DROP OPERATOR 1 (int4, int2)",
+            )
+            .await
+            .expect_err("a fixture member cannot be dropped");
+        assert!(
+            dropped.message
+                == "operator family \"integer_ops\" is built into this catalog and its own \
+                    members cannot be dropped",
+            "{}",
+            dropped.message
+        );
+    }
+
+    /// A member joins a built-in family by oid alone, but a rename, a reowning
+    /// or a schema move would need a row the fixture cannot provide. Say so
+    /// rather than claim the family is missing.
+    #[tokio::test]
+    async fn a_built_in_operator_family_refuses_to_be_renamed() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "ALTER OPERATOR FAMILY integer_ops USING btree RENAME TO whole_numbers",
+            "ALTER OPERATOR FAMILY integer_ops USING btree SET SCHEMA public",
+        ] {
+            let refused = session.simple_query(sql).await.expect_err(sql);
+            assert!(
+                refused.message
+                    == "operator family \"integer_ops\" is built into this catalog and cannot \
+                        be renamed, reowned or moved",
+                "{sql}: {}",
+                refused.message
+            );
+        }
+        // The name still resolves to the built-in, not to a phantom in `public`.
+        let missing = session
+            .simple_query("ALTER OPERATOR FAMILY no_such_ops USING btree RENAME TO other_ops")
+            .await
+            .expect_err("no such family");
+        assert!(
+            missing.message
+                == "operator family \"no_such_ops\" does not exist for access method \"btree\"",
+            "{}",
+            missing.message
+        );
+    }
+
+    /// A family member names `any_operator`, so a user-defined symbol like
+    /// `===` has to be sliced out of the source rather than read as one token.
+    #[tokio::test]
+    async fn a_family_member_names_a_multi_character_operator() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE FUNCTION eq_i4_i2(int4, int2) RETURNS bool \
+             STRICT IMMUTABLE LANGUAGE internal AS 'int42eq'",
+            "CREATE OPERATOR === (procedure = eq_i4_i2, leftarg = int4, rightarg = int2)",
+            "CREATE OPERATOR FAMILY cross_type_ops USING btree",
+            "ALTER OPERATOR FAMILY cross_type_ops USING btree ADD OPERATOR 3 === (int4, int2)",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop a, pg_catalog.pg_operator o, \
+                      pg_catalog.pg_opfamily f \
+                 WHERE a.amopopr = o.oid AND a.amopfamily = f.oid \
+                   AND f.opfname = 'cross_type_ops' AND o.oprname = '===' \
+                   AND a.amopstrategy = 3 AND a.amopmethod = 403",
+            )
+            .await
+                == "1"
         );
     }
 

@@ -1663,20 +1663,24 @@ pub fn list_operator_family_members(
 
 /// Add durable operator and support-function members to one family atomically.
 ///
+/// The family is named by oid rather than by record because a member may join a
+/// family `PostgreSQL` ships. Those have no row here — the built-in fixture is
+/// their whole definition — so there is nothing to re-read, and the caller has
+/// already resolved the oid it passes.
+///
 /// # Errors
 ///
-/// Returns duplicate-object, undefined-family, catalog storage, or corruption errors.
+/// Returns duplicate-object, catalog storage, or corruption errors.
 pub fn add_operator_family_members_ops(
     kv: &dyn Kv,
-    family: &OperatorFamily,
+    family_oid: u32,
     members: &[OperatorFamilyMember],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    get_operator_family(kv, &family.name, &family.method)?;
     let mut identities = HashSet::new();
     let mut ops = Vec::with_capacity(members.len());
     for member in members {
         let identity = operator_family_member_identity(member);
-        let key = operator_family_member_key(family.oid, identity);
+        let key = operator_family_member_key(family_oid, identity);
         if !identities.insert(identity) || kv.get(&key)?.is_some() {
             return Err(CatalogError::DuplicateObject(format!(
                 "operator family member {identity:?}"
@@ -1713,19 +1717,21 @@ pub fn add_operator_family_members_ops(
 
 /// Drop existing family members atomically.
 ///
+/// The family is named by oid for the reason
+/// [`add_operator_family_members_ops`] gives.
+///
 /// # Errors
 ///
 /// Returns undefined-object, catalog storage, or corruption errors.
 pub fn drop_operator_family_members_ops(
     kv: &dyn Kv,
-    family: &OperatorFamily,
+    family_oid: u32,
     members: &[OperatorFamilyMemberKey],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    get_operator_family(kv, &family.name, &family.method)?;
     let mut identities = HashSet::new();
     let mut ops = Vec::with_capacity(members.len());
     for member in members {
-        let key = operator_family_member_key(family.oid, *member);
+        let key = operator_family_member_key(family_oid, *member);
         if !identities.insert(*member) || kv.get(&key)?.is_none() {
             return Err(CatalogError::UndefinedObject(format!(
                 "operator family member {member:?}"

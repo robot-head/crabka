@@ -1985,12 +1985,40 @@ fn pg_amop_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             },
         )
         .collect::<Vec<_>>();
-    let methods = crabka_pgcatalog::list_operator_families(kv)?
+    // A member may hang off a family PostgreSQL ships as well as off a
+    // user-created one, so `amopmethod` has to be answerable for both.
+    let mut methods = crate::builtin_opfamilies::BUILTIN_OPERATOR_FAMILIES
+        .iter()
+        .filter_map(|(oid, method, _)| {
+            Some((
+                u32::try_from(*oid).ok()?,
+                access_method_oid(method).unwrap_or_default(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    methods.extend(
+        crabka_pgcatalog::list_operator_families(kv)?
+            .into_iter()
+            .map(|family| {
+                (
+                    family.oid,
+                    access_method_oid(&family.method).unwrap_or_default(),
+                )
+            }),
+    );
+    // A family member normally names a built-in operator, but `CREATE OPERATOR`
+    // followed by `ALTER OPERATOR FAMILY … ADD` is the documented way to build a
+    // cross-type family, so `amopopr` has to resolve a user-defined symbol too.
+    let user_operators = crabka_pgcatalog::list_user_operators(kv)?
         .into_iter()
-        .map(|family| {
+        .map(|operator| {
             (
-                family.oid,
-                access_method_oid(&family.method).unwrap_or_default(),
+                (
+                    operator.symbol,
+                    i32::try_from(operator.left_type_oid).unwrap_or_default(),
+                    i32::try_from(operator.right_type_oid).unwrap_or_default(),
+                ),
+                i32::try_from(operator.oid).unwrap_or_default(),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -2015,14 +2043,22 @@ fn pg_amop_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             continue;
         };
         let operator = operator.rsplit('.').next().unwrap_or(&operator);
+        let left = i32::try_from(left_type_oid).unwrap_or_default();
+        let right = i32::try_from(right_type_oid).unwrap_or_default();
         let operator_oid = crate::builtin_operators::BUILTIN_OPERATORS
             .iter()
-            .find(|(_, name, _, _, _, left, right, ..)| {
-                *name == operator
-                    && *left == i32::try_from(left_type_oid).unwrap_or_default()
-                    && *right == i32::try_from(right_type_oid).unwrap_or_default()
+            .find(|(_, name, _, _, _, builtin_left, builtin_right, ..)| {
+                *name == operator && *builtin_left == left && *builtin_right == right
             })
-            .map_or(0, |row| row.0);
+            .map_or_else(
+                || {
+                    user_operators
+                        .get(&(operator.to_string(), left, right))
+                        .copied()
+                        .unwrap_or_default()
+                },
+                |row| row.0,
+            );
         rows.push(vec![
             int(330_000 + i32::try_from(index).unwrap_or_default()),
             int(i32::try_from(family).unwrap_or_default()),
