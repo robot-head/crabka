@@ -1349,14 +1349,21 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    # 90 to match the other instrumented-coverage job above, which carries the
-    # same `-C instrument-coverage` build and already budgets 90. On
-    # 2026-08-13 both shards were cancelled at exactly 60m18s and 60m15s, with
-    # every setup step green and the cancel landing inside the test step
-    # itself. Two shards timing out together is a slow build rather than one
-    # leg wedged. The true requirement is unknown, because the job was cut off
-    # before it finished: if 90 also times out, measure the step rather than
-    # raising this again.
+    # 90 matches the other instrumented-coverage job above, which carries the
+    # same `-C instrument-coverage` build. Do NOT raise this again: 60 was
+    # tried, then 90, and the number is not the problem.
+    #
+    # Measured on 2026-08-13. Both shards were cancelled at 60m, raised to 90m,
+    # and cancelled again at 90m. The runner's own shutdown names the cause:
+    # "Terminate orphan process: ... (loki_differential-...)", four of them
+    # still alive. `crates/integration-tests/tests/loki_differential.rs` starts
+    # a `mirror.gcr.io/grafana/loki` container per test through testcontainers,
+    # and an image pull that never completes has no deadline to stop it. The
+    # job is not slow, it is waiting.
+    #
+    # The fix belongs in the test: a start deadline on the container, or moving
+    # this suite out of the coverage shard. A larger timeout only makes the
+    # wait longer.
     timeout-minutes: 90
     strategy:
       fail-fast: false
