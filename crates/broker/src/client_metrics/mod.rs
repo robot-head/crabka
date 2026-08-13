@@ -25,15 +25,21 @@ pub(crate) struct ClientMetrics {
 
 impl ClientMetrics {
     /// `otlp_endpoint` is `None` when OTLP forwarding is disabled.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         telemetry_max: ByteSize,
         default_interval: Time,
         otlp_endpoint: Option<String>,
+        otlp_protocol: crabka_telemetry::OtlpProtocol,
         otlp_queue_capacity: usize,
         prometheus_snapshot_ttl: Time,
+        dropped: prometheus_client::metrics::counter::Counter,
+        failed: prometheus_client::metrics::counter::Counter,
     ) -> Self {
         let otlp = match otlp_endpoint {
-            Some(ep) => OtlpForwarder::spawn(ep, otlp_queue_capacity),
+            Some(ep) => {
+                OtlpForwarder::spawn(ep, otlp_protocol, otlp_queue_capacity, dropped, failed)
+            }
             None => OtlpForwarder::disabled(),
         };
         Self {
@@ -43,5 +49,9 @@ impl ClientMetrics {
             )),
             otlp,
         }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.otlp.shutdown().await;
     }
 }

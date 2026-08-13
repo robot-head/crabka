@@ -304,6 +304,17 @@ services:
       rustfs-setup: { condition: service_completed_successfully }
       broker: { condition: service_healthy }
 
+  traces-metrics-generator:
+    <<: [*crabka-image, *compactor-res]
+    command: ["crabka-traces", "--target=metrics-generator", "--bootstrap=broker:9092", "--remote-write-url=http://metrics-distributor:4041/api/v1/push", "--enable-target-info"]
+    environment:
+      <<: *otlp-env
+      OTEL_SERVICE_NAME: traces-metrics-generator
+    depends_on:
+      broker: { condition: service_healthy }
+      metrics-distributor: { condition: service_started }
+      topic-setup: { condition: service_completed_successfully }
+
   traces-querier:
     <<: [*crabka-image, *querier-res]
     command: ["crabka-traces", "--target=querier", "--listen=0.0.0.0:3200", "--object-store-url=s3://crabka-traces"]

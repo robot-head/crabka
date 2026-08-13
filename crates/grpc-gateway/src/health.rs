@@ -26,6 +26,10 @@ impl Readiness {
         self.0.store(true, Ordering::SeqCst);
     }
 
+    pub fn set_not_ready(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.0.load(Ordering::SeqCst)
@@ -47,4 +51,31 @@ pub fn router(readiness: Readiness) -> Router {
             }),
         )
         .with_state(readiness)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn readiness_can_return_to_not_ready() {
+        let readiness = Readiness::new();
+        readiness.set_ready();
+        readiness.set_not_ready();
+
+        let response = router(readiness)
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

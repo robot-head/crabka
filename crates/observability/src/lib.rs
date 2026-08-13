@@ -441,6 +441,8 @@ pub enum ServiceRuntimeError {
     Frontier(#[from] CompactionFrontierStoreError),
     #[error(transparent)]
     DeleteRequests(#[from] LogDeleteRequestStoreError),
+    #[error("critical background task `{0}` stopped unexpectedly")]
+    CriticalTask(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -738,9 +740,7 @@ where
                 if start.elapsed().as_time() >= deadline {
                     return Err(error);
                 }
-                eprintln!(
-                    "[crabka-observability] WAL dependency {what} connect failed during broker warmup; retrying: {error}"
-                );
+                tracing::warn!(dependency = what, %error, "WAL dependency connect failed during broker warmup; retrying");
                 last_err = Some(error);
             }
             Err(_elapsed) => {
@@ -760,15 +760,17 @@ where
                         // hang; update last_err on next loop iteration and eventually
                         // we'll return Err from the Ok(Err) deadline arm.  For now,
                         // sleep briefly and let the loop expire naturally.
-                        eprintln!(
-                            "[crabka-observability] WAL dependency {what} connect timed out repeatedly; giving up"
+                        tracing::error!(
+                            dependency = what,
+                            "WAL dependency connect timed out repeatedly; giving up"
                         );
                         sleep(initial_backoff.to_std()).await;
                         continue;
                     };
                 }
-                eprintln!(
-                    "[crabka-observability] WAL dependency {what} connect timed out during broker warmup; retrying"
+                tracing::warn!(
+                    dependency = what,
+                    "WAL dependency connect timed out during broker warmup; retrying"
                 );
             }
         }
@@ -1281,7 +1283,7 @@ fn spawn_compaction_frontier_refresher(
                 refresh_compaction_frontier_and_prune(store.as_ref(), &prefix, &frontier, &hot_tail)
                     .await
             {
-                eprintln!("[crabka-observability] compaction frontier refresh failed: {error}");
+                tracing::warn!(%error, "compaction frontier refresh failed; retaining last good frontier");
             }
         }
     });
@@ -2570,9 +2572,23 @@ impl LogQueryAuthorizer for AllowAllQueryAuthorizer {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct UnavailableQueryAuthorizer;
+
+#[async_trait]
+impl LogQueryAuthorizer for UnavailableQueryAuthorizer {
+    async fn check(&self, tenant: &str) -> Result<(), QueryAuthorizationError> {
+        Err(QueryAuthorizationError::Unavailable {
+            tenant: tenant.to_string(),
+            reason: "broker-backed query authorization is not connected".to_string(),
+        })
+    }
+}
+
 struct BrokerBackedQueryAuthorizer {
     admin: tokio::sync::Mutex<AdminClient>,
     wal_topic: String,
+    connected: Arc<AtomicBool>,
 }
 
 impl BrokerBackedQueryAuthorizer {
@@ -2580,6 +2596,7 @@ impl BrokerBackedQueryAuthorizer {
         bootstrap: &str,
         wal_topic: String,
         client_resource_policy: ClientResourcePolicy,
+        connected: Arc<AtomicBool>,
     ) -> Result<Self, AdminError> {
         let admin = AdminClient::connect_with_options(
             &[bootstrap.to_string()],
@@ -2589,6 +2606,7 @@ impl BrokerBackedQueryAuthorizer {
         Ok(Self {
             admin: tokio::sync::Mutex::new(admin),
             wal_topic,
+            connected,
         })
     }
 }
@@ -2597,15 +2615,22 @@ impl BrokerBackedQueryAuthorizer {
 impl LogQueryAuthorizer for BrokerBackedQueryAuthorizer {
     #[cfg_attr(test, mutants::skip)]
     async fn check(&self, tenant: &str) -> Result<(), QueryAuthorizationError> {
-        let acls = {
+        let result = {
             let mut admin = self.admin.lock().await;
-            admin
-                .describe_acls(&AclEntryFilter::default())
-                .await
-                .map_err(|error| QueryAuthorizationError::Unavailable {
+            admin.describe_acls(&AclEntryFilter::default()).await
+        };
+        let acls = match result {
+            Ok(acls) => {
+                self.connected.store(true, AtomicOrdering::SeqCst);
+                acls
+            }
+            Err(error) => {
+                self.connected.store(false, AtomicOrdering::SeqCst);
+                return Err(QueryAuthorizationError::Unavailable {
                     tenant: tenant.to_string(),
                     reason: error.to_string(),
-                })?
+                });
+            }
         };
         check_tenant_wal_read_acl(tenant, &self.wal_topic, &acls)
     }
@@ -2614,19 +2639,18 @@ impl LogQueryAuthorizer for BrokerBackedQueryAuthorizer {
 /// A [`LogQueryAuthorizer`] whose underlying implementation can change after
 /// construction.
 ///
-/// The querier uses it to start with a permissive allow-all policy while the
-/// real [`BrokerBackedQueryAuthorizer`] connects asynchronously in the
-/// background (FIX B2).
+/// The querier uses it to fail closed while the real
+/// [`BrokerBackedQueryAuthorizer`] connects asynchronously.
 struct SwappableQueryAuthorizer {
     inner: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>,
 }
 
 impl SwappableQueryAuthorizer {
-    /// Creates a new swappable authorizer that starts with
-    /// `AllowAllQueryAuthorizer`.
+    /// Creates a new swappable authorizer that starts unavailable.
     fn new() -> (Self, Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>) {
-        let inner: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>> =
-            Arc::new(tokio::sync::RwLock::new(Arc::new(AllowAllQueryAuthorizer)));
+        let inner: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>> = Arc::new(
+            tokio::sync::RwLock::new(Arc::new(UnavailableQueryAuthorizer)),
+        );
         (
             Self {
                 inner: inner.clone(),
@@ -3345,10 +3369,13 @@ fn spawn_log_hot_tail_poller(
     hot_tail: BufferedLogHotTail,
     frontier: Option<SharedCompactionFrontier>,
     poll_interval: Time,
-) {
+    token: CancellationToken,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let result = {
+            let result = tokio::select! {
+                () = token.cancelled() => return,
+                result = async {
                 let mut consumer = consumer.lock().await;
                 poll_log_hot_tail_once_with_frontier(
                     consumer.as_mut(),
@@ -3357,16 +3384,23 @@ fn spawn_log_hot_tail_poller(
                     frontier.as_ref(),
                 )
                 .await
+                } => result,
             };
             let should_back_off = match result {
                 Ok(decoded) => decoded == 0,
-                Err(_) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "querier WAL hot-tail poll failed; retrying");
+                    true
+                }
             };
             if should_back_off {
-                sleep(poll_interval.to_std()).await;
+                tokio::select! {
+                    () = token.cancelled() => return,
+                    () = sleep(poll_interval.to_std()) => {}
+                }
             }
         }
-    });
+    })
 }
 
 /// Spawns a background task that retries `KafkaLogWalConsumer::connect` until
@@ -3386,6 +3420,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
     token: CancellationToken,
     poll_interval: Time,
     reconnect_interval: Time,
+    readiness: ServiceReadiness,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut consumer = loop {
@@ -3400,9 +3435,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
                     match result {
                         Ok(c) => break c,
                         Err(error) => {
-                            eprintln!(
-                                "[crabka-observability] querier WAL consumer connect failed; retrying: {error}"
-                            );
+                            tracing::warn!(%error, "querier WAL consumer connect failed; retrying");
                             tokio::select! {
                                 () = token.cancelled() => return,
                                 () = sleep(reconnect_interval.to_std()) => {}
@@ -3412,14 +3445,22 @@ fn spawn_wal_hot_tail_connect_and_poll(
                 }
             }
         };
+        readiness.wal_connected.store(true, AtomicOrdering::SeqCst);
         loop {
             let result = tokio::select! {
                 () = token.cancelled() => break,
                 result = poll_log_hot_tail_once_with_frontier(&mut consumer, &hot_tail, poll_interval, frontier.as_ref()) => result,
             };
             let should_back_off = match result {
-                Ok(decoded) => decoded == 0,
-                Err(_) => true,
+                Ok(decoded) => {
+                    readiness.wal_connected.store(true, AtomicOrdering::SeqCst);
+                    decoded == 0
+                }
+                Err(error) => {
+                    readiness.wal_connected.store(false, AtomicOrdering::SeqCst);
+                    tracing::warn!(%error, "querier WAL hot-tail poll failed; retrying");
+                    true
+                }
             };
             if should_back_off {
                 tokio::select! {
@@ -3433,8 +3474,8 @@ fn spawn_wal_hot_tail_connect_and_poll(
 }
 
 /// Spawns a background task that retries `BrokerBackedQueryAuthorizer::connect`
-/// until it succeeds, then swaps the given `slot` from `AllowAll` to the real
-/// broker-backed authorizer (FIX B2).
+/// until it succeeds, then swaps the unavailable authorizer for the real
+/// broker-backed authorizer.
 #[cfg_attr(test, mutants::skip)]
 fn spawn_query_authorizer_connect(
     bootstrap: String,
@@ -3442,31 +3483,39 @@ fn spawn_query_authorizer_connect(
     slot: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>,
     client_resource_policy: ClientResourcePolicy,
     reconnect_interval: Time,
-) {
+    token: CancellationToken,
+    readiness: ServiceReadiness,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let authorizer = loop {
-            match BrokerBackedQueryAuthorizer::connect(
+            let result = tokio::select! {
+                () = token.cancelled() => return,
+                result = BrokerBackedQueryAuthorizer::connect(
                 &bootstrap,
                 topic.clone(),
                 client_resource_policy,
-            )
-            .await
-            {
+                readiness.authorization_connected.clone(),
+                ) => result,
+            };
+            match result {
                 Ok(a) => break a,
                 Err(error) => {
-                    eprintln!(
-                        "[crabka-observability] querier authorizer connect failed; retrying: {error}"
-                    );
-                    sleep(reconnect_interval.to_std()).await;
+                    tracing::warn!(%error, "querier authorizer connect failed; retrying");
+                    tokio::select! {
+                        () = token.cancelled() => return,
+                        () = sleep(reconnect_interval.to_std()) => {}
+                    }
                 }
             }
         };
         let mut guard = slot.write().await;
         *guard = Arc::new(authorizer);
-        eprintln!(
-            "[crabka-observability] querier query authorizer promoted to broker-backed ACL checks"
-        );
-    });
+        readiness
+            .authorization_connected
+            .store(true, AtomicOrdering::SeqCst);
+        tracing::info!("querier query authorizer connected; broker-backed ACL checks active");
+        token.cancelled().await;
+    })
 }
 
 fn has_native_kafka_log_headers(headers: &[KafkaWalHeader]) -> bool {
@@ -3732,6 +3781,33 @@ struct RoleOps {
     role_ring_path: Option<&'static str>,
 }
 
+#[derive(Clone)]
+struct ServiceReadiness {
+    wal_connected: Arc<AtomicBool>,
+    authorization_connected: Arc<AtomicBool>,
+}
+
+impl ServiceReadiness {
+    fn ready() -> Self {
+        Self {
+            wal_connected: Arc::new(AtomicBool::new(true)),
+            authorization_connected: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    fn deferred_querier() -> Self {
+        Self {
+            wal_connected: Arc::new(AtomicBool::new(false)),
+            authorization_connected: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.wal_connected.load(AtomicOrdering::SeqCst)
+            && self.authorization_connected.load(AtomicOrdering::SeqCst)
+    }
+}
+
 const DISTRIBUTOR_OPS: RoleOps = RoleOps {
     target: "distributor",
     ring_component: "crabka-distributor",
@@ -3750,7 +3826,11 @@ const COMPACTOR_OPS: RoleOps = RoleOps {
     role_ring_path: Some("/compactor/ring"),
 };
 
-fn with_role_ops_routes<S>(mut router: Router<S>, ops: RoleOps) -> Router<S>
+fn with_role_ops_routes<S>(
+    mut router: Router<S>,
+    ops: RoleOps,
+    readiness: ServiceReadiness,
+) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
@@ -3766,7 +3846,7 @@ where
     if let Some(path) = ops.role_ring_path {
         router = router.route(path, get(role_ring));
     }
-    router.layer(Extension(ops))
+    router.layer(Extension(ops)).layer(Extension(readiness))
 }
 
 fn distributor_router_with_sink(
@@ -3785,7 +3865,7 @@ fn distributor_router_with_sink(
         metrics: metrics.clone(),
     };
 
-    with_role_ops_routes(Router::new(), DISTRIBUTOR_OPS)
+    with_role_ops_routes(Router::new(), DISTRIBUTOR_OPS, ServiceReadiness::ready())
         .route("/flush", post(flush_ingester_chunks))
         .route(
             "/ingester/prepare_shutdown",
@@ -6541,7 +6621,7 @@ async fn build_service_router_with_shutdown(
     dependencies: ServiceDependencies,
     object_store: Option<&dyn ObjectStore>,
     token: CancellationToken,
-) -> Result<(Router, Option<JoinHandle<()>>), ServiceConfigError> {
+) -> Result<(Router, Vec<(&'static str, JoinHandle<()>)>), ServiceConfigError> {
     let metrics = dependencies.metrics.clone().unwrap_or_default();
     match config.target {
         Role::Distributor => {
@@ -6561,11 +6641,12 @@ async fn build_service_router_with_shutdown(
                     Some(config.creation_grace_period),
                     metrics,
                 ),
-                None,
+                Vec::new(),
             ))
         }
         Role::Querier => {
-            let mut wal_handle: Option<JoinHandle<()>> = None;
+            let mut background_tasks = Vec::new();
+            let mut readiness = ServiceReadiness::ready();
             let configured_store = if object_store.is_none() {
                 build_configured_object_store(config)?
             } else {
@@ -6615,18 +6696,23 @@ async fn build_service_router_with_shutdown(
                         config.querier_frontier_refresh_interval,
                     );
                 }
-                spawn_log_hot_tail_poller(
-                    wal_consumer,
-                    hot_tail.clone(),
-                    frontier.clone(),
-                    config.querier_hot_tail_interval,
-                );
+                background_tasks.push((
+                    "querier WAL hot-tail",
+                    spawn_log_hot_tail_poller(
+                        wal_consumer,
+                        hot_tail.clone(),
+                        frontier.clone(),
+                        config.querier_hot_tail_interval,
+                        token.clone(),
+                    ),
+                ));
                 if let Some(frontier) = frontier {
                     state = state.with_hot_tail_shared_frontier(hot_tail, frontier);
                 } else {
                     state = state.with_hot_tail(hot_tail, i64::MIN);
                 }
             } else if let Some(deferred) = dependencies.deferred_wal_consumer_connect {
+                readiness = ServiceReadiness::deferred_querier();
                 // Deferred connect: the consumer and authorizer connect asynchronously so the
                 // querier's HTTP port binds without waiting for the broker to be ready (FIX B2).
                 let hot_tail =
@@ -6650,25 +6736,33 @@ async fn build_service_router_with_shutdown(
                 }
 
                 // Spawn the consumer connect + poll loop in a background task.
-                wal_handle = Some(spawn_wal_hot_tail_connect_and_poll(
-                    deferred.clone(),
-                    hot_tail.clone(),
-                    frontier.clone(),
-                    token,
-                    config.querier_hot_tail_interval,
-                    config.querier_dependency_reconnect_interval,
+                background_tasks.push((
+                    "querier WAL hot-tail",
+                    spawn_wal_hot_tail_connect_and_poll(
+                        deferred.clone(),
+                        hot_tail.clone(),
+                        frontier.clone(),
+                        token.clone(),
+                        config.querier_hot_tail_interval,
+                        config.querier_dependency_reconnect_interval,
+                        readiness.clone(),
+                    ),
                 ));
 
-                // Install a swappable authorizer that starts as AllowAll and gets promoted
-                // to BrokerBackedQueryAuthorizer once connected in the background.
+                // Fail closed until the broker-backed authorizer connects.
                 let (swappable, slot) = SwappableQueryAuthorizer::new();
-                spawn_query_authorizer_connect(
-                    deferred.bootstrap,
-                    deferred.topic,
-                    slot,
-                    deferred.client_resource_policy,
-                    config.querier_dependency_reconnect_interval,
-                );
+                background_tasks.push((
+                    "querier authorization",
+                    spawn_query_authorizer_connect(
+                        deferred.bootstrap,
+                        deferred.topic,
+                        slot,
+                        deferred.client_resource_policy,
+                        config.querier_dependency_reconnect_interval,
+                        token.clone(),
+                        readiness.clone(),
+                    ),
+                ));
                 state = state.with_query_authorizer(swappable);
 
                 if let Some(frontier) = frontier {
@@ -6678,12 +6772,18 @@ async fn build_service_router_with_shutdown(
                 }
             }
             state = state.with_metrics(metrics);
-            Ok((loki_router(state), wal_handle))
+            Ok((
+                loki_router_with_readiness(state, readiness),
+                background_tasks,
+            ))
         }
         Role::Compactor => {
             let delete_requests =
                 compactor_delete_requests_for_config(config, dependencies.delete_requests)?;
-            Ok((compactor_router_with_delete_requests(delete_requests), None))
+            Ok((
+                compactor_router_with_delete_requests(delete_requests),
+                Vec::new(),
+            ))
         }
     }
 }
@@ -6734,16 +6834,40 @@ pub async fn serve_service_listener(
         token_sig.cancel();
     });
     let token_srv = token.clone();
-    let (app, wal_handle) =
+    let (app, background_tasks) =
         build_service_router_with_shutdown(&config, dependencies, object_store, token.clone())
             .await?;
-    axum::serve(listener, app)
+    let server = axum::serve(listener, app)
         .with_graceful_shutdown(async move { token_srv.cancelled().await })
-        .await?;
-    token.cancel();
-    if let Some(h) = wal_handle {
-        let _ = h.await;
+        .into_future();
+    tokio::pin!(server);
+    let mut tasks = tokio::task::JoinSet::new();
+    for (name, handle) in background_tasks {
+        tasks.spawn(async move {
+            let result = handle.await;
+            (name, result)
+        });
     }
+    if tasks.is_empty() {
+        server.await?;
+    } else {
+        tokio::select! {
+            result = &mut server => result?,
+            result = tasks.join_next() => {
+                if token.is_cancelled() {
+                    server.await?;
+                } else {
+                    let name = result
+                        .and_then(Result::ok)
+                        .map_or("unknown", |(name, _)| name);
+                    token.cancel();
+                    return Err(ServiceRuntimeError::CriticalTask(name));
+                }
+            }
+        }
+    }
+    token.cancel();
+    while tasks.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -6781,7 +6905,11 @@ async fn serve_compactor_service_listener(
 }
 
 pub fn loki_router(state: QuerierState) -> Router {
-    with_role_ops_routes(Router::new(), QUERIER_OPS)
+    loki_router_with_readiness(state, ServiceReadiness::ready())
+}
+
+fn loki_router_with_readiness(state: QuerierState, readiness: ServiceReadiness) -> Router {
+    with_role_ops_routes(Router::new(), QUERIER_OPS, readiness)
         .route("/loki/api/v1/rules", get(loki_rules))
         .route(
             "/loki/api/v1/rules/{namespace}",
@@ -6883,7 +7011,7 @@ pub fn loki_router(state: QuerierState) -> Router {
 
 fn compactor_router_with_delete_requests(delete_requests: SharedLogDeleteRequests) -> Router {
     let delete_state = CompactorDeleteState { delete_requests };
-    with_role_ops_routes(Router::new(), COMPACTOR_OPS)
+    with_role_ops_routes(Router::new(), COMPACTOR_OPS, ServiceReadiness::ready())
         .route(
             "/loki/api/v1/format_query",
             get(format_query).post(format_query_post),
@@ -6898,8 +7026,12 @@ fn compactor_router_with_delete_requests(delete_requests: SharedLogDeleteRequest
         .with_state(delete_state)
 }
 
-async fn ready() -> Response {
-    (StatusCode::OK, "ready\n").into_response()
+async fn ready(Extension(readiness): Extension<ServiceReadiness>) -> Response {
+    if readiness.is_ready() {
+        (StatusCode::OK, "ready\n").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response()
+    }
 }
 
 async fn flush_ingester_chunks() -> Response {
@@ -7002,7 +7134,7 @@ async fn role_config(
     status_config(ops.target, raw_query.as_deref())
 }
 
-fn status_config(_target: &'static str, raw_query: Option<&str>) -> Response {
+fn status_config(target: &'static str, raw_query: Option<&str>) -> Response {
     match query_param_value(raw_query, "mode").as_deref() {
         Some("diff") => {
             return (
@@ -7016,7 +7148,7 @@ fn status_config(_target: &'static str, raw_query: Option<&str>) -> Response {
             return (
                 StatusCode::OK,
                 [("content-type", "application/yaml; charset=utf-8")],
-                "target: all\nauth_enabled: true\n",
+                format!("target: {target}\nauth_enabled: true\n"),
             )
                 .into_response();
         }
@@ -7026,7 +7158,7 @@ fn status_config(_target: &'static str, raw_query: Option<&str>) -> Response {
     (
         StatusCode::OK,
         [("content-type", "application/yaml; charset=utf-8")],
-        "target: all\n",
+        format!("target: {target}\n"),
     )
         .into_response()
 }
@@ -20832,6 +20964,33 @@ mod tests {
         let mut empty = HeaderMap::new();
         empty.insert("X-Scope-OrgID", "".parse().unwrap());
         assert_eq!(ingest_tenant(&empty), "unknown");
+    }
+
+    #[tokio::test]
+    async fn unavailable_query_authorizer_fails_closed() {
+        let result = UnavailableQueryAuthorizer.check("tenant-a").await;
+
+        assert2::assert!(matches!(
+            result,
+            Err(QueryAuthorizationError::Unavailable { tenant, .. }) if tenant == "tenant-a"
+        ));
+    }
+
+    #[test]
+    fn service_readiness_requires_wal_and_authorization() {
+        assert2::assert!(ServiceReadiness::ready().is_ready());
+
+        let readiness = ServiceReadiness::deferred_querier();
+        assert2::assert!(!readiness.is_ready());
+        readiness.wal_connected.store(true, AtomicOrdering::SeqCst);
+        assert2::assert!(!readiness.is_ready());
+        readiness.wal_connected.store(false, AtomicOrdering::SeqCst);
+        readiness
+            .authorization_connected
+            .store(true, AtomicOrdering::SeqCst);
+        assert2::assert!(!readiness.is_ready());
+        readiness.wal_connected.store(true, AtomicOrdering::SeqCst);
+        assert2::assert!(readiness.is_ready());
     }
 
     #[derive(Clone)]

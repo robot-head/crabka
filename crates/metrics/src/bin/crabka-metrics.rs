@@ -22,7 +22,7 @@ use crabka_metrics::{
     DEFAULT_MAX_RATE_BUCKETS, MetricsCompactorConfig,
     distributor::{
         DistributorState, HA_TRACKER_TOPIC, KafkaHaElectionSink, KafkaSink,
-        run_ha_election_consumer_loop, serve,
+        router as distributor_router, run_ha_election_consumer_loop,
     },
     metrics::ServiceMetrics,
     run_compactor_consumer_loop,
@@ -238,7 +238,7 @@ fn build_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, Box<dyn std::er
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let _telemetry = crabka_telemetry::init(
+    let telemetry = crabka_telemetry::init(
         OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
             "crabka-metrics",
@@ -249,55 +249,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "info",
         "crabka-metrics",
     )?;
-    let metrics = ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin_with_config(
-        cli.admin_listen_addr,
-        crabka_metrics::metrics::metrics_router(metrics.registry.clone()),
-        cli.profiling.clone(),
-    )
-    .await?;
+    let result = async {
+        let metrics = ServiceMetrics::new();
+        let admin = crabka_telemetry::profiling::spawn_admin_with_config(
+            cli.admin_listen_addr,
+            crabka_metrics::metrics::metrics_router(metrics.registry.clone()),
+            cli.profiling.clone(),
+        )
+        .await?;
 
-    match cli.target {
-        Target::Distributor => run_distributor(cli, metrics).await?,
-        Target::Compactor => run_compactor(cli, metrics).await?,
-        Target::Querier => run_querier(cli).await?,
-        Target::QueryFrontend => run_query_frontend(cli).await?,
-        Target::Ruler => run_ruler(cli).await?,
+        let role = async {
+            match cli.target {
+                Target::Distributor => run_distributor(cli, metrics).await?,
+                Target::Compactor => run_compactor(cli, metrics).await?,
+                Target::Querier => run_querier(cli).await?,
+                Target::QueryFrontend => run_query_frontend(cli).await?,
+                Target::Ruler => run_ruler(cli).await?,
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        tokio::select! {
+            result = role => result?,
+            result = crabka_telemetry::profiling::await_admin_exit(admin) => result?,
+        }
+        Ok(())
     }
-
-    Ok(())
+    .await;
+    telemetry.shutdown();
+    result
 }
 
 async fn run_querier(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let bound = serve_querier(cli.listen, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await?;
+    let listener = TcpListener::bind(cli.listen).await?;
+    let bound = listener.local_addr()?;
     tracing::info!(%bound, "metrics querier listening");
-    let _ = tokio::signal::ctrl_c().await;
+    axum::serve(listener, querier_router())
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }
 
 async fn run_query_frontend(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let bound = serve_query_frontend(cli.listen, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await?;
+    let listener = TcpListener::bind(cli.listen).await?;
+    let bound = listener.local_addr()?;
     tracing::info!(%bound, "metrics query-frontend listening");
-    let _ = tokio::signal::ctrl_c().await;
+    axum::serve(listener, query_frontend_router())
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }
 
 async fn run_ruler(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let bound = serve_ruler(cli.listen, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await?;
+    let listener = TcpListener::bind(cli.listen).await?;
+    let bound = listener.local_addr()?;
     tracing::info!(%bound, "metrics ruler listening");
-    let _ = tokio::signal::ctrl_c().await;
+    axum::serve(listener, ruler_router())
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }
 
+#[cfg(test)]
 async fn serve_querier(
     addr: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -305,6 +323,7 @@ async fn serve_querier(
     serve_role_http(addr, querier_router(), "metrics querier", shutdown).await
 }
 
+#[cfg(test)]
 async fn serve_query_frontend(
     addr: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -318,6 +337,7 @@ async fn serve_query_frontend(
     .await
 }
 
+#[cfg(test)]
 async fn serve_ruler(
     addr: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -325,6 +345,7 @@ async fn serve_ruler(
     serve_role_http(addr, ruler_router(), "metrics ruler", shutdown).await
 }
 
+#[cfg(test)]
 async fn serve_role_http(
     addr: SocketAddr,
     router: Router,
@@ -431,25 +452,38 @@ async fn run_distributor(
     let ha_state = Arc::clone(&state);
     let ha_topic = cli.ha_tracker_topic.clone();
     let ha_poll_timeout = cli.ha_tracker_poll_timeout;
-    tokio::spawn(async move {
-        let result = run_ha_election_consumer_loop(
+    let mut ha_task = tokio::spawn(async move {
+        run_ha_election_consumer_loop(
             &mut ha_consumer,
             ha_state.tracker(),
             &ha_topic,
             ha_poll_timeout,
             |_| false,
         )
-        .await;
-        if let Err(error) = result {
-            tracing::warn!(%error, "metrics HA tracker consumer stopped");
-        }
+        .await
     });
-    let bound = serve(cli.listen, state, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await?;
+    let listener = TcpListener::bind(cli.listen).await?;
+    let bound = listener.local_addr()?;
     tracing::info!(%bound, "metrics distributor listening");
-    let _ = tokio::signal::ctrl_c().await;
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(listener, distributor_router(state)).with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        }),
+    );
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => {
+            ha_task.abort();
+            result?;
+        }
+        result = &mut ha_task => {
+            match result {
+                Ok(Ok(_)) => return Err("metrics HA tracker consumer stopped unexpectedly".into()),
+                Ok(Err(error)) => return Err(error.into()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     Ok(())
 }
 

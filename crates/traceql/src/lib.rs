@@ -39,7 +39,8 @@ pub use span_columns::{
     COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
     COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
     COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START, EVENT_ATTR_PREFIX,
-    InputSpan, LINK_ATTR_PREFIX, NestedSet, assign_nested_set, span_schema, span_schema_with_attrs,
+    INSTRUMENTATION_ATTR_PREFIX, InputSpan, LINK_ATTR_PREFIX, NestedSet, assign_nested_set,
+    span_schema, span_schema_with_attrs,
 };
 pub use store::{
     MatchCmp, MatchScope, MatchValue, ScanJob, ScanOptions, ScanResult, SpanMatcher, SpanStore,

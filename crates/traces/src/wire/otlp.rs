@@ -120,6 +120,19 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
                 .as_ref()
                 .map(|scope| scope.version.clone())
                 .unwrap_or_default();
+            let instrumentation_attrs = scope_spans.scope.as_ref().map_or_else(Vec::new, |scope| {
+                kvs(&scope.attributes)
+                    .into_iter()
+                    .map(|mut attribute| {
+                        attribute.key = format!(
+                            "{}{}",
+                            crabka_traceql::INSTRUMENTATION_ATTR_PREFIX,
+                            attribute.key
+                        );
+                        attribute
+                    })
+                    .collect::<Vec<_>>()
+            });
 
             for span in &scope_spans.spans {
                 let parent_span_id = if span.parent_span_id.is_empty() {
@@ -149,6 +162,8 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
                     })
                     .collect::<Result<Vec<_>, WireError>>()?;
 
+                let mut span_attrs = kvs(&span.attributes);
+                span_attrs.extend(instrumentation_attrs.clone());
                 out.push(Span {
                     trace_id: fixed16(&span.trace_id, "trace_id")?,
                     span_id: fixed8(&span.span_id, "span_id")?,
@@ -164,7 +179,7 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
                     status,
                     status_message,
                     resource_attrs: resource_attrs.clone(),
-                    span_attrs: kvs(&span.attributes),
+                    span_attrs,
                     events,
                     links,
                     instrumentation_scope: scope_name.clone(),
@@ -305,6 +320,13 @@ mod tests {
         data.resource_spans[0].scope_spans[0].scope = Some(InstrumentationScope {
             name: "tracer".into(),
             version: "1.2.3".into(),
+            attributes: vec![OtlpKv {
+                key: "library.language".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue("rust".into())),
+                }),
+                ..OtlpKv::default()
+            }],
             ..InstrumentationScope::default()
         });
 
@@ -316,6 +338,10 @@ mod tests {
                 spans[0].instrumentation_version.as_str(),
             ) == ("tracer", "1.2.3")
         );
+        assert2::assert!(spans[0].span_attrs.iter().any(|attribute| {
+            attribute.key == "__instrumentation.library.language"
+                && attribute.value == AttrValue::Str("rust".into())
+        }));
     }
 
     #[test]

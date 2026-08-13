@@ -33,6 +33,7 @@ pub const COL_LINK_SPAN_ID: &str = "link_span_id";
 pub const ATTR_PREFIX: &str = "attr.";
 pub const EVENT_ATTR_PREFIX: &str = "__event.";
 pub const LINK_ATTR_PREFIX: &str = "__link.";
+pub const INSTRUMENTATION_ATTR_PREFIX: &str = "__instrumentation.";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InputSpan {

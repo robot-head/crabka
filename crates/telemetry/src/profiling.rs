@@ -349,15 +349,27 @@ pub async fn serve_admin(addr: SocketAddr, extra: Router) -> std::io::Result<()>
 }
 
 async fn serve_router(addr: SocketAddr, app: Router) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let bound = listener.local_addr()?;
-    tracing::info!(%bound, "profiling admin server listening");
+    let task = spawn_router(addr, app).await?;
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            tracing::warn!(error = %e, "admin server error");
+        match task.await {
+            Ok(Ok(())) => tracing::warn!("admin server stopped unexpectedly"),
+            Ok(Err(error)) => tracing::warn!(%error, "admin server error"),
+            Err(error) => tracing::warn!(%error, "admin server task failed"),
         }
     });
     Ok(())
+}
+
+async fn spawn_router(
+    addr: SocketAddr,
+    app: Router,
+) -> std::io::Result<tokio::task::JoinHandle<std::io::Result<()>>> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    tracing::info!(%bound, "profiling admin server listening");
+    Ok(tokio::spawn(
+        async move { axum::serve(listener, app).await },
+    ))
 }
 
 /// Bind a profiling admin server with explicit policy.
@@ -372,6 +384,35 @@ pub async fn serve_admin_with_config(
     let app = pprof_router_with_config(config)?.merge(extra);
     serve_router(addr, app).await?;
     Ok(())
+}
+
+/// Bind a profiling admin server and return its task for lifecycle supervision.
+///
+/// # Errors
+/// Returns an error for invalid profiling configuration or listener failure.
+pub async fn spawn_admin_with_config(
+    addr: SocketAddr,
+    extra: Router,
+    config: ProfilingConfig,
+) -> Result<tokio::task::JoinHandle<std::io::Result<()>>, ProfilingError> {
+    let app = pprof_router_with_config(config)?.merge(extra);
+    Ok(spawn_router(addr, app).await?)
+}
+
+/// Wait for a supervised admin task, treating every terminal outcome as an error.
+///
+/// # Errors
+/// Returns the server error, join error, or an unexpected clean-exit error.
+pub async fn await_admin_exit(
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+) -> std::io::Result<()> {
+    match task.await {
+        Ok(Ok(())) => Err(std::io::Error::other("admin server stopped unexpectedly")),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(std::io::Error::other(format!(
+            "admin server task failed: {error}"
+        ))),
+    }
 }
 
 /// Like [`serve_admin`], but with the bind address from the environment.
@@ -423,6 +464,26 @@ pub async fn serve_admin_from_env_with_config(
     serve_admin_with_config(addr, extra, config).await
 }
 
+/// Environment-address variant of [`spawn_admin_with_config`].
+///
+/// # Errors
+/// Returns an error for invalid profiling configuration or listener failure.
+///
+/// # Panics
+/// Panics when `CRABKA_ADMIN_LISTEN_ADDR` is not a socket address.
+pub async fn spawn_admin_from_env_with_config(
+    default_addr: &str,
+    extra: Router,
+    config: ProfilingConfig,
+) -> Result<tokio::task::JoinHandle<std::io::Result<()>>, ProfilingError> {
+    let raw =
+        std::env::var("CRABKA_ADMIN_LISTEN_ADDR").unwrap_or_else(|_| default_addr.to_string());
+    let addr: SocketAddr = raw
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid CRABKA_ADMIN_LISTEN_ADDR `{raw}`: {e}"));
+    spawn_admin_with_config(addr, extra, config).await
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -465,6 +526,34 @@ mod tests {
             ["libc", "custom"]
         );
         assert!(configured.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn supervised_admin_exit_classifies_clean_error_and_join_outcomes() {
+        let clean = tokio::spawn(async { Ok(()) });
+        assert_eq!(
+            await_admin_exit(clean).await.unwrap_err().to_string(),
+            "admin server stopped unexpectedly"
+        );
+
+        let io_error = tokio::spawn(async { Err(std::io::Error::other("socket failed")) });
+        assert_eq!(
+            await_admin_exit(io_error).await.unwrap_err().to_string(),
+            "socket failed"
+        );
+
+        let panic = tokio::spawn(async {
+            panic!("admin panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        });
+        assert!(
+            await_admin_exit(panic)
+                .await
+                .unwrap_err()
+                .to_string()
+                .starts_with("admin server task failed:")
+        );
     }
 
     #[test]

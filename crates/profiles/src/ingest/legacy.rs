@@ -79,7 +79,14 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
                 };
             }
             "sampleRate" => {
-                sample_rate = value.parse().unwrap_or(100);
+                sample_rate = value.parse().map_err(|error| {
+                    ProfilesError::Invalid(format!("invalid sampleRate `{value}`: {error}"))
+                })?;
+                if sample_rate == 0 {
+                    return Err(ProfilesError::Invalid(
+                        "sampleRate must be positive".to_string(),
+                    ));
+                }
             }
             "units" => {
                 if !value.is_empty() {
@@ -246,6 +253,11 @@ pub async fn decode_ingest_multipart_with_limits(
             jfr_to_pprof(&query.name, &raw)?
         }
     };
+    let profile = if query.format == IngestFormat::Pprof {
+        profile
+    } else {
+        apply_query_sample_rate(profile, query.sample_rate)
+    };
     let profile = apply_query_time(profile, query)?;
 
     Ok(RawProfile {
@@ -256,6 +268,12 @@ pub async fn decode_ingest_multipart_with_limits(
         sample_span_ids: Vec::new(),
         sample_trace_ids: Vec::new(),
     })
+}
+
+fn apply_query_sample_rate(profile: PprofProfile, sample_rate: u32) -> PprofProfile {
+    let mut profile = profile.into_inner();
+    profile.period = (1_000_000_000_i64 / i64::from(sample_rate)).max(1);
+    PprofProfile::from(profile)
 }
 
 ///
@@ -324,7 +342,7 @@ pub async fn decode_ingest_body_with_limits(
             ));
         }
     };
-    let profile = apply_query_time(profile, query)?;
+    let profile = apply_query_time(apply_query_sample_rate(profile, query.sample_rate), query)?;
     Ok(RawProfile {
         labels: query_labels(query, Vec::new()),
         profile,
@@ -384,16 +402,29 @@ struct SampleTypeConfig {
     units: Option<String>,
     #[serde(rename = "display-name")]
     display_name: Option<String>,
-    #[allow(dead_code)]
     aggregation: Option<String>,
     cumulative: Option<bool>,
-    #[allow(dead_code)]
     sampled: Option<bool>,
 }
 
 fn parse_sample_type_config(raw: &[u8]) -> Result<SampleTypeConfig, ProfilesError> {
-    serde_json::from_slice(raw)
-        .map_err(|err| ProfilesError::Decode(format!("sample_type_config is not JSON: {err}")))
+    let config: SampleTypeConfig = serde_json::from_slice(raw)
+        .map_err(|err| ProfilesError::Decode(format!("sample_type_config is not JSON: {err}")))?;
+    if config
+        .aggregation
+        .as_deref()
+        .is_some_and(|aggregation| !aggregation.eq_ignore_ascii_case("sum"))
+    {
+        return Err(ProfilesError::Invalid(
+            "sample_type_config aggregation must be `sum`".to_string(),
+        ));
+    }
+    if config.sampled == Some(false) {
+        return Err(ProfilesError::Invalid(
+            "sample_type_config sampled=false is not supported".to_string(),
+        ));
+    }
+    Ok(config)
 }
 
 fn apply_sample_type_config(profile: PprofProfile, config: &SampleTypeConfig) -> PprofProfile {
@@ -1136,6 +1167,21 @@ mod tests {
     }
 
     #[test]
+    fn sample_rate_is_validated_and_sets_raw_profile_period() {
+        assert!(parse_ingest_query("name=app&sampleRate=0").is_err());
+        assert!(parse_ingest_query("name=app&sampleRate=nope").is_err());
+
+        let profile = stacks_to_pprof(
+            "app",
+            "samples",
+            "count",
+            BTreeMap::from([(vec![("root".to_string(), 0)], 1)]),
+        );
+        let profile = apply_query_sample_rate(profile, 250).into_inner();
+        assert!(profile.period == 4_000_000);
+    }
+
+    #[test]
     fn unknown_format_defaults_to_groups() {
         let q = parse_ingest_query("name=app").unwrap();
 
@@ -1144,9 +1190,11 @@ mod tests {
 
     #[tokio::test]
     async fn decode_multipart_pprof_profile_part() {
-        let query = parse_ingest_query("name=myapp{env=\"prod\"}&format=pprof").unwrap();
+        let query =
+            parse_ingest_query("name=myapp{env=\"prod\"}&format=pprof&sampleRate=7").unwrap();
         let boundary = "test-boundary";
         let pprof = crate::wire::test_fixtures::cpu_profile_pprof_bytes();
+        let original_period = PprofProfile::decode(&pprof).unwrap().inner().period;
         let mut body = Vec::new();
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"profile\"\r\n");
@@ -1166,6 +1214,7 @@ mod tests {
         check!(raw.labels.get("__name__") == Some("myapp"));
         check!(raw.labels.get("env") == Some("prod"));
         check!(raw.profile.sample_types()[0].0 == "cpu");
+        check!(raw.profile.inner().period == original_period);
     }
 
     #[tokio::test]
@@ -1200,6 +1249,15 @@ mod tests {
         );
         let split = crate::ingest::split_sample_types(&raw).unwrap();
         assert!(split[0].profile_type == "myapp:wall:nanoseconds:wall:nanoseconds:delta");
+    }
+
+    #[test]
+    fn sample_type_config_rejects_semantics_it_cannot_apply() {
+        let average = parse_sample_type_config(br#"{"aggregation":"average"}"#);
+        assert!(matches!(average, Err(ProfilesError::Invalid(_))));
+        let unsampled = parse_sample_type_config(br#"{"sampled":false}"#);
+        assert!(matches!(unsampled, Err(ProfilesError::Invalid(_))));
+        assert!(parse_sample_type_config(br#"{"aggregation":"sum","sampled":true}"#).is_ok());
     }
 
     #[tokio::test]
@@ -1254,7 +1312,8 @@ mod tests {
 
     #[tokio::test]
     async fn decode_plain_lines_counts_repeated_stack_lines() {
-        let query = parse_ingest_query("name=myapp&format=lines&units=samples").unwrap();
+        let query =
+            parse_ingest_query("name=myapp&format=lines&units=samples&sampleRate=250").unwrap();
         let body = "main;work\nmain;work\nmain;idle\nmain;work\n";
 
         let raw = decode_ingest_body(
@@ -1276,6 +1335,7 @@ mod tests {
         values.sort_unstable();
 
         assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        assert!(raw.profile.inner().period == 4_000_000);
         assert!(values == vec![1, 3]);
     }
 
