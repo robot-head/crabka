@@ -3226,7 +3226,7 @@ mod tests {
             assert2::assert!(sorted(column) == expected);
         }
 
-        let matches = |key: &str, value: &str| {
+        let accepts = |key: &str, value: &str| {
             instrumentation_matches(
                 out,
                 0,
@@ -3240,10 +3240,10 @@ mod tests {
             )
             .unwrap()
         };
-        assert2::assert!(matches("name", "otel-rust"));
-        assert2::assert!(matches("version", "1.2.3"));
-        assert2::assert!(matches("library", "otel"));
-        assert2::assert!(!matches("name", "other"));
+        assert2::assert!(accepts("name", "otel-rust"));
+        assert2::assert!(accepts("version", "1.2.3"));
+        assert2::assert!(accepts("library", "otel"));
+        assert2::assert!(!accepts("name", "other"));
 
         let mut values = BTreeSet::new();
         collect_attribute_tag_values(out, "http.method", "service.version", &mut values).unwrap();

@@ -2447,9 +2447,9 @@ mod tests {
             None,
             "root",
             vec![
-                ("library".into(), AttrValue::Str("span".into())),
+                ("library", AttrValue::Str("span".into())),
                 (
-                    "__instrumentation.library".into(),
+                    "__instrumentation.library",
                     AttrValue::Str("instrumentation".into()),
                 ),
             ],
