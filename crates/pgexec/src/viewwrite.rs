@@ -57,45 +57,96 @@ use crate::error::ExecError;
 const NOT_SINGLE_RELATION: &str =
     "Views that do not select from a single table or view are not automatically updatable.";
 
-/// Which of the three write statements named a view.
+/// Which of the three write commands a statement performs on a view.
 ///
 /// Carried rather than inferred from the statement, because every message this
 /// module raises is spelled differently for each and the spellings are not
 /// derivable from one another — "insert into", "update", "delete from".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ViewWrite {
+pub(crate) enum ViewCommand {
     Insert,
     Update,
     Delete,
 }
 
+/// One write performed on a view: the command, and whether a `MERGE` action
+/// spelled it.
+///
+/// `MERGE` is not a fourth command. Each of its `WHEN` clauses inserts, updates
+/// or deletes, and `PostgreSQL` judges the view's updatability once per command
+/// the clause list can reach — which is why [`ViewWrite`] pairs a command with
+/// a spelling rather than growing a variant. What the spelling changes is the
+/// wording: an unassignable column reports "cannot merge into column", and the
+/// hint offers only an `INSTEAD OF` trigger, because a rule cannot make a view
+/// mergeable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ViewWrite {
+    command: ViewCommand,
+    merge: bool,
+}
+
 impl ViewWrite {
+    /// A write the statement spelled as itself — a plain `INSERT`, `UPDATE` or
+    /// `DELETE` naming the view.
+    pub(crate) const fn direct(command: ViewCommand) -> Self {
+        Self {
+            command,
+            merge: false,
+        }
+    }
+
+    /// A write one `MERGE` `WHEN` clause performs.
+    pub(crate) const fn merged(command: ViewCommand) -> Self {
+        Self {
+            command,
+            merge: true,
+        }
+    }
+
+    /// The command this write performs, which decides the privilege it needs.
+    pub(crate) const fn command(self) -> ViewCommand {
+        self.command
+    }
+
     /// The `cannot … view "v"` message raised when the view is not
     /// automatically updatable.
-    fn refusal(self, view: &str) -> String {
-        match self {
-            Self::Insert => format!("cannot insert into view \"{view}\""),
-            Self::Update => format!("cannot update view \"{view}\""),
-            Self::Delete => format!("cannot delete from view \"{view}\""),
+    pub(crate) fn refusal(self, view: &str) -> String {
+        match self.command {
+            ViewCommand::Insert => format!("cannot insert into view \"{view}\""),
+            ViewCommand::Update => format!("cannot update view \"{view}\""),
+            ViewCommand::Delete => format!("cannot delete from view \"{view}\""),
         }
     }
 
     /// The `HINT` naming what a user could add to make the write work. Rules
     /// are offered even though this engine has none: the hint is advice about
     /// `PostgreSQL`-compatible SQL, not a report of what is implemented here.
-    const fn hint(self) -> &'static str {
-        match self {
-            Self::Insert => {
+    /// A `MERGE` action is offered no rule at all, because `PostgreSQL` refuses
+    /// to merge into a relation that carries one.
+    pub(crate) const fn hint(self) -> &'static str {
+        match (self.command, self.merge) {
+            (ViewCommand::Insert, false) => {
                 "To enable inserting into the view, provide an INSTEAD OF INSERT trigger or an \
                  unconditional ON INSERT DO INSTEAD rule."
             }
-            Self::Update => {
+            (ViewCommand::Update, false) => {
                 "To enable updating the view, provide an INSTEAD OF UPDATE trigger or an \
                  unconditional ON UPDATE DO INSTEAD rule."
             }
-            Self::Delete => {
+            (ViewCommand::Delete, false) => {
                 "To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an \
                  unconditional ON DELETE DO INSTEAD rule."
+            }
+            (ViewCommand::Insert, true) => {
+                "To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT \
+                 trigger."
+            }
+            (ViewCommand::Update, true) => {
+                "To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger."
+            }
+            (ViewCommand::Delete, true) => {
+                "To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE \
+                 trigger."
             }
         }
     }
@@ -103,18 +154,23 @@ impl ViewWrite {
     /// `DELETE` names no columns, so it is the one write that does not require
     /// the view to have an updatable column at all.
     const fn assigns_columns(self) -> bool {
-        !matches!(self, Self::Delete)
+        !matches!(self.command, ViewCommand::Delete)
     }
 
     /// The `cannot … column "c" of view "v"` message for assigning to a column
     /// the base relation does not have.
     fn column_refusal(self, column: &str, view: &str) -> String {
-        match self {
-            Self::Insert => format!("cannot insert into column \"{column}\" of view \"{view}\""),
+        if self.merge {
+            return format!("cannot merge into column \"{column}\" of view \"{view}\"");
+        }
+        match self.command {
+            ViewCommand::Insert => {
+                format!("cannot insert into column \"{column}\" of view \"{view}\"")
+            }
             // A DELETE assigns nothing and so never reaches here; spelling it
             // as an update keeps the match total without an arm a later caller
             // could make reachable without noticing.
-            Self::Update | Self::Delete => {
+            ViewCommand::Update | ViewCommand::Delete => {
                 format!("cannot update column \"{column}\" of view \"{view}\"")
             }
         }
@@ -494,6 +550,17 @@ fn sole_source(select: &SelectStmt) -> Result<(&RelationRef, &str), &'static str
     Ok((name, alias.as_deref().unwrap_or(&name.name)))
 }
 
+/// Why a stored view's body cannot be written through automatically, or `None`
+/// when it can.
+///
+/// Exposed for the one decision made outside the chain walk: a `MERGE` whose
+/// target view carries `INSTEAD OF` triggers for some of its actions and not
+/// others is reported differently depending on whether the rest of the actions
+/// had a rewrite available to them.
+pub(crate) fn body_refusal(view: &View) -> Option<&'static str> {
+    parse_body(view).err()
+}
+
 /// The parsed body of a stored view, or the reason it disqualifies the view.
 fn parse_body(view: &View) -> Result<QueryExpr, &'static str> {
     let Ok(statements) = crabka_pgparser::parse(&view.definition) else {
@@ -596,6 +663,12 @@ pub(crate) struct ViewWriteCtx<'a> {
 /// body's own qualifier to `target`, so the level above substitutes by column
 /// name alone.
 ///
+/// `writes` is every command the statement can perform through the view, in the
+/// order the statement spelled them — one entry for a plain `INSERT`, `UPDATE`
+/// or `DELETE`, and one per command a `MERGE`'s `WHEN` clauses can reach. A
+/// refusal names the first of them the view cannot serve, which is the order
+/// `PostgreSQL` reports a multi-action `MERGE` in.
+///
 /// # Errors
 ///
 /// `PostgreSQL`'s 55000 refusal, naming the *innermost* view that is not
@@ -604,19 +677,26 @@ pub(crate) struct ViewWriteCtx<'a> {
 pub(crate) fn resolve(
     ctx: &ViewWriteCtx<'_>,
     view: &View,
-    write: ViewWrite,
+    writes: &[ViewWrite],
     target: &str,
     role: &str,
 ) -> Result<ViewRewrite, ExecError> {
+    // Every write the statement performs is refused by an unupdatable body, so
+    // the first one the statement spelled is the one reported.
+    let Some(first) = writes.first().copied() else {
+        return Err(ExecError::Unsupported(
+            "a write through a view must perform at least one command".into(),
+        ));
+    };
     let mut levels: Vec<Level> = Vec::new();
     let mut current = view.clone();
     let mut run_as = role.to_string();
     let relation = loop {
         (ctx.permit)(&current, &run_as)?;
         let query = parse_body(&current).map_err(|detail| ExecError::ViewNotUpdatable {
-            message: write.refusal(&current.name.name),
+            message: first.refusal(&current.name.name),
             detail,
-            hint: write.hint(),
+            hint: first.hint(),
         })?;
         let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
             unreachable!("query_refusal rejects every body that is not a SELECT");
@@ -637,7 +717,12 @@ pub(crate) fn resolve(
                 ..column
             })
             .collect::<Vec<_>>();
-        if write.assigns_columns() && !columns.iter().any(|column| column.base.is_some()) {
+        // A `DELETE` names no columns and so survives a view with none that can
+        // be assigned; the refusal is owed to the first write that does name
+        // them, which for a `MERGE` is the first such `WHEN` clause.
+        if !columns.iter().any(|column| column.base.is_some())
+            && let Some(write) = writes.iter().find(|write| write.assigns_columns())
+        {
             return Err(ExecError::ViewNotUpdatable {
                 message: write.refusal(&current.name.name),
                 detail: "Views that have no updatable columns are not automatically updatable.",

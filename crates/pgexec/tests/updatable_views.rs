@@ -1,8 +1,8 @@
 //! Writing through a view that carries no `INSTEAD OF` trigger.
 //!
-//! `PostgreSQL` rewrites an `INSERT`/`UPDATE`/`DELETE` that names a simple
-//! enough view onto the relation underneath it. Three things about that are
-//! worth pinning down, and this file is organised around them.
+//! `PostgreSQL` rewrites an `INSERT`/`UPDATE`/`DELETE`/`MERGE` that names a
+//! simple enough view onto the relation underneath it. Three things about that
+//! are worth pinning down, and this file is organised around them.
 //!
 //! * **Which views qualify, and what a refusal says.** The `DETAIL` naming the
 //!   disqualifying clause is the only thing that tells a user why their view is
@@ -123,6 +123,15 @@ const UPDATE_HINT: &str = "To enable updating the view, provide an INSTEAD OF UP
                            unconditional ON UPDATE DO INSTEAD rule.";
 const DELETE_HINT: &str = "To enable deleting from the view, provide an INSTEAD OF DELETE trigger \
                            or an unconditional ON DELETE DO INSTEAD rule.";
+
+/// A `MERGE` action is offered no rule, because `PostgreSQL` refuses to merge
+/// into a relation that carries one at all.
+const MERGE_INSERT_HINT: &str =
+    "To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT trigger.";
+const MERGE_UPDATE_HINT: &str =
+    "To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger.";
+const MERGE_DELETE_HINT: &str =
+    "To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.";
 
 /// Each case is a view body, and the `DETAIL` a write through it reports.
 ///
@@ -1027,5 +1036,186 @@ async fn a_returning_list_cannot_read_a_column_the_view_hides() {
                 "2,r2,20".to_string(),
                 "3,r3,30".to_string()
             ]
+    );
+}
+
+/// A `MERGE` that names a view is rewritten onto the relation underneath, and
+/// every one of its actions writes there.
+///
+/// `MERGE` is the one write with no `WHERE` of its own, so the view's
+/// qualification cannot ride the statement text: it filters the target scan
+/// instead. `WHEN NOT MATCHED BY SOURCE` is what makes the difference
+/// observable — put the qualification in the `ON` condition and a row the view
+/// hides reads as unmatched, and this clause would delete it.
+#[tokio::test]
+async fn a_merge_through_a_view_reaches_only_the_rows_the_view_presents() {
+    let (engine, _kv) = engine_with(&format!(
+        "{BASE} CREATE VIEW v AS SELECT a AS aa, b AS bb FROM base_tbl WHERE a > 1"
+    ))
+    .await;
+    let mut session = engine.connect();
+    // One statement taking all three actions: row 2 updates, row 9 inserts,
+    // row 3 is matched by nothing in the source and is deleted.
+    run(
+        &mut session,
+        "MERGE INTO v t USING (VALUES (2,'R2'),(9,'R9')) AS s(a,b) ON t.aa = s.a
+           WHEN MATCHED THEN UPDATE SET bb = s.b
+           WHEN NOT MATCHED THEN INSERT (aa, bb) VALUES (s.a, s.b)
+           WHEN NOT MATCHED BY SOURCE THEN DELETE",
+    )
+    .await;
+    // Row 1 is below the view's `a > 1` and survives untouched: the statement
+    // could not see it, so it was never "not matched by source".
+    assert!(
+        query(&mut session, "SELECT a, b, c FROM base_tbl ORDER BY a").await
+            == rows(&["1,r1,10", "2,R2,20", "9,R9,NULL"])
+    );
+}
+
+/// Each `WHEN` clause performs its own command, so each is judged against the
+/// view on its own — with the hint naming a trigger and no rule.
+#[tokio::test]
+async fn each_merge_action_spells_its_own_refusal() {
+    let (engine, _kv) = engine_with(&format!(
+        "{BASE} CREATE VIEW ro AS SELECT DISTINCT a FROM base_tbl"
+    ))
+    .await;
+    let mut session = engine.connect();
+    let detail = "Views containing DISTINCT are not automatically updatable.";
+    let source = "USING (VALUES (1)) AS s(a) ON t.a = s.a";
+    let cases = [
+        (
+            format!("MERGE INTO ro t {source} WHEN MATCHED THEN DELETE"),
+            "cannot delete from view \"ro\"",
+            MERGE_DELETE_HINT,
+        ),
+        (
+            format!("MERGE INTO ro t {source} WHEN MATCHED THEN UPDATE SET a = 1"),
+            "cannot update view \"ro\"",
+            MERGE_UPDATE_HINT,
+        ),
+        (
+            format!("MERGE INTO ro t {source} WHEN NOT MATCHED THEN INSERT (a) VALUES (s.a)"),
+            "cannot insert into view \"ro\"",
+            MERGE_INSERT_HINT,
+        ),
+        // Clause order decides which command a multi-action MERGE reports.
+        (
+            format!(
+                "MERGE INTO ro t {source} WHEN MATCHED THEN DELETE \
+                 WHEN NOT MATCHED THEN INSERT (a) VALUES (s.a)"
+            ),
+            "cannot delete from view \"ro\"",
+            MERGE_DELETE_HINT,
+        ),
+    ];
+    for (sql, message, hint) in cases {
+        assert!(
+            failure(&mut session, &sql).await
+                == Failure::new("55000", message, Some(detail), Some(hint)),
+            "{sql}"
+        );
+    }
+    // `DO NOTHING` performs no command, so it asks the view for nothing at all
+    // and is accepted on a body no write could ever be rewritten through.
+    assert!(
+        run(
+            &mut session,
+            &format!("MERGE INTO ro t {source} WHEN MATCHED THEN DO NOTHING"),
+        )
+        .await
+        .len()
+            == 1
+    );
+}
+
+/// A column the view computes is no more assignable through `MERGE` than
+/// through the other three writes; only the wording changes.
+#[tokio::test]
+async fn merge_refuses_a_column_the_view_computes() {
+    let (engine, _kv) = engine_with(&format!(
+        "{BASE} CREATE VIEW v AS SELECT a, upper(b), c FROM base_tbl"
+    ))
+    .await;
+    let mut session = engine.connect();
+    let detail = "View columns that are not columns of their base relation are not updatable.";
+    let source = "USING (VALUES (1)) AS s(a) ON t.a = s.a";
+    for sql in [
+        format!("MERGE INTO v t {source} WHEN MATCHED THEN UPDATE SET upper = 'X'"),
+        format!("MERGE INTO v t {source} WHEN NOT MATCHED THEN INSERT VALUES (4, 'X', 1)"),
+    ] {
+        assert!(
+            failure(&mut session, &sql).await
+                == Failure::new(
+                    "0A000",
+                    "cannot merge into column \"upper\" of view \"v\"",
+                    Some(detail),
+                    None,
+                ),
+            "{sql}"
+        );
+    }
+}
+
+/// A `WITH CHECK OPTION` judges the row a `MERGE` action produces, exactly as
+/// it judges the row an `INSERT` or `UPDATE` produces.
+#[tokio::test]
+async fn a_check_option_judges_what_a_merge_writes() {
+    let (engine, _kv) = engine_with(&format!(
+        "{BASE} CREATE VIEW v AS SELECT a, b FROM base_tbl WHERE a < 100 WITH CHECK OPTION"
+    ))
+    .await;
+    let mut session = engine.connect();
+    let source = "USING (VALUES (200, 'x')) AS s(a,b) ON t.a = s.a";
+    for sql in [
+        format!("MERGE INTO v t {source} WHEN NOT MATCHED THEN INSERT (a,b) VALUES (s.a, s.b)"),
+        "MERGE INTO v t USING (VALUES (1)) AS s(a) ON t.a = s.a \
+         WHEN MATCHED THEN UPDATE SET a = 200"
+            .to_string(),
+    ] {
+        let failed = failure(&mut session, &sql).await;
+        assert!(
+            failed.code == "44000"
+                && failed.message == "new row violates check option for view \"v\"",
+            "{sql} answered {failed:?}"
+        );
+    }
+    assert!(
+        query(&mut session, "SELECT a FROM base_tbl ORDER BY a").await == rows(&["1", "2", "3"])
+    );
+}
+
+/// A `MERGE` needs, on the view, the privilege each of its clauses implies —
+/// settled at statement start, whether or not that clause ever fires.
+#[tokio::test]
+async fn a_merge_needs_every_privilege_its_clauses_imply() {
+    let (engine, _kv) = engine_with(&format!(
+        "{BASE}
+         CREATE VIEW v AS SELECT a, b FROM base_tbl;
+         CREATE ROLE merger LOGIN;
+         GRANT SELECT, UPDATE ON v TO merger"
+    ))
+    .await;
+    let mut session = engine.connect();
+    run(&mut session, "SET SESSION AUTHORIZATION merger").await;
+    let source = "USING (VALUES (1, 'x')) AS s(a,b) ON t.a = s.a";
+    // The UPDATE clause alone is held.
+    run(
+        &mut session,
+        &format!("MERGE INTO v t {source} WHEN MATCHED THEN UPDATE SET b = s.b"),
+    )
+    .await;
+    // Adding a DELETE clause that never fires still needs DELETE.
+    let failed = failure(
+        &mut session,
+        &format!(
+            "MERGE INTO v t {source} WHEN MATCHED AND t.a < 0 THEN DELETE \
+             WHEN MATCHED THEN UPDATE SET b = s.b"
+        ),
+    )
+    .await;
+    assert!(
+        failed.code == "42501" && failed.message == "permission denied for view v",
+        "{failed:?}"
     );
 }

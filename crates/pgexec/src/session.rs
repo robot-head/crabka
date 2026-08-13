@@ -3405,6 +3405,7 @@ impl SqlSession {
     ) -> crate::exec::WriteContext<'a> {
         crate::exec::WriteContext {
             view_checks: &[],
+            merge_target_qual: None,
             governing: None,
             catalog_kv: self.catalog_kv.as_ref(),
             kv: self.kv.as_ref(),
@@ -9441,6 +9442,7 @@ impl SqlSession {
             let policy_stack = crate::rls::PolicyStack::default();
             let write_ctx = crate::exec::WriteContext {
                 view_checks: &[],
+                merge_target_qual: None,
                 governing: None,
                 catalog_kv: catalog_kv.as_ref(),
                 kv: kv.as_ref(),

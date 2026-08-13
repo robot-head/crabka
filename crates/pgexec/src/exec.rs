@@ -230,6 +230,21 @@ pub(crate) struct WriteContext<'a> {
     /// of the seven write paths that statement takes — every one of which
     /// already builds its per-row check through [`WriteContext::row_check`].
     pub view_checks: &'a [crate::viewwrite::ViewCheck],
+    /// The `WHERE` of the views a `MERGE` was rewritten through, restricting
+    /// which rows of the relation underneath the statement may match.
+    ///
+    /// The other three write statements fold the same qual into their own
+    /// `WHERE`. A `MERGE` has none, and its `ON` condition is not a substitute:
+    /// a target row the view hides would then read as unmatched, and a `WHEN
+    /// NOT MATCHED BY SOURCE THEN DELETE` clause would delete a row the
+    /// statement could not even see. So it filters the candidate rows instead,
+    /// which is where `PostgreSQL` puts it — on the scan of the target.
+    ///
+    /// It rides here for the reason [`WriteContext::view_checks`] does: the
+    /// rewrite hands the base-relation statement back to
+    /// [`execute_write_body`], and there is no room in the statement text to
+    /// carry it.
+    pub merge_target_qual: Option<&'a Expr>,
     /// The relation whose privileges and row-security policies decide this
     /// write, when the rows it touches are stored in a different one.
     ///
@@ -5124,6 +5139,10 @@ struct RewrittenViewWrite {
     /// The check options collected on the way down, ready for the row that
     /// reaches storage.
     checks: Vec<crate::viewwrite::ViewCheck>,
+    /// The views' `WHERE`s, for a `MERGE`, which has no `WHERE` of its own to
+    /// fold them into. `None` for the other three statements, whose rewritten
+    /// filter already carries them.
+    target_qual: Option<Expr>,
 }
 
 /// Enforce the check options this statement was rewritten through against a row
@@ -5164,26 +5183,22 @@ fn rewrite_view_write(
     let catalog_kv = write_ctx.catalog_kv;
     let resolution = write_ctx.eval_ctx.resolution();
     let stored = crabka_pgcatalog::get_view(catalog_kv, name)?;
-    let (write, alias) = match stmt {
-        Statement::Insert { .. } => (crate::viewwrite::ViewWrite::Insert, None),
-        Statement::Update { alias, .. } => (crate::viewwrite::ViewWrite::Update, alias.as_deref()),
-        Statement::Delete { alias, .. } => (crate::viewwrite::ViewWrite::Delete, alias.as_deref()),
-        _ => unreachable!("view DML only accepts INSERT, UPDATE, or DELETE"),
-    };
+    let writes = view_writes(stmt);
+    let alias = view_write_alias(stmt);
     let qualifier = view_write_qualifier(name, alias).to_string();
     let privileges = write_ctx.privileges();
     let permit = |view: &crabka_pgcatalog::View, role: &str| {
-        crate::privilege::require(
-            &crate::privilege::PrivilegeCtx::new(catalog_kv, role),
-            &view.name,
-            &view.owner,
-            crate::privilege::RelationKind::View,
-            match write {
-                crate::viewwrite::ViewWrite::Insert => crate::privilege::Privilege::Insert,
-                crate::viewwrite::ViewWrite::Update => crate::privilege::Privilege::Update,
-                crate::viewwrite::ViewWrite::Delete => crate::privilege::Privilege::Delete,
-            },
-        )
+        let ctx = crate::privilege::PrivilegeCtx::new(catalog_kv, role);
+        for write in &writes {
+            crate::privilege::require(
+                &ctx,
+                &view.name,
+                &view.owner,
+                crate::privilege::RelationKind::View,
+                view_command_privilege(write.command()),
+            )?;
+        }
+        Ok(())
     };
     let instead = |relation: &crabka_pgcatalog::RelationName| {
         let id = crate::catalog_rel::view_oids(catalog_kv)?
@@ -5223,7 +5238,7 @@ fn rewrite_view_write(
     let rewrite = crate::viewwrite::resolve(
         &view_ctx,
         &stored,
-        write,
+        &writes,
         &qualifier,
         write_ctx.fctx.effective_role(),
     )?;
@@ -5239,6 +5254,59 @@ fn rewrite_view_write(
             rewrite.reject_foreign_columns(expr, &qualifier, strict)?;
         }
         Ok(())
+    };
+    // The base columns an insert through the view assigns, from the column list
+    // it wrote or — with none — the view's leading columns truncated to what
+    // the source supplies. That is the rule `resolve_insert_targets` applies to
+    // a table, applied one level up so the truncation counts *view* columns.
+    // Shared with `MERGE`'s insert action, which spells the same thing.
+    let insert_targets = |columns: &Option<Vec<String>>,
+                          width: usize,
+                          write: crate::viewwrite::ViewWrite|
+     -> Result<Vec<String>, ExecError> {
+        let named: Vec<String> = match columns {
+            Some(written) => written.clone(),
+            None => rewrite
+                .columns
+                .iter()
+                .take(width)
+                .map(|column| column.name.clone())
+                .collect(),
+        };
+        let mapped = named
+            .iter()
+            .map(|column| rewrite.assignable(column, &name.name, write))
+            .collect::<Result<Vec<_>, ExecError>>()?;
+        // Two of the view's columns may select the same base column
+        // (`SELECT a, b, a AS aa`), and an insert that names both would assign
+        // it twice. PostgreSQL reports that against the *base* column, and
+        // reports it here rather than letting the second value quietly win.
+        let mut assigned = std::collections::HashSet::new();
+        if let Some(repeated) = mapped.iter().find(|column| !assigned.insert(*column)) {
+            return Err(ExecError::Syntax(format!(
+                "multiple assignments to same column \"{repeated}\""
+            )));
+        }
+        Ok(mapped)
+    };
+    // The same for an assignment list, shared with `MERGE`'s update action.
+    let update_assignments = |assignments: &[crabka_pgparser::ast::Assignment],
+                              write: crate::viewwrite::ViewWrite|
+     -> Result<Vec<crabka_pgparser::ast::Assignment>, ExecError> {
+        assignments
+            .iter()
+            .map(|assignment| {
+                Ok(crabka_pgparser::ast::Assignment {
+                    targets: assignment
+                        .targets
+                        .iter()
+                        .map(|column| rewrite.assignable(column, &name.name, write))
+                        .collect::<Result<Vec<_>, ExecError>>()?,
+                    subscripts: assignment.subscripts.clone(),
+                    value: rewrite_assignment_value(&assignment.value, &sub),
+                })
+            })
+            .collect()
     };
     let returning_items = |returning: &Option<crabka_pgparser::ast::Returning>| {
         returning.as_ref().map(|returning| {
@@ -5284,44 +5352,19 @@ fn rewrite_view_write(
             returning,
             ..
         } => {
-            // With no column list the implicit target list is the view's
-            // leading columns, truncated to what the source supplies — the same
-            // rule `resolve_insert_targets` applies to a table, applied one
-            // level up so the truncation counts *view* columns.
-            let named: Vec<String> = match columns {
-                Some(written) => written.clone(),
-                None => {
-                    let width = match source {
-                        InsertSource::Values(rows) => rows.first().map_or(0, Vec::len),
-                        InsertSource::DefaultValues => 0,
-                        InsertSource::Query(query) => crate::query::describe_query_expr_with_ctes(
-                            catalog_kv, resolution, query, ctes,
-                        )?
-                        .len(),
-                    };
-                    rewrite
-                        .columns
-                        .iter()
-                        .take(width)
-                        .map(|column| column.name.clone())
-                        .collect()
-                }
+            let width = match source {
+                InsertSource::Values(rows) => rows.first().map_or(0, Vec::len),
+                InsertSource::DefaultValues => 0,
+                InsertSource::Query(query) => crate::query::describe_query_expr_with_ctes(
+                    catalog_kv, resolution, query, ctes,
+                )?
+                .len(),
             };
-            let mapped = named
-                .iter()
-                .map(|column| rewrite.assignable(column, &name.name, write))
-                .collect::<Result<Vec<_>, _>>()?;
-            // Two of the view's columns may select the same base column
-            // (`SELECT a, b, a AS aa`), and an INSERT that names both would
-            // assign it twice. PostgreSQL reports that against the *base*
-            // column, and reports it here rather than letting the second value
-            // quietly win.
-            let mut assigned = std::collections::HashSet::new();
-            if let Some(repeated) = mapped.iter().find(|column| !assigned.insert(*column)) {
-                return Err(ExecError::Syntax(format!(
-                    "multiple assignments to same column \"{repeated}\""
-                )));
-            }
+            let mapped = insert_targets(
+                columns,
+                width,
+                crate::viewwrite::ViewWrite::direct(crate::viewwrite::ViewCommand::Insert),
+            )?;
             // Judged before substitution, on the list the user wrote: after it
             // every reference names a base column, including the ones `*`
             // expanded to, and there is nothing left to tell apart.
@@ -5367,20 +5410,10 @@ fn rewrite_view_write(
         } => {
             check_names(&filter.iter().collect::<Vec<_>>(), from.is_empty())?;
             rewrite.reject_foreign_returning(returning.as_ref(), &qualifier, from.is_empty())?;
-            let assignments = assignments
-                .iter()
-                .map(|assignment| {
-                    Ok(crabka_pgparser::ast::Assignment {
-                        targets: assignment
-                            .targets
-                            .iter()
-                            .map(|column| rewrite.assignable(column, &name.name, write))
-                            .collect::<Result<Vec<_>, ExecError>>()?,
-                        subscripts: assignment.subscripts.clone(),
-                        value: rewrite_assignment_value(&assignment.value, &sub),
-                    })
-                })
-                .collect::<Result<Vec<_>, ExecError>>()?;
+            let assignments = update_assignments(
+                assignments,
+                crate::viewwrite::ViewWrite::direct(crate::viewwrite::ViewCommand::Update),
+            )?;
             Statement::Update {
                 table: target,
                 only: true,
@@ -5410,12 +5443,90 @@ fn rewrite_view_write(
                 returning: returning_items(returning),
             }
         }
-        _ => unreachable!("view DML only accepts INSERT, UPDATE, or DELETE"),
+        Statement::Merge {
+            source,
+            on,
+            clauses,
+            returning,
+            ..
+        } => {
+            use crabka_pgparser::ast::{MergeAction, MergeWhen};
+
+            // A MERGE always has a source relation of its own, so an
+            // unqualified name in the `ON` condition, a clause condition or the
+            // `RETURNING` list may be the source's rather than the view's and
+            // cannot be judged against the view alone — the same reason an
+            // `UPDATE … FROM` relaxes the test.
+            check_names(&[on], false)?;
+            rewrite.reject_foreign_returning(returning.as_ref(), &qualifier, false)?;
+            let clauses = clauses
+                .iter()
+                .map(|when| {
+                    if let Some(condition) = &when.condition {
+                        check_names(&[condition], false)?;
+                    }
+                    let action = match &when.action {
+                        MergeAction::DoNothing => MergeAction::DoNothing,
+                        MergeAction::Delete => MergeAction::Delete,
+                        MergeAction::Update(assignments) => {
+                            MergeAction::Update(update_assignments(
+                                assignments,
+                                crate::viewwrite::ViewWrite::merged(
+                                    crate::viewwrite::ViewCommand::Update,
+                                ),
+                            )?)
+                        }
+                        // `INSERT DEFAULT VALUES` names no column and supplies
+                        // no value, so it stays spelled that way rather than
+                        // becoming an empty target list.
+                        MergeAction::Insert {
+                            columns,
+                            values: Some(values),
+                        } => MergeAction::Insert {
+                            columns: Some(insert_targets(
+                                columns,
+                                values.len(),
+                                crate::viewwrite::ViewWrite::merged(
+                                    crate::viewwrite::ViewCommand::Insert,
+                                ),
+                            )?),
+                            values: Some(values.iter().map(&sub).collect()),
+                        },
+                        MergeAction::Insert { values: None, .. } => MergeAction::Insert {
+                            columns: None,
+                            values: None,
+                        },
+                    };
+                    Ok(MergeWhen {
+                        kind: when.kind,
+                        condition: when.condition.as_ref().map(&sub),
+                        action,
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            Statement::Merge {
+                table: target,
+                with: None,
+                alias: Some(qualifier.clone()),
+                source: source.clone(),
+                on: sub(on),
+                clauses,
+                returning: returning_items(returning),
+            }
+        }
+        _ => unreachable!("view DML only accepts INSERT, UPDATE, DELETE, or MERGE"),
     };
+    // A MERGE reaches its target rows through a scan the statement never
+    // filters, so the views' quals cannot ride the statement text and travel
+    // beside it instead.
+    let target_qual = matches!(stmt, Statement::Merge { .. })
+        .then(|| rewrite.restrict(None))
+        .flatten();
     Ok(RewrittenViewWrite {
         stmt,
         role: rewrite.run_as.clone(),
         checks: rewrite.row_checks(&qualifier),
+        target_qual,
     })
 }
 
@@ -5433,7 +5544,7 @@ fn rewrite_view_conflict(
 ) -> Result<crabka_pgparser::ast::OnConflict, ExecError> {
     use crabka_pgparser::ast::{OnConflict, OnConflictAction, OnConflictTarget};
 
-    let write = crate::viewwrite::ViewWrite::Insert;
+    let write = crate::viewwrite::ViewWrite::direct(crate::viewwrite::ViewCommand::Insert);
     // An INSERT has no alias to hang the statement's qualifier on, so a
     // reference to the *stored* row moves onto the target's bare relation name;
     // `excluded` keeps its own qualifier, which is not the statement's.
@@ -5509,6 +5620,135 @@ fn view_write_qualifier<'a>(
     alias.unwrap_or(&name.name)
 }
 
+/// The alias a write gave the view it names, if any.
+fn view_write_alias(stmt: &Statement) -> Option<&str> {
+    match stmt {
+        Statement::Update { alias, .. }
+        | Statement::Delete { alias, .. }
+        | Statement::Merge { alias, .. } => alias.as_deref(),
+        // An INSERT names its target and nothing else; there is no `AS` clause
+        // in the grammar to carry an alias.
+        _ => None,
+    }
+}
+
+/// Every command a statement performs through the view it names, in the order
+/// it spelled them.
+///
+/// A plain `INSERT`, `UPDATE` or `DELETE` performs exactly one. A `MERGE`
+/// performs one per command its `WHEN` clauses can reach, and `PostgreSQL`
+/// judges the view's updatability and the role's privileges once per command
+/// — at statement start, whether or not that clause ever fires. `DO NOTHING`
+/// reaches none, which is why a `MERGE` written only with `DO NOTHING` clauses
+/// asks the view for nothing at all.
+fn view_writes(stmt: &Statement) -> Vec<crate::viewwrite::ViewWrite> {
+    use crabka_pgparser::ast::MergeAction;
+
+    use crate::viewwrite::{ViewCommand, ViewWrite};
+
+    match stmt {
+        Statement::Insert { .. } => vec![ViewWrite::direct(ViewCommand::Insert)],
+        Statement::Update { .. } => vec![ViewWrite::direct(ViewCommand::Update)],
+        Statement::Delete { .. } => vec![ViewWrite::direct(ViewCommand::Delete)],
+        Statement::Merge { clauses, .. } => {
+            let mut writes: Vec<ViewWrite> = Vec::new();
+            for clause in clauses {
+                let command = match clause.action {
+                    MergeAction::Insert { .. } => ViewCommand::Insert,
+                    MergeAction::Update(_) => ViewCommand::Update,
+                    MergeAction::Delete => ViewCommand::Delete,
+                    MergeAction::DoNothing => continue,
+                };
+                let write = ViewWrite::merged(command);
+                if !writes.contains(&write) {
+                    writes.push(write);
+                }
+            }
+            writes
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether the `INSTEAD OF` row triggers on `view` perform this `MERGE`'s
+/// actions instead of the rewrite.
+///
+/// A `MERGE` is answered by the triggers only when every command its clauses
+/// reach has one, and rewritten only when none of them does. `PostgreSQL`
+/// refuses the mixture, but which refusal it raises depends on what the actions
+/// with no trigger could otherwise have done:
+///
+/// * The body is automatically updatable, so those actions had a rewrite
+///   available and the view now asks for both mechanisms at once. That is the
+///   0A000 naming the view.
+/// * The body is not, so those actions have no way to run at all, and the
+///   refusal is the ordinary "cannot … view" one owed to the first of them —
+///   the trigger a user has to add, not the mixture.
+///
+/// # Errors
+///
+/// One of those two refusals, and catalog errors.
+fn merge_instead_of_triggers(
+    write_ctx: &WriteContext<'_>,
+    view: &Table,
+    stored: &crabka_pgcatalog::View,
+    stmt: &Statement,
+) -> Result<bool, ExecError> {
+    let writes = view_writes(stmt);
+    let mut uncovered = Vec::new();
+    let mut covered = 0_usize;
+    for write in writes {
+        let event = match write.command() {
+            crate::viewwrite::ViewCommand::Insert => crate::trigger::DmlEvent::Insert,
+            crate::viewwrite::ViewCommand::Update => crate::trigger::DmlEvent::Update,
+            crate::viewwrite::ViewCommand::Delete => crate::trigger::DmlEvent::Delete,
+        };
+        if crate::trigger::has_instead_row_trigger(write_ctx.catalog_kv, view.id, event, &[])? {
+            covered += 1;
+        } else {
+            uncovered.push(write);
+        }
+    }
+    let Some(first_uncovered) = uncovered.first().copied() else {
+        return Ok(covered > 0);
+    };
+    if covered == 0 {
+        return Ok(false);
+    }
+    match crate::viewwrite::body_refusal(stored) {
+        Some(detail) => Err(ExecError::ViewNotUpdatable {
+            message: first_uncovered.refusal(&view.name.name),
+            detail,
+            hint: first_uncovered.hint(),
+        }),
+        None => Err(ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "0A000",
+                format!("cannot merge into view \"{}\"", view.name.name),
+            )
+            .with_detail(
+                "MERGE is not supported for views with INSTEAD OF triggers for some actions but \
+                 not all.",
+            )
+            .with_hint(
+                "To enable merging into the view, either provide a full set of INSTEAD OF \
+                 triggers or drop the existing INSTEAD OF triggers.",
+            ),
+        )),
+    }
+}
+
+/// The privilege one command performed through a view needs on it.
+const fn view_command_privilege(
+    command: crate::viewwrite::ViewCommand,
+) -> crate::privilege::Privilege {
+    match command {
+        crate::viewwrite::ViewCommand::Insert => crate::privilege::Privilege::Insert,
+        crate::viewwrite::ViewCommand::Update => crate::privilege::Privilege::Update,
+        crate::viewwrite::ViewCommand::Delete => crate::privilege::Privilege::Delete,
+    }
+}
+
 /// Dispatch a write that named a view.
 ///
 /// Two paths, and which one applies is decided by whether the view carries an
@@ -5524,8 +5764,9 @@ async fn execute_view_dml(
     let reference = match stmt {
         Statement::Insert { table, .. }
         | Statement::Update { table, .. }
-        | Statement::Delete { table, .. } => table,
-        _ => unreachable!("view DML only accepts INSERT, UPDATE, or DELETE"),
+        | Statement::Delete { table, .. }
+        | Statement::Merge { table, .. } => table,
+        _ => unreachable!("view DML only accepts INSERT, UPDATE, DELETE, or MERGE"),
     };
     let name = resolve_relation(
         write_ctx.catalog_kv,
@@ -5546,7 +5787,23 @@ async fn execute_view_dml(
         ),
         _ => (crate::trigger::DmlEvent::Delete, Vec::new()),
     };
-    if !crate::trigger::has_instead_row_trigger(write_ctx.catalog_kv, view.id, event, &updated)? {
+    // A MERGE whose every clause is `DO NOTHING` performs no command, so it
+    // asks the view for no privilege, no updatability and no rewrite — and it
+    // reaches no row, whatever the join finds. `PostgreSQL` accepts it on a
+    // view no write could ever be rewritten through, which is the only way a
+    // read-only view can appear as a MERGE target at all.
+    if let Statement::Merge { .. } = stmt
+        && view_writes(stmt).is_empty()
+    {
+        return Ok((WriteOutcome::command("MERGE 0".into()), Vec::new()));
+    }
+    let instead = if let Statement::Merge { .. } = stmt {
+        let stored = crabka_pgcatalog::get_view(write_ctx.catalog_kv, &name)?;
+        merge_instead_of_triggers(write_ctx, &view, &stored, stmt)?
+    } else {
+        crate::trigger::has_instead_row_trigger(write_ctx.catalog_kv, view.id, event, &updated)?
+    };
+    if !instead {
         let rewritten = rewrite_view_write(write_ctx, ctes, stmt, &name)?;
         let inner = WriteContext {
             fctx: ForeignCtx {
@@ -5554,6 +5811,7 @@ async fn execute_view_dml(
                 ..write_ctx.fctx
             },
             view_checks: &rewritten.checks,
+            merge_target_qual: rewritten.target_qual.as_ref(),
             ..*write_ctx
         };
         return Box::pin(execute_write_body(
@@ -5767,6 +6025,14 @@ async fn execute_view_dml(
                 Vec::new(),
             ))
         }
+        // A MERGE whose actions are all covered by `INSTEAD OF` triggers gets
+        // here. `PostgreSQL` runs it by firing the trigger for whichever action
+        // each row takes; nothing does that yet, and a rewrite would write the
+        // relation underneath a view whose author asked for the trigger to
+        // decide instead.
+        Statement::Merge { .. } => Err(ExecError::Unsupported(
+            "MERGE into a view with INSTEAD OF triggers is not supported".into(),
+        )),
         _ => unreachable!(),
     }
 }
@@ -5820,6 +6086,7 @@ async fn execute_write_body(
         Statement::Insert { table, .. }
         | Statement::Update { table, .. }
         | Statement::Delete { table, .. }
+        | Statement::Merge { table, .. }
             if is_view_ref(catalog_kv, resolution, table)? =>
         {
             Box::pin(execute_view_dml(write_ctx, ctes, stmt, writes)).await
@@ -7395,7 +7662,7 @@ async fn execute_merge(
     // privileges it needs. Both are settled here, before the first row is read:
     // `PostgreSQL` checks a MERGE's privileges at statement start whether or
     // not a particular `WHEN` clause ever fires.
-    let target_rows = write_candidate_rows(
+    let mut target_rows = write_candidate_rows(
         write_ctx,
         &t,
         crate::privilege::WriteAction::Merge(crate::privilege::MergeClauses::of(clauses)),
@@ -7403,6 +7670,21 @@ async fn execute_merge(
         true,
         crate::scope::GeneratedReads::every(),
     )?;
+    // A MERGE rewritten from a view sees only the rows the view presents. The
+    // qual filters the scan and not the join, so a row the view hides is not
+    // "not matched by source" — it is not there at all. See
+    // [`WriteContext::merge_target_qual`].
+    if let Some(qual) = write_ctx.merge_target_qual {
+        let target_scope = Scope::single(&t, qualifier);
+        let bound = crate::bind::BoundExpr::new(qual, &target_scope)?;
+        let mut kept = Vec::with_capacity(target_rows.len());
+        for row in target_rows {
+            if row_matches(Some(bound.expr()), &target_scope, &row.2, ctx)? {
+                kept.push(row);
+            }
+        }
+        target_rows = kept;
+    }
     // The `UPDATE` and `DELETE` policies then judge each row an action reaches,
     // one row at a time, and raise rather than skip — see `MergeRowSecurity`.
     let row_security = MergeRowSecurity::compile(write_ctx, &t)?;
