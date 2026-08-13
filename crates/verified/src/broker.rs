@@ -3,6 +3,9 @@
 //! Keeping these small arithmetic decisions here lets Creusot prove the exact
 //! executable bodies used by the asynchronous broker.
 
+#[cfg(creusot)]
+use std::clone::Clone;
+
 use creusot_std::prelude::*;
 
 /// Visibility bounds and response watermarks for one Fetch partition.
@@ -20,18 +23,23 @@ pub struct FetchVisibility {
 
 /// Compute Kafka's consumer/follower Fetch visibility window.
 #[requires(0 <= log_start@ && log_start@ <= hw@ && hw@ <= log_end@)]
-#[requires(lso@ <= hw@)]
 #[requires(read_committed ==> !is_follower)]
 #[ensures(result.out_of_range == (fetch_offset@ < log_start@))]
+#[ensures(result.empty == (!(fetch_offset@ < log_start@)
+    && fetch_offset@ >= if is_follower { log_end@ } else { hw@ }))]
+#[ensures(result.effective_lso@ == if read_committed {
+    if lso@ < hw@ { lso@ } else { hw@ }
+} else { lso@ })]
+#[ensures(result.read_committed_aborts == read_committed)]
 #[ensures(result.response_hw@ == if is_follower { log_end@ } else { hw@ })]
 #[ensures(result.response_lso@ == if is_follower { log_end@ } else if read_committed {
     if lso@ < hw@ { lso@ } else { hw@ }
 } else { hw@ })]
-#[ensures(is_follower ==> result.limit_offset@ == log_end@)]
-#[ensures(!is_follower ==> result.limit_offset@ <= hw@)]
-#[ensures(read_committed ==> result.limit_offset@ <= lso@ && result.read_committed_aborts)]
+#[ensures(result.limit_offset@ == if is_follower { log_end@ } else if read_committed {
+    if lso@ < hw@ { lso@ } else { hw@ }
+} else { hw@ })]
 #[must_use]
-pub const fn fetch_visibility(
+pub fn fetch_visibility(
     is_follower: bool,
     read_committed: bool,
     log_start: i64,
@@ -42,7 +50,7 @@ pub const fn fetch_visibility(
 ) -> FetchVisibility {
     let upper_bound = if is_follower { log_end } else { hw };
     let effective_lso = if read_committed && !is_follower {
-        if lso < hw { lso } else { hw }
+        lso.min(hw)
     } else {
         lso
     };
@@ -92,17 +100,32 @@ pub const fn delete_records_offset_out_of_range(target: i64, log_end_offset: i64
 }
 
 /// Non-negative KIP-932 backlog above the effective share start offset.
-#[ensures(result@ >= 0)]
-#[ensures(result@ <= if hwm@ >= log_start@ { hwm@ - log_start@ } else { 0 })]
+#[cfg(creusot)]
+#[logic]
+#[cfg_attr(test, mutants::skip)]
+pub fn effective_share_backlog_model(hwm: i64, spso: i64, log_start: i64) -> Int {
+    pearlite! {
+        let base = if spso@ >= 0 && spso@ > log_start@ { spso@ } else { log_start@ };
+        let difference = hwm@ - base;
+        if difference <= 0 {
+            0
+        } else if difference > 9223372036854775807 {
+            9223372036854775807
+        } else {
+            difference
+        }
+    }
+}
+
+#[ensures(result@ == effective_share_backlog_model(hwm, spso, log_start))]
 #[must_use]
-pub const fn effective_share_backlog(hwm: i64, spso: i64, log_start: i64) -> i64 {
-    let base = if spso >= 0 && spso > log_start {
-        spso
+pub fn effective_share_backlog(hwm: i64, spso: i64, log_start: i64) -> i64 {
+    let base = if spso >= 0 {
+        spso.max(log_start)
     } else {
         log_start
     };
-    let backlog = hwm.saturating_sub(base);
-    if backlog > 0 { backlog } else { 0 }
+    hwm.saturating_sub(base).max(0)
 }
 
 #[cfg(test)]
@@ -116,6 +139,10 @@ mod tests {
         assert_eq!(committed.response_hw, 8);
         assert_eq!(committed.response_lso, 6);
         assert!(committed.read_committed_aborts);
+
+        let lso_above_hw = fetch_visibility(false, true, 2, 8, 9, 10, 3);
+        assert_eq!(lso_above_hw.effective_lso, 8);
+        assert_eq!(lso_above_hw.limit_offset, 8);
 
         let follower = fetch_visibility(true, false, 2, 8, 6, 10, 10);
         assert_eq!(follower.limit_offset, 10);
@@ -133,5 +160,105 @@ mod tests {
             effective_share_backlog(i64::MAX, i64::MIN, i64::MIN),
             i64::MAX
         );
+    }
+
+    #[test]
+    fn fetch_visibility_matches_the_complete_decision_table() {
+        for is_follower in [false, true] {
+            for read_committed in [false, true] {
+                for log_start in [0, 2] {
+                    for hw in [2, 5] {
+                        for lso in [1, 4, 7] {
+                            for log_end in [5, 9] {
+                                for fetch_offset in [0, 2, 4, 5, 10] {
+                                    let got = fetch_visibility(
+                                        is_follower,
+                                        read_committed,
+                                        log_start,
+                                        hw,
+                                        lso,
+                                        log_end,
+                                        fetch_offset,
+                                    );
+                                    let upper = if is_follower { log_end } else { hw };
+                                    let effective_lso = if read_committed && !is_follower {
+                                        lso.min(hw)
+                                    } else {
+                                        lso
+                                    };
+                                    let response_lso = if is_follower {
+                                        log_end
+                                    } else if read_committed {
+                                        lso.min(hw)
+                                    } else {
+                                        hw
+                                    };
+                                    let limit = if is_follower {
+                                        log_end
+                                    } else if read_committed {
+                                        effective_lso
+                                    } else {
+                                        hw
+                                    };
+                                    let out_of_range = fetch_offset < log_start;
+
+                                    assert_eq!(got.out_of_range, out_of_range);
+                                    assert_eq!(got.empty, !out_of_range && fetch_offset >= upper);
+                                    assert_eq!(got.limit_offset, limit);
+                                    assert_eq!(got.effective_lso, effective_lso);
+                                    assert_eq!(
+                                        got.read_committed_aborts,
+                                        read_committed && !is_follower
+                                    );
+                                    assert_eq!(
+                                        got.response_hw,
+                                        if is_follower { log_end } else { hw }
+                                    );
+                                    assert_eq!(got.response_lso, response_lso);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn broker_arithmetic_matches_wide_integer_oracles() {
+        let values = [i64::MIN, -2, -1, 0, 1, 2, i64::MAX];
+        for requested in values {
+            for high_watermark in values {
+                assert_eq!(
+                    delete_records_target(requested, high_watermark),
+                    if requested == -1 {
+                        high_watermark
+                    } else {
+                        requested
+                    }
+                );
+                assert_eq!(
+                    delete_records_offset_out_of_range(requested, high_watermark),
+                    requested < 0 || requested > high_watermark
+                );
+            }
+        }
+
+        for hwm in values {
+            for spso in values {
+                for log_start in values {
+                    let base = if spso >= 0 {
+                        spso.max(log_start)
+                    } else {
+                        log_start
+                    };
+                    let expected = i64::try_from(
+                        (i128::from(hwm) - i128::from(base)).clamp(0, i128::from(i64::MAX)),
+                    )
+                    .expect("oracle is clamped to the i64 range");
+                    assert_eq!(effective_share_backlog(hwm, spso, log_start), expected);
+                }
+            }
+        }
     }
 }

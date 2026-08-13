@@ -1,0 +1,27 @@
+(* #"/workspace/crabka/crates/verified/src/broker.rs" 87 0 87 85 *)
+
+let%span sbroker = "/workspace/crabka/crates/verified/src/broker.rs" 88 27 88 29
+let%span sbroker'0 = "/workspace/crabka/crates/verified/src/broker.rs" 85 10 85 94
+
+use creusot.int.Int64
+use creusot.prelude.Any
+use int.Int
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let delete_records_target [#"/workspace/crabka/crates/verified/src/broker.rs" 87 0 87 85] (requested_offset: Int64.t)
+  (high_watermark: Int64.t) (return (x: Int64.t)) = (! bb0
+  [ bb0 = s0
+    [ s0 = [ &_6 <- requested_offset = ([%#sbroker] (-1: Int64.t)) ] s1
+    | s1 = any [ br0 -> {_6 = false} (! bb2) | br1 -> {_6} (! bb1) ] ]
+  | bb1 = s0 [ s0 = [ &_ret <- high_watermark ] s1 | s1 = return {_ret} ]
+  | bb2 = s0 [ s0 = [ &_ret <- requested_offset ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: Int64.t = Any.any_l ()
+  | & requested_offset: Int64.t = requested_offset
+  | & high_watermark: Int64.t = high_watermark
+  | & _6: bool = Any.any_l () ])
+  [ return (result: Int64.t) -> {[@stop_split] [@expl:delete_records_target ensures] [%#sbroker'0] Int64.to_int result
+    = (if Int64.to_int requested_offset = - 1 then Int64.to_int high_watermark else Int64.to_int requested_offset)}
+    (! return {result}) ]
