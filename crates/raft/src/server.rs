@@ -56,8 +56,12 @@ const API_KEY_API_VERSIONS: i16 = 18;
 
 /// Highest `ApiVersions` request version this listener speaks: the advertised
 /// max in the `api_keys` table and the clamp applied to the response body codec
-/// (JVM controllers dial at v4; Crabka's own client at v0).
-const API_VERSIONS_MAX_VERSION: i16 = 4;
+/// (current JVM controllers dial at v5; Crabka's own client at v0).
+const API_VERSIONS_MAX_VERSION: i16 = 5;
+/// First `ApiVersions` version that carries KIP-1242 routing identity.
+const API_VERSIONS_ROUTING_MIN_VERSION: i16 = 5;
+const API_VERSIONS_INVALID_REQUEST: i16 = 42;
+const API_VERSIONS_REBOOTSTRAP_REQUIRED: i16 = 129;
 /// First `ApiVersions` response version where JVM clients accept a zero minimum
 /// for `kraft.version`.
 const KRAFT_ZERO_MIN_API_VERSION: i16 = 4;
@@ -189,10 +193,17 @@ where
                     // v0; the JVM controller asks at v4. The generated codec
                     // speaks the raw `int16`, so unwrap the version here.
                     let image = engine.current_image();
+                    let error_code = api_versions_routing_error(
+                        api_version.get(),
+                        &body,
+                        &image.cluster_id().to_string(),
+                        engine.node_id().0,
+                    )?;
                     let resp = api_versions_response_body(
                         api_version.get(),
                         &image,
                         admin_router.as_deref(),
+                        error_code,
                     );
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
                     continue;
@@ -482,6 +493,38 @@ where
     Ok(())
 }
 
+/// Validate the KIP-1242 routing identity carried by `ApiVersions` v5.
+fn api_versions_routing_error(
+    req_version: i16,
+    body: &[u8],
+    expected_cluster_id: &str,
+    expected_node_id: u64,
+) -> Result<i16, RaftError> {
+    use crabka_protocol::{Decode, owned::api_versions_request::ApiVersionsRequest};
+
+    if req_version < API_VERSIONS_ROUTING_MIN_VERSION {
+        return Ok(0);
+    }
+
+    let mut cur = body;
+    let request = ApiVersionsRequest::decode(&mut cur, req_version)?;
+    let expected_node_id = i32::try_from(expected_node_id).map_err(|_| {
+        RaftError::Protocol(crabka_protocol::ProtocolError::InvalidValue(
+            "controller node id exceeds the Kafka wire range",
+        ))
+    })?;
+    Ok(match (&request.cluster_id, request.node_id) {
+        (None, -1) => 0,
+        (Some(_), -1) | (None, _) => API_VERSIONS_INVALID_REQUEST,
+        (Some(cluster_id), node_id)
+            if cluster_id != expected_cluster_id || node_id != expected_node_id =>
+        {
+            API_VERSIONS_REBOOTSTRAP_REQUIRED
+        }
+        (Some(_), _) => 0,
+    })
+}
+
 /// `ApiVersionsResponse` advertising the controller-listener APIs.
 ///
 /// A real `mirror.gcr.io/apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
@@ -500,6 +543,7 @@ fn api_versions_response_body(
     req_version: i16,
     image: &crabka_metadata::MetadataImage,
     admin_router: Option<&dyn crate::ControllerAdminRouter>,
+    error_code: i16,
 ) -> Bytes {
     use crabka_protocol::{
         Encode,
@@ -527,6 +571,16 @@ fn api_versions_response_body(
         registration::SUPPORTED_APIS[1],
         registration::SUPPORTED_APIS[2],
     ];
+
+    if error_code != 0 {
+        let response = ApiVersionsResponse {
+            error_code,
+            ..Default::default()
+        };
+        let mut body = BytesMut::new();
+        let _ = response.encode(&mut body, req_version.clamp(0, API_VERSIONS_MAX_VERSION));
+        return body.freeze();
+    }
     let mut api_keys: Vec<ApiVersionEntry> = KEYS
         .iter()
         .map(|&(api_key, max_version)| ApiVersionEntry {
@@ -1943,7 +1997,7 @@ mod tests {
             level: 24,
         }));
         for req_v in [0i16, 4i16] {
-            let body = super::api_versions_response_body(req_v, &image, None);
+            let body = super::api_versions_response_body(req_v, &image, None, 0);
             let v = req_v.clamp(0, 4);
             let mut cur = &body[..];
             let resp = ApiVersionsResponse::decode(&mut cur, v).expect("decode body");
@@ -1986,6 +2040,51 @@ mod tests {
     }
 
     #[test]
+    fn api_versions_v5_validates_controller_routing_identity() {
+        use crabka_protocol::{
+            Encode,
+            owned::{
+                api_versions_request::ApiVersionsRequest,
+                api_versions_response::ApiVersionsResponse,
+            },
+        };
+
+        let request = |cluster_id: Option<&str>, node_id| {
+            let request = ApiVersionsRequest {
+                client_software_name: "crabka-test".into(),
+                client_software_version: "1.0.0".into(),
+                cluster_id: cluster_id.map(str::to_string),
+                node_id,
+                ..Default::default()
+            };
+            let mut body = bytes::BytesMut::new();
+            request.encode(&mut body, 5).expect("encode ApiVersions v5");
+            body.freeze()
+        };
+
+        for (cluster_id, node_id, expected) in [
+            (None, -1, 0),
+            (Some("cluster"), -1, API_VERSIONS_INVALID_REQUEST),
+            (None, 7, API_VERSIONS_INVALID_REQUEST),
+            (Some("cluster"), 7, 0),
+            (Some("wrong-cluster"), 7, API_VERSIONS_REBOOTSTRAP_REQUIRED),
+            (Some("cluster"), 8, API_VERSIONS_REBOOTSTRAP_REQUIRED),
+        ] {
+            let error =
+                super::api_versions_routing_error(5, &request(cluster_id, node_id), "cluster", 7)
+                    .expect("decode ApiVersions v5");
+            assert2::assert!(error == expected);
+        }
+
+        let image = crabka_metadata::MetadataImage::new(Uuid::nil());
+        let body =
+            super::api_versions_response_body(5, &image, None, API_VERSIONS_REBOOTSTRAP_REQUIRED);
+        let response = ApiVersionsResponse::decode(&mut body.as_ref(), 5).unwrap();
+        assert2::assert!(response.error_code == API_VERSIONS_REBOOTSTRAP_REQUIRED);
+        assert2::assert!(response.api_keys.is_empty());
+    }
+
+    #[test]
     fn describe_cluster_body_projects_controllers_and_rejects_brokers() {
         use crabka_protocol::{
             Decode,
@@ -1997,7 +2096,7 @@ mod tests {
 
         // DescribeCluster (60) is advertised so clients negotiate it (KIP-919).
         let image = crabka_metadata::MetadataImage::new(Uuid::nil());
-        let av = super::api_versions_response_body(4, &image, None);
+        let av = super::api_versions_response_body(4, &image, None, 0);
         let mut cur = &av[..];
         let avr = ApiVersionsResponse::decode(&mut cur, 4).unwrap();
         assert2::assert!(avr.api_keys.iter().any(|k| k.api_key == 60));

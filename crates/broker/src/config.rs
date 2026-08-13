@@ -241,6 +241,8 @@ pub struct BrokerConfig {
     pub operator_recovery_deadline: Time,
     /// Maximum quota throttle delay.
     pub quota_throttle_max: Time,
+    /// Window whose throughput defines the controller-mutation burst capacity.
+    pub controller_mutation_quota_window: Time,
     /// Maximum self-registration attempts before startup fails.
     pub self_registration_max_attempts: u32,
     /// Maximum bytes fetched by a metadata observer request.
@@ -1083,6 +1085,7 @@ impl BrokerConfig {
             unclean_recovery_balanced_deadline: secs(30),
             operator_recovery_deadline: secs(25),
             quota_throttle_max: secs(1),
+            controller_mutation_quota_window: secs(1),
             self_registration_max_attempts: 8,
             observer_fetch_max: mebibytes(1),
             audit_event_queue_capacity: 8_192,
@@ -1705,6 +1708,10 @@ impl BrokerConfig {
             ),
             ("quota_throttle_max", self.quota_throttle_max),
             (
+                "controller_mutation_quota_window",
+                self.controller_mutation_quota_window,
+            ),
+            (
                 "controller_heartbeat_interval",
                 self.controller_heartbeat_interval,
             ),
@@ -2073,6 +2080,7 @@ impl Default for BrokerConfig {
             unclean_recovery_balanced_deadline: secs(30),
             operator_recovery_deadline: secs(25),
             quota_throttle_max: secs(1),
+            controller_mutation_quota_window: secs(1),
             self_registration_max_attempts: 8,
             observer_fetch_max: mebibytes(1),
             audit_event_queue_capacity: 8_192,
@@ -2375,6 +2383,7 @@ mod tests {
                 config.unclean_recovery_balanced_deadline,
                 config.operator_recovery_deadline,
                 config.quota_throttle_max,
+                config.controller_mutation_quota_window,
             ) == (
                 secs(1),
                 secs(5),
@@ -2383,6 +2392,7 @@ mod tests {
                 secs(2),
                 secs(30),
                 secs(25),
+                secs(1),
                 secs(1),
             )
         );

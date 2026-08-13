@@ -292,7 +292,7 @@ fn success_topic_row(
         name: Some(record.name.clone()),
         topic_id: WireUuid(record.topic_id.into_bytes()),
         partitions,
-        is_internal: false,
+        is_internal: crate::handlers::is_internal_topic(name),
         topic_authorized_operations,
         ..Default::default()
     }
@@ -460,5 +460,17 @@ mod tests {
         let out = project_broker(&rec, "tls", "plain");
         assert!(out.host == "legacy-host");
         assert!(out.port == 1000);
+    }
+
+    #[test]
+    fn internal_topics_are_marked_in_metadata() {
+        for (name, expected) in [
+            ("__consumer_offsets", true),
+            ("__transaction_state", true),
+            ("__remote_log_metadata", true),
+            ("orders", false),
+        ] {
+            assert!(crate::handlers::is_internal_topic(name) == expected);
+        }
     }
 }

@@ -575,11 +575,11 @@ async fn populate_acquired_response(
 
 /// Applies one acknowledgement batch to the state machine.
 ///
-/// Each `acknowledge_type` entry maps to one offset, starting at `first`. This
-/// function merges a run of the same type into one `acknowledge` call. An
-/// empty `acknowledge_types` applies `Accept` across `[first, last]`, which is
-/// KIP-932's per-batch shorthand. It returns the first error code that it
-/// met.
+/// A singleton `acknowledge_types` applies that type across the whole range;
+/// otherwise each entry maps to one offset, starting at `first`. This function
+/// merges a run of the same type into one `acknowledge` call. An empty array
+/// applies `Accept` across `[first, last]`. It returns the first error code that
+/// it met.
 pub(crate) fn apply_one_ack(
     st: &mut crate::share_partition::state::AcquisitionState,
     member: &str,
@@ -591,6 +591,17 @@ pub(crate) fn apply_one_ack(
     if types.is_empty() {
         let ack = AckType::Accept;
         return st.acknowledge(member, Offset(first), Offset(last), ack, now);
+    }
+    if types.len() == 1 {
+        let ack = AckType::from_i8(types[0]).ok_or(codes::INVALID_RECORD_STATE)?;
+        return st.acknowledge(member, Offset(first), Offset(last), ack, now);
+    }
+    let range_len = last
+        .checked_sub(first)
+        .and_then(|len| len.checked_add(1))
+        .and_then(|len| usize::try_from(len).ok());
+    if range_len != Some(types.len()) {
+        return Err(codes::INVALID_RECORD_STATE);
     }
     // Walk the per-offset type list, coalescing equal-typed runs.
     let mut result = Ok(());
@@ -846,6 +857,41 @@ mod tests {
         let batches = collect_ack_batches(&partition);
 
         assert!(batches == vec![(10, 12, vec![0, 1, 1]), (30, 30, Vec::new())]);
+    }
+
+    #[test]
+    fn singleton_ack_type_applies_to_the_whole_range() {
+        let mut state = crate::share_partition::state::AcquisitionState::new(Offset(0));
+        state.materialize(Offset(200), 200);
+        assert!(
+            state
+                .acquire(
+                    "member",
+                    200,
+                    i32::MAX,
+                    Instant::now(),
+                    Duration::from_secs(30),
+                    5
+                )
+                .len()
+                == 1
+        );
+
+        apply_one_ack(&mut state, "member", 0, 199, &[1], Instant::now()).expect("acknowledge");
+
+        assert!(state.start_offset == Offset(200));
+        assert!(
+            state
+                .acquire(
+                    "other",
+                    200,
+                    i32::MAX,
+                    Instant::now(),
+                    Duration::from_secs(30),
+                    5
+                )
+                .is_empty()
+        );
     }
 
     #[test]

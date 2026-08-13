@@ -1,6 +1,9 @@
 //! Per-broker cache of `TokenBucket`s, one per (`quota_key`, `entity_key`) pair.
 
-use std::sync::Arc;
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use crabka_metadata::EntityKey;
 use dashmap::DashMap;
@@ -13,6 +16,15 @@ pub struct QuotaBuckets {
     /// each (`quota_type`, entity) pair, allocated lazily on the first
     /// lookup.
     buckets: DashMap<(String, EntityKey), Arc<TokenBucket>>,
+    controller_mutations: DashMap<EntityKey, Arc<Mutex<ControllerMutationBucket>>>,
+}
+
+#[derive(Debug)]
+pub(super) struct ControllerMutationBucket {
+    pub(super) rate: f64,
+    pub(super) window_secs: f64,
+    pub(super) tokens: f64,
+    pub(super) updated_at: Instant,
 }
 
 impl QuotaBuckets {
@@ -20,6 +32,7 @@ impl QuotaBuckets {
     pub fn new() -> Self {
         Self {
             buckets: DashMap::new(),
+            controller_mutations: DashMap::new(),
         }
     }
 
@@ -53,6 +66,25 @@ impl QuotaBuckets {
         self.buckets
             .iter()
             .map(|r| (r.key().clone(), r.value().clone()))
+    }
+
+    pub(super) fn controller_mutation_bucket(
+        &self,
+        entity_key: &EntityKey,
+        rate: f64,
+        window_secs: f64,
+    ) -> Arc<Mutex<ControllerMutationBucket>> {
+        self.controller_mutations
+            .entry(entity_key.clone())
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(ControllerMutationBucket {
+                    rate,
+                    window_secs,
+                    tokens: rate * window_secs,
+                    updated_at: Instant::now(),
+                }))
+            })
+            .clone()
     }
 
     #[cfg(test)]

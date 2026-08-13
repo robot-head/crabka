@@ -300,10 +300,13 @@ impl SharePersister {
         if pr.error_code != 0 {
             return Ok(None);
         }
+        let Some(start_offset) = initialized_start_offset(pr.start_offset) else {
+            return Ok(None);
+        };
         Ok(Some(SharePartitionState {
             state_epoch: pr.state_epoch,
             leader_epoch: 0,
-            start_offset: Offset(pr.start_offset),
+            start_offset,
             delivery_complete_count: 0,
             state_batches: pr
                 .state_batches
@@ -471,5 +474,20 @@ impl SharePersister {
             .map_err(|e| BrokerError::Share(format!("share-state RPC: {e}")))?;
         conn.close();
         Ok(resp)
+    }
+}
+
+fn initialized_start_offset(raw: i64) -> Option<Offset> {
+    (raw >= 0).then_some(Offset(raw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_start_offset_is_uninitialized_state() {
+        assert!(initialized_start_offset(-1).is_none());
+        assert_eq!(initialized_start_offset(0), Some(Offset(0)));
     }
 }

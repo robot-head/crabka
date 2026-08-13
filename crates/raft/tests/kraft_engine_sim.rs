@@ -179,7 +179,10 @@ where
         if let Some(v) = f() {
             return v;
         }
-        assert2::assert!(tokio::time::Instant::now() < deadline);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition not met before timeout"
+        );
         tokio::task::yield_now().await;
     }
 }
@@ -221,7 +224,10 @@ async fn await_single_leader(net: &SimNet, ids: &[NodeId], timeout: Duration) ->
                 }
             }
         }
-        assert2::assert!(tokio::time::Instant::now() < deadline);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no single leader before timeout; states={snap:?}"
+        );
         tokio::task::yield_now().await;
     }
 }
@@ -404,6 +410,47 @@ async fn leader_failure_reelects() {
     }
 
     for &id in &survivors {
+        net.get(id).unwrap().shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_leader_restart_reelects() {
+    let net = SimNet::new();
+    let ids = [NodeId(1), NodeId(2), NodeId(3)];
+    let cid = uuid::Uuid::from_u128(301);
+    let mut dirs: HashMap<NodeId, tempfile::TempDir> = HashMap::new();
+    for (i, &id) in ids.iter().enumerate() {
+        let (ctrl, dir) = build_engine(id, &ids, cid, STAGGERED_TIMEOUTS[i], &net);
+        net.register(id, ctrl);
+        dirs.insert(id, dir);
+    }
+
+    for _ in 0..5 {
+        let (leader, _) = await_single_leader(&net, &ids, Duration::from_secs(10)).await;
+        net.get(leader).unwrap().shutdown().await;
+        net.remove(leader);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let reopened = KraftController::open(
+            dirs[&leader].path().to_path_buf(),
+            leader,
+            cid,
+            voter_set(&ids),
+            STAGGERED_TIMEOUTS[usize::try_from(leader.0 - 1).unwrap()],
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::default(),
+            MetadataRaftFetchMax::default(),
+            Arc::new(net.clone()),
+            0,
+            MetadataSnapshotFetchMax::default(),
+        )
+        .expect("reopen leader");
+        net.register(leader, reopened);
+    }
+
+    let _ = await_single_leader(&net, &ids, Duration::from_secs(10)).await;
+    for &id in &ids {
         net.get(id).unwrap().shutdown().await;
     }
 }

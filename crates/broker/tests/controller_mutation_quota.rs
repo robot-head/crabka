@@ -2,8 +2,8 @@
 //!
 //! Tests:
 //! 1. `controller_mutation_rate_throttles_create_topics`. Set rate=2.0 for
-//!    alice. Create a topic with 10 partitions. Assert `throttle_time_ms` > 0
-//!    AND wall ≥800ms.
+//!    alice. Let one strict request cross the limit, then assert the next is
+//!    rejected with `THROTTLING_QUOTA_EXCEEDED`.
 //! 2. `unthrottled_create_topics_unaffected`. No quota. Create a topic.
 //!    Assert `throttle_time_ms` == 0.
 //! 3. `controller_mutation_rate_throttles_delete_topics`. Pre-create a topic
@@ -354,9 +354,9 @@ async fn drive_delete_topics_sasl(
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: Set `controller_mutation_rate=2.0` for alice. Create a topic with
-/// 10 partitions (mutations=10, burst=2, overage=8 → delay=4s capped at 1s).
-/// Assert `throttle_time_ms` > 0 AND wall ≥ 800ms.
+/// Test 1: Set `controller_mutation_rate=2.0` for alice. A strict v7 request
+/// may cross the limit, but the following mutation is rejected while debt
+/// remains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn controller_mutation_rate_throttles_create_topics() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -408,22 +408,25 @@ async fn controller_mutation_rate_throttles_create_topics() {
         })
         .await;
 
-    // Create topic with 10 partitions (mutations=10, burst=2, overage=8 → delay capped at 1s).
-    let started = std::time::Instant::now();
+    // This operation crosses the limit but is accepted under strict quota
+    // semantics because the bucket was not already exhausted.
     let (throttle_ms, err_code) =
         drive_create_topics_sasl(addr, "alice", "alice-secret", "throttled-topic", 10).await;
-    let elapsed = started.elapsed();
     check!(
         err_code == 0,
         "create-topics should succeed (alice has Cluster Create ACL)"
     );
+    check!(throttle_ms == 0);
+
+    let (throttle_ms, err_code) =
+        drive_create_topics_sasl(addr, "alice", "alice-secret", "rejected-topic", 1).await;
+    check!(
+        err_code == crabka_broker::codes::THROTTLING_QUOTA_EXCEEDED,
+        "expected strict quota rejection, got error {err_code}"
+    );
     check!(
         throttle_ms > 0,
         "expected throttle_time_ms > 0, got {throttle_ms}"
-    );
-    check!(
-        elapsed >= std::time::Duration::from_millis(800),
-        "expected >=800ms wall delay, got {elapsed:?}"
     );
 }
 

@@ -46,10 +46,7 @@ use crate::{
     broker::Broker,
     codes,
     error::BrokerError,
-    txn::{
-        state::{TopicPartition, TxnState},
-        util::now_millis,
-    },
+    txn::state::TopicPartition,
 };
 
 #[tracing::instrument(
@@ -290,79 +287,35 @@ async fn process_one_txn(
         return per_topic_with_denied(topics, denied, codes::NOT_COORDINATOR);
     }
 
-    // 2. Look up entry; verify (pid, epoch).
+    // 2. Look up entry for the TV_2 verify-only path.
     let Some(entry_mutex) = coord.get(tid) else {
         return per_topic_with_denied(topics, denied, codes::INVALID_PRODUCER_ID_MAPPING);
     };
-
-    let mut entry = entry_mutex.lock().await;
-    if entry.has_staged_producer_identity() {
-        return per_topic_with_denied(topics, denied, codes::INVALID_TXN_STATE);
-    }
-    if entry.producer_id != producer_id || entry.producer_epoch != producer_epoch {
-        return per_topic_with_denied(topics, denied, codes::INVALID_PRODUCER_EPOCH);
-    }
-
-    // KIP-890 TV_2 server-side verification: confirm each requested
-    // partition is already part of the producer's ongoing txn; never add,
-    // never touch state, never persist. Absent partitions get
-    // TRANSACTION_ABORTABLE so the client aborts. Below TV_2, or with
-    // verify_only=false, this is skipped and the classic add path runs
-    // unchanged (verify_only is ignored, matching pre-KIP-890 behavior).
     if txnv.verified() && verify_only {
+        let entry = entry_mutex.lock().await;
+        if entry.has_staged_producer_identity() {
+            return per_topic_with_denied(topics, denied, codes::INVALID_TXN_STATE);
+        }
+        if entry.producer_id != producer_id || entry.producer_epoch != producer_epoch {
+            return per_topic_with_denied(topics, denied, codes::INVALID_PRODUCER_EPOCH);
+        }
         return verify_partitions(&entry, topics, denied);
     }
+    drop(entry_mutex);
 
-    // 3. State machine: Empty/Ongoing → Ongoing.
-    //    CompleteCommit/CompleteAbort → Ongoing is also allowed to support
-    //    re-use of a transactional_id without an intervening InitProducerId.
-    //    In that case we clear the stale partition set so EndTxn only fans out
-    //    markers to the new transaction's partitions.
-    if !entry.state.can_transition_to(TxnState::Ongoing) {
-        return per_topic_with_denied(topics, denied, codes::INVALID_TXN_STATE);
-    }
-    let prior_state = entry.state;
-    let was_complete = matches!(
-        prior_state,
-        TxnState::CompleteCommit | TxnState::CompleteAbort
-    );
-    entry.state = TxnState::Ongoing;
-    if was_complete {
-        // Starting a new transaction after a completed one: discard the stale
-        // partition set so the new transaction starts clean.
-        entry.partitions.clear();
-    }
-    // KIP-98/KIP-939: a transaction "starts" on the edge into Ongoing. Stamp
-    // the start timestamp here (Kafka's `txnStartTimestamp`) so the idle-txn
-    // reaper measures the timeout from the real start, not from InitProducerId.
-    // A partition added to an already-Ongoing transaction keeps the original
-    // start, so an active producer can't keep resetting its own timeout.
-    if prior_state != TxnState::Ongoing {
-        entry.start_ms = now_millis();
-    }
-
-    // 4. Register partitions for ALLOWED topics only.
-    for t in &allowed_topics {
-        for &p in &t.partitions {
-            entry.partitions.insert(TopicPartition {
-                topic: t.name.clone(),
-                partition: PartitionIndex(p),
-            });
-        }
-    }
-    entry.last_update_ms = now_millis();
-    let snap = entry.clone();
-    // Drop lock before the async persist call.
-    drop(entry);
-
-    // 5. Persist.
-    if let Err(e) = coord.put(snap, txnv).await {
-        tracing::error!(tid, error = %e, "AddPartitionsToTxn: failed to persist TxnEntry");
-        return per_topic_with_denied(topics, denied, codes::UNKNOWN_SERVER_ERROR);
-    }
-
-    // 6. Success — NONE for allowed topics, TOPIC_AUTHORIZATION_FAILED for denied.
-    per_topic_with_denied(topics, denied, codes::NONE)
+    let partitions = allowed_topics
+        .into_iter()
+        .flat_map(|topic| {
+            topic.partitions.iter().map(|&partition| TopicPartition {
+                topic: topic.name.clone(),
+                partition: PartitionIndex(partition),
+            })
+        })
+        .collect();
+    let code = coord
+        .register_partitions(tid, producer_id, producer_epoch, partitions, txnv)
+        .await;
+    per_topic_with_denied(topics, denied, code)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

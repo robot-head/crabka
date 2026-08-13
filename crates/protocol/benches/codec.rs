@@ -43,6 +43,7 @@ fn make_api_versions_request() -> ApiVersionsRequest {
         client_software_name: "crabka".to_string(),
         client_software_version: "0.1.0".to_string(),
         unknown_tagged_fields: UnknownTaggedFields::default(),
+        ..Default::default()
     }
 }
 

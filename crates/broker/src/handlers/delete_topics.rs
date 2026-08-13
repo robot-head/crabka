@@ -127,6 +127,28 @@ pub(crate) async fn handle(
                 .map_or(0, |name| image.partitions_of(name).count() as u64)
         })
         .sum();
+    let quota = crate::quota::apply_controller_mutation_quota_mode(
+        &image,
+        &broker.quota_buckets,
+        ctx.principal.name.as_str(),
+        ctx.client_id,
+        mutation_count,
+        broker.config.controller_mutation_quota_window,
+        broker.config.quota_throttle_max,
+        version >= 5,
+    );
+    if quota.is_rejected() {
+        let results = name_list
+            .iter()
+            .map(|(name, _, topic_id)| {
+                delete_topic_result(name.clone(), *topic_id, codes::THROTTLING_QUOTA_EXCEEDED)
+            })
+            .collect();
+        return crate::handlers::encode_response(
+            &delete_topics_response(results, crate::quota::throttle_time_ms(quota.delay())),
+            version,
+        );
+    }
 
     // ── ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic name for `Delete`. Topics that come
@@ -253,14 +275,7 @@ pub(crate) async fn handle(
     );
 
     // KIP-599: apply controller_mutation_rate throttle after response assembly.
-    let delay = crate::quota::consume_controller_mutation_quota(
-        &image,
-        &broker.quota_buckets,
-        ctx.principal.name.as_str(),
-        ctx.client_id,
-        mutation_count,
-        broker.config.quota_throttle_max,
-    );
+    let delay = quota.delay();
     let throttle_time_ms = crate::quota::throttle_time_ms(delay);
     if should_wait_for_quota_delay(delay) {
         tokio::time::sleep(delay.to_std()).await;

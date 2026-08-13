@@ -1,12 +1,12 @@
 //! `DescribeConfigs` (`api_key=32`). It returns the dynamic override configs
-//! that the metadata image holds.
+//! that the metadata image holds plus the broker's static node id.
 //!
 //! - `resource_type=2` (TOPIC): the handler reads the per-topic override map
 //!   and emits entries with `config_source = DYNAMIC_TOPIC_CONFIG (1)`.
 //! - `resource_type=4` (BROKER): a numeric name returns the effective dynamic
 //!   per-broker and cluster-default overrides. An empty name returns the
 //!   cluster-wide defaults. Sources distinguish `DYNAMIC_BROKER_CONFIG (2)`
-//!   from `DYNAMIC_DEFAULT_BROKER_CONFIG (3)`.
+//!   from `DYNAMIC_DEFAULT_BROKER_CONFIG (3)` and `STATIC_BROKER_CONFIG (4)`.
 //! - Every other resource type receives an empty configs list and no error.
 //!   The JVM `AdminClient` accepts that.
 //!
@@ -43,6 +43,7 @@ use crate::{
 const CONFIG_SOURCE_DYNAMIC_TOPIC: i8 = 1;
 const CONFIG_SOURCE_DYNAMIC_BROKER: i8 = 2;
 const CONFIG_SOURCE_DYNAMIC_DEFAULT_BROKER: i8 = 3;
+const CONFIG_SOURCE_STATIC_BROKER: i8 = 4;
 /// `ConfigSource::DEFAULT_CONFIG`, for keys reported at their default.
 const CONFIG_SOURCE_DEFAULT: i8 = 5;
 /// `DescribeConfigsResponse.ConfigSource::CLIENT_METRICS_CONFIG` wire byte.
@@ -137,7 +138,7 @@ fn describe_one(
                 .into_iter()
                 .flat_map(std::collections::BTreeMap::keys),
         );
-        let configs: Vec<DescribeConfigsResourceResult> = keys
+        let mut configs: Vec<DescribeConfigsResourceResult> = keys
             .into_iter()
             .filter(|key| key_filter.is_none_or(|ks| ks.iter().any(|filter| filter == *key)))
             .map(|key| {
@@ -155,6 +156,15 @@ fn describe_one(
                 )
             })
             .collect();
+        if let Some(node_id) = node_id
+            && key_filter.is_none_or(|keys| keys.iter().any(|key| key == "node.id"))
+        {
+            let mut entry =
+                make_entry("node.id", &node_id.to_string(), CONFIG_SOURCE_STATIC_BROKER);
+            entry.read_only = true;
+            configs.push(entry);
+            configs.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        }
         return ok(configs);
     }
 
@@ -569,7 +579,40 @@ mod tests {
                         "2048",
                         super::CONFIG_SOURCE_DYNAMIC_BROKER,
                     ),
+                    DescribeConfigsResourceResult {
+                        name: "node.id".into(),
+                        value: Some("1".into()),
+                        read_only: true,
+                        config_source: super::CONFIG_SOURCE_STATIC_BROKER,
+                        ..Default::default()
+                    },
                 ]
+        );
+    }
+
+    #[test]
+    fn broker_describe_without_overrides_includes_static_node_id() {
+        let result = super::describe_one(
+            &MetadataImage::new(Uuid::nil()),
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_BROKER,
+                resource_name: "7".into(),
+                configuration_keys: None,
+                ..Default::default()
+            },
+            300_000,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        );
+
+        assert!(
+            result.configs
+                == vec![DescribeConfigsResourceResult {
+                    name: "node.id".into(),
+                    value: Some("7".into()),
+                    read_only: true,
+                    config_source: super::CONFIG_SOURCE_STATIC_BROKER,
+                    ..Default::default()
+                }]
         );
     }
 

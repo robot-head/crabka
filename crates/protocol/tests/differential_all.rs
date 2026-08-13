@@ -20,6 +20,9 @@ fn every_pair_byte_equal() {
     let mut o = oracle::shared();
     let mut failures: Vec<String> = Vec::new();
     for case in CASES {
+        if !oracle_supports(case) {
+            continue;
+        }
         let rust_bytes = encode_default(case.name, case.version);
         let jval = default_json_for(case.name, case.version);
 
@@ -84,6 +87,25 @@ fn every_pair_byte_equal() {
         }
     }
     assert2::assert!(failures.is_empty());
+}
+
+fn oracle_supports(case: &Case) -> bool {
+    // The pinned Kafka 4.3.1 client predates KIP-1242 and silently encodes v5
+    // as v4. The Rust v5 codec remains covered by its owned roundtrip tests.
+    !(case.name == "ApiVersionsRequest" && case.version == 5)
+}
+
+#[test]
+fn kafka_431_oracle_excludes_kip1242_request() {
+    let v4 = Case {
+        name: "ApiVersionsRequest",
+        api_key: 18,
+        version: 4,
+        kind: Kind::Request,
+    };
+    let v5 = Case { version: 5, ..v4 };
+
+    assert2::assert!((oracle_supports(&v4), oracle_supports(&v5)) == (true, false));
 }
 
 fn kind_str(k: Kind) -> &'static str {

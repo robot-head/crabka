@@ -13,6 +13,7 @@ fn borrowed_api_versions_request_v3_roundtrip() {
         client_software_name: "crabka",
         client_software_version: "0.0.0",
         unknown_tagged_fields: UnknownTaggedFields::default(),
+        ..Default::default()
     };
     let mut buf = BytesMut::new();
     req.encode(&mut buf, 3).unwrap();
@@ -29,6 +30,7 @@ fn borrowed_api_versions_request_to_owned_matches_owned_codec() {
         client_software_name: "crabka",
         client_software_version: "0.0.0",
         unknown_tagged_fields: UnknownTaggedFields::default(),
+        ..Default::default()
     };
     let mut a = BytesMut::new();
     req.encode(&mut a, 3).unwrap();

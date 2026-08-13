@@ -115,6 +115,7 @@ pub enum GroupActorMessage {
     // ── classic protocol (parking) ──
     ClassicJoin {
         req: JoinGroupRequest,
+        version: i16,
         client_id: String,
         client_host: String,
         reply: oneshot::Sender<JoinResult>,
@@ -486,11 +487,13 @@ async fn handle_actor_heartbeat(
     true
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the actor message boundary explicit.
 async fn handle_classic_join_message(
     group: &mut CoordinatorGroup,
     parked: &mut ParkedWaiters,
     services: ActorServices<'_>,
-    request: JoinGroupRequest,
+    mut request: JoinGroupRequest,
+    version: i16,
     client_id: &str,
     client_host: &str,
     reply: oneshot::Sender<JoinResult>,
@@ -499,9 +502,10 @@ async fn handle_classic_join_message(
         let previous = state.clone();
         match classic_ops::handle_join(
             state,
-            &request,
+            &mut request,
             client_id,
             client_host,
+            version >= 4,
             services.config.classic_initial_rebalance_delay,
         ) {
             classic_ops::JoinAction::Immediate(result) => {
@@ -923,6 +927,7 @@ async fn handle_actor_message(
         }
         GroupActorMessage::ClassicJoin {
             req,
+            version,
             client_id,
             client_host,
             reply,
@@ -932,6 +937,7 @@ async fn handle_actor_message(
                 parked,
                 services,
                 req,
+                version,
                 &client_id,
                 &client_host,
                 reply,
@@ -2646,6 +2652,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
+                version: 4,
                 client_id: "new-client".into(),
                 client_host: "new-host".into(),
                 reply: tx,
@@ -2701,6 +2708,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
+                version: 4,
                 client_id: "new-client".into(),
                 client_host: "new-host".into(),
                 reply: tx,
@@ -3773,6 +3781,7 @@ mod tests {
                     protocol_type: "consumer".into(),
                     ..Default::default()
                 },
+                version: 4,
                 client_id: "client-a".into(),
                 client_host: String::new(),
                 reply: tx,
@@ -4252,6 +4261,7 @@ mod tests {
                     rebalance_timeout_ms: 60_000,
                     ..Default::default()
                 },
+                version: 4,
                 client_id: "client-a".into(),
                 client_host: "127.0.0.1".into(),
                 reply: tx,

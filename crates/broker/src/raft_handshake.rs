@@ -883,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_versions_response_uses_schema_ranges_and_versioned_encoding() {
-        let expected_ranges = [(17, 0, 1), (36, 0, 2), (18, 0, 4)];
+        let expected_ranges = [(17, 0, 1), (36, 0, 2), (18, 0, 5)];
 
         for version in [0, 3] {
             let (mut client, mut server) = tokio::io::duplex(256);

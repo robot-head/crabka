@@ -25,6 +25,11 @@ impl<'a> Arbitrary<'a> for ApiVersionsRequest {
         Ok(Self {
             client_software_name: ascii(u, 0, 32)?,
             client_software_version: ascii(u, 0, 32)?,
+            cluster_id: u
+                .arbitrary::<bool>()?
+                .then(|| ascii(u, 0, 32))
+                .transpose()?,
+            node_id: u.arbitrary()?,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         })
     }

@@ -12,7 +12,9 @@ use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
     Decode,
     owned::{
-        describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest,
+        describe_share_group_offsets_request::{
+            DescribeShareGroupOffsetsRequest, DescribeShareGroupOffsetsRequestTopic,
+        },
         describe_share_group_offsets_response::{
             DescribeShareGroupOffsetsResponse, DescribeShareGroupOffsetsResponseGroup,
             DescribeShareGroupOffsetsResponsePartition, DescribeShareGroupOffsetsResponseTopic,
@@ -118,7 +120,7 @@ pub(crate) async fn handle(
             .as_ref()
             .and_then(|ng| ng.share_state_partition_metadata(&gid));
 
-        let req_topics = group.topics.unwrap_or_default();
+        let req_topics = requested_topics(group.topics, metadata.as_ref(), &image);
         let mut topics: Vec<DescribeShareGroupOffsetsResponseTopic> =
             Vec::with_capacity(req_topics.len());
 
@@ -142,6 +144,36 @@ pub(crate) async fn handle(
         ..Default::default()
     };
     crate::handlers::encode_response(&resp, version)
+}
+
+fn requested_topics(
+    requested: Option<Vec<DescribeShareGroupOffsetsRequestTopic>>,
+    metadata: Option<
+        &crate::coordinator::unified::share::persistence::ShareGroupStatePartitionMetadataValue,
+    >,
+    image: &crabka_metadata::MetadataImage,
+) -> Vec<DescribeShareGroupOffsetsRequestTopic> {
+    let Some(metadata) = metadata else {
+        return requested.unwrap_or_default();
+    };
+    if let Some(topics) = requested {
+        return topics;
+    }
+    let mut topics: Vec<_> = metadata
+        .initialized
+        .iter()
+        .filter_map(|(topic_id, partitions)| {
+            image.topic_name_by_id(topic_id).map(|topic_name| {
+                DescribeShareGroupOffsetsRequestTopic {
+                    topic_name: topic_name.into(),
+                    partitions: partitions.clone(),
+                    ..Default::default()
+                }
+            })
+        })
+        .collect();
+    topics.sort_by(|a, b| a.topic_name.cmp(&b.topic_name));
+    topics
 }
 
 /// Build one response topic. It resolves `name → id`, and an unknown name
@@ -496,5 +528,33 @@ mod tests {
         };
         assert!(topic == expected);
         broker_handle.shutdown().await;
+    }
+
+    #[test]
+    fn null_topics_resolves_all_initialized_topic_partitions() {
+        let alpha_id = uuid::Uuid::from_u128(1);
+        let beta_id = uuid::Uuid::from_u128(2);
+        let missing_id = uuid::Uuid::from_u128(3);
+        let mut image = image_with_topic("beta", beta_id);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "alpha".into(),
+            topic_id: alpha_id,
+            partitions: 2,
+            replication_factor: 1,
+        }));
+        let metadata = crate::coordinator::unified::share::persistence::ShareGroupStatePartitionMetadataValue {
+            initialized: vec![(beta_id, vec![0]), (missing_id, vec![7]), (alpha_id, vec![0, 1])],
+            deleting: Vec::new(),
+        };
+
+        let topics = requested_topics(None, Some(&metadata), &image);
+
+        assert!(
+            topics
+                .iter()
+                .map(|topic| (topic.topic_name.as_str(), topic.partitions.as_slice()))
+                .collect::<Vec<_>>()
+                == vec![("alpha", &[0, 1][..]), ("beta", &[0][..])]
+        );
     }
 }
