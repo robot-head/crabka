@@ -53,6 +53,9 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
         "ALTER OPERATOR FAMILY" | "DROP OPERATOR FAMILY" => {
             &["CREATE OPERATOR FAMILY parser_commands_family USING hash"]
         }
+        // Each probe runs against a fresh engine, so the cast this drops has to
+        // be made first.
+        "DROP CAST" => &["CREATE CAST (int8 AS timestamp) WITHOUT FUNCTION"],
         "ALTER TABLESPACE" | "DROP TABLESPACE" => {
             &["CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'"]
         }
@@ -224,7 +227,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 170);
+    assert!(report.probes.len() == 172);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -260,7 +263,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 129);
+    assert!(executed == 131);
     assert!(refused == 41);
 }
 

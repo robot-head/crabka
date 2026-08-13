@@ -691,6 +691,22 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         expected_statement: "CreateOperatorFamily",
         refusal: None,
     },
+    // A binary-coercible pair: both are 8 bytes and Gres can decode one as the
+    // other, which is what `CREATE CAST ... WITHOUT FUNCTION` asserts. The pair
+    // is probed at DDL time rather than at first use, so a pair that cannot be
+    // decoded is refused here rather than surfacing as a wrong value later.
+    CommandProbe {
+        command: "CREATE CAST",
+        sql: "CREATE CAST (int8 AS timestamp) WITHOUT FUNCTION",
+        expected_statement: "CreateCast",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP CAST",
+        sql: "DROP CAST (int8 AS timestamp)",
+        expected_statement: "DropCast",
+        refusal: None,
+    },
     CommandProbe {
         command: "ALTER OPERATOR CLASS",
         sql: "ALTER OPERATOR CLASS parser_commands_ops USING hash RENAME TO parser_commands_ops2",
@@ -1257,7 +1273,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 170,
+            report.commands.len() == 172,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1315,7 +1331,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(170));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(172));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")
