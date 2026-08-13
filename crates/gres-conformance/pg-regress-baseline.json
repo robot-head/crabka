@@ -481,10 +481,10 @@
       "sha256": "b78e3930608148bc85bf2abef8e493078f122b5175a1629394b1c56abf121ff1"
     },
     "interval": {
-      "changed_lines": 329,
+      "changed_lines": 273,
       "expected": "interval.out",
-      "hunks": 24,
-      "sha256": "de6f451f37339a26212d062bb8ad4c794b7bb06480b86f1b1fbe8a68b31aec67"
+      "hunks": 22,
+      "sha256": "eabcf699c45d9524d4a977240b1adabdba2d61e2d42aa7bd36b6748693d3b071"
     },
     "join": {
       "changed_lines": 7988,
