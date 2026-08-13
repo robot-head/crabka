@@ -157,10 +157,10 @@
       "sha256": "24bb700c0c41df8f4718b97ee206d97e97a150c30ae0167a3fd3e6a1bb0138df"
     },
     "create_cast": {
-      "changed_lines": 60,
+      "changed_lines": 34,
       "expected": "create_cast.out",
       "hunks": 3,
-      "sha256": "e7c428950890ba8e1685476e9e61dc151e2069abe2a55ba2b8a8a86dee50c3a2"
+      "sha256": "fabab1ea1924d4e2a1cd45606523c5029df057f44266e04c9eda97a3c58db7fb"
     },
     "create_function_sql": {
       "changed_lines": 349,
@@ -223,10 +223,10 @@
       "sha256": "eb0a5222905fe362a8c017526f439516d424dde93c7edc1825a6a75901c9a7c7"
     },
     "create_type": {
-      "changed_lines": 200,
+      "changed_lines": 197,
       "expected": "create_type.out",
-      "hunks": 12,
-      "sha256": "55257456a051ed914cc2c051f68837a2668fbc2a82690628e772d4fc4be7bb6e"
+      "hunks": 11,
+      "sha256": "e3eedd91134ef4f98da21b797956eca1f4ce52691c0473dd07ff5f141fcc83f9"
     },
     "create_view": {
       "changed_lines": 1686,
@@ -607,10 +607,10 @@
       "sha256": "efef6dc7a1cf9fd2666ee8f9866cfc4c256c9b9893e6acfd095b56ffd9b798ca"
     },
     "opr_sanity": {
-      "changed_lines": 403,
+      "changed_lines": 363,
       "expected": "opr_sanity.out",
-      "hunks": 48,
-      "sha256": "8f6cb54f44cd071ca74d654f16ce98f9c2dc32535d171af81e4b87e94c052c79"
+      "hunks": 42,
+      "sha256": "61f6a6d73ccda89408e23363c40500ebfba36d0eac1bb93ea135bcf58acb992f"
     },
     "partition_aggregate": {
       "changed_lines": 1201,
@@ -658,7 +658,7 @@
       "changed_lines": 1857,
       "expected": "plpgsql.out",
       "hunks": 163,
-      "sha256": "0c75551a9e00a37aa14d6c05f6ec2112be5db09a853a45e82e9bc97bba352f7a"
+      "sha256": "10fc0d3310a134abbc595d4f2a2d3c0c3bc0d17cf6320875bbc41369e11ab5f8"
     },
     "polygon": {
       "changed_lines": 157,
@@ -743,12 +743,6 @@
       "expected": "regex.out",
       "hunks": 12,
       "sha256": "eee2a234c6be806e13d40dcce2c14bb979702fce45924e7dcd6ff92ac9bdc9d0"
-    },
-    "regproc": {
-      "changed_lines": 75,
-      "expected": "regproc.out",
-      "hunks": 6,
-      "sha256": "65c0cebd30c077ba8f4ab0a452f15b651c66bd51c58172218f8fb9008275912a"
     },
     "reloptions": {
       "changed_lines": 104,
@@ -1081,7 +1075,7 @@
       "sha256": "fba8d9ee23aaaa7ceebd026299b8d3cfcd1e9c96bc65a2b2f62bcd3bc100337c"
     }
   },
-  "passed": 51,
+  "passed": 52,
   "postgres_tag": "REL_18_4",
   "schedule": [
     "test_setup",
