@@ -8,7 +8,7 @@ repositories { mavenCentral() }
 
 dependencies {
     implementation("com.connectrpc:connect-kotlin:0.9.0")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.22.0")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.22.1")
     implementation("com.google.protobuf:protobuf-java:4.35.1")
     implementation("com.squareup.okhttp3:okhttp:5.1.0")
 
