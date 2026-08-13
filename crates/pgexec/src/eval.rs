@@ -379,6 +379,11 @@ fn eval_depth_inner(
         Expr::Func(fc) if crate::reg_fn::is_reg_func(&fc.name) => {
             crate::reg_fn::eval_reg_func(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
+        // `currtid2(relation, tid)`, which resolves a relation *and* reads its
+        // rows, so it sits with the other families that reach the catalog.
+        Expr::Func(fc) if crate::tid_fn::is_tid_func(&fc.name) => {
+            crate::tid_fn::eval_tid(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::eval_scalar(fc, Some(scope), ctx, |e| {
                 eval_depth(e, scope, values, ctx, d)
@@ -4115,6 +4120,9 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         }
         Expr::Func(fc) if crate::reg_fn::is_reg_func(&fc.name) => {
             crate::reg_fn::reg_func_result_type(fc, scope)
+        }
+        Expr::Func(fc) if crate::tid_fn::is_tid_func(&fc.name) => {
+            crate::tid_fn::tid_func_result_type(fc, scope)
         }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::scalar_result_type(fc, scope)

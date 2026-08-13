@@ -10129,6 +10129,27 @@ impl SqlSession {
                 }
             }
         };
+        // A materialized view that has never been refreshed holds no rows to
+        // copy. The rewritten `SELECT` would refuse it too, and in the same
+        // SQLSTATE — but `PostgreSQL` words this refusal for `COPY`
+        // specifically rather than reusing the read one, so the two do not say
+        // the same thing and the rewrite cannot stand in for it.
+        if table
+            .materialized
+            .as_ref()
+            .is_some_and(|matview| !matview.populated)
+        {
+            return Err(ExecError::Remote(
+                PgError::error(
+                    "0A000",
+                    format!(
+                        "cannot copy from unpopulated materialized view \"{}\"",
+                        table.name.name
+                    ),
+                )
+                .with_hint("Use the REFRESH MATERIALIZED VIEW command."),
+            ));
+        }
         let named = |column: &str| SelectItem::Expr {
             expr: Expr::Column {
                 table: None,
@@ -10274,6 +10295,9 @@ impl SqlSession {
         // without passing `copy_in_start`. Both entry points must refuse, or
         // one of them loads rows past a policy.
         self.precheck_copy_from(copy)?;
+        // Only here, and never in the pre-check: see the refusal's own note on
+        // why `PostgreSQL` raises this one after the client has sent its data.
+        self.refuse_unfreezable_freeze_target(copy)?;
         let data_len = chunks.iter().map(bytes::Bytes::len).sum();
         let mut data = Vec::with_capacity(data_len);
         for chunk in chunks {
@@ -13207,6 +13231,60 @@ impl SqlSession {
                     .with_hint("Use INSERT statements instead."),
             )),
         }
+    }
+
+    /// The two relation kinds `COPY … FROM … (FREEZE)` may not name.
+    ///
+    /// `FREEZE` asks for rows stamped as already visible to everyone, which is
+    /// a statement about the relation the rows land in. Neither of these is
+    /// that relation: a partitioned table routes every row to a leaf it has not
+    /// opened, and a foreign table's rows are the remote side's to stamp.
+    ///
+    /// **This one refusal is deliberately late**, and every other one this
+    /// module makes about a `COPY` target is deliberately early. The rest are
+    /// raised before `CopyInResponse` goes out, because a refusal after it
+    /// leaves psql in copy-in mode feeding the script to the server as data.
+    /// `PostgreSQL` raises *these* two in `CopyFrom`, which runs after
+    /// `BeginCopyFrom` has announced copy-in mode — so there the client does
+    /// send its data and its terminator, and `copy.out` records the error alone
+    /// with none of the `invalid command \.` wreckage the early refusals leave
+    /// behind. Moving the check earlier reproduces the message and loses the
+    /// file, which is how this landed here.
+    ///
+    /// The rest of `PostgreSQL`'s `FREEZE` conditions are *not* checked: it
+    /// also refuses a relation that was not created or truncated in the current
+    /// subtransaction, which is a rule about when the optimization is safe to
+    /// apply. Gres applies no optimization — [`crate::copyfmt`] accepts
+    /// `FREEZE` and ignores it — so it has nothing to make unsafe, and refusing
+    /// on that condition would reject the `pgbench -i` that motivated accepting
+    /// the option at all. What is refused here is only what no `FREEZE` could
+    /// mean whatever the engine did with it.
+    fn refuse_unfreezable_freeze_target(&self, copy: &CopyStmt) -> Result<(), ExecError> {
+        if !copy.options.freeze {
+            return Ok(());
+        }
+        let target = copy_into_target(copy)?;
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            target.name,
+            crate::relname::SchemaDisposition::Utility,
+        )?;
+        let Ok(table) = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &resolved) else {
+            // Every kind with no table record of its own was refused for its
+            // kind before this ran.
+            return Ok(());
+        };
+        let kind = if table.foreign.is_some() {
+            "foreign table"
+        } else if crate::partition::is_partitioned(self.catalog_kv.as_ref(), &resolved)? {
+            "partitioned table"
+        } else {
+            return Ok(());
+        };
+        Err(ExecError::Unsupported(format!(
+            "cannot perform COPY FREEZE on a {kind}"
+        )))
     }
 
     /// The role this session's row-security decisions are made under.
@@ -17966,6 +18044,102 @@ mod tests {
             .await
             .expect_err("there is no statement 9");
         assert!(out_of_range.message == "COPY data received for a non-COPY statement");
+    }
+
+    /// `COPY … (FREEZE)` is refused for the two kinds that hold no rows of
+    /// their own — and refused *late*, after copy-in mode has been announced,
+    /// which is where `PostgreSQL` refuses it and what keeps the client's data
+    /// and terminator from being read back as SQL.
+    #[tokio::test]
+    async fn copy_freeze_is_refused_late_for_a_relation_with_no_rows_of_its_own() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for ddl in [
+            "CREATE TABLE p (a int) PARTITION BY RANGE (a)",
+            "CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10)",
+            "CREATE TABLE plain (a int)",
+            "CREATE FOREIGN DATA WRAPPER w",
+            "CREATE SERVER srv FOREIGN DATA WRAPPER w",
+            "CREATE FOREIGN TABLE f (a int) SERVER srv",
+        ] {
+            session.simple_query(ddl).await.expect("ddl");
+        }
+
+        for (relation, kind) in [("p", "partitioned table"), ("f", "foreign table")] {
+            let sql = format!("COPY {relation} FROM STDIN (FREEZE)");
+            let statement = crabka_pgparser::parse(&sql).expect("parse");
+            let copy = statement
+                .first()
+                .and_then(crate::session::copy_from_stdin_stmt)
+                .expect("copy statement")
+                .clone();
+            // Copy-in mode is announced: the refusal is not a pre-check.
+            session.copy_in_start(&copy).expect("copy-in announced");
+            let refused = session
+                .copy_in(&sql, 0, vec![bytes::Bytes::from_static(b"1\n")])
+                .await
+                .expect_err("freeze refused once the data is in");
+            assert!(refused.message == format!("cannot perform COPY FREEZE on a {kind}"));
+        }
+
+        // An ordinary table still takes the option, which is why it is accepted
+        // and ignored rather than refused outright.
+        session
+            .copy_in(
+                "COPY plain FROM STDIN (FREEZE)",
+                0,
+                vec![bytes::Bytes::from_static(b"1\n")],
+            )
+            .await
+            .expect("freeze on an ordinary table is accepted");
+    }
+
+    /// `COPY <matview> TO` has its own wording for an unpopulated relation, and
+    /// does not fall through to the one a `SELECT` from it reports.
+    #[tokio::test]
+    async fn copy_to_words_an_unpopulated_materialized_view_for_itself() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE MATERIALIZED VIEW mv AS SELECT 1 AS id WITH NO DATA")
+            .await
+            .expect("create");
+
+        let read = session
+            .simple_query("SELECT id FROM mv")
+            .await
+            .expect_err("unpopulated");
+        assert!(read.message == "materialized view \"mv\" has not been populated");
+
+        // Through the server-side file form, which shares `copy_out_source`
+        // with the `STDOUT` one the wire path drives.
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let to_file = format!("COPY mv (id) TO '{}'", file.path().display());
+        let copied = session
+            .simple_query(&to_file)
+            .await
+            .expect_err("unpopulated");
+        assert!(copied.message == "cannot copy from unpopulated materialized view \"mv\"");
+        assert!(
+            copied
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.hint.as_deref())
+                == Some("Use the REFRESH MATERIALIZED VIEW command.")
+        );
+
+        session
+            .simple_query("REFRESH MATERIALIZED VIEW mv")
+            .await
+            .expect("refresh");
+        session
+            .simple_query(&to_file)
+            .await
+            .expect("populated copies");
     }
 
     /// Storing a value runs the target type's *input* function, so an ambiguous

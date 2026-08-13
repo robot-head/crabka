@@ -1236,7 +1236,7 @@ fn role_argument_name(kv: &dyn Kv, argument: &Datum) -> Result<String, ExecError
 /// superuser — see `ForeignCtx::effective_role`. Answering these functions under
 /// a different role than the enforcement path uses would let a session be told
 /// it may not read a relation it can read.
-fn effective_privilege_role(role: &str) -> String {
+pub(crate) fn effective_privilege_role(role: &str) -> String {
     if role == crabka_pgcatalog::PUBLIC_ROLE {
         crabka_pgcatalog::BOOTSTRAP_ROLE.to_string()
     } else {

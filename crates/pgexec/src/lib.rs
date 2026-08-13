@@ -120,6 +120,7 @@ pub mod telemetry;
 mod temporal_arith;
 mod text_search_catalog;
 mod text_search_fn;
+mod tid_fn;
 pub mod timestamp_txn;
 mod trigger;
 pub mod ts_gc;

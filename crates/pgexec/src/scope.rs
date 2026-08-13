@@ -162,6 +162,16 @@ pub(crate) fn row_ctid(identity: u64) -> Datum {
     })
 }
 
+/// The lowest storage identity [`row_ctid`] places in `block`.
+///
+/// The inverse of [`row_ctid`]'s block arithmetic, for the one question asked
+/// about a `tid` that no row produced: does this relation reach that far?
+/// `PostgreSQL` answers it from the heap file's length, and
+/// [`crate::tid_fn`] answers it by looking for a row at or above this identity.
+pub(crate) fn first_identity_in_block(block: u32) -> u64 {
+    u64::from(block) * ROWS_PER_BLOCK + 1
+}
+
 /// How many rows one block of [`row_ctid`]'s address space holds.
 ///
 /// The engine has no heap, so nothing here forces a number — but *some* number
