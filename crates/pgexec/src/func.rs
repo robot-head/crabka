@@ -1326,11 +1326,14 @@ fn builtin_eval_scalar(
             if oid.is_null() {
                 return Ok(Datum::Null);
             }
-            let typmod = match &typmod {
-                Datum::Null => -1,
-                other => int_arg(other)?,
-            };
-            Ok(Datum::Text(format_type(int_arg(&oid)?, typmod)))
+            // A NULL second argument is not `-1`: it withholds the modifier
+            // rather than stating there is none, which is a different name for
+            // `bit` and `bpchar`. `FORMAT_TYPE_TYPEMOD_GIVEN` is exactly this
+            // distinction.
+            Ok(Datum::Text(match &typmod {
+                Datum::Null => format_type(int_arg(&oid)?, -1),
+                other => format_type_given(int_arg(&oid)?, int_arg(other)?),
+            }))
         }
         // `pg_notify` is NOT strict: PostgreSQL substitutes the empty string for
         // a NULL channel or payload, so `pg_notify(NULL, 'x')` raises the same
@@ -2552,17 +2555,39 @@ fn require_int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     require_int(arg, scope).map(|_| ())
 }
 
-/// PostgreSQL `format_type(oid, typmod)`: the SQL-standard spelling of a type,
-/// with its modifier applied. An unrecognized OID is `-`, matching PostgreSQL's
-/// placeholder for a type that no longer exists.
+/// PostgreSQL `format_type_be(oid)`: the SQL-standard spelling of a type, named
+/// with **no** modifier in hand. An unrecognized OID is `-`, matching
+/// PostgreSQL's placeholder for a type that no longer exists.
+///
+/// A negative `typmod` means "this type carries no modifier", not "a modifier
+/// of -1 was supplied". The two readings differ for exactly the two types whose
+/// bare grammar keyword implies a length; [`format_type_given`] is the other
+/// reading.
 pub(crate) fn format_type(oid: i64, typmod: i64) -> String {
+    format_type_extended(oid, typmod, typmod >= 0)
+}
+
+/// PostgreSQL `format_type_extended(oid, typmod, FORMAT_TYPE_TYPEMOD_GIVEN)`:
+/// the caller states a modifier, and `-1` states that the value has none.
+///
+/// `bit` and `bpchar` are the two types where that is not the same as saying
+/// nothing. Their bare grammar keywords mean `bit(1)` and `character(1)`, so a
+/// value that really carries no length has to be named in a spelling the parser
+/// will not re-decorate: `"bit"` in quotes, and `bpchar` under PostgreSQL's
+/// internal name. Naming the same type with no modifier in hand instead prints
+/// the SQL keyword, `bit` and `character`.
+pub(crate) fn format_type_given(oid: i64, typmod: i64) -> String {
+    format_type_extended(oid, typmod, true)
+}
+
+fn format_type_extended(oid: i64, typmod: i64, given: bool) -> String {
     let Ok(oid) = u32::try_from(oid) else {
         return "-".to_string();
     };
     let Some((base, kind)) = builtin_format_type(oid) else {
         return "-".to_string();
     };
-    let modifier = if typmod < 0 {
+    let modifier = if typmod < 0 || !given {
         String::new()
     } else {
         type_modifier(kind, typmod)
@@ -2572,6 +2597,13 @@ pub(crate) fn format_type(oid: i64, typmod: i64) -> String {
         None => (base, ""),
     };
     if modifier.is_empty() {
+        // With a modifier stated and none to state, the name has to survive
+        // being read back: `character` would come back as `character(1)`.
+        let element = match (element, given) {
+            ("bpchar", false) => "character",
+            ("bit", true) => "\"bit\"",
+            (element, _) => element,
+        };
         return format!("{element}{suffix}");
     }
     // `bpchar` is PostgreSQL's internal name for an unmodified blank-padded

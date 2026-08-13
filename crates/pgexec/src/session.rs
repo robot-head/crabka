@@ -14962,10 +14962,13 @@ fn attach_reg_cast_literal_position(sql: &str, error: PgError) -> PgError {
         "regtype",
     ];
 
-    // 42P01 undefined_table, 42704 undefined_object, 42883 undefined_function
-    // and 3F000 invalid_schema_name are the four a `reg*` lookup can raise.
-    if !matches!(error.code.as_str(), "42P01" | "42704" | "42883" | "3F000")
-        || !error.message.ends_with(" does not exist")
+    // 42P01 undefined_table, 42704 undefined_object, 42883 undefined_function,
+    // 3F000 invalid_schema_name and 42602 invalid_name are the five a `reg*`
+    // lookup can raise.
+    if !matches!(
+        error.code.as_str(),
+        "42P01" | "42704" | "42883" | "3F000" | "42602"
+    ) || !reg_lookup_message(&error.message)
         || error
             .diagnostics
             .as_ref()
@@ -14995,6 +14998,23 @@ fn attach_reg_cast_literal_position(sql: &str, error: PgError) -> PgError {
         [position] => error.with_position(*position),
         _ => error,
     }
+}
+
+/// Does this message read as one a `reg*` input function raises about the name
+/// it was handed?
+///
+/// Most of them end in `does not exist`, and the two that do not are the whole
+/// reason this is a function rather than a suffix test. `regoperin` puts the
+/// name last but not the verb — `operator does not exist: ||//` — and
+/// `regrolein`/`regnamespacein` refuse a dotted name before any lookup happens,
+/// with a message that quotes nothing at all. `PostgreSQL` points at the
+/// constant for all three; measured on the 18.4 corpus, admitting them costs
+/// nothing, because `invalid name syntax` appears only in `regproc.out` and no
+/// file outside it writes a `reg*` call with a string constant.
+fn reg_lookup_message(message: &str) -> bool {
+    message.ends_with(" does not exist")
+        || message.starts_with("operator does not exist: ")
+        || message == "invalid name syntax"
 }
 
 /// The top-level clause a token sits in, for [`attach_query_analysis_position`].

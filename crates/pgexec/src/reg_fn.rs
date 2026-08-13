@@ -223,7 +223,7 @@ fn resolve(
     scope: &crate::relname::ResolutionScope,
 ) -> Result<i32, ExecError> {
     match kind {
-        RegKind::Type => crate::exec::resolve_type_name(kv, scope, written),
+        RegKind::Type => parse_type_string(kv, scope, written).map(|(oid, _)| oid),
         RegKind::Proc => resolve_proc(kv, written),
         RegKind::Procedure => resolve_procedure(kv, scope, written),
         RegKind::Oper => resolve_oper(written),
@@ -727,7 +727,11 @@ fn split_name_and_arg_types(
                 args.push(0);
                 continue;
             }
-            args.push(crate::exec::resolve_type_name(kv, scope, arg)?);
+            // An argument is a full type name, modifier and all:
+            // `parseNameAndArgTypes` runs each piece through the same
+            // `typeStringToTypeName` that `regtypein` runs, and then discards
+            // the typmod — an overload is picked by type, never by length.
+            args.push(parse_type_string(kv, scope, arg)?.0);
         }
     }
     Ok((name, args))
@@ -759,6 +763,458 @@ fn split_top_level_commas(inner: &str) -> Vec<&str> {
 fn invalid_text(message: &'static str) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "22P02",
+        message: message.into(),
+    }
+}
+
+// ---------------------------------------------------------------- regtype ---
+
+/// `parseTypeString`: the oid **and** the typmod a written type name resolves
+/// to.
+///
+/// PostgreSQL runs the whole type grammar over the string, which is why
+/// `'varchar(32)'::regtype`, `'timestamp(4)'::regtype` and
+/// `'double precision'::regtype` all work while the plain name resolver behind
+/// [`crate::exec::resolve_type_name`] sees only a `SplitIdentifierString`
+/// name. Three of the grammar's productions are reproduced here, and nothing
+/// else is:
+///
+/// * a parenthesised modifier list, lifted out of the middle of the name so
+///   that `timestamp(4) with time zone` still reads as one type word;
+/// * the compound spellings the grammar reserves — `double precision`,
+///   `character varying`, `bit varying` and the four `time`/`timestamp`
+///   `with`/`without time zone` forms — which have a space in them and so
+///   never reach the name resolver;
+/// * the two implicit modifiers, where the keyword `BIT` means `bit(1)` and
+///   the keyword `CHARACTER` means `character(1)`. Neither the quoted spelling
+///   `"bit"` nor `pg_type`'s own name `bpchar` reaches those productions, so
+///   the same two types carry nothing when they are named that way.
+///
+/// Known divergence: crabka resolves the bare word `char` to `"char"`, the
+/// one-byte type, where PostgreSQL's grammar resolves it to `character(1)`. The
+/// implicit modifier is therefore keyed on the resolved oid as well as the
+/// keyword, so that `to_regtype('char')` and `to_regtypemod('char')` stay
+/// consistent with each other rather than describing two different types.
+///
+/// # Errors
+///
+/// Everything [`crate::exec::resolve_type_name`] raises, plus the hard 42601
+/// the grammar raises for a string that is not a type name at all and the hard
+/// 22023 a `typmodin` raises for a modifier the type refuses. Those two are the
+/// reason `to_regtype('incorrect type name syntax')` is an ERROR rather than
+/// NULL: they are `ereport`, not `ereturn`, so [`soft`] does not cover them,
+/// exactly as PostgreSQL leaves them. `regproc.sql` files both under "Some
+/// cases that should be soft errors, but are not yet".
+fn parse_type_string(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    written: &str,
+) -> Result<(i32, i32), ExecError> {
+    let spelling = TypeSpelling::read(written);
+    let oid = spelling.resolve(kv, scope, &spelling.name)?;
+    // `LookupTypeName` reads the modifier against the *element* type and only
+    // then switches to the array, which is what makes `numeric(10,2)[]` carry
+    // `numerictypmodin`'s answer rather than refusing a modifier `_numeric`
+    // has no `typmodin` for.
+    let modified = if spelling.element == spelling.name {
+        oid
+    } else {
+        spelling.resolve(kv, scope, &spelling.element)?
+    };
+    let typmod = spelling.typmod(modified)?;
+    Ok((oid, typmod))
+}
+
+/// A written type name split the way the grammar reads it.
+struct TypeSpelling<'a> {
+    /// The whole string as written, which is what the diagnostics echo and
+    /// what a reported position counts into.
+    written: &'a str,
+    /// The type name with its modifier group lifted out, so
+    /// `timestamp(4) with time zone` is `timestamp with time zone`.
+    name: String,
+    /// [`Self::name`] without its array suffix — the type whose `typmodin`
+    /// reads the modifier, because `LookupTypeName` applies the modifier to the
+    /// element and only then switches to the array. Equal to `name` when
+    /// nothing was subscripted.
+    element: String,
+    /// The text between the parentheses, or `None` when none were written.
+    modifier: Option<&'a str>,
+    /// Whether the last name part was written in double quotes. A quoted name
+    /// is an ordinary `pg_type.typname` lookup that carries no implicit
+    /// modifier, which is the whole difference between `bit` and `"bit"`.
+    quoted: bool,
+}
+
+impl<'a> TypeSpelling<'a> {
+    fn read(written: &'a str) -> Self {
+        // An empty or all-whitespace string is the one refusal in
+        // `typeStringToTypeName` that PostgreSQL reports *softly*, because it
+        // is checked before the parser runs and so goes through `ereturn`
+        // rather than the grammar. It falls out of the name resolver below as
+        // the same soft 42602 crabka already reported for it, so there is no
+        // early return here.
+        let trimmed = written.trim();
+        // The subscripts come off first, because everything left of them is
+        // one element type: `numeric(10,2)[]` and `double precision[]` both
+        // hide their real shape behind the brackets. PostgreSQL discards the
+        // declared bound and the declared *number* of dimensions, so one
+        // normalised `[]` stands for whatever was written.
+        let (base, array) = match top_level(trimmed, '[') {
+            Some(bracket) => (trimmed[..bracket].trim_end(), true),
+            None => (trimmed, false),
+        };
+        let (head, modifier, tail) = match split_modifier(base) {
+            Some((open, close)) => (
+                base[..open].trim_end(),
+                Some(base[open + 1..close].trim()),
+                base[close + 1..].trim(),
+            ),
+            None => (base, None, ""),
+        };
+        // Whatever follows the modifier is a grammar keyword tail, which is
+        // part of the type word: `timestamp(4) with time zone`.
+        let element = if tail.is_empty() {
+            head.to_string()
+        } else {
+            format!("{head} {tail}")
+        };
+        let name = if array {
+            format!("{element}[]")
+        } else {
+            element.clone()
+        };
+        Self {
+            written,
+            quoted: last_part_is_quoted(head),
+            element,
+            name,
+            modifier,
+        }
+    }
+
+    /// The oid a name resolves to, by the compound-spelling table when the name
+    /// has a space in it and by the ordinary resolver otherwise.
+    fn resolve(
+        &self,
+        kv: &dyn Kv,
+        scope: &crate::relname::ResolutionScope,
+        name: &str,
+    ) -> Result<i32, ExecError> {
+        if second_word(name).is_none() {
+            return crate::exec::resolve_type_name(kv, scope, name);
+        }
+        let folded = name
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        let resolved = match folded.strip_suffix("[]") {
+            Some(element) => {
+                ColumnType::from_builtin_sql_name(element).and_then(ColumnType::array_of)
+            }
+            None => ColumnType::from_builtin_sql_name(&folded),
+        };
+        resolved
+            .and_then(|ty| i32::try_from(ty.oid()).ok())
+            .ok_or_else(|| self.syntax_error())
+    }
+
+    /// The typmod the resolved type packs this modifier list into, or `-1` when
+    /// the type carries none.
+    fn typmod(&self, oid: i32) -> Result<i32, ExecError> {
+        use crabka_pgtypes::oids;
+
+        let family = TypmodFamily::of(oid);
+        let Some(written) = self.modifier else {
+            // `BIT` and `CHARACTER` are the two productions the grammar hands a
+            // modifier the writer did not: both mean length one. Only those
+            // *keywords* do, so `"bit"` in quotes and `bpchar` under
+            // PostgreSQL's own internal name both stay unmodified even though
+            // all four name the same two types.
+            if self.quoted {
+                return Ok(-1);
+            }
+            let keyword = self.element.to_ascii_lowercase();
+            return Ok(match (keyword.as_str(), u32::try_from(oid)) {
+                ("bit", Ok(oids::BIT)) => 1,
+                ("char" | "character" | "nchar", Ok(oids::BPCHAR)) => 1 + VARHDRSZ,
+                _ => -1,
+            });
+        };
+        let parts = split_top_level_commas(written)
+            .into_iter()
+            .map(str::trim)
+            .map(|part| {
+                part.parse::<i32>()
+                    .map_err(|_| type_modifier_not_constant())
+            })
+            .collect::<Result<Vec<i32>, ExecError>>()?;
+        family.pack(oid, &parts, &self.name)
+    }
+
+    /// The grammar's own complaint about a string that is not a type name,
+    /// pointed at the token it stopped on and carrying the CONTEXT
+    /// `typeStringToTypeName` pushes around the parse.
+    ///
+    /// The position counts into the *type string*, not into the statement, and
+    /// PostgreSQL reports it that way: the caret under
+    /// `pg_input_error_info('incorrect type name syntax', 'regtype')` lands on
+    /// character 11 of the statement because 11 is where `type` sits in the
+    /// argument. Reproducing the offset reproduces the misplaced caret, which
+    /// is what the expected output holds.
+    fn syntax_error(&self) -> ExecError {
+        let Some((offset, token)) = second_word(self.written) else {
+            return invalid_type_name(self.written);
+        };
+        ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "42601",
+                format!("syntax error at or near \"{token}\""),
+            )
+            .with_position(self.written[..offset].chars().count() + 1)
+            .with_context(format!("invalid type name \"{}\"", self.written)),
+        )
+    }
+}
+
+/// `VARHDRSZ`, which the character types add to their declared length "for
+/// largely historical reasons" — enough client code reads a `varchar` typmod
+/// as length plus four that PostgreSQL will not change it.
+const VARHDRSZ: i32 = 4;
+
+/// The offsets of the first top-level parenthesis pair, or `None` when the
+/// spelling carries no modifier group. A parenthesis inside double quotes is
+/// part of an identifier and is not one.
+fn split_modifier(written: &str) -> Option<(usize, usize)> {
+    let open = top_level(written, '(')?;
+    let mut in_quote = false;
+    written
+        .char_indices()
+        .skip_while(|&(index, _)| index <= open)
+        .find(|&(_, c)| {
+            if c == '"' {
+                in_quote = !in_quote;
+            }
+            c == ')' && !in_quote
+        })
+        .map(|(close, _)| (open, close))
+}
+
+/// The offset of the first `wanted` outside double quotes.
+fn top_level(written: &str, wanted: char) -> Option<usize> {
+    let mut in_quote = false;
+    written
+        .char_indices()
+        .find(|&(_, c)| {
+            if c == '"' {
+                in_quote = !in_quote;
+            }
+            c == wanted && !in_quote
+        })
+        .map(|(index, _)| index)
+}
+
+/// The offset and text of the second whitespace-separated word, or `None` for a
+/// one-word name. Whitespace inside double quotes belongs to the identifier.
+fn second_word(name: &str) -> Option<(usize, &str)> {
+    let mut in_quote = false;
+    let mut boundary = None;
+    for (index, c) in name.char_indices() {
+        match c {
+            '"' => in_quote = !in_quote,
+            c if c.is_whitespace() && !in_quote && boundary.is_none() => boundary = Some(index),
+            c if !c.is_whitespace() && boundary.is_some() => {
+                let rest = &name[index..];
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                return Some((index, &rest[..end]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Was the last dotted part of `name` written in double quotes?
+fn last_part_is_quoted(name: &str) -> bool {
+    let mut in_quote = false;
+    let mut last_dot = None;
+    for (index, c) in name.char_indices() {
+        match c {
+            '"' => in_quote = !in_quote,
+            '.' if !in_quote => last_dot = Some(index),
+            _ => {}
+        }
+    }
+    let part = match last_dot {
+        Some(dot) => &name[dot + 1..],
+        None => name,
+    };
+    part.trim_start().starts_with('"')
+}
+
+/// How a type reads its modifier list — one `typmodin` per shape, named for the
+/// shape rather than the type because five types share three of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypmodFamily {
+    /// `varchar(n)` / `char(n)`: the length plus `VARHDRSZ`.
+    Length,
+    /// `numeric(p[,s])`: precision and scale packed into one word.
+    PrecisionScale,
+    /// `time(p)` / `timestamp(p)`: the fractional-seconds precision, stored raw.
+    Seconds,
+    /// `interval(p)`: the precision with the field-range mask above it.
+    Interval,
+    /// `bit(n)` / `bit varying(n)`: the bit count, stored raw.
+    Bit,
+    /// A type with no `typmodin` at all, which refuses any modifier.
+    None,
+}
+
+impl TypmodFamily {
+    fn of(oid: i32) -> Self {
+        use crabka_pgtypes::oids;
+
+        let Ok(oid) = u32::try_from(oid) else {
+            return Self::None;
+        };
+        match oid {
+            oids::VARCHAR | oids::BPCHAR => Self::Length,
+            oids::NUMERIC => Self::PrecisionScale,
+            oids::TIME | oids::TIMETZ | oids::TIMESTAMP | oids::TIMESTAMPTZ => Self::Seconds,
+            oids::INTERVAL => Self::Interval,
+            oids::BIT | oids::VARBIT => Self::Bit,
+            _ => Self::None,
+        }
+    }
+
+    /// Run the `typmodin` this family names over a parsed modifier list.
+    fn pack(self, oid: i32, parts: &[i32], name: &str) -> Result<i32, ExecError> {
+        use crabka_pgtypes::oids;
+
+        /// `MaxAttrSize`, the ceiling `anychar_typmodin` puts on a declared
+        /// character length.
+        const MAX_ATTR_SIZE: i32 = 10 * 1024 * 1024;
+        /// `MAX_TIME_PRECISION` and `MAX_TIMESTAMP_PRECISION`, which are equal.
+        const MAX_SECONDS_PRECISION: i32 = 6;
+        /// `INTERVAL_FULL_RANGE`: every field, which is what `INTERVAL(p)` with
+        /// no field qualifier means.
+        const INTERVAL_FULL_RANGE: i32 = 0x7fff;
+
+        match (self, parts) {
+            (Self::None, _) => Err(modifier_not_allowed(name)),
+            (Self::Length, [length]) => {
+                // `bpchartypmodin` calls itself `char` and `varchartypmodin`
+                // calls itself `varchar`, neither the SQL spelling.
+                let spelled = if u32::try_from(oid) == Ok(oids::BPCHAR) {
+                    "char"
+                } else {
+                    "varchar"
+                };
+                if *length < 1 {
+                    return Err(invalid_parameter(format!(
+                        "length for type {spelled} must be at least 1"
+                    )));
+                }
+                if *length > MAX_ATTR_SIZE {
+                    return Err(invalid_parameter(format!(
+                        "length for type {spelled} cannot exceed {MAX_ATTR_SIZE}"
+                    )));
+                }
+                Ok(length + VARHDRSZ)
+            }
+            (Self::PrecisionScale, [precision] | [precision, _]) => {
+                if !(1..=1000).contains(precision) {
+                    return Err(invalid_parameter(format!(
+                        "NUMERIC precision {precision} must be between 1 and 1000"
+                    )));
+                }
+                let scale = parts.get(1).copied().unwrap_or(0);
+                if !(-1000..=1000).contains(&scale) {
+                    return Err(invalid_parameter(format!(
+                        "NUMERIC scale {scale} must be between -1000 and 1000"
+                    )));
+                }
+                Ok(((precision << 16) | (scale & 0x7ff)) + VARHDRSZ)
+            }
+            // The one arity error PostgreSQL words for the type rather than
+            // generically, and the only reason it is reachable at all: the
+            // grammar admits any expression list here, so `numeric(1,2,3)`
+            // parses and `numerictypmodin` is what refuses it.
+            (Self::PrecisionScale, _) => Err(invalid_parameter("invalid NUMERIC type modifier")),
+            (Self::Seconds | Self::Interval, [precision]) => {
+                let tz = matches!(u32::try_from(oid), Ok(oids::TIMETZ | oids::TIMESTAMPTZ));
+                let spelled = if matches!(u32::try_from(oid), Ok(oids::TIME | oids::TIMETZ)) {
+                    "TIME"
+                } else if self == Self::Interval {
+                    "INTERVAL"
+                } else {
+                    "TIMESTAMP"
+                };
+                if *precision < 0 {
+                    let zone = if tz { " WITH TIME ZONE" } else { "" };
+                    return Err(invalid_parameter(format!(
+                        "{spelled}({precision}){zone} precision must not be negative"
+                    )));
+                }
+                // Over the ceiling PostgreSQL clamps and reports a WARNING.
+                // Known gap: the clamp is reproduced and the WARNING is not,
+                // because nothing on this path can raise one.
+                let precision = (*precision).min(MAX_SECONDS_PRECISION);
+                Ok(if self == Self::Interval {
+                    (INTERVAL_FULL_RANGE << 16) | precision
+                } else {
+                    precision
+                })
+            }
+            (Self::Bit, [length]) => {
+                let spelled = if u32::try_from(oid) == Ok(oids::VARBIT) {
+                    "bit varying"
+                } else {
+                    "bit"
+                };
+                if *length < 1 {
+                    return Err(invalid_parameter(format!(
+                        "length for type {spelled} must be at least 1"
+                    )));
+                }
+                Ok(*length)
+            }
+            _ => Err(invalid_parameter("invalid type modifier")),
+        }
+    }
+}
+
+/// `typeStringToTypeName`'s refusal of a string that holds no type name at all.
+fn invalid_type_name(written: &str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "42601",
+        message: format!("invalid type name \"{written}\""),
+    }
+}
+
+/// `typenameTypeMod`'s refusal of a modifier on a type with no `typmodin`.
+fn modifier_not_allowed(name: &str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "42601",
+        message: format!("type modifier is not allowed for type \"{name}\""),
+    }
+}
+
+/// `typenameTypeMod`'s refusal of a modifier that is not a plain constant.
+fn type_modifier_not_constant() -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "42601",
+        message: "type modifiers must be simple constants or identifiers".into(),
+    }
+}
+
+/// 22023 `invalid_parameter_value`, which every `typmodin` raises and none of
+/// them softens — so a bad modifier escapes `to_regtype` rather than turning
+/// into NULL.
+fn invalid_parameter(message: impl Into<String>) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "22023",
         message: message.into(),
     }
 }
@@ -900,12 +1356,20 @@ enum RegFunc {
     Cast(RegKind),
     /// `to_regfoo(x)` — the same resolution, with a soft error answering NULL.
     Soft(RegKind),
+    /// `to_regtypemod(x)` — the *other* half of the same type-name parse.
+    /// `to_regtype` keeps the oid and throws the modifier away; this keeps the
+    /// modifier and throws the oid away, which is why the two are always
+    /// written as a pair.
+    TypeMod,
 }
 
 /// Classify a (lowercased) function name. Only the nine `to_reg*` functions
 /// PostgreSQL actually declares are here: there is no `to_regconfig` or
 /// `to_regdictionary`, so those two names stay 42883.
 fn reg_func(name: &str) -> Option<RegFunc> {
+    if name == "to_regtypemod" {
+        return Some(RegFunc::TypeMod);
+    }
     let Some(bare) = name.strip_prefix("to_") else {
         return reg_kind_named(name).map(RegFunc::Cast);
     };
@@ -948,7 +1412,7 @@ pub(crate) fn reg_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colum
             // `to_reg*` is a plain function declared over `text`. PostgreSQL has
             // no implicit anything-to-text, so an integer argument is 42883
             // rather than a silent conversion.
-            RegFunc::Soft(_) => from.is_string(),
+            RegFunc::Soft(_) | RegFunc::TypeMod => from.is_string(),
         }
     };
     if !accepted {
@@ -958,6 +1422,9 @@ pub(crate) fn reg_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colum
     }
     Ok(match f {
         RegFunc::Cast(kind) | RegFunc::Soft(kind) => kind.column_type(),
+        // `prorettype => 'int4'`, not an oid: a typmod is a plain integer, and
+        // `format_type`'s second parameter is what consumes it.
+        RegFunc::TypeMod => ColumnType::Int4,
     })
 }
 
@@ -1016,7 +1483,26 @@ pub(crate) fn eval_reg_func(
             Err(error) if soft(&error) => Ok(Datum::Null),
             Err(error) => Err(error),
         },
+        RegFunc::TypeMod => match type_modifier_of(&value, ctx) {
+            Ok(typmod) => Ok(typmod),
+            Err(error) if soft(&error) => Ok(Datum::Null),
+            Err(error) => Err(error),
+        },
     }
+}
+
+/// `to_regtypemod`: the typmod half of the type-name parse.
+///
+/// Unlike `to_regtype` this never goes through `regtypein`, so it has no
+/// numeric-oid or `-` shortcut: `to_regtypemod('23')` parses `23` as a type
+/// *name* and finds nothing. Without a catalog to resolve against there is no
+/// answer at all, which is the same NULL a missing type gives.
+fn type_modifier_of(value: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    let (Some(kv), Datum::Text(written)) = (ctx.catalog(), value) else {
+        return Ok(Datum::Null);
+    };
+    let (_, typmod) = parse_type_string(kv, ctx.resolution(), written)?;
+    Ok(Datum::Int4(typmod))
 }
 
 /// One `x::regfoo`, catalog-resolved when a catalog is in scope and through the

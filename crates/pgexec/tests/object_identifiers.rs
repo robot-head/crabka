@@ -481,6 +481,7 @@ async fn to_reg_rejects_a_non_text_argument() {
         "to_regoperator",
         "to_regclass",
         "to_regtype",
+        "to_regtypemod",
         "to_regnamespace",
         "to_regrole",
         "to_regcollation",
@@ -882,5 +883,167 @@ async fn pg_type_describes_the_whole_family() {
         );
         let sql = format!("SELECT format_type({oid}, -1)");
         assert!(client.scalar(&sql).await == Some(name.into()), "{sql}");
+    }
+}
+
+/// `to_regtype` and `to_regtypemod` are the two halves of one parse: the first
+/// keeps the oid the type name resolves to and the second keeps the modifier
+/// the name carried, which is why they are always written as a pair.
+///
+/// Two of the answers here are not in the string at all. Bare `bit` is the
+/// grammar's `BIT`, which means `bit(1)`, and bare `character` is
+/// `character(1)`; `"bit"` in quotes and `bpchar` under `pg_type`'s own name
+/// are ordinary catalog lookups for those same two types and carry nothing.
+/// Everything else is the type's own `typmodin`: `varchar` and `character` add
+/// the four-byte varlena header to the declared length, the date/time types
+/// store the fractional-seconds precision raw, and `numeric` packs precision
+/// above scale.
+#[tokio::test]
+async fn to_regtypemod_answers_the_modifier_the_name_carries() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for (written, expected) in [
+        ("text", Some("-1")),
+        ("int4", Some("-1")),
+        ("timestamp(4)", Some("4")),
+        ("timestamptz(2)", Some("2")),
+        ("time(0)", Some("0")),
+        ("varchar(32)", Some("36")),
+        ("character varying(32)", Some("36")),
+        ("character(10)", Some("14")),
+        // The implicit `(1)` belongs to the `CHARACTER` keyword, not to the
+        // type: `bpchar` is the same type under `pg_type`'s own name and
+        // carries nothing.
+        ("character", Some("5")),
+        ("bpchar", Some("-1")),
+        ("bpchar(10)", Some("14")),
+        ("numeric(10,2)", Some("655366")),
+        ("numeric(10)", Some("655364")),
+        ("bit", Some("1")),
+        ("\"bit\"", Some("-1")),
+        ("bit(4)", Some("4")),
+        ("varbit", Some("-1")),
+        ("varbit(4)", Some("4")),
+        ("double precision", Some("-1")),
+        // A type nothing declares is the same soft 42704 the cast reports, so
+        // the modifier half answers NULL just as `to_regtype` does.
+        ("no_such_type(4)", None),
+        ("no_such_type", None),
+        // The empty string is the one refusal inside `typeStringToTypeName`
+        // that is checked before the parser runs, so it stays soft where the
+        // grammar's own refusals do not.
+        ("", None),
+        ("   ", None),
+    ] {
+        let sql = format!("SELECT to_regtypemod('{written}')");
+        assert!(
+            client.scalar(&sql).await == expected.map(Into::into),
+            "{sql}"
+        );
+    }
+}
+
+/// `format_type(to_regtype(x), to_regtypemod(x))` reads back as `x` did — the
+/// round trip the pair exists for.
+#[tokio::test]
+async fn a_type_name_survives_the_round_trip_through_the_pair() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for (written, expected) in [
+        ("varchar(32)", "character varying(32)"),
+        ("bit", "bit(1)"),
+        ("\"bit\"", "\"bit\""),
+        ("timestamp(4)", "timestamp(4) without time zone"),
+        ("numeric(10,2)", "numeric(10,2)"),
+        ("text", "text"),
+    ] {
+        let sql =
+            format!("SELECT format_type(to_regtype('{written}'), to_regtypemod('{written}'))");
+        assert!(client.scalar(&sql).await == Some(expected.into()), "{sql}");
+    }
+}
+
+/// `format_type`'s second argument distinguishes "the modifier is -1" from "no
+/// modifier was supplied", and for `bit` and `bpchar` those are different
+/// names. Both spell a type whose bare keyword would come back decorated, so
+/// the modifier-stated form has to name it in a spelling the parser will not
+/// re-decorate.
+#[tokio::test]
+async fn format_type_distinguishes_a_stated_modifier_from_no_modifier() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for (sql, expected) in [
+        ("SELECT format_type('bpchar'::regtype, NULL)", "character"),
+        ("SELECT format_type('bpchar'::regtype, -1)", "bpchar"),
+        ("SELECT format_type('bpchar'::regtype, 14)", "character(10)"),
+        ("SELECT format_type('bit'::regtype, NULL)", "bit"),
+        ("SELECT format_type('bit'::regtype, -1)", "\"bit\""),
+        ("SELECT format_type('bit'::regtype, 4)", "bit(4)"),
+        // Every other type names itself the same way either side of the line.
+        (
+            "SELECT format_type('varchar'::regtype, NULL)",
+            "character varying",
+        ),
+        (
+            "SELECT format_type('varchar'::regtype, -1)",
+            "character varying",
+        ),
+        (
+            "SELECT format_type('varchar'::regtype, 42)",
+            "character varying(38)",
+        ),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+}
+
+/// The type grammar's own refusals are `ereport`, not `ereturn`, so they escape
+/// `to_reg*` instead of turning into NULL. `PostgreSQL`'s `regproc.sql` files all
+/// of these under "Some cases that should be soft errors, but are not yet",
+/// and crabka matches it rather than being quietly more forgiving.
+#[tokio::test]
+async fn a_string_that_is_not_a_type_name_is_a_hard_error() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for (written, expected) in [
+        (
+            "incorrect type name syntax",
+            ("42601", "syntax error at or near \"type\""),
+        ),
+        ("numeric(1,2,3)", ("22023", "invalid NUMERIC type modifier")),
+        (
+            "numeric(0)",
+            ("22023", "NUMERIC precision 0 must be between 1 and 1000"),
+        ),
+        (
+            "varchar(0)",
+            ("22023", "length for type varchar must be at least 1"),
+        ),
+        (
+            "bit(0)",
+            ("22023", "length for type bit must be at least 1"),
+        ),
+        (
+            "int4(4)",
+            ("42601", "type modifier is not allowed for type \"int4\""),
+        ),
+        (
+            "way.too.many.names",
+            (
+                "42601",
+                "improper qualified name (too many dotted names): way.too.many.names",
+            ),
+        ),
+    ] {
+        for spelled in [
+            format!("SELECT to_regtype('{written}')"),
+            format!("SELECT to_regtypemod('{written}')"),
+        ] {
+            let (code, message) = fails(&mut client, &spelled).await;
+            assert!(
+                (code.as_str(), message.as_str()) == expected,
+                "{spelled}: {code} {message}"
+            );
+        }
     }
 }

@@ -1477,7 +1477,7 @@ fn xml_construct_text(
             "XMLSERIALIZE({} {} AS {} {})",
             mode(option)?,
             text(value),
-            crate::func::format_type(
+            crate::func::format_type_given(
                 i64::from(serialize_type.oid()),
                 i64::from(serialize_type.typmod())
             ),
@@ -1507,7 +1507,7 @@ fn cast_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> String {
         } else {
             format!(
                 "({text})::{}",
-                crate::func::format_type(i64::from(ty.oid()), i64::from(ty.typmod()))
+                crate::func::format_type_given(i64::from(ty.oid()), i64::from(ty.typmod()))
             )
         };
     }
