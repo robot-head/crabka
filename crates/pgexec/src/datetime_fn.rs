@@ -885,18 +885,36 @@ fn extract_from_interval(unit: &str, field: &str, iv: Interval) -> Result<String
         "quarter" => int_str((months % 12) / 3 + 1),
         "month" => int_str(months % 12),
         "day" => int_str(i64::from(iv.days)),
+        // `interval_part`'s DTK_WEEK is `tm_mday / 7` -- the days field alone,
+        // truncating toward zero. Months contribute nothing, which is the same
+        // reason `date_trunc` refuses `week` for an interval: a month is not a
+        // whole number of weeks, so only the days field has a week in it.
+        "week" => int_str(i64::from(iv.days) / 7),
         "hour" => int_str(secs_whole / 3600),
         "minute" => int_str((secs_whole % 3600) / 60),
         "second" => seconds_str(secs_whole % 60, subsec * 1_000),
         "milliseconds" => millis_str(secs_whole % 60, subsec * 1_000),
         "microseconds" => micros_str(secs_whole % 60, subsec * 1_000),
         "epoch" => {
-            // PG: total seconds, treating a month as 30 days and a day as 86400 s.
-            // PostgreSQL's `extract(epoch …)` returns `numeric`, so a wide
-            // interval has an answer rather than an overflow; compute in i128
-            // so this one does too.
-            let total_micros = (i128::from(months) * 30 + i128::from(iv.days)) * 86_400_000_000
-                + i128::from(iv.micros);
+            // A whole year is 365.25 days, and only the leftover months are 30.
+            // Treating every month as 30 days makes `@ 34 years` 1057536000
+            // where PostgreSQL says 1072958400 -- 1.4% short, and wrong for
+            // every interval carrying a year.
+            //
+            // `interval_part` keeps this in integers by scaling: DAYS_PER_YEAR
+            // is a multiple of 0.25 and SECS_PER_DAY a multiple of 4, so it
+            // multiplies the day counts by 4 (1461 = 4 x 365.25, 120 = 4 x 30)
+            // and divides the seconds by 4 (21600 = 86400 / 4). Rust and C
+            // both truncate integer division toward zero, so a negative
+            // interval splits into years and months the same way.
+            //
+            // `extract(epoch ...)` returns `numeric`, so a wide interval has an
+            // answer rather than an overflow; compute in i128 so this one does.
+            let secs_from_day_month = (1461 * i128::from(months / 12)
+                + 120 * i128::from(months % 12)
+                + 4 * i128::from(iv.days))
+                * 21_600;
+            let total_micros = secs_from_day_month * 1_000_000 + i128::from(iv.micros);
             epoch_string_micros_wide(total_micros)
         }
         _ => return Err(unsupported_field(field, "interval")),
@@ -1501,6 +1519,49 @@ mod tests {
             ev("date_part('hour', TIMESTAMP '2024-01-15 13:45:06')", &ctx),
             Datum::Float8(13.0)
         );
+    }
+
+    /// `EXTRACT(WEEK FROM interval)` is the days field divided by seven, and
+    /// `date_trunc` still refuses the same unit.
+    ///
+    /// `interval_part`'s `DTK_WEEK` is `tm_mday / 7`, so months contribute
+    /// nothing: `@ 34 years` has no weeks in it. `date_trunc` is the opposite
+    /// case and PostgreSQL rejects it, because there is no week boundary to
+    /// truncate a months-and-days value to. Both spellings are pinned here so
+    /// a later change cannot quietly make them agree.
+    #[test]
+    fn extract_week_from_interval_counts_days_but_date_trunc_refuses_it() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        // The three rows expected/interval.out pins for this column.
+        assert!(ev("extract(week from INTERVAL '10 days')", &ctx) == num("1"));
+        assert!(ev("extract(week from INTERVAL '34 years')", &ctx) == num("0"));
+        assert!(ev("extract(week from INTERVAL '3 mons')", &ctx) == num("0"));
+        // Truncating toward zero, and a negative interval keeps the sign.
+        assert!(ev("extract(week from INTERVAL '13 days')", &ctx) == num("1"));
+        assert!(ev("extract(week from INTERVAL '14 days')", &ctx) == num("2"));
+        assert!(ev("extract(week from INTERVAL '-10 days')", &ctx) == num("-1"));
+        // `epoch` counts a whole year as 365.25 days and only the leftover
+        // months as 30. Every value here is the one expected/interval.out
+        // prints for the same interval.
+        assert!(ev("extract(epoch from INTERVAL '34 years')", &ctx) == num("1072958400.000000"));
+        assert!(ev("extract(epoch from INTERVAL '6 years')", &ctx) == num("189345600.000000"));
+        assert!(ev("extract(epoch from INTERVAL '3 mons')", &ctx) == num("7776000.000000"));
+        assert!(ev("extract(epoch from INTERVAL '10 days')", &ctx) == num("864000.000000"));
+        assert!(
+            ev("extract(epoch from INTERVAL '5 mons 12 hours')", &ctx) == num("13003200.000000")
+        );
+        // A month is not a whole number of weeks, so this stays refused.
+        let refused = crate::eval::eval(
+            &crabka_pgparser::parser::parse_expr_for_test("date_trunc('week', INTERVAL '10 days')")
+                .expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx,
+        )
+        .expect_err("date_trunc must still refuse week for an interval");
+        assert!(format!("{refused:?}").contains("not supported for type interval"));
     }
 
     #[test]

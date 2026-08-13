@@ -26,6 +26,10 @@ pub struct ParseError {
     detail: Option<String>,
     /// `PostgreSQL`'s HINT line, for the errors that offer a remedy.
     hint: Option<&'static str>,
+    /// Whether `position` is the one `PostgreSQL` puts in the `P` field of this
+    /// same error, which is what makes psql draw a `LINE`/caret pair under the
+    /// statement. See [`ParseError::reported_position`].
+    reports_position: bool,
 }
 
 impl ParseError {
@@ -36,6 +40,7 @@ impl ParseError {
             sqlstate: "42601",
             detail: None,
             hint: None,
+            reports_position: false,
         }
     }
 
@@ -50,6 +55,7 @@ impl ParseError {
             sqlstate,
             detail: None,
             hint: None,
+            reports_position: false,
         }
     }
 
@@ -65,6 +71,7 @@ impl ParseError {
             sqlstate: error.sqlstate,
             detail: error.detail,
             hint: error.hint,
+            reports_position: false,
         }
     }
 
@@ -93,11 +100,50 @@ impl ParseError {
             sqlstate: "54001",
             detail: None,
             hint: None,
+            reports_position: false,
         }
     }
 
     #[must_use]
     pub fn sqlstate(&self) -> &'static str {
         self.sqlstate
+    }
+
+    /// Declare that `PostgreSQL` reports a cursor position for this error, at
+    /// the same offset.
+    ///
+    /// `PostgreSQL`'s grammar attaches `scanner_errposition` to every syntax
+    /// error it raises, and psql turns that `P` field into the `LINE n: …` echo
+    /// with a caret under the offending token. Crabka's parser knows an offset
+    /// for every error it builds, but the offset is only *`PostgreSQL`'s* offset
+    /// where crabka rejects the same text `PostgreSQL` rejects. Most of what
+    /// this parser refuses, `PostgreSQL` accepts — grammar crabka has not
+    /// implemented — and dressing those refusals in a caret would spell a
+    /// coverage gap as though it were the user's typing mistake. Measured over
+    /// the 231-file `pg_regress` corpus, marking every `syntax error at or near`
+    /// would add 624 output lines against 40 that upstream also carries.
+    ///
+    /// So the marker is opt-in, one grammar rule at a time, and belongs only on
+    /// a rule that rejects exactly what `PostgreSQL`'s rejects.
+    #[must_use]
+    pub(crate) fn reporting_position(mut self) -> Self {
+        self.reports_position = true;
+        self
+    }
+
+    /// The one-based **character** position `PostgreSQL` would put in the `P`
+    /// field, for an error whose rule declared one with
+    /// [`ParseError::reporting_position`].
+    ///
+    /// `source` is the query text [`Self::position`] indexes as a byte offset;
+    /// the wire field counts characters, so the two differ once a statement
+    /// holds any multi-byte text before the error.
+    #[must_use]
+    pub fn reported_position(&self, source: &str) -> Option<usize> {
+        if !self.reports_position {
+            return None;
+        }
+        let prefix = source.get(..self.position)?;
+        Some(prefix.chars().count() + 1)
     }
 }

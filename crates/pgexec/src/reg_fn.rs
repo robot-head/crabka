@@ -188,9 +188,10 @@ pub(crate) fn stored_value(
     kind: RegKind,
     oid: i32,
     kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
 ) -> Result<RegclassValue, ExecError> {
     if kind == RegKind::Class {
-        return crate::exec::regclass_by_oid(kv, oid);
+        return crate::exec::regclass_by_oid(kv, scope, oid);
     }
     Ok(RegclassValue {
         oid,

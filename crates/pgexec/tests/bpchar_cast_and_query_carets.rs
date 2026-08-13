@@ -364,3 +364,61 @@ async fn an_error_postgresql_does_not_position_stays_bare() {
         assert!(found == None, "{sql}: {error:?}");
     }
 }
+
+/// A `COPY ( query )` that does not go `TO` carries the caret its grammar rule
+/// earns.
+///
+/// `PostgreSQL` positions every syntax error its grammar raises. Crabka's parser
+/// knows an offset for all of its own, but most of what it refuses `PostgreSQL`
+/// accepts, so the offset is only `PostgreSQL`'s where the rule rejects the same
+/// text — and `COPY ( query )` is such a rule. Both offsets below are the ones
+/// 18.4 reports for `copyselect.sql`'s two failing statements, and the character
+/// count is what makes the multi-byte case land in the same place.
+#[tokio::test]
+async fn a_copy_grammar_error_carries_postgresqls_caret() {
+    let cases = [
+        ("copy (select * from t) from stdin;", 24_usize),
+        ("copy (select * from t) (a,b) to stdout;", 24),
+        // The `P` field counts characters, not bytes, so text before the error
+        // must not shift the caret by its encoded width.
+        ("select 'éé'; copy (select * from t) from stdin;", 37),
+    ];
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(&mut session, "CREATE TABLE t (a int, b int)").await;
+    for (sql, position) in cases {
+        let error = fail(&mut session, sql).await;
+        assert!(error.code == "42601", "{sql}: {error:?}");
+        let found = error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.position);
+        assert!(found == Some(position), "{sql}: {error:?}");
+    }
+}
+
+/// A syntax error from a rule that did not claim `PostgreSQL`'s offset stays
+/// bare, whether or not the parser knows where it stopped.
+///
+/// Every one of these is grammar `PostgreSQL` accepts and Crabka has not
+/// implemented, so the report itself is Crabka's; a caret under it would spell a
+/// coverage gap as a typing mistake and cost two more lines of divergence.
+#[tokio::test]
+async fn a_syntax_error_postgresql_does_not_raise_stays_bare() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(&mut session, "CREATE TABLE t (a int, b int)").await;
+    let cases = [
+        "CREATE RULE r AS ON INSERT TO t DO INSTEAD NOTHING",
+        "COPY t FROM stdin WITH (on_error ignore)",
+        "SELECT a FROM t WHERE a IN (SELECT a FROM t) FOR UPDATE OF nosuch",
+    ];
+    for sql in cases {
+        let error = fail(&mut session, sql).await;
+        let found = error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.position);
+        assert!(found == None, "{sql}: {error:?}");
+    }
+}

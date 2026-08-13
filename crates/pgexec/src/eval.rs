@@ -158,6 +158,64 @@ fn bpchar_to_text_operands(
     ))
 }
 
+/// Everything an explicit `expr :: type` does once the operand is a value.
+///
+/// This is the whole of the cast that does *not* depend on how the operand was
+/// spelled, and it is deliberately the only copy. The scalar evaluator reaches
+/// it from `Expr::Cast`, and [`crate::agg`]'s grouped evaluator — a second,
+/// parallel walk over the same AST — reaches it from its own `Expr::Cast`. When
+/// the two disagreed, `SELECT tableoid::regclass … GROUP BY tableoid` printed a
+/// bare oid where `SELECT tableoid::regclass` printed the relation's name: the
+/// grouped arm called the pure value-layer cast, which has no catalog and so no
+/// name to attach.
+///
+/// The `reg*` family is the one set of casts that needs the catalog: a name has
+/// to be resolved to its oid (`PostgreSQL`'s `reg*in`), and an oid has to be
+/// resolved *back* to the name `reg*out` prints, because the value layer that
+/// renders it has no catalog handle. `ctx` is where both the catalog and the
+/// session's search path are in scope, so the name is attached here and travels
+/// with the value. Without a catalog — a planning context or a unit test — the
+/// pure cast below yields the bare-oid rendering.
+///
+/// # Errors
+///
+/// Whatever the conversion raises: 22P02 for an unparsable text operand, 22003
+/// for overflow, 42846 for an undefined cast, 42P01 for a `reg*` name no object
+/// carries, and the domain's own 23502/23514 for a cast to a domain.
+pub(crate) fn cast_operand(
+    value: &Datum,
+    ty: ColumnType,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    if let Some(kind) = crate::reg_fn::RegKind::of(ty)
+        && let Some(resolved) = crate::reg_fn::reg_cast(kind, value, ctx)?
+    {
+        return Ok(resolved);
+    }
+    if ty == ColumnType::Array(ElemType::Regtype)
+        && let Datum::OidVector(arguments) = value
+    {
+        let elems = arguments
+            .elems
+            .iter()
+            .map(|argument| {
+                crate::reg_fn::reg_cast(crate::reg_fn::RegKind::Type, argument, ctx)?
+                    .ok_or_else(|| ExecError::TypeMismatch("cannot cast oid to regtype".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Datum::Array(crabka_pgtypes::ArrayValue::with_dims(
+            ElemType::Regtype,
+            elems,
+            arguments.dims.clone(),
+        )));
+    }
+    let cast = cast_value_in(value, ty, ctx.output_style())?;
+    // A cast to a domain converts through the base type and then has to satisfy
+    // the domain's own NOT NULL and CHECK constraints.
+    crate::usertype::check_domain(ty, &cast, ctx)?;
+    Ok(cast)
+}
+
 /// [`cast_value`] in the session's styles, so an ambiguous all-numeric date
 /// literal is read under the session's `DateStyle` field order.
 pub(crate) fn cast_value_in(
@@ -472,52 +530,7 @@ fn eval_depth_inner(
                 }
                 _ => v,
             };
-            // The `reg*` family is the one set of casts that needs the catalog:
-            // a name has to be resolved to its oid (PostgreSQL's `reg*in`), and
-            // an oid has to be resolved *back* to the name `reg*out` prints,
-            // because the value layer that renders it has no catalog handle.
-            // This is the point where one is in scope, so the name is attached
-            // here and travels with the value — and it is also where the
-            // session's search path is in scope, which is what decides the
-            // schema a bare name lands in. Without a catalog — a planning
-            // context or a unit test — the pure cast below yields the bare-oid
-            // rendering.
-            if let Some(kind) = crate::reg_fn::RegKind::of(*ty)
-                && let Some(resolved) = crate::reg_fn::reg_cast(kind, &v, ctx)?
-            {
-                return Ok(resolved);
-            }
-            if *ty == crabka_pgtypes::ColumnType::Array(crabka_pgtypes::ElemType::Regtype)
-                && let Datum::OidVector(arguments) = &v
-            {
-                let elems = arguments
-                    .elems
-                    .iter()
-                    .map(|argument| {
-                        crate::reg_fn::reg_cast(crate::reg_fn::RegKind::Type, argument, ctx)?
-                            .ok_or_else(|| {
-                                ExecError::TypeMismatch("cannot cast oid to regtype".into())
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                return Ok(Datum::Array(crabka_pgtypes::ArrayValue::with_dims(
-                    crabka_pgtypes::ElemType::Regtype,
-                    elems,
-                    arguments.dims.clone(),
-                )));
-            }
-            let cast = if matches!(
-                ty.storage_type(),
-                ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
-            ) {
-                cast_value(&v, *ty, &ctx.time_zone)?
-            } else {
-                crabka_pgtypes::cast::cast_in(&v, *ty, ctx.output_style())?
-            };
-            // A cast to a domain converts through the base type and then has to
-            // satisfy the domain's own NOT NULL and CHECK constraints.
-            crate::usertype::check_domain(*ty, &cast, ctx)?;
-            Ok(cast)
+            cast_operand(&v, *ty, ctx)
         }
         // `ARRAY[e1, e2, …]`: every element is coerced to the constructor's
         // unified element type, so the built array is homogeneous.

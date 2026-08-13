@@ -1281,7 +1281,7 @@ fn relation_size_with_fork(
         return Ok(Datum::Null);
     }
     let oid = resolve_relation_oid(catalog_kv, scope, object)?;
-    if relation_name_by_oid(catalog_kv, oid)?.is_none() {
+    if crate::catalog_rel::relation_for_oid(catalog_kv, oid)?.is_none() {
         return Ok(Datum::Null);
     }
     let fork = match vals.get(1) {
@@ -1336,7 +1336,7 @@ fn indexes_size(
         return Ok(Datum::Null);
     }
     let oid = resolve_relation_oid(catalog_kv, scope, object)?;
-    if relation_name_by_oid(catalog_kv, oid)?.is_none() {
+    if crate::catalog_rel::relation_for_oid(catalog_kv, oid)?.is_none() {
         return Ok(Datum::Null);
     }
     Ok(Datum::Int8(indexes_size_bytes(catalog_kv, data_kv, oid)?))
@@ -1352,7 +1352,7 @@ fn total_relation_size(
         return Ok(Datum::Null);
     }
     let oid = resolve_relation_oid(catalog_kv, scope, object)?;
-    if relation_name_by_oid(catalog_kv, oid)?.is_none() {
+    if crate::catalog_rel::relation_for_oid(catalog_kv, oid)?.is_none() {
         return Ok(Datum::Null);
     }
     let bytes = relation_size_bytes(catalog_kv, data_kv, oid)?
@@ -1491,7 +1491,7 @@ pub(crate) fn regclass_cast(
         return crate::exec::regclass_cast(kv, scope, value);
     };
     let oid = resolve_relation_in_scope(kv, scope, name)?;
-    crate::exec::regclass_by_oid(kv, oid)
+    crate::exec::regclass_by_oid(kv, scope, oid)
         .map(Datum::Regclass)
         .map(Some)
 }
@@ -1540,18 +1540,6 @@ fn relation_oid(kv: &dyn Kv, name: &RelationName) -> Result<Option<i32>, ExecErr
     Ok(None)
 }
 
-/// The catalog name of a virtual relation, which [`crate::exec`] lists under a
-/// flat spelling.
-///
-/// An `information_schema.` qualifier names that schema. Every unqualified
-/// spelling is a `pg_catalog` relation.
-fn virtual_relation_name(spelled: &str) -> RelationName {
-    match spelled.split_once('.') {
-        Some((schema, name)) => RelationName::new(schema, name),
-        None => RelationName::new(crate::search_path::PG_CATALOG, spelled),
-    }
-}
-
 /// The catalog name a written relation reference denotes, resolved through the
 /// one resolver.
 ///
@@ -1576,79 +1564,69 @@ fn resolve_relation_name(
 /// when no relation has that oid.
 ///
 /// The name is spelled as PostgreSQL spells it. Each identifier is quoted only
-/// when `quote_ident` would quote it, and the name is schema-qualified only
-/// when the schema is outside the search path. `public` and `pg_catalog` print
-/// bare, so a catalog name that carries no schema prefix already has the right
-/// shape. Every spelling this function produces has to read back through
+/// when `quote_ident` would quote it, and the name is schema-qualified exactly
+/// when an unqualified reference would not reach this relation — the test
+/// `scope` decides, in [`quote_relation_name`]. Every spelling this function
+/// produces has to read back through
 /// [`crate::relname::parse_written_relation`] as the same relation. That is the
 /// round trip `regclass_input.rs` pins.
-pub(crate) fn relation_name_by_oid(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
-    for virtual_table in crate::exec::virtual_table_names() {
-        if crate::exec::virtual_relation_oid(virtual_table) == oid {
-            return Ok(Some(quote_relation_name(&virtual_relation_name(
-                virtual_table,
-            ))));
-        }
-    }
-    for table in crabka_pgcatalog::list_tables(kv)? {
-        if crate::catalog_rel::table_relation_oid(table.id)? == oid {
-            return Ok(Some(quote_relation_name(&table.name)));
-        }
-    }
-    for map in [
-        crate::catalog_rel::view_oids(kv)?,
-        crate::catalog_rel::sequence_oids(kv)?,
-    ] {
-        if let Some((name, _)) = map.iter().find(|(_, candidate)| **candidate == oid) {
-            return Ok(Some(quote_relation_name(name)));
-        }
-    }
-    for index in crabka_pgcatalog::list_indexes(kv)? {
-        if crate::catalog_rel::index_relation_oid(index.id)? == oid {
-            return Ok(Some(quote_relation_name(&index.qualified_name())));
-        }
-    }
-    Ok(None)
+pub(crate) fn relation_name_by_oid(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    oid: i32,
+) -> Result<Option<String>, ExecError> {
+    let Some(name) = crate::catalog_rel::relation_for_oid(kv, oid)? else {
+        return Ok(None);
+    };
+    quote_relation_name(kv, scope, &name).map(Some)
 }
 
 /// Spell a catalog relation name the way `regclassout` would: `schema.relation`
-/// with each half quoted as needed, dropping the schema for the two that are
-/// *usually* on the search path.
+/// with each half quoted as needed, and the schema dropped exactly when writing
+/// the bare name would reach this very relation.
 ///
-/// **This rule is known to be wrong, and the fix needs a signature change this
-/// function cannot make alone.** `regclassout` qualifies exactly when
-/// `RelationIsVisible` says an unqualified reference would miss the relation —
-/// the test [`crate::visibility::relation_name_is_visible`] now implements —
-/// and the fixed rule only agrees with it under the default `search_path`.
-/// Verified against `postgres:18.4`, it is wrong in both directions:
+/// `regclassout` asks `RelationIsVisible` and qualifies only when the answer is
+/// no. [`crate::visibility::relation_name_is_visible`] is that walk. It depends
+/// on the session, so this function takes the session's `scope`; the rule it
+/// replaced — drop the schema for `public` and `pg_catalog`, keep it otherwise
+/// — agrees with `PostgreSQL` only under the default `search_path` and is wrong
+/// in both directions elsewhere. Verified against `postgres:18.4`:
 ///
 /// ```text
 /// SET search_path = app;
-/// 'app.ap'::regclass::text     -- PostgreSQL: ap          here: app.ap
-/// 'public.pp'::regclass::text  -- PostgreSQL: public.pp   here: pp
+/// 'app.ap'::regclass::text     -- PostgreSQL: ap          old rule: app.ap
+/// 'public.pp'::regclass::text  -- PostgreSQL: public.pp   old rule: pp
 /// ```
 ///
-/// Everything a `regclass` renders funnels through [`relation_name_by_oid`],
-/// whose one name-consuming caller is `crate::exec::regclass_by_oid`; making the
-/// answer depend on the session means threading a `ResolutionScope` through that
-/// function and its callers in `exec.rs` and `session.rs`. Doing it halfway is
-/// worse than not doing it: the `::regclass` cast and a scanned `regclass`
-/// column would then disagree inside one query. [`foreign_key_definition`]'s
-/// referent is *not* affected — it deparses with `generate_relation_name`, a
-/// different `PostgreSQL` function that this one used to be conflated with, and
-/// it takes the visibility test directly.
-fn quote_relation_name(name: &RelationName) -> String {
-    if name.schema == crabka_pgcatalog::PUBLIC_SCHEMA
-        || name.schema == crate::search_path::PG_CATALOG
-    {
-        crate::string_fn::quote_ident(&name.name)
-    } else {
-        format!(
-            "{}.{}",
-            crate::string_fn::quote_ident(&name.schema),
-            crate::string_fn::quote_ident(&name.name)
-        )
+/// A temporary relation is visible under its own session's scope, because
+/// [`crate::relname::ResolutionScope::visible_schemas`] puts the temporary
+/// namespace first exactly as `recomputeNamespacePath` does — so `'tt'::regclass`
+/// prints `tt`, not `pg_temp_7.tt`. Another session's temporary relation is not
+/// visible and keeps its real `pg_temp_<id>` qualifier, which is the spelling
+/// `get_namespace_name` gives `regclassout` there too.
+///
+/// [`foreign_key_definition`]'s referent is *not* routed through here — it
+/// deparses with `generate_relation_name`, a different `PostgreSQL` function
+/// that this one used to be conflated with, and it takes the visibility test
+/// directly.
+///
+/// # Errors
+///
+/// Propagates storage/corruption errors from the catalog KV seam, which the
+/// visibility walk reads to find what each schema on the path already holds.
+fn quote_relation_name(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    name: &RelationName,
+) -> Result<String, ExecError> {
+    if crate::visibility::relation_name_is_visible(kv, scope, name)? {
+        return Ok(crate::string_fn::quote_ident(&name.name));
     }
+    Ok(format!(
+        "{}.{}",
+        crate::string_fn::quote_ident(&name.schema),
+        crate::string_fn::quote_ident(&name.name)
+    ))
 }
 
 /// `pg_get_userbyid(oid)`, the role name for a role oid.
@@ -2293,9 +2271,17 @@ pub(crate) fn default_source_text(
         // A `regclass` default stores only the oid, so the name it deparses to
         // is read from the catalog now: a `RENAME` of the relation changes what
         // `\d` and `pg_get_expr` print, as it does in PostgreSQL.
+        //
+        // The default scope, not the reader's, for the reason
+        // `crate::exec::format_column_default` gives: `pg_attrdef.adbin` is one
+        // stored text per column and cannot vary by who reads it.
         crabka_pgcatalog::ColumnDefault::Value(Datum::Regclass(value)) => {
-            let resolved = crate::exec::regclass_by_oid(kv, value.oid)
-                .unwrap_or_else(|_| crabka_pgtypes::RegclassValue::unresolved(value.oid));
+            let resolved = crate::exec::regclass_by_oid(
+                kv,
+                crate::relname::ResolutionScope::default_scope(),
+                value.oid,
+            )
+            .unwrap_or_else(|_| crabka_pgtypes::RegclassValue::unresolved(value.oid));
             crate::viewdef::const_text(&Datum::Regclass(resolved), ty, style)
         }
         // A bit-string default deparses with the *literal's* type, not the

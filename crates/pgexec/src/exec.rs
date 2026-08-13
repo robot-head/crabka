@@ -129,6 +129,15 @@ impl ForeignCtx<'_> {
         }
     }
 
+    /// Whose eyes a DDL statement's diagnostics are written for.
+    ///
+    /// `EvalCtx::for_ddl` leaves `current_user` at the conventional `"public"`,
+    /// so a DDL path that needs the acting role has to take it from here — the
+    /// evaluation context a DDL statement builds does not carry it.
+    pub(crate) fn describer(&self) -> crate::rls::Describer {
+        crate::rls::Describer::seen_by(self.current_user, self.row_security)
+    }
+
     /// The next reserved id, or the shared counter when there is no block or the
     /// block is spent.
     fn table_id(&self) -> crabka_pgcatalog::TableIdSource {
@@ -329,18 +338,8 @@ impl<'a> WriteContext<'a> {
     /// Whose eyes a rejected row would be described to — `CURRENT_USER`, not
     /// the role whose rights the statement borrows, for the reason
     /// [`crate::rls::Describer`] gives.
-    ///
-    /// `PUBLIC` normalizes to the bootstrap superuser here exactly as it does
-    /// in [`ForeignCtx::effective_role`]: a session that authenticated as
-    /// nobody is acting as that role, and comparing the pseudo-role against a
-    /// relation's owner would answer "no" for every relation in the database.
     fn describer(&self) -> crate::rls::Describer {
-        let role = if self.eval_ctx.current_user == crabka_pgcatalog::PUBLIC_ROLE {
-            crabka_pgcatalog::BOOTSTRAP_ROLE
-        } else {
-            &self.eval_ctx.current_user
-        };
-        crate::rls::Describer::new(role, self.fctx.row_security)
+        crate::rls::Describer::seen_by(&self.eval_ctx.current_user, self.fctx.row_security)
     }
 
     fn rls(&self) -> crate::rls::RlsCtx<'_> {
@@ -1427,11 +1426,13 @@ pub(crate) fn execute_ddl(
                     clustered: false,
                     without_overlaps: false,
                 };
+                let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
                 ops.extend(local_index_backfill_ops(
                     kv,
                     &table_meta,
                     &index,
                     fctx.own_xid,
+                    &IndexBuild::new(&fctx, &ddl_ctx),
                 )?);
             }
             Ok((command("CREATE INDEX"), ops))
@@ -3126,7 +3127,9 @@ fn default_value(column: &Column, ctx: &crate::clock::EvalCtx) -> Result<Datum, 
         // gets, which is what lets `RETURNING` print the relation's current
         // name rather than the bare number.
         ColumnDefault::Value(Datum::Regclass(value)) => match ctx.catalog() {
-            Some(catalog) => regclass_by_oid(catalog, value.oid).map(Datum::Regclass),
+            Some(catalog) => {
+                regclass_by_oid(catalog, ctx.resolution(), value.oid).map(Datum::Regclass)
+            }
             None => Ok(Datum::Regclass(value.clone())),
         },
         ColumnDefault::Value(value) => Ok(value.clone()),
@@ -9141,13 +9144,58 @@ fn local_index_backfill_ops(
     table: &Table,
     index: &crabka_pgcatalog::Index,
     own_xid: Option<u64>,
+    build: &IndexBuild<'_>,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let all_committed = all_committed_snapshot();
     // `own_xid` makes the open transaction's own uncommitted rows visible to the
     // back-validation; the all-committed snapshot alone does not, because the
     // scan still asks the commit log and this transaction is in progress there.
     let rows = scan_live(kv, kv, &all_committed, &all_committed, own_xid, table)?;
-    local_index_backfill_ops_for_rows(&rows, table, index)
+    local_index_backfill_ops_for_rows(kv, &rows, table, index, build)
+}
+
+/// What a back-validating index build needs to describe the duplicate key it
+/// found, and nothing else: whose eyes the key is described to, and the output
+/// styles it is spelled in.
+///
+/// The two travel together because neither is enough on its own, and every DDL
+/// path that can raise the error already has to carry both — the role from the
+/// statement's [`ForeignCtx`], because `EvalCtx::for_ddl` leaves `current_user`
+/// at the conventional `"public"` and so cannot supply it.
+pub(crate) struct IndexBuild<'a> {
+    describer: crate::rls::Describer,
+    ctx: &'a crate::clock::EvalCtx,
+}
+
+impl<'a> IndexBuild<'a> {
+    pub(crate) fn new(fctx: &ForeignCtx<'_>, ctx: &'a crate::clock::EvalCtx) -> Self {
+        Self {
+            describer: fctx.describer(),
+            ctx,
+        }
+    }
+
+    /// The evaluation context the build's own scans run under.
+    pub(crate) const fn ctx(&self) -> &'a crate::clock::EvalCtx {
+        self.ctx
+    }
+
+    /// The 23505 a build raises for a key two live rows already share.
+    fn duplicate(
+        &self,
+        kv: &dyn Kv,
+        table: &Table,
+        index: &crabka_pgcatalog::Index,
+        values: &[Datum],
+    ) -> ExecError {
+        ExecError::UniqueIndexBuildViolation(Box::new(crate::error::UniqueViolation {
+            index: index.name.clone(),
+            table: table.name.clone(),
+            key: self
+                .describer
+                .index_key(kv, table, &index.columns, values, self.ctx),
+        }))
+    }
 }
 
 /// Backfill index entries for already-scanned live rows.
@@ -9157,9 +9205,11 @@ fn local_index_backfill_ops(
 /// NULL key column are not indexed, which matches SQL NULL-distinct
 /// semantics.
 fn local_index_backfill_ops_for_rows(
+    kv: &dyn Kv,
     rows: &[(u64, u64, Vec<Datum>)],
     table: &Table,
     index: &crabka_pgcatalog::Index,
+    build: &IndexBuild<'_>,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let mut seen = HashSet::new();
     let mut ops = Vec::with_capacity(rows.len());
@@ -9169,7 +9219,7 @@ fn local_index_backfill_ops_for_rows(
                 continue;
             }
             if index.unique && !seen.insert(values.clone()) {
-                return Err(ExecError::UniqueIndexBuildViolation(index.name.clone()));
+                return Err(build.duplicate(kv, table, index, &values));
             }
             ops.push(crabka_pgkv::WriteOp::Put {
                 key: crabka_pgkv::key::secondary_index_entry_key(
@@ -9430,19 +9480,24 @@ fn exclusion_violation(
     proposed: &[Datum],
     existing: &[Datum],
 ) -> ExecError {
-    let columns = index.columns.join(", ");
-    let render = |values: &[Datum]| {
-        values
-            .iter()
-            .map(|value| {
-                String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text_in(
-                    value,
-                    write_ctx.eval_ctx.output_style(),
-                ))
-                .into_owned()
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+    let describer = write_ctx.describer();
+    let describe = |values: &[Datum]| {
+        describer.index_key(
+            write_ctx.catalog_kv,
+            table,
+            &index.columns,
+            values,
+            write_ctx.eval_ctx,
+        )
+    };
+    // `check_exclusion_or_unique_constraint` describes both keys and prints the
+    // pair only if it got both. A caller that may not read the relation gets the
+    // bare sentence, which says nothing the primary message did not.
+    let detail = match (describe(proposed), describe(existing)) {
+        (Some(proposed), Some(existing)) => {
+            format!("Key {proposed} conflicts with existing key {existing}.")
+        }
+        _ => "Key conflicts with existing key.".to_string(),
     };
     ExecError::Remote(
         crabka_pgwire::error::PgError::error(
@@ -9452,15 +9507,32 @@ fn exclusion_violation(
                 index.name
             ),
         )
-        .with_detail(format!(
-            "Key ({columns})=({}) conflicts with existing key ({columns})=({}).",
-            render(proposed),
-            render(existing)
-        ))
+        .with_detail(detail)
         .with_schema(table.name.schema.clone())
         .with_table(table.name.name.clone())
         .with_constraint(index.name.clone()),
     )
+}
+
+/// The 23505 a write raises when its key is already taken, with the `DETAIL`
+/// `PostgreSQL`'s `_bt_check_unique` attaches to it.
+fn unique_violation(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    values: &[Datum],
+) -> ExecError {
+    ExecError::UniqueViolation(Box::new(crate::error::UniqueViolation {
+        index: index.name.clone(),
+        table: table.name.clone(),
+        key: write_ctx.describer().index_key(
+            write_ctx.catalog_kv,
+            table,
+            &index.columns,
+            values,
+            write_ctx.eval_ctx,
+        ),
+    }))
 }
 
 async fn enforce_unique_local_index(
@@ -9479,7 +9551,7 @@ async fn enforce_unique_local_index(
     // both write the same key.
     let pending_key = (index.id, values.clone());
     if !writes.pending_unique_keys.insert(pending_key) {
-        return Err(ExecError::UniqueViolation(index.name.clone()));
+        return Err(unique_violation(write_ctx, table, index, &values));
     }
     let holders = lock_and_probe_unique_key(write_ctx, table, index, &values).await?;
     // A holder whose key an earlier part of this statement freed is a version
@@ -9489,7 +9561,7 @@ async fn enforce_unique_local_index(
         .iter()
         .any(|holder| holder.rowid != rowid && writes.holder_still_holds(index.id, holder.rowid))
     {
-        return Err(ExecError::UniqueViolation(index.name.clone()));
+        return Err(unique_violation(write_ctx, table, index, &values));
     }
     Ok(())
 }
@@ -13142,7 +13214,12 @@ fn build_correlated_scalar_lookup(
         Err(error) => return Err(error),
     };
     let mut rows: Vec<Vec<Datum>> = scanned.into_iter().map(|row| row.row).collect();
-    resolve_regclass_at(read_ctx.catalog_kv, &projected_regclass_columns, &mut rows)?;
+    resolve_regclass_at(
+        read_ctx.catalog_kv,
+        read_ctx.eval_ctx.resolution(),
+        &projected_regclass_columns,
+        &mut rows,
+    )?;
     let saw_rows = !rows.is_empty();
     let mut values = HashMap::new();
     let mut bytes = rows.iter().fold(0usize, |used, row| {
@@ -16108,7 +16185,7 @@ fn scan_stored_relation(
         let scan_bounds = bounds.unwrap_or(&default_bounds);
         let mut rows =
             scanner.scan(t, &server, mapping.as_ref(), scan_bounds, read_ctx.eval_ctx)?;
-        resolve_scanned_regclass(catalog_kv, t, &mut rows)?;
+        resolve_scanned_regclass(catalog_kv, read_ctx.eval_ctx.resolution(), t, &mut rows)?;
         expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
         return Ok(crate::rls::RawScan::of_relation(
             t,
@@ -16211,7 +16288,12 @@ fn scanned_rows(
         rows.push(row.row);
         identities.push(row.rowid);
     }
-    resolve_scanned_regclass(read_ctx.catalog_kv, t, &mut rows)?;
+    resolve_scanned_regclass(
+        read_ctx.catalog_kv,
+        read_ctx.eval_ctx.resolution(),
+        t,
+        &mut rows,
+    )?;
     expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
     for (row, identity) in rows.iter_mut().zip(identities) {
         stamp.extend_row(row, identity);
@@ -16964,7 +17046,12 @@ fn try_distributed_inner_equi_join(
         right_table,
         left_table.columns.len(),
     ));
-    resolve_regclass_at(read_ctx.catalog_kv, &regclass_columns, &mut rows)?;
+    resolve_regclass_at(
+        read_ctx.catalog_kv,
+        read_ctx.eval_ctx.resolution(),
+        &regclass_columns,
+        &mut rows,
+    )?;
     let mut scope = Scope::single(left_table, left_qualifier);
     scope
         .columns
@@ -19960,9 +20047,19 @@ fn format_column_default(catalog_kv: &dyn Kv, default: &ColumnDefault, ty: Colum
         }
         // Only the oid is stored, so the name is read from the catalog now —
         // the same output-time resolution `pg_get_expr` performs.
+        //
+        // The default scope, not the reader's: a deparsed default is a property
+        // of the column and every session that reads `information_schema` has to
+        // be told the same text, where `regclassout` deliberately answers each
+        // session in its own search path. This is the rule the whole of
+        // `regclassout` used before it became visibility-aware.
         ColumnDefault::Value(Datum::Regclass(value)) => {
-            let resolved = regclass_by_oid(catalog_kv, value.oid)
-                .unwrap_or_else(|_| crabka_pgtypes::RegclassValue::unresolved(value.oid));
+            let resolved = regclass_by_oid(
+                catalog_kv,
+                crate::relname::ResolutionScope::default_scope(),
+                value.oid,
+            )
+            .unwrap_or_else(|_| crabka_pgtypes::RegclassValue::unresolved(value.oid));
             format!("'{}'::{}", escape_sql_string(&resolved.name), ty.name())
         }
         ColumnDefault::Value(value) => format_default_value(value, ty),
@@ -21048,12 +21145,17 @@ pub(crate) fn resolve_regclass(
 /// `regclassout` prints for it. An oid no relation has is not an error in
 /// PostgreSQL. It keeps the fallback rendering, `-` for `InvalidOid` and the
 /// bare number otherwise, which [`RegclassValue::unresolved`] supplies.
+///
+/// `scope` is the session's, because `regclassout` schema-qualifies exactly
+/// when an unqualified reference would miss the relation, and that question has
+/// no answer without a search path.
 pub(crate) fn regclass_by_oid(
     catalog_kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
     oid: i32,
 ) -> Result<crabka_pgtypes::RegclassValue, ExecError> {
     Ok(
-        crate::catalog_fn::relation_name_by_oid(catalog_kv, oid)?.map_or_else(
+        crate::catalog_fn::relation_name_by_oid(catalog_kv, scope, oid)?.map_or_else(
             || crabka_pgtypes::RegclassValue::unresolved(oid),
             |name| crabka_pgtypes::RegclassValue::resolved(oid, &name),
         ),
@@ -21084,16 +21186,17 @@ fn holds_reg(ty: ColumnType) -> Option<crate::reg_fn::RegKind> {
 /// what makes an already-stored value follow a `RENAME` and fall back to the
 /// bare oid once its relation is dropped, which is what PostgreSQL does.
 ///
-/// [`crate::catalog_fn::relation_name_by_oid`] walks the whole catalog, so the
-/// lookup is memoized across the scan: a column holding one repeated oid costs
-/// one lookup, not one per row. A table with no `regclass` column returns before
-/// touching a row.
+/// [`crate::catalog_fn::relation_name_by_oid`] reads the catalog and then walks
+/// the search path to decide whether to qualify, so the lookup is memoized
+/// across the scan: a column holding one repeated oid costs one lookup, not one
+/// per row. A table with no `regclass` column returns before touching a row.
 fn resolve_scanned_regclass(
     catalog_kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
     table: &crabka_pgcatalog::Table,
     rows: &mut [Vec<Datum>],
 ) -> Result<(), ExecError> {
-    resolve_regclass_at(catalog_kv, &regclass_column_indexes(table, 0), rows)
+    resolve_regclass_at(catalog_kv, scope, &regclass_column_indexes(table, 0), rows)
 }
 
 /// The positions of `table`'s `regclass`-valued columns within a scanned row
@@ -21115,6 +21218,7 @@ fn regclass_column_indexes(
 /// columns.
 fn resolve_regclass_at(
     catalog_kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
     columns: &[(usize, crate::reg_fn::RegKind)],
     rows: &mut [Vec<Datum>],
 ) -> Result<(), ExecError> {
@@ -21134,7 +21238,7 @@ fn resolve_regclass_at(
             let value = match resolved.entry((oid, kind)) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
                 std::collections::hash_map::Entry::Vacant(entry) => entry
-                    .insert(crate::reg_fn::stored_value(kind, oid, catalog_kv)?)
+                    .insert(crate::reg_fn::stored_value(kind, oid, catalog_kv, scope)?)
                     .clone(),
             };
             row[index] = Datum::Regclass(value);
@@ -21160,7 +21264,7 @@ pub(crate) fn regclass_from_text(
             Err(_) => resolve_regclass(catalog_kv, scope, text)?,
         }
     };
-    regclass_by_oid(catalog_kv, oid).map(Datum::Regclass)
+    regclass_by_oid(catalog_kv, scope, oid).map(Datum::Regclass)
 }
 
 /// The catalog-aware half of a `… :: regclass` cast. `None` for an operand the
@@ -21181,7 +21285,7 @@ pub(crate) fn regclass_cast(
         Datum::Regclass(value) => value.oid,
         _ => return Ok(None),
     };
-    regclass_by_oid(catalog_kv, oid)
+    regclass_by_oid(catalog_kv, scope, oid)
         .map(Datum::Regclass)
         .map(Some)
 }
@@ -22693,7 +22797,12 @@ pub(crate) async fn execute_read_locking(
         }
     }
 
-    resolve_scanned_regclass(read_ctx.catalog_kv, &t, &mut kept)?;
+    resolve_scanned_regclass(
+        read_ctx.catalog_kv,
+        read_ctx.eval_ctx.resolution(),
+        &t,
+        &mut kept,
+    )?;
     if let Some(row_exprs) = row_exprs {
         materialize_correlated_row_exprs(read_ctx, row_exprs, &mut scope, &mut kept)?;
     }
@@ -26423,6 +26532,7 @@ fn alter_table_action_ops(
     let own_xid = fctx.own_xid;
     let catalog = fctx.catalog;
     let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, catalog);
+    let build = IndexBuild::new(&fctx, &ddl_ctx);
     let table_name = state.table.name.clone();
     match action {
         Action::AddColumn {
@@ -26529,7 +26639,7 @@ fn alter_table_action_ops(
                                 primary_key,
                                 without_overlaps: false,
                             },
-                            &ddl_ctx,
+                            &build,
                         )?;
                     }
                     // `ADD COLUMN a int REFERENCES p (id)` is a one-column
@@ -26822,7 +26932,7 @@ fn alter_table_action_ops(
                 .try_for_each(|check| validate_check_predicate(&state.table, &check.expr));
             state.table.checks = checks;
             revalidated?;
-            rebuild_indexes_on_column(kv, state, column, &ddl_ctx)?;
+            rebuild_indexes_on_column(kv, state, column, &build)?;
             state.retyped_columns.push(column.clone());
             Ok(())
         }
@@ -26849,7 +26959,7 @@ fn alter_table_action_ops(
                         primary_key: true,
                         without_overlaps: *without_overlaps,
                     },
-                    &ddl_ctx,
+                    &build,
                 )
             }
             crabka_pgparser::ast::TableConstraintKind::Unique {
@@ -26867,7 +26977,7 @@ fn alter_table_action_ops(
                         primary_key: false,
                         without_overlaps: *without_overlaps,
                     },
-                    &ddl_ctx,
+                    &build,
                 )
             }
             // `reject_not_valid` is deliberately NOT called here: `NOT VALID`
@@ -27593,8 +27703,9 @@ fn add_constraint_index(
     kv: &dyn Kv,
     state: &mut AlterTableState,
     request: &AddConstraintIndex<'_>,
-    ctx: &crate::clock::EvalCtx,
+    build: &IndexBuild<'_>,
 ) -> Result<(), ExecError> {
+    let ctx = build.ctx();
     let AddConstraintIndex {
         name,
         columns,
@@ -27672,7 +27783,7 @@ fn add_constraint_index(
         validate_no_exclusion_conflicts(&state.table, &index, &rows, ctx)?;
         Vec::new()
     } else {
-        local_index_backfill_ops_for_rows(&rows, &state.table, &index)?
+        local_index_backfill_ops_for_rows(kv, &rows, &state.table, &index, build)?
     };
     if primary_key {
         for (_rowid, _xmin, row) in &rows {
@@ -27816,8 +27927,9 @@ fn rebuild_indexes_on_column(
     kv: &dyn Kv,
     state: &mut AlterTableState,
     column: &str,
-    ctx: &crate::clock::EvalCtx,
+    build: &IndexBuild<'_>,
 ) -> Result<(), ExecError> {
+    let ctx = build.ctx();
     let mut affected = crabka_pgcatalog::list_table_indexes(kv, &state.table.name)?;
     // An index created earlier in this same statement is not in the catalog
     // yet, so listing cannot find it — but its staged entries are encoded under
@@ -27856,9 +27968,11 @@ fn rebuild_indexes_on_column(
             .map(|(key, _)| crabka_pgkv::WriteOp::Delete { key })
             .collect();
         ops.extend(local_index_backfill_ops_for_rows(
+            kv,
             &rows,
             &state.table,
             index,
+            build,
         )?);
         state.ops.extend(ops);
     }

@@ -10947,8 +10947,13 @@ impl Parser {
         let query = self.copy_preparable_stmt(query_pos)?;
         self.expect(&Token::RParen)?;
 
+        // `COPY ( query )` may only go `TO`, and the whole of `copy_query_stmt`
+        // is grammar crabka implements, so a token here is a token PostgreSQL
+        // rejects at the same offset: `copy (select …) from stdin` and
+        // `copy (select …) (t,id) to stdout` are `copyselect.sql`'s two cases.
+        // The position therefore carries, and psql draws the caret.
         if *self.peek() != Token::Keyword(Keyword::To) {
-            return Err(self.syntax_error_here());
+            return Err(self.syntax_error_here().reporting_position());
         }
         self.bump();
         let direction = self.copy_endpoint(false)?;

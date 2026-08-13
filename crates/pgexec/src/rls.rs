@@ -476,6 +476,81 @@ pub(crate) fn describe_row(
     Some(format!("({}) = ({})", names.join(", "), values.join(", ")))
 }
 
+/// Describe one index key, for the `DETAIL` line that follows the constraint
+/// error it violated — `PostgreSQL`'s `BuildIndexValueDescription`.
+///
+/// The result is the `(a, b)=(1, 2)` body alone. The sentence around it belongs
+/// to the constraint that was violated, and there are four of them: `Key %s
+/// already exists.`, `Key %s is duplicated.`, `Key %s conflicts with existing
+/// key %s.` and, for a build, `Key %s conflicts with key %s.`
+///
+/// `None` means *print no key at all*, which is upstream's answer whenever the
+/// caller could not have read the values for itself. The gate is the one
+/// [`describe_row`] applies, minus its partial-disclosure clause:
+///
+/// 1. An active row-level security policy hides the row the key came from.
+/// 2. Table-level `SELECT` describes the whole key.
+/// 3. Anything less describes nothing. Upstream is explicit about why a partial
+///    key is not worth returning — it cannot say which columns the caller
+///    supplied itself, so it cannot tell a disclosure from an echo — and this
+///    engine has a second reason: a role holding only column grants is refused
+///    the relation outright by [`crate::privilege`], so describing the key to it
+///    would print values from a relation it cannot scan.
+///
+/// Unlike [`describe_row`], no value is truncated. Upstream truncates a row
+/// description at `maxfieldlen` because a heap field can be arbitrarily wide,
+/// and deliberately does not truncate a key description, because an index entry
+/// is not. [`crate::partition::field_text`] is therefore the wrong renderer
+/// here, however similar the two lines look.
+pub(crate) fn describe_index_key(
+    privileges: &crate::privilege::PrivilegeCtx<'_>,
+    security: &RlsCtx<'_>,
+    table: &Table,
+    columns: &[String],
+    values: &[Datum],
+    ctx: &crate::clock::EvalCtx,
+) -> Option<String> {
+    if !matches!(
+        decide(security, table, PolicyCommand::Select),
+        Ok(RowSecurity::Open)
+    ) {
+        return None;
+    }
+    if !matches!(
+        crate::privilege::holds(
+            privileges,
+            &table.name,
+            &table.owner,
+            crate::privilege::Privilege::Select,
+        ),
+        Ok(true)
+    ) {
+        return None;
+    }
+    Some(format!(
+        "({})=({})",
+        columns.join(", "),
+        values
+            .iter()
+            .map(|value| key_field_text(value, ctx))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// One value of an index-key description: the type's own output text, the bare
+/// word `null` for a NULL, and no clipping at any width.
+fn key_field_text(value: &Datum, ctx: &crate::clock::EvalCtx) -> String {
+    match value {
+        Datum::Null => "null".to_string(),
+        other => String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text_in(
+            other,
+            ctx.output_style(),
+        ))
+        .into_owned(),
+    }
+}
+
 /// Decide row security for one relation and one command.
 ///
 /// # Errors
@@ -1141,6 +1216,40 @@ impl Describer {
 
     pub(crate) fn security<'a>(&'a self, kv: &'a dyn Kv) -> RlsCtx<'a> {
         RlsCtx::new(kv, &self.role, self.row_security)
+    }
+
+    /// [`Describer::new`] with `PUBLIC` normalized to the bootstrap role: a
+    /// session that authenticated as nobody is acting as that role, and
+    /// comparing the pseudo-role against a relation's owner would answer "no"
+    /// for every relation in the database.
+    pub(crate) fn seen_by(role: &str, row_security: bool) -> Self {
+        Self::new(
+            if role == crabka_pgcatalog::PUBLIC_ROLE {
+                crabka_pgcatalog::BOOTSTRAP_ROLE
+            } else {
+                role
+            },
+            row_security,
+        )
+    }
+
+    /// [`describe_index_key`], decided for this describer's role.
+    pub(crate) fn index_key(
+        &self,
+        kv: &dyn Kv,
+        table: &Table,
+        columns: &[String],
+        values: &[Datum],
+        ctx: &crate::clock::EvalCtx,
+    ) -> Option<String> {
+        describe_index_key(
+            &self.privileges(kv),
+            &self.security(kv),
+            table,
+            columns,
+            values,
+            ctx,
+        )
     }
 }
 

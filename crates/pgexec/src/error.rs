@@ -181,11 +181,11 @@ pub enum ExecError {
     /// with no cast to supply the element type.
     IndeterminateType(String),
     /// A row would duplicate a visible row in a unique index (23505).
-    UniqueViolation(String),
+    UniqueViolation(Box<UniqueViolation>),
     /// Existing rows hold a duplicate key for a unique index being built
     /// (23505). `PostgreSQL` reports the index build, not a row insertion, so
     /// the message differs from [`ExecError::UniqueViolation`].
-    UniqueIndexBuildViolation(String),
+    UniqueIndexBuildViolation(Box<UniqueViolation>),
     /// An object's definition is self-inconsistent (42P17), for example a
     /// generated column whose expression reads another generated column.
     InvalidObjectDefinition(String),
@@ -696,6 +696,28 @@ pub struct GucRangeViolation {
     pub max: String,
 }
 
+/// The payload of [`ExecError::UniqueViolation`] and
+/// [`ExecError::UniqueIndexBuildViolation`], boxed to keep the error enum
+/// narrow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueViolation {
+    /// The unique index, named in the primary message and reported as the
+    /// error's constraint field.
+    pub index: String,
+    /// The relation the index is on, reported as the error's schema and table
+    /// fields — `PostgreSQL`'s `errtableconstraint`, which names the *heap*.
+    pub table: crabka_pgcatalog::RelationName,
+    /// The `(a, b)=(1, 2)` body of the `DETAIL` line, already rendered and
+    /// already judged against the caller's privileges by
+    /// `crate::rls::describe_index_key`.
+    ///
+    /// `None` is a caller that may not read the key, and the two errors differ
+    /// in what they then say. A duplicate-key insertion drops the `DETAIL`
+    /// entirely; a failed index build keeps one, because `Duplicate keys exist.`
+    /// discloses nothing the primary message did not.
+    pub key: Option<String>,
+}
+
 /// The payload of [`ExecError::ForeignKeyViolation`], boxed to keep the error
 /// enum narrow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -827,6 +849,17 @@ impl DroppedObject {
                 format!("index {name}")
             }
         }
+    }
+}
+
+impl UniqueViolation {
+    /// Name the relation and the constraint on a rendered error, which is what
+    /// `errtableconstraint` does at both of `PostgreSQL`'s raise sites.
+    fn attach(&self, error: PgError) -> PgError {
+        error
+            .with_schema(self.table.schema.clone())
+            .with_table(self.table.name.clone())
+            .with_constraint(self.index.clone())
     }
 }
 
@@ -1187,13 +1220,28 @@ impl ExecError {
                 PgError::error("42P01", format!("{kind} \"{name}\" does not exist"))
             }
             ExecError::IndeterminateType(m) => PgError::error("42P18", m),
-            ExecError::UniqueViolation(index) => PgError::error(
-                "23505",
-                format!("duplicate key value violates unique constraint \"{index}\""),
-            ),
-            ExecError::UniqueIndexBuildViolation(index) => PgError::error(
-                "23505",
-                format!("could not create unique index \"{index}\""),
+            ExecError::UniqueViolation(violation) => {
+                let error = PgError::error(
+                    "23505",
+                    format!(
+                        "duplicate key value violates unique constraint \"{}\"",
+                        violation.index
+                    ),
+                );
+                violation.attach(match &violation.key {
+                    Some(key) => error.with_detail(format!("Key {key} already exists.")),
+                    None => error,
+                })
+            }
+            ExecError::UniqueIndexBuildViolation(violation) => violation.attach(
+                PgError::error(
+                    "23505",
+                    format!("could not create unique index \"{}\"", violation.index),
+                )
+                .with_detail(match &violation.key {
+                    Some(key) => format!("Key {key} is duplicated."),
+                    None => "Duplicate keys exist.".to_string(),
+                }),
             ),
             ExecError::InvalidObjectDefinition(m) => PgError::error("42P17", m),
             ExecError::DependentObjectsStillExist(m) => PgError::error("2BP01", m),
@@ -1921,16 +1969,21 @@ mod tests {
         }
     }
 
-    /// DETAIL and HINT exist for the foreign-key errors only. This wave does
-    /// not widen them to the rest of the executor's errors.
+    /// The errors that carry no key of their own carry no DETAIL and no HINT
+    /// either — including a unique violation whose key the caller may not read,
+    /// which drops the line rather than reporting an empty one.
     #[test]
-    fn non_foreign_key_errors_carry_no_detail_or_hint() {
+    fn errors_without_a_describable_key_carry_no_detail_or_hint() {
         let cases = vec![
             ExecError::Unsupported("cannot truncate".into()),
             ExecError::DependentObjectsStillExist(
                 "cannot drop view v because other objects depend on it".into(),
             ),
-            ExecError::UniqueViolation("t_pkey".into()),
+            ExecError::UniqueViolation(Box::new(UniqueViolation {
+                index: "t_pkey".into(),
+                table: RelationName::public("t"),
+                key: None,
+            })),
             ExecError::CheckViolation {
                 table: "t".into(),
                 constraint: "t_a_check".into(),

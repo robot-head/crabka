@@ -939,7 +939,9 @@ fn partition_ancestor_rows(value: &Datum, ctx: &EvalCtx) -> Result<Vec<Vec<Datum
         && let Some(&oid) = oids.get(&parent)
     {
         produced.push(vec![Datum::Regclass(crate::exec::regclass_by_oid(
-            catalog, oid,
+            catalog,
+            ctx.resolution(),
+            oid,
         )?)]);
         current = parent;
     }

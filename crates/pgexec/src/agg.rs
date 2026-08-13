@@ -1495,14 +1495,17 @@ fn eval_grouped_depth(
             crate::array_fn::eval_array(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
         }
         Expr::Func(fc) => Err(undefined_function(&fc.name)),
-        // SP31: cast in a grouped context — convert the grouped-evaluated operand
-        // using the session zone from `ctx`.
+        // SP31: cast in a grouped context. The conversion itself is
+        // [`crate::eval::cast_operand`], the same one the scalar evaluator runs,
+        // so a `reg*` target resolves its name against the catalog here too:
+        // `tableoid::regclass … GROUP BY tableoid` prints the relation's name
+        // and not the bare oid.
         Expr::Cast { expr, ty } => {
             if let Some(empty) = crate::eval::empty_array_cast(expr, *ty) {
                 return Ok(empty);
             }
             let v = eval_grouped_depth(expr, grouped, d)?;
-            crate::eval::cast_value(&v, *ty, &ctx.time_zone)
+            crate::eval::cast_operand(&v, *ty, ctx)
         }
         // The array expression forms in a grouped context — same semantics as
         // scalar `eval`, recursing through the grouped evaluator.

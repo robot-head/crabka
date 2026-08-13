@@ -414,3 +414,127 @@ async fn a_stored_regclass_keeps_the_oid_as_its_identity() {
     let binary = rows(&result)[0][0].as_ref().expect("a cell").binary.clone();
     assert!(binary.len() == 4);
 }
+
+// `regclassout` qualifies exactly when `RelationIsVisible` says an unqualified
+// reference would miss the relation, so the same oid prints differently under
+// different search paths. Both directions matter: a relation the path reaches
+// loses its schema, and one it does not reach — `public` included — keeps it.
+// Verified against `postgres:18.4`.
+#[tokio::test]
+async fn qualification_follows_the_search_path_in_both_directions() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE SCHEMA app",
+        "CREATE TABLE app.ap (a int)",
+        "CREATE TABLE public.pp (a int)",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+
+    let both = "SELECT 'app.ap'::regclass::text, 'public.pp'::regclass::text";
+    assert!(
+        row_text(&query(&mut session, both).await, 0)
+            == vec![Some("app.ap".into()), Some("pp".into())]
+    );
+
+    session
+        .simple_query("SET search_path = app")
+        .await
+        .expect("SET");
+    assert!(
+        row_text(&query(&mut session, both).await, 0)
+            == vec![Some("ap".into()), Some("public.pp".into())]
+    );
+}
+
+// A relation the path *would* reach by name, but for a relation of the same
+// name earlier in the path, is not visible and prints qualified — the shadowing
+// half of `RelationIsVisible`, which a "drop the schema for public" rule cannot
+// express.
+#[tokio::test]
+async fn a_shadowed_relation_prints_qualified() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE SCHEMA front",
+        "CREATE TABLE front.dup (a int)",
+        "CREATE TABLE public.dup (a int)",
+        "SET search_path = front, public",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+
+    let both = "SELECT 'front.dup'::regclass::text, 'public.dup'::regclass::text";
+    assert!(
+        row_text(&query(&mut session, both).await, 0)
+            == vec![Some("dup".into()), Some("public.dup".into())]
+    );
+}
+
+// The session's own temporary namespace sits at the front of the search path,
+// exactly as `recomputeNamespacePath` puts it there, so a temporary relation is
+// visible and prints bare rather than as `pg_temp_<backend id>.tt`.
+#[tokio::test]
+async fn a_temporary_relation_prints_without_its_namespace() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    session
+        .simple_query("CREATE TEMP TABLE tt (a int)")
+        .await
+        .expect("CREATE TEMP TABLE");
+
+    assert!(scalar(&mut session, "SELECT 'tt'::regclass::text").await == Some("tt".into()));
+}
+
+// Both halves of a qualified name are quoted the way `quote_ident` quotes them,
+// which the schema half only reaches once a schema needs quoting.
+#[tokio::test]
+async fn a_qualified_name_quotes_the_schema_too() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE SCHEMA \"My Schema\"",
+        "CREATE TABLE \"My Schema\".\"Odd Rel\" (a int)",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+
+    assert!(
+        scalar(
+            &mut session,
+            "SELECT '\"My Schema\".\"Odd Rel\"'::regclass::text"
+        )
+        .await
+            == Some("\"My Schema\".\"Odd Rel\"".into())
+    );
+}
+
+// A `reg*` cast in a grouped projection resolves against the catalog exactly as
+// the same cast does in an ungrouped one. `GROUP BY tableoid` with
+// `tableoid::regclass` in the select list is `copy.sql`'s shape, and it printed
+// the bare oid while `SELECT tableoid::regclass` printed the name: the grouped
+// evaluator ran the value layer's cast, which has no catalog.
+#[tokio::test]
+async fn a_grouped_projection_resolves_a_regclass_cast() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE TABLE parted (a int, b int) PARTITION BY LIST (b)",
+        "CREATE TABLE parted_one PARTITION OF parted FOR VALUES IN (1)",
+        "INSERT INTO parted VALUES (1, 1), (2, 1)",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+
+    for sql in [
+        "SELECT tableoid::regclass::text FROM parted GROUP BY tableoid",
+        "SELECT max(tableoid)::regclass::text FROM parted",
+        "SELECT DISTINCT tableoid::regclass::text FROM parted",
+    ] {
+        assert!(
+            scalar(&mut session, sql).await == Some("parted_one".into()),
+            "{sql}"
+        );
+    }
+}

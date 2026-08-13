@@ -6392,10 +6392,9 @@ impl SqlSession {
                 // qualifier is a property of the literal. PostgreSQL still
                 // points its caret at that literal, and this is the only place
                 // the failure passes through, so the run-time attachment in
-                // `attach_known_runtime_diagnostics` never sees it. Only a
-                // type-input SQLSTATE gets this far; a syntax error carries its
-                // own position already.
-                Err(attach_type_input_literal_position(sql, error))
+                // `attach_known_runtime_diagnostics` never sees it.
+                let error = attach_type_input_literal_position(sql, error);
+                Err(attach_declared_parse_position(sql, &parsed, error))
             }
         }
     }
@@ -10841,7 +10840,7 @@ fn parse_single_extended_statement(
     type_schemas: &[String],
 ) -> Result<Statement, PgError> {
     let statements = crabka_pgparser::parse_with_type_schemas(sql, type_schemas)
-        .map_err(|e| attach_type_input_literal_position(sql, ExecError::from(e).into_pg()))?;
+        .map_err(|error| parse_failure(sql, error))?;
     match statements.as_slice() {
         [] => Err(PgError::error(
             sqlstate::SYNTAX_ERROR,
@@ -11466,7 +11465,7 @@ impl ParamBinder<'_> {
             }
             1 => {
                 let oid = i32::from_be_bytes(binary_array(value)?);
-                crate::exec::regclass_by_oid(self.catalog_kv, oid)
+                crate::exec::regclass_by_oid(self.catalog_kv, self.resolution, oid)
                     .map(Datum::Regclass)
                     .map_err(ExecError::into_pg)?
             }
@@ -14560,6 +14559,40 @@ fn attach_undefined_function_position(sql: &str, stmt: &Statement, error: PgErro
     }
 }
 
+/// Carry the position a grammar rule declared `PostgreSQL` also reports.
+///
+/// The parser knows an offset for every error it raises, but only some of those
+/// offsets are `PostgreSQL`'s: a rule has to opt in with
+/// `ParseError::reporting_position`, for the reason recorded there. This is the
+/// step that turns the declaration into the wire's `P` field, which is what
+/// makes psql print the `LINE n:` echo and the caret. Nothing else in the parse
+/// path sets a position, so this never overwrites one.
+fn attach_declared_parse_position(sql: &str, parsed: &ExecError, error: PgError) -> PgError {
+    let ExecError::Parse(parsed) = parsed else {
+        return error;
+    };
+    match parsed.reported_position(sql) {
+        Some(position) => error.with_position(position),
+        None => error,
+    }
+}
+
+/// The wire error a failed parse of `sql` reports, with every position the parse
+/// path can recover attached.
+///
+/// Four of the five parse entry points share this: the extended protocol's
+/// `Parse`, the simple protocol's copy-in and copy-out probes, and the copy-in
+/// data path can all see the same statement text, and a diagnostic that appeared
+/// under one spelling and not the other would be a difference the client cannot
+/// explain. `SqlSession::parse_for_session` runs the same three attachments
+/// inline, because it needs the [`ExecError`] for telemetry before it reports.
+fn parse_failure(sql: &str, error: crabka_pgparser::ParseError) -> PgError {
+    let error = ExecError::from(error);
+    let reported = attach_type_input_literal_position(sql, error.clone().into_pg());
+    let reported = attach_parsed_bit_string_position(sql, &error, reported);
+    attach_declared_parse_position(sql, &error, reported)
+}
+
 /// Point at the bit-string literal whose digits `bit_in` rejected.
 ///
 /// A `B'…'`/`X'…'` literal is decoded while the statement is *parsed*, because
@@ -15521,9 +15554,7 @@ impl Session for SqlSession {
         let statements =
             crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
                 self.mark_transaction_failed();
-                let error = ExecError::from(error);
-                let reported = attach_type_input_literal_position(sql, error.clone().into_pg());
-                attach_parsed_bit_string_position(sql, &error, reported)
+                parse_failure(sql, error)
             })?;
         let parsed = single_copy_from_stdin(&statements)?;
         self.copy_probe = Some((sql.to_string(), statements));
@@ -15544,9 +15575,7 @@ impl Session for SqlSession {
                 let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
                 crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
                     self.mark_transaction_failed();
-                    let error = ExecError::from(error);
-                    let reported = attach_type_input_literal_position(sql, error.clone().into_pg());
-                    attach_parsed_bit_string_position(sql, &error, reported)
+                    parse_failure(sql, error)
                 })?
             }
         };
@@ -15575,7 +15604,7 @@ impl Session for SqlSession {
         let _tracked = self.track_statement(sql);
         let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
         let statements = crabka_pgparser::parse_with_type_schemas(sql, &type_schemas)
-            .map_err(|error| ExecError::from(error).into_pg())?;
+            .map_err(|error| parse_failure(sql, error))?;
         let Some(copy) = single_copy_from_stdin(&statements)? else {
             return Err(PgError::error(
                 sqlstate::SYNTAX_ERROR,
