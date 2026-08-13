@@ -8,6 +8,7 @@
     "moduleResolution": "nodenext",
     "target": "ESNext",
     "lib": ["ESNext", "DOM"],
+    "types": ["node"],
     "declaration": true,
     "declarationMap": true,
     "noEmit": false,
