@@ -109,10 +109,10 @@
       "sha256": "fb7ea469b5d9807423d7ab3ad222d5240e9c457cdf7f7f6d53099eb03c497e24"
     },
     "constraints": {
-      "changed_lines": 842,
+      "changed_lines": 752,
       "expected": "constraints.out",
       "hunks": 43,
-      "sha256": "f6d0039cc03eb6af43dc594e9ec546979943a53b78a66490a425fe8a51a01197"
+      "sha256": "a3f70b84e011023d0c5de49037e0fe5a7af824914d1ef6a336009de26bc90bc1"
     },
     "conversion": {
       "changed_lines": 448,
@@ -775,10 +775,10 @@
       "sha256": "2b2842c0705c0fbf45e989755397bd6216e3f00af51704060fc0952fbc05e76b"
     },
     "replica_identity": {
-      "changed_lines": 76,
+      "changed_lines": 70,
       "expected": "replica_identity.out",
       "hunks": 15,
-      "sha256": "f8dc9bf0aaf4b2f0c03dad9f1e91a4b0c665ce0c5717b8a76695b30c08888b8c"
+      "sha256": "5d84979ea250ea4a18788d62e4e3383e81dd30a1de967485799329f0484a1171"
     },
     "returning": {
       "changed_lines": 631,
