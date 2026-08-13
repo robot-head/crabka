@@ -682,10 +682,10 @@ fn crabka_mixed_config(
 }
 
 /// Stand up two Crabka brokers (the metadata-quorum majority + data plane) and
-/// one mirror.gcr.io/apache/kafka:4.0.0 broker joined to the same static `KRaft` quorum.
+/// one mirror.gcr.io/apache/kafka:4.0.0 broker, optionally as a controller voter.
 /// Returns once the Crabka voters have elected a shared leader. The JVM broker
 /// starts detached and the caller polls for it to register.
-async fn start_mixed_cluster(container: &str) -> MixedCluster {
+async fn start_mixed_cluster(container: &str, jvm_is_controller: bool) -> MixedCluster {
     support::init_tracing();
     docker_rm(container);
 
@@ -700,11 +700,13 @@ async fn start_mixed_cluster(container: &str) -> MixedCluster {
     let p2 = controller_addrs[1].port();
     let p3 = controller_addrs[2].port();
 
-    let crabka_voters: Vec<(u64, SocketAddr)> = vec![
+    let mut crabka_voters: Vec<(u64, SocketAddr)> = vec![
         (1, format!("127.0.0.1:{p1}").parse().unwrap()),
         (2, format!("127.0.0.1:{p2}").parse().unwrap()),
-        (3, format!("127.0.0.1:{p3}").parse().unwrap()),
     ];
+    if jvm_is_controller {
+        crabka_voters.push((3, format!("127.0.0.1:{p3}").parse().unwrap()));
+    }
 
     let dir1 = TempDir::new().unwrap();
     let dir2 = TempDir::new().unwrap();
@@ -735,16 +737,30 @@ async fn start_mixed_cluster(container: &str) -> MixedCluster {
         )
     };
 
-    // Start the JVM broker (id 3): process.roles=broker,controller, joining the
-    // shared static quorum, publishing a data listener (PLAINTEXT) and its
-    // controller port. Reachable from tool containers at host.docker.internal.
+    // Start JVM node 3, optionally as a controller voter. The capability test
+    // uses broker-only mode so UpdateFeatures deterministically reaches Crabka.
     let jvm_data_port = client_addrs[2].port();
+    let process_roles = if jvm_is_controller {
+        "broker,controller"
+    } else {
+        "broker"
+    };
+    let third_voter = if jvm_is_controller {
+        format!(",3@localhost:{p3}")
+    } else {
+        String::new()
+    };
+    let controller_listener = if jvm_is_controller {
+        format!(",CONTROLLER://0.0.0.0:{p3}")
+    } else {
+        String::new()
+    };
     let props = format!(
-        "process.roles=broker,controller\n\
+        "process.roles={process_roles}\n\
          node.id=3\n\
-         controller.quorum.voters=1@host.docker.internal:{p1},2@host.docker.internal:{p2},3@localhost:{p3}\n\
+         controller.quorum.voters=1@host.docker.internal:{p1},2@host.docker.internal:{p2}{third_voter}\n\
          controller.listener.names=CONTROLLER\n\
-         listeners=PLAINTEXT://0.0.0.0:{jvm_data_port},CONTROLLER://0.0.0.0:{p3}\n\
+         listeners=PLAINTEXT://0.0.0.0:{jvm_data_port}{controller_listener}\n\
          advertised.listeners=PLAINTEXT://{advertised_host}:{jvm_data_port}\n\
          listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT\n\
          inter.broker.listener.name=PLAINTEXT\n\
@@ -851,7 +867,7 @@ async fn metadata_version_downgrade_rejects_pre_kip1155_jvm() {
     const CONTAINER: &str = "crabka-mv-capability-jvm-broker";
     const UPPER_LEVEL: i16 = 25; // 4.0-IV3.
 
-    let cluster = start_mixed_cluster(CONTAINER).await;
+    let cluster = start_mixed_cluster(CONTAINER, false).await;
     assert!(
         cluster.wait_for_brokers(3, Duration::from_mins(2)).await,
         "JVM broker never joined the mixed cluster"
@@ -937,7 +953,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
     const TOPIC: &str = "crabka-kip320-jvm-follower";
     const CONTAINER: &str = "crabka-kip320-jvm-follower-broker";
 
-    let cluster = start_mixed_cluster(CONTAINER).await;
+    let cluster = start_mixed_cluster(CONTAINER, true).await;
     let c1 = &cluster.crabka[0].0; // Crabka broker_id 1
     let bootstrap_all = cluster.bootstrap_all.clone();
 
@@ -1222,7 +1238,7 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
     const TOPIC: &str = "crabka-kip320-crabka-follower";
     const CONTAINER: &str = "crabka-kip320-crabka-follower-broker";
 
-    let cluster = start_mixed_cluster(CONTAINER).await;
+    let cluster = start_mixed_cluster(CONTAINER, true).await;
     let c1 = &cluster.crabka[0].0;
     let bootstrap_all = cluster.bootstrap_all.clone();
 
