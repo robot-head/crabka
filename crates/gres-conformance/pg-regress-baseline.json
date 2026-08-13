@@ -318,12 +318,6 @@
       "hunks": 20,
       "sha256": "abb98b70ec24f52d97e33bd3565ecce7551ff40c7a83409a8bac1243a981894e"
     },
-    "float4": {
-      "changed_lines": 18,
-      "expected": "float4.out",
-      "hunks": 1,
-      "sha256": "39a7f58c8c15c0c2a31678f1fd9e3a92ba8d704007e7de045afc0635573d5650"
-    },
     "float8": {
       "changed_lines": 465,
       "expected": "float8.out",
@@ -1111,7 +1105,7 @@
       "sha256": "fba8d9ee23aaaa7ceebd026299b8d3cfcd1e9c96bc65a2b2f62bcd3bc100337c"
     }
   },
-  "passed": 46,
+  "passed": 47,
   "postgres_tag": "REL_18_4",
   "schedule": [
     "test_setup",
