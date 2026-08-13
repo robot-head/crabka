@@ -233,6 +233,13 @@ jobs:
           # `--exclude hub.docker.com`: Docker Hub rate-limits and 503s
           # anonymous requests from GitHub-hosted runners (observed timeout
           # then 503 on consecutive runs), making image-page links flaky.
+          # `--exclude effective-rust.com`: unlike the entries above, this host
+          # is down rather than slow. It is cited once, in the rust-skills
+          # README. On 2026-08-13 it timed out in CI and also from a developer
+          # machine: DNS resolves to 192.64.118.77, but two 25-second requests
+          # both returned nothing at all. Retries and a longer timeout cannot
+          # reach a host that never answers. Drop the exclude and re-check the
+          # link if the book comes back.
           # `--remap`: Zola renders internal links absolute against `base_url`,
           # so without this lychee validates them over the network against the
           # *already deployed* site. That is the wrong target: a PR adding a
@@ -256,6 +263,7 @@ jobs:
             --exclude www\.sigstore\.dev
             --exclude slsa\.dev
             --exclude hub\.docker\.com
+            --exclude effective-rust\.com
             --remap "https://robot-head\.github\.io/crabka/ file://${{ github.workspace }}/website/public/"
             --include-fragments
             --fallback-extensions html
