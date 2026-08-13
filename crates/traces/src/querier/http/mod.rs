@@ -3873,6 +3873,13 @@ overrides:
         assert2::assert!(scope.name == "tracer");
         assert2::assert!(scope.version.is_empty());
         assert2::assert!(scope.attributes.is_empty());
+
+        empty.instrumentation_name.clear();
+        empty.instrumentation_version = "1.2.3".into();
+        let projected = otlp_scope_spans([9; 16], vec![&empty]);
+        let scope = projected[0].scope.as_ref().unwrap();
+        assert2::assert!(scope.name.is_empty());
+        assert2::assert!(scope.version == "1.2.3");
     }
 
     #[test]

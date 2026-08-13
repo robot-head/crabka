@@ -557,19 +557,17 @@ fn collect_attribute_tag_values(
 ) -> Result<(), TraceqlError> {
     for row in 0..batch.num_rows() {
         for (key, value) in attr_values_with_resource(batch, row, true)? {
-            let matches = key == tag
-                || key == index_tag
-                || key
-                    .strip_prefix(RESOURCE_ATTR_PREFIX)
-                    .is_some_and(|key| key == index_tag || key == tag)
-                || key
+            let matches = if let Some(key) = key.strip_prefix(RESOURCE_ATTR_PREFIX) {
+                [tag, index_tag].contains(&key)
+            } else if let Some(key) = key.strip_prefix(INSTRUMENTATION_ATTR_PREFIX) {
+                let requested = tag.strip_prefix("instrumentation.").unwrap_or(tag);
+                let indexed = index_tag
                     .strip_prefix(INSTRUMENTATION_ATTR_PREFIX)
-                    .is_some_and(|key| {
-                        key == tag
-                            || tag
-                                .strip_prefix("instrumentation.")
-                                .is_some_and(|tag| key == tag)
-                    });
+                    .unwrap_or(requested);
+                [requested, indexed].contains(&key)
+            } else {
+                [tag, index_tag].contains(&key.as_str())
+            };
             if matches {
                 values.insert(attr_typed_value_parts(&value));
             }

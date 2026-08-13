@@ -386,6 +386,29 @@ mod tests {
                 },
             ]);
         }
+        for (metric, first_start, second_start, expected) in [
+            ("unknown_previous", 0, 8, 8.0),
+            ("unknown_current", 8, 0, 8.0),
+            ("reset", 7, 8, 3.0),
+        ] {
+            for (value, start) in [(5.0, first_start), (3.0, second_start)] {
+                sink.ingest(&[DataPoint {
+                    metric: metric.into(),
+                    client_instance_id: "i".into(),
+                    client_id: "c".into(),
+                    attributes: vec![],
+                    value: PointValue::Counter(value),
+                    delta_start: Some(start),
+                }]);
+            }
+            let guard = sink.points.lock().unwrap();
+            let point = guard
+                .get(&(metric.into(), "i".into(), "c".into(), vec![]))
+                .unwrap();
+            assert!(
+                matches!(point.value, PointValue::Counter(value) if (value - expected).abs() < f64::EPSILON)
+            );
+        }
 
         let guard = sink.points.lock().unwrap();
         assert!(guard.values().any(
@@ -397,6 +420,17 @@ mod tests {
                 if (*sum - 10.0).abs() < f64::EPSILON
                     && buckets.as_slice() == [(1.0, 3), (f64::MAX, 2)]
         )));
+
+        let mut total = PointValue::Histogram {
+            count: 2,
+            sum: 4.0,
+            buckets: vec![(1.0, 1), (f64::MAX, 1)],
+        };
+        assert!(!total.accumulate(&PointValue::Histogram {
+            count: 3,
+            sum: 6.0,
+            buckets: vec![(2.0, 2), (f64::MAX, 1)],
+        }));
     }
 
     #[test]
