@@ -19363,6 +19363,12 @@ const TIMETZ_ARRAY_OID: i32 = 1270;
 /// `pg_type.oid` of `_int2vector`, which is in that same position.
 const INT2VECTOR_ARRAY_OID: i32 = 1006;
 
+/// `pg_type.oid` of `_pg_snapshot`, in that same position again.
+const PG_SNAPSHOT_ARRAY_OID: i32 = 5039;
+
+/// `pg_type.oid` of `_txid_snapshot`.
+const TXID_SNAPSHOT_ARRAY_OID: i32 = 2949;
+
 /// One of the relations the engine synthesises, with its rows.
 ///
 /// A synthesised relation is stored nowhere, so it has no rowid to derive a
@@ -20890,7 +20896,10 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::Xid8(_)
         | Datum::Cid(_)
         | Datum::Tid(_)
-        | Datum::PgLsn(_) => {
+        | Datum::PgLsn(_)
+        // A snapshot's text form is its canonical form, so a default reads
+        // back exactly as it was written: `'12:20:13,15,18'::pg_snapshot`.
+        | Datum::PgSnapshot(_) => {
             match zone_independent_text(value) {
                 Some(literal) => {
                     let mut out = String::new();
@@ -21152,6 +21161,10 @@ fn attribute_storage(ty: ColumnType) -> &'static str {
         | C::VarBit(_)
         | C::Path
         | C::Polygon
+        // Both snapshot types are `x` in the pinned catalog, and `d`-aligned
+        // rather than `i`-aligned, because their running list is 64-bit.
+        | C::PgSnapshot
+        | C::TxidSnapshot
         | C::Array(_)
         | C::Record(_)
         | C::Range(_)
@@ -22295,6 +22308,25 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             array: crabka_pgtypes::oids::PG_LSNARRAY as i32,
         },
         BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::PG_SNAPSHOT as i32,
+            name: "pg_snapshot",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: PG_SNAPSHOT_ARRAY_OID,
+        },
+        // `txid_snapshot` is a type of its own and not an alias, so it needs a
+        // row of its own: a column declared with it reports 2970, and
+        // `FigureColname` labels a cast to it `txid_snapshot`.
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TXID_SNAPSHOT as i32,
+            name: "txid_snapshot",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: TXID_SNAPSHOT_ARRAY_OID,
+        },
+        BuiltinTypeRow {
             oid: crabka_pgtypes::oids::OIDVECTOR as i32,
             name: "oidvector",
             len: -1,
@@ -22882,6 +22914,26 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 len: -1,
                 category: "A",
                 elem: crabka_pgtypes::oids::REGNAMESPACE as i32,
+                array: 0,
+            },
+            // Neither snapshot type has an `ElemType`, so crabka can build no
+            // array of either. The rows are here for the same reason the
+            // `reg*` array rows below are: `typarray` has to point at a type
+            // that exists, and `type_sanity` checks exactly that link.
+            BuiltinTypeRow {
+                oid: PG_SNAPSHOT_ARRAY_OID,
+                name: "_pg_snapshot",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::PG_SNAPSHOT as i32,
+                array: 0,
+            },
+            BuiltinTypeRow {
+                oid: TXID_SNAPSHOT_ARRAY_OID,
+                name: "_txid_snapshot",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::TXID_SNAPSHOT as i32,
                 array: 0,
             },
         ]);
@@ -24528,6 +24580,8 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::CID => ColumnType::Cid,
         crabka_pgtypes::oids::TID => ColumnType::Tid,
         crabka_pgtypes::oids::PG_LSN => ColumnType::PgLsn,
+        crabka_pgtypes::oids::PG_SNAPSHOT => ColumnType::PgSnapshot,
+        crabka_pgtypes::oids::TXID_SNAPSHOT => ColumnType::TxidSnapshot,
         crabka_pgtypes::oids::RECORD => ColumnType::Record(None),
         // Every array oid crabka has an element type for, `_json` included.
         _ => match crabka_pgtypes::ElemType::from_array_oid(oid) {
@@ -25591,6 +25645,16 @@ fn is_immutable_function(name: &str) -> bool {
             | "pg_postmaster_start_time"
             | "txid_current"
             | "pg_current_xact_id"
+            // The rest of the transaction-id surface. Every one of these reads
+            // live transaction state: the two snapshot constructors are
+            // STABLE, and `pg_xact_status` is VOLATILE because a transaction
+            // it reported in progress can commit under it.
+            | "txid_current_if_assigned"
+            | "pg_current_xact_id_if_assigned"
+            | "txid_current_snapshot"
+            | "pg_current_snapshot"
+            | "txid_status"
+            | "pg_xact_status"
             | "inet_client_addr"
             | "inet_server_addr"
     )

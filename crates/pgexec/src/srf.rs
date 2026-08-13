@@ -102,6 +102,11 @@ enum Srf {
     /// `json_populate_record` and its seven relatives — see [`RecordCall`].
     Record(RecordCall),
     PgInputErrorInfo,
+    /// `pg_snapshot_xip(pg_snapshot)` → `xid8`, and `txid_snapshot_xip`, which
+    /// is the same expansion reported as `bigint`. One row per running
+    /// transaction the snapshot lists, ascending, and no row at all for a
+    /// snapshot with an empty window.
+    SnapshotXip(SnapshotFamily),
     /// `pg_partition_ancestors(regclass)` → `relid regclass` — the relation
     /// itself, then every parent up to the root of its partition tree.
     PgPartitionAncestors,
@@ -124,6 +129,46 @@ enum JsonFamily {
     /// `jsonb` — decomposed and canonically ordered, with duplicate keys already
     /// resolved to the last one.
     Jsonb,
+}
+
+/// Which of the two declared spellings a snapshot expansion belongs to.
+///
+/// `pg_snapshot_xip` reads a `pg_snapshot` and reports `xid8`;
+/// `txid_snapshot_xip` reads a `txid_snapshot` and reports `bigint`. The two
+/// run the same C function upstream, and they expand the same value here, so
+/// the family decides only which types the signature names. The scalar half of
+/// the same surface is [`crate::snapshot_fn`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotFamily {
+    Modern,
+    Legacy,
+}
+
+impl SnapshotFamily {
+    /// The type the family's argument carries.
+    fn snapshot_type(self) -> ColumnType {
+        match self {
+            SnapshotFamily::Modern => ColumnType::PgSnapshot,
+            SnapshotFamily::Legacy => ColumnType::TxidSnapshot,
+        }
+    }
+
+    /// The type the family reports one running transaction id as.
+    fn xid_type(self) -> ColumnType {
+        match self {
+            SnapshotFamily::Modern => ColumnType::Xid8,
+            SnapshotFamily::Legacy => ColumnType::Int8,
+        }
+    }
+
+    /// One running transaction id as a value of that type.
+    fn xid_datum(self, xid: u64) -> Datum {
+        match self {
+            SnapshotFamily::Modern => Datum::Xid8(xid),
+            // `bigint` reinterprets the bits, as the whole `txid_*` family does.
+            SnapshotFamily::Legacy => Datum::Int8(xid.cast_signed()),
+        }
+    }
 }
 
 impl JsonFamily {
@@ -284,6 +329,8 @@ fn classify(name: &str) -> Option<Srf> {
         "json_to_recordset" => Srf::Record(RECORD_JSON_TO.into_set()),
         "jsonb_to_recordset" => Srf::Record(RECORD_JSONB_TO.into_set()),
         "pg_input_error_info" => Srf::PgInputErrorInfo,
+        "pg_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Modern),
+        "txid_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Legacy),
         "pg_partition_ancestors" => Srf::PgPartitionAncestors,
         "pg_event_trigger_ddl_commands" => Srf::EventDdlCommands,
         "pg_event_trigger_dropped_objects" => Srf::EventDroppedObjects,
@@ -488,6 +535,12 @@ pub(crate) fn plan(
         // Handled above: the record family resolves its own shape, and the
         // column-definition-list rules differ for it.
         Srf::Record(_) => unreachable!("plan_record answered the record family"),
+        Srf::SnapshotXip(family) => {
+            require_arity(name, &given, (1, 1))?;
+            // A single-column SRF names its column after the function, so
+            // `txid_snapshot_xip` must not report `pg_snapshot_xip`.
+            vec![column(&bare, family.xid_type())]
+        }
         Srf::PgInputErrorInfo => {
             require_arity(name, &given, (2, 2))?;
             vec![
@@ -702,6 +755,7 @@ pub(crate) fn rows(
         Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals)?,
         Srf::Record(call) => record_rows(call, plan, vals, ctx)?,
         Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
+        Srf::SnapshotXip(family) => snapshot_xip_rows(family, &plan.name, &vals[0], ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
         Srf::EventDroppedObjects => event_dropped_object_rows(ctx)?,
@@ -754,6 +808,7 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             params
         }
         Srf::PgInputErrorInfo => vec![text, text],
+        Srf::SnapshotXip(family) => vec![Some(family.snapshot_type())],
         // `regclass`, but resolving a *name* to a relation needs the catalog and
         // the search path, which the pure cast this drives has neither of. The
         // literal is left `unknown` so the row builder can run the catalog-aware
@@ -902,6 +957,34 @@ fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>
         Datum::Null,
         Datum::Text(error.code),
     ]])
+}
+
+/// `pg_snapshot_xip` / `txid_snapshot_xip`: one row per running transaction the
+/// snapshot lists, in the ascending order the value already holds them in.
+fn snapshot_xip_rows(
+    family: SnapshotFamily,
+    name: &str,
+    value: &Datum,
+    ctx: &EvalCtx,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    // An `unknown` literal reaches here as text, because `param_types` names
+    // the parameter and the coercion runs `pg_snapshot_in` — which reports the
+    // same 22P02 a written cast would.
+    let snapshot = match value {
+        Datum::PgSnapshot(snapshot) => snapshot.as_ref().clone(),
+        other => {
+            match crabka_pgtypes::cast::cast_in(other, ColumnType::PgSnapshot, ctx.output_style())?
+            {
+                Datum::PgSnapshot(snapshot) => *snapshot,
+                _ => return Err(undefined_function(name, &[])),
+            }
+        }
+    };
+    Ok(snapshot
+        .xip()
+        .iter()
+        .map(|xid| vec![family.xid_datum(*xid)])
+        .collect())
 }
 
 /// `pg_partition_ancestors(regclass)`: the relation itself, then its parent, its
@@ -2288,6 +2371,16 @@ mod tests {
             ColumnType::Jsonb,
         )
     }
+    /// One snapshot with three running ids, declared as whichever of the two
+    /// SQL types the caller is testing.
+    fn snapshot_arg(ty: ColumnType) -> Expr {
+        constant(
+            Datum::PgSnapshot(Box::new(
+                "12:20:13,15,18".parse().expect("valid pg_snapshot"),
+            )),
+            ty,
+        )
+    }
 
     /// A `json` argument. Unlike [`jsonb_arg`] the document is *not* rebuilt —
     /// `json_in` validates and keeps every byte — so the spacing, key order and
@@ -2353,6 +2446,8 @@ mod tests {
             "json_array_elements_text",
             "jsonb_path_query",
             "pg_input_error_info",
+            "pg_snapshot_xip",
+            "txid_snapshot_xip",
         ] {
             assert!(is_srf(name), "{name} should be a set-returning function");
             assert!(is_srf(&name.to_ascii_uppercase()), "{name} uppercased");
@@ -2482,6 +2577,19 @@ mod tests {
                 "json_array_elements_text",
                 vec![json_arg("[1]")],
                 vec![("value", ColumnType::Text)],
+            ),
+            // The snapshot pair is the same expansion over two declared types,
+            // and each names its column after itself rather than after the
+            // other.
+            (
+                "pg_snapshot_xip",
+                vec![snapshot_arg(ColumnType::PgSnapshot)],
+                vec![("pg_snapshot_xip", ColumnType::Xid8)],
+            ),
+            (
+                "txid_snapshot_xip",
+                vec![snapshot_arg(ColumnType::TxidSnapshot)],
+                vec![("txid_snapshot_xip", ColumnType::Int8)],
             ),
         ];
 

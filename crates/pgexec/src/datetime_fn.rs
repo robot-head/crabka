@@ -1485,6 +1485,7 @@ mod tests {
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            txn: None,
         }
     }
     fn ev(sql: &str, ctx: &EvalCtx) -> Datum {
@@ -1859,6 +1860,7 @@ mod tests {
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            txn: None,
         };
         assert_eq!(
             ev("current_date", &ctx),
@@ -1948,6 +1950,7 @@ mod tests {
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            txn: None,
         };
         assert_eq!(
             ev(

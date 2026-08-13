@@ -2664,6 +2664,14 @@ pub struct SqlSession {
     /// value therefore never reaches the client before the op that records it
     /// is durable. That is what makes re-seeding safe for the next writer.
     pending_sequences: Arc<Mutex<crate::seq::PendingSequences>>,
+    /// An xid `pg_current_xact_id()` assigned during expression evaluation and
+    /// the transaction has not adopted yet.
+    ///
+    /// It is the transaction-identity twin of `pending_sequences`: evaluation
+    /// holds the session's context by shared reference, so a function that has
+    /// to allocate stages the result here and
+    /// [`SqlSession::adopt_assigned_xact_id`] moves it across.
+    assigned_xact_id: Arc<Mutex<Option<u64>>>,
     /// This connection's registration on the engine's `LISTEN`/`NOTIFY` bus.
     /// `None` until an owner calls [`SqlSession::register_notify`] or
     /// [`SqlSession::adopt_notify`]; `LISTEN`/`NOTIFY`/`pg_notify` then report a
@@ -3181,6 +3189,7 @@ impl SqlSession {
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
             pending_sequences: Arc::new(Mutex::new(crate::seq::PendingSequences::default())),
+            assigned_xact_id: Arc::new(Mutex::new(None)),
             notify: None,
             notify_rx: None,
             notice_tx,
@@ -3413,6 +3422,65 @@ impl SqlSession {
             notify: Some(Arc::clone(&self.notify_pending)),
             transition_relations: Some(Arc::clone(&self.transition_relations)),
             event_trigger: self.event_trigger.clone(),
+            txn: Some(Arc::new(crate::clock::TxnRuntime {
+                snapshot: self.exported_snapshot(),
+                own_xid: self.local_xid(),
+                procarray: Arc::clone(&self.procarray),
+                assigned: Arc::clone(&self.assigned_xact_id),
+            })),
+        }
+    }
+
+    /// The snapshot `pg_current_snapshot()` exports.
+    ///
+    /// Inside a block this is the transaction's own snapshot, which
+    /// `read_context` re-takes per statement under READ COMMITTED and leaves
+    /// fixed under REPEATABLE READ — so the exported triple tracks what the
+    /// statement can actually see, as `GetActiveSnapshot()` does. Outside one
+    /// there is nothing to export and the caller reads the registry itself;
+    /// every statement runs inside at least an implicit transaction before it
+    /// evaluates anything, so that path is reached only where no transaction
+    /// exists at all.
+    fn exported_snapshot(&self) -> Option<Snapshot> {
+        match &self.state {
+            TxnState::InTransaction(c) | TxnState::Prepared(c) | TxnState::Failed(c) => {
+                Some(c.snapshot.clone())
+            }
+            TxnState::Idle => None,
+        }
+    }
+
+    /// Move an xid that expression evaluation assigned into the transaction
+    /// that now owns it.
+    ///
+    /// `pg_current_xact_id()` can assign the first xid of a transaction that
+    /// has not written, and it runs behind a shared reference, so it stages the
+    /// assignment rather than storing it. Until this runs the xid is registered
+    /// in the `ProcArray` and recorded nowhere else, so every path that can
+    /// finish a statement calls it — an unadopted xid would stay running for
+    /// the life of the process and hold every later snapshot's `xmin` down.
+    fn adopt_assigned_xact_id(&mut self) {
+        let Some(xid) = self
+            .assigned_xact_id
+            .lock()
+            .expect("assigned xact id mutex")
+            .take()
+        else {
+            return;
+        };
+        match &mut self.state {
+            TxnState::InTransaction(c) | TxnState::Prepared(c) | TxnState::Failed(c)
+                if c.xid.is_none() =>
+            {
+                c.xid = Some(xid);
+                if self.implicit_transaction {
+                    self.implicit_xid = Some(xid);
+                }
+            }
+            // The transaction already had an xid, or it ended under the
+            // statement. Either way nothing will ever record this one's
+            // outcome, so deregister it here instead of stranding it.
+            _ => self.procarray.finish(xid),
         }
     }
 
@@ -6963,6 +7031,10 @@ impl SqlSession {
         // holds stay held) until COMMIT/ROLLBACK releases them. Autocommit errors
         // leave us Idle (the statement was its own transaction).
         record_statement_status(&tracing::Span::current(), &result);
+        // Before the block is marked failed, so an xid a failing statement
+        // assigned still reaches the ctx that ROLLBACK writes the abort record
+        // for. Idempotent: the SELECT path has usually adopted already.
+        self.adopt_assigned_xact_id();
         self.record_statement_transaction();
         if result.is_err() {
             self.mark_transaction_failed();
@@ -7679,9 +7751,14 @@ impl SqlSession {
 
     async fn run_select_inner(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let span = crate::telemetry::select_span(false);
-        Box::pin(self.run_select_traced(stmt))
+        let result = Box::pin(self.run_select_traced(stmt))
             .instrument(span)
-            .await
+            .await;
+        // A `SELECT pg_current_xact_id()` assigns the transaction's xid during
+        // evaluation. Adopt it here, inside the implicit transaction
+        // `run_select` opened, so the COMMIT that follows records its outcome.
+        self.adopt_assigned_xact_id();
+        result
     }
 
     async fn run_select_traced(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
@@ -12414,6 +12491,8 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::CID) => Ok(Some(ColumnType::Cid)),
         Some(crabka_pgtypes::oids::TID) => Ok(Some(ColumnType::Tid)),
         Some(crabka_pgtypes::oids::PG_LSN) => Ok(Some(ColumnType::PgLsn)),
+        Some(crabka_pgtypes::oids::PG_SNAPSHOT) => Ok(Some(ColumnType::PgSnapshot)),
+        Some(crabka_pgtypes::oids::TXID_SNAPSHOT) => Ok(Some(ColumnType::TxidSnapshot)),
         Some(0) | None => Ok(None),
         // Every array OID crabka has an element type for (`_int4`, `_text`, …).
         Some(oid) => match ElemType::from_array_oid(oid) {
@@ -12743,6 +12822,16 @@ pub(crate) fn decode_binary_value(
                 .map_err(ExecError::into_pg)
         }
         ColumnType::JsonPath => decode_jsonpath_binary(value),
+        // `pg_snapshot_recv`, which `txid_snapshot_recv` also is: the count of
+        // running ids, then the window and the ids themselves. Unlike the text
+        // form it is not a re-read of the output function, so it has a reader
+        // of its own.
+        ColumnType::PgSnapshot | ColumnType::TxidSnapshot => {
+            crabka_pgtypes::snapshot::PgSnapshot::from_binary(value)
+                .map(|snapshot| Datum::PgSnapshot(Box::new(snapshot)))
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
         ColumnType::TsVector | ColumnType::TsQuery => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             decode_text_bound_param(text, ty, time_zone)
@@ -14227,6 +14316,12 @@ const TIMESTAMP_TYPE_KEYS: &[&str] = &["timestamp", "timestamp with time zone"];
 /// literal is rejected with `invalid input syntax for type json` as well.
 const JSON_TYPE_KEYS: &[&str] = &["json", "jsonb"];
 
+/// `txid_snapshot_in` **is** `pg_snapshot_in` — one `pg_proc` entry under two
+/// names — so a `txid_snapshot` literal is rejected under the other type's
+/// name. The written type is still what the caret has to be found by, so the
+/// message admits either spelling, exactly as the JSON pair above does.
+const SNAPSHOT_TYPE_KEYS: &[&str] = &["pg_snapshot", "txid_snapshot"];
+
 /// What a type-input message proves about the type that rejected the literal.
 enum RejectedType {
     /// The message names the type outright.
@@ -14302,7 +14397,11 @@ fn rejected_input(message: &str) -> Option<RejectedInput<'_>> {
 
     if let Some(rest) = message.strip_prefix("invalid input syntax for type ") {
         if let Some((type_name, quoted)) = rest.split_once(": \"") {
-            return Some(named(quoted.strip_suffix('"')?, type_name));
+            let value = quoted.strip_suffix('"')?;
+            if canonical_type_key(type_name) == "pg_snapshot" {
+                return Some(family(value, SNAPSHOT_TYPE_KEYS));
+            }
+            return Some(named(value, type_name));
         }
         // `json_in` names its type but not the value, because the value is
         // spelled out in the DETAIL and CONTEXT instead. With no value to search

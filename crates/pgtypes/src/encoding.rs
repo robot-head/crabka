@@ -288,6 +288,9 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Tid(value) => value.to_text().into_bytes(),
         // `pg_lsn_out`: `%X/%X`, upper case and unpadded.
         Datum::PgLsn(value) => crate::sysid::lsn_to_text(*value).into_bytes(),
+        // `pg_snapshot_out` — also `txid_snapshot_out`, which is the same
+        // routine under another name.
+        Datum::PgSnapshot(value) => value.to_string().into_bytes(),
         Datum::Range(range) => crate::range::to_text(range, |bound| {
             String::from_utf8(encode_text_in(bound, style))
                 .expect("a Datum's text encoding is always valid UTF-8")
@@ -600,6 +603,22 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
             let mut out = Vec::with_capacity(6);
             out.extend_from_slice(&value.block.to_be_bytes());
             out.extend_from_slice(&value.offset.to_be_bytes());
+            out
+        }
+        // `pg_snapshot_send`: the count of running ids as a big-endian uint32,
+        // then `xmin`, `xmax` and each running id as a big-endian uint64. The
+        // count leads, which is why the reader can size its array before it
+        // reads the window.
+        Datum::PgSnapshot(value) => {
+            let xip = value.xip();
+            let mut out = Vec::with_capacity(4 + 16 + 8 * xip.len());
+            let count = u32::try_from(xip.len()).unwrap_or(u32::MAX);
+            out.extend_from_slice(&count.to_be_bytes());
+            out.extend_from_slice(&value.xmin().to_be_bytes());
+            out.extend_from_slice(&value.xmax().to_be_bytes());
+            for id in xip {
+                out.extend_from_slice(&id.to_be_bytes());
+            }
             out
         }
     }

@@ -144,6 +144,10 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         }
         Datum::MacAddr(_) => return Err(unsupported("macaddr")),
         Datum::MacAddr8(_) => return Err(unsupported("macaddr8")),
+        // `pg_snapshot` and `txid_snapshot` have no hash operator family, and
+        // no equality operator to build one on, so `PostgreSQL` cannot
+        // partition by one either.
+        Datum::PgSnapshot(_) => return Err(unsupported("pg_snapshot")),
         // `money` hashes through `hashint8extended`, as `pg_amproc` records
         // for its default operator family.
         Datum::Money(value) => hash_int64_extended(*value, seed),

@@ -68,6 +68,27 @@ impl PgSnapshot {
         Self { xmin, xmax, xip }
     }
 
+    /// `pg_snapshot_recv` — the wire form `pg_snapshot_send` writes.
+    ///
+    /// The layout is the count of running ids as a big-endian `uint32`, then
+    /// `xmin`, `xmax` and each running id as a big-endian `uint64`.
+    ///
+    /// The checks are `pg_snapshot_recv`'s own, and they are *not* the text
+    /// grammar's. The reader folds a repeated id instead of rejecting it, and
+    /// it admits an id equal to `xmax` where [`FromStr`] stops below it. Both
+    /// are kept: a reader stricter than the writer of the same format would
+    /// refuse bytes another server sends.
+    ///
+    /// # Errors
+    ///
+    /// 22P03 for a length, a count or an ordering the format does not admit.
+    pub fn from_binary(bytes: &[u8]) -> Result<Self, TypeError> {
+        parse_binary(bytes).ok_or_else(|| TypeError::Coded {
+            sqlstate: "22P03",
+            message: "invalid external pg_snapshot data".to_string(),
+        })
+    }
+
     /// The lowest id that was still running — `pg_snapshot_xmin`.
     #[must_use]
     pub fn xmin(&self) -> u64 {
@@ -169,6 +190,43 @@ fn parse(s: &str) -> Option<PgSnapshot> {
         };
     }
 
+    Some(PgSnapshot { xmin, xmax, xip })
+}
+
+/// `pg_snapshot_recv`'s grammar, returning `None` for every rejection.
+fn parse_binary(bytes: &[u8]) -> Option<PgSnapshot> {
+    let (count, rest) = bytes.split_at_checked(4)?;
+    let count = u32::from_be_bytes(count.try_into().ok()?);
+    let count = usize::try_from(count).ok()?;
+    // `pg_snapshot_recv` sizes its array from the count before it reads a
+    // single id, so a count the remaining bytes cannot supply is the format's
+    // own error rather than a short read later.
+    let (window, rest) = rest.split_at_checked(16)?;
+    if rest.len() != count * 8 {
+        return None;
+    }
+    let xmin = u64::from_be_bytes(window[..8].try_into().ok()?);
+    let xmax = u64::from_be_bytes(window[8..].try_into().ok()?);
+    if !is_valid_id(xmin) || !is_valid_id(xmax) || xmax < xmin {
+        return None;
+    }
+
+    let mut xip: Vec<u64> = Vec::with_capacity(count);
+    let mut last: Option<u64> = None;
+    for chunk in rest.chunks_exact(8) {
+        let id = u64::from_be_bytes(chunk.try_into().ok()?);
+        if id < xmin || id > xmax || last.is_some_and(|previous| id < previous) {
+            return None;
+        }
+        if last != Some(id) {
+            xip.push(id);
+        }
+        last = Some(id);
+    }
+    // An id equal to `xmax` is admitted by the reader and says nothing, since
+    // the window alone already decides it. Dropping it here keeps the type's
+    // invariant that every member lies inside `xmin..xmax`.
+    xip.retain(|id| *id < xmax);
     Some(PgSnapshot { xmin, xmax, xip })
 }
 
@@ -350,6 +408,58 @@ mod tests {
                 }
         );
         assert!(snapshot.to_string() == "12:20:13,15,18");
+    }
+
+    /// Every accepted value survives `pg_snapshot_send` followed by
+    /// `pg_snapshot_recv`, which is the whole point of having both.
+    #[test]
+    fn the_binary_form_round_trips_every_accepted_value() {
+        for text in ["12:13:", "12:20:13,15,18", "1:9223372036854775807:3", WIDE] {
+            let snapshot = parsed(text);
+            let wire = crate::encoding::encode_binary(&crate::Datum::PgSnapshot(Box::new(
+                snapshot.clone(),
+            )));
+            assert!(PgSnapshot::from_binary(&wire) == Ok(snapshot), "{text}");
+        }
+    }
+
+    #[test]
+    fn rejected_binary_input_is_22p03() {
+        let cases: [&[u8]; 6] = [
+            // Too short for even the count.
+            &[0, 0, 0],
+            // A count of one with no id to read.
+            &[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 20],
+            // A count of zero with an id present anyway.
+            &[
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0,
+                13,
+            ],
+            // xmax below xmin.
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 31, 0, 0, 0, 0, 0, 0, 0, 12],
+            // xmin is the invalid id.
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            // A running id below xmin.
+            &[
+                0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0,
+                11,
+            ],
+        ];
+        for input in cases {
+            let error = PgSnapshot::from_binary(input).expect_err("input is rejected");
+            assert!(error.sqlstate() == "22P03", "{input:?}");
+        }
+    }
+
+    /// The reader is deliberately looser than the text grammar in the two
+    /// places `pg_snapshot_recv` is, and both still land inside the invariant.
+    #[test]
+    fn the_binary_reader_folds_a_repeat_and_drops_an_id_at_xmax() {
+        let wire: &[u8] = &[
+            0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 13,
+            0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 20,
+        ];
+        assert!(PgSnapshot::from_binary(wire) == Ok(parsed("12:20:13")));
     }
 
     #[test]

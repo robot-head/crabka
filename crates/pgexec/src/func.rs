@@ -294,6 +294,7 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::bit_fn::is_bit_func(name)
         || crate::money_fn::is_money_func(name)
         || crate::sysid_fn::is_sysid_func(name)
+        || crate::snapshot_fn::is_snapshot_func(name)
         || crate::geometry_fn::is_geometry_func(name)
         || constructor_cast_type(name).is_some()
 }
@@ -582,6 +583,9 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
     }
     if crate::sysid_fn::is_sysid_func(&fc.name) {
         return crate::sysid_fn::sysid_func_result_type(fc, scope);
+    }
+    if crate::snapshot_fn::is_snapshot_func(&fc.name) {
+        return crate::snapshot_fn::snapshot_func_result_type(fc, scope);
     }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::math_func_result_type(fc, scope);
@@ -1209,6 +1213,9 @@ fn builtin_eval_scalar(
     }
     if crate::sysid_fn::is_sysid_func(&fc.name) {
         return crate::sysid_fn::eval_sysid(fc, ctx, eval_child);
+    }
+    if crate::snapshot_fn::is_snapshot_func(&fc.name) {
+        return crate::snapshot_fn::eval_snapshot(fc, ctx, eval_child);
     }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::eval_math(fc, ctx, eval_child);
@@ -2704,6 +2711,10 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         3220 => ("pg_lsn", NoMod),
         3221 => ("pg_lsn[]", NoMod),
         5069 => ("xid8", NoMod),
+        2949 => ("txid_snapshot[]", NoMod),
+        2970 => ("txid_snapshot", NoMod),
+        5038 => ("pg_snapshot", NoMod),
+        5039 => ("pg_snapshot[]", NoMod),
         114 => ("json", NoMod),
         142 => ("xml", NoMod),
         199 => ("json[]", NoMod),

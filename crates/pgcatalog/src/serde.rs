@@ -156,6 +156,11 @@ mod datum_tag {
     /// half of its range has no text form that is valid UTF-8. Append-only —
     /// no version bump.
     pub const INTERNAL_CHAR: u8 = 23;
+    /// A `pg_snapshot` or `txid_snapshot` value — followed by its canonical
+    /// `xmin:xmax:xip` text (u32 length + bytes), the way [`TSVECTOR`] and
+    /// [`TSQUERY`] store theirs. The text form is the canonical form here, so
+    /// nothing is lost by it. Append-only — no version bump.
+    pub const PG_SNAPSHOT: u8 = 24;
 }
 
 mod type_tag {
@@ -284,6 +289,14 @@ mod type_tag {
     /// `PostgreSQL` `"char"`, the one-byte type — not [`BPCHAR`], which is
     /// `character(n)`. Append-only — no version bump.
     pub const INTERNAL_CHAR: u8 = 59;
+    /// `PostgreSQL` `pg_snapshot`. Append-only — no version bump.
+    pub const PG_SNAPSHOT: u8 = 60;
+    /// `PostgreSQL` `txid_snapshot`. Its own tag rather than
+    /// [`PG_SNAPSHOT`]'s, because the two are different SQL types at different
+    /// oids: a column declared `txid_snapshot` must still report 2970 after a
+    /// restart, which only a tag of its own preserves. Append-only — no
+    /// version bump.
+    pub const TXID_SNAPSHOT: u8 = 61;
 }
 
 #[derive(Debug)]
@@ -389,6 +402,8 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Cid => out.push(type_tag::CID),
         ColumnType::Tid => out.push(type_tag::TID),
         ColumnType::PgLsn => out.push(type_tag::PG_LSN),
+        ColumnType::PgSnapshot => out.push(type_tag::PG_SNAPSHOT),
+        ColumnType::TxidSnapshot => out.push(type_tag::TXID_SNAPSHOT),
         ColumnType::Bit(len) => write_optional_i32_type(out, type_tag::BIT, len),
         ColumnType::VarBit(len) => write_optional_i32_type(out, type_tag::VARBIT, len),
         ColumnType::Json => out.push(type_tag::JSON),
@@ -536,6 +551,8 @@ fn read_type_with(
         type_tag::CID => ColumnType::Cid,
         type_tag::TID => ColumnType::Tid,
         type_tag::PG_LSN => ColumnType::PgLsn,
+        type_tag::PG_SNAPSHOT => ColumnType::PgSnapshot,
+        type_tag::TXID_SNAPSHOT => ColumnType::TxidSnapshot,
         type_tag::BIT => ColumnType::Bit(read_optional_i32_type(cur)?),
         type_tag::VARBIT => ColumnType::VarBit(read_optional_i32_type(cur)?),
         type_tag::JSON => ColumnType::Json,
@@ -728,6 +745,10 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::TSVECTOR);
             write_str(out, &value.to_string());
         }
+        Datum::PgSnapshot(value) => {
+            out.push(datum_tag::PG_SNAPSHOT);
+            write_str(out, &value.to_string());
+        }
         Datum::TsQuery(value) => {
             out.push(datum_tag::TSQUERY);
             write_str(out, &value.to_string());
@@ -876,6 +897,11 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             Datum::TsVector(read_string(cur)?.parse().map_err(|error| {
                 KvError::CorruptRow(format!("invalid tsvector default: {error}"))
             })?)
+        }
+        datum_tag::PG_SNAPSHOT => {
+            Datum::PgSnapshot(Box::new(read_string(cur)?.parse().map_err(|error| {
+                KvError::CorruptRow(format!("invalid pg_snapshot default: {error}"))
+            })?))
         }
         datum_tag::TSQUERY => {
             Datum::TsQuery(read_string(cur)?.parse().map_err(|error| {

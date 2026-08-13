@@ -138,6 +138,22 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
             | ColumnType::Tid
             | ColumnType::PgLsn,
         ) => from.is_string() || to.is_string(),
+        // `pg_snapshot` and `txid_snapshot` have no `pg_cast` entry, so each
+        // reaches another type only through its text form. The pair is decided
+        // here for the same reason the family above is: without this arm they
+        // would fall into the string rules from the far side and acquire
+        // conversions PostgreSQL refuses.
+        //
+        // Relabelling one as the other is allowed, which PostgreSQL does not
+        // do. Gres holds both in one datum, so the conversion is a no-op it
+        // has no way to fail at, and refusing it would only stop a value
+        // reaching a column that already holds exactly that value.
+        (
+            ColumnType::PgSnapshot | ColumnType::TxidSnapshot,
+            ColumnType::PgSnapshot | ColumnType::TxidSnapshot,
+        ) => true,
+        (ColumnType::PgSnapshot | ColumnType::TxidSnapshot, other)
+        | (other, ColumnType::PgSnapshot | ColumnType::TxidSnapshot) => other.is_string(),
         // The network family's own casts (`pg_cast`): `cidr → inet` is
         // binary-coercible, `inet → cidr` runs `inet_to_cidr`, and the two MAC
         // widths convert both ways. Everything else in the family reaches
@@ -334,6 +350,18 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         (
             ColumnType::Bit(_) | ColumnType::VarBit(_),
             ColumnType::Bit(_) | ColumnType::VarBit(_),
+        ) => true,
+        // `pg_snapshot` and `txid_snapshot` hold one value in one datum here,
+        // so which of the two a value belongs to is the column's business and
+        // not the value's. A store between them is therefore a relabelling
+        // with nothing to convert and nothing to fail at, and it is admitted
+        // rather than reported as the mismatch it is not. `PostgreSQL` keeps
+        // them apart, having a separate representation for each; the
+        // divergence is the store, never the reported type, which stays the
+        // column's own.
+        (
+            ColumnType::PgSnapshot | ColumnType::TxidSnapshot,
+            ColumnType::PgSnapshot | ColumnType::TxidSnapshot,
         ) => true,
         _ => geometric_assignment_cast(from, to),
     }
@@ -565,6 +593,17 @@ pub fn cast_in(
         (Datum::Text(s), ColumnType::Xid8) => crate::sysid::uint64_in(s, "xid8").map(Datum::Xid8),
         (Datum::Text(s), ColumnType::Tid) => crate::sysid::Tid::parse(s).map(Datum::Tid),
         (Datum::Text(s), ColumnType::PgLsn) => crate::sysid::lsn_in(s).map(Datum::PgLsn),
+        // `pg_snapshot_in`, which `txid_snapshot_in` also is — so both cast
+        // targets run the same grammar and report the same 22P02, naming
+        // `pg_snapshot` even when `txid_snapshot` was written.
+        (Datum::Text(s), ColumnType::PgSnapshot | ColumnType::TxidSnapshot) => s
+            .parse::<crate::snapshot::PgSnapshot>()
+            .map(|snapshot| Datum::PgSnapshot(Box::new(snapshot))),
+        // Relabelling one snapshot type as the other is the identity: the two
+        // hold one value, and no `pg_cast` entry converts between them anyway.
+        (Datum::PgSnapshot(value), ColumnType::PgSnapshot | ColumnType::TxidSnapshot) => {
+            Ok(Datum::PgSnapshot(value.clone()))
+        }
         // `money`'s own conversions. `cash_numeric` divides by 100 and keeps
         // scale 2; `numeric_cash` / `int4_cash` / `int8_cash` multiply by 100
         // and report `bigint out of range` on overflow, because they delegate

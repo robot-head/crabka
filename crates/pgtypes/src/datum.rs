@@ -51,6 +51,13 @@ pub mod oids {
     pub const PG_LSN: u32 = 3220;
     /// `pg_lsn[]`.
     pub const PG_LSNARRAY: u32 = 3221;
+    /// PostgreSQL `pg_snapshot` — an exported `(xmin, xmax, xip)` triple.
+    pub const PG_SNAPSHOT: u32 = 5038;
+    /// PostgreSQL `txid_snapshot` — `pg_snapshot`'s deprecated predecessor. It
+    /// is a separate type with a separate oid, and it shares every input and
+    /// output function with `pg_snapshot`, so the two hold the same values and
+    /// report the same errors.
+    pub const TXID_SNAPSHOT: u32 = 2970;
     pub const OIDVECTOR: u32 = 30;
     /// PostgreSQL `int2vector` — a zero-based `int2` array with the same
     /// space-separated text form `oidvector` uses.
@@ -412,6 +419,10 @@ impl ElemType {
             | ColumnType::Cid
             | ColumnType::Tid
             | ColumnType::PgLsn
+            // The two snapshot types have array oids upstream, and no element
+            // the array encoder can name here either.
+            | ColumnType::PgSnapshot
+            | ColumnType::TxidSnapshot
             | ColumnType::Money
             | ColumnType::Bit(_)
             | ColumnType::VarBit(_)
@@ -833,6 +844,17 @@ pub enum ColumnType {
     /// PostgreSQL `pg_lsn` (OID 3220) — a 64-bit log sequence number written
     /// `X/Y` in hexadecimal.
     PgLsn,
+    /// PostgreSQL `pg_snapshot` (OID 5038) — an exported transaction snapshot,
+    /// written `xmin:xmax:xip_list`. It has no operators at all, not even
+    /// equality: every question about one is asked through a function.
+    PgSnapshot,
+    /// PostgreSQL `txid_snapshot` (OID 2970) — the deprecated predecessor of
+    /// `pg_snapshot`. It is a distinct type with its own oid, so a column
+    /// declared with it reports 2970 and a cast to it is labelled
+    /// `txid_snapshot`. It holds the same values, because every one of its
+    /// input, output and accessor functions is `pg_snapshot`'s under another
+    /// name — which is also why its errors name `pg_snapshot`.
+    TxidSnapshot,
     /// PostgreSQL `money` (OID 790) — a signed 64-bit count of minor currency
     /// units, rendered through `lc_monetary`.
     Money,
@@ -971,6 +993,8 @@ impl ColumnType {
             "cid" => Some(ColumnType::Cid),
             "tid" => Some(ColumnType::Tid),
             "pg_lsn" => Some(ColumnType::PgLsn),
+            "pg_snapshot" => Some(ColumnType::PgSnapshot),
+            "txid_snapshot" => Some(ColumnType::TxidSnapshot),
             // `name` (OID 19) is a pragmatic alias for `text`, the same shape of
             // divergence as `oid` → `int4` above: the catalog's name-valued
             // columns are already Text, so `'x'::name` and a `name[]` column
@@ -1158,6 +1182,8 @@ impl ColumnType {
             ColumnType::Cid => oids::CID,
             ColumnType::Tid => oids::TID,
             ColumnType::PgLsn => oids::PG_LSN,
+            ColumnType::PgSnapshot => oids::PG_SNAPSHOT,
+            ColumnType::TxidSnapshot => oids::TXID_SNAPSHOT,
             ColumnType::Money => oids::MONEY,
             ColumnType::Bit(_) => oids::BIT,
             ColumnType::VarBit(_) => oids::VARBIT,
@@ -1232,6 +1258,8 @@ impl ColumnType {
             ColumnType::Cid => "cid",
             ColumnType::Tid => "tid",
             ColumnType::PgLsn => "pg_lsn",
+            ColumnType::PgSnapshot => "pg_snapshot",
+            ColumnType::TxidSnapshot => "txid_snapshot",
             ColumnType::Money => "money",
             ColumnType::Bit(_) => "bit",
             ColumnType::VarBit(_) => "bit varying",
@@ -1302,6 +1330,8 @@ impl ColumnType {
             ColumnType::Oid | ColumnType::Xid | ColumnType::Cid => 4,
             ColumnType::Tid => 6,
             ColumnType::Xid8 | ColumnType::PgLsn => 8,
+            // Both snapshot types are varlena: the running list has no bound.
+            ColumnType::PgSnapshot | ColumnType::TxidSnapshot => -1,
             // `money` is a pass-by-value int64; the two bit types are varlena.
             ColumnType::Money => 8,
             ColumnType::Bit(_) | ColumnType::VarBit(_) => -1,
@@ -1501,6 +1531,12 @@ pub enum Datum {
     Tid(crate::sysid::Tid),
     /// PostgreSQL `pg_lsn`, a 64-bit log position.
     PgLsn(u64),
+    /// PostgreSQL `pg_snapshot` — and `txid_snapshot`, which is the same value
+    /// under an older name. One variant serves both because the two types
+    /// share every input, output and accessor function; which SQL type a
+    /// particular value is declared as is carried by the column, not by the
+    /// datum, and [`Datum::column_type`] therefore reports the modern name.
+    PgSnapshot(Box<crate::snapshot::PgSnapshot>),
 }
 
 /// A PostgreSQL range value.
@@ -1922,6 +1958,7 @@ impl PartialEq for Datum {
             | (Datum::Cid(a), Datum::Cid(b)) => a == b,
             (Datum::Xid8(a), Datum::Xid8(b)) | (Datum::PgLsn(a), Datum::PgLsn(b)) => a == b,
             (Datum::Tid(a), Datum::Tid(b)) => a == b,
+            (Datum::PgSnapshot(a), Datum::PgSnapshot(b)) => a == b,
             (Datum::Range(a), Datum::Range(b)) => a == b,
             (Datum::Multirange(a), Datum::Multirange(b)) => a == b,
             _ => false,
@@ -2009,6 +2046,7 @@ impl std::hash::Hash for Datum {
             Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => value.hash(state),
             Datum::Xid8(value) | Datum::PgLsn(value) => value.hash(state),
             Datum::Tid(value) => value.hash(state),
+            Datum::PgSnapshot(value) => value.hash(state),
             Datum::Range(range) => range.hash(state),
             Datum::Multirange(multirange) => multirange.hash(state),
         }
@@ -2088,6 +2126,7 @@ impl Datum {
             Datum::Cid(_) => Some(ColumnType::Cid),
             Datum::Tid(_) => Some(ColumnType::Tid),
             Datum::PgLsn(_) => Some(ColumnType::PgLsn),
+            Datum::PgSnapshot(_) => Some(ColumnType::PgSnapshot),
             Datum::Range(range) => Some(range.column_type()),
             Datum::Multirange(multirange) => Some(multirange.column_type()),
         }

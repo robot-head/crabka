@@ -7477,7 +7477,8 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Xid8(_)
         | Datum::Cid(_)
         | Datum::Tid(_)
-        | Datum::PgLsn(_) => None,
+        | Datum::PgLsn(_)
+        | Datum::PgSnapshot(_) => None,
     }
 }
 

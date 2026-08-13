@@ -130,6 +130,21 @@ mod tag {
     /// type's range is not valid UTF-8 to store as text in the first place.
     /// Append-only — no version bump.
     pub const INTERNAL_CHAR: u8 = 46;
+    /// `PostgreSQL` `pg_snapshot` and `txid_snapshot` (`[47]` then a
+    /// length-prefixed UTF-8 string), stored in the canonical `xmin:xmax:xip`
+    /// text form the way [`TSVECTOR`] and [`TSQUERY`] store theirs.
+    ///
+    /// The text form is lossless here, unlike for most types, because it *is*
+    /// the canonical form: the value's running list is already sorted, already
+    /// de-duplicated and already clipped to the window, so printing and
+    /// re-reading it recovers the same triple.
+    ///
+    /// One tag covers both SQL types, as one datum holds both. Which of the
+    /// two a stored value belongs to is the column's declared type, not the
+    /// value's, so the tag has no discriminator to carry.
+    ///
+    /// Append-only — no version bump.
+    pub const PG_SNAPSHOT: u8 = 47;
 }
 
 /// Encodes one row in the current storage format.
@@ -308,6 +323,14 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             }
             Datum::TsVector(vector) => encode_search(tag::TSVECTOR, &vector.to_string(), out),
             Datum::TsQuery(query) => encode_search(tag::TSQUERY, &query.to_string(), out),
+            Datum::PgSnapshot(snapshot) => {
+                push_tagged_bytes(
+                    out,
+                    tag::PG_SNAPSHOT,
+                    snapshot.to_string().as_bytes(),
+                    "pg_snapshot column",
+                );
+            }
             Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_) => {
                 encode_network(d, out);
             }
@@ -751,6 +774,10 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             .parse()
             .map(Datum::TsQuery)
             .map_err(|error| KvError::CorruptRow(format!("corrupt tsquery: {error}")))?,
+        tag::PG_SNAPSHOT => take_text(cur, "pg_snapshot")?
+            .parse()
+            .map(|snapshot| Datum::PgSnapshot(Box::new(snapshot)))
+            .map_err(|error| KvError::CorruptRow(format!("corrupt pg_snapshot: {error}")))?,
         tag::INET => {
             let is_cidr = take_u8(cur)? != 0;
             let family = crabka_pgtypes::InetFamily::from_wire_code(take_u8(cur)?)

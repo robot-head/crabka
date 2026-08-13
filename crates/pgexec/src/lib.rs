@@ -111,6 +111,7 @@ mod search_path;
 mod seq;
 mod session;
 mod setops;
+mod snapshot_fn;
 mod sql92;
 mod srf;
 mod string_fn;
@@ -2085,6 +2086,10 @@ impl SqlEngine {
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            // A scattered write carries no transaction of its own to export,
+            // so `pg_current_xact_id()` in one refuses for the same reason
+            // `pg_notify` above does.
+            txn: None,
         };
         crate::exec::execute_timestamp_write(
             self.catalog_kv.as_ref(),

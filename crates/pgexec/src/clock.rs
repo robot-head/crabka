@@ -111,6 +111,47 @@ pub struct EvalCtx {
     pub(crate) notify: Option<Arc<Mutex<crate::session::NotifyPending>>>,
     pub(crate) transition_relations: Option<Arc<Mutex<HashMap<String, TransitionRelation>>>>,
     pub(crate) event_trigger: Option<Arc<EventTriggerContext>>,
+    /// The session's transaction identity, for the functions that export it.
+    ///
+    /// `None` outside a SQL session — in a planning context or a unit test —
+    /// where `pg_current_xact_id()` and its family report 0A000 rather than
+    /// inventing a transaction that is not running.
+    pub(crate) txn: Option<Arc<TxnRuntime>>,
+}
+
+/// The transaction state `pg_current_xact_id()`, `pg_current_snapshot()` and
+/// `pg_xact_status()` read.
+///
+/// It is bundled behind one `Option<Arc<…>>` for the same reason
+/// [`SequenceRuntime`] is: the four pieces are acquired together or not at all,
+/// and every context that has none of them must refuse rather than guess.
+pub(crate) struct TxnRuntime {
+    /// The statement's read snapshot, exactly as the session took it — the
+    /// analogue of `GetActiveSnapshot()`. Under REPEATABLE READ this is the
+    /// snapshot fixed at `BEGIN`, which is what makes `pg_current_snapshot()`
+    /// stable across the block.
+    ///
+    /// `None` where the session holds no transaction and so took no snapshot.
+    /// A fresh one is then read from `procarray` on demand rather than eagerly,
+    /// so building a context costs no lock on the registry every session
+    /// shares.
+    pub(crate) snapshot: Option<crabka_pgmvcc::visibility::Snapshot>,
+    /// The transaction's own xid, if the transaction has already written and
+    /// so already has one. `None` is exactly what
+    /// `pg_current_xact_id_if_assigned()` reports as NULL.
+    pub(crate) own_xid: Option<u64>,
+    /// The running-transaction registry, so `pg_current_xact_id()` can assign
+    /// an xid to a transaction that has not written, and `pg_xact_status()`
+    /// can tell a running transaction from a lost one.
+    pub(crate) procarray: Arc<crate::procarray::ProcArray>,
+    /// An xid this statement's evaluation assigned, for the session to adopt.
+    ///
+    /// Expression evaluation holds the context by shared reference and cannot
+    /// write the transaction's own xid slot, so it stages the assignment here
+    /// and [`crate::session::SqlSession`] moves it across. This is the seam
+    /// [`SequenceRuntime::pending`] gives `nextval`, and it exists for the
+    /// same reason.
+    pub(crate) assigned: Arc<Mutex<Option<u64>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +245,19 @@ impl EvalCtx {
         self.sequence.as_ref().map(|runtime| runtime.data.as_ref())
     }
 
+    /// The session's transaction identity, or the 0A000 every member of the
+    /// transaction-id family reports where there is no session behind the
+    /// evaluation.
+    ///
+    /// # Errors
+    ///
+    /// 0A000 naming the function the caller was asked for.
+    pub(crate) fn txn(&self, what: &str) -> Result<&TxnRuntime, crate::error::ExecError> {
+        self.txn.as_deref().ok_or_else(|| {
+            crate::error::ExecError::Unsupported(format!("{what} requires a SQL session"))
+        })
+    }
+
     /// The scope an unqualified relation name resolves against.
     pub(crate) fn resolution(&self) -> &crate::relname::ResolutionScope {
         self.resolution
@@ -271,6 +325,7 @@ impl EvalCtx {
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            txn: None,
         }
     }
 }
