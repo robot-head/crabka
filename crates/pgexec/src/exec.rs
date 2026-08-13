@@ -31365,28 +31365,23 @@ mod tests {
 
     /// A cast gres cannot perform is refused outright rather than recorded and
     /// left inert, which is the difference between an unsupported feature and a
-    /// catalog that lies.
+    /// catalog that lies. `WITH FUNCTION` is the one left: it needs the cast
+    /// path to call a routine, which the evaluator has no seam for.
     #[tokio::test]
     async fn a_cast_gres_cannot_perform_is_refused_not_recorded() {
         use assert2::assert;
         let engine = SqlEngine::new();
         let mut session = engine.connect();
-        for sql in [
-            "CREATE CAST (int4 AS text) WITH FUNCTION int4out(int4)",
-            "CREATE CAST (int4 AS text) WITH INOUT",
-        ] {
-            assert!(sqlstate_of(&mut session, sql).await == "0A000", "{sql}");
-            // Nothing was written, so the pair is still free.
-            assert!(
-                sqlstate_of(&mut session, "DROP CAST (int4 AS text)").await == "42704",
-                "{sql}"
-            );
-        }
+        let sql = "CREATE CAST (int4 AS text) WITH FUNCTION int4out(int4)";
+        assert!(sqlstate_of(&mut session, sql).await == "0A000");
+        // Nothing was written, so the pair is still free.
+        assert!(sqlstate_of(&mut session, "DROP CAST (int4 AS text)").await == "42704");
     }
 
     /// `CREATE TYPE name (…)` needs both I/O functions, and gres additionally
-    /// needs a `LIKE` — it holds a base type's values in the representation
-    /// type's form and has no opaque byte image to fall back on.
+    /// needs a representation it can name — from `LIKE`, or from a layout it
+    /// carries a built-in for. A layout it carries nothing for is 0A000 rather
+    /// than a type that exists and cannot hold anything.
     #[tokio::test]
     async fn a_base_type_needs_its_io_pair_and_a_representation() {
         use assert2::assert;
@@ -31410,20 +31405,70 @@ mod tests {
         let (state, message) = error_of(&mut session, "CREATE TYPE t (input = t_in)").await;
         assert!(state == "42P17");
         assert!(message == "type output function must be specified");
-        // No `LIKE`, and an `INTERNALLENGTH` gres has no value for, are both
-        // 0A000 rather than a type that exists and cannot hold anything.
-        assert!(
-            sqlstate_of(&mut session, "CREATE TYPE t (input = t_in, output = t_out)").await
-                == "0A000"
-        );
+        // `widget`'s 24 bytes and `city_budget`'s 16 name a layout gres carries
+        // no built-in for, and stay refused.
         assert!(
             sqlstate_of(
                 &mut session,
-                "CREATE TYPE t (input = t_in, output = t_out, internallength = 24)"
+                "CREATE TYPE t (input = t_in, output = t_out, internallength = 24, \
+                 alignment = double)"
             )
             .await
                 == "0A000"
         );
+        // `LIKE` and the layout triple are two spellings of one thing, and gres
+        // has no `typbyval`/`typalign` of its own to apply one over the other.
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "CREATE TYPE t (input = t_in, output = t_out, like = float4, alignment = int4)"
+            )
+            .await
+                == "0A000"
+        );
+        // A malformed layout is 22023, as `defGetTypeLength` and `DefineType`
+        // have it, and not the 0A000 of one gres merely cannot carry.
+        let (state, message) = error_of(
+            &mut session,
+            "CREATE TYPE t (input = t_in, output = t_out, alignment = quadruple)",
+        )
+        .await;
+        assert!(state == "22023");
+        assert!(message == "alignment \"quadruple\" not recognized");
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "CREATE TYPE t (input = t_in, output = t_out, internallength = 0)"
+            )
+            .await
+                == "22023"
+        );
+        // A layout `TypeCreate` itself rejects is 42P17 with PostgreSQL's own
+        // message, which keeps it apart from the 0A000 that says only that gres
+        // has no carrier.
+        let (state, message) = error_of(
+            &mut session,
+            "CREATE TYPE t (input = t_in, output = t_out, internallength = 3, passedbyvalue)",
+        )
+        .await;
+        assert!(state == "42P17");
+        assert!(message == "internal size 3 is invalid for passed-by-value type");
+        let (state, message) = error_of(
+            &mut session,
+            "CREATE TYPE t (input = t_in, output = t_out, internallength = 4, passedbyvalue, \
+             alignment = double)",
+        )
+        .await;
+        assert!(state == "42P17");
+        assert!(message == "alignment \"d\" is invalid for passed-by-value type of size 4");
+        let (state, message) = error_of(
+            &mut session,
+            "CREATE TYPE t (input = t_in, output = t_out, internallength = variable, \
+             alignment = char)",
+        )
+        .await;
+        assert!(state == "42P17");
+        assert!(message == "alignment \"c\" is invalid for variable-length type");
         // An I/O function that does not exist is 42883.
         assert!(
             sqlstate_of(
@@ -31432,6 +31477,161 @@ mod tests {
             )
             .await
                 == "42883"
+        );
+        // `DefineType`'s own defaults are variable length, by reference, int
+        // alignment — a varlena, which gres carries as `text`.
+        run_s(&mut session, "CREATE TYPE t (input = t_in, output = t_out)").await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT typlen, typtype FROM pg_type WHERE typname = 't'"
+            )
+            .await
+                == vec![text_row(&["-1", "b"])]
+        );
+    }
+
+    /// `INTERNALLENGTH`/`PASSEDBYVALUE`/`ALIGNMENT` describe the same layout
+    /// `LIKE` copies, so a type built either way is the same type: it carries
+    /// its values in the built-in of that layout, and a `WITHOUT FUNCTION` cast
+    /// to that built-in is the pass-through `pg_cast` says it is.
+    #[tokio::test]
+    async fn a_base_type_takes_its_layout_written_out() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TYPE vt").await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION vt_in(cstring) RETURNS vt LANGUAGE internal AS 'textin'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION vt_out(vt) RETURNS cstring LANGUAGE internal AS 'textout'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE TYPE vt (internallength = variable, input = vt_in, output = vt_out, \
+             alignment = int4)",
+        )
+        .await;
+        // A varlena pair needs no reinterpretation, so the cast is recorded and
+        // the value passes through unchanged.
+        run_s(&mut session, "CREATE CAST (text AS vt) WITHOUT FUNCTION").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT 'foo'::text::vt").await == vec![text_row(&["foo"])]
+        );
+
+        run_s(&mut session, "CREATE TYPE ft").await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION ft_in(cstring) RETURNS ft LANGUAGE internal AS 'int4in'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION ft_out(ft) RETURNS cstring LANGUAGE internal AS 'int4out'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE TYPE ft (internallength = 4, input = ft_in, output = ft_out, \
+             alignment = int4, passedbyvalue)",
+        )
+        .await;
+        run_s(&mut session, "CREATE CAST (int4 AS ft) WITHOUT FUNCTION").await;
+        assert!(text_rows_of(&mut session, "SELECT 42::int4::ft").await == vec![text_row(&["42"])]);
+        // `typlen` is the layout's own, not the carrier's by coincidence: the
+        // 4-byte type reports 4 and the varlena reports -1.
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT typname, typlen, typtype FROM pg_type \
+                 WHERE typname IN ('vt', 'ft') ORDER BY typname"
+            )
+            .await
+                == vec![text_row(&["ft", "4", "b"]), text_row(&["vt", "-1", "b"])]
+        );
+    }
+
+    /// `CREATE CAST … WITH INOUT` is `typoutput` then `typinput`: the source's
+    /// text form, read as the target. It needs no shared layout, which is what
+    /// separates it from `WITHOUT FUNCTION` — `integer` and a varlena base type
+    /// have nothing physical in common and convert here anyway.
+    #[tokio::test]
+    async fn an_inout_cast_converts_through_the_text_form() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TYPE vt").await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION vt_in(cstring) RETURNS vt LANGUAGE internal AS 'textin'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION vt_out(vt) RETURNS cstring LANGUAGE internal AS 'textout'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE TYPE vt (internallength = variable, input = vt_in, output = vt_out, \
+             alignment = int4)",
+        )
+        .await;
+        // A binary cast over this pair is refused for the width mismatch, and
+        // an I/O one is recorded for the same pair.
+        assert!(
+            sqlstate_of(&mut session, "CREATE CAST (int4 AS vt) WITHOUT FUNCTION").await == "42P17"
+        );
+        run_s(&mut session, "CREATE CAST (int4 AS vt) WITH INOUT").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT 1234::int4::vt").await == vec![text_row(&["1234"])]
+        );
+        assert!(
+            text_rows_of(&mut session, "SELECT (NULL::int4::vt) IS NULL").await
+                == vec![text_row(&["t"])]
+        );
+        // A second cast over the same pair is 42710 whatever its method.
+        assert!(sqlstate_of(&mut session, "CREATE CAST (int4 AS vt) WITH INOUT").await == "42710");
+        run_s(&mut session, "DROP CAST (int4 AS vt)").await;
+        assert!(sqlstate_of(&mut session, "SELECT 1234::int4::vt").await == "42846");
+
+        // The target's own text input is what reads the form, so a value the
+        // target cannot parse is an error and not some other value.
+        run_s(&mut session, "CREATE TYPE it").await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION it_in(cstring) RETURNS it LANGUAGE internal AS 'int4in'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE FUNCTION it_out(it) RETURNS cstring LANGUAGE internal AS 'int4out'",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE TYPE it (internallength = 4, input = it_in, output = it_out, \
+             alignment = int4, passedbyvalue)",
+        )
+        .await;
+        run_s(&mut session, "CREATE CAST (text AS it) WITH INOUT").await;
+        assert!(
+            text_rows_of(&mut session, "SELECT '42'::text::it").await == vec![text_row(&["42"])]
+        );
+        assert!(sqlstate_of(&mut session, "SELECT 'abc'::text::it").await == "22P02");
+        // `WITH FUNCTION` stays refused: the cast path cannot call a routine.
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "CREATE CAST (it AS text) WITH FUNCTION it_out(it)"
+            )
+            .await
+                == "0A000"
         );
     }
 

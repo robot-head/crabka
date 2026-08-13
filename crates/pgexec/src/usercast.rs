@@ -6,12 +6,18 @@
 //! consults this module first and only falls through to the built-in rules when
 //! no user cast covers the pair.
 //!
-//! Only `WITHOUT FUNCTION` is implemented. That is the case the type system can
-//! honour truthfully — a binary-coercible pair is two names for one byte
-//! image, and gres can perform it by re-reading the source's `send` bytes as
-//! the target. `WITH FUNCTION` and `WITH INOUT` would need to call a routine
-//! from inside the cast path, which the evaluator has no seam for; both are
-//! refused rather than recorded and quietly ignored.
+//! `WITHOUT FUNCTION` and `WITH INOUT` are the two the type system can honour
+//! truthfully. A binary-coercible pair is two names for one byte image, and
+//! gres performs it by re-reading the source's `send` bytes as the target. An
+//! I/O conversion is the source's text form parsed as the target, which is what
+//! gres would run for the declared `typoutput`/`typinput` pair anyway: a base
+//! type's values live in its representation type's `Datum`, and it is that
+//! type's I/O that renders and reads them. Where the declared input function
+//! would have read a form the representation type does not, the conversion
+//! fails loudly rather than producing some other value.
+//!
+//! `WITH FUNCTION` is refused. It needs the cast path to call a routine, which
+//! the evaluator has no seam for, and recording the cast would leave it inert.
 
 use crabka_pgcatalog::UserCast;
 use crabka_pgkv::{Kv, WriteOp};
@@ -45,6 +51,11 @@ pub(crate) fn publish(kv: &dyn Kv) -> Result<(), ExecError> {
         .map(|cast| crabka_pgtypes::usercast::DeclaredCast {
             source: cast.source,
             target: cast.target,
+            method: if cast.method == 'i' {
+                crabka_pgtypes::usercast::CastMethod::InOut
+            } else {
+                crabka_pgtypes::usercast::CastMethod::Binary
+            },
         });
     crabka_pgtypes::usercast::publish(declared);
     Ok(())
@@ -94,6 +105,46 @@ pub(crate) fn coerce_binary(
     crate::session::decode_binary_value(&bytes, to, time_zone).map_err(ExecError::Remote)
 }
 
+/// Perform an I/O conversion: render the value in the source's text form and
+/// read it back as the target's.
+///
+/// This is `COERCION_METHOD_INOUT` — `typoutput` then `typinput`. gres runs the
+/// *representation* type's pair rather than the routines the type declared,
+/// which is the same substitution it makes everywhere a base type's value is
+/// rendered, and exact whenever the declared pair is the representation type's
+/// (`textin`/`textout` on a varlena base type is the case `create_cast` builds).
+/// Where it is not, the parse fails and says so.
+///
+/// # Errors
+///
+/// Whatever the target's text input reports for a form it cannot read, and
+/// 22021 if the source's text form is not valid UTF-8.
+pub(crate) fn coerce_inout(
+    value: &Datum,
+    target: ColumnType,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    if value.is_null() {
+        return Ok(Datum::Null);
+    }
+    let rendered = crabka_pgtypes::encoding::encode_text_in(value, ctx.output_style());
+    let rendered = String::from_utf8(rendered).map_err(|_| {
+        ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "22021",
+            "cast source value has no valid text form".to_string(),
+        ))
+    })?;
+    let converted = crate::eval::cast_value_in(
+        &Datum::Text(rendered),
+        physical_type(target),
+        ctx.output_style(),
+    )?;
+    // A domain target keeps its constraints: `cast_value_in` converts to the
+    // base and stops there, exactly as it does on the built-in cast path.
+    crate::usertype::check_domain(target, &converted, ctx)?;
+    Ok(converted)
+}
+
 /// Apply a user-declared cast of `expr` to `target`, or `None` when the pair
 /// carries none and the built-in rules should have it.
 ///
@@ -118,24 +169,31 @@ pub(crate) fn coerce_declared(
     let Ok(source) = crate::eval::infer_type(expr, scope) else {
         return Ok(None);
     };
-    if !crabka_pgtypes::usercast::is_declared(source.oid(), target.oid()) {
+    let Some(method) = crabka_pgtypes::usercast::declared_method(source.oid(), target.oid()) else {
         return Ok(None);
+    };
+    match method {
+        crabka_pgtypes::usercast::CastMethod::Binary => {
+            coerce_binary(value, source, target, &ctx.time_zone).map(Some)
+        }
+        crabka_pgtypes::usercast::CastMethod::InOut => coerce_inout(value, target, ctx).map(Some),
     }
-    coerce_binary(value, source, target, &ctx.time_zone).map(Some)
 }
 
-/// `CREATE CAST (source AS target) WITHOUT FUNCTION`.
+/// `CREATE CAST (source AS target) { WITHOUT FUNCTION | WITH INOUT }`.
 ///
-/// Mirrors `CreateCast`'s `WITHOUT FUNCTION` branch: the two types must share
-/// a physical representation, and neither may be a container type, an enum or
-/// a domain — all of those embed an oid or carry constraints that a
-/// pass-through would silently discard. See [`reject_non_coercible`] for where
-/// gres's physical test differs from PostgreSQL's.
+/// Mirrors `CreateCast`'s branches. `WITHOUT FUNCTION` requires the two types
+/// to share a physical representation, and neither may be a container type, an
+/// enum or a domain — all of those embed an oid or carry constraints that a
+/// pass-through would silently discard; see [`reject_non_coercible`] for where
+/// gres's physical test differs from PostgreSQL's. `WITH INOUT` goes through
+/// the text form and so carries none of those requirements, exactly as
+/// `CreateCast` has it.
 ///
 /// # Errors
 ///
-/// 42710 when the pair already has a cast, and 42P17 for every physical
-/// incompatibility PostgreSQL rejects.
+/// 42710 when the pair already has a cast, 42P17 for every physical
+/// incompatibility PostgreSQL rejects, and 0A000 for `WITH FUNCTION`.
 pub(crate) fn create_cast(
     kv: &dyn Kv,
     source: ColumnType,
@@ -143,11 +201,12 @@ pub(crate) fn create_cast(
     method: &CastMethod,
     context: CastContext,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
-    match method {
-        CastMethod::WithoutFunction => {}
-        // Recording either of these would be a promise the cast path cannot
-        // keep: it has no seam for calling a routine mid-conversion, so the
-        // cast would exist in `pg_cast` and do nothing at the point of use.
+    let recorded = match method {
+        CastMethod::WithoutFunction => 'b',
+        CastMethod::WithInout => 'i',
+        // Recording this one would be a promise the cast path cannot keep: it
+        // has no seam for calling a routine mid-conversion, so the cast would
+        // exist in `pg_cast` and do nothing at the point of use.
         CastMethod::WithFunction { .. } => {
             return Err(ExecError::Unsupported(
                 "CREATE CAST … WITH FUNCTION is not supported: the cast path cannot call a \
@@ -155,20 +214,17 @@ pub(crate) fn create_cast(
                     .into(),
             ));
         }
-        CastMethod::WithInout => {
-            return Err(ExecError::Unsupported(
-                "CREATE CAST … WITH INOUT is not supported: it needs the source's output and \
-                 the target's input function, which the cast path cannot call"
-                    .into(),
-            ));
-        }
-    }
+    };
     if source == target {
         return Err(ExecError::InvalidObjectDefinition(
             "source data type and target data type are the same".into(),
         ));
     }
-    reject_non_coercible(source, target)?;
+    // `CreateCast` applies the physical checks to `WITHOUT FUNCTION` alone. An
+    // I/O conversion goes through the text form and needs no shared layout.
+    if recorded == 'b' {
+        reject_non_coercible(source, target)?;
+    }
     if crabka_pgcatalog::get_user_cast(kv, source.oid(), target.oid())?.is_some() {
         return Err(ExecError::DuplicateObject(format!(
             "cast from type {} to type {} already exists",
@@ -181,7 +237,7 @@ pub(crate) fn create_cast(
         oid: 0,
         source: source.oid(),
         target: target.oid(),
-        method: 'b',
+        method: recorded,
         context: match context {
             CastContext::Explicit => 'e',
             CastContext::Assignment => 'a',
@@ -235,11 +291,12 @@ pub(crate) fn drop_cast(
 /// that agree on width and disagree on alignment — `uuid` and `point` are the
 /// pair that exists. It refuses nothing PostgreSQL accepts.
 ///
-/// The last check has no PostgreSQL counterpart: a pair can be physically
-/// compatible and still be one gres cannot *perform*, because it holds values
-/// as typed `Datum`s and reinterprets them through the binary codec. Refusing
-/// at definition time is what keeps `pg_cast` from carrying a row the cast path
-/// would then decline to honour.
+/// The last check has no PostgreSQL counterpart: a pair that differ in their
+/// physical type can be layout-compatible and still be one gres cannot
+/// *perform*, because it holds values as typed `Datum`s and reinterprets them
+/// through the binary codec. Refusing at definition time is what keeps `pg_cast`
+/// from carrying a row the cast path would then decline to honour. A pair that
+/// share a physical type needs no reinterpretation and skips the check.
 fn reject_non_coercible(source: ColumnType, target: ColumnType) -> Result<(), ExecError> {
     let refuse = |message: &str| Err(ExecError::InvalidObjectDefinition(message.to_string()));
     if source.type_size() != target.type_size() {
@@ -267,6 +324,13 @@ fn reject_non_coercible(source: ColumnType, target: ColumnType) -> Result<(), Ex
         return refuse("domain data types must not be marked binary-compatible");
     }
     let (from, to) = (physical_type(source), physical_type(target));
+    // Two names for one physical type is the pass-through case: `coerce_binary`
+    // hands the `Datum` back untouched, so there is no reinterpretation to be
+    // capable of. That is the whole of `text → casttesttype (LIKE = text)`, and
+    // it has to be settled before the width probe, which a varlena cannot pass.
+    if from == to {
+        return Ok(());
+    }
     if !decodes_fixed_width(from) || !decodes_fixed_width(to) {
         return Err(ExecError::Unsupported(format!(
             "a binary-coercible cast between {} and {} is not supported: gres reinterprets a \

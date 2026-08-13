@@ -136,19 +136,132 @@ pub fn create_domain(
     register(kv, name, UserTypeBody::Domain(body), "CREATE DOMAIN")
 }
 
-/// `CREATE TYPE name (INPUT = …, OUTPUT = …, LIKE = …)` — a user-defined base
-/// type, completing a shell of the same name when one is already there.
+/// The physical layout `DefineType` records for a base type: `pg_type`'s
+/// `typlen`, `typbyval` and `typalign`.
 ///
-/// gres represents a base type's values in the `Datum` of the type `LIKE`
-/// names, so `LIKE` is *required* here even though PostgreSQL treats it as one
-/// way of several to describe the layout. `INTERNALLENGTH = 24` with no `LIKE`
-/// describes a byte image gres has no value for, and inventing an opaque one
-/// would buy a `CREATE TYPE` that succeeds and a first `SELECT` that cannot.
+/// `LIKE = T` reads all three off `T`; `INTERNALLENGTH`, `PASSEDBYVALUE` and
+/// `ALIGNMENT` write them directly. The two spellings carry the same
+/// information, which is why gres can honour either — see [`carrier_for`] for
+/// the part that is gres's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Layout {
+    /// `pg_type.typlen`: a positive byte count, or -1 for a varlena.
+    length: i32,
+    /// `pg_type.typbyval`.
+    by_value: bool,
+    /// `pg_type.typalign`: `c`, `s`, `i` or `d`.
+    alignment: char,
+}
+
+impl Default for Layout {
+    /// `DefineType`'s own defaults: variable length, by reference, `int`
+    /// alignment. A `CREATE TYPE` that names neither `LIKE` nor a layout option
+    /// gets a varlena, exactly as PostgreSQL does.
+    fn default() -> Self {
+        Self {
+            length: -1,
+            by_value: false,
+            alignment: 'i',
+        }
+    }
+}
+
+impl Layout {
+    /// `TypeCreate`'s consistency rules, which decide the layouts PostgreSQL
+    /// itself rejects.
+    ///
+    /// Running them keeps the two refusals apart: a layout that fails here is
+    /// 42P17 and would fail on PostgreSQL too, and only a layout that passes
+    /// here and has no [`carrier_for`] entry is the 0A000 that says gres cannot
+    /// carry it.
+    fn validate(self) -> Result<(), ExecError> {
+        let refuse = |message: String| Err(ExecError::InvalidObjectDefinition(message));
+        let alignment = self.alignment;
+        let length = self.length;
+        if self.by_value {
+            // `sizeof(Datum)` is 8 on every target gres builds for, so the
+            // 8-byte arm is unconditional here where PostgreSQL guards it.
+            let wanted = match length {
+                1 => 'c',
+                2 => 's',
+                4 => 'i',
+                8 => 'd',
+                _ => {
+                    return refuse(format!(
+                        "internal size {length} is invalid for passed-by-value type"
+                    ));
+                }
+            };
+            if alignment != wanted {
+                return refuse(format!(
+                    "alignment \"{alignment}\" is invalid for passed-by-value type of size {length}"
+                ));
+            }
+        } else if length == -1 && !matches!(alignment, 'i' | 'd') {
+            return refuse(format!(
+                "alignment \"{alignment}\" is invalid for variable-length type"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for Layout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let length = if self.length < 0 {
+            "variable".to_string()
+        } else {
+            format!("{} bytes", self.length)
+        };
+        let passing = if self.by_value {
+            "by value"
+        } else {
+            "by reference"
+        };
+        write!(f, "{length}, {passing}, {} alignment", self.alignment)
+    }
+}
+
+/// The built-in type gres carries a base type's values in, for a layout given
+/// as `INTERNALLENGTH`/`PASSEDBYVALUE`/`ALIGNMENT` rather than as `LIKE`.
+///
+/// gres holds a base type's value as a `Datum` of a *named* type, so a layout
+/// has to be resolved to one. PostgreSQL's layout triple names an equivalence
+/// class — `(4, by value, int)` is `int4`, `float4`, `oid` and `date` alike —
+/// and every member of that class is by PostgreSQL's own definition the same
+/// bytes, which is what makes picking one of them sound. The choice shows only
+/// where gres renders a value in text, and there it is already the
+/// representation type that decides, for a `LIKE`-built type too.
+///
+/// A layout gres has no member for — `widget`'s 24 bytes, `city_budget`'s 16 —
+/// stays refused. There is no carrier to name, and a type whose declared width
+/// the engine quietly ignored would be worse than the error.
+fn carrier_for(layout: Layout) -> Option<ColumnType> {
+    match (layout.length, layout.by_value, layout.alignment) {
+        (-1, false, 'i') => Some(ColumnType::Text),
+        (1, true, 'c') => Some(ColumnType::InternalChar),
+        (2, true, 's') => Some(ColumnType::Int2),
+        (4, true, 'i') => Some(ColumnType::Int4),
+        (8, true, 'd') => Some(ColumnType::Int8),
+        _ => None,
+    }
+}
+
+/// `CREATE TYPE name (INPUT = …, OUTPUT = …, …)` — a user-defined base type,
+/// completing a shell of the same name when one is already there.
+///
+/// gres represents a base type's values in the `Datum` of a named built-in.
+/// `LIKE = T` names it outright. The layout triple names it by description, and
+/// [`carrier_for`] resolves the description; a description with no gres carrier
+/// is refused rather than approximated. The two spellings are not combinable
+/// here, because gres models no `typbyval`/`typalign` of its own built-ins and
+/// so cannot apply one option as an override of what `LIKE` supplied.
 ///
 /// # Errors
 ///
 /// 42P17 when `INPUT` or `OUTPUT` is missing, 42710 when the name is taken by
-/// a defined type, and 0A000 for an option gres cannot honour.
+/// a defined type, 22023 for a malformed `ALIGNMENT` or `INTERNALLENGTH`, and
+/// 0A000 for an option or a layout gres cannot honour.
 fn create_base_type(
     kv: &dyn Kv,
     name: &RelationName,
@@ -156,26 +269,41 @@ fn create_base_type(
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
     let mut input = None;
     let mut output = None;
-    let mut representation = None;
+    let mut like = None;
     let mut category = None;
     let mut preferred = false;
     let mut delimiter = ",".to_string();
+    let mut layout = Layout::default();
+    let mut layout_written = false;
     for option in options {
         match option.name.as_str() {
             "input" => input = Some(option_name(option)?),
             "output" => output = Some(option_name(option)?),
-            "like" => representation = Some(option_type(option)?),
+            "like" => like = Some(option_type(option)?),
             "category" => category = Some(option_char(option)?),
             "preferred" => preferred = option_bool(option)?,
             "delimiter" => delimiter = option_string(option)?,
-            // Every remaining option describes a layout, a companion routine or
-            // an element type that gres has nowhere to put. Refusing is the
-            // whole difference between "not supported" and a type that exists
-            // but misbehaves.
+            "internallength" => {
+                layout.length = option_type_length(option)?;
+                layout_written = true;
+            }
+            "passedbyvalue" => {
+                layout.by_value = option_bool(option)?;
+                layout_written = true;
+            }
+            "alignment" => {
+                layout.alignment = option_alignment(option)?;
+                layout_written = true;
+            }
+            // Every remaining option names a companion routine, an element type
+            // or a storage strategy that gres has nowhere to put. Refusing is
+            // the whole difference between "not supported" and a type that
+            // exists but misbehaves.
             other => {
                 return Err(ExecError::Unsupported(format!(
                     "type attribute \"{other}\" is not supported: gres builds a base type only \
-                     from LIKE, INPUT, OUTPUT, CATEGORY, PREFERRED and DELIMITER"
+                     from LIKE, INTERNALLENGTH, PASSEDBYVALUE, ALIGNMENT, INPUT, OUTPUT, \
+                     CATEGORY, PREFERRED and DELIMITER"
                 )));
             }
         }
@@ -186,12 +314,29 @@ fn create_base_type(
     let output = output.ok_or_else(|| {
         ExecError::InvalidObjectDefinition("type output function must be specified".into())
     })?;
-    let Some(representation) = representation else {
-        return Err(ExecError::Unsupported(
-            "CREATE TYPE needs LIKE = <type>: gres holds a base type's values in the \
-             representation type's form, and has no opaque byte image to fall back on"
-                .into(),
-        ));
+    let representation = match (like, layout_written) {
+        // `DefineType` lets a layout option override one field of what `LIKE`
+        // supplied. gres cannot: it models no `typbyval`/`typalign` for its own
+        // built-ins, so it has no `LIKE` layout to override in the first place.
+        (Some(_), true) => {
+            return Err(ExecError::Unsupported(
+                "CREATE TYPE cannot combine LIKE with INTERNALLENGTH, PASSEDBYVALUE or \
+                 ALIGNMENT: gres reads a base type's representation from LIKE or from the \
+                 layout, and has no way to apply one as an override of the other"
+                    .into(),
+            ));
+        }
+        (Some(like), false) => like,
+        (None, _) => {
+            layout.validate()?;
+            carrier_for(layout).ok_or_else(|| {
+                ExecError::Unsupported(format!(
+                    "a base type of {layout} is not supported: gres holds a base type's values in \
+                     a built-in type's form, and has none of that layout — name one with \
+                     LIKE = <type>"
+                ))
+            })?
+        }
     };
     require_routine(kv, &input)?;
     require_routine(kv, &output)?;
@@ -263,6 +408,49 @@ fn option_char(option: &BaseTypeOption) -> Result<String, ExecError> {
         Ok(text)
     } else {
         Err(malformed_option(option, "a single character"))
+    }
+}
+
+/// `INTERNALLENGTH = variable` or `INTERNALLENGTH = <n>`, as `defGetTypeLength`
+/// reads it: the word `variable` is -1 and anything else must be a positive
+/// byte count.
+fn option_type_length(option: &BaseTypeOption) -> Result<i32, ExecError> {
+    match &option.value {
+        BaseTypeOptionValue::Int(length) => i32::try_from(*length)
+            .ok()
+            .filter(|length| *length > 0)
+            .ok_or_else(|| {
+                ExecError::InvalidParameterValueMessage(format!(
+                    "invalid type internal size {length}"
+                ))
+            }),
+        BaseTypeOptionValue::Name(word) | BaseTypeOptionValue::Str(word)
+            if word.eq_ignore_ascii_case("variable") =>
+        {
+            Ok(-1)
+        }
+        _ => Err(malformed_option(option, "a positive integer or `variable`")),
+    }
+}
+
+/// `ALIGNMENT = double | int4 | int2 | char`, mapped to `pg_type.typalign`.
+///
+/// `DefineType` compares against the *canonical* spellings because PostgreSQL's
+/// grammar folds an unquoted type name to them before it gets there — writing
+/// `alignment = integer` reaches it as `int4`. gres's parser hands the option
+/// through the other way round, spelling `int4` back as `integer`, so both
+/// forms of each name are recognised here and the accepted set is the same.
+fn option_alignment(option: &BaseTypeOption) -> Result<char, ExecError> {
+    let written = option_string(option)?;
+    let bare = written.rsplit('.').next().unwrap_or(&written);
+    match bare.to_ascii_lowercase().as_str() {
+        "double" | "float8" | "double precision" => Ok('d'),
+        "int4" | "integer" => Ok('i'),
+        "int2" | "smallint" => Ok('s'),
+        "char" | "bpchar" | "character" => Ok('c'),
+        _ => Err(ExecError::InvalidParameterValueMessage(format!(
+            "alignment \"{written}\" not recognized"
+        ))),
     }
 }
 
