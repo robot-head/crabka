@@ -561,12 +561,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     max_age: cli.hot_store_max_age,
                     max_records: cli.hot_store_max_records,
                 });
-                spawn_wal_tail(
+                let wal_tail = spawn_wal_tail(
                     &cli,
                     hot.clone(),
                     client_dispatch_queue_capacity,
                     client_frame_max,
-                    shutdown.clone(),
                 );
                 let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
                 let state = Arc::new(
@@ -579,7 +578,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let bound = serve_querier(cli.listen, state, shutdown.clone()).await?;
                 tracing::info!(%bound, "profiles querier listening");
-                shutdown.cancelled().await;
+                tokio::select! {
+                    () = shutdown.cancelled() => {}
+                    result = wal_tail => {
+                        shutdown.cancel();
+                        result??;
+                    }
+                }
             }
             Target::QueryFrontend => {
                 let shutdown = role_shutdown_token();
@@ -614,12 +619,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     max_age: cli.hot_store_max_age,
                     max_records: cli.hot_store_max_records,
                 });
-                spawn_wal_tail(
+                let wal_tail = spawn_wal_tail(
                     &cli,
                     hot.clone(),
                     client_dispatch_queue_capacity,
                     client_frame_max,
-                    shutdown.clone(),
                 );
                 let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
                 let state = Arc::new(
@@ -639,7 +643,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     shard_width = %cli.query_frontend_shard_width.human(),
                     "profiles query-frontend listening"
                 );
-                shutdown.cancelled().await;
+                tokio::select! {
+                    () = shutdown.cancelled() => {}
+                    result = wal_tail => {
+                        shutdown.cancel();
+                        result??;
+                    }
+                }
             }
             Target::Symbolizer => {
                 crabka_profiles::symbolizer::run_with_config(
@@ -718,14 +728,13 @@ fn spawn_wal_tail(
     hot: WalTailProfileStore,
     client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     client_frame_max: crabka_client_core::ClientFrameMax,
-    shutdown: CancellationToken,
-) {
+) -> tokio::task::JoinHandle<Result<(), crabka_profiles::ProfilesError>> {
     let bootstrap = cli.bootstrap.clone();
     let group_id = cli.query_wal_tail_group_id.clone();
     let wal_topic = cli.wal_topic.clone();
     let poll_timeout = cli.wal_poll_timeout;
     tokio::spawn(async move {
-        if let Err(err) = crabka_profiles::hot_store::run_wal_tail_with_topic(
+        crabka_profiles::hot_store::run_wal_tail_with_topic(
             hot,
             bootstrap,
             group_id,
@@ -735,11 +744,7 @@ fn spawn_wal_tail(
             client_frame_max,
         )
         .await
-        {
-            tracing::error!(%err, "profiles hot WAL-tail stopped");
-            shutdown.cancel();
-        }
-    });
+    })
 }
 
 fn role_shutdown_token() -> CancellationToken {

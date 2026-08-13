@@ -29,6 +29,40 @@ pub(crate) enum PointValue {
 }
 
 impl PointValue {
+    fn accumulate(&mut self, delta: &Self) -> bool {
+        match (self, delta) {
+            (Self::Gauge(total), Self::Gauge(value))
+            | (Self::Counter(total), Self::Counter(value)) => {
+                *total += *value;
+                true
+            }
+            (
+                Self::Histogram {
+                    count,
+                    sum,
+                    buckets,
+                },
+                Self::Histogram {
+                    count: delta_count,
+                    sum: delta_sum,
+                    buckets: delta_buckets,
+                },
+            ) if buckets
+                .iter()
+                .map(|(bound, _)| bound)
+                .eq(delta_buckets.iter().map(|(bound, _)| bound)) =>
+            {
+                *count = count.saturating_add(*delta_count);
+                *sum += *delta_sum;
+                for ((_, count), (_, delta_count)) in buckets.iter_mut().zip(delta_buckets) {
+                    *count = count.saturating_add(*delta_count);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn same_type(&self, other: &Self) -> bool {
         matches!(
             (self, other),
@@ -70,12 +104,14 @@ pub(crate) struct DataPoint {
     pub client_id: String,
     pub attributes: Vec<(String, String)>,
     pub value: PointValue,
+    pub delta_start: Option<u64>,
 }
 
 #[derive(Debug)]
 struct StoredPoint {
     attributes: Vec<(String, String)>,
     value: PointValue,
+    delta_start: Option<u64>,
     at: Instant,
 }
 
@@ -109,16 +145,29 @@ impl ClientMetricsCollector {
             return;
         }
         for p in points {
+            let key = (
+                p.metric.clone(),
+                p.client_instance_id.clone(),
+                p.client_id.clone(),
+                p.attributes.clone(),
+            );
+            if let Some(start) = p.delta_start
+                && let Some(stored) = guard.get_mut(&key)
+                && stored
+                    .delta_start
+                    .is_some_and(|previous| previous == 0 || start == 0 || previous == start)
+                && stored.value.accumulate(&p.value)
+            {
+                stored.delta_start = Some(start);
+                stored.at = now;
+                continue;
+            }
             guard.insert(
-                (
-                    p.metric.clone(),
-                    p.client_instance_id.clone(),
-                    p.client_id.clone(),
-                    p.attributes.clone(),
-                ),
+                key,
                 StoredPoint {
                     attributes: p.attributes.clone(),
                     value: p.value.clone(),
+                    delta_start: p.delta_start,
                     at: now,
                 },
             );
@@ -242,6 +291,7 @@ mod tests {
             client_id: "svc-1".into(),
             attributes: vec![("rack".into(), "a".into())],
             value: PointValue::Gauge(42.0),
+            delta_start: None,
         }]);
         let mut reg = Registry::default();
         reg.register_collector(Box::new(sink));
@@ -273,6 +323,7 @@ mod tests {
                 client_id: "c".into(),
                 attributes: vec![],
                 value: PointValue::Counter(7.0),
+                delta_start: None,
             },
             DataPoint {
                 metric: "latency".into(),
@@ -284,6 +335,7 @@ mod tests {
                     sum: 9.5,
                     buckets: vec![(1.0, 1), (5.0, 2), (f64::INFINITY, 3)],
                 },
+                delta_start: None,
             },
         ]);
         let mut registry = Registry::default();
@@ -305,6 +357,49 @@ mod tests {
     }
 
     #[test]
+    fn delta_points_accumulate_per_series() {
+        let sink = ClientMetricsCollector::new(Duration::from_mins(1));
+        for (counter, count, sum, buckets) in [
+            (5.0, 2, 4.0, vec![(1.0, 1), (f64::MAX, 1)]),
+            (3.0, 3, 6.0, vec![(1.0, 2), (f64::MAX, 1)]),
+        ] {
+            sink.ingest(&[
+                DataPoint {
+                    metric: "requests".into(),
+                    client_instance_id: "i".into(),
+                    client_id: "c".into(),
+                    attributes: vec![],
+                    value: PointValue::Counter(counter),
+                    delta_start: Some(7),
+                },
+                DataPoint {
+                    metric: "latency".into(),
+                    client_instance_id: "i".into(),
+                    client_id: "c".into(),
+                    attributes: vec![],
+                    value: PointValue::Histogram {
+                        count,
+                        sum,
+                        buckets,
+                    },
+                    delta_start: Some(7),
+                },
+            ]);
+        }
+
+        let guard = sink.points.lock().unwrap();
+        assert!(guard.values().any(
+            |point| matches!(point.value, PointValue::Counter(value) if (value - 8.0).abs() < f64::EPSILON)
+        ));
+        assert!(guard.values().any(|point| matches!(
+            &point.value,
+            PointValue::Histogram { count: 5, sum, buckets }
+                if (*sum - 10.0).abs() < f64::EPSILON
+                    && buckets.as_slice() == [(1.0, 3), (f64::MAX, 2)]
+        )));
+    }
+
+    #[test]
     fn multiple_series_same_metric_encode_once() {
         use prometheus_client::registry::Registry;
         let sink = ClientMetricsCollector::new(std::time::Duration::from_mins(1));
@@ -315,6 +410,7 @@ mod tests {
                 client_id: "c1".into(),
                 attributes: vec![],
                 value: PointValue::Gauge(1.0),
+                delta_start: None,
             },
             DataPoint {
                 metric: "org.apache.kafka.consumer.fetch.size".into(),
@@ -322,6 +418,7 @@ mod tests {
                 client_id: "c2".into(),
                 attributes: vec![],
                 value: PointValue::Gauge(2.0),
+                delta_start: None,
             },
         ]);
         let mut reg = Registry::default();
@@ -353,6 +450,7 @@ mod tests {
             client_id: "c".into(),
             attributes: vec![],
             value: PointValue::Gauge(1.0),
+            delta_start: None,
         }]);
         assert_eq!(sink.live_point_count(), 0);
         assert!(ClientMetricsCollector::is_live(
@@ -375,6 +473,7 @@ mod tests {
                 client_id: "c".into(),
                 attributes: vec![],
                 value: PointValue::Gauge(1.0),
+                delta_start: None,
             },
             DataPoint {
                 metric: "same-name".into(),
@@ -382,6 +481,7 @@ mod tests {
                 client_id: "c".into(),
                 attributes: vec![],
                 value: PointValue::Counter(2.0),
+                delta_start: None,
             },
         ]);
 
@@ -402,6 +502,7 @@ mod tests {
             client_id: "c".into(),
             attributes: vec![],
             value: PointValue::Gauge(3.0),
+            delta_start: None,
         }]);
 
         let output = encode_collector(SharedClientMetricsCollector(sink));

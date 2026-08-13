@@ -2588,6 +2588,7 @@ impl LogQueryAuthorizer for UnavailableQueryAuthorizer {
 struct BrokerBackedQueryAuthorizer {
     admin: tokio::sync::Mutex<AdminClient>,
     wal_topic: String,
+    connected: Arc<AtomicBool>,
 }
 
 impl BrokerBackedQueryAuthorizer {
@@ -2595,6 +2596,7 @@ impl BrokerBackedQueryAuthorizer {
         bootstrap: &str,
         wal_topic: String,
         client_resource_policy: ClientResourcePolicy,
+        connected: Arc<AtomicBool>,
     ) -> Result<Self, AdminError> {
         let admin = AdminClient::connect_with_options(
             &[bootstrap.to_string()],
@@ -2604,6 +2606,7 @@ impl BrokerBackedQueryAuthorizer {
         Ok(Self {
             admin: tokio::sync::Mutex::new(admin),
             wal_topic,
+            connected,
         })
     }
 }
@@ -2612,15 +2615,22 @@ impl BrokerBackedQueryAuthorizer {
 impl LogQueryAuthorizer for BrokerBackedQueryAuthorizer {
     #[cfg_attr(test, mutants::skip)]
     async fn check(&self, tenant: &str) -> Result<(), QueryAuthorizationError> {
-        let acls = {
+        let result = {
             let mut admin = self.admin.lock().await;
-            admin
-                .describe_acls(&AclEntryFilter::default())
-                .await
-                .map_err(|error| QueryAuthorizationError::Unavailable {
+            admin.describe_acls(&AclEntryFilter::default()).await
+        };
+        let acls = match result {
+            Ok(acls) => {
+                self.connected.store(true, AtomicOrdering::SeqCst);
+                acls
+            }
+            Err(error) => {
+                self.connected.store(false, AtomicOrdering::SeqCst);
+                return Err(QueryAuthorizationError::Unavailable {
                     tenant: tenant.to_string(),
                     reason: error.to_string(),
-                })?
+                });
+            }
         };
         check_tenant_wal_read_acl(tenant, &self.wal_topic, &acls)
     }
@@ -3442,8 +3452,12 @@ fn spawn_wal_hot_tail_connect_and_poll(
                 result = poll_log_hot_tail_once_with_frontier(&mut consumer, &hot_tail, poll_interval, frontier.as_ref()) => result,
             };
             let should_back_off = match result {
-                Ok(decoded) => decoded == 0,
+                Ok(decoded) => {
+                    readiness.wal_connected.store(true, AtomicOrdering::SeqCst);
+                    decoded == 0
+                }
                 Err(error) => {
+                    readiness.wal_connected.store(false, AtomicOrdering::SeqCst);
                     tracing::warn!(%error, "querier WAL hot-tail poll failed; retrying");
                     true
                 }
@@ -3480,6 +3494,7 @@ fn spawn_query_authorizer_connect(
                 &bootstrap,
                 topic.clone(),
                 client_resource_policy,
+                readiness.authorization_connected.clone(),
                 ) => result,
             };
             match result {

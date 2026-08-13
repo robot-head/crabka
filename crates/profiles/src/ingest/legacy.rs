@@ -342,7 +342,7 @@ pub async fn decode_ingest_body_with_limits(
             ));
         }
     };
-    let profile = apply_query_time(profile, query)?;
+    let profile = apply_query_time(apply_query_sample_rate(profile, query.sample_rate), query)?;
     Ok(RawProfile {
         labels: query_labels(query, Vec::new()),
         profile,
@@ -1312,7 +1312,8 @@ mod tests {
 
     #[tokio::test]
     async fn decode_plain_lines_counts_repeated_stack_lines() {
-        let query = parse_ingest_query("name=myapp&format=lines&units=samples").unwrap();
+        let query =
+            parse_ingest_query("name=myapp&format=lines&units=samples&sampleRate=250").unwrap();
         let body = "main;work\nmain;work\nmain;idle\nmain;work\n";
 
         let raw = decode_ingest_body(
@@ -1334,6 +1335,7 @@ mod tests {
         values.sort_unstable();
 
         assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        assert!(raw.profile.inner().period == 4_000_000);
         assert!(values == vec![1, 3]);
     }
 

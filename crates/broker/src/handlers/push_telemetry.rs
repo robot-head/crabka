@@ -137,7 +137,7 @@ fn flatten_for_prometheus(
 ) -> Vec<DataPoint> {
     use opentelemetry_proto::tonic::{
         common::v1::{AnyValue, KeyValue, any_value::Value as AnyValueKind},
-        metrics::v1::{metric::Data, number_data_point::Value},
+        metrics::v1::{AggregationTemporality, metric::Data, number_data_point::Value},
     };
     let mut out = Vec::new();
     let num = |v: &Value| -> f64 {
@@ -166,10 +166,11 @@ fn flatten_for_prometheus(
             .iter()
             .flat_map(|set| set.iter())
             .filter_map(|attribute| {
-                Some((
-                    sanitize_prometheus_label(&attribute.key),
-                    attribute_value(attribute.value.as_ref()?)?,
-                ))
+                let name = sanitize_prometheus_label(&attribute.key);
+                if matches!(name.as_str(), "client_id" | "client_instance_id") {
+                    return None;
+                }
+                Some((name, attribute_value(attribute.value.as_ref()?)?))
             })
             .collect::<Vec<_>>();
         labels.sort();
@@ -195,6 +196,7 @@ fn flatten_for_prometheus(
                                         dp.attributes.as_slice(),
                                     ]),
                                     value: PointValue::Gauge(num(v)),
+                                    delta_start: None,
                                 });
                             }
                         }
@@ -218,12 +220,18 @@ fn flatten_for_prometheus(
                                     } else {
                                         PointValue::Gauge(num(v))
                                     },
+                                    delta_start: (s.aggregation_temporality
+                                        == AggregationTemporality::Delta as i32)
+                                        .then_some(dp.start_time_unix_nano),
                                 });
                             }
                         }
                     }
                     Some(Data::Histogram(h)) => {
                         for dp in &h.data_points {
+                            let Some(sum) = dp.sum else {
+                                continue;
+                            };
                             let mut buckets = dp
                                 .explicit_bounds
                                 .iter()
@@ -246,9 +254,12 @@ fn flatten_for_prometheus(
                                 ]),
                                 value: PointValue::Histogram {
                                     count: dp.count,
-                                    sum: dp.sum.unwrap_or_default(),
+                                    sum,
                                     buckets,
                                 },
+                                delta_start: (h.aggregation_temporality
+                                    == AggregationTemporality::Delta as i32)
+                                    .then_some(dp.start_time_unix_nano),
                             });
                         }
                     }
@@ -287,8 +298,8 @@ mod tests {
     use opentelemetry_proto::tonic::{
         common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
         metrics::v1::{
-            Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
-            ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
+            AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, MetricsData,
+            NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
         },
         resource::v1::Resource,
     };
@@ -484,9 +495,12 @@ mod tests {
             Metric {
                 name: "requests.total".into(),
                 data: Some(metric::Data::Sum(Sum {
-                    data_points: vec![number_point(number_data_point::Value::AsInt(42))],
+                    data_points: vec![NumberDataPoint {
+                        start_time_unix_nano: 7,
+                        ..number_point(number_data_point::Value::AsInt(42))
+                    }],
                     is_monotonic: true,
-                    ..Default::default()
+                    aggregation_temporality: AggregationTemporality::Delta as i32,
                 })),
                 ..Default::default()
             },
@@ -496,6 +510,19 @@ mod tests {
                     data_points: vec![HistogramDataPoint {
                         count: 3,
                         sum: Some(9.5),
+                        start_time_unix_nano: 7,
+                        ..Default::default()
+                    }],
+                    aggregation_temporality: AggregationTemporality::Delta as i32,
+                })),
+                ..Default::default()
+            },
+            Metric {
+                name: "missing.sum".into(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    data_points: vec![HistogramDataPoint {
+                        count: 1,
+                        sum: None,
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -520,10 +547,12 @@ mod tests {
         assert!(
             matches!(points[1].value, PointValue::Counter(value) if (value - 42.0).abs() < f64::EPSILON)
         );
+        assert!(points[1].delta_start == Some(7));
         assert!(points[2].metric == "latency.ms", "{points:?}");
         assert!(
             matches!(points[2].value, PointValue::Histogram { count: 3, sum, .. } if (sum - 9.5).abs() < f64::EPSILON)
         );
+        assert!(points[2].delta_start == Some(7));
     }
 
     fn string_attribute(key: &str, value: &str) -> KeyValue {
@@ -539,7 +568,10 @@ mod tests {
     #[test]
     fn flatten_for_prometheus_sanitizes_and_deduplicates_attribute_labels() {
         let mut point = number_point(number_data_point::Value::AsInt(1));
-        point.attributes = vec![string_attribute("dup.key", "point")];
+        point.attributes = vec![
+            string_attribute("dup.key", "point"),
+            string_attribute("client-id", "spoofed"),
+        ];
         let md = MetricsData {
             resource_metrics: vec![ResourceMetrics {
                 resource: Some(Resource {

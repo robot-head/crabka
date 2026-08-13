@@ -13,6 +13,8 @@ use opentelemetry_proto::tonic::{
 use prometheus_client::metrics::counter::Counter;
 use tokio::sync::mpsc;
 
+const FORWARD_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Build an OTLP export request from decoded metrics. This function tags
 /// every resource with the originating client's instance id.
 pub(crate) fn build_export_request(
@@ -132,14 +134,25 @@ impl OtlpForwarder {
 
     /// Closes the queue and waits until every accepted batch has been sent.
     pub(crate) async fn shutdown(&self) {
+        self.shutdown_with_timeout(FORWARD_DRAIN_TIMEOUT).await;
+    }
+
+    async fn shutdown_with_timeout(&self, drain_timeout: std::time::Duration) {
         self.tx
             .lock()
             .expect("OTLP forwarder mutex poisoned")
             .take();
-        if let Some(task) = self.task.lock().await.take()
-            && let Err(error) = task.await
-        {
-            tracing::warn!(%error, "client-metrics OTLP forward worker join failed");
+        if let Some(mut task) = self.task.lock().await.take() {
+            match tokio::time::timeout(drain_timeout, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "client-metrics OTLP forward worker join failed");
+                }
+                Err(_) => {
+                    task.abort();
+                    tracing::warn!("client-metrics OTLP forward drain timed out; worker aborted");
+                }
+            }
         }
     }
 }
@@ -204,5 +217,29 @@ mod tests {
 
         assert_eq!(dropped.get(), 0);
         assert_eq!(failed.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_a_stalled_export() {
+        let server = MockServer::start().await;
+        Mock::given(path("/v1/metrics"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(1)))
+            .mount(&server)
+            .await;
+        let forwarder = OtlpForwarder::spawn(
+            server.uri(),
+            crabka_telemetry::OtlpProtocol::HttpProtobuf,
+            1,
+            Counter::default(),
+            Counter::default(),
+        );
+        forwarder.forward(MetricsData::default(), "client-a");
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            forwarder.shutdown_with_timeout(std::time::Duration::from_millis(10)),
+        )
+        .await
+        .expect("shutdown must remain bounded");
     }
 }
