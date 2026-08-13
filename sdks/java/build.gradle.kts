@@ -1,6 +1,6 @@
 plugins {
     `java-library`
-    kotlin("jvm") version "2.2.21"
+    kotlin("jvm") version "2.4.10"
     application
 }
 
