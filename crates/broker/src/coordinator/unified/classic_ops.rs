@@ -661,7 +661,7 @@ mod tests {
         );
 
         assert!(matches!(action, JoinAction::Park));
-        assert!(g.rebalance_deadline.unwrap() >= before + Duration::from_secs(60));
+        assert!(g.rebalance_deadline.unwrap() >= before + Duration::from_mins(1));
     }
 
     #[test]

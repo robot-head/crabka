@@ -12,8 +12,9 @@ use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
     Decode,
     owned::{
-        describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest,
-        describe_share_group_offsets_request::DescribeShareGroupOffsetsRequestTopic,
+        describe_share_group_offsets_request::{
+            DescribeShareGroupOffsetsRequest, DescribeShareGroupOffsetsRequestTopic,
+        },
         describe_share_group_offsets_response::{
             DescribeShareGroupOffsetsResponse, DescribeShareGroupOffsetsResponseGroup,
             DescribeShareGroupOffsetsResponsePartition, DescribeShareGroupOffsetsResponseTopic,

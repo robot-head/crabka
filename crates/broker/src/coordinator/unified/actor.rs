@@ -487,6 +487,7 @@ async fn handle_actor_heartbeat(
     true
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the actor message boundary explicit.
 async fn handle_classic_join_message(
     group: &mut CoordinatorGroup,
     parked: &mut ParkedWaiters,

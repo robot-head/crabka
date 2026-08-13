@@ -57,6 +57,8 @@ pub fn consume_controller_mutation_quota(
 /// Atomically check accumulated controller-mutation debt and record this
 /// operation. Strict APIs reject only when debt already exists; an operation
 /// that crosses the limit is accepted and makes the next operation fail.
+#[allow(clippy::too_many_arguments)] // Quota identity and policy are separate inputs.
+#[allow(clippy::cast_precision_loss)] // Mutation counts cannot approach f64's integer limit.
 pub(crate) fn apply_controller_mutation_quota_mode(
     image: &MetadataImage,
     buckets: &QuotaBuckets,

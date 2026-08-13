@@ -368,8 +368,8 @@ impl TxnCoordinator {
     }
 
     /// Add partitions to the locally-coordinated transaction after validating
-    /// its producer identity. This is shared by client AddPartitionsToTxn and
-    /// the KIP-890 server-side TxnOffsetCommit path.
+    /// its producer identity. This is shared by client `AddPartitionsToTxn` and
+    /// the KIP-890 server-side `TxnOffsetCommit` path.
     pub(crate) async fn register_partitions(
         &self,
         tid: &str,
@@ -418,7 +418,7 @@ impl TxnCoordinator {
     }
 
     /// KIP-890: route the offsets partition enrollment to the transaction
-    /// coordinator before a v5+ TxnOffsetCommit append.
+    /// coordinator before a v5+ `TxnOffsetCommit` append.
     pub(crate) async fn register_offsets_partition(
         &self,
         tid: &str,
