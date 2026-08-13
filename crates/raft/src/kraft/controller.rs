@@ -1421,6 +1421,9 @@ impl Engine {
                 }
             }
             Inbound::Fetch { req, reply } => {
+                if !self.core.role().is_leader() {
+                    return;
+                }
                 if let Some(wire::PeerRequest::Fetch {
                     from,
                     fetch_epoch,

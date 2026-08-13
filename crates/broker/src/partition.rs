@@ -322,9 +322,9 @@ impl Partition {
     pub(crate) async fn apply_log_config_overrides(
         &self,
         overrides: &std::collections::BTreeMap<String, String>,
+        base: &crabka_log::LogConfig,
     ) -> Result<(), BrokerError> {
-        let merged =
-            crate::config_keys::apply_to_log_config(overrides, &crabka_log::LogConfig::default());
+        let merged = crate::config_keys::apply_to_log_config(overrides, base);
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::SetLogConfig {

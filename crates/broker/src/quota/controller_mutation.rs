@@ -3,12 +3,29 @@
 //! the response.
 
 use crabka_metadata::MetadataImage;
-use crabka_units::{Time, convert::TimeExt};
+use crabka_units::{Time, convert::TimeExt, secs};
 
-use super::{
-    QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota, positive_f64_to_u64,
-    u64_to_f64,
-};
+use super::buckets::QuotaBuckets;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ControllerMutationQuotaDecision {
+    Allowed { delay: Time },
+    Rejected { delay: Time },
+}
+
+impl ControllerMutationQuotaDecision {
+    #[must_use]
+    pub(crate) fn delay(self) -> Time {
+        match self {
+            Self::Allowed { delay } | Self::Rejected { delay } => delay,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn is_rejected(self) -> bool {
+        matches!(self, Self::Rejected { .. })
+    }
+}
 
 /// Consume `mutations` from the `controller_mutation_rate` bucket for
 /// `(principal, client_id)`. This function returns the throttle delay to apply
@@ -24,20 +41,86 @@ pub fn consume_controller_mutation_quota(
     mutations: u64,
     maximum_delay: Time,
 ) -> Time {
-    consume_configured_quota(
-        QuotaConsumption {
-            image,
-            buckets,
-            principal,
-            client_id,
-            quota_key: "controller_mutation_rate",
-            amount: mutations,
-        },
-        |_| {},
-        |rate| Some(positive_f64_to_u64(rate)),
-        |overage, rate, _| Time::from_secs_f64(u64_to_f64(overage) / rate),
+    apply_controller_mutation_quota_mode(
+        image,
+        buckets,
+        principal,
+        client_id,
+        mutations,
+        secs(1),
         maximum_delay,
+        false,
     )
+    .delay()
+}
+
+/// Atomically check accumulated controller-mutation debt and record this
+/// operation. Strict APIs reject only when debt already exists; an operation
+/// that crosses the limit is accepted and makes the next operation fail.
+pub(crate) fn apply_controller_mutation_quota_mode(
+    image: &MetadataImage,
+    buckets: &QuotaBuckets,
+    principal: &str,
+    client_id: &str,
+    mutations: u64,
+    window: Time,
+    maximum_delay: Time,
+    strict: bool,
+) -> ControllerMutationQuotaDecision {
+    if mutations == 0 {
+        return ControllerMutationQuotaDecision::Allowed {
+            delay: <Time as TimeExt>::ZERO,
+        };
+    }
+    let Some((entity_key, rate)) = super::lookup::lookup_quota_with_key(
+        image,
+        principal,
+        client_id,
+        "controller_mutation_rate",
+    ) else {
+        return ControllerMutationQuotaDecision::Allowed {
+            delay: <Time as TimeExt>::ZERO,
+        };
+    };
+    let window_secs = window.secs_f64();
+    if !rate.is_finite() || rate <= 0.0 || !window_secs.is_finite() || window_secs <= 0.0 {
+        return ControllerMutationQuotaDecision::Allowed {
+            delay: <Time as TimeExt>::ZERO,
+        };
+    }
+
+    let bucket = buckets.controller_mutation_bucket(&entity_key, rate, window_secs);
+    let mut bucket = bucket
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    let capacity = rate * window_secs;
+    if bucket.rate.to_bits() != rate.to_bits()
+        || bucket.window_secs.to_bits() != window_secs.to_bits()
+    {
+        bucket.rate = rate;
+        bucket.window_secs = window_secs;
+        bucket.tokens = capacity;
+    } else {
+        bucket.tokens = (bucket.tokens
+            + now.duration_since(bucket.updated_at).as_secs_f64() * rate)
+            .min(capacity);
+    }
+    bucket.updated_at = now;
+
+    if strict && bucket.tokens < 0.0 {
+        return ControllerMutationQuotaDecision::Rejected {
+            delay: Time::from_secs_f64((-bucket.tokens / rate).max(0.0)).min(maximum_delay),
+        };
+    }
+
+    bucket.tokens -= mutations as f64;
+    let delay = if !strict && bucket.tokens < 0.0 {
+        Time::from_secs_f64((-bucket.tokens / rate).max(0.0)).min(maximum_delay)
+    } else {
+        <Time as TimeExt>::ZERO
+    };
+    ControllerMutationQuotaDecision::Allowed { delay }
 }
 
 #[cfg(test)]
@@ -88,5 +171,28 @@ mod tests {
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 100, millis(25));
 
         assert!(delay == millis(25));
+    }
+
+    #[test]
+    fn fractional_strict_quota_rejects_the_operation_after_debt() {
+        let img = img_with_quota(vec![("user", Some("alice"))], 0.015);
+        let buckets = QuotaBuckets::new();
+        let apply = |mutations| {
+            apply_controller_mutation_quota_mode(
+                &img,
+                &buckets,
+                "alice",
+                "",
+                mutations,
+                secs(2_000),
+                secs(1),
+                true,
+            )
+        };
+
+        assert!(!apply(10).is_rejected());
+        assert!(!apply(10).is_rejected());
+        assert!(!apply(20).is_rejected());
+        assert!(apply(1).is_rejected());
     }
 }

@@ -41,7 +41,7 @@ pub enum ApiKey {
     ListGroups = 16,
     /// `SaslHandshakeRequest` (versions 0–1).
     SaslHandshake = 17,
-    /// `ApiVersionsRequest` (versions 0–4).
+    /// `ApiVersionsRequest` (versions 0–5).
     ApiVersions = 18,
     /// `CreateTopicsRequest` (versions 2–7).
     CreateTopics = 19,

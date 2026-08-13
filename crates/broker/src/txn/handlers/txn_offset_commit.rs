@@ -133,10 +133,10 @@ pub(crate) async fn handle(
 
     // 1. Verify that this broker leads the group's offsets partition before
     //    creating or accessing its actor.
-    let offsets_partition = {
+    let (offsets_partition, txnv) = {
         let image = broker.controller.current_image();
         match local_partition_for_group(&image, broker.config.node_id, &req.group_id) {
-            Ok(partition) => partition,
+            Ok(partition) => (partition, crate::txn::version::resolve_txn_version(&image)),
             Err(GroupRoutingError::Unavailable) => {
                 return encode_err_all(version, &req, codes::COORDINATOR_NOT_AVAILABLE);
             }
@@ -185,6 +185,31 @@ pub(crate) async fn handle(
         };
         if let Some(code) = code {
             return encode_err_all(version, &req, code);
+        }
+    }
+
+    // KIP-890 transaction protocol v2 folds AddOffsetsToTxn into v5+
+    // TxnOffsetCommit. Enroll the group's offsets partition with the
+    // transaction coordinator before appending the transactional records.
+    if version >= 5
+        && txnv.verified()
+        && req
+            .topics
+            .iter()
+            .any(|topic| !denied_topics.contains(&topic.name) && !topic.partitions.is_empty())
+    {
+        let code = broker
+            .txn_coordinator
+            .register_offsets_partition(
+                &req.transactional_id,
+                crabka_log::ProducerId(req.producer_id),
+                req.producer_epoch,
+                PartitionIndex(offsets_partition),
+                txnv,
+            )
+            .await;
+        if code != codes::NONE {
+            return encode_resp(version, &build_response(&req, code, &denied_topics));
         }
     }
 

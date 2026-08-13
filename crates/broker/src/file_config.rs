@@ -367,6 +367,9 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub quota_throttle_max: Option<Time>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub controller_mutation_quota_window: Option<Time>,
     pub self_registration_max_attempts: Option<u32>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
@@ -404,6 +407,9 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
     pub log_timestamp_scan_window: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub log_segment_bytes: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
     pub socket_request_max: Option<ByteSize>,
@@ -2331,6 +2337,11 @@ impl RuntimeFileConfig {
             cfg.operator_recovery_deadline
         );
         set_runtime_time_millis!(runtime, quota_throttle_max, cfg.quota_throttle_max);
+        set_runtime_time_millis!(
+            runtime,
+            controller_mutation_quota_window,
+            cfg.controller_mutation_quota_window
+        );
         set_runtime_u32!(
             runtime,
             self_registration_max_attempts,
@@ -2434,6 +2445,12 @@ impl RuntimeFileConfig {
             log_timestamp_scan_window,
             cfg.log_config.timestamp_scan_window,
             whole_bytes_usize
+        );
+        set_runtime_size_bytes!(
+            runtime,
+            log_segment_bytes,
+            cfg.log_config.segment_size,
+            whole_bytes_u64
         );
         Ok(())
     }
@@ -5013,6 +5030,7 @@ controller_heartbeat_interval = "500ms"
 controller_fetch_miss_limit = 7
 metadata_raft_command_queue_capacity = 512
 metadata_raft_fetch_max = "4MiB"
+log_segment_bytes = "1MiB"
 share_group_max_size = 17
 share_group_backlog_poll_interval = "250ms"
 streams_group_enable = false
@@ -5046,6 +5064,7 @@ streams_group_max_size = 19
         assert!(cfg.controller_fetch_miss_limit.get() == 7);
         assert!(cfg.metadata_raft_command_queue_capacity.get() == 512);
         assert!(cfg.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
+        assert!(cfg.log_config.segment_size == mebibytes(1));
         assert!(cfg.diskless_wal_flush_interval == millis(125));
         assert!(cfg.diskless_wal_flush_max_size == mebibytes(4));
         assert!(cfg.diskless_wal_trim_safety_lag == 0);

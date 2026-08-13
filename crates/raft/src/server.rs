@@ -56,8 +56,8 @@ const API_KEY_API_VERSIONS: i16 = 18;
 
 /// Highest `ApiVersions` request version this listener speaks: the advertised
 /// max in the `api_keys` table and the clamp applied to the response body codec
-/// (JVM controllers dial at v4; Crabka's own client at v0).
-const API_VERSIONS_MAX_VERSION: i16 = 4;
+/// (current JVM controllers dial at v5; Crabka's own client at v0).
+const API_VERSIONS_MAX_VERSION: i16 = 5;
 /// First `ApiVersions` response version where JVM clients accept a zero minimum
 /// for `kraft.version`.
 const KRAFT_ZERO_MIN_API_VERSION: i16 = 4;

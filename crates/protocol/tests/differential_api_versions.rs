@@ -41,6 +41,7 @@ fn apiversions_request_v3_byte_equal() {
         client_software_name: "crabka".into(),
         client_software_version: "0.0.0".into(),
         unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        ..Default::default()
     };
     let rust = rust_encode(&req, 3);
     let java = o.encode(

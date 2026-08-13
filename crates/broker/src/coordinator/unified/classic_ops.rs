@@ -46,9 +46,10 @@ pub(super) enum JoinAction {
 /// Port of `handlers/join_group.rs` steps 1–6. It operates on `ClassicState`.
 pub(super) fn handle_join(
     state: &mut ClassicState,
-    req: &JoinGroupRequest,
+    req: &mut JoinGroupRequest,
     client_id: &str,
     client_host: &str,
+    require_known_member_id: bool,
     initial_rebalance_delay: Duration,
 ) -> JoinAction {
     // 1. Empty member_id on first join → broker generates one (KIP-394).
@@ -63,12 +64,16 @@ pub(super) fn handle_join(
         } else {
             format!("crabka-{}", Uuid::new_v4())
         };
-        return JoinAction::Immediate(JoinResult {
-            error_code: codes::MEMBER_ID_REQUIRED,
-            member_id,
-            ..JoinResult::default()
-        });
+        if require_known_member_id {
+            return JoinAction::Immediate(JoinResult {
+                error_code: codes::MEMBER_ID_REQUIRED,
+                member_id,
+                ..JoinResult::default()
+            });
+        }
+        req.member_id = member_id;
     }
+    let req = &*req;
 
     // 2. protocol_type mismatch on an existing group → INCONSISTENT (KIP-559 echo).
     if let Some(existing_type) = state.protocol_type.as_deref()
@@ -144,13 +149,18 @@ pub(super) fn handle_join(
     );
     let static_rejoin_to_stable = matches!(outcome, AddMemberOutcome::StaticRejoin { .. })
         && matches!(pre_state, GroupState::Stable);
-    // Open the rebalance window: the deadline drives completion in the actor,
-    // anchored at the first join. Use the SHORTER of the client's
-    // rebalance_timeout and the configured initial delay (the effective wait the
-    // old per-handler `tokio::time::timeout` used).
+    // Open the rebalance window, anchored at the first join. A new group uses
+    // the configured batching delay. An existing group gets the member's full
+    // rebalance timeout so its current members have time to observe
+    // REBALANCE_IN_PROGRESS and rejoin; they still complete the round early as
+    // soon as all are present.
     if !static_rejoin_to_stable && state.rebalance_deadline.is_none() {
-        state.rebalance_deadline =
-            Some(Instant::now() + rebalance_timeout.min(initial_rebalance_delay));
+        let delay = if matches!(pre_state, GroupState::Empty) {
+            rebalance_timeout.min(initial_rebalance_delay)
+        } else {
+            rebalance_timeout
+        };
+        state.rebalance_deadline = Some(Instant::now() + delay);
     }
 
     // 5. Static rejoin into a `Stable` group: skip the rebalance entirely.
@@ -498,7 +508,15 @@ mod tests {
         req: &JoinGroupRequest,
         client_host: &str,
     ) -> JoinAction {
-        super::handle_join(state, req, "client-a", client_host, Duration::from_secs(3))
+        let mut req = req.clone();
+        super::handle_join(
+            state,
+            &mut req,
+            "client-a",
+            client_host,
+            true,
+            Duration::from_secs(3),
+        )
     }
 
     fn join_req(member_id: &str, instance: Option<&str>) -> JoinGroupRequest {
@@ -547,6 +565,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_join_with_empty_member_id_adds_generated_member() {
+        let mut g = ClassicState::new("g");
+        let mut request = join_req("", None);
+        let action = super::handle_join(
+            &mut g,
+            &mut request,
+            "client-a",
+            "h",
+            false,
+            Duration::from_secs(3),
+        );
+        assert!(matches!(action, JoinAction::Park));
+        assert!(request.member_id.starts_with("crabka-"));
+        assert!(
+            g.members
+                .keys()
+                .any(|member_id| member_id.starts_with("crabka-"))
+        );
+    }
+
+    #[test]
     fn join_protocol_type_mismatch_is_inconsistent() {
         let mut g = ClassicState::new("g");
         g.protocol_type = Some("connect".into());
@@ -585,11 +624,13 @@ mod tests {
     fn join_uses_configured_initial_rebalance_delay() {
         let mut g = ClassicState::new("g");
         let before = Instant::now();
+        let mut request = join_req("m1", None);
         let action = super::handle_join(
             &mut g,
-            &join_req("m1", None),
+            &mut request,
             "client-a",
             "h",
+            true,
             Duration::from_millis(17),
         );
         let after = Instant::now();
@@ -598,6 +639,29 @@ mod tests {
         let deadline = g.rebalance_deadline.expect("rebalance deadline");
         assert!(deadline >= before + Duration::from_millis(17));
         assert!(deadline <= after + Duration::from_millis(17));
+    }
+
+    #[test]
+    fn late_join_uses_rebalance_timeout_for_existing_members_to_rejoin() {
+        let mut g = ClassicState::new("g");
+        let _ = handle_join(&mut g, &join_req("m1", None), "h");
+        try_complete(&mut g).unwrap();
+        g.state = GroupState::Stable;
+
+        let before = Instant::now();
+        let mut request = join_req("m2", None);
+        request.rebalance_timeout_ms = 60_000;
+        let action = super::handle_join(
+            &mut g,
+            &mut request,
+            "client-a",
+            "h",
+            true,
+            Duration::from_secs(3),
+        );
+
+        assert!(matches!(action, JoinAction::Park));
+        assert!(g.rebalance_deadline.unwrap() >= before + Duration::from_secs(60));
     }
 
     #[test]

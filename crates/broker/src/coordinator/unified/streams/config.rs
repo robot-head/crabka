@@ -8,8 +8,9 @@ pub const KEY_NUM_WARMUP_REPLICAS: &str = "streams.num.warmup.replicas";
 pub const KEY_NUM_STANDBY_REPLICAS: &str = "streams.num.standby.replicas";
 pub const KEY_TASK_OFFSET_INTERVAL_MS: &str = "streams.task.offset.interval.ms";
 pub const KEY_ASSIGNOR_NAME: &str = "streams.assignor.name";
+pub const KEY_SHARE_AUTO_OFFSET_RESET: &str = "share.auto.offset.reset";
 
-pub const GROUP_CONFIG_KEYS: [&str; 7] = [
+pub const GROUP_CONFIG_KEYS: [&str; 8] = [
     KEY_SESSION_TIMEOUT_MS,
     KEY_HEARTBEAT_INTERVAL_MS,
     KEY_ACCEPTABLE_RECOVERY_LAG,
@@ -17,6 +18,7 @@ pub const GROUP_CONFIG_KEYS: [&str; 7] = [
     KEY_NUM_STANDBY_REPLICAS,
     KEY_TASK_OFFSET_INTERVAL_MS,
     KEY_ASSIGNOR_NAME,
+    KEY_SHARE_AUTO_OFFSET_RESET,
 ];
 
 /// Server-side task-assignor selection for a streams group. `Auto` (the Kafka
@@ -147,6 +149,12 @@ impl StreamsGroupConfig {
                     out.task_offset_interval = parse_positive_millis(key, value)?;
                 }
                 KEY_ASSIGNOR_NAME => out.assignor = StreamsAssignorKind::parse(value)?,
+                KEY_SHARE_AUTO_OFFSET_RESET if value == "earliest" => {}
+                KEY_SHARE_AUTO_OFFSET_RESET => {
+                    return Err(format!(
+                        "{KEY_SHARE_AUTO_OFFSET_RESET} currently supports only `earliest`"
+                    ));
+                }
                 _ => return Err(format!("unknown group config `{key}`")),
             }
         }
@@ -198,6 +206,7 @@ impl StreamsGroupConfig {
                 self.task_offset_interval.as_millis().to_string(),
             ),
             (KEY_ASSIGNOR_NAME.into(), self.assignor.config_name().into()),
+            (KEY_SHARE_AUTO_OFFSET_RESET.into(), "earliest".into()),
         ])
     }
 }

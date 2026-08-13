@@ -55,6 +55,9 @@ pub const NOT_CONTROLLER: i16 = 41;
 pub const INVALID_REQUEST: i16 = 42;
 /// `INVALID_REGULAR_EXPRESSION` (128): a request contains a malformed regex.
 pub const INVALID_REGULAR_EXPRESSION: i16 = 128;
+/// `REBOOTSTRAP_REQUIRED` (129, KIP-1242): the client connected using stale
+/// cluster or node metadata and must bootstrap again.
+pub const REBOOTSTRAP_REQUIRED: i16 = 129;
 /// Kafka error 87. The broker returns it when a record-bearing payload is
 /// structurally malformed. Examples include an invalid Produce `MessageSet`
 /// and a `PushTelemetry` payload that cannot be decompressed or decoded as

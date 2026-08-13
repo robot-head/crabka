@@ -259,6 +259,7 @@ pub(crate) async fn push_topic_configs(
     desired: &HashSet<TopicPartition>,
     partitions: &PartitionRegistry,
     image: &MetadataImage,
+    base: &LogConfig,
 ) {
     let empty: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (topic, partition) in desired {
@@ -266,7 +267,7 @@ pub(crate) async fn push_topic_configs(
             continue;
         };
         let overrides = image.topic_config(topic).unwrap_or(&empty);
-        if let Err(e) = part.apply_log_config_overrides(overrides).await {
+        if let Err(e) = part.apply_log_config_overrides(overrides, base).await {
             warn!(
                 topic = %topic, partition = partition, error = %e,
                 "supervisor: apply_log_config_overrides failed"
@@ -816,7 +817,7 @@ impl ReplicatorSupervisor {
         // noop write inside `Log::set_config`. The metadata-watch reconcile
         // loop fires on every image change, so AlterConfigs propagation is
         // bounded to one reconcile tick.
-        push_topic_configs(&local_set, &self.partitions, image).await;
+        push_topic_configs(&local_set, &self.partitions, image, &self.log_config).await;
 
         let desired = desired_follower_set(self.node_id, image);
 
@@ -2689,13 +2690,17 @@ mod tests {
         // Materialize the partition on disk.
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(PartitionRegistry::new());
+        let base = LogConfig {
+            segment_size: crabka_units::mebibytes(1),
+            ..LogConfig::default()
+        };
         materialize_partition(MaterializePartitionConfig {
             partitions: &partitions,
             topic: "t",
             topic_id: None,
             partition: 0,
             log_dirs: &[dir.path().to_path_buf()],
-            log_config: &LogConfig::default(),
+            log_config: &base,
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
             producer_id_expiration: hours(24),
@@ -2712,7 +2717,7 @@ mod tests {
         // Call push_topic_configs directly.
         let mut desired = HashSet::new();
         desired.insert(("t".to_string(), 0));
-        push_topic_configs(&desired, &partitions, &img).await;
+        push_topic_configs(&desired, &partitions, &img, &base).await;
 
         // Wait until the writer actor applies the SetLogConfig message and the
         // partition's Log reports retention.ms=60s.
@@ -2730,6 +2735,7 @@ mod tests {
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
         assert!(snap.retention == Some(crabka_units::minutes(1)));
+        assert!(snap.segment_size == crabka_units::mebibytes(1));
     }
 
     #[tokio::test]
@@ -2783,7 +2789,7 @@ mod tests {
 
         let mut desired = HashSet::new();
         desired.insert(("t".to_string(), 0));
-        push_topic_configs(&desired, &partitions, &img).await;
+        push_topic_configs(&desired, &partitions, &img, &LogConfig::default()).await;
 
         // No overrides → default retention applies. Wait until the writer actor
         // has processed the push (the log already carries the default, so this

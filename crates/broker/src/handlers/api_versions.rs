@@ -9,6 +9,10 @@
 //! increments a Prometheus counter for that (name, version) pair,
 //! `crabka_broker_client_software_versions_total`, so operators can see which
 //! client libraries connect.
+//!
+//! From v5, KIP-1242 lets a client include the cluster and node it intended to
+//! reach. Both fields must be absent or present together. A complete mismatch
+//! returns `REBOOTSTRAP_REQUIRED` so the client discards stale metadata.
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::{
@@ -28,6 +32,9 @@ const CLIENT_INFO_MIN_VERSION: i16 = 3;
 
 /// First `ApiVersions` version whose JVM client accepts `kraft.version` minimum zero.
 const KRAFT_ZERO_MIN_API_VERSION: i16 = 4;
+
+/// First `ApiVersions` version that carries the KIP-1242 routing identity.
+const ROUTING_IDENTITY_MIN_VERSION: i16 = 5;
 
 // KIP-584 feature surface. `supported_features` advertises `metadata.version`
 // over the full Kafka-faithful range MIN=7 (3.3-IV3) .. MAX=25 (4.0-IV3),
@@ -121,22 +128,38 @@ pub(crate) fn handle(
     let req_bytes = req_bytes.to_vec();
     let metrics = broker.metrics.clone();
     let image = broker.controller.current_image();
+    let expected_cluster_id = image.cluster_id().to_string();
+    let expected_node_id = broker.config.broker_id;
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ApiVersionsRequest::decode(&mut cur, version)?;
 
-        // KIP-511: validate client-info fields on v3+. The codegen
-        // leaves both as empty strings on earlier versions, so the
-        // check would always fire — gate it on the version range that
-        // actually carries the fields. On reject, return a degraded
-        // response (error code, empty api_keys); clients are expected
-        // to retry with a fixed name/version or give up.
-        if version >= CLIENT_INFO_MIN_VERSION
+        let error_code = if version >= CLIENT_INFO_MIN_VERSION
             && (!is_valid_client_info(&req.client_software_name)
                 || !is_valid_client_info(&req.client_software_version))
         {
+            Some(codes::INVALID_REQUEST)
+        } else if version >= ROUTING_IDENTITY_MIN_VERSION {
+            match (&req.cluster_id, req.node_id) {
+                (None, -1) => None,
+                (Some(_), -1) | (None, _) => Some(codes::INVALID_REQUEST),
+                (Some(cluster_id), node_id)
+                    if cluster_id != &expected_cluster_id || node_id != expected_node_id =>
+                {
+                    Some(codes::REBOOTSTRAP_REQUIRED)
+                }
+                (Some(_), _) => None,
+            }
+        } else {
+            None
+        };
+
+        // Invalid client information or an incomplete KIP-1242 identity is
+        // INVALID_REQUEST. A complete but stale identity asks the client to
+        // rebootstrap. Both use the normal v5 response shape with no API list.
+        if let Some(error_code) = error_code {
             let resp = ApiVersionsResponse {
-                error_code: codes::INVALID_REQUEST,
+                error_code,
                 ..Default::default()
             };
             let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
@@ -179,6 +202,7 @@ mod tests {
     use crate::broker::Broker;
 
     const API_VERSIONS_V3: i16 = 3;
+    const API_VERSIONS_V5: i16 = 5;
 
     fn request(name: &str, version: &str) -> Bytes {
         let req = ApiVersionsRequest {
@@ -189,6 +213,20 @@ mod tests {
         let mut buf = BytesMut::with_capacity(req.encoded_len(API_VERSIONS_V3));
         req.encode(&mut buf, API_VERSIONS_V3)
             .expect("encode ApiVersionsRequest");
+        buf.freeze()
+    }
+
+    fn routing_request(cluster_id: Option<String>, node_id: i32) -> Bytes {
+        let req = ApiVersionsRequest {
+            client_software_name: "crabka-test".into(),
+            client_software_version: "1.0.0".into(),
+            cluster_id,
+            node_id,
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(req.encoded_len(API_VERSIONS_V5));
+        req.encode(&mut buf, API_VERSIONS_V5)
+            .expect("encode ApiVersionsRequest v5");
         buf.freeze()
     }
 
@@ -407,6 +445,45 @@ mod tests {
             .expect("metadata.version finalized");
         assert!(finalized_mv.max_version_level == 24, "{resp:?}");
         assert!(finalized_mv.min_version_level == 24, "{resp:?}");
+
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_applies_kip1242_routing_checks() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        let cluster_id = broker.controller.current_image().cluster_id().to_string();
+        let node_id = broker.config.broker_id;
+
+        for (request_cluster_id, request_node_id, expected_error) in [
+            (None, -1, codes::NONE),
+            (Some(cluster_id.clone()), -1, codes::INVALID_REQUEST),
+            (None, node_id, codes::INVALID_REQUEST),
+            (Some(cluster_id.clone()), node_id, codes::NONE),
+            (
+                Some("wrong-cluster".into()),
+                node_id,
+                codes::REBOOTSTRAP_REQUIRED,
+            ),
+            (
+                Some(cluster_id.clone()),
+                node_id + 1,
+                codes::REBOOTSTRAP_REQUIRED,
+            ),
+        ] {
+            let request = routing_request(request_cluster_id, request_node_id);
+            let bytes = handle(&broker, API_VERSIONS_V5, 7, &request)
+                .await
+                .expect("ApiVersions v5 handler");
+            let response = decode_response(API_VERSIONS_V5, &bytes);
+
+            assert!(response.error_code == expected_error, "{response:?}");
+            assert!(
+                response.api_keys.is_empty() == (expected_error != codes::NONE),
+                "{response:?}"
+            );
+        }
 
         broker_handle.shutdown().await;
     }

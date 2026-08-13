@@ -23,6 +23,14 @@ pub type ErrorCode = i16;
 /// Client-chosen request correlation id. The response header echoes it exactly.
 pub type CorrelationId = i32;
 
+/// Kafka topics owned by the broker rather than an application.
+pub(crate) fn is_internal_topic(name: &str) -> bool {
+    matches!(
+        name,
+        "__consumer_offsets" | "__transaction_state" | "__remote_log_metadata"
+    )
+}
+
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::Encode;
 

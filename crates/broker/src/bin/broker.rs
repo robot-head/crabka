@@ -182,6 +182,8 @@ struct RuntimeArgs {
     operator_recovery_deadline: Option<Time>,
     #[arg(long, env = "CRABKA_QUOTA_THROTTLE_MAX", value_parser = crabka_units::parse::positive_time)]
     quota_throttle_max: Option<Time>,
+    #[arg(long, env = "CRABKA_CONTROLLER_MUTATION_QUOTA_WINDOW", value_parser = crabka_units::parse::positive_time)]
+    controller_mutation_quota_window: Option<Time>,
     #[arg(long, env = "CRABKA_SELF_REGISTRATION_MAX_ATTEMPTS", value_parser = clap::value_parser!(u32).range(1..))]
     self_registration_max_attempts: Option<u32>,
     #[arg(long, env = "CRABKA_OBSERVER_FETCH_MAX", value_parser = crabka_units::parse::positive_byte_size)]
@@ -434,6 +436,7 @@ impl RuntimeArgs {
             unclean_recovery_balanced_deadline,
             operator_recovery_deadline,
             quota_throttle_max,
+            controller_mutation_quota_window,
             offsets_topic_metadata_wait_timeout,
             producer_id_expiration,
             producer_id_expiration_scan_interval,
