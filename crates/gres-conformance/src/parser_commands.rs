@@ -41,8 +41,13 @@ pub enum ParserCommandError {
     Rejected {
         command: &'static str,
         sql: &'static str,
+        /// Boxed because `ParseError` carries a message, a detail and a hint,
+        /// which puts this variant over the 128 bytes `result_large_err`
+        /// allows -- and every function here returns this type on a path that
+        /// almost always succeeds, so the whole `Result` would pay for the one
+        /// rejection that never happens.
         #[source]
-        source: ParseError,
+        source: Box<ParseError>,
     },
     /// A representative SQL command did not produce exactly one statement.
     #[error("parser command probe {command} produced {count} statements; expected exactly one")]
@@ -992,7 +997,7 @@ fn behavior_probe(probe: &CommandProbe) -> Result<BehaviorProbe, ParserCommandEr
     let statements = parse(probe.sql).map_err(|source| ParserCommandError::Rejected {
         command: probe.command,
         sql: probe.sql,
-        source,
+        source: Box::new(source),
     })?;
     let [statement] = statements.as_slice() else {
         return Err(ParserCommandError::StatementCount {
@@ -1024,7 +1029,7 @@ fn validate_probe(probe: &CommandProbe) -> Result<(), ParserCommandError> {
             ParserCommandError::Rejected {
                 command: probe.command,
                 sql: probe.sql,
-                source,
+                source: Box::new(source),
             }
         })?;
     let [(statement, identity)] = classified.as_slice() else {
