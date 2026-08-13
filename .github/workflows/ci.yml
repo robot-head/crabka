@@ -1349,7 +1349,15 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90 to match the other instrumented-coverage job above, which carries the
+    # same `-C instrument-coverage` build and already budgets 90. On
+    # 2026-08-13 both shards were cancelled at exactly 60m18s and 60m15s, with
+    # every setup step green and the cancel landing inside the test step
+    # itself. Two shards timing out together is a slow build rather than one
+    # leg wedged. The true requirement is unknown, because the job was cut off
+    # before it finished: if 90 also times out, measure the step rather than
+    # raising this again.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
