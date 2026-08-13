@@ -144,12 +144,6 @@
       "hunks": 2,
       "sha256": "b843f7be4bcb548d259cce08df081ae8f9ea5db27d36ee7fc8f5eb1b0bc6a078"
     },
-    "copyselect": {
-      "changed_lines": 24,
-      "expected": "copyselect.out",
-      "hunks": 1,
-      "sha256": "5a53cacaddd9be668ec09772d37e35f100073543a6cb5d8148bcb62932bb4fb2"
-    },
     "create_aggregate": {
       "changed_lines": 95,
       "expected": "create_aggregate.out",
@@ -715,10 +709,10 @@
       "sha256": "6dcece3408b95d4390fd68925e5aba0cc90086fd9751649dab71cd36b139fc7c"
     },
     "psql": {
-      "changed_lines": 1205,
+      "changed_lines": 1185,
       "expected": "psql.out",
-      "hunks": 70,
-      "sha256": "9cbbac306f3d0f35310c6502ea71ba5fa32e4d512b3d7620c8ebf98a29b7951d"
+      "hunks": 71,
+      "sha256": "fdec0d5d9d025f2ccd7ce3e57577ef1653acf1768bae3dce0f66419aafd3d484"
     },
     "psql_pipeline": {
       "changed_lines": 172,
@@ -1105,7 +1099,7 @@
       "sha256": "fba8d9ee23aaaa7ceebd026299b8d3cfcd1e9c96bc65a2b2f62bcd3bc100337c"
     }
   },
-  "passed": 47,
+  "passed": 48,
   "postgres_tag": "REL_18_4",
   "schedule": [
     "test_setup",
