@@ -312,6 +312,15 @@ detect_infrastructure_failures() {
     done < <(grep -ERil --include='*.out' \
         'server closed the connection|connection (to server )?(was )?(lost|closed|reset)|connection reset by peer|could not (receive|send) data (from|to) server' \
         "${output}/results" 2>/dev/null || true)
+    # The preflight guard refuses to start on a full disk; this catches the
+    # disk filling *during* the run, which corrupts results the same way and
+    # leaves the same clean-looking artifact behind.
+    local free_kib
+    free_kib=$(df -Pk "${ROOT_DIR}" | awk 'NR == 2 { print $4 }')
+    if [[ -n "$free_kib" ]] && ((free_kib < 4 * 1024 * 1024)); then
+        printf 'disk-exhausted: %s GiB free after the run\n' \
+            "$((free_kib / 1024 / 1024))" >>"$failures"
+    fi
     ((regress_rc <= 1)) || printf 'pg-regress-exit: %s\n' "$regress_rc" >>"$failures"
     ((postflight_rc == 0)) || printf 'postflight-failed\n' >>"$failures"
     ((server_alive == 1)) || printf 'server-exited\n' >>"$failures"
