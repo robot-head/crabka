@@ -512,3 +512,59 @@ async fn json_to_tsvector_validates_the_documents_escapes() {
         Some("'café':1 'cat':2".to_owned())
     );
 }
+
+/// `ts_lexize` reports the lexemes of *one* dictionary, so it answers only for
+/// the two templates crabka implements. A name that resolves to nothing — every
+/// `ispell`, `synonym` and `thesaurus` dictionary, whose `CREATE` fails for want
+/// of the template — is a missing dictionary and says so, rather than inventing
+/// lexemes that would quietly change what a search matches.
+#[tokio::test]
+async fn ts_lexize_answers_for_the_dictionaries_crabka_has() {
+    let client = connect().await;
+    for (sql, expected) in [
+        ("SELECT ts_lexize('english_stem', 'skies')", "{sky}"),
+        ("SELECT ts_lexize('english_stem', 'identity')", "{ident}"),
+        ("SELECT ts_lexize('english_stem', 'the')", "{}"),
+        ("SELECT ts_lexize('simple', 'SkIeS')", "{skies}"),
+        ("SELECT ts_lexize('simple', 'the')", "{the}"),
+        ("SELECT ts_lexize('pg_catalog.simple', 'The')", "{the}"),
+    ] {
+        assert2::assert!(
+            scalar(&client, sql).await.as_deref() == Some(expected),
+            "{sql}"
+        );
+    }
+    assert2::assert!(scalar(&client, "SELECT ts_lexize('simple', NULL)").await == None);
+
+    // A dictionary of crabka's own, built on the snowball template, stems like
+    // the built-in it copies.
+    client
+        .simple_query(
+            "CREATE TEXT SEARCH DICTIONARY mystem (TEMPLATE = snowball, Language = english)",
+        )
+        .await
+        .expect("create dictionary");
+    assert2::assert!(
+        scalar(&client, "SELECT ts_lexize('mystem', 'skies')")
+            .await
+            .as_deref()
+            == Some("{sky}")
+    );
+
+    for name in ["ispell", "synonym", "thesaurus", "snowball"] {
+        let refused = client
+            .simple_query(&format!("SELECT ts_lexize('{name}', 'skies')"))
+            .await
+            .expect_err("a dictionary crabka does not have must be refused");
+        assert2::assert!(refused.code().map(|c| c.code().to_owned()) == Some("42704".to_owned()));
+        assert2::assert!(
+            refused
+                .as_db_error()
+                .map(|e| e.message().to_owned())
+                .as_deref()
+                == Some(&*format!(
+                    "text search dictionary \"{name}\" does not exist"
+                ))
+        );
+    }
+}

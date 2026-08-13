@@ -398,7 +398,41 @@ fn non_finite_to_char(value: &Datum) -> bool {
 /// literals. So a scan of the input alone reproduces PostgreSQL for every
 /// template the corpus uses. Everything else in the numeric template family
 /// agrees.
-fn to_number(input: &str, _template: &str, name: &str) -> Result<Datum, ExecError> {
+fn to_number(input: &str, template: &str, name: &str) -> Result<Datum, ExecError> {
+    match numeric::number_template(template) {
+        numeric::NumberTemplate::Digits => {}
+        numeric::NumberTemplate::Refused(numeric::RomanRefusal::Twice) => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42601",
+                message: "cannot use \"RN\" twice".to_string(),
+            });
+        }
+        numeric::NumberTemplate::Refused(numeric::RomanRefusal::Incompatible) => {
+            return Err(ExecError::FunctionErrorWithDetail {
+                sqlstate: "42601",
+                message: "\"RN\" is incompatible with other formats",
+                detail: "\"RN\" may only be used together with \"FM\".",
+            });
+        }
+        numeric::NumberTemplate::Roman => {
+            // An empty input never reaches PostgreSQL's Roman decoder at all:
+            // the processor stops on the exhausted input and `numeric_in` is
+            // handed the bare sign space instead.
+            if input.is_empty() {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "22P02",
+                    message: "invalid input syntax for type numeric: \" \"".to_string(),
+                });
+            }
+            return match numeric::roman_to_int(input) {
+                Some(value) => Ok(Datum::Numeric(numeric::from_i64(i64::from(value)))),
+                None => Err(ExecError::FunctionError {
+                    sqlstate: "22P02",
+                    message: "invalid Roman numeral".to_string(),
+                }),
+            };
+        }
+    }
     let mut digits = String::with_capacity(input.len());
     let mut seen_decimal = false;
     let mut trailing_negative = false;
@@ -475,15 +509,17 @@ fn to_char(value: &Datum, template: &str, ctx: &EvalCtx, name: &str) -> Result<D
             numeric::format_numeric(template, &numeric::from_i64(*n)).map_err(map_type)?
         }
         Datum::Numeric(d) => numeric::format_numeric(template, d).map_err(map_type)?,
-        // `float4_to_char` works at the type's own `FLT_DIG` precision, which is
-        // what `from_f32` reproduces.
+        // `float4_to_char` / `float8_to_char` clamp the template's fractional
+        // positions to the type's own decimal digits, which `NumPrecision` carries.
         Datum::Float4(f) => {
             let bd = numeric::from_f32(*f);
-            numeric::format_numeric(template, &bd).map_err(map_type)?
+            numeric::format_numeric_prec(template, &bd, numeric::NumPrecision::Float4)
+                .map_err(map_type)?
         }
         Datum::Float8(f) => {
             let bd = numeric::from_f64(*f);
-            numeric::format_numeric(template, &bd).map_err(map_type)?
+            numeric::format_numeric_prec(template, &bd, numeric::NumPrecision::Float8)
+                .map_err(map_type)?
         }
         _ => return Err(undefined_function(name)),
     };

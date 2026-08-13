@@ -672,7 +672,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 2)?;
             let a = require_numeric(&args[0], scope)?;
             let b = require_numeric(&args[1], scope)?;
-            Ok(power_result_type(a, b))
+            Ok(power_overload(args, a, b))
         }
         ScalarFunc::Pi => {
             require_arity(fc, n == 0)?;
@@ -1182,10 +1182,25 @@ fn coerce_unknown_args(
         | ScalarFunc::Trunc
         | ScalarFunc::Sign
         | ScalarFunc::Sqrt
-        | ScalarFunc::Power
         | ScalarFunc::Exp
         | ScalarFunc::Ln
         | ScalarFunc::Log => ColumnType::Float8,
+        // `power` has both a `float8` and a `numeric` candidate, so a typed
+        // operand picks the overload the same way `mod`'s does.
+        ScalarFunc::Power if args.len() == 2 => {
+            let typed = |i: usize| {
+                if is_unknown_literal(&args[i]) {
+                    None
+                } else {
+                    vals[i].column_type()
+                }
+            };
+            match (typed(0), typed(1)) {
+                (Some(a), Some(b)) => power_result_type(a, b),
+                (Some(t), None) | (None, Some(t)) => power_result_type(t, t),
+                (None, None) => ColumnType::Float8,
+            }
+        }
         // `mod` has no float8 candidate, so a typed operand picks the overload.
         ScalarFunc::Mod => args
             .iter()
@@ -2680,6 +2695,22 @@ fn finite_or_overflow(x: f64) -> Result<Datum, ExecError> {
 /// PostgreSQL power result type. It is float8 if any operand is float8. If not,
 /// it is numeric if any operand is numeric. Otherwise it is float8, the all-int
 /// case, which is PG's preferred type.
+/// Which `power` overload a call resolves to. PostgreSQL has both
+/// `power(double precision, double precision)` and `power(numeric, numeric)`,
+/// and an `unknown` literal constrains neither: `func_select_candidate` keeps
+/// the candidate that needs no coercion of the argument that IS typed. So
+/// `power('-2'::numeric, 'inf')` is `numeric` — and answers `Infinity` — where
+/// forcing the untyped `'inf'` to `float8` would drag the whole call onto the
+/// float path and raise instead.
+fn power_overload(args: &[Expr], a: ColumnType, b: ColumnType) -> ColumnType {
+    match (is_unknown_literal(&args[0]), is_unknown_literal(&args[1])) {
+        (false, false) => power_result_type(a, b),
+        (true, false) => power_result_type(b, b),
+        (false, true) => power_result_type(a, a),
+        (true, true) => ColumnType::Float8,
+    }
+}
+
 fn power_result_type(a: ColumnType, b: ColumnType) -> ColumnType {
     let (a, b) = (float4_widens(a), float4_widens(b));
     if a == ColumnType::Float8 || b == ColumnType::Float8 {

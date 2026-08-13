@@ -77,6 +77,8 @@ enum MathFunc {
     Radians,
     Log10,
     Cbrt,
+    /// `numeric_inc(numeric)`: PostgreSQL's internal increment, exposed as SQL.
+    NumericInc,
 }
 
 /// Classify a lowercased function name. The lexer lowercases unquoted idents.
@@ -86,6 +88,7 @@ fn math_func(name: &str) -> Option<MathFunc> {
         "lcm" => MathFunc::Lcm,
         "factorial" => MathFunc::Factorial,
         "div" => MathFunc::Div,
+        "numeric_inc" => MathFunc::NumericInc,
         "scale" => MathFunc::Scale,
         "min_scale" => MathFunc::MinScale,
         "trim_scale" => MathFunc::TrimScale,
@@ -214,6 +217,11 @@ pub(crate) fn math_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
         MathFunc::Factorial => {
             require_arity(fc, n == 1)?;
             int_or_null(&args[0], scope)?;
+            Ok(ColumnType::Numeric(None))
+        }
+        MathFunc::NumericInc => {
+            require_arity(fc, n == 1)?;
+            numeric_castable(&args[0], scope)?;
             Ok(ColumnType::Numeric(None))
         }
         MathFunc::Div | MathFunc::TrimScale => {
@@ -448,6 +456,13 @@ fn eval_strict(
             require_arity(fc, vals.len() == 1)?;
             factorial(int_arg(&vals[0])?)
         }
+        MathFunc::NumericInc => {
+            require_arity(fc, vals.len() == 1)?;
+            // PostgreSQL's `numeric_inc` is plain `x + 1`, so a special is
+            // returned unchanged: `numeric_inc('inf')` is `Infinity`.
+            let x = to_numeric(&vals[0])?;
+            Ok(Datum::Numeric(numeric::add(&x, &NumericValue::from(1i64))))
+        }
         MathFunc::Div => {
             require_arity(fc, vals.len() == 2)?;
             let (a, b) = (to_numeric(&vals[0])?, to_numeric(&vals[1])?);
@@ -679,7 +694,13 @@ fn factorial(n: i64) -> Result<Datum, ExecError> {
         }));
     }
     if n > MAX_FACTORIAL {
-        return Err(ExecError::Type(crabka_pgtypes::TypeError::Overflow));
+        // PostgreSQL runs out of `numeric` digits, not of integer range, so the
+        // 22003 it reports names the format: `factorial(100000)` is
+        // `value overflows numeric format`.
+        return Err(ExecError::Type(crabka_pgtypes::TypeError::Domain {
+            sqlstate: "22003",
+            message: "value overflows numeric format",
+        }));
     }
     let mut acc = bigdecimal::num_bigint::BigInt::from(1);
     for i in 2..=n {

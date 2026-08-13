@@ -214,3 +214,55 @@ async fn numeric_transcendentals_over_the_wire() {
     assert_eq!(rows[0].columns()[0].type_().oid(), 1700);
     assert_eq!(rows[0].columns()[1].type_().oid(), 701);
 }
+
+/// `power` is the only two-argument member of this family with BOTH a `float8`
+/// and a `numeric` candidate, so an `unknown` literal beside a typed operand
+/// decides which one the call resolves to. `PostgreSQL` keeps the candidate that
+/// needs no coercion of the typed argument, and the choice is visible in the
+/// answer: the `numeric` overload knows `(-2) ^ Infinity`, while the `float8`
+/// one refuses it as a complex result.
+#[tokio::test]
+async fn power_resolves_an_unknown_argument_to_the_typed_operand() {
+    use assert2::assert;
+    let port = spawn().await;
+    let client = connect(port).await;
+
+    let cases: &[(&str, &str)] = &[
+        ("SELECT pg_typeof(power('-2'::numeric, '3'))", "numeric"),
+        ("SELECT pg_typeof(power('3', '-2'::numeric))", "numeric"),
+        (
+            "SELECT pg_typeof(power('2'::float8, '3'))",
+            "double precision",
+        ),
+        // Neither operand is typed, so the preferred `float8` candidate wins.
+        ("SELECT pg_typeof(power('2', '3'))", "double precision"),
+        ("SELECT power('-2'::numeric, '3')", "-8.0000000000000000"),
+        ("SELECT power('-2'::numeric, 'inf')", "Infinity"),
+        ("SELECT power('-2'::numeric, '-inf')", "0"),
+        ("SELECT power('-1'::numeric, 'inf')", "1"),
+        ("SELECT power('-inf'::numeric, '2')", "Infinity"),
+        ("SELECT power('-inf'::numeric, '3')", "-Infinity"),
+        ("SELECT power('-inf'::numeric, '-3')", "0"),
+        // `numeric_inc(x)` is `x + 1`, specials included.
+        ("SELECT numeric_inc('4.2'::numeric)", "5.2"),
+        ("SELECT numeric_inc('inf'::numeric)", "Infinity"),
+        ("SELECT pg_typeof(numeric_inc(1::numeric))", "numeric"),
+        // `to_number` reads a Roman numeral, stopping at the first non-numeral.
+        ("SELECT to_number('CvIiI', 'rn')", "108"),
+        ("SELECT to_number('  XIV  ', '  RN')", "14"),
+        ("SELECT to_number('M CC', 'RN')", "1000"),
+    ];
+    for (sql, want) in cases {
+        assert!(
+            scalar(&client, sql).await.as_deref() == Some(*want),
+            "{sql}"
+        );
+    }
+
+    // A malformed numeral and the two template combinations PostgreSQL refuses.
+    assert!(err_code(&client, "SELECT to_number('viv', 'RN')").await == "22P02");
+    assert!(err_code(&client, "SELECT to_number('CM', 'MIRN')").await == "42601");
+    assert!(err_code(&client, "SELECT to_number('CM', 'RNRN')").await == "42601");
+    // Running out of `numeric` digits is a format overflow, not an integer one.
+    assert!(err_code(&client, "SELECT factorial(100000)").await == "22003");
+}

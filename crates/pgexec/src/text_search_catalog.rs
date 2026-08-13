@@ -226,6 +226,68 @@ pub(crate) fn execute(
     }
 }
 
+/// The template a text-search dictionary is built on.
+///
+/// crabka implements two of PostgreSQL's five dictionary templates. `ispell`,
+/// `synonym` and `thesaurus` all read their word lists out of
+/// `$SHAREDIR/tsearch_data`, which crabka has no counterpart for, so no
+/// dictionary can name them and [`dictionary_template`] never returns one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DictionaryTemplate {
+    /// `simple`: fold to lower case, and reject a stop word.
+    Simple,
+    /// `snowball`: fold, reject a stop word, then stem.
+    Snowball,
+}
+
+/// The template `name` bottoms out at, following `TEMPLATE` through the
+/// user-defined dictionaries in between.
+///
+/// The 42704 this raises is PostgreSQL's own wording for a `regdictionary`
+/// that resolves to nothing, which is what a dictionary built on a template
+/// crabka does not have leaves behind: the `CREATE` failed, so the name is
+/// genuinely absent from the catalog rather than present and unserviceable.
+pub(crate) fn dictionary_template(
+    kv: Option<&dyn Kv>,
+    name: &str,
+) -> Result<DictionaryTemplate, ExecError> {
+    let undefined =
+        || ExecError::UndefinedObject(format!("text search dictionary \"{name}\" does not exist"));
+    let strip = |value: &str| {
+        let value = canonical(value);
+        value
+            .strip_prefix("pg_catalog.")
+            .unwrap_or(&value)
+            .to_string()
+    };
+    let mut current = strip(name);
+    let mut seen = BTreeSet::new();
+    loop {
+        if !seen.insert(current.clone()) {
+            return Err(ExecError::Unsupported(
+                "text search dictionary TEMPLATE cycle".into(),
+            ));
+        }
+        // The two built-in dictionaries come first: `simple` names both a
+        // dictionary and the template it is built on, and `english_stem` is a
+        // `snowball` dictionary whose own name is neither.
+        match current.as_str() {
+            "simple" => return Ok(DictionaryTemplate::Simple),
+            "english_stem" => return Ok(DictionaryTemplate::Snowball),
+            _ => {}
+        }
+        let kv = kv.ok_or_else(undefined)?;
+        let object = find(kv, TextSearchObjectKind::Dictionary, &current)?.ok_or_else(undefined)?;
+        let base = strip(&object.base);
+        // `snowball` is a template only, so it terminates the walk; `simple`
+        // rejoins the arm above on the next turn.
+        if base == "snowball" {
+            return Ok(DictionaryTemplate::Snowball);
+        }
+        current = base;
+    }
+}
+
 /// The oid `pg_ts_config`/`pg_ts_dict` reports for a text-search object, and
 /// the one `regconfig`/`regdictionary` resolve to.
 ///

@@ -466,6 +466,15 @@ pub enum ExecError {
         sqlstate: &'static str,
         message: String,
     },
+    /// A scalar function's own error that also carries `PostgreSQL`'s `DETAIL`
+    /// line — `to_number`'s `"RN" is incompatible with other formats` names the
+    /// one pattern `RN` tolerates beside it, and the message alone does not say
+    /// which combination was refused.
+    FunctionErrorWithDetail {
+        sqlstate: &'static str,
+        message: &'static str,
+        detail: &'static str,
+    },
     /// A SQL/JSON diagnostic that carries `PostgreSQL`'s `DETAIL`/`HINT` lines
     /// alongside its SQLSTATE — `JSON_TABLE`'s coercion failures name the
     /// underlying type error in `DETAIL`, and its no-wrapper error hints at
@@ -1434,6 +1443,11 @@ impl ExecError {
                 "42P17",
                 format!("infinite recursion detected in policy for relation \"{relation}\""),
             ),
+            ExecError::FunctionErrorWithDetail {
+                sqlstate,
+                message,
+                detail,
+            } => PgError::error(sqlstate, message).with_detail(detail),
             ExecError::FunctionError { sqlstate, message } => {
                 let hint = ambiguous_operator_hint(&message);
                 let rendered = PgError::error(sqlstate, message);
