@@ -30,12 +30,7 @@ use crate::{
 };
 
 pub(crate) fn effective_backlog(hwm: i64, spso: i64, log_start: i64) -> i64 {
-    let base = if spso >= 0 {
-        spso.max(log_start)
-    } else {
-        log_start
-    };
-    (hwm - base).max(0)
+    crabka_verified::effective_share_backlog(hwm, spso, log_start)
 }
 
 pub(crate) struct BacklogPoller {

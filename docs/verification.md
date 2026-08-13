@@ -14,6 +14,9 @@ bodies for verified and runtime code paths.
 | `recompute_high_watermark` | `crabka-verified` | High watermark recomputation advances only when a majority has replicated an offset in the current epoch. |
 | `offset_index_lookup` | `crabka-verified` | Offset-index lookup returns the greatest indexed position not greater than the target, or zero when none exists. |
 | `retain_decision` | `crabka-verified` | Log compaction retention decisions preserve KIP-534 transaction/marker semantics and newest-key retention. |
+| `fetch_visibility` | `crabka-verified` | Broker Fetch windows never expose consumer data beyond HW, clamp read-committed data to LSO, and allow followers through LEO. |
+| `delete_records_target` / `delete_records_offset_out_of_range` | `crabka-verified` | DeleteRecords resolves the `-1` sentinel and rejects precisely negative or beyond-LEO targets. |
+| `effective_share_backlog` | `crabka-verified` | KIP-932 backlog is non-negative, overflow-safe, and never exceeds backlog measured from log start. |
 
 The stateright models in `crabka-throttle`, `crabka-raft`, and `crabka-log`
 drive the same functions through the runtime APIs, so model checking and

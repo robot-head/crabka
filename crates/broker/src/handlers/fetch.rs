@@ -1010,37 +1010,23 @@ pub(crate) fn compute_visibility_window(
     log_end: Offset,
     fetch_offset: Offset,
 ) -> VisibilityWindow {
-    let upper_bound = if is_follower { log_end } else { hw };
-    let effective_lso = if read_committed && !is_follower {
-        lso.min(hw)
-    } else {
-        lso
-    };
-    let response_hw = if is_follower { log_end } else { hw };
-    let response_lso = if read_committed && !is_follower {
-        lso.min(hw)
-    } else if is_follower {
-        log_end
-    } else {
-        hw
-    };
-    let limit_offset = if is_follower {
-        log_end
-    } else if read_committed {
-        effective_lso
-    } else {
-        hw
-    };
-    let out_of_range = fetch_offset < log_start;
-    let empty = !out_of_range && fetch_offset >= upper_bound;
+    let verified = crabka_verified::fetch_visibility(
+        is_follower,
+        read_committed,
+        log_start.0,
+        hw.0,
+        lso.0,
+        log_end.0,
+        fetch_offset.0,
+    );
     VisibilityWindow {
-        out_of_range,
-        empty,
-        limit_offset,
-        effective_lso,
-        read_committed_aborts: read_committed && !is_follower,
-        response_hw,
-        response_lso,
+        out_of_range: verified.out_of_range,
+        empty: verified.empty,
+        limit_offset: Offset(verified.limit_offset),
+        effective_lso: Offset(verified.effective_lso),
+        read_committed_aborts: verified.read_committed_aborts,
+        response_hw: Offset(verified.response_hw),
+        response_lso: Offset(verified.response_lso),
     }
 }
 
