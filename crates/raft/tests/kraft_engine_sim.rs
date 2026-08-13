@@ -179,9 +179,10 @@ where
         if let Some(v) = f() {
             return v;
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("condition not met before timeout");
-        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition not met before timeout"
+        );
         tokio::task::yield_now().await;
     }
 }
@@ -223,9 +224,10 @@ async fn await_single_leader(net: &SimNet, ids: &[NodeId], timeout: Duration) ->
                 }
             }
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("no single leader before timeout; states={snap:?}");
-        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no single leader before timeout; states={snap:?}"
+        );
         tokio::task::yield_now().await;
     }
 }
