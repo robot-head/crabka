@@ -47,6 +47,7 @@ base64 = { workspace = true }
 hex = { workspace = true }
 pglz = { workspace = true }
 unicode-normalization = { workspace = true }
+unicode-general-category = { workspace = true }
 encoding_rs = { workspace = true }
 zstd = { workspace = true }
 

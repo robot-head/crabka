@@ -75,6 +75,17 @@ impl ParseError {
         }
     }
 
+    /// Attach `PostgreSQL`'s HINT line to this error.
+    ///
+    /// The hint is the remedy `PostgreSQL` prints under the message, so it
+    /// belongs only on a rule that rejects exactly what `PostgreSQL`'s rejects
+    /// and whose hint reads the same.
+    #[must_use]
+    pub(crate) fn with_hint(mut self, hint: &'static str) -> Self {
+        self.hint = Some(hint);
+        self
+    }
+
     #[must_use]
     pub fn detail(&self) -> Option<&str> {
         self.detail.as_deref()

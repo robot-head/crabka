@@ -272,4 +272,8 @@ sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "r
 # PostgreSQL's `normalize(text, form)` / `is_normalized(text, form)` need the
 # Unicode NFC/NFD/NFKC/NFKD algorithms; this is the ecosystem's UAX #15 crate.
 unicode-normalization = "0.1"
+# `unicode_assigned(text)` asks whether every code point has been assigned,
+# which is General_Category != Cn. The table is generated from `UnicodeData.txt`
+# and is the whole of it, so no hand-kept list of ranges lives in this tree.
+unicode-general-category = "1"
 encoding_rs = "0.8"

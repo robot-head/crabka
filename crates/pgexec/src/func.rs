@@ -97,6 +97,12 @@ enum ScalarFunc {
     AdvisoryUnlockAll,
     CurrentDatabase,
     GetDatabaseEncoding,
+    /// `unicode_version()`: the Unicode release the engine's character tables
+    /// come from.
+    UnicodeVersion,
+    /// `unicode_assigned(text)`: has every code point in the string been
+    /// assigned?
+    UnicodeAssigned,
     CurrentSchema,
     CurrentUser,
     SessionUser,
@@ -224,6 +230,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_advisory_unlock_all" => ScalarFunc::AdvisoryUnlockAll,
         "current_database" => ScalarFunc::CurrentDatabase,
         "getdatabaseencoding" => ScalarFunc::GetDatabaseEncoding,
+        "unicode_version" => ScalarFunc::UnicodeVersion,
+        "unicode_assigned" => ScalarFunc::UnicodeAssigned,
         "current_schema" => ScalarFunc::CurrentSchema,
         "current_user" => ScalarFunc::CurrentUser,
         "session_user" => ScalarFunc::SessionUser,
@@ -287,6 +295,176 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::money_fn::is_money_func(name)
         || crate::sysid_fn::is_sysid_func(name)
         || crate::geometry_fn::is_geometry_func(name)
+        || constructor_cast_type(name).is_some()
+}
+
+/// Every one-argument function `PostgreSQL` names after a type, with the
+/// argument types it declares — `("float8", ["int4", "int8", …])` for the
+/// `float8(bigint)` that `SELECT q1, float8(q1) FROM int8_tbl` calls.
+///
+/// A cast function's `pg_proc.proname` is its *target type's* `pg_type.typname`,
+/// so the call means exactly `q1::float8`. `PostgreSQL` documents the spelling
+/// as obsolescent, but its own regression suite writes it, so the engine has to
+/// resolve it.
+///
+/// Enumerated from the pinned donor `REL_18_4`, not from what a test happened to
+/// name: every `src/include/catalog/pg_proc.dat` row whose `proname` is a
+/// `pg_type.dat` `typname` and whose `proargtypes` has exactly one non-array
+/// entry. A donor bump re-runs that filter over the new files.
+///
+/// Taking the arity from `pg_proc` and not from `pg_cast` is what keeps the
+/// length-coercion casts out. `pg_cast` has a `numeric` → `numeric` row, but its
+/// function is `numeric(numeric, int4)`; a one-argument `numeric(x::numeric)` is
+/// 42883 on `PostgreSQL` and has to stay 42883 here.
+///
+/// Sorted by name, so the lookup below can binary-search and a duplicate is
+/// visible on sight.
+const CONSTRUCTOR_CASTS: &[(&str, &[&str])] = &[
+    ("bool", &["int4", "jsonb"]),
+    ("box", &["circle", "point", "polygon"]),
+    ("bpchar", &["char", "name"]),
+    ("bytea", &["int2", "int4", "int8"]),
+    ("char", &["int4", "text"]),
+    ("cidr", &["inet"]),
+    ("circle", &["box", "polygon"]),
+    ("date", &["timestamp", "timestamptz"]),
+    ("datemultirange", &["daterange"]),
+    (
+        "float4",
+        &["float8", "int2", "int4", "int8", "jsonb", "numeric"],
+    ),
+    (
+        "float8",
+        &["float4", "int2", "int4", "int8", "jsonb", "numeric"],
+    ),
+    (
+        "int2",
+        &[
+            "bytea", "float4", "float8", "int4", "int8", "jsonb", "numeric",
+        ],
+    ),
+    (
+        "int4",
+        &[
+            "bit", "bool", "bytea", "char", "float4", "float8", "int2", "int8", "jsonb", "numeric",
+        ],
+    ),
+    ("int4multirange", &["int4range"]),
+    (
+        "int8",
+        &[
+            "bit", "bytea", "float4", "float8", "int2", "int4", "jsonb", "numeric", "oid",
+        ],
+    ),
+    ("int8multirange", &["int8range"]),
+    ("interval", &["time"]),
+    ("lseg", &["box"]),
+    ("macaddr", &["macaddr8"]),
+    ("macaddr8", &["macaddr"]),
+    ("money", &["int4", "int8", "numeric"]),
+    ("name", &["bpchar", "text", "varchar"]),
+    (
+        "numeric",
+        &["float4", "float8", "int2", "int4", "int8", "jsonb", "money"],
+    ),
+    ("nummultirange", &["numrange"]),
+    ("oid", &["int8"]),
+    ("path", &["polygon"]),
+    ("pg_lsn", &["numeric"]),
+    ("point", &["box", "circle", "lseg", "polygon"]),
+    ("polygon", &["box", "circle", "path"]),
+    ("regclass", &["text"]),
+    ("text", &["bool", "bpchar", "char", "inet", "name", "xml"]),
+    ("time", &["interval", "timestamp", "timestamptz", "timetz"]),
+    ("timestamp", &["date", "timestamptz"]),
+    ("timestamptz", &["date", "timestamp"]),
+    ("timetz", &["time", "timestamptz"]),
+    ("tsmultirange", &["tsrange"]),
+    ("tstzmultirange", &["tstzrange"]),
+    ("varchar", &["name"]),
+    ("xid", &["xid8"]),
+    ("xml", &["text"]),
+];
+
+/// The Unicode release `unicode_version()` reports, as (major, minor).
+///
+/// `PostgreSQL` generates every Unicode table it has in one run, so it has one
+/// version to report. Crabka's come from two crates on separate release
+/// schedules — `unicode-normalization` for UAX #15 and
+/// `unicode-general-category` for `unicode_assigned` — so the *lower* of the
+/// two is the release at which every Unicode answer this engine gives is
+/// current. Reporting the higher would claim coverage the other table has not
+/// caught up to.
+fn unicode_version() -> (u64, u64) {
+    let (norm_major, norm_minor, _) = unicode_normalization::UNICODE_VERSION;
+    let normalization = (u64::from(norm_major), u64::from(norm_minor));
+    let (cat_major, cat_minor, _) = unicode_general_category::UNICODE_VERSION;
+    normalization.min((cat_major, cat_minor))
+}
+
+/// Resolve one of the enumeration's `typname`s.
+///
+/// A `pg_proc` name is a `typname`, which is what a **quoted** type name
+/// resolves through: `PostgreSQL` spells the one-byte type's cast function
+/// `char`, the same identifier `"char"` names, and never `character(1)`. So the
+/// quoted table is consulted first, exactly as the parser does for `'a'::"char"`.
+fn type_of_typname(name: &str) -> Option<ColumnType> {
+    ColumnType::from_quoted_builtin_sql_name(name)
+        .or_else(|| ColumnType::from_builtin_sql_name(name))
+}
+
+/// The type a constructor-style cast call converts to, or `None` when `name` is
+/// no such function.
+fn constructor_cast_type(name: &str) -> Option<ColumnType> {
+    CONSTRUCTOR_CASTS
+        .binary_search_by_key(&name, |(target, _)| *target)
+        .ok()?;
+    type_of_typname(name)
+}
+
+/// The `Expr::Cast` a one-argument constructor-style call is, or `None` when the
+/// call is not one.
+///
+/// Rewriting to the cast node rather than converting here is what keeps the two
+/// spellings from drifting: `float8(x)` then goes through the same operand
+/// evaluation, the same `CREATE CAST` lookup and the same conversion table as
+/// `x::float8`, and gains whatever either of those gains.
+///
+/// The operand's type must be one the function declares. Without that check
+/// `xid('1'::xid)` would answer a value where `PostgreSQL` has only
+/// `xid(xid8)` and reports 42883, and `text(row('Jim','Beam'))` would render the
+/// composite the explicit cast renders. An operand still typed `unknown` is
+/// allowed through, because `PostgreSQL` resolves those against the candidate
+/// list rather than rejecting them.
+///
+/// Crabka holds `name` values in `text`, so the two collapse into one candidate
+/// here and `varchar(x::text)` resolves where `PostgreSQL` wants a `name`. That
+/// is the existing type mapping showing through, not a rule of this table.
+fn constructor_cast(fc: &FuncCall, scope: Option<&Scope>) -> Option<Expr> {
+    let index = CONSTRUCTOR_CASTS
+        .binary_search_by_key(&fc.name.as_str(), |(target, _)| *target)
+        .ok()?;
+    let ty = type_of_typname(fc.name.as_str())?;
+    let FuncArgs::Exprs(args) = &fc.args else {
+        return None;
+    };
+    let [arg] = args.as_slice() else {
+        return None;
+    };
+    let declared = CONSTRUCTOR_CASTS[index].1;
+    let given = scope.and_then(|scope| crate::eval::infer_type(arg, scope).ok());
+    if let Some(given) = given
+        && !declared
+            .iter()
+            .filter_map(|name| type_of_typname(name))
+            .any(|declared| declared.oid() == given.oid())
+    {
+        return None;
+    }
+    Some(Expr::Cast {
+        expr: Box::new(arg.clone()),
+        ty,
+    })
 }
 
 /// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
@@ -374,6 +552,19 @@ pub(crate) fn checked_args(fc: &FuncCall) -> Result<&[Expr], ExecError> {
 /// runtime as 42804, not here as 42883. This per-clause difference is
 /// documented.
 pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
+    match builtin_scalar_result_type(fc, scope) {
+        Err(ExecError::UndefinedFunction(message)) => constructor_cast(fc, Some(scope))
+            .map_or(Err(ExecError::UndefinedFunction(message)), |cast| {
+                crate::eval::infer_type(&cast, scope)
+            }),
+        resolved => resolved,
+    }
+}
+
+/// [`scalar_result_type`] without the constructor-cast last resort, so that
+/// `text(inet)` keeps `network_fn`'s meaning and only a 42883 there falls
+/// through to the cast.
+fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
     if crate::text_search_fn::is_text_search_func(&fc.name) {
         return crate::text_search_fn::text_search_result_type(fc, scope);
     }
@@ -824,8 +1015,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Text)
         }
+        ScalarFunc::UnicodeAssigned => {
+            require_arity(fc, n == 1)?;
+            require_text(&args[0], scope)?;
+            Ok(ColumnType::Bool)
+        }
         ScalarFunc::CurrentDatabase
         | ScalarFunc::GetDatabaseEncoding
+        | ScalarFunc::UnicodeVersion
         | ScalarFunc::CurrentSchema
         | ScalarFunc::CurrentUser
         | ScalarFunc::SessionUser
@@ -968,6 +1165,27 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
 /// and only the closure differs. Short-circuiting functions (`coalesce`) and
 /// the lazy ones evaluate arguments only as far as they need to.
 pub(crate) fn eval_scalar(
+    fc: &FuncCall,
+    scope: Option<&Scope>,
+    ctx: &EvalCtx,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Result<Datum, ExecError> {
+    match builtin_eval_scalar(fc, scope, ctx, &mut eval_child) {
+        // A rewritten operand is evaluated a second time here. Every function
+        // that can reach this arm is pure — the side-effecting ones (`nextval`,
+        // the advisory locks) are named nothing like a type and resolve long
+        // before it.
+        Err(ExecError::UndefinedFunction(message)) => match constructor_cast(fc, scope) {
+            Some(cast) => eval_child(&cast),
+            None => Err(ExecError::UndefinedFunction(message)),
+        },
+        resolved => resolved,
+    }
+}
+
+/// [`eval_scalar`] without the constructor-cast last resort. See
+/// [`builtin_scalar_result_type`] for why the fallback is not inline.
+fn builtin_eval_scalar(
     fc: &FuncCall,
     scope: Option<&Scope>,
     ctx: &EvalCtx,
@@ -1593,10 +1811,12 @@ fn eval_eager(
                     .checked_abs()
                     .map(Datum::Int4)
                     .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow)),
-                Datum::Int8(n) => n
-                    .checked_abs()
-                    .map(Datum::Int8)
-                    .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow)),
+                // `TypeError::Overflow` says "integer out of range", which is
+                // `int4`'s wording and not this overload's: `int8abs` reports
+                // the type it could not represent the result in.
+                Datum::Int8(n) => n.checked_abs().map(Datum::Int8).ok_or_else(|| {
+                    ExecError::Type(crabka_pgtypes::TypeError::out_of_range_for("bigint"))
+                }),
                 // SP30: abs over float8 (always representable, no overflow trap).
                 Datum::Float4(f) => Ok(Datum::Float4(f.abs())),
                 Datum::Float8(f) => Ok(Datum::Float8(f.abs())),
@@ -1900,6 +2120,23 @@ fn eval_eager(
         ScalarFunc::GetDatabaseEncoding => {
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Text("UTF8".into()))
+        }
+        ScalarFunc::UnicodeVersion => {
+            require_arity(fc, vals.is_empty())?;
+            let (major, minor) = unicode_version();
+            Ok(Datum::Text(format!("{major}.{minor}")))
+        }
+        // `pg_u_prop_assigned`: a code point is assigned when its
+        // General_Category is anything but `Cn`. Rust's `char` cannot hold a
+        // surrogate, so the halves PostgreSQL also rejects here can never reach
+        // this point — they are refused when the literal is lexed.
+        ScalarFunc::UnicodeAssigned => {
+            require_arity(fc, vals.len() == 1)?;
+            let assigned = text_arg(&vals[0])?.chars().all(|c| {
+                unicode_general_category::get_general_category(c)
+                    != unicode_general_category::GeneralCategory::Unassigned
+            });
+            Ok(Datum::Bool(assigned))
         }
         // The schema a `CREATE` with no qualifier lands in — the first
         // `search_path` entry that names an existing schema, and NULL when the
@@ -4019,5 +4256,146 @@ mod tests {
         assert!(err_code("area(lseg '[(0,0),(1,1)]')", Some(&t)) == "42883");
         assert!(ec_eval("area(lseg '[(0,0),(1,1)]')") == "42883");
         assert!(err_code("area(n)", Some(&t)) == "42883");
+    }
+
+    /// The enumeration is only trustworthy if it stays sorted (the lookup binary
+    /// searches it), holds no name twice, and names types this engine has.
+    #[test]
+    fn the_constructor_cast_enumeration_is_sorted_and_resolvable() {
+        assert!(CONSTRUCTOR_CASTS.windows(2).all(|w| w[0].0 < w[1].0));
+        for (target, sources) in CONSTRUCTOR_CASTS {
+            assert!(sources.windows(2).all(|w| w[0] < w[1]), "{target}");
+            assert!(type_of_typname(target).is_some(), "{target}");
+            for source in *sources {
+                assert!(type_of_typname(source).is_some(), "{target}({source})");
+            }
+        }
+    }
+
+    /// `T(x)` is the cast function `pg_proc` names after its target type, so it
+    /// converts exactly as `x::T` does — in the value and in the reported type.
+    #[test]
+    fn a_constructor_call_casts_to_the_type_it_names() {
+        for (call, cast) in [
+            (
+                "float8(4567890123456789::int8)",
+                "4567890123456789::int8::float8",
+            ),
+            ("float4(2::int8)", "2::int8::float4"),
+            ("int4('123'::int8)", "'123'::int8::int4"),
+            ("int2('123'::int8)", "'123'::int8::int2"),
+            ("int8(2.5::float8)", "2.5::float8::int8"),
+            ("numeric(2.5::float8)", "2.5::float8::numeric"),
+            ("oid(4::int8)", "4::int8::oid"),
+            ("bool(1::int4)", "1::int4::bool"),
+            ("text(true::bool)", "true::bool::text"),
+            (
+                "date(timestamp '2026-08-13 12:00:00')",
+                "timestamp '2026-08-13 12:00:00'::date",
+            ),
+            (
+                "timestamptz(date '2026-08-13')",
+                "date '2026-08-13'::timestamptz",
+            ),
+            ("cidr(inet '10.0.0.0/8')", "inet '10.0.0.0/8'::cidr"),
+        ] {
+            assert!(ev(call) == ev(cast), "{call}");
+            let scope = Scope::empty();
+            let ty = |sql: &str| {
+                crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type")
+            };
+            assert!(ty(call) == ty(cast), "{call}");
+        }
+    }
+
+    /// The name a *quoted* type name resolves through is the one `pg_proc` gives
+    /// the cast function, so `"char"(x)` is the one-byte type and never
+    /// `character(1)`.
+    #[test]
+    fn the_char_constructor_names_the_one_byte_type() {
+        assert!(constructor_cast_type("char") == Some(ColumnType::InternalChar));
+        assert!(constructor_cast_type("bpchar") == Some(ColumnType::Char(None)));
+    }
+
+    /// A name outside the enumeration stays 42883, and so do the arities the
+    /// enumeration does not carry: it holds only the one-argument functions.
+    #[test]
+    fn a_constructor_call_is_still_undefined_off_the_enumeration() {
+        for sql in [
+            "jsonb('1')",
+            "uuid('00000000-0000-0000-0000-000000000000')",
+            "float8()",
+            "float8(1::int8, 2)",
+        ] {
+            assert!(err_code(sql, None) == "42883", "{sql}");
+        }
+    }
+
+    /// An operand type the function does not declare stays 42883 — the
+    /// enumeration is a candidate list, not a licence to cast anything.
+    /// `xid(xid8)` is the only `xid` overload, `numeric(numeric)` is the
+    /// length coercion and takes a modifier, and no candidate takes a
+    /// composite.
+    #[test]
+    fn an_undeclared_operand_type_has_no_constructor_cast() {
+        for sql in [
+            "xid('1'::xid)",
+            "numeric(1.5::numeric)",
+            "text(1::int4)",
+            "text(row('Jim', 'Beam'))",
+            "int4('123'::text)",
+        ] {
+            assert!(err_code(sql, None) == "42883", "{sql}");
+        }
+    }
+
+    /// `int8`'s overflow says which type could not hold the result. The wording
+    /// is `int4`'s in `TypeError::Overflow`, which is not this overload's.
+    #[test]
+    fn abs_reports_the_overflowing_type_by_name() {
+        for (sql, message) in [
+            ("abs('-9223372036854775808'::int8)", "bigint out of range"),
+            ("abs((-2147483648)::int4)", "integer out of range"),
+            ("abs((-32768)::int2)", "smallint out of range"),
+        ] {
+            let ctx = crate::clock::EvalCtx::test_default();
+            let pg = crate::eval::eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx)
+                .expect_err("expected overflow")
+                .into_pg();
+            assert!(pg.code == "22003", "{sql}");
+            assert!(pg.message == message, "{sql}");
+        }
+    }
+
+    /// `unicode_version()` answers the release the engine's own tables come
+    /// from, in PostgreSQL's two-component form, and never claims a release
+    /// past the older of the two tables.
+    #[test]
+    fn unicode_version_reports_the_older_of_the_two_tables() {
+        let (major, minor) = unicode_version();
+        assert!(ev("unicode_version()") == Datum::Text(format!("{major}.{minor}")));
+        let (norm_major, norm_minor, _) = unicode_normalization::UNICODE_VERSION;
+        let (cat_major, cat_minor, _) = unicode_general_category::UNICODE_VERSION;
+        assert!((major, minor) <= (u64::from(norm_major), u64::from(norm_minor)));
+        assert!((major, minor) <= (cat_major, cat_minor));
+    }
+
+    /// `unicode_assigned` is false as soon as one code point is unassigned, and
+    /// vacuously true for the empty string. `U+10FFFF` is the last code point
+    /// and a permanent noncharacter, so it is `Cn` in every Unicode release.
+    #[test]
+    fn unicode_assigned_rejects_a_single_unassigned_code_point() {
+        for (sql, expected) in [
+            ("unicode_assigned('')", Datum::Bool(true)),
+            ("unicode_assigned('abc')", Datum::Bool(true)),
+            ("unicode_assigned(U&'abc')", Datum::Bool(true)),
+            ("unicode_assigned(U&'abc\\+10FFFF')", Datum::Bool(false)),
+            ("unicode_assigned(U&'\\00E4\\24D1c')", Datum::Bool(true)),
+            ("unicode_assigned(NULL)", Datum::Null),
+        ] {
+            assert!(ev(sql) == expected, "{sql}");
+        }
+        assert!(err_code("unicode_assigned(1)", None) == "42883");
+        assert!(err_code("unicode_assigned('a', 'b')", None) == "42883");
     }
 }

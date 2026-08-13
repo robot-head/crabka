@@ -447,13 +447,19 @@ impl Parser {
         }
     }
 
-    /// Is the token at the cursor a *quoted* identifier (`"select"`)? Quoting
-    /// strips a word of every keyword property, so neither the `ColId` nor the
-    /// `BareColLabel` restriction applies to it. The lexer folds the quotes away
-    /// and keeps only the text, so this reads the source byte the token starts
-    /// at.
+    /// Is the token at the cursor a *quoted* identifier (`"select"` or its
+    /// Unicode-escape spelling `U&"select"`)? Quoting strips a word of every
+    /// keyword property, so neither the `ColId` nor the `BareColLabel`
+    /// restriction applies to it. The lexer folds the quotes and the escapes
+    /// away and keeps only the text, so this reads the source bytes the token
+    /// starts at.
     fn peek_is_quoted_ident(&self) -> bool {
-        self.source.as_bytes().get(self.peek_pos()) == Some(&b'"')
+        let source = self.source.as_bytes();
+        let at = self.peek_pos();
+        source.get(at) == Some(&b'"')
+            || (matches!(source.get(at), Some(b'u' | b'U'))
+                && source.get(at + 1) == Some(&b'&')
+                && source.get(at + 2) == Some(&b'"'))
     }
 
     /// The word at the cursor when it may be spelled as a `ColId`, whether it
@@ -1385,6 +1391,12 @@ impl Parser {
                 word.eq_ignore_ascii_case("unknown")
                     || word.eq_ignore_ascii_case("json")
                     || word.eq_ignore_ascii_case("document")
+                    || word.eq_ignore_ascii_case("normalized")
+                    // `IS NFC NORMALIZED` needs the third token: `NFC` alone is
+                    // an ordinary word, so `x IS nfc` must stay whatever it was.
+                    || (unicode_normal_form(word).is_some()
+                        && matches!(self.peek3(), Token::Ident(next)
+                            if next.eq_ignore_ascii_case("normalized")))
             }
             _ => false,
         }
@@ -2632,11 +2644,41 @@ impl Parser {
             "trim" => self.trim_expr(),
             "position" => self.position_expr(),
             "overlay" => self.overlay_expr(),
+            "normalize" => self.normalize_expr(),
             "xmlparse" => self.xmlparse_expr(),
             "xmlserialize" => self.xmlserialize_expr(),
             "xmlconcat" => self.xmlconcat_expr(),
             _ => Ok(None),
         }
+    }
+
+    /// `NORMALIZE ( text [, form] )`, positioned at `(`.
+    ///
+    /// `PostgreSQL`'s grammar spells the form as a bare word — its
+    /// `unicode_normal_form` is one of `NFC`, `NFD`, `NFKC` and `NFKD` — and
+    /// rewrites it to a string constant, so `normalize(x, NFC)` and
+    /// `normalize(x, 'NFC')` are the same call. Any other second argument stays
+    /// the expression it was written as and reaches the executor unchanged,
+    /// which is what still raises `invalid normalization form: def` for
+    /// `normalize(x, 'def')`.
+    fn normalize_expr(&mut self) -> Result<Option<Expr>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut args = vec![self.expr(0)?];
+        if self.eat_comma() {
+            let form = match self.peek() {
+                Token::Ident(word) => unicode_normal_form(word),
+                _ => None,
+            };
+            match form {
+                Some(form) => {
+                    self.bump();
+                    args.push(Expr::StringLiteral(form.into()));
+                }
+                None => args.push(self.expr(0)?),
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Some(Self::call("normalize", args)))
     }
 
     /// `XMLPARSE ( {DOCUMENT | CONTENT} value [{PRESERVE | STRIP} WHITESPACE] )`.
@@ -2995,11 +3037,32 @@ impl Parser {
         matches!(self.peek2(), Token::RParen | Token::Comma)
     }
 
+    /// Is the cursor on the tail of an `IS [NOT] [form] NORMALIZED` predicate,
+    /// i.e. on `NORMALIZED` itself or on a form word that one follows?
+    ///
+    /// The form has to be confirmed by the word after it, because none of the
+    /// five words is reserved: `x IS nfc` names a column called `nfc` and stays
+    /// the syntax error it was.
+    fn peek_normalized_predicate(&self) -> bool {
+        if self.peek_ident_eq("normalized") {
+            return true;
+        }
+        matches!(self.peek(), Token::Ident(word) if unicode_normal_form(word).is_some())
+            && self.peek2_ident_eq("normalized")
+    }
+
     /// The whole `IS` postfix family, positioned at `IS`: `IS [NOT] NULL`, the
-    /// three boolean tests `IS [NOT] TRUE|FALSE|UNKNOWN`, and the null-safe
-    /// comparison `IS [NOT] DISTINCT FROM expr`. Anything else after `IS` is a
-    /// 42601. `UNKNOWN` is matched keyword-free (as a lowercased identifier), so
-    /// a column named `unknown` is unaffected everywhere else.
+    /// three boolean tests `IS [NOT] TRUE|FALSE|UNKNOWN`, the null-safe
+    /// comparison `IS [NOT] DISTINCT FROM expr`, and the `IS [NOT] [form]
+    /// NORMALIZED` Unicode predicate. Anything else after `IS` is a 42601.
+    /// `UNKNOWN` is matched keyword-free (as a lowercased identifier), so a
+    /// column named `unknown` is unaffected everywhere else, and so are the four
+    /// normalization form names.
+    ///
+    /// `NORMALIZED` desugars the way `PostgreSQL`'s `gram.y` desugars it: onto
+    /// the ordinary `is_normalized(text[, text])` function, negated by a `NOT`
+    /// node for the negative spelling. The executor already has that function,
+    /// so the predicate needs nothing of its own there.
     fn parse_is_predicate(&mut self, lhs: Expr) -> Result<Expr, ParseError> {
         self.expect(&Token::Keyword(Keyword::Is))?;
         let negated = self.eat_keyword(Keyword::Not);
@@ -3062,6 +3125,31 @@ impl Parser {
                 item,
                 unique_keys,
             }));
+        }
+        // `expr IS [NOT] [NFC|NFD|NFKC|NFKD] NORMALIZED`.
+        if self.peek_normalized_predicate() {
+            let form = match self.bump() {
+                Token::Ident(word) => unicode_normal_form(&word),
+                _ => None,
+            };
+            // The form word is only a form when `NORMALIZED` follows it, which
+            // is what `peek_normalized_predicate` has just established.
+            if form.is_some() {
+                self.bump();
+            }
+            let mut args = vec![lhs];
+            if let Some(form) = form {
+                args.push(Expr::StringLiteral(form.into()));
+            }
+            let call = Self::call("is_normalized", args);
+            return Ok(if negated {
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(call),
+                }
+            } else {
+                call
+            });
         }
         let op = if self.eat_keyword(Keyword::True) {
             if negated {
@@ -15554,6 +15642,17 @@ fn is_col_id_word(word: &str) -> bool {
         .is_err()
 }
 
+/// The Unicode normalization form `word` names, in the spelling
+/// `is_normalized`/`normalize` expect, or `None` when it names none.
+///
+/// `PostgreSQL`'s `unicode_normal_form` admits exactly these four, and each is
+/// unreserved everywhere else, so a table may still have a column called `nfc`.
+fn unicode_normal_form(word: &str) -> Option<&'static str> {
+    ["NFC", "NFD", "NFKC", "NFKD"]
+        .into_iter()
+        .find(|form| word.eq_ignore_ascii_case(form))
+}
+
 /// May `word` be a column alias written without `AS` (`PostgreSQL`'s
 /// `BareColLabel`)?
 fn is_bare_label_word(word: &str) -> bool {
@@ -19781,6 +19880,159 @@ mod tests {
             assert2::assert!(error.sqlstate() == "42601", "{sql}");
             assert2::assert!(error.message == "unequal number of entries in row expressions");
         }
+    }
+
+    #[test]
+    fn the_normalized_predicate_desugars_onto_is_normalized() {
+        use assert2::assert;
+
+        use crate::ast::UnaryOp;
+
+        // PostgreSQL's grammar lowers the predicate onto the ordinary function,
+        // and negates the call for the NOT spelling; the executor already has
+        // `is_normalized(text[, text])` and needs nothing else.
+        let x = || Expr::Column {
+            table: None,
+            name: "x".into(),
+        };
+        let normalized = |form: Option<&str>| {
+            let mut args = vec![x()];
+            if let Some(form) = form {
+                args.push(Expr::StringLiteral(form.into()));
+            }
+            Parser::call("is_normalized", args)
+        };
+        let not = |e: Expr| Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(e),
+        };
+        let cases: Vec<(&str, Expr)> = vec![
+            ("x IS NORMALIZED", normalized(None)),
+            ("x IS NFC NORMALIZED", normalized(Some("NFC"))),
+            ("x IS NFD NORMALIZED", normalized(Some("NFD"))),
+            ("x IS NFKC NORMALIZED", normalized(Some("NFKC"))),
+            ("x IS NFKD NORMALIZED", normalized(Some("NFKD"))),
+            // The form and the predicate word fold case, like any keyword.
+            ("x is nfkd normalized", normalized(Some("NFKD"))),
+            ("x IS NOT NORMALIZED", not(normalized(None))),
+            ("x IS NOT NFC NORMALIZED", not(normalized(Some("NFC")))),
+        ];
+        for (sql, want) in cases {
+            assert!(expr(sql) == want, "{sql}");
+        }
+        // None of the five words is reserved: each still names a column, and an
+        // `IS` that no predicate follows is still a syntax error.
+        for word in ["normalized", "nfc", "nfd", "nfkc", "nfkd"] {
+            assert!(
+                expr(word)
+                    == Expr::Column {
+                        table: None,
+                        name: word.into(),
+                    },
+                "{word}"
+            );
+        }
+        assert!(parse_expr_for_test("x IS nfc").is_err());
+    }
+
+    #[test]
+    fn normalize_takes_its_form_argument_as_a_bare_word() {
+        use assert2::assert;
+
+        // `unicode_normal_form` is grammar, not a value, so the four names arrive
+        // unquoted and are rewritten to the string the function expects. Every
+        // other second argument stays what it was written as, which is what still
+        // carries `'def'` through to the executor's `invalid normalization form`.
+        let x = || Expr::Column {
+            table: None,
+            name: "x".into(),
+        };
+        let normalize = |args: Vec<Expr>| Parser::call("normalize", args);
+        let cases: Vec<(&str, Expr)> = vec![
+            ("normalize(x)", normalize(vec![x()])),
+            (
+                "normalize(x, NFC)",
+                normalize(vec![x(), Expr::StringLiteral("NFC".into())]),
+            ),
+            (
+                "normalize(x, nfkd)",
+                normalize(vec![x(), Expr::StringLiteral("NFKD".into())]),
+            ),
+            (
+                "normalize(x, 'def')",
+                normalize(vec![x(), Expr::StringLiteral("def".into())]),
+            ),
+            (
+                "normalize('abc', 'def')",
+                normalize(vec![
+                    Expr::StringLiteral("abc".into()),
+                    Expr::StringLiteral("def".into()),
+                ]),
+            ),
+        ];
+        for (sql, want) in cases {
+            assert!(expr(sql) == want, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_unicode_escape_literal_stands_where_a_string_or_a_name_stands() {
+        use assert2::assert;
+
+        use crate::ast::SelectItem;
+
+        // The lexer resolves both spellings, so the projection sees an ordinary
+        // string and the alias an ordinary name — including the alias whose whole
+        // text is the backslash its own UESCAPE demoted to a plain character.
+        let item = |sql: &str| match only_select(sql).projection.into_iter().next() {
+            Some(SelectItem::Expr { expr, alias }) => (expr, alias),
+            other => panic!("{sql} projects one expression, got {other:?}"),
+        };
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                r#"SELECT U&'d\0061t\+000061' AS U&"d\0061t\+000061""#,
+                "data",
+                "data",
+            ),
+            (
+                r#"SELECT U&'d!0061t\+000061' UESCAPE '!' AS U&"d*0061t\+000061" UESCAPE '*'"#,
+                r"dat\+000061",
+                r"dat\+000061",
+            ),
+            (r#"SELECT U&'a\\b' AS "a\b""#, r"a\b", r"a\b"),
+            (r#"SELECT U&' \' UESCAPE '!' AS "tricky""#, r" \", "tricky"),
+            (r#"SELECT 'tricky' AS U&"\" UESCAPE '!'"#, "tricky", r"\"),
+        ];
+        for (sql, text, alias) in cases {
+            assert!(
+                item(sql) == (Expr::StringLiteral((*text).into()), Some((*alias).into())),
+                "{sql}"
+            );
+        }
+        // A Unicode-escaped name is a QUOTED one, so it keeps its case and it may
+        // spell a word the bare grammar reserves.
+        assert!(
+            item(r#"SELECT 1 U&"Select""#).1.as_deref() == Some("Select"),
+            "bare label"
+        );
+        // The predicate and the call take a Unicode literal like any other value,
+        // and the form word still labels the column after it.
+        let (predicate, alias) = item(r"SELECT U&'\00E4\24D1c' IS NFC NORMALIZED AS NFC");
+        assert!(alias.as_deref() == Some("nfc"));
+        assert!(
+            predicate
+                == Parser::call(
+                    "is_normalized",
+                    vec![
+                        Expr::StringLiteral("ä\u{24d1}c".into()),
+                        Expr::StringLiteral("NFC".into()),
+                    ],
+                )
+        );
+        assert!(
+            parse(r#"SELECT normalize(U&'\0061\0308\24D1c', NFC) = U&'\00E4\24D1c' COLLATE "C" AS test_nfc"#)
+                .is_ok()
+        );
     }
 
     #[test]
