@@ -44,7 +44,7 @@ use crabka_pgparser::ast::{
     ArraySubscript, Expr, FuncArgs, SelectItem, SelectStmt, TableFuncCall, TableFuncColumnDef,
 };
 use crabka_pgtypes::{
-    ColumnType, Datum, ElemType, RecordValue, TypeError, numeric::NumericValue,
+    ArrayValue, ColumnType, Datum, ElemType, RecordValue, TypeError, numeric::NumericValue,
     usertype::UserTypeRef,
 };
 use crabka_pgwire::engine::FieldDescription;
@@ -56,6 +56,7 @@ use crate::{
     join::Relation,
     json_fn::JsonbSrf,
     json_record::RecordShape,
+    regexp_fn::{compile_pattern, group_datums},
     scope::{ColumnBinding, Exposure, Scope},
 };
 
@@ -75,6 +76,13 @@ enum Srf {
     StringToTable,
     /// `regexp_split_to_table(text, pattern [, flags])`.
     RegexpSplitToTable,
+    /// `regexp_matches(text, pattern [, flags])` → one `text[]` per match.
+    ///
+    /// The set-returning sibling of `regexp_match`: without the `g` flag it
+    /// produces the first match's capture groups and stops, and with `g` it
+    /// produces one row per non-overlapping match. A pattern that matches
+    /// nothing produces no rows at all rather than a NULL one.
+    RegexpMatches,
     /// `json_each(json)` → `(key text, value json)`, `jsonb_each(jsonb)` →
     /// `(key text, value jsonb)`.
     Each(JsonFamily),
@@ -251,6 +259,7 @@ fn classify(name: &str) -> Option<Srf> {
         "generate_subscripts" => Srf::GenerateSubscripts,
         "string_to_table" => Srf::StringToTable,
         "regexp_split_to_table" => Srf::RegexpSplitToTable,
+        "regexp_matches" => Srf::RegexpMatches,
         // Ten functions, five shapes over two document types. The `json_*` half
         // reads the original text, so it keeps input order and duplicate keys
         // where the `jsonb_*` half has already discarded both.
@@ -439,6 +448,10 @@ pub(crate) fn plan(
         Srf::RegexpSplitToTable => {
             require_arity(name, &given, (2, 3))?;
             vec![column("regexp_split_to_table", ColumnType::Text)]
+        }
+        Srf::RegexpMatches => {
+            require_arity(name, &given, (2, 3))?;
+            vec![column("regexp_matches", ColumnType::Array(ElemType::Text))]
         }
         Srf::Each(family) => {
             require_json_document(name, &given, family)?;
@@ -680,6 +693,7 @@ pub(crate) fn rows(
         Srf::GenerateSubscripts => subscript_rows(&plan.name, vals)?,
         Srf::StringToTable => string_to_table_rows(&plan.name, vals)?,
         Srf::RegexpSplitToTable => regexp_split_rows(&plan.name, vals)?,
+        Srf::RegexpMatches => regexp_matches_rows(&plan.name, vals)?,
         Srf::Each(family) => expand_json(family, JsonbSrf::Each, vals)?,
         Srf::EachText(family) => expand_json(family, JsonbSrf::EachText, vals)?,
         Srf::ObjectKeys(family) => expand_json(family, JsonbSrf::ObjectKeys, vals)?,
@@ -715,7 +729,9 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             vec![Some(value), Some(value), Some(step)]
         }
         Srf::GenerateSubscripts => vec![None, Some(ColumnType::Int4), Some(ColumnType::Bool)],
-        Srf::StringToTable | Srf::RegexpSplitToTable => vec![text, text, text],
+        Srf::StringToTable | Srf::RegexpSplitToTable | Srf::RegexpMatches => {
+            vec![text, text, text]
+        }
         Srf::Each(family)
         | Srf::EachText(family)
         | Srf::ObjectKeys(family)
@@ -2070,7 +2086,7 @@ fn regexp_split_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, Exec
         None => "",
         Some(other) => text_arg(name, other)?,
     };
-    let re = compile_regex(pattern, flags)?;
+    let re = compile_pattern("regexp_split_to_table()", false, pattern, flags)?;
     let mut pieces = Vec::new();
     let mut piece_start = 0usize;
     let mut search = 0usize;
@@ -2114,56 +2130,44 @@ fn next_boundary(input: &str, at: usize) -> usize {
         .map_or(at + 1, |c| at + c.len_utf8())
 }
 
-/// Compile a PostgreSQL regular expression with its flag string.
+/// `regexp_matches(string, pattern [, flags])`: the capture groups of each
+/// match, one `text[]` row per match.
 ///
-/// PostgreSQL's default is "non-newline-sensitive": `.` matches a newline and
-/// `^`/`$` anchor only at the ends of the string. `n`/`m` make both
-/// newline-sensitive, `s` restores the default, `i`/`c` set case folding, `x`
-/// enables expanded syntax and `q` makes the pattern a literal. This function
-/// rejects `g` the way PostgreSQL rejects it for this function.
-fn compile_regex(pattern: &str, flags: &str) -> Result<regex::Regex, ExecError> {
-    let mut case_insensitive = false;
-    let mut newline_sensitive = false;
-    let mut expanded = false;
-    let mut literal = false;
-    for flag in flags.chars() {
-        match flag {
-            'i' => case_insensitive = true,
-            'c' => case_insensitive = false,
-            'n' | 'm' | 'p' | 'w' => newline_sensitive = true,
-            's' | 'e' | 'b' | 't' => newline_sensitive = false,
-            'x' => expanded = true,
-            'q' => literal = true,
-            'g' => {
-                return Err(ExecError::FunctionError {
-                    sqlstate: "22023",
-                    message: "regexp_split_to_table() does not support the \"global\" option"
-                        .to_string(),
-                });
-            }
-            other => {
-                return Err(ExecError::FunctionError {
-                    sqlstate: "22023",
-                    message: format!("invalid regular expression option: \"{other}\""),
-                });
-            }
-        }
-    }
-    let source = if literal {
-        regex::escape(pattern)
-    } else {
-        pattern.to_string()
+/// Without `g` only the first match produces a row. With `g` the scan walks
+/// forward from the end of each match — and one character past it when the
+/// match was empty, which is what makes `regexp_matches(…, '^', 'mg')` yield a
+/// row per line instead of looping. A pattern with no capture groups reports
+/// the whole match as the array's one element.
+fn regexp_matches_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let input = text_arg(name, &vals[0])?;
+    let pattern = text_arg(name, &vals[1])?;
+    let flags = match vals.get(2) {
+        None => "",
+        Some(other) => text_arg(name, other)?,
     };
-    regex::RegexBuilder::new(&source)
-        .case_insensitive(case_insensitive)
-        .multi_line(newline_sensitive)
-        .dot_matches_new_line(!newline_sensitive)
-        .ignore_whitespace(expanded)
-        .build()
-        .map_err(|error| ExecError::FunctionError {
-            sqlstate: "2201B",
-            message: format!("invalid regular expression: {error}"),
-        })
+    let global = flags.contains('g');
+    let re = compile_pattern("regexp_matches()", true, pattern, flags)?;
+    let mut rows = Vec::new();
+    let mut search = 0usize;
+    while search <= input.len() {
+        let Some(caps) = re.captures_at(input, search) else {
+            break;
+        };
+        let whole = caps.get(0).expect("group 0 always participates");
+        rows.push(vec![Datum::Array(ArrayValue::new(
+            ElemType::Text,
+            group_datums(&re, &caps),
+        ))]);
+        if !global {
+            break;
+        }
+        search = if whole.is_empty() {
+            next_boundary(input, whole.end())
+        } else {
+            whole.end()
+        };
+    }
+    Ok(rows)
 }
 
 // ---- shared helpers ----
@@ -2336,6 +2340,7 @@ mod tests {
             "generate_subscripts",
             "string_to_table",
             "regexp_split_to_table",
+            "regexp_matches",
             "jsonb_each",
             "jsonb_each_text",
             "jsonb_object_keys",
@@ -2744,6 +2749,109 @@ mod tests {
                 "{name}{args:?}"
             );
         }
+    }
+
+    /// One expected row of `regexp_matches`: a capture group per element, where
+    /// `None` is a group that did not participate.
+    type Groups<'a> = &'a [Option<&'a str>];
+
+    /// `regexp_matches` reports one `text[]` per match, and the `g` flag is
+    /// what decides whether it stops after the first one.
+    #[test]
+    fn regexp_matches_reports_the_capture_groups_of_each_match() {
+        let arrays = |rows: &[Groups<'_>]| -> Vec<Datum> {
+            rows.iter()
+                .map(|groups| {
+                    Datum::Array(ArrayValue::new(
+                        ElemType::Text,
+                        groups
+                            .iter()
+                            .map(|g| g.map_or(Datum::Null, |s| Datum::Text(s.to_string())))
+                            .collect(),
+                    ))
+                })
+                .collect()
+        };
+        let cases: Vec<(Vec<Expr>, Vec<Groups<'_>>)> = vec![
+            // Two groups, one match.
+            (
+                vec![text("foobarbequebaz"), text("(bar)(beque)")],
+                vec![&[Some("bar"), Some("beque")]],
+            ),
+            // No groups at all: the array holds the whole match.
+            (
+                vec![text("foobarbequebaz"), text("barbeque")],
+                vec![&[Some("barbeque")]],
+            ),
+            // A group that did not participate is a NULL element, not an empty
+            // string — which an *empty* match is.
+            (
+                vec![text("foobarbequebaz"), text("(bar)(.+)?(beque)")],
+                vec![&[Some("bar"), None, Some("beque")]],
+            ),
+            (
+                vec![text("foobarbequebaz"), text("(bar)(.*)(beque)")],
+                vec![&[Some("bar"), Some(""), Some("beque")]],
+            ),
+            // No match is no rows, not one NULL row.
+            (
+                vec![text("foobarbequebaz"), text("(bar)(.+)(beque)")],
+                vec![],
+            ),
+            // Without `g` the scan stops after the first match; with it every
+            // non-overlapping match reports.
+            (
+                vec![text("foobarbequebazilbarfbonk"), text("(b[^b]+)(b[^b]+)")],
+                vec![&[Some("bar"), Some("beque")]],
+            ),
+            (
+                vec![
+                    text("foobarbequebazilbarfbonk"),
+                    text("(b[^b]+)(b[^b]+)"),
+                    text("g"),
+                ],
+                vec![
+                    &[Some("bar"), Some("beque")],
+                    &[Some("bazil"), Some("barf")],
+                ],
+            ),
+            (
+                vec![text("foObARbEqUEbAz"), text("(bar)(beque)"), text("i")],
+                vec![&[Some("bAR"), Some("bEqUE")]],
+            ),
+            // An empty match advances one character, so a line anchor under `m`
+            // reports once per line instead of looping.
+            (
+                vec![text("foo\nbar\nbaz"), text("^"), text("mg")],
+                vec![&[Some("")], &[Some("")], &[Some("")]],
+            ),
+            (
+                vec![text("1\n2\n"), text("^.?"), text("mg")],
+                vec![&[Some("1")], &[Some("2")], &[Some("")]],
+            ),
+        ];
+        for (args, expected) in cases {
+            assert!(
+                single_column("regexp_matches", &args).expect("rows") == arrays(&expected),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// `regexp_matches` is the one function in the family that reads `g`, so it
+    /// must not inherit `regexp_split_to_table`'s rejection of it.
+    #[test]
+    fn regexp_matches_accepts_the_global_flag_that_the_split_srf_rejects() {
+        let args = [text("aa"), text("a"), text("g")];
+        assert!(single_column("regexp_matches", &args).expect("rows").len() == 2);
+        let error = single_column("regexp_split_to_table", &args)
+            .expect_err("rejected")
+            .into_pg();
+        assert!(error.code == "22023", "{error:?}");
+        assert!(
+            error.message == "regexp_split_to_table() does not support the \"global\" option",
+            "{error:?}"
+        );
     }
 
     #[test]

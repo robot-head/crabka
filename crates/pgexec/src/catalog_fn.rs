@@ -2030,7 +2030,7 @@ fn part_key_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<
     let keys = scheme
         .keys
         .iter()
-        .map(|key| quote_identifier(&key.name))
+        .map(|key| quote_identifier(key))
         .collect::<Vec<_>>()
         .join(", ");
     Ok(Datum::Text(format!(

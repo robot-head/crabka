@@ -29,7 +29,7 @@ use crate::{
     error::ExecError,
     func::{
         ambiguous_function, checked_args, domain, int_arg, is_unknown_arg, no_matching_function,
-        require_arity, to_numeric, type_error, undefined_function,
+        require_arity, to_numeric, type_error, undefined_function, undefined_function_spelled,
     },
     scope::Scope,
 };
@@ -228,9 +228,15 @@ pub(crate) fn math_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
             numeric_castable(&args[0], scope)?;
             Ok(ColumnType::Int4)
         }
-        // width_bucket(operand, low, high, count) -> int4, over numeric or float8.
+        // width_bucket(operand, low, high, count) -> int4, over numeric or
+        // float8; width_bucket(operand, thresholds) -> int4, over any type with
+        // a btree ordering.
         MathFunc::WidthBucket => {
-            require_arity(fc, n == 4)?;
+            require_arity(fc, n == 2 || n == 4)?;
+            if n == 2 {
+                require_threshold_array(fc, args, scope)?;
+                return Ok(ColumnType::Int4);
+            }
             widest(&args[..3], scope, NumKind::Numeric)?;
             arg_kind(&args[3], scope)?;
             Ok(ColumnType::Int4)
@@ -340,6 +346,12 @@ fn coerce_unknown_args(
     if !args.iter().any(is_unknown_arg) {
         return Ok(());
     }
+    // The threshold-array form has no numeric family to widen towards: an
+    // `unknown` array literal takes the operand's own type, and an `unknown`
+    // operand takes the array's element type.
+    if f == MathFunc::WidthBucket && args.len() == 2 {
+        return coerce_threshold_args(args, vals, ctx);
+    }
     // `width_bucket`'s bucket count is int4 whatever family the bounds resolve
     // to, so it is coerced separately from the first three arguments.
     let (family_args, count_arg) = if f == MathFunc::WidthBucket && args.len() == 4 {
@@ -355,6 +367,30 @@ fn coerce_unknown_args(
     }
     if count_arg && is_unknown_arg(&args[3]) {
         vals[3] = crabka_pgtypes::cast::cast(&vals[3], ColumnType::Int4, &ctx.time_zone)?;
+    }
+    Ok(())
+}
+
+/// Resolve the `unknown` half of `width_bucket(operand, thresholds)` against
+/// the typed half. `require_threshold_array` has already refused the call in
+/// which both halves are `unknown`.
+fn coerce_threshold_args(
+    args: &[Expr],
+    vals: &mut [Datum],
+    ctx: &EvalCtx,
+) -> Result<(), ExecError> {
+    if is_unknown_arg(&args[1]) {
+        let elem = vals[0]
+            .column_type()
+            .and_then(crabka_pgtypes::ElemType::from_column_type)
+            .ok_or_else(|| type_error("width_bucket", &vals[0]))?;
+        vals[1] = crabka_pgtypes::cast::cast(&vals[1], ColumnType::Array(elem), &ctx.time_zone)?;
+        return Ok(());
+    }
+    if is_unknown_arg(&args[0])
+        && let Some(ColumnType::Array(elem)) = vals[1].column_type()
+    {
+        vals[0] = crabka_pgtypes::cast::cast(&vals[0], elem.column_type(), &ctx.time_zone)?;
     }
     Ok(())
 }
@@ -443,10 +479,11 @@ fn eval_strict(
                 Some(d) => NumericValue::from(trimmed(d)),
             }))
         }
-        MathFunc::WidthBucket => {
-            require_arity(fc, vals.len() == 4)?;
-            width_bucket(&vals[0], &vals[1], &vals[2], int_arg(&vals[3])?)
-        }
+        MathFunc::WidthBucket => match vals {
+            [operand, thresholds] => width_bucket_array(operand, thresholds),
+            [operand, low, high, count] => width_bucket(operand, low, high, int_arg(count)?),
+            _ => Err(undefined_function(&fc.name)),
+        },
         MathFunc::Random => {
             require_arity(fc, vals.is_empty() || vals.len() == 2)?;
             match vals {
@@ -656,6 +693,75 @@ fn factorial(n: i64) -> Result<Datum, ExecError> {
 /// 2201G, that is `invalid_argument_for_width_bucket_function`.
 fn width_bucket_error(message: &'static str) -> ExecError {
     domain("2201G", message)
+}
+
+/// Check `width_bucket(operand, thresholds)`, whose declared parameter types are
+/// `anycompatible` and `anycompatiblearray`.
+///
+/// The two have to unify, so a `text` operand against an `integer[]` is 42883
+/// rather than a comparison across families. An `unknown` array literal takes
+/// its element type from the operand — that is what makes
+/// `width_bucket(5, '{}')` an empty `integer[]` rather than ambiguous — and an
+/// `unknown` operand takes its type from the array.
+fn require_threshold_array(fc: &FuncCall, args: &[Expr], scope: &Scope) -> Result<(), ExecError> {
+    let mismatch = || undefined_function_spelled(&fc.name, args, scope);
+    let operand = if is_unknown_arg(&args[0]) {
+        None
+    } else {
+        Some(crate::eval::infer_type(&args[0], scope)?)
+    };
+    if is_unknown_arg(&args[1]) {
+        // The array side resolves from the operand, so an all-`unknown` call
+        // has nothing to resolve either side from.
+        return operand.map(|_| ()).ok_or_else(mismatch);
+    }
+    let ColumnType::Array(elem) = crate::eval::infer_type(&args[1], scope)? else {
+        return Err(mismatch());
+    };
+    let (Some(operand), elem) = (operand, elem.column_type()) else {
+        return Ok(());
+    };
+    // `anycompatible` unifies the numeric widths with one another and otherwise
+    // demands the same type; `varchar`/`char` reach `text` by binary coercion.
+    let compatible = operand == elem
+        || (operand.is_numeric() && elem.is_numeric())
+        || (operand.is_string() && elem.is_string());
+    if compatible { Ok(()) } else { Err(mismatch()) }
+}
+
+/// `width_bucket(operand, thresholds)`: how many of the ascending `thresholds`
+/// the operand is at or above, so `0` below the first and `array_length` at or
+/// above the last.
+///
+/// PostgreSQL binary-searches the array with the element type's btree ordering
+/// and never checks that it is sorted. That ordering is also what places a
+/// `float8`/`numeric` NaN above every other value, so a NaN operand lands in
+/// the last bucket and a NaN threshold ends the search.
+fn width_bucket_array(operand: &Datum, thresholds: &Datum) -> Result<Datum, ExecError> {
+    let Datum::Array(array) = thresholds else {
+        return Err(type_error("width_bucket", thresholds));
+    };
+    if array.dims.len() > 1 {
+        return Err(domain("2202E", "thresholds must be one-dimensional array"));
+    }
+    if array.elems.iter().any(Datum::is_null) {
+        return Err(domain("22004", "thresholds array must not contain NULLs"));
+    }
+    let (mut left, mut right) = (0usize, array.elems.len());
+    while left < right {
+        let mid = left + (right - left) / 2;
+        let below = crabka_pgtypes::ops::compare(operand, &array.elems[mid])
+            .map_err(ExecError::Type)?
+            .is_none_or(Ordering::is_lt);
+        if below {
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+    Ok(Datum::Int4(i32::try_from(left).map_err(|_| {
+        ExecError::Type(crabka_pgtypes::TypeError::Overflow)
+    })?))
 }
 
 /// `width_bucket(operand, low, high, count)`: which of `count` equal-width

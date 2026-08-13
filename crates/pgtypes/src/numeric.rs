@@ -1928,10 +1928,18 @@ pub fn num_ln(arg: &NumericValue) -> Result<NumericValue, TypeError> {
         NumericValue::Infinity | NumericValue::NegInfinity => return Ok(NumericValue::Infinity),
         NumericValue::Finite(bd) => bd,
     };
-    let rscale = ln_rscale(bd);
+    Ok(NumericValue::Finite(finite_ln(bd, ln_rscale(bd))?))
+}
+
+/// `ln(bd)` rounded to `rscale` fractional digits (PostgreSQL `ln_var`).
+///
+/// `num_ln` lets `ln_rscale` pick the scale; `log_var` (see [`num_log`])
+/// instead asks for a scale of its own, because it divides two logarithms and
+/// needs guard digits in each of them.
+fn finite_ln(bd: &BigDecimal, rscale: i64) -> Result<BigDecimal, TypeError> {
     let prec = transc_prec(estimate_ln_dweight(bd) + 1, rscale);
     let v = bf_ln(&num_to_bf(&finite_to_text(bd), prec), prec).ok_or_else(err_log_negative)?;
-    Ok(NumericValue::Finite(finish_transc(&bf_to_text(&v), rscale)))
+    Ok(finish_transc(&bf_to_text(&v), rscale))
 }
 
 /// numeric log base 10; same domain and special rules as [`num_ln`].
@@ -1955,6 +1963,69 @@ pub fn num_log10(arg: &NumericValue) -> Result<NumericValue, TypeError> {
     Ok(NumericValue::Finite(canonical(
         quotient.with_scale_round(rscale, RoundingMode::HalfUp),
     )))
+}
+
+/// numeric log base `base` of `num` (PostgreSQL `numeric_log` / `log_var`).
+///
+/// The domain errors are `ln`'s, taken on the base before the argument, so
+/// `log(0, -1)` reports zero rather than a negative number. A base of exactly
+/// one makes `ln(base)` zero and the division 22012, which is how PostgreSQL
+/// reports `log(1.0, 12.34)`.
+pub fn num_log(base: &NumericValue, num: &NumericValue) -> Result<NumericValue, TypeError> {
+    let (b, n) = match (base, num) {
+        (NumericValue::Finite(b), NumericValue::Finite(n)) => (b, n),
+        _ => return special_log(base, num),
+    };
+    if let Some(err) = log_domain_error(base).or_else(|| log_domain_error(num)) {
+        return Err(err);
+    }
+    finite_log(b, n).map(NumericValue::Finite)
+}
+
+/// `log(base, num)` where at least one operand is `NaN` or an infinity.
+///
+/// PostgreSQL screens the signs and zeros of *both* operands before it looks at
+/// which one is infinite, so `log(Infinity, 0)` is the zero error rather than a
+/// shortcut answer.
+fn special_log(base: &NumericValue, num: &NumericValue) -> Result<NumericValue, TypeError> {
+    if base.is_nan() || num.is_nan() {
+        return Ok(NumericValue::NaN);
+    }
+    if base.signum() < 0 || num.signum() < 0 {
+        return Err(err_log_negative());
+    }
+    if base.is_zero() || num.is_zero() {
+        return Err(err_log_zero());
+    }
+    if base.is_infinite() {
+        // Infinity/Infinity is indeterminate; over an infinite base a finite
+        // logarithm underflows to plain zero rather than raising.
+        if num.is_infinite() {
+            return Ok(NumericValue::NaN);
+        }
+        return Ok(NumericValue::from(0i64));
+    }
+    Ok(NumericValue::Infinity)
+}
+
+/// PostgreSQL `log_var`: divide the two natural logarithms, each computed with
+/// eight guard digits past what the quotient's own scale needs.
+fn finite_log(base: &BigDecimal, num: &BigDecimal) -> Result<BigDecimal, TypeError> {
+    let ln_base_dweight = estimate_ln_dweight(base);
+    let ln_num_dweight = estimate_ln_dweight(num);
+    let result_dweight = ln_num_dweight - ln_base_dweight;
+    let rscale = (MIN_SIG_DIGITS - result_dweight)
+        .max(base.fractional_digit_count().max(0))
+        .max(num.fractional_digit_count().max(0))
+        .clamp(0, TRANSC_MAX_SCALE);
+    let ln_base = finite_ln(base, (rscale + result_dweight - ln_base_dweight + 8).max(0))?;
+    let ln_num = finite_ln(num, (rscale + result_dweight - ln_num_dweight + 8).max(0))?;
+    if finite_is_zero(&ln_base) {
+        return Err(TypeError::DivisionByZero);
+    }
+    Ok(canonical(
+        (ln_num / ln_base).with_scale_round(rscale, RoundingMode::HalfUp),
+    ))
 }
 
 /// numeric exp; `Err(22003)` when the result overflows the numeric format.
@@ -3164,6 +3235,54 @@ mod tests {
         assert!(num_ln(&n("-inf")).unwrap_err() == err_log_negative());
         assert!(num_log10(&n("0")).unwrap_err() == err_log_zero());
         assert!(num_log10(&n("-inf")).unwrap_err() == err_log_negative());
+    }
+
+    /// `log_var` picks the result scale from the estimated weight of the
+    /// quotient and floors it at either input's own display scale, so the
+    /// printed digit count is part of the answer.
+    #[test]
+    fn two_argument_log_matches_postgres_value_and_display_scale() {
+        use assert2::assert;
+        let cases: &[(&str, &str, &str)] = &[
+            ("2", "2", "1.0000000000000000"),
+            ("2", "4.2", "2.0703893278913979"),
+            ("4.2", "2", "0.4830009440873890"),
+            ("10", "1000", "3.0000000000000000"),
+            ("0.99923", "4.58934e34", "-103611.55579544132"),
+            ("1.000016", "8.452010e18", "2723830.2877097365"),
+            // A base and argument at opposite ends of the format keep every
+            // digit their display scales ask for.
+            (
+                "1.23e-89",
+                "6.4689e45",
+                "-0.5152489207781856983977054971756484879653568168479201885425588841094788842469115325262329756",
+            ),
+        ];
+        for (base, num, expected) in cases {
+            let got = to_text(&num_log(&n(base), &n(num)).expect("log"));
+            assert!(got == *expected, "log({base}, {num}) gave {got}");
+        }
+    }
+
+    #[test]
+    fn two_argument_log_specials_and_domains_match_postgres() {
+        use assert2::assert;
+        assert!(to_text(&num_log(&n("2"), &n("inf")).expect("log")) == "Infinity");
+        assert!(to_text(&num_log(&n("inf"), &n("2")).expect("log")) == "0");
+        assert!(to_text(&num_log(&n("inf"), &n("inf")).expect("log")) == "NaN");
+        assert!(to_text(&num_log(&n("nan"), &n("2")).expect("log")) == "NaN");
+        assert!(to_text(&num_log(&n("2"), &n("nan")).expect("log")) == "NaN");
+        // A NaN operand wins over the sign and zero screens.
+        assert!(to_text(&num_log(&n("nan"), &n("0")).expect("log")) == "NaN");
+        assert!(num_log(&n("0"), &n("10")).unwrap_err() == err_log_zero());
+        assert!(num_log(&n("10"), &n("0")).unwrap_err() == err_log_zero());
+        assert!(num_log(&n("-inf"), &n("10")).unwrap_err() == err_log_negative());
+        assert!(num_log(&n("10"), &n("-inf")).unwrap_err() == err_log_negative());
+        // The sign screen runs before the zero screen, even across operands.
+        assert!(num_log(&n("inf"), &n("0")).unwrap_err() == err_log_zero());
+        assert!(num_log(&n("-inf"), &n("inf")).unwrap_err() == err_log_negative());
+        // ln(1) is zero, so there is no divisor.
+        assert!(num_log(&n("1.0"), &n("12.34")).unwrap_err() == TypeError::DivisionByZero);
     }
 
     #[test]

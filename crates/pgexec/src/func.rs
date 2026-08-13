@@ -64,6 +64,7 @@ enum ScalarFunc {
     Ln,
     Log,
     Pi,
+    Float4Send,
     // SP33: string family.
     Lpad,
     Rpad,
@@ -165,6 +166,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "ln" => ScalarFunc::Ln,
         "log" => ScalarFunc::Log,
         "pi" => ScalarFunc::Pi,
+        "float4send" => ScalarFunc::Float4Send,
         "lpad" => ScalarFunc::Lpad,
         "rpad" => ScalarFunc::Rpad,
         "left" => ScalarFunc::Left,
@@ -644,7 +646,21 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             }
         }
         ScalarFunc::Sqrt | ScalarFunc::Exp | ScalarFunc::Ln | ScalarFunc::Log => {
-            require_arity(fc, n == 1)?;
+            require_arity(fc, n == 1 || (f == ScalarFunc::Log && n == 2))?;
+            if n == 2 {
+                // `log(base, num)` is declared over `numeric` alone — there is
+                // no two-argument `float8` candidate — so a `float8` operand
+                // has nothing to resolve to and both `unknown` literals land on
+                // `numeric` rather than the usual `float8`.
+                for arg in args {
+                    if !is_unknown_literal(arg)
+                        && float4_widens(require_numeric(arg, scope)?) == ColumnType::Float8
+                    {
+                        return Err(no_matching_function());
+                    }
+                }
+                return Ok(ColumnType::Numeric(None));
+            }
             let at = require_numeric(&args[0], scope)?;
             Ok(if at.is_numeric() {
                 ColumnType::Numeric(None)
@@ -661,6 +677,27 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         ScalarFunc::Pi => {
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Float8)
+        }
+        // `float4send(real)` is `real`'s binary output function, and the wire
+        // format is what it returns: four big-endian IEEE 754 bytes. The suite
+        // reads it to pin how a decimal literal rounds into `real`, which is a
+        // question the printed value cannot answer on its own.
+        ScalarFunc::Float4Send => {
+            require_arity(fc, n == 1)?;
+            if !is_unknown_literal(&args[0]) {
+                let t = crate::eval::infer_type(&args[0], scope)?;
+                // `real` is the only declared parameter; the integer widths
+                // reach it through PostgreSQL's implicit widening casts, while
+                // `float8` and `numeric` do not (their casts to `real` are
+                // assignment-only) and leave the call unresolved.
+                if !matches!(
+                    t,
+                    ColumnType::Float4 | ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8
+                ) {
+                    return Err(undefined_function_spelled(&fc.name, args, scope));
+                }
+            }
+            Ok(ColumnType::Bytea)
         }
         ScalarFunc::Lpad | ScalarFunc::Rpad => {
             require_arity(fc, n == 2 || n == 3)?;
@@ -1136,6 +1173,8 @@ fn coerce_unknown_args(
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
+        // `log(base, num)` likewise has no two-argument `float8` candidate.
+        ScalarFunc::Log if args.len() == 2 => ColumnType::Numeric(None),
         ScalarFunc::Abs
         | ScalarFunc::Floor
         | ScalarFunc::Ceil
@@ -1549,7 +1588,12 @@ fn eval_eager(
             Ok(Datum::Float8(x.ln()))
         }
         ScalarFunc::Log => {
-            require_arity(fc, vals.len() == 1)?;
+            require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
+            if let [base, num] = vals {
+                return crabka_pgtypes::numeric::num_log(&to_numeric(base)?, &to_numeric(num)?)
+                    .map(Datum::Numeric)
+                    .map_err(ExecError::Type);
+            }
             if let Datum::Numeric(d) = &vals[0] {
                 return crabka_pgtypes::numeric::num_log10(d)
                     .map(Datum::Numeric)
@@ -1582,6 +1626,17 @@ fn eval_eager(
         ScalarFunc::Pi => {
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Float8(std::f64::consts::PI))
+        }
+        ScalarFunc::Float4Send => {
+            require_arity(fc, vals.len() == 1)?;
+            let Datum::Float4(value) =
+                crabka_pgtypes::cast::cast(&vals[0], ColumnType::Float4, &ctx.time_zone)?
+            else {
+                return Err(type_error("float4send", &vals[0]));
+            };
+            Ok(Datum::Bytea(crabka_pgtypes::encoding::encode_binary(
+                &Datum::Float4(value),
+            )))
         }
         ScalarFunc::Lpad | ScalarFunc::Rpad => {
             require_arity(fc, vals.len() == 2 || vals.len() == 3)?;
@@ -2993,6 +3048,88 @@ mod tests {
     fn ev(sql: &str) -> Datum {
         let ctx = crate::clock::EvalCtx::test_default();
         crate::eval::eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx).expect("eval")
+    }
+
+    /// Render an expression the way the wire would, so a case's expectation is
+    /// exactly the text PostgreSQL prints — including a numeric's display
+    /// scale, which is the whole point of `log_var`'s scale selection.
+    fn rendered(sql: &str) -> String {
+        let ctx = crate::clock::EvalCtx::test_default();
+        text_render(&ev(sql), &ctx.time_zone)
+    }
+
+    /// `log(base, num)` is declared over `numeric` alone, and its result scale
+    /// comes from `log_var`, not from either input on its own.
+    #[test]
+    fn two_argument_log_divides_the_logarithms_at_postgres_display_scale() {
+        for (sql, expected) in [
+            ("log(2, 2)", "1.0000000000000000"),
+            ("log(2, 4.2)", "2.0703893278913979"),
+            ("log(4.2, 2)", "0.4830009440873890"),
+            ("log(numeric '2', 'Infinity')", "Infinity"),
+            ("log(numeric 'Infinity', 2)", "0"),
+            ("log(numeric 'Infinity', 'Infinity')", "NaN"),
+            ("log(numeric 'NaN', 2)", "NaN"),
+            ("log(0.99923, 4.58934e34)", "-103611.55579544132"),
+            ("log(1.000016, 8.452010e18)", "2723830.2877097365"),
+            // The one-argument form is still base 10.
+            ("log(100)", "2"),
+        ] {
+            assert!(rendered(sql) == expected, "{sql} gave {}", rendered(sql));
+        }
+        assert!(
+            crate::eval::infer_type(&pexpr("log(2, 8)").expect("parse"), &Scope::empty())
+                .expect("type")
+                == ColumnType::Numeric(None)
+        );
+    }
+
+    #[test]
+    fn two_argument_log_reports_the_domain_error_of_whichever_operand_fails() {
+        for (sql, code) in [
+            ("log(numeric '0', 10)", "2201E"),
+            ("log(numeric '10', 0)", "2201E"),
+            ("log(numeric '-Infinity', 10)", "2201E"),
+            ("log(numeric 'Infinity', 0)", "2201E"),
+            ("log(numeric 'Infinity', '-Infinity')", "2201E"),
+            // ln(1) is zero, so the division has no divisor.
+            ("log(1.0, 12.34)", "22012"),
+            // There is no two-argument float8 candidate.
+            ("log(2::float8, 8::float8)", "42883"),
+        ] {
+            assert!(err_code(sql, None) == code, "{sql}");
+        }
+    }
+
+    /// `float4send` is `real`'s binary output function: four big-endian IEEE
+    /// 754 bytes, which is how the suite pins the rounding of a decimal literal
+    /// that prints the same either way.
+    #[test]
+    fn float4send_reports_the_four_wire_bytes_of_a_real() {
+        for (sql, expected) in [
+            ("float4send('5e-20'::float4)", r"\x1f6c1e4a"),
+            ("float4send('67e14'::float4)", r"\x59be6cea"),
+            // Two literals that print alike and round to the same real.
+            ("float4send('1.17549435e-38'::float4)", r"\x00800000"),
+            ("float4send('1.1754944e-38'::float4)", r"\x00800000"),
+            ("float4send(0::float4)", r"\x00000000"),
+            ("float4send('-0'::float4)", r"\x80000000"),
+        ] {
+            assert!(rendered(sql) == expected, "{sql} gave {}", rendered(sql));
+        }
+        assert!(
+            crate::eval::infer_type(
+                &pexpr("float4send(1::float4)").expect("parse"),
+                &Scope::empty()
+            )
+            .expect("type")
+                == ColumnType::Bytea
+        );
+        assert!(ev("float4send(null)") == Datum::Null);
+        // `float8` reaches `real` only by an assignment cast, so it resolves to
+        // no candidate at all.
+        assert!(err_code("float4send(1::float8)", None) == "42883");
+        assert!(err_code("float4send('a'::text)", None) == "42883");
     }
 
     #[test]

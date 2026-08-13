@@ -5017,7 +5017,13 @@ fn check_partition_constraint(
             .map(|ordinal| current_row.get(*ordinal).cloned().unwrap_or(Datum::Null))
             .collect::<Vec<_>>();
         let siblings = crate::partition::partitions_of(kv, &parent)?;
-        if !crate::partition::satisfies(&scheme, &bound, &siblings, &parent_row)? {
+        if !crate::partition::satisfies(
+            &scheme,
+            &parent_table.columns,
+            &bound,
+            &siblings,
+            &parent_row,
+        )? {
             return Err(ExecError::PartitionConstraintViolation {
                 relation: table.name.to_string(),
                 row: describe_row(write_ctx, table, row, modified),
@@ -17142,11 +17148,18 @@ fn route_row_to_leaf(
         return Ok((parent.clone(), row.to_vec()));
     };
     let partitions = crate::partition::partitions_of(kv, &parent.name)?;
-    let Some(chosen) = crate::partition::route(&scheme, &partitions, row)? else {
+    let Some(chosen) = crate::partition::route(&scheme, &parent.columns, &partitions, row)? else {
         return Err(ExecError::NoPartitionForRow {
             relation: parent.name.to_string(),
             key: may_describe_key(write_ctx, parent)
-                .then(|| crate::partition::key_description(&scheme, row, write_ctx.eval_ctx))
+                .then(|| {
+                    crate::partition::key_description(
+                        &scheme,
+                        &parent.columns,
+                        row,
+                        write_ctx.eval_ctx,
+                    )
+                })
                 .transpose()?,
         });
     };
@@ -19967,11 +19980,12 @@ fn pg_partitioned_table_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exe
         let natts = i16::try_from(scheme.keys.len())
             .map_err(|_| ExecError::Unsupported("partnatts exceeds int2 range".into()))?;
         // `partattrs` is an int2vector, printed as a space-separated list of
-        // one-based attribute numbers.
-        let attrs = scheme
-            .keys
-            .iter()
-            .map(|key| (key.ordinal + 1).to_string())
+        // one-based attribute numbers. Crabka compacts the column list on `DROP
+        // COLUMN`, so an attribute number is the column's position *now* and is
+        // derived here rather than stored.
+        let attrs = crate::partition::key_ordinals(&scheme, &table.columns)?
+            .into_iter()
+            .map(|ordinal| (ordinal + 1).to_string())
             .collect::<Vec<_>>()
             .join(" ");
         rows.push(vec![
@@ -24806,15 +24820,15 @@ fn partition_scheme_from_ast(
     // every partition-key column is part of the key, because two partitions
     // never see each other's rows.
     for index in indexes {
-        if let Some(missing) = keys.iter().find(|key| !index.columns.contains(&key.name)) {
+        if let Some(missing) = keys.iter().find(|key| !index.columns.contains(key)) {
             let kind = match index.constraint {
                 Some(crabka_pgcatalog::IndexConstraint::PrimaryKey) => "PRIMARY KEY",
                 _ => "UNIQUE",
             };
             return Err(ExecError::Unsupported(format!(
                 "unique constraint on partitioned table must include all partitioning columns: \
-                 the {kind} constraint lacks column \"{}\" which is part of the partition key",
-                missing.name
+                 the {kind} constraint lacks column \"{missing}\" which is part of the partition \
+                 key"
             )));
         }
     }
@@ -24866,7 +24880,7 @@ fn resolve_partition_bound(
                 }
             ))
         })?;
-        crate::partition::key_column_type(columns, key)
+        crate::partition::key_column_type(columns, key.as_str())
     };
     // A bound value is an assignment to the partition-key column it bounds, so
     // an unadorned `'…'` is resolved by that column's type — `FOR VALUES IN
@@ -27657,6 +27671,7 @@ fn alter_table_action_ops(
             using,
         } => {
             let index = state.column_index(column)?;
+            reject_partition_key_column(kv, &table_name, "alter", column)?;
             // The written `COLLATE` is checked against the *new* type, before
             // any rows are rewritten: `ALTER COLUMN id TYPE int COLLATE "C"` is
             // PostgreSQL's 42804 and must not leave the column half-changed.
@@ -28188,7 +28203,7 @@ fn attach_partition_ops(
             .iter()
             .map(|ordinal| stored.get(*ordinal).cloned().unwrap_or(Datum::Null))
             .collect::<Vec<_>>();
-        if !crate::partition::satisfies(&scheme, &resolved, &siblings, &row)? {
+        if !crate::partition::satisfies(&scheme, &parent.columns, &resolved, &siblings, &row)? {
             return Err(ExecError::PartitionConstraintViolationOnExistingRows(
                 child.to_string(),
             ));
@@ -28971,6 +28986,40 @@ fn rebuild_indexes_on_column(
     Ok(())
 }
 
+/// `PostgreSQL`'s `has_partition_attrs` guard, in the two spellings that reach
+/// it: `DROP COLUMN` and `ALTER COLUMN … TYPE`. `verb` is the one word that
+/// differs between the two messages.
+///
+/// Upstream refuses both because the key column's dependency would cascade the
+/// whole table away. Crabka has a second reason for each, and they are the
+/// harder ones. A drop *compacts* the column list, so a key left naming a
+/// departed column resolves to nothing and the relation can no longer route a
+/// row at all. A retype leaves every stored bound coerced to the old type,
+/// where it no longer compares against the key value — which is the same
+/// unroutable relation by a different road.
+///
+/// The caller runs this per relation, so a sub-partitioned descendant reached
+/// by the recursion refuses on its own key. `ATExecDropColumn` and
+/// `ATPrepAlterColumnType` check on each level for exactly that reason.
+fn reject_partition_key_column(
+    kv: &dyn Kv,
+    table_name: &crabka_pgcatalog::RelationName,
+    verb: &str,
+    column: &str,
+) -> Result<(), ExecError> {
+    let Some(scheme) = crate::partition::scheme_of(kv, table_name)? else {
+        return Ok(());
+    };
+    if !scheme.keys.iter().any(|key| key == column) {
+        return Ok(());
+    }
+    Err(ExecError::InvalidTableDefinition(format!(
+        "cannot {verb} column \"{column}\" because it is part of the partition key of relation \
+         \"{}\"",
+        table_name.name
+    )))
+}
+
 /// Remove one column from the working schema and every stored row version, and
 /// drop the indexes, `CHECK`s and foreign keys that depended on it. This is
 /// `PostgreSQL`'s own `DROP COLUMN` dependency handling.
@@ -28989,6 +29038,7 @@ fn drop_table_column(
         return Ok(());
     };
     let table_name = state.table.name.clone();
+    reject_partition_key_column(kv, &table_name, "drop", column)?;
     // A grant on the column dies with the column. Leaving it behind would hand
     // the grant to whatever column is added under that name next.
     state
@@ -29180,17 +29230,17 @@ fn rename_column_dependencies(
                 &named,
             )?);
     }
-    // A partitioned parent stores each key column by name as well as by
-    // ordinal, and `pg_get_partkeydef` — so `\d` — prints the name. Routing
-    // reads the ordinal and is unaffected, which is what made this quiet: the
-    // partition kept working while `\d` named a column the relation no longer
-    // had. This runs per relation, so an intermediate parent reached by the
-    // recursion is rewritten on its own pass.
+    // A partitioned parent names each key column, and routing resolves that
+    // name against the live column list on every row. A key left holding the
+    // old name would therefore stop resolving altogether, not merely misprint
+    // in `pg_get_partkeydef` — so this rewrite is load-bearing, not cosmetic.
+    // It runs per relation, so an intermediate parent reached by the recursion
+    // is rewritten on its own pass.
     if let Some(mut scheme) = crate::partition::scheme_of(kv, &table_name)? {
         let mut touched = false;
         for key in &mut scheme.keys {
-            if key.name == old_name {
-                key.name = new_name.to_string();
+            if key == old_name {
+                *key = new_name.to_string();
                 touched = true;
             }
         }

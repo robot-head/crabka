@@ -357,3 +357,68 @@ fn the_bounded_draw_never_escapes_its_range() {
         }
     }
 }
+
+/// `width_bucket(operand, thresholds)` counts the thresholds the operand is at
+/// or above, using the element type's btree ordering — which is also what puts
+/// a NaN above every other value.
+#[test]
+fn width_bucket_over_a_threshold_array_counts_the_thresholds_at_or_below() {
+    let cases = [
+        ("width_bucket(0, ARRAY[1, 3, 5, 10])", "0"),
+        ("width_bucket(1, ARRAY[1, 3, 5, 10])", "1"),
+        ("width_bucket(4, ARRAY[1, 3, 5, 10])", "2"),
+        ("width_bucket(10, ARRAY[1, 3, 5, 10])", "4"),
+        ("width_bucket(11, ARRAY[1, 3, 5, 10])", "4"),
+        ("width_bucket(5, ARRAY[3])", "1"),
+        // An `unknown` array literal takes the operand's own type.
+        ("width_bucket(5, '{}')", "0"),
+        (
+            "width_bucket(0.5::numeric, ARRAY[0, 5.5, 9.99]::numeric[])",
+            "1",
+        ),
+        // NaN is the largest float8, so it lands past every threshold and a NaN
+        // threshold ends the search short of the ones behind it.
+        ("width_bucket('NaN'::float8, ARRAY[1, 3, 9]::float8[])", "3"),
+        (
+            "width_bucket(77::float8, ARRAY[1, 3, 9, 'NaN'::float8, 'NaN'::float8]::float8[])",
+            "3",
+        ),
+        (
+            "width_bucket('NaN'::float8, ARRAY[1, 3, 9, 'NaN'::float8, 'NaN'::float8]::float8[])",
+            "5",
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert!(text_of(sql) == expected, "{sql}");
+    }
+    assert!(result_type("width_bucket(5, ARRAY[3])") == ColumnType::Int4);
+}
+
+#[test]
+fn width_bucket_rejects_thresholds_it_cannot_search() {
+    let cases = [
+        (
+            "width_bucket(5, ARRAY[3, 4, NULL])",
+            "22004",
+            "thresholds array must not contain NULLs",
+        ),
+        (
+            "width_bucket(5, ARRAY[ARRAY[1, 2], ARRAY[3, 4]])",
+            "2202E",
+            "thresholds must be one-dimensional array",
+        ),
+        // `anycompatible` cannot unify text with integer, so there is no
+        // candidate at all rather than a cross-family comparison.
+        (
+            "width_bucket('5'::text, ARRAY[3, 4]::integer[])",
+            "42883",
+            "function width_bucket(text, integer[]) does not exist",
+        ),
+    ];
+    for (sql, code, message) in cases {
+        assert!(
+            error_of(sql) == (code.to_string(), message.to_string()),
+            "{sql}"
+        );
+    }
+}

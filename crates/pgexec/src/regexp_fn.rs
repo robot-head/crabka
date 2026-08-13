@@ -337,7 +337,7 @@ fn nth_match<'h>(re: &Regex, haystack: &'h str, nth: usize) -> Option<Captures<'
 /// The result is the whole match when the pattern has no groups. If the pattern
 /// has groups, the result has one element per group, and a non-participating
 /// group is a NULL element.
-fn group_datums(re: &Regex, caps: &Captures<'_>) -> Vec<Datum> {
+pub(crate) fn group_datums(re: &Regex, caps: &Captures<'_>) -> Vec<Datum> {
     if re.captures_len() == 1 {
         return vec![Datum::Text(
             caps.get(0)
@@ -459,6 +459,22 @@ fn char_suffix(s: &str, start: i64) -> &str {
 /// newline-sensitive, `s`/`e`/`b`/`t` restore the default, `i`/`c` set case
 /// folding, `x` enables expanded syntax and `q` makes the pattern a literal.
 fn compile(f: RegexpFunc, pattern: &str, flags: &str) -> Result<Regex, ExecError> {
+    compile_pattern(f.sql_name(), f.allows_global(), pattern, flags)
+}
+
+/// Compile `pattern` under PostgreSQL's flag string, on behalf of `caller`.
+///
+/// `caller` is the SQL spelling with parentheses — `regexp_matches()` — which
+/// only the "global option" rejection prints, and `allow_global` says whether
+/// `g` is one of that function's flags. The set-returning half of the family
+/// lives in `srf` and compiles its patterns through here, so the flag dialect
+/// is written down once for both halves.
+pub(crate) fn compile_pattern(
+    caller: &str,
+    allow_global: bool,
+    pattern: &str,
+    flags: &str,
+) -> Result<Regex, ExecError> {
     let mut case_insensitive = false;
     let mut newline_sensitive = false;
     let mut expanded = false;
@@ -471,11 +487,11 @@ fn compile(f: RegexpFunc, pattern: &str, flags: &str) -> Result<Regex, ExecError
             's' | 'e' | 'b' | 't' => newline_sensitive = false,
             'x' => expanded = true,
             'q' => literal = true,
-            'g' if f.allows_global() => {}
+            'g' if allow_global => {}
             'g' => {
                 return Err(ExecError::FunctionError {
                     sqlstate: "22023",
-                    message: format!("{} does not support the \"global\" option", f.sql_name()),
+                    message: format!("{caller} does not support the \"global\" option"),
                 });
             }
             other => {
@@ -499,8 +515,25 @@ fn compile(f: RegexpFunc, pattern: &str, flags: &str) -> Result<Regex, ExecError
         .build()
         .map_err(|error| ExecError::FunctionError {
             sqlstate: "2201B",
-            message: format!("invalid regular expression: {error}"),
+            message: format!("invalid regular expression: {}", one_line_reason(&error)),
         })
+}
+
+/// The one-line reason inside a `regex` crate compile error.
+///
+/// PostgreSQL's 2201B message is always a single short clause — `parentheses ()
+/// not balanced`, `invalid repetition count(s)`. The `regex` crate instead
+/// formats a four-line report that echoes the pattern under a caret rule and
+/// ends with `error: <reason>`. An embedded newline in a primary error message
+/// is something PostgreSQL never sends, so take that last clause and drop the
+/// rule. A future error shape without the marker degrades to the whole text
+/// with its newlines folded to spaces.
+fn one_line_reason(error: &regex::Error) -> String {
+    let text = error.to_string();
+    match text.rsplit_once("error: ") {
+        Some((_, reason)) => reason.trim().replace('\n', " "),
+        None => text.split_whitespace().collect::<Vec<_>>().join(" "),
+    }
 }
 
 #[cfg(test)]

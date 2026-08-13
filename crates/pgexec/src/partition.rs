@@ -48,7 +48,11 @@ const CHILD_PREFIX: &[u8] = b"\0\0\0\0catalog_partition/child/";
 /// System-key prefix for the parent → child index.
 const CHILDREN_PREFIX: &[u8] = b"\0\0\0\0catalog_partition/children/";
 
-const SCHEME_VERSION: u8 = 1;
+/// Version 2 dropped the column ordinal each key used to carry beside its name.
+/// A position is resolved from the live column list at every use instead. See
+/// [`Scheme`]. A version-1 record is refused rather than read, because its
+/// leading ordinal would decode as the length of a name.
+const SCHEME_VERSION: u8 = 2;
 const BOUND_VERSION: u8 = 1;
 
 /// `PARTITION BY` strategy.
@@ -97,24 +101,34 @@ impl Strategy {
     }
 }
 
-/// One partition-key column of a partitioned parent.
+/// A partitioned parent's key definition: the strategy, and the parent's own
+/// name for each key column.
 ///
-/// This type stores only plain column references. An expression key is refused
-/// at `CREATE TABLE` time. See [`key_columns`]. A row routed through an
-/// arbitrary expression would need the expression's result type to coerce the
-/// stored bounds against, and a wrong result type routes rows to the wrong leaf.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct KeyColumn {
-    /// Zero-based ordinal of the column in the parent's column list.
-    pub ordinal: usize,
-    pub name: String,
-}
-
-/// A partitioned parent's key definition.
+/// A key holds only plain column references. An expression key is refused at
+/// `CREATE TABLE` time. See [`key_columns`]. A row routed through an arbitrary
+/// expression would need the expression's result type to coerce the stored
+/// bounds against, and a wrong result type routes rows to the wrong leaf.
+///
+/// # Why a name and not a position
+///
+/// A key column's *position* in the parent's column list is not stored, and is
+/// resolved from the live column list at every use. See [`key_ordinals`].
+///
+/// `PostgreSQL` can store `pg_partitioned_table.partattrs` as attribute numbers
+/// because an attnum is stable for the life of the relation: `DROP COLUMN`
+/// leaves the attribute in place and sets `attisdropped`. Crabka instead
+/// *compacts* the column list and every stored row, so a position is only
+/// meaningful against one particular version of the schema. A stored position
+/// silently decays into a pointer at the neighbouring column the moment
+/// anything earlier is dropped — and a partition key that reads the wrong
+/// column routes rows into the wrong leaf without an error. A name cannot decay
+/// that way: `RENAME COLUMN` rewrites it, and `DROP COLUMN` refuses to remove a
+/// column a key names at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Scheme {
     pub strategy: Strategy,
-    pub keys: Vec<KeyColumn>,
+    /// Key columns, in the order `PARTITION BY` wrote them.
+    pub keys: Vec<String>,
 }
 
 /// One value of a range partition's `FROM`/`TO` tuple.
@@ -246,9 +260,7 @@ fn serialize_scheme(scheme: &Scheme) -> Vec<u8> {
     let count = u32::try_from(scheme.keys.len()).expect("a partition key has few columns");
     out.extend_from_slice(&count.to_be_bytes());
     for key in &scheme.keys {
-        let ordinal = u32::try_from(key.ordinal).expect("a column ordinal fits in u32");
-        out.extend_from_slice(&ordinal.to_be_bytes());
-        write_str(&mut out, &key.name);
+        write_str(&mut out, key);
     }
     out
 }
@@ -263,12 +275,7 @@ fn deserialize_scheme(bytes: &[u8]) -> Result<Scheme, ExecError> {
     let count = usize::try_from(take_u32(&mut cur)?).expect("u32 fits usize on supported targets");
     let mut keys = Vec::with_capacity(count.min(32));
     for _ in 0..count {
-        let ordinal =
-            usize::try_from(take_u32(&mut cur)?).expect("u32 fits usize on supported targets");
-        keys.push(KeyColumn {
-            ordinal,
-            name: read_string(&mut cur)?,
-        });
+        keys.push(read_string(&mut cur)?);
     }
     Ok(Scheme { strategy, keys })
 }
@@ -674,13 +681,39 @@ pub(crate) fn drop_metadata_ops(
 
 // ── Routing ──────────────────────────────────────────────────────────────────
 
-/// Extract a row's partition key values.
-fn key_values(scheme: &Scheme, row: &[Datum]) -> Result<Vec<Datum>, ExecError> {
+/// Where each key column sits in `columns`, which must be the *parent's* column
+/// list in the parent's own order. A caller holding a leaf's row permutes it
+/// into parent order first; see `exec::column_mapping`.
+///
+/// A name that resolves to nothing is genuine catalog corruption rather than a
+/// user error: `DROP COLUMN` refuses to remove a column a partition key names,
+/// and `RENAME COLUMN` rewrites the key alongside the column.
+pub(crate) fn key_ordinals(
+    scheme: &Scheme,
+    columns: &[crabka_pgcatalog::Column],
+) -> Result<Vec<usize>, ExecError> {
     scheme
         .keys
         .iter()
         .map(|key| {
-            row.get(key.ordinal)
+            columns
+                .iter()
+                .position(|column| column.name == *key)
+                .ok_or_else(|| corrupt("partition key names a column the relation does not have"))
+        })
+        .collect()
+}
+
+/// Extract a row's partition key values. `columns` describes `row`.
+fn key_values(
+    scheme: &Scheme,
+    columns: &[crabka_pgcatalog::Column],
+    row: &[Datum],
+) -> Result<Vec<Datum>, ExecError> {
+    key_ordinals(scheme, columns)?
+        .into_iter()
+        .map(|ordinal| {
+            row.get(ordinal)
                 .cloned()
                 .ok_or_else(|| corrupt("partition key column ordinal is past the end of the row"))
         })
@@ -735,21 +768,22 @@ pub(crate) fn field_text(value: &Datum, ctx: &crate::clock::EvalCtx) -> String {
 /// unconditional; disclosing it is not. See `exec::may_describe_key`.
 pub(crate) fn key_description(
     scheme: &Scheme,
+    columns: &[crabka_pgcatalog::Column],
     row: &[Datum],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<String, ExecError> {
-    let columns = scheme
+    let names = scheme
         .keys
         .iter()
-        .map(|key| crate::catalog_fn::quote_identifier(&key.name))
+        .map(|key| crate::catalog_fn::quote_identifier(key))
         .collect::<Vec<_>>()
         .join(", ");
-    let values = key_values(scheme, row)?
+    let values = key_values(scheme, columns, row)?
         .iter()
         .map(|value| field_text(value, ctx))
         .collect::<Vec<_>>()
         .join(", ");
-    Ok(format!("({columns}) = ({values})"))
+    Ok(format!("({names}) = ({values})"))
 }
 
 /// Compare two partition-key datums. `None` means the comparison had no answer,
@@ -834,13 +868,15 @@ fn compare_range_tuple(key: &[Datum], bound: &[RangeDatum]) -> Result<Ordering, 
 ///
 /// `partitions` is the full direct-partition list. This function chooses the
 /// default partition only after every other bound has declined the row,
-/// exactly as `PostgreSQL` does.
+/// exactly as `PostgreSQL` does. `columns` describes `row`, which is in the
+/// parent's own column order.
 pub(crate) fn route<'a>(
     scheme: &Scheme,
+    columns: &[crabka_pgcatalog::Column],
     partitions: &'a [Partition],
     row: &[Datum],
 ) -> Result<Option<&'a Partition>, ExecError> {
-    let key = key_values(scheme, row)?;
+    let key = key_values(scheme, columns, row)?;
     for partition in partitions {
         if contains(scheme, &partition.bound, &key)? {
             return Ok(Some(partition));
@@ -858,11 +894,12 @@ pub(crate) fn route<'a>(
 /// the caller must supply the sibling bounds too.
 pub(crate) fn satisfies(
     scheme: &Scheme,
+    columns: &[crabka_pgcatalog::Column],
     bound: &Bound,
     siblings: &[Partition],
     row: &[Datum],
 ) -> Result<bool, ExecError> {
-    let key = key_values(scheme, row)?;
+    let key = key_values(scheme, columns, row)?;
     if matches!(bound, Bound::Default) {
         for sibling in siblings {
             if contains(scheme, &sibling.bound, &key)? {
@@ -1078,7 +1115,7 @@ pub(crate) fn key_columns(
     strategy: Strategy,
     keys: &[crabka_pgparser::ast::PartitionKeyElem],
     columns: &[crabka_pgcatalog::Column],
-) -> Result<Vec<KeyColumn>, ExecError> {
+) -> Result<Vec<String>, ExecError> {
     if strategy == Strategy::List && keys.len() > 1 {
         return Err(ExecError::InvalidObjectDefinition(
             "cannot use \"list\" partition strategy with more than one column".into(),
@@ -1094,14 +1131,10 @@ pub(crate) fn key_columns(
                     "cannot use system column \"{name}\" in partition key"
                 )));
             }
-            let ordinal = columns
-                .iter()
-                .position(|column| column.name == name)
-                .ok_or_else(|| ExecError::UndefinedPartitionKeyColumn(name.to_string()))?;
-            Ok(KeyColumn {
-                ordinal,
-                name: name.to_string(),
-            })
+            if !columns.iter().any(|column| column.name == name) {
+                return Err(ExecError::UndefinedPartitionKeyColumn(name.to_string()));
+            }
+            Ok(name.to_string())
         })
         .collect()
 }
@@ -1128,13 +1161,15 @@ fn expression_key_error(text: &str) -> ExecError {
     ))
 }
 
-/// Type of the `ordinal`-th column, for the coercion of a written bound value.
+/// Type of the key column named `key`, for the coercion of a written bound
+/// value.
 pub(crate) fn key_column_type(
     columns: &[crabka_pgcatalog::Column],
-    key: &KeyColumn,
+    key: &str,
 ) -> Result<ColumnType, ExecError> {
     columns
-        .get(key.ordinal)
+        .iter()
+        .find(|column| column.name == key)
         .map(|column| column.ty)
         .ok_or_else(|| corrupt("partition key names a column the relation does not have"))
 }
@@ -1359,21 +1394,20 @@ mod tests {
     fn list_scheme() -> Scheme {
         Scheme {
             strategy: Strategy::List,
-            keys: vec![KeyColumn {
-                ordinal: 0,
-                name: "a".into(),
-            }],
+            keys: vec!["a".into()],
         }
     }
 
     fn range_scheme() -> Scheme {
         Scheme {
             strategy: Strategy::Range,
-            keys: vec![KeyColumn {
-                ordinal: 0,
-                name: "a".into(),
-            }],
+            keys: vec!["a".into()],
         }
+    }
+
+    /// The one-column relation the schemes above are keyed on.
+    fn keyed_columns() -> Vec<crabka_pgcatalog::Column> {
+        vec![crabka_pgcatalog::Column::new("a", ColumnType::Int4)]
     }
 
     fn value(n: i32) -> RangeDatum {
@@ -1399,8 +1433,13 @@ mod tests {
             (Datum::Int4(9), Some("p_default")),
             (Datum::Null, Some("p_default")),
         ] {
-            let routed =
-                route(&scheme, &partitions, std::slice::from_ref(&input)).expect("routing decides");
+            let routed = route(
+                &scheme,
+                &keyed_columns(),
+                &partitions,
+                std::slice::from_ref(&input),
+            )
+            .expect("routing decides");
             assert!(routed.map(|partition| partition.name.name.as_str()) == expected);
         }
     }
@@ -1412,9 +1451,11 @@ mod tests {
             name: RelationName::public("p_null"),
             bound: Bound::List(vec![Datum::Null]),
         }];
-        let routed = route(&scheme, &partitions, &[Datum::Null]).expect("routing decides");
+        let routed =
+            route(&scheme, &keyed_columns(), &partitions, &[Datum::Null]).expect("routing decides");
         assert!(routed.map(|partition| partition.name.name.as_str()) == Some("p_null"));
-        let routed = route(&scheme, &partitions, &[Datum::Int4(1)]).expect("routing decides");
+        let routed = route(&scheme, &keyed_columns(), &partitions, &[Datum::Int4(1)])
+            .expect("routing decides");
         assert!(routed.is_none());
     }
 
@@ -1443,12 +1484,18 @@ mod tests {
             (10, Some("p_high")),
             (i32::MAX, Some("p_high")),
         ] {
-            let routed =
-                route(&scheme, &partitions, &[Datum::Int4(input)]).expect("routing decides");
+            let routed = route(
+                &scheme,
+                &keyed_columns(),
+                &partitions,
+                &[Datum::Int4(input)],
+            )
+            .expect("routing decides");
             assert!(routed.map(|partition| partition.name.name.as_str()) == expected);
         }
         // A NULL key belongs to no range partition.
-        let routed = route(&scheme, &partitions, &[Datum::Null]).expect("routing decides");
+        let routed =
+            route(&scheme, &keyed_columns(), &partitions, &[Datum::Null]).expect("routing decides");
         assert!(routed.is_none());
     }
 
@@ -1604,12 +1651,24 @@ mod tests {
             bound: Bound::List(vec![Datum::Int4(1)]),
         }];
         assert!(
-            satisfies(&scheme, &Bound::Default, &siblings, &[Datum::Int4(9)])
-                .expect("default check decides")
+            satisfies(
+                &scheme,
+                &keyed_columns(),
+                &Bound::Default,
+                &siblings,
+                &[Datum::Int4(9)]
+            )
+            .expect("default check decides")
         );
         assert!(
-            !satisfies(&scheme, &Bound::Default, &siblings, &[Datum::Int4(1)])
-                .expect("default check decides")
+            !satisfies(
+                &scheme,
+                &keyed_columns(),
+                &Bound::Default,
+                &siblings,
+                &[Datum::Int4(1)]
+            )
+            .expect("default check decides")
         );
     }
 
@@ -1617,16 +1676,7 @@ mod tests {
     fn scheme_and_bound_metadata_round_trip_through_their_encodings() {
         let scheme = Scheme {
             strategy: Strategy::Range,
-            keys: vec![
-                KeyColumn {
-                    ordinal: 0,
-                    name: "a".into(),
-                },
-                KeyColumn {
-                    ordinal: 2,
-                    name: "c".into(),
-                },
-            ],
+            keys: vec!["a".into(), "c".into()],
         };
         let encoded = serialize_scheme(&scheme);
         assert!(deserialize_scheme(&encoded).expect("scheme decodes") == scheme);
