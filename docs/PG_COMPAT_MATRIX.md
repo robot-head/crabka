@@ -13,9 +13,9 @@ tools/check-pg-compat-matrix.sh
 
 ## Current G-1/G-2 baseline
 
-The authoritative PostgreSQL 18.4 core-schedule score is **46 / 231 exact in
+The authoritative PostgreSQL 18.4 core-schedule score is **50 / 231 exact in
 serial**, under the runner's explicit 20 MiB blocking-query memory policy,
-leaving 185 failures across **114,393 changed lines**. Both PostgreSQL
+leaving 181 failures across **112,317 changed lines**. Both PostgreSQL
 self-checks pass 231 / 231, Gres completes all 231 files, and the
 infrastructure report is empty. The checked-in floor in
 [`pg-regress-baseline.json`](../crates/gres-conformance/pg-regress-baseline.json)
@@ -25,19 +25,19 @@ file longer than recorded.
 Parallel mode has not been re-measured since the type-input wave; its last
 certified figure was 22 / 231 at 177,530 changed lines.
 
-### What the remaining 114,393 lines are
+### What the remaining 112,317 lines are
 
 Classified per changed line, not per file — a file is not "an EXPLAIN problem"
 because one hunk of it prints a plan:
 
 ```text
-data / other output                78,087   68.3%
-EXPLAIN / plan text                15,436   13.5%
-other ERROR: line                   7,085    6.2%
-missing object or function          5,553    4.9%
-DETAIL / HINT / LINE / CONTEXT      4,391    3.8%
-syntax error                        2,851    2.5%
-deliberate: refused by design         985    0.9%
+data / other output                76,362   68.0%
+EXPLAIN / plan text                15,520   13.8%
+other ERROR: line                   6,985    6.2%
+missing object or function          5,413    4.8%
+DETAIL / HINT / LINE / CONTEXT      4,263    3.8%
+syntax error                        2,786    2.5%
+deliberate: refused by design         983    0.9%
 ```
 
 Counting rule, because getting it wrong is easy and quiet: a changed line is
@@ -65,6 +65,22 @@ recovered by fixing the earlier failure, which is why single defects in this
 corpus routinely return hundreds of lines — `ctid` on the write path returned
 663 in `tidrangescan` alone — and why per-file line counts are a poor guide to
 per-defect cost.
+
+### Two traps in reading these numbers
+
+**A file may score against a variant expected file.** `unicode` is checked
+against `unicode_1.out`, the non-UTF8 skip variant, which is three lines long
+and ends at `\quit`. Because Gres reports UTF8 the whole body runs, so every
+statement made to *succeed* adds output and pushes the count **up** -- a probe
+adding one working function moved that file 54 to 56. Half a fix there was a
+regression. Check which `expected/*.out` a test scores against before assuming
+errors-removed means lines-removed.
+
+**Counting errors understates a file that fails early.** `+ERROR: column "u"
+does not exist` is one line where the success it replaced is five, so an
+error-keyed estimate was 4x low on exactly the file where it mattered. Error
+counts are a floor in both directions: they miss wrong *values* entirely, and
+they understate a refusal that suppressed a result block.
 
 ### Method
 
