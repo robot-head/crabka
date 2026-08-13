@@ -215,7 +215,7 @@ async fn execute_probe(command: &str, sql: &str) {
             .expect("COPY must enter CopyIn mode")
             .expect("COPY response");
         session
-            .copy_in(sql, vec![Bytes::from_static(b"1\n")])
+            .copy_in(sql, 0, vec![Bytes::from_static(b"1\n")])
             .await
             .expect("COPY representative must execute");
     } else {

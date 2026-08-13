@@ -313,6 +313,7 @@ async fn a_blocked_copy_in_names_itself_in_the_registry() {
         session
             .copy_in(
                 "COPY t FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"2\tcopied\n")],
             )
             .await
@@ -367,6 +368,7 @@ async fn every_copy_entry_point_clears_its_entry() {
     session
         .copy_in(
             "COPY t FROM STDIN",
+            0,
             vec![bytes::Bytes::from_static(b"2\ttwo\n")],
         )
         .await

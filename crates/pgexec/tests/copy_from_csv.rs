@@ -38,7 +38,7 @@ async fn copy_in(
         .await
         .map_err(|error| (error.code.clone(), error.message.clone()))?;
     match session
-        .copy_in(sql, vec![bytes::Bytes::copy_from_slice(data.as_bytes())])
+        .copy_in(sql, 0, vec![bytes::Bytes::copy_from_slice(data.as_bytes())])
         .await
     {
         Ok(QueryResult::Command { tag }) => Ok(tag),

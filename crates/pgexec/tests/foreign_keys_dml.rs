@@ -211,6 +211,7 @@ async fn copy_from_stdin_reports_the_child_violation() {
     let error = s
         .copy_in(
             "COPY c (id, a) FROM STDIN",
+            0,
             vec![Bytes::from_static(b"2\t1\n")],
         )
         .await
@@ -222,6 +223,7 @@ async fn copy_from_stdin_reports_the_child_violation() {
     // refusing every copied row.
     s.copy_in(
         "COPY c (id, a) FROM STDIN",
+        0,
         vec![Bytes::from_static(b"3\t10\n4\t\\N\n")],
     )
     .await

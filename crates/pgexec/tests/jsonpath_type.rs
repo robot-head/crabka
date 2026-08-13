@@ -530,6 +530,7 @@ async fn jsonpath_domains_use_the_native_input_function() {
     session
         .copy_in(
             "COPY jsonpath_domain_values (path, paths) FROM STDIN",
+            0,
             vec![bytes::Bytes::from_static(
                 b"lax $.copied\t{\"$.copied_array\"}\n",
             )],
@@ -539,6 +540,7 @@ async fn jsonpath_domains_use_the_native_input_function() {
     let error = session
         .copy_in(
             "COPY jsonpath_domain_values (path, paths) FROM STDIN",
+            0,
             vec![bytes::Bytes::from_static(b"\\N\t{\"$.array\"}\n")],
         )
         .await
@@ -547,6 +549,7 @@ async fn jsonpath_domains_use_the_native_input_function() {
     let error = session
         .copy_in(
             "COPY jsonpath_domain_values (paths) FROM STDIN",
+            0,
             vec![bytes::Bytes::from_static(b"{\"$.array\"}\n")],
         )
         .await

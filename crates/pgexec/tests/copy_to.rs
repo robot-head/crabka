@@ -393,6 +393,7 @@ async fn copy_from_honours_the_framing_options_it_accepts() {
     session
         .copy_in(
             "COPY loaded FROM STDIN WITH (DELIMITER '|', NULL 'NUL', HEADER MATCH)",
+            0,
             vec![bytes::Bytes::from_static(b"s|n\na|1\nb|NUL\nc|\\N\n")],
         )
         .await
@@ -574,7 +575,7 @@ async fn a_failing_copy_from_row_reports_the_line_it_came_from() {
 
     for case in cases {
         let error = session
-            .copy_in(case.sql, vec![bytes::Bytes::from(case.data.clone())])
+            .copy_in(case.sql, 0, vec![bytes::Bytes::from(case.data.clone())])
             .await
             .err()
             .unwrap_or_else(|| panic!("{} should have failed", case.name));
@@ -631,6 +632,7 @@ async fn a_copy_context_is_appended_below_one_the_error_already_carried() {
     let error = session
         .copy_in(
             "COPY lsnck FROM STDIN",
+            0,
             vec![bytes::Bytes::from_static(b"-5\n")],
         )
         .await
@@ -660,7 +662,11 @@ async fn a_copy_failure_raised_after_the_row_loop_carries_no_context() {
     run(&mut session, "CREATE TABLE c (a int REFERENCES p(a))").await;
 
     let error = session
-        .copy_in("COPY c FROM STDIN", vec![bytes::Bytes::from_static(b"9\n")])
+        .copy_in(
+            "COPY c FROM STDIN",
+            0,
+            vec![bytes::Bytes::from_static(b"9\n")],
+        )
         .await
         .expect_err("the foreign key should reject the row");
     let context = error
@@ -712,6 +718,7 @@ async fn a_header_match_failure_reports_the_header_line() {
         let error = session
             .copy_in(
                 "COPY header_copytest FROM STDIN WITH (HEADER match)",
+                0,
                 vec![bytes::Bytes::from_static(case.data)],
             )
             .await

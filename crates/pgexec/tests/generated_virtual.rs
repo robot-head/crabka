@@ -401,7 +401,7 @@ async fn copy_leaves_a_generated_column_out_and_refuses_one_written_down() {
             .await
             .unwrap_or_else(|error| panic!("{relation}: {error:?}"));
         session
-            .copy_in(&sql, vec![bytes::Bytes::from_static(b"3\n4\n")])
+            .copy_in(&sql, 0, vec![bytes::Bytes::from_static(b"3\n4\n")])
             .await
             .unwrap_or_else(|error| panic!("{relation}: {error:?}"));
     }

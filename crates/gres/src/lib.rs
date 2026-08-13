@@ -2827,6 +2827,31 @@ impl Session for RuntimeSession {
         }
     }
 
+    /// Forwarded for the same reason as [`Session::simple_query_into`], and for
+    /// one more: the trait default cannot stop at a `COPY … FROM STDIN`, so a
+    /// runtime that inherited it would refuse every copy that shares its query
+    /// string with another statement.
+    async fn simple_query_batch_into<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        sql: &str,
+        from_statement: usize,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Result<crabka_pgwire::engine::SimpleQueryStop, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => {
+                session
+                    .simple_query_batch_into(sql, from_statement, page_rows, sink)
+                    .await
+            }
+            Self::Multi(session) => {
+                session
+                    .simple_query_batch_into(sql, from_statement, page_rows, sink)
+                    .await
+            }
+        }
+    }
+
     async fn parse(
         &mut self,
         name: &str,
@@ -2921,11 +2946,12 @@ impl Session for RuntimeSession {
     async fn copy_in(
         &mut self,
         sql: &str,
+        statement_index: usize,
         data: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, crabka_pgwire::error::PgError> {
         match self {
-            Self::Single(session) => session.copy_in(sql, data).await,
-            Self::Multi(session) => session.copy_in(sql, data).await,
+            Self::Single(session) => session.copy_in(sql, statement_index, data).await,
+            Self::Multi(session) => session.copy_in(sql, statement_index, data).await,
         }
     }
 

@@ -15,7 +15,8 @@ use tracing::Instrument as _;
 use crate::{
     engine::{
         BoundParam, CloseTarget, CopyInResponse, CopyOutStream, Engine, ExecuteOutcome,
-        Notification, QueryResult, ReportedParameter, ResultPage, ResultSink, Session, TxStatus,
+        Notification, QueryResult, ReportedParameter, ResultPage, ResultSink, Session,
+        SimpleQueryStop, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
     messages::{
@@ -233,8 +234,14 @@ struct CopyInState {
 /// (simple protocol) or must wait for the client's Sync (extended protocol).
 #[derive(Debug)]
 enum CopyInTarget {
-    /// Simple-protocol Query: complete with [`Session::copy_in`] and the SQL text.
+    /// Simple-protocol Query whose whole text is the copy: complete with
+    /// [`Session::copy_in`] and the SQL text, and owe nothing after it.
     Statement { sql: String },
+    /// A copy the engine stopped at part-way through a multi-statement
+    /// simple-protocol Query: complete it the same way, then resume the query
+    /// string at the statement after `statement_index`. Only the resumption
+    /// finishes the Query, so the `ReadyForQuery` is owed there, not here.
+    Batched { sql: String, statement_index: usize },
     /// Extended-protocol Execute: complete with [`Session::copy_in_portal`].
     Portal { name: String },
 }
@@ -576,6 +583,82 @@ fn query_canceled() -> PgError {
         sqlstate::QUERY_CANCELED,
         "canceling statement due to user request",
     )
+}
+
+/// How a run of a simple-query string ended, and therefore what the connection
+/// loop owes the client next.
+enum BatchOutcome {
+    /// Every remaining statement ran. `ReadyForQuery` is owed.
+    Done,
+    /// A `COPY … FROM STDIN` was reached at this index and its
+    /// `CopyInResponse` is written. Nothing else is owed until the copy
+    /// finishes and the string resumes.
+    CopyIn { statement_index: usize },
+    /// A diagnostic is written. `ReadyForQuery` is owed.
+    Failed,
+    /// A fatal diagnostic is written; the connection is over.
+    Fatal(PgError),
+}
+
+/// Run `sql` from `from_statement` on, writing its results into `out`.
+///
+/// Everything this writes is buffered — the caller flushes, because only the
+/// caller knows whether a `ReadyForQuery` belongs on the end of the same write.
+async fn run_simple_batch<Sess: Session>(
+    session: &mut Sess,
+    sql: &str,
+    from_statement: usize,
+    cancel: &SessionCancel,
+    statement_span: &tracing::Span,
+    notices: &mut Option<mpsc::Receiver<PgError>>,
+    out: &mut BytesMut,
+) -> BatchOutcome {
+    let token = cancel.begin_query();
+    let mut sink = WireResultSink {
+        out,
+        notices: notices.as_mut(),
+        rows: 0,
+        pages: 0,
+    };
+    let outcome = tokio::select! {
+        // biased + cancellation-first; see handle_execute.
+        biased;
+        () = token.cancelled() => None,
+        r = session
+            .simple_query_batch_into(sql, from_statement, 1024, &mut sink)
+            .instrument(statement_span.clone()) => Some(r),
+    };
+    // Read off the sink's running totals before it is dropped: the pages
+    // themselves get no spans, only this one summary.
+    let (rows, pages) = (sink.rows, sink.pages);
+    let outcome = if let Some(outcome) = outcome {
+        outcome
+    } else {
+        session.cancel_current_query().await;
+        Err(query_canceled())
+    };
+    telemetry::record_statement_rows(statement_span, rows, pages);
+    match outcome {
+        Ok(SimpleQueryStop::Done) => BatchOutcome::Done,
+        Ok(SimpleQueryStop::CopyIn {
+            statement_index,
+            response,
+        }) => {
+            write_notices(out, notices.as_mut());
+            backend::copy_in_response(out, response.overall_format, &response.column_formats);
+            BatchOutcome::CopyIn { statement_index }
+        }
+        Err(e) => {
+            telemetry::record_statement_error(statement_span, &e);
+            write_notices(out, notices.as_mut());
+            backend::error_response(out, &e);
+            if e.severity == Severity::Fatal {
+                BatchOutcome::Fatal(e)
+            } else {
+                BatchOutcome::Failed
+            }
+        }
+    }
 }
 
 fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result<(), PgError> {
@@ -1053,7 +1136,10 @@ where
                             r = async {
                                 match &target {
                                     CopyInTarget::Statement { sql } => {
-                                        session.copy_in(sql, chunks).await
+                                        session.copy_in(sql, 0, chunks).await
+                                    }
+                                    CopyInTarget::Batched { sql, statement_index } => {
+                                        session.copy_in(sql, *statement_index, chunks).await
                                     }
                                     CopyInTarget::Portal { name } => {
                                         session.copy_in_portal(name, chunks).await
@@ -1068,6 +1154,7 @@ where
                             Err(query_canceled())
                         };
                         write_notices(&mut out, notices.as_mut());
+                        let copy_succeeded = matches!(outcome, Ok(QueryResult::Command { .. }));
                         match outcome {
                             Ok(QueryResult::Command { tag }) => {
                                 backend::command_complete(&mut out, &tag);
@@ -1089,6 +1176,50 @@ where
                                 } else {
                                     backend::error_response(&mut out, &e);
                                 }
+                            }
+                        }
+                        // A copy the engine stopped at part-way through a query
+                        // string leaves the rest of that string to run, and the
+                        // rest may hold another copy. Resume until the string is
+                        // finished or stops again; only then is anything owed.
+                        if copy_succeeded
+                            && let CopyInTarget::Batched {
+                                sql,
+                                statement_index,
+                            } = &target
+                        {
+                            let span = telemetry::statement_span(StatementProtocol::Simple);
+                            let batch = run_simple_batch(
+                                &mut session,
+                                sql,
+                                statement_index + 1,
+                                &cancel,
+                                &span,
+                                &mut notices,
+                                &mut out,
+                            )
+                            .await;
+                            match batch {
+                                BatchOutcome::CopyIn {
+                                    statement_index: next,
+                                } => {
+                                    stream.write_all(&out).await?;
+                                    out.clear();
+                                    copy_in = Some(CopyInState {
+                                        target: CopyInTarget::Batched {
+                                            sql: sql.clone(),
+                                            statement_index: next,
+                                        },
+                                        chunks: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                BatchOutcome::Fatal(e) => {
+                                    telemetry::record_error(&session_span, &e);
+                                    stream.write_all(&out).await?;
+                                    return Ok(());
+                                }
+                                BatchOutcome::Done | BatchOutcome::Failed => {}
                             }
                         }
                         // Extended protocol: the client's Sync (sent after
@@ -1204,46 +1335,38 @@ where
                             continue;
                         }
                     }
-                    let token = cancel.begin_query();
-                    let mut sink = WireResultSink {
-                        out: &mut out,
-                        notices: notices.as_mut(),
-                        rows: 0,
-                        pages: 0,
-                    };
-                    let outcome = tokio::select! {
-                        // biased + cancellation-first; see handle_execute.
-                        biased;
-                        () = token.cancelled() => None,
-                        r = session
-                            .simple_query_into(&sql, 1024, &mut sink)
-                            .instrument(statement_span.clone()) => Some(r),
-                    };
-                    // Read off the sink's running totals before it is dropped:
-                    // the pages themselves get no spans, only this one summary.
-                    let (rows, pages) = (sink.rows, sink.pages);
-                    let outcome = if let Some(outcome) = outcome {
-                        outcome
-                    } else {
-                        session.cancel_current_query().await;
-                        Err(query_canceled())
-                    };
-                    telemetry::record_statement_rows(&statement_span, rows, pages);
-                    match outcome {
-                        Ok(()) => {}
-                        Err(e) => {
-                            telemetry::record_statement_error(&statement_span, &e);
-                            write_notices(&mut out, notices.as_mut());
-                            backend::error_response(&mut out, &e);
-                            if e.severity == Severity::Fatal {
-                                // A fatal diagnostic ends the connection, so it
-                                // is the session's outcome too — the only thing
-                                // that marks `gres.session` failed.
-                                telemetry::record_error(&session_span, &e);
-                                stream.write_all(&out).await?;
-                                return Ok(());
-                            }
+                    let batch = run_simple_batch(
+                        &mut session,
+                        &sql,
+                        0,
+                        &cancel,
+                        &statement_span,
+                        &mut notices,
+                        &mut out,
+                    )
+                    .await;
+                    match batch {
+                        BatchOutcome::CopyIn { statement_index } => {
+                            stream.write_all(&out).await?;
+                            out.clear();
+                            copy_in = Some(CopyInState {
+                                target: CopyInTarget::Batched {
+                                    sql,
+                                    statement_index,
+                                },
+                                chunks: Vec::new(),
+                            });
+                            continue;
                         }
+                        BatchOutcome::Fatal(e) => {
+                            // A fatal diagnostic ends the connection, so it is
+                            // the session's outcome too — the only thing that
+                            // marks `gres.session` failed.
+                            telemetry::record_error(&session_span, &e);
+                            stream.write_all(&out).await?;
+                            return Ok(());
+                        }
+                        BatchOutcome::Done | BatchOutcome::Failed => {}
                     }
                     write_ready(
                         &mut out,

@@ -31,6 +31,38 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
+/// Page one [`crabka_pgwire::engine::QueryResult`] into a sink, which is what
+/// the trait's own default does around [`Session::simple_query`].
+async fn send_one_result<S: crabka_pgwire::engine::ResultSink>(
+    sink: &mut S,
+    result_index: usize,
+    page_rows: usize,
+    result: crabka_pgwire::engine::QueryResult,
+) -> Result<(), crabka_pgwire::error::PgError> {
+    use crabka_pgwire::engine::{QueryResult, ResultPage};
+
+    match result {
+        QueryResult::Rows { fields, rows, tag } => {
+            let mut fields = Some(fields);
+            let chunks = rows.len().div_ceil(page_rows).max(1);
+            for (index, rows) in rows.chunks(page_rows.max(1)).enumerate() {
+                sink.send(ResultPage::Rows {
+                    result_index,
+                    fields: fields.take(),
+                    rows: rows.to_vec(),
+                    tag: (index + 1 == chunks).then(|| tag.clone()),
+                })
+                .await?;
+            }
+        }
+        QueryResult::Command { tag } => {
+            sink.send(ResultPage::Command { result_index, tag }).await?;
+        }
+        QueryResult::Empty => sink.send(ResultPage::Empty { result_index }).await?,
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct CopyEngine;
 
@@ -98,6 +130,34 @@ impl crabka_pgwire::engine::Session for CopySession {
             crabka_pgwire::error::sqlstate::FEATURE_NOT_SUPPORTED,
             "unsupported",
         ))
+    }
+
+    /// Split `sql` on `;` and run the statements from `from_statement` on,
+    /// stopping at a `COPY t FROM STDIN` the way the real engine does.
+    async fn simple_query_batch_into<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        sql: &str,
+        from_statement: usize,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Result<crabka_pgwire::engine::SimpleQueryStop, crabka_pgwire::error::PgError> {
+        let statements: Vec<&str> = sql.split(';').map(str::trim).collect();
+        for (result_index, statement) in statements.iter().enumerate().skip(from_statement) {
+            if *statement == "COPY t FROM STDIN" {
+                let response = self
+                    .begin_copy_in(statement)
+                    .await?
+                    .expect("the stub answers this copy");
+                return Ok(crabka_pgwire::engine::SimpleQueryStop::CopyIn {
+                    statement_index: result_index,
+                    response,
+                });
+            }
+            for (offset, result) in self.simple_query(statement).await?.into_iter().enumerate() {
+                send_one_result(sink, result_index + offset, page_rows, result).await?;
+            }
+        }
+        Ok(crabka_pgwire::engine::SimpleQueryStop::Done)
     }
 
     async fn parse(
@@ -192,6 +252,7 @@ impl crabka_pgwire::engine::Session for CopySession {
     async fn copy_in(
         &mut self,
         _sql: &str,
+        _statement_index: usize,
         data: Vec<bytes::Bytes>,
     ) -> Result<crabka_pgwire::engine::QueryResult, crabka_pgwire::error::PgError> {
         let rows = data
@@ -455,6 +516,80 @@ async fn raw_copy_from_stdin_success_then_query_recovery() {
     put_message(&mut copy, b'c', b"");
     stream.write_all(&copy).await.expect("copy data");
     assert_eq!(read_tag(&mut stream).await, b'C');
+    assert_eq!(read_ready_status(&mut stream).await, b'I');
+
+    let mut query = Vec::new();
+    put_message(&mut query, b'Q', b"SELECT 1\0");
+    stream.write_all(&query).await.expect("select");
+    assert_eq!(read_tag(&mut stream).await, b'T');
+    assert_eq!(read_tag(&mut stream).await, b'D');
+    assert_eq!(read_tag(&mut stream).await, b'C');
+    assert_eq!(read_ready_status(&mut stream).await, b'I');
+}
+
+/// `PostgreSQL` answers a query string carrying two copies among its
+/// statements with the first result, a `CopyInResponse`, the copy's tag, a
+/// second `CopyInResponse`, its tag, the last result, and one `ReadyForQuery`
+/// on the end. This is `copyselect`'s
+/// `select 0\; copy … from stdin\; copy … from stdin\; select 1`.
+#[tokio::test]
+async fn raw_copy_from_stdin_between_other_statements_resumes_the_query_string() {
+    let mut stream = raw_connect(spawn_copy_server().await).await;
+    let mut out = Vec::new();
+    put_message(
+        &mut out,
+        b'Q',
+        b"SELECT 1; COPY t FROM STDIN; COPY t FROM STDIN; SELECT 1\0",
+    );
+    stream.write_all(&out).await.expect("query");
+
+    // The statement before the first copy reports in full first.
+    assert_eq!(read_tag(&mut stream).await, b'T');
+    assert_eq!(read_tag(&mut stream).await, b'D');
+    assert_eq!(read_tag(&mut stream).await, b'C');
+
+    for _ in 0..2 {
+        assert_eq!(read_tag(&mut stream).await, b'G');
+        let mut copy = Vec::new();
+        put_message(&mut copy, b'd', b"1\n");
+        put_message(&mut copy, b'c', b"");
+        stream.write_all(&copy).await.expect("copy data");
+        assert_eq!(read_tag(&mut stream).await, b'C');
+    }
+
+    // Only the statement after the last copy closes the query.
+    assert_eq!(read_tag(&mut stream).await, b'T');
+    assert_eq!(read_tag(&mut stream).await, b'D');
+    assert_eq!(read_tag(&mut stream).await, b'C');
+    assert_eq!(read_ready_status(&mut stream).await, b'I');
+
+    let mut query = Vec::new();
+    put_message(&mut query, b'Q', b"SELECT 1\0");
+    stream.write_all(&query).await.expect("select");
+    assert_eq!(read_tag(&mut stream).await, b'T');
+    assert_eq!(read_tag(&mut stream).await, b'D');
+    assert_eq!(read_tag(&mut stream).await, b'C');
+    assert_eq!(read_ready_status(&mut stream).await, b'I');
+}
+
+/// A `CopyFail` on a copy the engine stopped at part-way through a query
+/// string ends the whole string: the statements after it never run, and the
+/// `ReadyForQuery` is owed straight away.
+#[tokio::test]
+async fn raw_copy_fail_mid_query_string_abandons_the_rest() {
+    let mut stream = raw_connect(spawn_copy_server().await).await;
+    let mut out = Vec::new();
+    put_message(&mut out, b'Q', b"SELECT 1; COPY t FROM STDIN; SELECT 1\0");
+    stream.write_all(&out).await.expect("query");
+    assert_eq!(read_tag(&mut stream).await, b'T');
+    assert_eq!(read_tag(&mut stream).await, b'D');
+    assert_eq!(read_tag(&mut stream).await, b'C');
+    assert_eq!(read_tag(&mut stream).await, b'G');
+
+    let mut fail = Vec::new();
+    put_message(&mut fail, b'f', b"client aborted\0");
+    stream.write_all(&fail).await.expect("copy fail");
+    assert_eq!(read_tag(&mut stream).await, b'E');
     assert_eq!(read_ready_status(&mut stream).await, b'I');
 
     let mut query = Vec::new();

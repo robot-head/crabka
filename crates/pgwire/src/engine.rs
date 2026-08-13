@@ -79,6 +79,22 @@ pub enum ResultPage {
     },
 }
 
+/// Why [`Session::simple_query_batch_into`] returned.
+#[derive(Debug)]
+pub enum SimpleQueryStop {
+    /// Every statement in the query string ran.
+    Done,
+    /// A `COPY … FROM STDIN` was reached. The wire layer owes the client a
+    /// `CopyInResponse`, then the copy's data, then a resumption of the same
+    /// query string at `statement_index + 1`.
+    CopyIn {
+        /// The copy's position among the statements of the query string, which
+        /// is what [`Session::copy_in`] is given to find it again.
+        statement_index: usize,
+        response: CopyInResponse,
+    },
+}
+
 /// Backpressured consumer for bounded simple-query result pages.
 #[async_trait::async_trait]
 pub trait ResultSink: Send {
@@ -492,6 +508,42 @@ pub trait Session: Send {
         }
     }
 
+    /// Execute simple-query text from `from_statement` on, stopping at the
+    /// first `COPY … FROM STDIN`.
+    ///
+    /// This is the entry point the wire loop uses, because a simple query may
+    /// carry a copy-in anywhere among its statements: `PostgreSQL` answers
+    /// `select 0\; copy t from stdin\; select 1` with the first result, then a
+    /// `CopyInResponse`, then the rest once the client has sent its data. The
+    /// engine cannot drive that alone — the data arrives on the wire, not
+    /// through this call — so it stops and hands the index back, and the wire
+    /// layer resumes at the next statement once the copy is complete.
+    ///
+    /// `from_statement` counts statements in `sql`, not results; an index at or
+    /// past the end runs nothing and reports [`SimpleQueryStop::Done`].
+    ///
+    /// The default runs the whole string through [`Session::simple_query_into`]
+    /// and never stops, which is right for an engine with no copy-in support:
+    /// such an engine cannot produce the stop, so it can never be asked to
+    /// resume either.
+    fn simple_query_batch_into<S: ResultSink>(
+        &mut self,
+        sql: &str,
+        from_statement: usize,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> impl Future<Output = Result<SimpleQueryStop, PgError>> + Send {
+        async move {
+            if from_statement != 0 {
+                return Err(PgError::protocol(
+                    "this engine cannot resume a simple query part-way through",
+                ));
+            }
+            self.simple_query_into(sql, page_rows, sink).await?;
+            Ok(SimpleQueryStop::Done)
+        }
+    }
+
     fn parse(
         &mut self,
         name: &str,
@@ -537,12 +589,17 @@ pub trait Session: Send {
     }
 
     /// Finish a COPY FROM STDIN after the client sends `CopyDone`.
+    ///
+    /// `statement_index` names the copy's position among the statements of
+    /// `sql`, so that a query string carrying more than one of them completes
+    /// the right one. A string that is a single copy passes 0.
     fn copy_in(
         &mut self,
         sql: &str,
+        statement_index: usize,
         data: Vec<Bytes>,
     ) -> impl Future<Output = Result<QueryResult, PgError>> + Send {
-        let _ = (sql, data);
+        let _ = (sql, statement_index, data);
         async {
             Err(PgError::error(
                 crate::error::sqlstate::FEATURE_NOT_SUPPORTED,

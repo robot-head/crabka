@@ -33,7 +33,7 @@ use crabka_pgwire::{
     engine::{
         BoundParam, Cell, CloseTarget, CopyInResponse, CopyOutResponse, CopyOutStream,
         ExecuteOutcome, FieldDescription, Notification, PortalDescription, PreparedDescription,
-        QueryResult, Session, TxStatus,
+        QueryResult, Session, SimpleQueryStop, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
 };
@@ -10947,29 +10947,17 @@ fn parse_single_extended_statement(
     }
 }
 
-/// The single `COPY … FROM STDIN` a simple query may carry, if it carries one.
+/// The `COPY … FROM STDIN` a one-statement simple query is, if it is one.
 ///
-/// Copy-in is a connection *mode*, not a result: once it is entered the client
-/// sends data rather than SQL, so the statement that enters it cannot share a
-/// query string with anything else. A COPY FROM STDIN written alongside other
-/// statements is refused here rather than run, because running it would leave
-/// the two sides of the connection disagreeing about what the next bytes are.
-fn single_copy_from_stdin(statements: &[Statement]) -> Result<Option<CopyStmt>, PgError> {
+/// A query string holding several statements is not answered here even when one
+/// of them is a copy: copy-in is a connection *mode*, and the statements before
+/// it have to have run and reported before the client may start sending data.
+/// [`SqlSession::run_simple_batch`] drives that case, stopping at the copy and
+/// handing its index back to the wire layer.
+fn single_copy_from_stdin(statements: &[Statement]) -> Option<CopyStmt> {
     match statements {
-        [stmt] => Ok(copy_from_stdin_stmt(stmt).cloned()),
-        [] => Ok(None),
-        statements => {
-            if statements
-                .iter()
-                .any(|stmt| copy_from_stdin_stmt(stmt).is_some())
-            {
-                return Err(PgError::error(
-                    sqlstate::SYNTAX_ERROR,
-                    "COPY FROM STDIN must be the only statement in a simple query",
-                ));
-            }
-            Ok(None)
-        }
+        [stmt] => copy_from_stdin_stmt(stmt).cloned(),
+        _ => None,
     }
 }
 
@@ -15361,6 +15349,29 @@ impl Session for SqlSession {
         page_rows: usize,
         sink: &mut S,
     ) -> Result<(), PgError> {
+        match self
+            .simple_query_batch_into(sql, 0, page_rows, sink)
+            .await?
+        {
+            SimpleQueryStop::Done => Ok(()),
+            // Only the wire loop can carry a copy-in: the data arrives as
+            // `CopyData` frames, which no sink delivers. A caller that asked
+            // for the whole string in one call is told so rather than left
+            // waiting for bytes that cannot reach it.
+            SimpleQueryStop::CopyIn { .. } => Err(PgError::error(
+                sqlstate::FEATURE_NOT_SUPPORTED,
+                "COPY FROM STDIN cannot be run through this interface",
+            )),
+        }
+    }
+
+    async fn simple_query_batch_into<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        sql: &str,
+        from_statement: usize,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Result<SimpleQueryStop, PgError> {
         use crabka_pgwire::engine::ResultPage;
 
         if page_rows == 0 {
@@ -15369,14 +15380,27 @@ impl Session for SqlSession {
             ));
         }
         if sql.trim().is_empty() {
-            return sink.send(ResultPage::Empty { result_index: 0 }).await;
+            sink.send(ResultPage::Empty { result_index: 0 }).await?;
+            return Ok(SimpleQueryStop::Done);
         }
         let _tracked = self.track_statement(sql);
         let statements = self.parse_for_session(sql)?;
         if statements.is_empty() {
-            return sink.send(ResultPage::Empty { result_index: 0 }).await;
+            sink.send(ResultPage::Empty { result_index: 0 }).await?;
+            return Ok(SimpleQueryStop::Done);
         }
-        for (result_index, stmt) in statements.iter().enumerate() {
+        for (result_index, stmt) in statements.iter().enumerate().skip(from_statement) {
+            // A `COPY … FROM STDIN` cannot be run from here at all: its data is
+            // on the wire behind a `CopyInResponse` this loop has no way to
+            // send. Stop and name the statement, so the wire layer can drive
+            // the copy and then resume the string at the next one.
+            if let Some(copy) = copy_from_stdin_stmt(stmt).cloned() {
+                let response = self.copy_in_start(&copy)?;
+                return Ok(SimpleQueryStop::CopyIn {
+                    statement_index: result_index,
+                    response,
+                });
+            }
             // A `COPY … TO STDOUT` is answered with a copy-out block rather
             // than rows, and the block is a page like any other, so a query
             // string may hold one anywhere among its statements. Caught here
@@ -15467,7 +15491,7 @@ impl Session for SqlSession {
                 }
             }
         }
-        Ok(())
+        Ok(SimpleQueryStop::Done)
     }
 
     async fn parse(
@@ -15792,7 +15816,7 @@ impl Session for SqlSession {
                 self.mark_transaction_failed();
                 parse_failure(sql, error)
             })?;
-        let parsed = single_copy_from_stdin(&statements)?;
+        let parsed = single_copy_from_stdin(&statements);
         self.copy_probe = Some((sql.to_string(), statements));
         let Some(copy) = parsed else {
             return Ok(None);
@@ -15835,13 +15859,18 @@ impl Session for SqlSession {
     async fn copy_in(
         &mut self,
         sql: &str,
+        statement_index: usize,
         data: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, PgError> {
         let _tracked = self.track_statement(sql);
         let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
         let statements = crabka_pgparser::parse_with_type_schemas(sql, &type_schemas)
             .map_err(|error| parse_failure(sql, error))?;
-        let Some(copy) = single_copy_from_stdin(&statements)? else {
+        let Some(copy) = statements
+            .get(statement_index)
+            .and_then(copy_from_stdin_stmt)
+            .cloned()
+        else {
             return Err(PgError::error(
                 sqlstate::SYNTAX_ERROR,
                 "COPY data received for a non-COPY statement",
@@ -17819,6 +17848,7 @@ mod tests {
         session
             .copy_in(
                 "COPY t (id, note) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"1\thello\\nworld\n2\t\\N\n")],
             )
             .await
@@ -17837,6 +17867,105 @@ mod tests {
         assert_eq!(rows[0][2].as_ref().expect("note").text, "hello\nworld");
         assert_eq!(rows[1][0].as_ref().expect("id").text, "2");
         assert!(rows[1][2].is_none());
+    }
+
+    /// A simple-query string may carry a `COPY … FROM STDIN` anywhere among its
+    /// statements, and more than one. `simple_query_batch_into` runs up to each
+    /// copy and names its index; `copy_in` completes the copy at that index,
+    /// and the next call resumes the string after it. Every statement runs
+    /// exactly once, and both copies land their own row.
+    ///
+    /// This is `copyselect`'s
+    /// `select 0\; copy test3 from stdin\; copy test3 from stdin\; select 1`.
+    #[tokio::test]
+    async fn a_simple_query_stops_at_each_copy_and_resumes_after_it() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{CollectingResultSink, SimpleQueryStop};
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE test3 (c int)")
+            .await
+            .expect("create");
+
+        let sql = "select 0; copy test3 from stdin; copy test3 from stdin; select 1";
+        let mut stops = Vec::new();
+        let mut tags = Vec::new();
+        let mut from_statement = 0;
+        loop {
+            let mut sink = CollectingResultSink::default();
+            let stop = session
+                .simple_query_batch_into(sql, from_statement, 16, &mut sink)
+                .await
+                .expect("batch runs");
+            let SimpleQueryStop::CopyIn {
+                statement_index, ..
+            } = stop
+            else {
+                break;
+            };
+            stops.push(statement_index);
+            let row = format!("{}\n", stops.len());
+            let result = session
+                .copy_in(sql, statement_index, vec![bytes::Bytes::from(row)])
+                .await
+                .expect("copy completes");
+            let QueryResult::Command { tag } = result else {
+                panic!("a copy answers with a command tag");
+            };
+            tags.push(tag);
+            from_statement = statement_index + 1;
+        }
+
+        assert!(stops == vec![1, 2]);
+        assert!(tags == vec!["COPY 1".to_string(), "COPY 1".to_string()]);
+
+        let rows = session
+            .simple_query("SELECT c FROM test3 ORDER BY c")
+            .await
+            .expect("select");
+        let QueryResult::Rows { rows, .. } = &rows[0] else {
+            panic!("expected rows");
+        };
+        let values: Vec<&str> = rows
+            .iter()
+            .map(|row| row[0].as_ref().expect("c").text.as_ref())
+            .map(|text| std::str::from_utf8(text).expect("utf-8"))
+            .collect();
+        assert!(values == vec!["1", "2"]);
+    }
+
+    /// The copy at the far end of a string is completed with its own index, and
+    /// a `copy_in` naming a statement that is not a copy is refused rather than
+    /// applied to whichever copy the string happens to hold.
+    #[tokio::test]
+    async fn copy_in_names_the_statement_it_completes() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE t (c int)")
+            .await
+            .expect("create");
+
+        let sql = "select 0; copy t from stdin";
+        let refused = session
+            .copy_in(sql, 0, vec![bytes::Bytes::from_static(b"1\n")])
+            .await
+            .expect_err("statement 0 is not a copy");
+        assert!(refused.message == "COPY data received for a non-COPY statement");
+
+        session
+            .copy_in(sql, 1, vec![bytes::Bytes::from_static(b"1\n")])
+            .await
+            .expect("statement 1 is the copy");
+        let out_of_range = session
+            .copy_in(sql, 9, vec![bytes::Bytes::from_static(b"1\n")])
+            .await
+            .expect_err("there is no statement 9");
+        assert!(out_of_range.message == "COPY data received for a non-COPY statement");
     }
 
     /// Storing a value runs the target type's *input* function, so an ambiguous
@@ -17873,6 +18002,7 @@ mod tests {
             session
                 .copy_in(
                     "COPY w (t, d) FROM STDIN",
+                    0,
                     vec![bytes::Bytes::from(format!("{date} 17:32:01\t{date}\n"))],
                 )
                 .await
@@ -17913,6 +18043,7 @@ mod tests {
             let copied = session
                 .copy_in(
                     "COPY z (d) FROM STDIN",
+                    0,
                     vec![bytes::Bytes::from_static(b"31/01/97\n")],
                 )
                 .await
@@ -17946,6 +18077,7 @@ mod tests {
             let code = session
                 .copy_in(
                     "COPY b (v, c) FROM STDIN",
+                    0,
                     vec![bytes::Bytes::from(format!("{field}\n"))],
                 )
                 .await
@@ -18003,6 +18135,7 @@ mod tests {
         let err = session
             .copy_in(
                 "COPY t (id, name) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"1\tok\n\\N\tbad\n")],
             )
             .await
@@ -18041,6 +18174,7 @@ mod tests {
         session
             .copy_in(
                 "COPY hc (id, value) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from(copy_rows)],
             )
             .await
@@ -18069,6 +18203,7 @@ mod tests {
         let error = session
             .copy_in(
                 "COPY hc (id, value) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"100\tok\n\\N\tbad\n")],
             )
             .await
@@ -18098,6 +18233,7 @@ mod tests {
         let existing_err = session
             .copy_in(
                 "COPY t (id, name) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"2\tnew\n3\texisting\n")],
             )
             .await
@@ -18106,6 +18242,7 @@ mod tests {
         let input_err = session
             .copy_in(
                 "COPY t (id, name) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"4\tdup\n5\tdup\n")],
             )
             .await
