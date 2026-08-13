@@ -10073,16 +10073,29 @@ impl SqlSession {
                 }
             }
         };
+        let named = |column: &str| SelectItem::Expr {
+            expr: Expr::Column {
+                table: None,
+                name: column.to_string(),
+            },
+            alias: None,
+        };
         let projection = match columns {
-            // No column list is every column in attribute order, which is
-            // exactly what the wildcard projects.
-            None => vec![SelectItem::Wildcard],
+            // No column list is every column in attribute order EXCEPT the
+            // generated ones, which `CopyGetAttnums` skips for both directions.
+            // A wildcard would project them, so the list is spelled out.
+            None => table
+                .columns
+                .iter()
+                .filter(|column| column.generated.is_none())
+                .map(|column| named(&column.name))
+                .collect(),
             Some(columns) => {
                 let mut seen = HashSet::new();
                 columns
                     .iter()
                     .map(|column| {
-                        if table.column_index(column).is_none() {
+                        let Some(index) = table.column_index(column) else {
                             return Err(ExecError::Remote(PgError::error(
                                 "42703",
                                 format!(
@@ -10090,17 +10103,14 @@ impl SqlSession {
                                     resolved.name
                                 ),
                             )));
+                        };
+                        if table.columns[index].generated.is_some() {
+                            return Err(crate::exec::copy_generated_column(column));
                         }
                         if !seen.insert(column.clone()) {
                             return Err(ExecError::DuplicateOutputColumn(column.clone()));
                         }
-                        Ok(SelectItem::Expr {
-                            expr: Expr::Column {
-                                table: None,
-                                name: column.clone(),
-                            },
-                            alias: None,
-                        })
+                        Ok(named(column))
                     })
                     .collect::<Result<Vec<_>, _>>()?
             }
@@ -13197,13 +13207,26 @@ impl SqlSession {
             Some(columns) => columns
                 .iter()
                 .map(|column| {
-                    table
+                    let index = table
                         .column_index(column)
-                        .map(|_| column.clone())
-                        .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
+                        .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+                    if table.columns[index].generated.is_some() {
+                        return Err(crate::exec::copy_generated_column(column));
+                    }
+                    Ok(column.clone())
                 })
                 .collect::<Result<Vec<String>, ExecError>>()?,
-            None => all.clone(),
+            // `CopyGetAttnums`'s default list skips a generated column: its
+            // value is produced by the write, never supplied by the data. A
+            // list that carried it demanded a field per row for a column
+            // nothing may assign — "missing data for column \"b\"" on the very
+            // first line of every `COPY t FROM stdin`.
+            None => table
+                .columns
+                .iter()
+                .filter(|column| column.generated.is_none())
+                .map(|column| column.name.clone())
+                .collect(),
         };
         Ok(CopyColumnLists {
             copied,
@@ -13429,6 +13452,16 @@ impl SqlSession {
             .text_search
             .is_some()
         {
+            return None;
+        }
+        // A `VIRTUAL` generated column is a NULL placeholder in storage and is
+        // produced by evaluating the catalog's expression over the rest of the
+        // row. This cursor streams rows straight out of the scan, so it
+        // answered NULL for every such column: `SELECT * FROM t` reported a
+        // blank where `SELECT * FROM t ORDER BY a` — the same query off this
+        // path — reported the value. Only `exec::expand_virtual_generated`
+        // produces it, and only the materializing path runs it.
+        if crate::exec::has_virtual_generated(&table) {
             return None;
         }
         // The two gates every other stored-relation read passes and this one

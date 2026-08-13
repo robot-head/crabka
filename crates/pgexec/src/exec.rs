@@ -2856,6 +2856,53 @@ fn resolve_targets(t: &Table, columns: &Option<Vec<String>>) -> Result<Vec<usize
     }
 }
 
+/// [`resolve_targets`] under `CopyGetAttnums`'s rule about generated columns:
+/// the default list leaves one out, and an explicit list may not name one.
+///
+/// `COPY` supplies field values, and a generated column's value is produced by
+/// the write rather than supplied — so unlike `INSERT`, which accepts the
+/// column with `DEFAULT` written against it, a copy has no spelling for it at
+/// all. Leaving it in the implicit list demanded a field per row for a column
+/// nothing may assign, which is 22P04 on the first line of every
+/// `COPY t FROM stdin` over a relation that has one.
+pub(crate) fn resolve_copy_targets(
+    t: &Table,
+    columns: &Option<Vec<String>>,
+) -> Result<Vec<usize>, ExecError> {
+    let slots = resolve_targets(t, columns)?;
+    if columns.is_none() {
+        return Ok(slots
+            .into_iter()
+            .filter(|slot| t.columns[*slot].generated.is_none())
+            .collect());
+    }
+    for slot in &slots {
+        let column = &t.columns[*slot];
+        if column.generated.is_some() {
+            return Err(copy_generated_column(&column.name));
+        }
+    }
+    Ok(slots)
+}
+
+/// `PostgreSQL`'s refusal of a generated column written in a `COPY` column
+/// list, raised by every path that resolves such a list.
+///
+/// Upstream raises it from `CopyGetAttnums`, which both directions go through,
+/// so one spelling serves both. On the load side the timing matters as much as
+/// the text: the session refuses while the statement is still being analysed,
+/// which keeps the server out of copy-in mode — psql then reads the rest of its
+/// script as SQL rather than as data.
+pub(crate) fn copy_generated_column(column: &str) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "42P10",
+            format!("column \"{column}\" is a generated column"),
+        )
+        .with_detail("Generated columns cannot be used in COPY."),
+    )
+}
+
 /// The column slots an `INSERT` fills, given how many expressions its source
 /// supplies per row.
 ///
@@ -3097,7 +3144,12 @@ pub(crate) fn finish_written_row(
     // expansion happens on a copy only when a constraint could read it.
     let checked = if virtual_generated_needed_for_constraints(table) {
         let mut expanded = row.to_vec();
-        expand_virtual_generated_row(table, &mut expanded, ctx)?;
+        expand_virtual_generated_row(
+            table,
+            &mut expanded,
+            ctx,
+            crate::scope::GeneratedReads::every(),
+        )?;
         std::borrow::Cow::Owned(expanded)
     } else {
         std::borrow::Cow::Borrowed(&*row)
@@ -3616,8 +3668,12 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
             )
             .await
             .map_err(lock_acquire_error)?;
-        let Some((cur_key_xid, cur_xmin, cur_row)) =
-            eval_plan_qual(&write_ctx.staged_mutation(staged), table, rowid)?
+        let Some((cur_key_xid, cur_xmin, cur_row)) = eval_plan_qual(
+            &write_ctx.staged_mutation(staged),
+            table,
+            rowid,
+            crate::scope::GeneratedReads::every(),
+        )?
         else {
             // Deleted by a concurrent committed transaction, or by this command's
             // own DML: nothing references the parent through this row any more.
@@ -6031,6 +6087,10 @@ async fn execute_write_body(
                 crabka_pgcatalog::policy::PolicyCommand::Update,
                 &updated_columns,
             )?;
+            // The virtual generated columns this statement can reach in the row
+            // it is about to overwrite. A `SET` right-hand side, the `WHERE`, a
+            // `FROM` item's `ON` and a `RETURNING old.…` are all in `refs`.
+            let reads = write_generated_reads(catalog_kv, &t, refs, qualifier)?;
             for (rowid, _xmin, scanned_row) in write_candidate_rows(
                 write_ctx,
                 &t,
@@ -6043,6 +6103,7 @@ async fn execute_write_body(
                     returning.as_ref(),
                     assignments,
                 ),
+                reads,
             )? {
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause (avoids over-locking and
@@ -6067,7 +6128,7 @@ async fn execute_write_body(
                 // 3. EvalPlanQual: re-read this row under the lock and decide what to
                 //    operate on (40001 under RR if changed since our snapshot).
                 let Some((cur_key_xid, cur_xmin, cur_row)) =
-                    eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
+                    eval_plan_qual(&write_ctx.mutation(), &t, rowid, reads)?
                 else {
                     continue; // deleted by a concurrent committed txn — skip
                 };
@@ -6175,6 +6236,12 @@ async fn execute_write_body(
             )?;
             let mut n: u64 = 0;
             let mut returned_rows = returning.as_ref().map(|_| Vec::new()).unwrap_or_default();
+            // A `DELETE`'s only reach into the row it removes is its `WHERE`,
+            // its `USING` join and its `RETURNING` — all of them in `refs`. A
+            // `TRUNCATE` desugars to one with none of the three, so it reaches
+            // nothing, which is why it can empty a relation holding a row whose
+            // generation expression overflows.
+            let reads = write_generated_reads(catalog_kv, &t, refs, qualifier)?;
             for (rowid, _xmin, scanned_row) in write_candidate_rows(
                 write_ctx,
                 &t,
@@ -6196,6 +6263,7 @@ async fn execute_write_body(
                     returning.as_ref(),
                     &[],
                 ),
+                reads,
             )? {
                 // 1. Filter on the snapshot-visible row FIRST — do not lock rows
                 //    that don't match the WHERE clause.
@@ -6218,7 +6286,7 @@ async fn execute_write_body(
                     .map_err(lock_acquire_error)?;
                 // 3. EvalPlanQual: re-read this row under the lock.
                 let Some((cur_key_xid, cur_xmin, cur_row)) =
-                    eval_plan_qual(&write_ctx.mutation(), &t, rowid)?
+                    eval_plan_qual(&write_ctx.mutation(), &t, rowid, reads)?
                 else {
                     continue; // already deleted by a concurrent committed txn
                 };
@@ -6950,7 +7018,12 @@ impl ReturningSpec {
             .map(|mut row| {
                 if let Some(target) = &self.target {
                     for image in [&mut row.old, &mut row.new].into_iter().flatten() {
-                        expand_virtual_generated_row(target, image, ctx)?;
+                        expand_virtual_generated_row(
+                            target,
+                            image,
+                            ctx,
+                            crate::scope::GeneratedReads::every(),
+                        )?;
                     }
                 }
                 // The visible target columns show the post-image, or the
@@ -7328,6 +7401,7 @@ async fn execute_merge(
         crate::privilege::WriteAction::Merge(crate::privilege::MergeClauses::of(clauses)),
         None,
         true,
+        crate::scope::GeneratedReads::every(),
     )?;
     // The `UPDATE` and `DELETE` policies then judge each row an action reaches,
     // one row at a time, and raise rather than skip — see `MergeRowSecurity`.
@@ -7638,8 +7712,12 @@ async fn apply_merge_row_action(
         )
         .await
         .map_err(lock_acquire_error)?;
-    let Some((cur_key_xid, cur_xmin, cur_row)) =
-        eval_plan_qual(&write_ctx.mutation(), t, request.rowid)?
+    let Some((cur_key_xid, cur_xmin, cur_row)) = eval_plan_qual(
+        &write_ctx.mutation(),
+        t,
+        request.rowid,
+        crate::scope::GeneratedReads::every(),
+    )?
     else {
         return Ok(None); // deleted by a concurrent committed transaction
     };
@@ -7947,7 +8025,7 @@ pub(crate) async fn execute_copy_write(
     let parent_fk = crate::fk::StatementFkContext::resolve(catalog_kv, &table)?;
     let mut leaf_fk: HashMap<TableId, crate::fk::StatementFkContext> = HashMap::new();
     let mut writes = StatementWrites::default();
-    let target_idx = resolve_targets(&table, target.columns)?;
+    let target_idx = resolve_copy_targets(&table, target.columns)?;
     let copied_columns = WriteContext::modified_columns(&table, &target_idx);
     let copy_check = write_ctx.row_check(
         &table,
@@ -8479,8 +8557,12 @@ async fn cluster_one_relation(
             )
             .await
             .map_err(lock_acquire_error)?;
-        let Some((cur_key_xid, cur_xmin, cur_row)) =
-            eval_plan_qual(&write_ctx.mutation(), table, *rowid)?
+        let Some((cur_key_xid, cur_xmin, cur_row)) = eval_plan_qual(
+            &write_ctx.mutation(),
+            table,
+            *rowid,
+            crate::scope::GeneratedReads::every(),
+        )?
         else {
             continue; // already deleted by a concurrent committed transaction
         };
@@ -10061,8 +10143,12 @@ async fn arbitrate_insert_row(
             } else {
                 write_ctx.mutation()
             };
-            let Some((cur_key_xid, cur_xmin, cur_row)) =
-                eval_plan_qual(&mutation, table, holder.rowid)?
+            let Some((cur_key_xid, cur_xmin, cur_row)) = eval_plan_qual(
+                &mutation,
+                table,
+                holder.rowid,
+                crate::scope::GeneratedReads::every(),
+            )?
             else {
                 // Concurrently deleted: re-arbitrate without it.
                 discarded.insert(holder.rowid);
@@ -10862,6 +10948,7 @@ fn write_candidate_rows(
     action: crate::privilege::WriteAction,
     filter: Option<&Expr>,
     reads_target_columns: bool,
+    reads: crate::scope::GeneratedReads<'_>,
 ) -> Result<Vec<(u64, u64, Vec<Datum>)>, ExecError> {
     let governor = write_ctx.governor(table);
     crate::privilege::require_write(
@@ -10889,13 +10976,83 @@ fn write_candidate_rows(
             table,
         )?
     };
-    // The `USING` qual, the statement's own WHERE, and any `RETURNING old.*`
-    // all read these rows, so a virtual generated column has to hold its value
-    // before any of them run.
+    // The `USING` qual, the statement's own WHERE and any `RETURNING old.*` all
+    // read these rows, so a virtual generated column each of them can reach has
+    // to hold its value before any of them run — and one none of them can reach
+    // must NOT be computed, or a row whose expression raises can never be
+    // deleted. What "can reach" means is settled by the caller, in
+    // [`write_generated_reads`], because the row this scan produces is re-read
+    // under its lock by `eval_plan_qual` and the two must agree.
     for (_, _, row) in &mut rows {
-        expand_virtual_generated_row(table, row, write_ctx.eval_ctx)?;
+        expand_virtual_generated_row(table, row, write_ctx.eval_ctx, reads)?;
     }
     using.retain_visible(table, rows, write_ctx.eval_ctx)
+}
+
+/// Which `VIRTUAL` generated columns of `table` a read of it under `qualifier`
+/// has to materialize.
+///
+/// The statement's own text answers it, with two escapes to "all of them":
+///
+/// * `None` refs is "no statement in hand" — the schema-description walk and
+///   every internal read — and reaches every column, as every path did before
+///   the set existed.
+/// * A relation under row security is judged by a qual written in the catalog,
+///   which can name a column the statement gives no sign of. The switch is
+///   tested rather than the decision, so the answer does not depend on which
+///   role is asking.
+fn read_generated_reads<'a>(
+    table: &Table,
+    refs: Option<&'a crate::scope::StatementRefs>,
+    qualifier: &'a str,
+) -> crate::scope::GeneratedReads<'a> {
+    match refs {
+        Some(refs) if !table.row_security => crate::scope::GeneratedReads::of(refs, qualifier),
+        _ => crate::scope::GeneratedReads::every(),
+    }
+}
+
+/// [`read_generated_reads`] for the row an `UPDATE` or `DELETE` is about to
+/// overwrite, which one more reader can reach.
+///
+/// A foreign key *carried by* a virtual generated column has its key read out
+/// of the row. `PostgreSQL` refuses such a key outright ("foreign key
+/// constraints on virtual generated columns are not supported") and this engine
+/// accepts it, so the value has to be there. The parent side needs no test: a
+/// referenced key must be backed by a unique index, and
+/// [`reject_index_over_virtual_generated`] keeps a virtual column out of every
+/// index.
+///
+/// A row trigger is deliberately NOT a reason to materialize one. Upstream does
+/// not let a trigger read a generated column at all, and
+/// [`crate::trigger::fire_before_row`] blanks the images it is handed.
+///
+/// The answer belongs to the statement rather than to one scan of it, because
+/// the candidate row and the version `eval_plan_qual` re-reads under the lock
+/// both reach the same readers and must be materialized alike.
+fn write_generated_reads<'a>(
+    catalog_kv: &dyn Kv,
+    table: &Table,
+    refs: &'a crate::scope::StatementRefs,
+    qualifier: &'a str,
+) -> Result<crate::scope::GeneratedReads<'a>, ExecError> {
+    let reads = read_generated_reads(table, Some(refs), qualifier);
+    if !has_virtual_generated(table) {
+        return Ok(reads);
+    }
+    let keyed = crabka_pgcatalog::list_table_foreign_keys(catalog_kv, table.id)?
+        .iter()
+        .flat_map(|key| &key.columns)
+        .any(|column| {
+            table
+                .column_index(column)
+                .is_some_and(|index| table.columns[index].is_virtual_generated())
+        });
+    Ok(if keyed {
+        crate::scope::GeneratedReads::every()
+    } else {
+        reads
+    })
 }
 
 /// The role a timestamp write is authorized as.
@@ -11624,6 +11781,7 @@ fn eval_plan_qual(
     mutation: &MutationContext<'_>,
     table: &crabka_pgcatalog::Table,
     rowid: u64,
+    reads: crate::scope::GeneratedReads<'_>,
 ) -> Result<Option<(u64, u64, Vec<crabka_pgtypes::Datum>)>, ExecError> {
     let kv = mutation.kv;
     let global = mutation.global;
@@ -11696,7 +11854,7 @@ fn eval_plan_qual(
     // and may hand it to `RETURNING old.*`, so it is completed here rather than
     // at each of them.
     if let Some((_, _, row)) = &mut found {
-        expand_virtual_generated_row(table, row, mutation.eval_ctx)?;
+        expand_virtual_generated_row(table, row, mutation.eval_ctx, reads)?;
     }
     Ok(found)
 }
@@ -16364,6 +16522,7 @@ fn scan_stored_relation(
     // `scanned_rows`.
     let stamp = crate::scope::SystemColumns::of(read_ctx.refs, t).stamp(t.id)?;
     stamp.extend_scope(&mut scope, qualifier);
+    let reads = read_generated_reads(t, read_ctx.refs, qualifier);
     // SP40: a foreign table reads through the registered scanner, not the local
     // MVCC version store. `build_from` materializes BEFORE WHERE, so this scan
     // runs even for `WHERE false` — there is no skip path.
@@ -16388,7 +16547,7 @@ fn scan_stored_relation(
         let mut rows =
             scanner.scan(t, &server, mapping.as_ref(), scan_bounds, read_ctx.eval_ctx)?;
         resolve_scanned_regclass(catalog_kv, read_ctx.eval_ctx.resolution(), t, &mut rows)?;
-        expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
+        expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx, reads)?;
         return Ok(crate::rls::RawScan::of_relation(
             t,
             scope,
@@ -16418,7 +16577,7 @@ fn scan_stored_relation(
     if let Some(unrestricted) = crate::rls::UnrestrictedTable::from_decision(permit, &decision, t)
         && let Some(rows) = try_scan_with_local_index(read_ctx, unrestricted, distributed_plan)?
     {
-        let rows = scanned_rows(read_ctx, t, rows, &stamp)?;
+        let rows = scanned_rows(read_ctx, t, rows, &stamp, reads)?;
         return Ok(crate::rls::RawScan::of_relation(t, scope, rows));
     }
     let scan_request = ScanRequest {
@@ -16465,7 +16624,7 @@ fn scan_stored_relation(
         }
         Err(error) => return Err(error),
     };
-    let rows = scanned_rows(read_ctx, t, rows, &stamp)?;
+    let rows = scanned_rows(read_ctx, t, rows, &stamp, reads)?;
     Ok(crate::rls::RawScan::of_relation(t, scope, rows))
 }
 
@@ -16483,6 +16642,7 @@ fn scanned_rows(
     t: &Table,
     scanned: Vec<ScannedRow>,
     stamp: &crate::scope::SystemStamp,
+    reads: crate::scope::GeneratedReads<'_>,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows: Vec<Vec<Datum>> = Vec::with_capacity(scanned.len());
     let mut identities: Vec<u64> = Vec::with_capacity(scanned.len());
@@ -16496,7 +16656,7 @@ fn scanned_rows(
         t,
         &mut rows,
     )?;
-    expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx)?;
+    expand_virtual_generated(t, &mut rows, read_ctx.eval_ctx, reads)?;
     for (row, identity) in rows.iter_mut().zip(identities) {
         stamp.extend_row(row, identity);
     }
@@ -22911,7 +23071,12 @@ pub(crate) async fn execute_read_locking(
         })? {
             // A generated column is expanded in the relation the row came out
             // of, before the row is reshaped into the one the query named.
-            expand_virtual_generated_row(from, &mut scanned_row, ctx)?;
+            expand_virtual_generated_row(
+                from,
+                &mut scanned_row,
+                ctx,
+                crate::scope::GeneratedReads::every(),
+            )?;
             let scanned_row = reshape_row(scanned_row, ordinals);
             // 0. Row security first: a row a policy hides must not be locked,
             //    because a lock is observable through NOWAIT, SKIP LOCKED and
@@ -22977,6 +23142,7 @@ pub(crate) async fn execute_read_locking(
                 },
                 from,
                 rowid,
+                crate::scope::GeneratedReads::every(),
             )?
             else {
                 continue; // deleted by a concurrent committed txn — skip
@@ -25357,16 +25523,24 @@ pub(crate) fn encode_table_tuple(table: &Table, xmin: u64, xmax: u64, row: &[Dat
     crabka_pgmvcc::version::encode_tuple(xmin, xmax, &stored_row(table, row))
 }
 
-/// Fill in every `VIRTUAL` generated column of one row read back from storage,
-/// where it sits as a NULL placeholder.
+/// Fill in the `VIRTUAL` generated columns of one row read back from storage,
+/// where each sits as a NULL placeholder, that `reads` says the statement can
+/// observe.
 ///
 /// This is the read-side counterpart of [`encode_table_tuple`]: the value a
 /// reader sees is produced here, from the catalog's *current* expression, and
 /// never read off the disk.
+///
+/// A column `reads` excludes keeps its placeholder. That is not an optimization
+/// — it is the behaviour `PostgreSQL` has, and the reason `DELETE … WHERE a =
+/// 2000000000` removes a row whose `b int GENERATED ALWAYS AS (a * 2)`
+/// overflows instead of raising 22003 for a column the statement never names.
+/// See [`crate::scope::GeneratedReads`] for who may narrow it and who must not.
 pub(crate) fn expand_virtual_generated_row(
     table: &Table,
     row: &mut [Datum],
     ctx: &crate::clock::EvalCtx,
+    reads: crate::scope::GeneratedReads<'_>,
 ) -> Result<(), ExecError> {
     if !has_virtual_generated(table) {
         return Ok(());
@@ -25375,6 +25549,9 @@ pub(crate) fn expand_virtual_generated_row(
     let snapshot = row.to_vec();
     for (index, column) in table.columns.iter().enumerate() {
         if !column.is_virtual_generated() {
+            continue;
+        }
+        if !reads.reads(&column.name) {
             continue;
         }
         let Some(source) = column.generation_expr() else {
@@ -25397,12 +25574,13 @@ pub(crate) fn expand_virtual_generated(
     table: &Table,
     rows: &mut [Vec<Datum>],
     ctx: &crate::clock::EvalCtx,
+    reads: crate::scope::GeneratedReads<'_>,
 ) -> Result<(), ExecError> {
     if !has_virtual_generated(table) {
         return Ok(());
     }
     for row in rows {
-        expand_virtual_generated_row(table, row, ctx)?;
+        expand_virtual_generated_row(table, row, ctx, reads)?;
     }
     Ok(())
 }
@@ -25701,7 +25879,12 @@ impl AlterTableState {
         let versions = self.rows.as_ref().expect("row versions were just loaded");
         let mut live = live_row_versions(kv, &self.table, versions, self.own_xid)?;
         for (_, _, row) in &mut live {
-            expand_virtual_generated_row(&self.table, row, ctx)?;
+            expand_virtual_generated_row(
+                &self.table,
+                row,
+                ctx,
+                crate::scope::GeneratedReads::every(),
+            )?;
         }
         Ok(live)
     }
@@ -33779,6 +33962,7 @@ mod tests {
             },
             &table,
             rowid,
+            crate::scope::GeneratedReads::every(),
         )
         .expect("eval_plan_qual must not error");
 

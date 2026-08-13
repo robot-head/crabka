@@ -1691,6 +1691,43 @@ pub(crate) struct WriteTarget<'a> {
     pub check: &'a crate::rls::WriteChecks,
 }
 
+/// Blank every `VIRTUAL` generated column of one trigger image, in place.
+///
+/// `PostgreSQL` does not let a trigger read a generated column — "it is not
+/// allowed to access generated columns in `BEFORE` triggers", and its `AFTER`
+/// images carry the same NULL — because the value is conceptually settled once
+/// the triggers have run and before then there is nothing to report. Blanking
+/// here rather than relying on the write path never to have computed the value
+/// makes the rule hold for a statement that DOES name the column in its own
+/// `WHERE`, which materializes it into the very row `OLD` is taken from.
+fn blank_virtual_generated(table: &Table, image: &mut [crabka_pgtypes::Datum]) {
+    for (index, _) in table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.is_virtual_generated())
+    {
+        if let Some(slot) = image.get_mut(index) {
+            *slot = crabka_pgtypes::Datum::Null;
+        }
+    }
+}
+
+/// [`blank_virtual_generated`] over a borrowed image, which is copied only when
+/// the relation has a virtual generated column to blank.
+fn trigger_image<'a>(
+    table: &Table,
+    image: Option<&'a [crabka_pgtypes::Datum]>,
+) -> Option<std::borrow::Cow<'a, [crabka_pgtypes::Datum]>> {
+    let image = image?;
+    if !crate::exec::has_virtual_generated(table) {
+        return Some(std::borrow::Cow::Borrowed(image));
+    }
+    let mut owned = image.to_vec();
+    blank_virtual_generated(table, &mut owned);
+    Some(std::borrow::Cow::Owned(owned))
+}
+
 /// Fire the relation's `BEFORE ROW` triggers, then judge the row they leave
 /// behind against the target's check.
 ///
@@ -1717,6 +1754,11 @@ pub(crate) fn fire_before_row(
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Option<Vec<crabka_pgtypes::Datum>>, ExecError> {
     let WriteTarget { table, check } = target;
+    let old_image = trigger_image(table, old);
+    let old = old_image.as_deref();
+    if let Some(image) = new.as_mut() {
+        blank_virtual_generated(table, image);
+    }
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)? {
         if trigger.timing != TriggerTiming::Before
             || trigger.level != TriggerLevel::Row
@@ -1743,6 +1785,11 @@ pub(crate) fn fire_before_row(
                     .map(|(value, column)| crate::exec::coerce(value, column.ty, ctx))
                     .collect::<Result<Vec<_>, _>>()?;
                 if matches!(event, DmlEvent::Insert | DmlEvent::Update) {
+                    // `check_modified_virtual_generated`: a value the trigger
+                    // assigned to a virtual generated column is dropped before
+                    // the next trigger — or the write — can see it.
+                    let mut values = values;
+                    blank_virtual_generated(table, &mut values);
                     new = Some(values);
                 }
             }
@@ -1826,6 +1873,10 @@ pub(crate) fn fire_after_row(
     new: Option<&[crabka_pgtypes::Datum]>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
+    let old_image = trigger_image(table, old);
+    let new_image = trigger_image(table, new);
+    let old = old_image.as_deref();
+    let new = new_image.as_deref();
     let mut recorded = Vec::new();
     // A relation may sit under a partitioned parent, under one or more
     // inheritance parents, or under a mixture, so the ancestry is a DAG and not

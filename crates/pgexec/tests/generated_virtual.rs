@@ -11,8 +11,18 @@
 //! [`an_expression_that_overflows_is_an_error_on_read_not_on_write`] inserts a
 //! row whose expression cannot be evaluated at all, and
 //! [`changing_the_expression_changes_what_rows_written_earlier_report`] rewords
-//! the expression without touching a row. Everything else here is the surface
-//! that has to agree with them.
+//! the expression without touching a row.
+//!
+//! The other consequence of "computed when it is read" is *who* reads it, which
+//! upstream answers by expanding the expression only where the statement
+//! references the column.
+//! [`a_row_whose_expression_raises_can_still_be_deleted_and_truncated`] is why
+//! that matters rather than being an optimization,
+//! [`a_reader_outside_the_statement_still_sees_the_computed_value`] is the side
+//! that makes narrowing sound, and
+//! [`a_trigger_sees_null_for_a_virtual_generated_column`] is the one reader
+//! upstream keeps the value away from. Everything else here is the surface that
+//! has to agree with them.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -77,11 +87,10 @@ async fn engine_with(setup: &[&str]) -> (SqlEngine, SqlSession) {
 /// the same insert is rejected there. No implementation that computed a virtual
 /// column on write could tell these two apart.
 ///
-/// The read-side error is *whole-relation*, not per-column: crabka fills every
-/// virtual column in at the scan, so that each reader does not have to remember
-/// to. `PostgreSQL` expands the expression only where the query names the
-/// column, so there a `SELECT a` over the same row succeeds. The narrower
-/// behaviour would need the referenced-column set threaded down to the scan.
+/// The error is per-column, not per-relation: only a statement that can observe
+/// the column evaluates it. Every expectation here was measured against
+/// `PostgreSQL` 18.4, including the two that look inconsistent side by side —
+/// `SELECT *` raises and `SELECT a` over the same row does not.
 #[tokio::test]
 async fn an_expression_that_overflows_is_an_error_on_read_not_on_write() {
     let (_engine, mut session) = engine_with(&[
@@ -91,13 +100,17 @@ async fn an_expression_that_overflows_is_an_error_on_read_not_on_write() {
     .await;
 
     run(&mut session, "INSERT INTO ovf_v (a) VALUES (2000000000)").await;
-    for sql in ["SELECT * FROM ovf_v", "SELECT a FROM ovf_v"] {
+    for sql in ["SELECT * FROM ovf_v", "SELECT b FROM ovf_v"] {
         assert!(
             error(&mut session, sql).await
                 == ("22003".to_string(), "integer out of range".to_string()),
             "{sql}"
         );
     }
+    // The same row, read by statements that never name the column.
+    assert!(query(&mut session, "SELECT a FROM ovf_v").await == vec!["2000000000"]);
+    assert!(query(&mut session, "SELECT count(*) FROM ovf_v").await == vec!["1"]);
+
     // Rewording the expression makes it evaluable again, and the row that was
     // written all along reports its value — proof it was stored regardless.
     run(
@@ -111,6 +124,112 @@ async fn an_expression_that_overflows_is_an_error_on_read_not_on_write() {
         error(&mut session, "INSERT INTO ovf_s (a) VALUES (2000000000)").await
             == ("22003".to_string(), "integer out of range".to_string())
     );
+}
+
+/// A row whose expression raises has to stay removable, or the relation holding
+/// it can never be emptied.
+///
+/// This is the whole reason the read is narrowed. `DELETE … WHERE a = …` and
+/// `TRUNCATE` reach nothing but the plain column, so neither evaluates the
+/// generation expression — `PostgreSQL` 18.4 runs both, and an engine that
+/// materialized every virtual column on every scan answered 22003 to both and
+/// left the row in place for good.
+#[tokio::test]
+async fn a_row_whose_expression_raises_can_still_be_deleted_and_truncated() {
+    let (_engine, mut session) = engine_with(&[
+        "CREATE TABLE poison (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)",
+        "INSERT INTO poison (a) VALUES (1), (2000000000)",
+    ])
+    .await;
+
+    run(&mut session, "DELETE FROM poison WHERE a = 2000000000").await;
+    assert!(query(&mut session, "SELECT * FROM poison").await == vec!["1,2"]);
+
+    // And with the row back, the unfiltered form each of them desugars to.
+    run(&mut session, "INSERT INTO poison (a) VALUES (2000000000)").await;
+    run(&mut session, "TRUNCATE poison").await;
+    assert!(query(&mut session, "SELECT count(*) FROM poison").await == vec!["0"]);
+
+    run(&mut session, "INSERT INTO poison (a) VALUES (2000000000)").await;
+    run(&mut session, "UPDATE poison SET a = 3 WHERE a = 2000000000").await;
+    assert!(query(&mut session, "SELECT * FROM poison").await == vec!["3,6"]);
+
+    run(&mut session, "DELETE FROM poison").await;
+}
+
+/// The reader a statement's own text gives no sign of.
+///
+/// Narrowing the read to the columns the statement spells is only sound while
+/// every other reader of the row is asked for, and a row-security `USING` qual
+/// is written in the catalog rather than in the statement.
+///
+/// A second — a foreign key carried by the generated column itself — is widened
+/// for as well, and is deliberately not asserted here. `PostgreSQL` 18.4
+/// refuses the constraint outright ("foreign key constraints on virtual
+/// generated columns are not supported"); this engine accepts the DDL and then
+/// enforces nothing, because the key it reads out of storage is the NULL
+/// placeholder and a NULL key satisfies every foreign key. Making the widening
+/// observable would mean fixing that first.
+#[tokio::test]
+async fn a_reader_outside_the_statement_still_sees_the_computed_value() {
+    let (_engine, mut session) = engine_with(&[
+        "CREATE TABLE policied (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)",
+        "INSERT INTO policied (a) VALUES (1), (5)",
+        "ALTER TABLE policied ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY visible ON policied USING (b < 5)",
+        "CREATE ROLE reader",
+        "GRANT SELECT, DELETE ON policied TO reader",
+    ])
+    .await;
+
+    // The policy names a column the statement does not, and still hides the row.
+    run(&mut session, "SET ROLE reader").await;
+    assert!(query(&mut session, "SELECT a FROM policied").await == vec!["1"]);
+    run(&mut session, "DELETE FROM policied WHERE a = 5").await;
+    run(&mut session, "RESET ROLE").await;
+    assert!(query(&mut session, "SELECT a FROM policied ORDER BY a").await == vec!["1", "5"]);
+}
+
+/// A trigger never sees a virtual generated column at all.
+///
+/// `PostgreSQL`: "it is not allowed to access generated columns in `BEFORE`
+/// triggers" — the value is conceptually settled after they have run — and its
+/// `AFTER` images carry the same NULL. A value the trigger *assigns* to one is
+/// dropped as well (`check_modified_virtual_generated`), so it reaches neither
+/// the next trigger nor the row that gets written.
+///
+/// The `WHERE` on the delete names the column on purpose: it makes the write
+/// path materialize the value into the very row `OLD` is taken from, so the
+/// NULL below can only come from the blanking and not from the narrowing.
+#[tokio::test]
+async fn a_trigger_sees_null_for_a_virtual_generated_column() {
+    let (_engine, mut session) = engine_with(&[
+        "CREATE TABLE triggered (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)",
+        "CREATE TABLE seen (tag text, b int)",
+        "CREATE FUNCTION record_images() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+             IF TG_OP = 'DELETE' THEN
+               INSERT INTO seen VALUES ('old', OLD.b);
+               RETURN OLD;
+             END IF;
+             INSERT INTO seen VALUES ('new', NEW.b);
+             NEW.b := 300;
+             RETURN NEW;
+           END $$",
+        "CREATE TRIGGER images BEFORE INSERT OR DELETE ON triggered FOR EACH ROW
+           EXECUTE FUNCTION record_images()",
+        "INSERT INTO triggered (a) VALUES (7)",
+        "DELETE FROM triggered WHERE b = 14",
+    ])
+    .await;
+
+    assert!(
+        query(&mut session, "SELECT tag, b FROM seen ORDER BY tag").await
+            == vec!["new,NULL", "old,NULL"]
+    );
+    // The delete found its row, so the qual did see the value the trigger did
+    // not — and the 300 the trigger assigned was never stored.
+    assert!(query(&mut session, "SELECT count(*) FROM triggered").await == vec!["0"]);
 }
 
 /// `SET EXPRESSION` rewords a virtual column without rewriting a row, so rows
@@ -214,6 +333,86 @@ async fn update_and_delete_can_qualify_on_a_virtual_column() {
     );
     run(&mut session, "DELETE FROM quals WHERE b = 6").await;
     assert!(query(&mut session, "SELECT * FROM quals ORDER BY a").await == vec!["1,2", "9,18"]);
+}
+
+// ── COPY ─────────────────────────────────────────────────────────────────────
+
+/// `COPY` never carries a generated column, in either direction.
+///
+/// Upstream's `CopyGetAttnums` leaves one out of the default column list and
+/// refuses one written in an explicit list, and both directions resolve their
+/// list through it. The kind does not matter, so `STORED` is checked beside
+/// `VIRTUAL`.
+///
+/// The load side's refusal has to arrive from `begin_copy_in`, before the mode
+/// is announced: psql reads the rest of its script as COPY data once
+/// `CopyInResponse` has gone out, so a refusal that arrives later eats every
+/// statement up to the next `\.`.
+#[tokio::test]
+async fn copy_leaves_a_generated_column_out_and_refuses_one_written_down() {
+    let (_engine, mut session) = engine_with(&[
+        "CREATE TABLE cpv (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)",
+        "CREATE TABLE cps (a int, b int GENERATED ALWAYS AS (a * 3) STORED)",
+        "INSERT INTO cpv (a) VALUES (1), (2)",
+        "INSERT INTO cps (a) VALUES (1), (2)",
+    ])
+    .await;
+
+    for relation in ["cpv", "cps"] {
+        let stream = session
+            .begin_copy_out(&format!("COPY {relation} TO stdout"))
+            .await
+            .unwrap_or_else(|error| panic!("{relation}: {error:?}"))
+            .unwrap_or_else(|| panic!("{relation} should be a copy-out"));
+        let payload = stream.rows.concat();
+        assert!(
+            String::from_utf8(payload).expect("utf8") == "1\n2\n",
+            "{relation}"
+        );
+
+        let refusal = (
+            "42P10".to_string(),
+            "column \"b\" is a generated column".to_string(),
+        );
+        let out = session
+            .begin_copy_out(&format!("COPY {relation} (a, b) TO stdout"))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{relation} copy-out should have been refused"));
+        assert!((out.code.clone(), out.message) == refusal, "{relation} TO");
+
+        let into = session
+            .begin_copy_in(&format!("COPY {relation} (a, b) FROM stdin"))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{relation} copy-in should have been refused"));
+        assert!(
+            (into.code.clone(), into.message) == refusal,
+            "{relation} IN"
+        );
+    }
+
+    // The default list loads the plain column alone, and the generated one is
+    // computed rather than demanded.
+    for relation in ["cpv", "cps"] {
+        let sql = format!("COPY {relation} FROM stdin");
+        session
+            .begin_copy_in(&sql)
+            .await
+            .unwrap_or_else(|error| panic!("{relation}: {error:?}"));
+        session
+            .copy_in(&sql, vec![bytes::Bytes::from_static(b"3\n4\n")])
+            .await
+            .unwrap_or_else(|error| panic!("{relation}: {error:?}"));
+    }
+    assert!(
+        query(&mut session, "SELECT * FROM cpv ORDER BY a").await
+            == vec!["1,2", "2,4", "3,6", "4,8"]
+    );
+    assert!(
+        query(&mut session, "SELECT * FROM cps ORDER BY a").await
+            == vec!["1,3", "2,6", "3,9", "4,12"]
+    );
 }
 
 // ── Constraints ──────────────────────────────────────────────────────────────

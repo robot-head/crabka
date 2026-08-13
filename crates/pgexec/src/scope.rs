@@ -281,14 +281,77 @@ pub(crate) const LIVE_QUALIFIER: &str = "$live";
 ///   these are read through `a.tableoid` as often as bare, so neither can be
 ///   narrowed to a qualifier.
 ///
+/// * `columns` is every column name the statement spells ANYWHERE, qualified or
+///   bare, and `wildcard` is whether it spells a `*` at all. Together they say
+///   which of a relation's `VIRTUAL` generated columns the statement can
+///   observe, which is what [`GeneratedReads`] answers and what decides whether
+///   a write materializes one. Deliberately not narrowed by qualifier: `b` in
+///   `SELECT b FROM x, y` may belong to either relation, and a set that guessed
+///   wrong would leave a column NULL where something reads it.
+///
 /// Deliberately not narrowed to "names that fail to resolve": which names those
 /// are depends on the scope, and the scope is what the read path is in the
 /// middle of building.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StatementRefs {
     names: std::collections::HashSet<String>,
+    columns: std::collections::HashSet<String>,
+    wildcard: bool,
     tableoid: bool,
     ctid: bool,
+}
+
+/// Which `VIRTUAL` generated columns of one relation a statement can observe.
+///
+/// A virtual generated column occupies no storage: the row read back carries a
+/// NULL placeholder, and the value is produced by evaluating the catalog's
+/// expression over the rest of the row. `PostgreSQL` does that only where the
+/// statement references the column — it expands the expression into the target
+/// list at rewrite time — so a row whose expression overflows is still
+/// deletable by a `WHERE` that does not mention the column. Evaluating every
+/// virtual column of every row makes such a row unreadable *and* unremovable.
+///
+/// [`Self::every`] is the answer wherever the statement is not known, and it is
+/// the conservative one: materializing a column nothing reads costs time, while
+/// skipping one something reads answers NULL.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GeneratedReads<'a> {
+    refs: Option<&'a StatementRefs>,
+    qualifier: Option<&'a str>,
+}
+
+impl<'a> GeneratedReads<'a> {
+    /// Materialize every virtual generated column, whatever the statement says.
+    pub(crate) const fn every() -> Self {
+        Self {
+            refs: None,
+            qualifier: None,
+        }
+    }
+
+    /// What `refs` asks of the relation reached under `qualifier`.
+    pub(crate) const fn of(refs: &'a StatementRefs, qualifier: &'a str) -> Self {
+        Self {
+            refs: Some(refs),
+            qualifier: Some(qualifier),
+        }
+    }
+
+    /// Can the statement observe `column` of this relation?
+    ///
+    /// A `*` anywhere, or a bare reference to the relation's own qualifier — a
+    /// whole-row variable, which [`Scope::whole_row_value`] builds out of every
+    /// column of the row — reaches all of them.
+    pub(crate) fn reads(self, column: &str) -> bool {
+        let Some(refs) = self.refs else {
+            return true;
+        };
+        refs.wildcard
+            || refs.columns.contains(column)
+            || self
+                .qualifier
+                .is_some_and(|qualifier| refs.names.contains(qualifier))
+    }
 }
 
 /// Must a join carry a liveness marker for `qualifier`?
@@ -486,6 +549,8 @@ impl StatementRefs {
     pub(crate) fn every_system_column() -> Self {
         Self {
             names: std::collections::HashSet::new(),
+            columns: std::collections::HashSet::new(),
+            wildcard: true,
             tableoid: true,
             ctid: true,
         }
@@ -727,7 +792,9 @@ impl StatementRefs {
                 SelectItem::Expr { expr, alias: _ } => self.add_expr(expr),
                 // `*` and `old.*` expand to the columns themselves, and
                 // `PostgreSQL` keeps a system column out of every expansion.
-                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => {}
+                // Every ordinary column IS in the expansion, so a generated one
+                // among them is read.
+                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => self.wildcard = true,
             }
         }
     }
@@ -756,8 +823,9 @@ impl StatementRefs {
             match item {
                 SelectItem::Expr { expr, alias: _ } => self.add_expr(expr),
                 // `*` and `a.*` expand to the columns themselves, never to a
-                // whole row.
-                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => {}
+                // whole row — but the expansion does reach every generated
+                // column of every relation the statement reads.
+                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => self.wildcard = true,
             }
         }
         for item in from {
@@ -934,6 +1002,11 @@ impl StatementRefs {
             if table.is_none() {
                 self.names.insert(name.clone());
             }
+            // Qualified or bare: which relation supplies the name is not
+            // decided here, and a generated column left NULL because the set
+            // guessed the wrong relation is a wrong answer rather than a wide
+            // row.
+            self.columns.insert(name.clone());
             // Qualified or not: `a.tableoid` is the spelling an inheritance
             // query uses most, and it reaches the same hidden column.
             self.tableoid |= name == TABLEOID_COLUMN;

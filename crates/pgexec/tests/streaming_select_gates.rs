@@ -412,3 +412,32 @@ async fn a_streamed_select_of_a_view_reads_the_body() {
     assert!(streamed(&mut session, "SELECT a FROM one").await == rows(&["1"]));
     assert!(!watcher.streamed());
 }
+
+/// **The fifth bypass.** A `VIRTUAL` generated column is a NULL placeholder in
+/// storage; its value is produced by evaluating the catalog's expression at
+/// read time, and only the materializing path does that. The cursor handed the
+/// placeholder to the wire, so `SELECT * FROM t` reported a blank where the
+/// same query with an `ORDER BY` reported the value — a wrong answer rather
+/// than a refusal, which is why it outlived the other four.
+#[tokio::test]
+async fn a_streamed_select_materializes_a_virtual_generated_column() {
+    let (engine, watcher) = watched_engine();
+    let mut session = engine.connect();
+    run(
+        &mut session,
+        "CREATE TABLE gen (a int4, b int4 GENERATED ALWAYS AS (a * 2) VIRTUAL);
+         CREATE TABLE plain (a int4);
+         INSERT INTO gen (a) VALUES (1), (2);
+         INSERT INTO plain VALUES (1), (2)",
+    )
+    .await;
+    let _setup = watcher.take();
+
+    assert!(streamed(&mut session, "SELECT * FROM gen").await == rows(&["1,2", "2,4"]));
+    assert!(!watcher.streamed());
+
+    // The same shape over a relation with no generated column still streams,
+    // so the decline is about the column and not about the shape.
+    assert!(streamed(&mut session, "SELECT * FROM plain").await == rows(&["1", "2"]));
+    assert!(watcher.streamed());
+}
