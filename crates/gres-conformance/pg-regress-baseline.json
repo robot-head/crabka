@@ -28,7 +28,7 @@
       "changed_lines": 1913,
       "expected": "alter_table.out",
       "hunks": 156,
-      "sha256": "673a14eec8bc9e70ecba4200a79a5c32c24627b6c08df6a24f9bd0a0f0fe27dc"
+      "sha256": "322a2e3499e3e466d82da9032440ae24834cc7376f1d09b056d2495870cba2b8"
     },
     "amutils": {
       "changed_lines": 180,
@@ -223,10 +223,10 @@
       "sha256": "76901fb80c57e369c41b23c80ea6dcf899c60ae3b6cd9462d223bb900dbb8e29"
     },
     "create_table_like": {
-      "changed_lines": 381,
+      "changed_lines": 377,
       "expected": "create_table_like.out",
-      "hunks": 17,
-      "sha256": "9894357b6cc646e324a59329241b79368a133f361fa28cd16d27eba2bde6e662"
+      "hunks": 16,
+      "sha256": "eb0a5222905fe362a8c017526f439516d424dde93c7edc1825a6a75901c9a7c7"
     },
     "create_type": {
       "changed_lines": 254,
@@ -262,7 +262,7 @@
       "changed_lines": 898,
       "expected": "domain.out",
       "hunks": 34,
-      "sha256": "d1b288408ae65f4b25b42ff0b10de584d6cde23d6882460622d436595f006793"
+      "sha256": "26ebb4fd60b2726d89644cca024a7bdb123de640d6ef624e48aedd45a03450ac"
     },
     "drop_if_exists": {
       "changed_lines": 173,
@@ -349,16 +349,16 @@
       "sha256": "6f4fba431ea4fa3a8a42c1829a9140f53405431764f19dbb81867e40151f4b49"
     },
     "generated_stored": {
-      "changed_lines": 1228,
+      "changed_lines": 564,
       "expected": "generated_stored.out",
-      "hunks": 10,
-      "sha256": "f318053249dd9d2f3583efcbc5757591c1be00a06c5fcfe1ba23fa9f6395893b"
+      "hunks": 47,
+      "sha256": "8350f38cfa1221da475dea53957d7f58c2feec49b80f26741f18030dedcc1203"
     },
     "generated_virtual": {
-      "changed_lines": 1512,
+      "changed_lines": 659,
       "expected": "generated_virtual.out",
-      "hunks": 10,
-      "sha256": "8c049c1f25e0d3f409b40f4c5a796933396f4756251287b546d9e8cac2676cd3"
+      "hunks": 56,
+      "sha256": "bf860d2fbf1571e817e41752e4333a8a528bc81b8b88341d16317df49afb421f"
     },
     "geometry": {
       "changed_lines": 1350,
@@ -562,7 +562,7 @@
       "changed_lines": 984,
       "expected": "merge.out",
       "hunks": 85,
-      "sha256": "9739bab4898a1990bd2ffe34eaf05df74859851bdfc5ff1f8ce4fdbbf4542146"
+      "sha256": "f455a9a59a80d5180729e9cfc49376eb9de09a4cca19a035aefeb704dda87482"
     },
     "misc": {
       "changed_lines": 234,
@@ -676,7 +676,7 @@
       "changed_lines": 1857,
       "expected": "plpgsql.out",
       "hunks": 163,
-      "sha256": "7c7f955fb1cd3f2a4bda676c5eb4238235e6f3794b75794ea1cb6de0681830b5"
+      "sha256": "87dc99d699983485a3b7e358acb55104fdeffbd32cb923f4504111170952da66"
     },
     "polygon": {
       "changed_lines": 157,
@@ -862,7 +862,7 @@
       "changed_lines": 313,
       "expected": "sqljson_jsontable.out",
       "hunks": 19,
-      "sha256": "9ec55157ad09f1bfa5da5ac1e3df3573e624817d0d580147c05447dcb229f768"
+      "sha256": "d277d58233e6c73cceb6cf50257b0d58b65795280b60edc2fdaa8db50fbcd959"
     },
     "sqljson_queryfuncs": {
       "changed_lines": 514,
@@ -874,7 +874,7 @@
       "changed_lines": 1397,
       "expected": "stats.out",
       "hunks": 37,
-      "sha256": "5305feba4bb4a50290c49398ac97df8dba0ee53297883870f9a1d695841d9988"
+      "sha256": "4ef159f35ff178f699fedc44f9b1e2bed376092043ba1ca28af951aa6e0632d5"
     },
     "stats_ext": {
       "changed_lines": 1419,
@@ -1045,10 +1045,10 @@
       "sha256": "d1e60c9089bc9c259627688ba6bb5a07b9f63b40f9bde9e9d28bfeba52ebb79e"
     },
     "updatable_views": {
-      "changed_lines": 1607,
+      "changed_lines": 1452,
       "expected": "updatable_views.out",
-      "hunks": 118,
-      "sha256": "84791921e8f2ca717c23561d22e0c88a7fc7cbf9cbed91ce0898a86d99dedb60"
+      "hunks": 113,
+      "sha256": "9c92fae7b98606a1fe6fed8bd382d78890602f673977bf1ee9f5fb8fb375f0ba"
     },
     "update": {
       "changed_lines": 538,
@@ -1108,7 +1108,7 @@
       "changed_lines": 131,
       "expected": "xmlmap_1.out",
       "hunks": 2,
-      "sha256": "c0f90338e27ec100f860eb0891f6f32fdb6155e1f7d302e4890c2b5adfca1068"
+      "sha256": "5caafc1c46fb8089245f327ea7ea3614172f1f7e46d7e0dc55db31fbed0ae323"
     }
   },
   "passed": 46,
