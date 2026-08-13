@@ -240,23 +240,46 @@ pub(crate) fn resolve_in_select(ctx: &SubCtx, s: &SelectStmt) -> Result<SelectSt
             *filter = resolve_expr(ctx, filter)?;
         }
         if let crabka_pgparser::ast::WindowRef::Spec(spec) = &mut call.over {
-            for expr in &mut spec.partition_by {
-                *expr = resolve_expr(ctx, expr)?;
-            }
-            for item in &mut spec.order_by {
-                item.expr = resolve_expr(ctx, &item.expr)?;
-            }
+            resolve_window_spec(ctx, spec)?;
         }
     }
     for window in &mut out.windows {
-        for expr in &mut window.spec.partition_by {
-            *expr = resolve_expr(ctx, expr)?;
-        }
-        for item in &mut window.spec.order_by {
-            item.expr = resolve_expr(ctx, &item.expr)?;
-        }
+        resolve_window_spec(ctx, &mut window.spec)?;
     }
     Ok(out)
+}
+
+/// Rewrite subqueries everywhere one window specification can hold them.
+///
+/// The frame offsets are here with the partition and ordering keys because a
+/// frame bound is an ordinary expression evaluated once for the whole window —
+/// `ROWS (SELECT …) PRECEDING` is legal `PostgreSQL`. Leaving them out left a
+/// raw subquery node for the scalar evaluator to refuse.
+fn resolve_window_spec(
+    ctx: &SubCtx,
+    spec: &mut crabka_pgparser::ast::WindowSpec,
+) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::FrameBound;
+
+    for expr in &mut spec.partition_by {
+        *expr = resolve_expr(ctx, expr)?;
+    }
+    for item in &mut spec.order_by {
+        item.expr = resolve_expr(ctx, &item.expr)?;
+    }
+    if let Some(frame) = &mut spec.frame {
+        for bound in [&mut frame.start, &mut frame.end] {
+            match bound {
+                FrameBound::Preceding(offset) | FrameBound::Following(offset) => {
+                    *offset = resolve_expr(ctx, offset)?;
+                }
+                FrameBound::UnboundedPreceding
+                | FrameBound::CurrentRow
+                | FrameBound::UnboundedFollowing => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Rewrite subqueries in a query expression's `LIMIT`/`OFFSET` expressions,

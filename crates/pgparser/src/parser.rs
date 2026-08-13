@@ -3996,6 +3996,9 @@ impl Parser {
             });
         }
         if self.eat_ident_eq("alter") {
+            if self.eat_ident_eq("constraint") {
+                return self.alter_constraint_action();
+            }
             return self.alter_column_action();
         }
         if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
@@ -4051,6 +4054,47 @@ impl Parser {
             ));
         }
         Ok(AlterTableAction::Unsupported(label))
+    }
+
+    /// `ALTER CONSTRAINT <name> { <attributes> | INHERIT }` — `ALTER
+    /// CONSTRAINT` is already consumed.
+    ///
+    /// `PostgreSQL` writes only the properties the statement names, so an absent
+    /// clause leaves the stored constraint alone rather than resetting it to a
+    /// default. `NOT VALID` parses and is then refused outright: a constraint
+    /// that has been validated cannot be un-validated.
+    fn alter_constraint_action(&mut self) -> Result<crate::ast::AlterTableAction, ParseError> {
+        let name = self.expect_col_id()?;
+        // The bare `INHERIT` is its own production in PostgreSQL's grammar, not
+        // an attribute, so it combines with nothing.
+        if self.eat_ident_eq("inherit") {
+            return Ok(crate::ast::AlterTableAction::AlterConstraint {
+                name,
+                spec: crate::ast::AlterConstraintSpec {
+                    inherit: Some(true),
+                    ..crate::ast::AlterConstraintSpec::default()
+                },
+            });
+        }
+        let pos = self.peek_pos();
+        let written = self.written_constraint_attributes(true)?;
+        if written.values.not_valid {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "constraints cannot be altered to be NOT VALID",
+                pos,
+            ));
+        }
+        Ok(crate::ast::AlterTableAction::AlterConstraint {
+            name,
+            spec: crate::ast::AlterConstraintSpec {
+                deferrability: written
+                    .saw_deferrability
+                    .then_some((written.values.deferrable, written.values.initially_deferred)),
+                enforced: written.enforced,
+                inherit: written.saw_no_inherit.then_some(false),
+            },
+        })
     }
 
     /// `ALTER [COLUMN] <name> <action>` — the leading `ALTER` is already
@@ -7514,6 +7558,10 @@ impl Parser {
                 matches!(self.peek2(), Token::Ident(k) if k.eq_ignore_ascii_case("key"))
             }
             Token::Ident(s) if s.eq_ignore_ascii_case("check") => *self.peek2() == Token::LParen,
+            // The unnamed table-level `NOT NULL <column>`. `NOT` is reserved, so
+            // no column definition can begin with it and the two spellings never
+            // compete here.
+            Token::Keyword(Keyword::Not) => *self.peek2() == Token::Keyword(Keyword::Null),
             Token::Keyword(Keyword::Foreign) => {
                 matches!(self.peek2(), Token::Ident(k) if k.eq_ignore_ascii_case("key"))
             }
@@ -7541,7 +7589,7 @@ impl Parser {
             None
         };
         let pos = self.peek_pos();
-        let kind = if self.eat_ident_eq("primary") {
+        let mut kind = if self.eat_ident_eq("primary") {
             self.expect_ident_eq("key")?;
             let (columns, without_overlaps) = self.parse_key_column_list()?;
             TableConstraintKind::PrimaryKey {
@@ -7558,6 +7606,14 @@ impl Parser {
             }
         } else if self.eat_ident_eq("check") {
             TableConstraintKind::Check(self.check_predicate()?)
+        } else if self.eat_keyword(Keyword::Not) {
+            self.expect(&Token::Keyword(Keyword::Null))?;
+            TableConstraintKind::NotNull {
+                column: self.expect_col_id()?,
+                // Filled in from the attribute tail below, which is where
+                // PostgreSQL's grammar puts `NO INHERIT` for this kind.
+                no_inherit: false,
+            }
         } else if self.eat_keyword(Keyword::Foreign) {
             self.expect_ident_eq("key")?;
             let (columns, period) = self.parse_period_column_list()?;
@@ -7600,11 +7656,14 @@ impl Parser {
                 pos,
             ));
         };
-        let attributes = self.eat_constraint_attributes(true)?;
+        let written = self.written_constraint_attributes(true)?;
+        if let TableConstraintKind::NotNull { no_inherit, .. } = &mut kind {
+            *no_inherit = written.saw_no_inherit;
+        }
         Ok(TableConstraint {
             name,
             kind,
-            attributes,
+            attributes: written.values,
         })
     }
 
@@ -7786,26 +7845,40 @@ impl Parser {
         ))
     }
 
-    /// `[NOT] DEFERRABLE`, `INITIALLY {DEFERRED|IMMEDIATE}`, `NOT VALID`,
-    /// `NO INHERIT`, `ENFORCED`/`NOT ENFORCED`, in any order.
-    ///
-    /// The parser accepts and discards `NO INHERIT` and the `ENFORCED`
-    /// spellings. The rest reach the AST. Each of the two mutually exclusive
-    /// pairs may be written at most once, and `INITIALLY DEFERRED` alone implies
-    /// `DEFERRABLE`. This parser reproduces all three of `PostgreSQL`'s `42601`
-    /// refusals here word for word, so the returned struct can never claim a
-    /// combination `PostgreSQL` rejects.
-    ///
-    /// `NOT VALID` belongs to `PostgreSQL`'s *table* constraint grammar only, so
-    /// `allow_not_valid` is false for a column constraint. `NOT VALID` there is
-    /// a syntax error, not a no-op the parser accepts without a message.
+    /// [`Self::written_constraint_attributes`], keeping only the values.
     fn eat_constraint_attributes(
         &mut self,
         allow_not_valid: bool,
     ) -> Result<crate::ast::ConstraintAttributes, ParseError> {
+        Ok(self.written_constraint_attributes(allow_not_valid)?.values)
+    }
+
+    /// `[NOT] DEFERRABLE`, `INITIALLY {DEFERRED|IMMEDIATE}`, `NOT VALID`,
+    /// `NO INHERIT`, `ENFORCED`/`NOT ENFORCED`, in any order —
+    /// `PostgreSQL`'s `ConstraintAttributeSpec`.
+    ///
+    /// Each of the three mutually exclusive pairs may be written at most once,
+    /// and `INITIALLY DEFERRED` alone implies `DEFERRABLE`. This parser
+    /// reproduces `PostgreSQL`'s `42601` refusals here word for word, so the
+    /// returned struct can never claim a combination `PostgreSQL` rejects.
+    ///
+    /// The caller gets both the values and a record of which clauses were
+    /// *written*, because `ALTER TABLE … ALTER CONSTRAINT` changes only the
+    /// properties its statement names and so cannot read an absent clause as a
+    /// default.
+    ///
+    /// `NOT VALID` belongs to `PostgreSQL`'s *table* constraint grammar only, so
+    /// `allow_not_valid` is false for a column constraint. `NOT VALID` there is
+    /// a syntax error, not a no-op the parser accepts without a message.
+    fn written_constraint_attributes(
+        &mut self,
+        allow_not_valid: bool,
+    ) -> Result<WrittenConstraintAttributes, ParseError> {
         let mut attributes = crate::ast::ConstraintAttributes::default();
         let mut saw_deferrability = false;
         let mut saw_initially = false;
+        let mut enforced: Option<bool> = None;
+        let mut saw_no_inherit = false;
         loop {
             let pos = self.peek_pos();
             if self.eat_ident_eq("deferrable") {
@@ -7820,6 +7893,10 @@ impl Parser {
                 continue;
             }
             if self.eat_ident_eq("enforced") {
+                if enforced.is_some() {
+                    return Err(conflicting_constraint_properties(pos));
+                }
+                enforced = Some(true);
                 continue;
             }
             if self.eat_ident_eq("initially") {
@@ -7870,6 +7947,8 @@ impl Parser {
                 }
                 let deferrable =
                     matches!(self.peek2(), Token::Ident(s) if s.eq_ignore_ascii_case("deferrable"));
+                let not_enforced =
+                    matches!(self.peek2(), Token::Ident(s) if s.eq_ignore_ascii_case("enforced"));
                 self.bump();
                 self.bump();
                 attributes.not_valid |= valid;
@@ -7886,6 +7965,12 @@ impl Parser {
                         return Err(initially_deferred_must_be_deferrable(pos));
                     }
                 }
+                if not_enforced {
+                    if enforced.is_some() {
+                        return Err(conflicting_constraint_properties(pos));
+                    }
+                    enforced = Some(false);
+                }
                 continue;
             }
             if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("no"))
@@ -7893,11 +7978,17 @@ impl Parser {
             {
                 self.bump();
                 self.bump();
+                saw_no_inherit = true;
                 continue;
             }
             break;
         }
-        Ok(attributes)
+        Ok(WrittenConstraintAttributes {
+            values: attributes,
+            saw_deferrability: saw_deferrability || saw_initially,
+            enforced,
+            saw_no_inherit,
+        })
     }
 
     /// `( key [= value] [, …] )`: a storage-parameter list, accepted and
@@ -15506,9 +15597,37 @@ fn initially_deferred_must_be_deferrable(position: usize) -> ParseError {
     )
 }
 
+/// `PostgreSQL`'s refusal when the two halves of one mutually exclusive
+/// attribute pair are both written — `ENFORCED NOT ENFORCED`, `DEFERRABLE NOT
+/// DEFERRABLE`, `INITIALLY IMMEDIATE INITIALLY DEFERRED`.
+fn conflicting_constraint_properties(position: usize) -> ParseError {
+    ParseError::new_sqlstate("42601", "conflicting constraint properties", position)
+}
+
+/// A parsed `ConstraintAttributeSpec`: the values, plus which of the mutually
+/// exclusive groups the statement actually wrote.
+///
+/// The distinction only matters to `ALTER TABLE … ALTER CONSTRAINT`, which
+/// leaves untouched every property its statement is silent about. Everywhere
+/// else an absent clause is the default and [`Self::values`] alone is enough.
+struct WrittenConstraintAttributes {
+    values: crate::ast::ConstraintAttributes,
+    /// Any of `DEFERRABLE`, `NOT DEFERRABLE`, `INITIALLY DEFERRED`,
+    /// `INITIALLY IMMEDIATE`.
+    saw_deferrability: bool,
+    /// `Some(false)` for `NOT ENFORCED`, `Some(true)` for `ENFORCED`, `None`
+    /// when neither was written.
+    enforced: Option<bool>,
+    /// `NO INHERIT`.
+    saw_no_inherit: bool,
+}
+
 fn starts_constraint_kind(token: &Token) -> bool {
     match token {
-        Token::Keyword(Keyword::Unique | Keyword::Foreign) => true,
+        // `NOT` opens the table-level `NOT NULL <column>`, which is also the
+        // column-level `NOT NULL`; which one it is depends on whether a column
+        // name follows, and only the caller knows that.
+        Token::Keyword(Keyword::Unique | Keyword::Foreign | Keyword::Not) => true,
         Token::Ident(word) => {
             word.eq_ignore_ascii_case("primary")
                 || word.eq_ignore_ascii_case("check")

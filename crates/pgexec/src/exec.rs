@@ -297,6 +297,20 @@ impl<'a> WriteContext<'a> {
         }
     }
 
+    /// The read context a *policy qual* of this write executes its subqueries
+    /// under.
+    ///
+    /// [`Self::read_ctx`] with no CTEs, deliberately. A policy qual is catalog
+    /// text that was compiled long before this statement was typed, so the
+    /// statement's `WITH` names are not in scope for it — a qual that resolved
+    /// one would read whatever the caller chose to bind that name to, which is
+    /// the caller steering their own policy.
+    fn policy_read_ctx(&self) -> crate::subquery::SubCtx<'_> {
+        static NO_CTES: std::sync::LazyLock<crate::cte::CteContext> =
+            std::sync::LazyLock::new(crate::cte::CteContext::empty);
+        self.read_ctx(&NO_CTES)
+    }
+
     /// The row-security decision context this write makes its decisions in.
     /// The check a row this statement writes into `table` must satisfy, for the
     /// policy command the statement runs under.
@@ -326,7 +340,7 @@ impl<'a> WriteContext<'a> {
             crate::privilege::Privilege::for_written_row(command),
         )?;
         let security = crate::rls::RowSecurityCheck::compile(
-            &self.rls(),
+            &self.policy_read_ctx(),
             governor,
             command,
             crate::rls::CheckSubject::NewRow,
@@ -355,14 +369,6 @@ impl<'a> WriteContext<'a> {
     /// [`crate::rls::Describer`] gives.
     fn describer(&self) -> crate::rls::Describer {
         crate::rls::Describer::seen_by(&self.eval_ctx.current_user, self.fctx.row_security)
-    }
-
-    fn rls(&self) -> crate::rls::RlsCtx<'_> {
-        crate::rls::RlsCtx::new(
-            self.catalog_kv,
-            self.fctx.effective_role(),
-            self.fctx.row_security,
-        )
     }
 
     /// The privilege decision context this write makes its decisions in.
@@ -665,7 +671,7 @@ pub(crate) fn execute_ddl(
             // A partition declares no columns of its own: it inherits the
             // parent's list, along with the parent's CHECK constraints, and may
             // only add qualifiers to what it inherits.
-            let (cols, checks, serial_sequences, pending_indexes, pending_foreign_keys) =
+            let (mut cols, checks, serial_sequences, pending_indexes, pending_foreign_keys) =
                 match partition_of {
                     Some(spec) => {
                         partition_definition(kv, name, spec, constraints, like, &ddl_ctx)?
@@ -689,6 +695,10 @@ pub(crate) fn execute_ddl(
                         &ddl_ctx,
                     )?,
                 };
+            // A table-level `NOT NULL c` may name a column the statement did not
+            // declare itself, so it is applied here, where `LIKE`, `INHERITS`
+            // and `PARTITION OF` have all contributed their columns already.
+            apply_table_not_null_constraints(&mut cols, constraints, name)?;
             // `fk::resolve_foreign_key` refuses a sharded relation itself, but
             // `Table` carries no partition flag, so this is the only place that
             // knows a partitioned relation is being defined.
@@ -4468,7 +4478,9 @@ fn resolve_write_subqueries(
     ctes: &crate::cte::CteContext,
     stmt: &Statement,
 ) -> Result<Statement, ExecError> {
-    use crabka_pgparser::ast::{AssignmentValue, InsertSource, MergeAction};
+    use crabka_pgparser::ast::{
+        AssignmentValue, InsertSource, MergeAction, OnConflictAction, Returning, SelectItem,
+    };
 
     let read = write_ctx.read_ctx(ctes);
     let resolve = |expr: &Expr| crate::subquery::resolve_expr(&read, expr);
@@ -4490,29 +4502,87 @@ fn resolve_write_subqueries(
             }
             Ok(())
         };
+    // `RETURNING` is evaluated per written row, but an uncorrelated subquery in
+    // it has the same value for every one of them — so it folds here with the
+    // rest of the statement rather than being refused. A `RETURNING *` carries
+    // no expression to fold.
+    let resolve_returning = |returning: &mut Option<Returning>| -> Result<(), ExecError> {
+        let Some(returning) = returning.as_mut() else {
+            return Ok(());
+        };
+        for item in &mut returning.items {
+            if let SelectItem::Expr { expr, .. } = item {
+                *expr = resolve(expr)?;
+            }
+        }
+        Ok(())
+    };
+    // `ON CONFLICT DO UPDATE`'s assignments and its `WHERE` are the update the
+    // statement runs when the insert collides. They are ordinary write-side
+    // expressions and fold like `UPDATE`'s own.
+    let resolve_on_conflict =
+        |on_conflict: &mut Option<crabka_pgparser::ast::OnConflict>| -> Result<(), ExecError> {
+            let Some(on_conflict) = on_conflict.as_mut() else {
+                return Ok(());
+            };
+            match &mut on_conflict.action {
+                OnConflictAction::DoUpdate {
+                    assignments,
+                    filter,
+                } => {
+                    for (_, expr) in assignments.iter_mut() {
+                        *expr = resolve(expr)?;
+                    }
+                    *filter = resolve_opt(filter)?;
+                }
+                OnConflictAction::DoNothing => {}
+            }
+            Ok(())
+        };
 
     let mut stmt = stmt.clone();
     match &mut stmt {
         Statement::Insert {
-            source: InsertSource::Values(rows),
+            source,
+            on_conflict,
+            returning,
             ..
         } => {
-            for row in rows {
-                for value in row {
-                    *value = resolve(value)?;
+            // An `INSERT … SELECT` source is a query, and the read path folds
+            // its own subqueries; only the `VALUES` form holds expressions this
+            // pass owns.
+            if let InsertSource::Values(rows) = source {
+                for row in rows {
+                    for value in row {
+                        *value = resolve(value)?;
+                    }
                 }
             }
+            resolve_on_conflict(on_conflict)?;
+            resolve_returning(returning)?;
         }
         Statement::Update {
             assignments,
             filter,
+            returning,
             ..
         } => {
             resolve_assignments(assignments)?;
             *filter = resolve_opt(filter)?;
+            resolve_returning(returning)?;
         }
-        Statement::Delete { filter, .. } => *filter = resolve_opt(filter)?,
-        Statement::Merge { on, clauses, .. } => {
+        Statement::Delete {
+            filter, returning, ..
+        } => {
+            *filter = resolve_opt(filter)?;
+            resolve_returning(returning)?;
+        }
+        Statement::Merge {
+            on,
+            clauses,
+            returning,
+            ..
+        } => {
             *on = resolve(on)?;
             for clause in clauses {
                 clause.condition = resolve_opt(&clause.condition)?;
@@ -4529,6 +4599,7 @@ fn resolve_write_subqueries(
                     MergeAction::Insert { .. } | MergeAction::Delete | MergeAction::DoNothing => {}
                 }
             }
+            resolve_returning(returning)?;
         }
         _ => {}
     }
@@ -7958,7 +8029,7 @@ impl MergeRowSecurity {
         let governor = write_ctx.governor(table);
         let compile = |command| {
             crate::rls::RowSecurityCheck::compile(
-                &write_ctx.rls(),
+                &write_ctx.policy_read_ctx(),
                 governor,
                 command,
                 crate::rls::CheckSubject::TargetRow,
@@ -10691,7 +10762,7 @@ async fn apply_insert_conflict_update(
     // the caller has just been told exists would itself disclose the row's
     // existence, and the caller would see neither an insert nor an update.
     crate::rls::RowSecurityCheck::compile(
-        &write_ctx.rls(),
+        &write_ctx.policy_read_ctx(),
         table,
         crabka_pgcatalog::policy::PolicyCommand::Update,
         crate::rls::CheckSubject::TargetRow,
@@ -11239,8 +11310,11 @@ fn write_candidate_rows(
         action,
         reads_target_columns,
     )?;
-    let using =
-        crate::rls::RowSecurityUsing::compile(&write_ctx.rls(), governor, action.policy_command())?;
+    let using = crate::rls::RowSecurityUsing::compile(
+        &write_ctx.policy_read_ctx(),
+        governor,
+        action.policy_command(),
+    )?;
     let mut rows: Vec<(u64, u64, Vec<Datum>)> = if let Some((index, value)) =
         choose_write_index_probe(write_ctx.catalog_kv, table, filter)?
     {
@@ -24867,6 +24941,40 @@ fn check_partition_bound_expr(expr: &Expr) -> Result<(), ExecError> {
     Ok(())
 }
 
+/// Apply every table-level `[CONSTRAINT n] NOT NULL <column>` a `CREATE TABLE`
+/// wrote to the finished column list.
+///
+/// `PostgreSQL` 17 gave the not-null a table-constraint spelling so that it
+/// could carry a name and a `NO INHERIT` of its own. Crabka records neither: the
+/// constraint is the column's flag, named after the column when `pg_constraint`
+/// is read and copied to every child. So the name is dropped and `NO INHERIT` is
+/// refused.
+fn apply_table_not_null_constraints(
+    columns: &mut [Column],
+    constraints: &[crabka_pgparser::ast::TableConstraint],
+    table: &crabka_pgcatalog::RelationName,
+) -> Result<(), ExecError> {
+    for constraint in constraints {
+        let crabka_pgparser::ast::TableConstraintKind::NotNull { column, no_inherit } =
+            &constraint.kind
+        else {
+            continue;
+        };
+        if *no_inherit {
+            return Err(no_inherit_not_null_unsupported());
+        }
+        let target = columns
+            .iter_mut()
+            .find(|candidate| candidate.name == *column)
+            .ok_or_else(|| ExecError::UndefinedTableColumn {
+                column: column.clone(),
+                table: table.to_string(),
+            })?;
+        target.not_null = true;
+    }
+    Ok(())
+}
+
 /// Build the catalog column list and `CHECK` list for a `CREATE TABLE`,
 /// expanding any `LIKE` clauses first (they contribute columns ahead of the
 /// explicitly written ones, in clause order, exactly like `PostgreSQL`).
@@ -25017,6 +25125,11 @@ fn create_table_definition(
     }
     for constraint in constraints {
         match &constraint.kind {
+            // A table-level `NOT NULL c` may name a column this definition does
+            // not declare — an inherited one, or a partition parent's. It is
+            // applied by `apply_table_not_null_constraints` once the caller has
+            // merged every source of columns together.
+            crabka_pgparser::ast::TableConstraintKind::NotNull { .. } => {}
             crabka_pgparser::ast::TableConstraintKind::Check(predicate) => {
                 let taken = non_check_constraint_names(&indexes, &foreign_keys);
                 push_table_check(
@@ -26281,6 +26394,14 @@ fn validate_alter_constraint_columns(
                     return Err(ExecError::UndefinedIndexColumn(missing.clone()));
                 }
             }
+            Constraint::NotNull { column, .. } => {
+                if !columns.contains(column) {
+                    return Err(ExecError::UndefinedTableColumn {
+                        column: column.clone(),
+                        table: table.name.to_string(),
+                    });
+                }
+            }
             Constraint::ForeignKey {
                 columns: referencing,
                 references,
@@ -26485,7 +26606,19 @@ fn action_recurses_to_descendants(action: &crabka_pgparser::ast::AlterTableActio
             | Action::DropDefault(_)
             | Action::SetExpression { .. }
             | Action::DropExpression { .. }
-    )
+    ) || added_not_null_column(action).is_some()
+}
+
+/// The column an `ADD [CONSTRAINT n] NOT NULL c` names, for the paths that
+/// treat the subcommand as the column write it is.
+fn added_not_null_column(action: &crabka_pgparser::ast::AlterTableAction) -> Option<&str> {
+    let crabka_pgparser::ast::AlterTableAction::AddConstraint(constraint) = action else {
+        return None;
+    };
+    match &constraint.kind {
+        crabka_pgparser::ast::TableConstraintKind::NotNull { column, .. } => Some(column.as_str()),
+        _ => None,
+    }
 }
 
 /// Whether the named relation abandoned the subcommand on its own existence
@@ -26617,6 +26750,12 @@ fn reject_only_that_would_skip_descendants(
                     Some("Do not specify the ONLY keyword."),
                 );
             }
+            other if partitioned && added_not_null_column(other).is_some() => {
+                return refuse(
+                    "constraint must be added to child tables too".into(),
+                    Some("Do not specify the ONLY keyword."),
+                );
+            }
             _ => {}
         }
     }
@@ -26669,7 +26808,7 @@ fn alter_descendant_action_ops(
         | Action::DropDefault(column)
         | Action::SetExpression { column, .. }
         | Action::DropExpression { column, .. } => Some(column.as_str()),
-        _ => None,
+        other => added_not_null_column(other),
     };
     match action {
         Action::AddColumn { column, .. } => {
@@ -26761,6 +26900,10 @@ fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableAction) -> u
         // work after the column-attribute pass. Crabka executes it directly,
         // so order the effective work rather than the examination pass.
         Action::SetNotNull(_) => 3,
+        // `ADD [CONSTRAINT n] NOT NULL c` writes the same flag as
+        // `ALTER COLUMN c SET NOT NULL`, so it shares that pass: a primary key
+        // added in the same statement must see the column already not-null.
+        _ if added_not_null_column(action).is_some() => 3,
         Action::AddConstraint(constraint)
             if matches!(
                 constraint.kind,
@@ -26778,6 +26921,7 @@ fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableAction) -> u
         Action::RenameTable { .. }
         | Action::RenameColumn { .. }
         | Action::RenameConstraint { .. }
+        | Action::AlterConstraint { .. }
         | Action::ValidateConstraint(_)
         | Action::SetStorageParameters(_)
         | Action::ResetStorageParameters(_)
@@ -26812,6 +26956,7 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
         Action::SetExpression { .. } => "ALTER COLUMN ... SET EXPRESSION",
         Action::DropExpression { .. } => "ALTER COLUMN ... DROP EXPRESSION",
         Action::AddConstraint(_) => "ADD CONSTRAINT",
+        Action::AlterConstraint { .. } => "ALTER CONSTRAINT",
         Action::DropConstraint { .. } => "DROP CONSTRAINT",
         Action::ValidateConstraint(_) => "VALIDATE CONSTRAINT",
         Action::RenameColumn { .. } => "RENAME COLUMN",
@@ -27400,20 +27545,7 @@ fn alter_table_action_ops(
             }
             drop_table_column(kv, state, column, *cascade)
         }
-        Action::SetNotNull(column) => {
-            let index = state.column_index(column)?;
-            let live = state.live_rows(kv, &ddl_ctx)?;
-            for (_rowid, _xmin, row) in &live {
-                if row.get(index).is_none_or(Datum::is_null) {
-                    return Err(ExecError::ColumnContainsNullValues {
-                        column: column.clone(),
-                        table: table_name.to_string(),
-                    });
-                }
-            }
-            state.table.columns[index].not_null = true;
-            Ok(())
-        }
+        Action::SetNotNull(column) => set_column_not_null(kv, state, column, &ddl_ctx),
         Action::DropNotNull(column) => {
             let index = state.column_index(column)?;
             state.table.columns[index].not_null = false;
@@ -27617,6 +27749,19 @@ fn alter_table_action_ops(
             Ok(())
         }
         Action::AddConstraint(constraint) => match &constraint.kind {
+            // `ADD [CONSTRAINT n] NOT NULL c` is PostgreSQL 17's table-level
+            // spelling of `ALTER COLUMN c SET NOT NULL`, and Crabka stores it as
+            // exactly that: one flag on the column, always valid and always
+            // inherited. The two attributes that would make it something else
+            // have nowhere to be recorded, so they are refused rather than
+            // dropped.
+            crabka_pgparser::ast::TableConstraintKind::NotNull { column, no_inherit } => {
+                reject_not_valid(constraint.attributes.not_valid, "NOT NULL")?;
+                if *no_inherit {
+                    return Err(no_inherit_not_null_unsupported());
+                }
+                set_column_not_null(kv, state, column, &ddl_ctx)
+            }
             crabka_pgparser::ast::TableConstraintKind::Check(predicate) => add_check_constraint(
                 state,
                 constraint.name.clone(),
@@ -27754,6 +27899,7 @@ fn alter_table_action_ops(
             state.table.columns[index].name = new_name.clone();
             Ok(())
         }
+        Action::AlterConstraint { name, spec } => alter_constraint(kv, state, name, *spec),
         Action::RenameConstraint { name, new_name } => {
             if let Some(check) = state.table.checks.iter_mut().find(|c| c.name == *name) {
                 check.name = new_name.clone();
@@ -28061,6 +28207,162 @@ fn reject_not_valid(not_valid: bool, kind: &str) -> Result<(), ExecError> {
             "{kind} constraints cannot be marked NOT VALID"
         )));
     }
+    Ok(())
+}
+
+/// What kind of constraint an `ALTER TABLE … ALTER CONSTRAINT` name resolves
+/// to. `PostgreSQL` decides every one of the subcommand's refusals from
+/// `pg_constraint.contype` alone, so this is the whole lookup result.
+enum AlteredConstraint {
+    ForeignKey(Box<crabka_pgcatalog::ForeignKey>),
+    NotNull,
+    /// A `CHECK`, or a `PRIMARY KEY`/`UNIQUE`/`EXCLUDE` and its backing index.
+    Other,
+}
+
+/// Resolve the constraint an `ALTER CONSTRAINT` names, in the order
+/// `PostgreSQL`'s single `pg_constraint` scan would find it. The not-null names
+/// come last because they are derived from the column rather than stored, so a
+/// real constraint of the same name always wins.
+fn find_altered_constraint(
+    kv: &dyn Kv,
+    state: &AlterTableState,
+    name: &str,
+) -> Result<Option<AlteredConstraint>, ExecError> {
+    if state.table.checks.iter().any(|check| check.name == name) {
+        return Ok(Some(AlteredConstraint::Other));
+    }
+    if let Some(foreign_key) = state
+        .current_foreign_keys(kv)?
+        .into_iter()
+        .find(|fk| fk.name == name)
+    {
+        return Ok(Some(AlteredConstraint::ForeignKey(Box::new(foreign_key))));
+    }
+    if crabka_pgcatalog::list_table_indexes(kv, &state.table.name)?
+        .iter()
+        .any(|index| index.name == name && index.constraint.is_some())
+    {
+        return Ok(Some(AlteredConstraint::Other));
+    }
+    if state.table.columns.iter().any(|column| {
+        column.not_null
+            && crate::catalog_rel::not_null_constraint_name(&state.table.name, &column.name) == name
+    }) {
+        return Ok(Some(AlteredConstraint::NotNull));
+    }
+    Ok(None)
+}
+
+/// `ALTER TABLE … ALTER CONSTRAINT <name> …`.
+///
+/// `PostgreSQL` admits a deferrability or enforceability change on a foreign key
+/// alone, and an inheritability change on a not-null alone; every other pairing
+/// is a 42809 that names the constraint. Those refusals are reproduced here word
+/// for word, because they are the whole observable behaviour of the subcommand
+/// for constraints Crabka does not let it touch.
+///
+/// Of the three properties Crabka can then be asked to write, only deferrability
+/// has somewhere to go: a foreign key records it, and the write path reads the
+/// record live. Enforceability has no counterpart at all — Crabka checks every
+/// constraint it stores — and a not-null's inheritability is fixed by the column
+/// flag being copied to every child. Both are refused rather than accepted and
+/// dropped.
+fn alter_constraint(
+    kv: &dyn Kv,
+    state: &mut AlterTableState,
+    name: &str,
+    spec: crabka_pgparser::ast::AlterConstraintSpec,
+) -> Result<(), ExecError> {
+    let table_name = state.table.name.to_string();
+    let found = find_altered_constraint(kv, state, name)?.ok_or_else(|| {
+        ExecError::UndefinedRelationConstraint {
+            name: name.to_string(),
+            table: table_name.clone(),
+        }
+    })?;
+    let foreign_key = match &found {
+        AlteredConstraint::ForeignKey(foreign_key) => Some(foreign_key.as_ref()),
+        AlteredConstraint::NotNull | AlteredConstraint::Other => None,
+    };
+    if spec.deferrability.is_some() && foreign_key.is_none() {
+        return Err(ExecError::WrongObjectType(format!(
+            "constraint \"{name}\" of relation \"{table_name}\" is not a foreign key constraint"
+        )));
+    }
+    if spec.enforced.is_some() && foreign_key.is_none() {
+        return Err(ExecError::WrongObjectType(format!(
+            "cannot alter enforceability of constraint \"{name}\" of relation \"{table_name}\""
+        )));
+    }
+    if spec.inherit.is_some() && !matches!(found, AlteredConstraint::NotNull) {
+        return Err(ExecError::WrongObjectType(format!(
+            "constraint \"{name}\" of relation \"{table_name}\" is not a not-null constraint"
+        )));
+    }
+    if spec.enforced.is_some() {
+        return Err(ExecError::Unsupported(
+            "ALTER TABLE … ALTER CONSTRAINT … [NOT] ENFORCED is not supported: Crabka checks \
+             every constraint it stores"
+                .to_string(),
+        ));
+    }
+    // `NO INHERIT` is the only inheritability a column flag cannot express;
+    // `INHERIT` asks for what Crabka already does, so it is a no-op rather than
+    // a refusal.
+    if spec.inherit == Some(false) {
+        return Err(no_inherit_not_null_unsupported());
+    }
+    if let Some((deferrable, initially_deferred)) = spec.deferrability
+        && let Some(foreign_key) = foreign_key
+    {
+        let mut updated = foreign_key.clone();
+        updated.deferrable = deferrable;
+        updated.initially_deferred = initially_deferred;
+        state
+            .ops
+            .extend(crabka_pgcatalog::put_foreign_key_ops(&updated));
+        state.created_foreign_keys.retain(|fk| fk.name != name);
+        state.created_foreign_keys.push(updated);
+    }
+    Ok(())
+}
+
+/// The refusal `NO INHERIT` on a not-null constraint earns.
+///
+/// Crabka stores a not-null as a flag on the column, and a flag is copied to
+/// every child a table gets. There is nowhere to record that one should not be.
+/// Accepting the clause and dropping it would leave a child claiming a
+/// constraint its parent said it must not have, so the statement is refused
+/// while the clause has no home.
+fn no_inherit_not_null_unsupported() -> ExecError {
+    ExecError::Unsupported(
+        "NOT NULL … NO INHERIT is not supported: Crabka stores a not-null as a column flag, \
+         which every child inherits"
+            .to_string(),
+    )
+}
+
+/// Set a column's not-null flag, refusing the change when a row already stored
+/// holds a null there. Shared by `ALTER COLUMN … SET NOT NULL` and by
+/// `ADD [CONSTRAINT n] NOT NULL <column>`, which mean the same thing.
+fn set_column_not_null(
+    kv: &dyn Kv,
+    state: &mut AlterTableState,
+    column: &str,
+    ddl_ctx: &crate::clock::EvalCtx,
+) -> Result<(), ExecError> {
+    let index = state.column_index(column)?;
+    let table_name = state.table.name.to_string();
+    for (_rowid, _xmin, row) in &state.live_rows(kv, ddl_ctx)? {
+        if row.get(index).is_none_or(Datum::is_null) {
+            return Err(ExecError::ColumnContainsNullValues {
+                column: column.to_string(),
+                table: table_name,
+            });
+        }
+    }
+    state.table.columns[index].not_null = true;
     Ok(())
 }
 

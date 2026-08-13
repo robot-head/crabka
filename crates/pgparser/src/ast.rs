@@ -2232,6 +2232,12 @@ pub enum AlterTableAction {
         using: Option<Expr>,
     },
     AddConstraint(TableConstraint),
+    /// `ALTER CONSTRAINT <name> <attributes>` — change the properties of a
+    /// constraint that already exists, without dropping it.
+    AlterConstraint {
+        name: String,
+        spec: AlterConstraintSpec,
+    },
     DropConstraint {
         name: String,
         if_exists: bool,
@@ -2787,8 +2793,9 @@ pub struct ForeignKeyRef {
 /// The trailing attributes any constraint may carry: `[NOT] DEFERRABLE`,
 /// `INITIALLY { DEFERRED | IMMEDIATE }`, and `NOT VALID`.
 ///
-/// `PostgreSQL` also accepts `ENFORCED` / `NOT ENFORCED` and `NO INHERIT` here;
-/// those are consumed and dropped.
+/// `PostgreSQL` also accepts `ENFORCED` / `NOT ENFORCED` and `NO INHERIT` here.
+/// `NO INHERIT` reaches [`TableConstraintKind::NotNull`], the one kind Crabka
+/// reads it on; the rest are consumed and dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConstraintAttributes {
     /// `NOT VALID` was written. In `ALTER TABLE … ADD CONSTRAINT` this skips
@@ -2803,6 +2810,23 @@ pub struct ConstraintAttributes {
     /// Never true without [`ConstraintAttributes::deferrable`], because `NOT
     /// DEFERRABLE INITIALLY DEFERRED` is a `42601` refusal.
     pub initially_deferred: bool,
+}
+
+/// Which properties an `ALTER TABLE … ALTER CONSTRAINT` writes, and their new
+/// values.
+///
+/// `PostgreSQL` alters only the properties the statement names, so each field is
+/// `None` when the matching clause was absent. A spec with every field `None` —
+/// `ALTER CONSTRAINT c` with no attribute at all — is legal grammar and a no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AlterConstraintSpec {
+    /// `(deferrable, initially_deferred)` when any of `DEFERRABLE`, `NOT
+    /// DEFERRABLE`, `INITIALLY DEFERRED` or `INITIALLY IMMEDIATE` was written.
+    pub deferrability: Option<(bool, bool)>,
+    /// `Some(false)` for `NOT ENFORCED`, `Some(true)` for `ENFORCED`.
+    pub enforced: Option<bool>,
+    /// `Some(false)` for `NO INHERIT`, `Some(true)` for the bare `INHERIT`.
+    pub inherit: Option<bool>,
 }
 
 /// `GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [( <sequence options> )]`.
@@ -2883,6 +2907,16 @@ pub enum TableConstraintKind {
         without_overlaps: bool,
     },
     Check(CheckPredicate),
+    /// `NOT NULL <column>` — `PostgreSQL` 17's table-constraint spelling of a
+    /// column's not-null, which is what gives the constraint a name of its own.
+    /// It carries exactly one column: `NOT NULL (a, b)` is not grammar.
+    NotNull {
+        column: String,
+        /// `NO INHERIT` was written in the constraint's attribute tail. It is
+        /// lifted out of [`ConstraintAttributes`] because a not-null is the only
+        /// kind Crabka reads it on.
+        no_inherit: bool,
+    },
     ForeignKey {
         columns: Vec<String>,
         /// `PERIOD` was written on the last referencing column — the temporal

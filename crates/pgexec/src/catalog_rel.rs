@@ -2548,7 +2548,7 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// The name is the *unqualified* table name, an underscore, the column and
 /// `_not_null`. A constraint name is never schema-qualified. `connamespace`
 /// holds the schema instead.
-fn not_null_constraint_name(table: &RelationName, column: &str) -> String {
+pub(crate) fn not_null_constraint_name(table: &RelationName, column: &str) -> String {
     format!("{}_{column}_not_null", table.name)
 }
 

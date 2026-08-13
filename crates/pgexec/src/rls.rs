@@ -282,6 +282,68 @@ impl RawScan {
     }
 }
 
+/// Fold the uncorrelated subqueries of one policy qual, under the recursion
+/// guard that catches a qual which reads the very relation it protects.
+///
+/// A policy qual is catalog text, so it names relations of its own and may read
+/// them with a subquery — `USING (lvl <= (SELECT lvl FROM acl WHERE pguser =
+/// current_user))` is the shape upstream's own suite uses throughout. The
+/// scalar evaluator executes no subqueries, so the fold has to happen while a
+/// read context is still in hand; every write-side caller of [`decide`] routes
+/// through here so none of them can forget.
+///
+/// The subquery reads under `read_ctx`, which carries the statement's snapshot
+/// and its effective role — so the relations the qual reads are themselves
+/// subject to their own policies and grants, rather than being read as the
+/// table owner because a policy happened to mention them.
+///
+/// # Errors
+///
+/// Returns 42P17 when the qual reads the relation its own policy protects, and
+/// whatever executing the subquery raises.
+fn resolve_decision(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    table: &Table,
+    decision: RowSecurity,
+) -> Result<RowSecurity, ExecError> {
+    let RowSecurity::Restricted { relation, qual } = decision else {
+        return Ok(decision);
+    };
+    if read_ctx.policy_stack.holds(table.id) {
+        return Err(ExecError::PolicyRecursion(relation));
+    }
+    let _entered = read_ctx.policy_stack.enter(table.id);
+    let qual = fold_policy_qual(read_ctx, &qual)?;
+    Ok(RowSecurity::Restricted { relation, qual })
+}
+
+/// [`crate::subquery::resolve_expr`] over a policy qual, leaving a qual that
+/// reads the row it judges for the row evaluator.
+///
+/// A qual like `WITH CHECK ((SELECT c <= limit FROM caps))` names an outer
+/// column inside its subquery, so there is no one value to fold to — it has to
+/// be executed per row, which the scalar evaluator cannot do. Folding is what
+/// makes the uncorrelated majority work; a correlated qual is handed on
+/// unchanged so it fails exactly where and how it did before folding existed,
+/// rather than failing *earlier* than it used to. The check compiles before the
+/// first row is read, so propagating the resolution error here would refuse
+/// statements that previously found no row to judge and succeeded.
+///
+/// Only the two name-resolution errors are absorbed. A recursive qual (42P17),
+/// a subquery the role may not read (42501) and every execution error still
+/// stop the statement, because each is a real answer about this qual rather
+/// than a statement that the fold was the wrong time to ask.
+fn fold_policy_qual(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    qual: &Expr,
+) -> Result<Expr, ExecError> {
+    match crate::subquery::resolve_expr(read_ctx, qual) {
+        Ok(folded) => Ok(folded),
+        Err(ExecError::MissingFromEntry(_) | ExecError::UndefinedColumn(_)) => Ok(qual.clone()),
+        Err(other) => Err(other),
+    }
+}
+
 /// The gate. Turn the raw rows of a stored relation into a readable relation,
 /// applying the governing relation's row-security policies.
 ///
@@ -896,13 +958,18 @@ impl RowSecurityUsing {
     ///
     /// # Errors
     ///
-    /// Returns catalog errors, or a refusal to compile an unsafe policy qual.
+    /// Returns 42P17 when a policy qual reads the relation its own policy
+    /// protects, catalog errors, or a refusal to compile an unsafe policy qual.
     pub(crate) fn compile(
-        ctx: &RlsCtx<'_>,
+        read_ctx: &crate::subquery::SubCtx<'_>,
         table: &Table,
         command: PolicyCommand,
     ) -> Result<Self, ExecError> {
-        Ok(Self(decide(ctx, table, command)?))
+        Ok(Self(resolve_decision(
+            read_ctx,
+            table,
+            decide(&read_ctx.rls(), table, command)?,
+        )?))
     }
 
     /// The candidate rows the statement may act on.
@@ -1070,20 +1137,55 @@ impl RowSecurityCheck {
     ///
     /// # Errors
     ///
-    /// Returns catalog errors, or a refusal to compile an unsafe policy qual.
+    /// Returns 42P17 when a policy qual reads the relation its own policy
+    /// protects, catalog errors, or a refusal to compile an unsafe policy qual.
     pub(crate) fn compile(
-        ctx: &RlsCtx<'_>,
+        read_ctx: &crate::subquery::SubCtx<'_>,
         table: &Table,
         command: PolicyCommand,
         subject: CheckSubject,
     ) -> Result<Self, ExecError> {
+        let mut plan = Self::plan(&read_ctx.rls(), table, command, subject)?;
+        let CheckPlan::Restricted(restricted) = &mut plan else {
+            return Ok(Self(plan));
+        };
+        // One guard for the whole fold rather than one per qual: they all
+        // belong to this relation, so a second entry would be the same relation
+        // re-entering itself either way. See [`resolve_decision`].
+        if read_ctx.policy_stack.holds(table.id) {
+            return Err(ExecError::PolicyRecursion(restricted.relation.clone()));
+        }
+        let _entered = read_ctx.policy_stack.enter(table.id);
+        for checked in
+            std::iter::once(&mut restricted.permissive).chain(&mut restricted.restrictive)
+        {
+            // Folded here, where a read context still exists: the row-by-row
+            // evaluator this qual is handed to runs no subqueries of its own.
+            checked.qual = fold_policy_qual(read_ctx, &checked.qual)?;
+        }
+        Ok(Self(plan))
+    }
+
+    /// The write-side check as the catalog describes it, before any subquery in
+    /// a qual has been executed.
+    ///
+    /// Split from [`Self::compile`] so the decision — which policies apply,
+    /// which qual each contributes, and how a violation names itself — can be
+    /// settled without a read context. `compile` is the only caller outside
+    /// tests, and it always folds.
+    fn plan(
+        ctx: &RlsCtx<'_>,
+        table: &Table,
+        command: PolicyCommand,
+        subject: CheckSubject,
+    ) -> Result<CheckPlan, ExecError> {
         if bypass_applies(ctx, table)? {
-            return Ok(Self(CheckPlan::Open));
+            return Ok(CheckPlan::Open);
         }
         let relation = table.name.name.clone();
         let applicable = applicable_policies(ctx, table, command)?;
         if !ctx.row_security && !applicable.is_empty() {
-            return Ok(Self(CheckPlan::Refuse { relation }));
+            return Ok(CheckPlan::Refuse { relation });
         }
         let mut permissive = Vec::new();
         let mut restrictive = Vec::new();
@@ -1102,12 +1204,12 @@ impl RowSecurityCheck {
                 restrictive.push(checked);
             }
         }
-        Ok(Self(CheckPlan::Restricted(Box::new(RestrictedCheck {
+        Ok(CheckPlan::Restricted(Box::new(RestrictedCheck {
             relation,
             subject,
             permissive: fold_permissive_checks(permissive),
             restrictive,
-        }))))
+        })))
     }
 
     /// A check for a write that row security does not reach, for the stated
@@ -1860,13 +1962,19 @@ mod tests {
         role(&kv, "stranger", crabka_pgcatalog::RoleAttributes::default());
         let ctx = RlsCtx::new(&kv, "stranger", true);
         let table = table(true, false);
-        let check = RowSecurityCheck::compile(
-            &ctx,
-            &table,
-            PolicyCommand::Insert,
-            crate::rls::CheckSubject::NewRow,
-        )
-        .expect("compile");
+        // The plan rather than the folded check: this policy's qual holds no
+        // subquery, so there is nothing for a read context to execute, and the
+        // question here is which qual the check reads and how it reports a
+        // violation.
+        let check = RowSecurityCheck(
+            RowSecurityCheck::plan(
+                &ctx,
+                &table,
+                PolicyCommand::Insert,
+                crate::rls::CheckSubject::NewRow,
+            )
+            .expect("plan"),
+        );
         let eval = crate::clock::EvalCtx::test_default();
         let rejected = check
             .permit_row(&table, &[crabka_pgtypes::Datum::Int4(1)], &eval)

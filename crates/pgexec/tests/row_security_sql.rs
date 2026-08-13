@@ -1191,3 +1191,218 @@ async fn a_merge_sees_the_rows_a_select_policy_shows_it() {
             == rows(&["2"])
     );
 }
+
+// ------------------------------------------------ a subquery inside the qual
+
+/// A relation whose policy qual reads a *second* relation with a subquery,
+/// where that second relation is itself under row security.
+///
+/// `clearance` holds one row per role and is readable only by the role it names,
+/// so the subquery's answer differs by who asks. That is what makes the setup
+/// worth the length: if the policy's subquery were run with row security off —
+/// as the owner, say, because the policy belongs to the owner — `max(level)`
+/// would be 9 instead of `bob`'s 2, and every check below would admit rows it
+/// must refuse. The escalation is invisible in a fixture where the inner
+/// relation is unprotected.
+const NESTED: &str = r"
+CREATE ROLE alice;
+CREATE ROLE bob;
+CREATE TABLE clearance (holder text, level int4);
+INSERT INTO clearance VALUES ('bob', 2), ('carol', 9);
+ALTER TABLE clearance OWNER TO alice;
+ALTER TABLE clearance ENABLE ROW LEVEL SECURITY;
+CREATE TABLE dossier (id int4 PRIMARY KEY, level int4, note text);
+INSERT INTO dossier VALUES (1, 1, 'low'), (2, 9, 'high');
+ALTER TABLE dossier OWNER TO alice;
+ALTER TABLE dossier ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON clearance TO bob;
+GRANT ALL ON dossier TO bob;
+";
+
+/// An engine with [`NESTED`] applied and the two policies in place: `clearance`
+/// shows a role only its own row, and `dossier` admits only rows at or below the
+/// level that subquery returns.
+async fn nested_engine() -> (SqlEngine, SqlSession) {
+    let engine = SqlEngine::new();
+    let mut alice = engine.connect();
+    run(&mut alice, NESTED).await;
+    run(&mut alice, "SET ROLE alice").await;
+    run(
+        &mut alice,
+        "CREATE POLICY own_row ON clearance FOR SELECT USING (holder = current_user)",
+    )
+    .await;
+    run(
+        &mut alice,
+        "CREATE POLICY cleared ON dossier FOR ALL
+           USING (level <= (SELECT max(level) FROM clearance))
+           WITH CHECK (level <= (SELECT max(level) FROM clearance))",
+    )
+    .await;
+    (engine, alice)
+}
+
+/// **A policy qual that holds a subquery governs every write path, not just
+/// reads.**
+///
+/// The read gate has resolved subqueries in a qual for as long as policies have
+/// existed; the four write paths compiled the same qual and handed it to a
+/// row-at-a-time evaluator that executes none, so each refused the statement
+/// outright. They are listed separately because they compile the check at four
+/// different points and none of them reaches the others.
+#[tokio::test]
+async fn a_policy_qual_with_a_subquery_governs_every_write_path() {
+    let (engine, _alice) = nested_engine().await;
+    let mut bob = as_bob(&engine).await;
+
+    // The read side, first, as the reference answer: bob is cleared to 2, so
+    // the level-9 row is not his to see.
+    assert!(query(&mut bob, "SELECT id FROM dossier ORDER BY id").await == rows(&["1"]));
+
+    // INSERT: at or below his clearance is written, above it is refused.
+    run(&mut bob, "INSERT INTO dossier VALUES (3, 2, 'ok')").await;
+    let (sqlstate, message) = error_of(&mut bob, "INSERT INTO dossier VALUES (4, 5, 'no')").await;
+    assert!(sqlstate == "42501");
+    assert!(message == "new row violates row-level security policy for table \"dossier\"");
+
+    // UPDATE: the new row is judged by the same qual.
+    run(&mut bob, "UPDATE dossier SET note = 'edited' WHERE id = 1").await;
+    assert!(
+        error_of(&mut bob, "UPDATE dossier SET level = 7 WHERE id = 1")
+            .await
+            .0
+            == "42501"
+    );
+
+    // UPDATE and DELETE also filter their candidate rows by the qual, so the
+    // row above his clearance is not merely unwritable but unreachable.
+    run(&mut bob, "UPDATE dossier SET note = 'reached' WHERE id = 2").await;
+    run(&mut bob, "DELETE FROM dossier WHERE id = 2").await;
+
+    // MERGE and ON CONFLICT DO UPDATE compile the check at their own points.
+    run(
+        &mut bob,
+        "MERGE INTO dossier d USING (SELECT 1 AS sid) s ON d.id = s.sid
+           WHEN MATCHED THEN UPDATE SET note = 'merged'",
+    )
+    .await;
+    run(
+        &mut bob,
+        "INSERT INTO dossier VALUES (3, 2, 'again')
+           ON CONFLICT DO NOTHING",
+    )
+    .await;
+
+    // Nothing above bob's clearance moved, and the hidden row is still there.
+    let mut alice = engine.connect();
+    run(&mut alice, "SET ROLE alice").await;
+    assert!(
+        query(&mut alice, "SELECT id,level,note FROM dossier ORDER BY id").await
+            == rows(&["1,1,merged", "2,9,high", "3,2,ok"])
+    );
+}
+
+/// **The subquery inside a policy qual is subject to row security itself.**
+///
+/// This is the test the rest of the file's caution is for. `carol`'s clearance
+/// of 9 exists in the same relation the qual reads, and the only thing keeping
+/// it out of `max(level)` is `clearance`'s own policy. Were the qual's subquery
+/// run as the relation's owner — the natural mistake, since the policy is the
+/// owner's — the write below would be admitted, and a role would have escalated
+/// itself by naming a relation it cannot read.
+#[tokio::test]
+async fn a_policy_subquery_reads_under_the_invoking_roles_own_policies() {
+    let (engine, _alice) = nested_engine().await;
+    let mut bob = as_bob(&engine).await;
+
+    // What bob may see of the inner relation, stated so the expectation below
+    // cannot be read as a coincidence.
+    assert!(query(&mut bob, "SELECT max(level) FROM clearance").await == rows(&["2"]));
+
+    // Carol's 9 would admit this row; bob's 2 must not.
+    let (sqlstate, _) = error_of(&mut bob, "INSERT INTO dossier VALUES (5, 9, 'escalated')").await;
+    assert!(sqlstate == "42501");
+
+    let mut alice = engine.connect();
+    run(&mut alice, "SET ROLE alice").await;
+    assert!(query(&mut alice, "SELECT count(*) FROM dossier WHERE id = 5").await == rows(&["0"]));
+}
+
+/// **A qual that reads its own relation is reported on every write path, not
+/// only on reads.**
+///
+/// The recursion guard is the reason a policy subquery may run at all: the qual
+/// is attacker-supplied SQL, so a qual that re-enters its own relation has to be
+/// caught rather than left to exhaust the stack. Each write path enters the
+/// guard for itself, so each is checked.
+#[tokio::test]
+async fn a_self_referencing_policy_subquery_is_reported_on_every_path() {
+    let engine = SqlEngine::new();
+    let mut alice = engine.connect();
+    run(
+        &mut alice,
+        "CREATE ROLE alice;
+         CREATE ROLE bob;
+         CREATE TABLE loop_tbl (a int4);
+         INSERT INTO loop_tbl VALUES (1), (2);
+         ALTER TABLE loop_tbl OWNER TO alice;
+         ALTER TABLE loop_tbl ENABLE ROW LEVEL SECURITY;
+         GRANT ALL ON loop_tbl TO bob;",
+    )
+    .await;
+    run(&mut alice, "SET ROLE alice").await;
+    run(
+        &mut alice,
+        "CREATE POLICY eats_itself ON loop_tbl USING (a IN (SELECT a FROM loop_tbl))",
+    )
+    .await;
+    let mut bob = as_bob(&engine).await;
+
+    for sql in [
+        "SELECT * FROM loop_tbl",
+        "INSERT INTO loop_tbl VALUES (3)",
+        "UPDATE loop_tbl SET a = 4",
+        "DELETE FROM loop_tbl",
+    ] {
+        let (sqlstate, message) = error_of(&mut bob, sql).await;
+        assert!(sqlstate == "42P17", "{sql} should report recursion");
+        assert!(message == "infinite recursion detected in policy for relation \"loop_tbl\"");
+    }
+}
+
+/// **A policy qual whose subquery reads the row it judges is left to the row
+/// evaluator, not refused at compile time.**
+///
+/// `(SELECT dossier.level <= level FROM clearance)` has no single value to fold
+/// to — it depends on the row under test — so the fold cannot answer it. The
+/// check is compiled before the first row is read, so a fold that propagated
+/// its failure would refuse statements that never reach a row to judge, which
+/// is a statement that used to succeed now failing. Leaving the qual alone
+/// keeps the failure exactly where it was: at the row, if a row arrives.
+#[tokio::test]
+async fn a_correlated_policy_qual_fails_no_earlier_than_it_used_to() {
+    let engine = SqlEngine::new();
+    let mut alice = engine.connect();
+    run(&mut alice, NESTED).await;
+    run(&mut alice, "SET ROLE alice").await;
+    run(
+        &mut alice,
+        "CREATE POLICY own_row ON clearance FOR SELECT USING (holder = current_user)",
+    )
+    .await;
+    run(
+        &mut alice,
+        "CREATE POLICY correlated ON dossier FOR ALL USING (true)
+           WITH CHECK ((SELECT dossier.level <= level FROM clearance))",
+    )
+    .await;
+    let mut bob = as_bob(&engine).await;
+
+    // No row matches, so no row is ever judged and the statement succeeds —
+    // the behaviour a compile-time refusal would have taken away.
+    run(&mut bob, "UPDATE dossier SET note = 'x' WHERE id = 999").await;
+
+    // A statement that does reach a row still fails, and at the row.
+    let (_, message) = error_of(&mut bob, "UPDATE dossier SET note = 'x' WHERE id = 1").await;
+    assert!(message == "subqueries are only supported in SELECT");
+}
