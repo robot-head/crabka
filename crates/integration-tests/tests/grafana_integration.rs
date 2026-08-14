@@ -3,6 +3,13 @@
 //! The test provisions Grafana's built-in Loki datasource against a real Crabka
 //! querier listener. It then queries through Grafana's datasource proxy and
 //! through the backend datasource execution path.
+//!
+//! Cargo ignores this test by default, because it pulls and runs
+//! `mirror.gcr.io/grafana/grafana` under Docker. The
+//! `observability-differential` job in `.github/workflows/ci.yml` preloads that
+//! image and runs the test. Run it locally with:
+//!
+//! `cargo test -p crabka-integration-tests --test grafana_integration -- --ignored --nocapture`
 
 use std::{
     net::SocketAddr,
@@ -36,6 +43,7 @@ const GRAFANA_PASSWORD: &str = "admin";
 const HOST_ALIAS: &str = "host.testcontainers.internal";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
 async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     let (broker, bootstrap, _broker_dir) = boot_crabka().await;
     let data_root = TempDir::new().expect("data root");
