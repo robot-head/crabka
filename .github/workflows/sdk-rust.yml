@@ -46,7 +46,7 @@ jobs:
         run: |
           cargo +nightly fmt --all -- --check
           cargo clippy -p crabka-sdk-conformance -p crabka-app-sdk --all-targets --features crabka-app-sdk/conformance-adapter -- -D warnings
-          cargo nextest run -p crabka-sdk-conformance -p crabka-app-sdk --features crabka-app-sdk/conformance-adapter
+          cargo nextest run -p crabka-sdk-conformance -p crabka-app-sdk --profile ci --features crabka-app-sdk/conformance-adapter
           ./tools/check-publish-allowlist.sh
       - name: Build Rust conformance adapter
         run: cargo build -p crabka-app-sdk --bin conformance_adapter --features conformance-adapter

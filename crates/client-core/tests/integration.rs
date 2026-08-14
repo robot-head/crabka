@@ -54,6 +54,12 @@ use testcontainers::runners::AsyncRunner;
 // `Kafka` here is the Confluent module's container type.
 use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
 
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 /// Maximum attempts for the initial `ApiVersions` round-trip while the broker
 /// still warms up. With a 1s pause between attempts this gives ~15s of
 /// tolerance, which empirically covers slow CI runners.
@@ -72,9 +78,9 @@ fn init_tracing() {
 
 /// Start a Kafka container and return the container handle + bootstrap address.
 async fn start_kafka() -> (testcontainers::ContainerAsync<Kafka>, String) {
-    let kafka = Kafka::default()
-        .start()
+    let kafka = tokio::time::timeout(CONTAINER_START_TIMEOUT, Kafka::default().start())
         .await
+        .expect("kafka container start timed out")
         .expect("kafka container failed to start");
     let port = kafka
         .get_host_port_ipv4(KAFKA_PORT)

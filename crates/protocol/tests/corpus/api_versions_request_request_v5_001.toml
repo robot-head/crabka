@@ -1,0 +1,6 @@
+api_key = 18
+version = 5
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "ApiVersionsRequest v5 schema-synthesized; kafka-clients 4.3.1 predates KIP-1242 and encodes v5 as v4, so the JVM oracle cannot emit this frame"

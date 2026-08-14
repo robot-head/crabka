@@ -6,7 +6,7 @@
 //!
 //! `cargo test -p crabka-metrics-service --test diff_prometheus -- --ignored --nocapture`
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use crabka_metrics::{
@@ -30,6 +30,13 @@ use tokio::sync::oneshot;
 mod diff_corpus;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 
 const TENANT: &str = "compliance";
 const PROMETHEUS_PORT: u16 = 9090;
@@ -103,7 +110,8 @@ async fn prometheus_compliance_corpus_matches_crabka() -> TestResult {
 
 async fn start_prometheus() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PROMETHEUS_IMAGE_TAG").unwrap_or_else(|_| "v3.8.0".to_string());
-    Ok(
+    Ok(tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
         GenericImage::new("mirror.gcr.io/prom/prometheus".to_string(), tag)
             .with_exposed_port(PROMETHEUS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stderr(
@@ -115,9 +123,9 @@ async fn start_prometheus() -> TestResult<testcontainers::ContainerAsync<Generic
                 "--web.enable-remote-write-receiver",
                 "--enable-feature=native-histograms",
             ])
-            .start()
-            .await?,
+            .start(),
     )
+    .await??)
 }
 
 async fn mapped_base_url(

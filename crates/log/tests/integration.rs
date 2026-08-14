@@ -5,7 +5,7 @@
 use std::{
     path::Path,
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
@@ -17,6 +17,12 @@ use testcontainers::{ImageExt, core::Mount, runners::AsyncRunner};
 use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
 
 const TOPIC: &str = "crabka-log-itest";
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// `docker exec <container_id> <args...>`. This fails the test on a non-zero
 /// exit.
@@ -70,9 +76,9 @@ fn docker_cp(container_id: &str, src: &str, dst: &Path) {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn read_jvm_produced_log_dir() {
-    let kafka = Kafka::default()
-        .start()
+    let kafka = tokio::time::timeout(CONTAINER_START_TIMEOUT, Kafka::default().start())
         .await
+        .expect("kafka container start timed out")
         .expect("start kafka container");
     let container_id = kafka.id().to_string();
 
@@ -156,15 +162,19 @@ async fn jvm_consumes_rust_written_log_dir() {
         .path()
         .to_str()
         .expect("temporary path must be UTF-8");
-    let kafka = Kafka::default()
-        // The broker and the test process have different host UIDs. Root is
-        // limited to this disposable container and can reopen both sets of
-        // files after the restart.
-        .with_user("root")
-        .with_mount(Mount::bind_mount(host_data, "/var/lib/kafka/data"))
-        .start()
-        .await
-        .expect("start kafka container");
+    let kafka = tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
+        Kafka::default()
+            // The broker and the test process have different host UIDs. Root is
+            // limited to this disposable container and can reopen both sets of
+            // files after the restart.
+            .with_user("root")
+            .with_mount(Mount::bind_mount(host_data, "/var/lib/kafka/data"))
+            .start(),
+    )
+    .await
+    .expect("kafka container start timed out")
+    .expect("start kafka container");
     let container_id = kafka.id().to_string();
     let bootstrap = "localhost:9092";
 
@@ -226,7 +236,10 @@ async fn jvm_consumes_rust_written_log_dir() {
     log.append(&mut batch).expect("append Rust-written batch");
     drop(log);
 
-    kafka.start().await.expect("restart kafka container");
+    tokio::time::timeout(CONTAINER_START_TIMEOUT, kafka.start())
+        .await
+        .expect("kafka container restart timed out")
+        .expect("restart kafka container");
     let out = docker_exec(
         &container_id,
         &[

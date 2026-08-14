@@ -7132,14 +7132,24 @@ fn parse_log_level_param(raw_query: Option<&str>) -> Result<String, HttpQueryErr
     Err(HttpQueryError::MissingQueryParameter("log_level"))
 }
 
-async fn role_config(
-    Extension(ops): Extension<RoleOps>,
-    RawQuery(raw_query): RawQuery,
-) -> Response {
-    status_config(ops.target, raw_query.as_deref())
+/// The `target` that `/config` reports, for every role.
+///
+/// Loki reports the components its process runs. Crabka serves the full Loki
+/// surface from each role, so its ops endpoints answer as single-binary Loki
+/// does: [`status_services`] lists every component whichever role serves it,
+/// and `/config` reports the target that goes with that list.
+/// `real_loki_and_crabka_return_same_stable_config_status_lines` compares this
+/// against a real Loki container, which reports `all`.
+///
+/// The per-role name stays in [`RoleOps::target`] for `/metrics`, where Loki
+/// does report the running component.
+const LOKI_CONFIG_TARGET: &str = "all";
+
+async fn role_config(RawQuery(raw_query): RawQuery) -> Response {
+    status_config(raw_query.as_deref())
 }
 
-fn status_config(target: &'static str, raw_query: Option<&str>) -> Response {
+fn status_config(raw_query: Option<&str>) -> Response {
     match query_param_value(raw_query, "mode").as_deref() {
         Some("diff") => {
             return (
@@ -7153,7 +7163,7 @@ fn status_config(target: &'static str, raw_query: Option<&str>) -> Response {
             return (
                 StatusCode::OK,
                 [("content-type", "application/yaml; charset=utf-8")],
-                format!("target: {target}\nauth_enabled: true\n"),
+                format!("target: {LOKI_CONFIG_TARGET}\nauth_enabled: true\n"),
             )
                 .into_response();
         }
@@ -7163,7 +7173,7 @@ fn status_config(target: &'static str, raw_query: Option<&str>) -> Response {
     (
         StatusCode::OK,
         [("content-type", "application/yaml; charset=utf-8")],
-        format!("target: {target}\n"),
+        format!("target: {LOKI_CONFIG_TARGET}\n"),
     )
         .into_response()
 }

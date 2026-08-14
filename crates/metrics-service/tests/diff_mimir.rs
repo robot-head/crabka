@@ -19,7 +19,7 @@
 //! includes them by path below, exactly as `diff_prometheus.rs` does, so both
 //! differential suites share one corpus definition.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use crabka_metrics::{
@@ -43,6 +43,13 @@ use tokio::sync::oneshot;
 mod diff_corpus;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Fixed tenant header used on both sides.
 ///
@@ -192,7 +199,8 @@ async fn mimir_compliance_corpus_matches_crabka() -> TestResult {
 async fn start_mimir() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag =
         std::env::var("CRABKA_MIMIR_IMAGE_TAG").unwrap_or_else(|_| MIMIR_IMAGE_TAG.to_string());
-    Ok(
+    Ok(tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
         GenericImage::new("mirror.gcr.io/grafana/mimir".to_string(), tag)
             .with_exposed_port(MIMIR_PORT.tcp())
             // Mimir 2.16.x logs go-kit lines to stderr; the HTTP server announces
@@ -219,9 +227,9 @@ async fn start_mimir() -> TestResult<testcontainers::ContainerAsync<GenericImage
                 // different config path than `querier:`.)
                 "-querier.query-ingesters-within=0",
             ])
-            .start()
-            .await?,
+            .start(),
     )
+    .await??)
 }
 
 async fn mapped_base_url(

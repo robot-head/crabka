@@ -629,6 +629,30 @@ pub async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig,
     panic!("cluster start failed after 3 attempts; last error: {last_err:?}");
 }
 
+/// Start a broker on listen addresses another broker has just vacated.
+///
+/// [`BrokerHandle::shutdown`] awaits its listener tasks, so the sockets are
+/// closed by the time it returns, but the port can still be unbindable for a
+/// moment afterwards, and a concurrently-running test binary can win the race
+/// for the freed ephemeral port. Both surface as `AddrInUse` on the re-bind.
+/// Retry briefly instead of failing the test on a port-reuse race, in the
+/// spirit of [`start_n_node_with_retry`].
+pub async fn start_reusing_addrs(cfg: &BrokerConfig, what: &str) -> BrokerHandle {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match Broker::start(cfg.clone()).await {
+            Ok(handle) => return handle,
+            Err(BrokerError::Io(e))
+                if e.kind() == std::io::ErrorKind::AddrInUse && Instant::now() < deadline =>
+            {
+                tracing::warn!(%what, error = %e, "vacated port not yet bindable; retrying");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("{what}: {e:?}"),
+        }
+    }
+}
+
 /// Await every broker's controller image until each one sees `n` brokers
 /// registered. Call this before any test that needs the partition's replica
 /// set to include all `n` nodes. `CreateTopics` reads `image.brokers()` to pick

@@ -9,7 +9,7 @@ use std::{
     collections::BTreeSet,
     io::Write,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -48,6 +48,13 @@ const FUNC_WORK: &str = "main.work";
 const FUNC_HOT: &str = "main.hotloop";
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 
 #[derive(Clone, Default)]
 struct CapturingSink {
@@ -764,18 +771,20 @@ async fn grafana_accepts_pyroscope_datasource_pointing_at_crabka() -> TestResult
 
 async fn start_pyroscope() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PYROSCOPE_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
-    Ok(
+    Ok(tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
         GenericImage::new("mirror.gcr.io/grafana/pyroscope".to_string(), tag)
             .with_exposed_port(PYROSCOPE_HTTP_PORT.tcp())
             .with_wait_for(WaitFor::seconds(3))
-            .start()
-            .await?,
+            .start(),
     )
+    .await??)
 }
 
 async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
-    Ok(
+    Ok(tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
         GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
             .with_exposed_port(3000.tcp())
             .with_wait_for(WaitFor::seconds(5))
@@ -783,9 +792,9 @@ async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericIma
             // Let the container reach the in-process Crabka querier on the host via
             // host.docker.internal (host-gateway mapping; works on Docker Desktop + Linux).
             .with_host("host.docker.internal", Host::HostGateway)
-            .start()
-            .await?,
+            .start(),
     )
+    .await??)
 }
 
 async fn mapped_base_url(

@@ -30,7 +30,7 @@ stateright = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util", "process"] }
 tokio-tungstenite = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }

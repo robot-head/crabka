@@ -46,7 +46,7 @@ jobs:
         run: |
           cargo +nightly fmt --all -- --check
           cargo clippy -p crabka-sdk-conformance --all-targets -- -D warnings
-          cargo nextest run -p crabka-sdk-conformance
+          cargo nextest run -p crabka-sdk-conformance --profile ci
           ./tools/check-publish-allowlist.sh
       - name: Verify Go SDK
         working-directory: sdks/go

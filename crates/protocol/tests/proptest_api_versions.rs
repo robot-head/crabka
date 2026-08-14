@@ -28,7 +28,13 @@ proptest! {
         prop_assert_eq!(v.encoded_len(3), buf.len());
         let mut cur = &buf[..];
         let decoded = ApiVersionsRequest::decode(&mut cur, 3).unwrap();
-        prop_assert_eq!(decoded, v);
+        // `cluster_id` and `node_id` arrived at v5 (KIP-1242), so v3 never puts
+        // them on the wire and they decode to their schema defaults — normalize.
+        let default = ApiVersionsRequest::default();
+        let mut expected = v.clone();
+        expected.cluster_id = default.cluster_id.clone();
+        expected.node_id = default.node_id;
+        prop_assert_eq!(decoded, expected);
         prop_assert!(cur.is_empty());
     }
 

@@ -101,6 +101,13 @@ use tower::ServiceExt as _;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
+
 /// Mirror of Tempo's `TraceByIDResponse`, which is
 /// `message TraceByIDResponse { Trace trace = 1 }`.
 ///
@@ -921,20 +928,22 @@ async fn start_crabka_querier(records: &[SpanRecord]) -> TestResult<CrabkaPair> 
 
 async fn start_grafana() -> TestResult<ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "11.5.2".into());
-    Ok(
+    Ok(tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
         GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
             .with_exposed_port(GRAFANA_HTTP_PORT.tcp())
             .with_wait_for(WaitFor::seconds(5))
             .with_env_var("GF_SECURITY_ADMIN_PASSWORD", GRAFANA_ADMIN)
             .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
-            .start()
-            .await?,
+            .start(),
     )
+    .await??)
 }
 
 async fn start_prometheus() -> TestResult<ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PROM_IMAGE_TAG").unwrap_or_else(|_| "v3.1.0".into());
-    Ok(
+    Ok(tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
         GenericImage::new("mirror.gcr.io/prom/prometheus".to_string(), tag)
             .with_exposed_port(PROM_HTTP_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stderr(
@@ -949,9 +958,9 @@ async fn start_prometheus() -> TestResult<ContainerAsync<GenericImage>> {
                 "--config.file=/etc/prometheus/prometheus.yml",
                 "--storage.tsdb.retention.time=1h",
             ])
-            .start()
-            .await?,
+            .start(),
     )
+    .await??)
 }
 
 async fn mapped_base_url(
