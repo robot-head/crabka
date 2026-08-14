@@ -664,11 +664,22 @@ with (
 
     # Both logical clients remain connected while PgDog has exactly one backend.
     # Client two must receive a reset backend, not client one's committed value.
+    #
+    # The reset backend reports PgDog's OWN startup value, not an empty string.
+    # PgDog opens its server connection with application_name='PgDog', gres
+    # stores that verbatim (`VERBATIM_REPORTED_PARAMS` in pgwire/session.rs),
+    # and PostgreSQL marks application_name GUC_REPORT in guc_tables.c, so any
+    # conforming server reports it back. This gate asserted `== ""` until
+    # 2026-08-14, which held only while gres failed to announce the parameter
+    # at all. Assert the property the gate is for -- no leak of client one's
+    # session state -- rather than the empty string that defect produced.
     with second_connection.cursor() as cursor:
         cursor.execute("BEGIN")
         cursor.execute("SHOW application_name")
         second_name = cursor.fetchone()[0]
-        assert second_name == "", f"client two inherited application_name={second_name!r}"
+        assert second_name not in ("f1-client-one", "f1-distinct-set"), (
+            f"client two inherited client one's application_name={second_name!r}"
+        )
         cursor.execute("SET LOCAL statement_timeout = 17")
         cursor.execute("SHOW statement_timeout")
         local_timeout = cursor.fetchone()[0]
