@@ -75,15 +75,11 @@ fn delete_records_response(topics: Vec<DeleteRecordsTopicResult>) -> DeleteRecor
 }
 
 fn target_offset(requested_offset: i64, high_watermark: i64) -> i64 {
-    if requested_offset == -1 {
-        high_watermark
-    } else {
-        requested_offset
-    }
+    crabka_verified::delete_records_target(requested_offset, high_watermark)
 }
 
 fn offset_out_of_range(target: i64, log_end_offset: i64) -> bool {
-    target < 0 || target > log_end_offset
+    crabka_verified::delete_records_offset_out_of_range(target, log_end_offset)
 }
 
 #[tracing::instrument(

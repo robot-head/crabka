@@ -9341,7 +9341,17 @@ fn stable_config_response(status: u16, body: &str) -> Value {
     let mut lines = body
         .lines()
         .filter(|&line| line.starts_with("target:") || line.starts_with("auth_enabled:"))
-        .map(|line| line.trim().to_owned())
+        .map(|line| {
+            if line.starts_with("target:") {
+                // `target` is deployment topology, not wire compatibility. This
+                // suite runs Loki single-binary (`target: all`) against a Crabka
+                // querier (`target: querier`), so the two can only ever agree on
+                // the key's presence, never its value. Compare the key alone.
+                "target:".to_owned()
+            } else {
+                line.trim().to_owned()
+            }
+        })
         .collect::<Vec<String>>();
     lines.sort();
     json!({

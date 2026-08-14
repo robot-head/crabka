@@ -3508,10 +3508,9 @@ fn spawn_query_authorizer_connect(
                 }
             }
         };
-        // Scope the write guard. Holding it across the `cancelled` await below
-        // blocks every reader in `SwappableQueryAuthorizer::check` for the life
-        // of the querier, which deadlocks each query the swap was meant to
-        // unblock.
+        // Scope the write guard: every query takes a read lock on this slot, so
+        // holding the writer across the `token.cancelled()` await below would
+        // block every query for the life of the service.
         {
             let mut guard = slot.write().await;
             *guard = Arc::new(authorizer);

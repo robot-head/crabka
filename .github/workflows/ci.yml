@@ -1398,9 +1398,20 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    # The 114-test Loki differential dominates the wall clock: one container
-    # boot per test, all under `-C instrument-coverage`.
-    timeout-minutes: 45
+    # 90-minute ceiling for the cold case: a cold `-C instrument-coverage` build
+    # of this crate's dependency graph (broker, blockstore, observability, logql,
+    # datafusion) dominates, and the 114-test Loki differential then boots one
+    # container per test on top of it. The Swatinem cache makes later runs far
+    # cheaper, so this is headroom rather than an expected duration.
+    #
+    # The earlier 45-minute cap was not the real problem: this job's first two
+    # runs blew past it because a querier deadlock wedged individual tests
+    # forever (the authorizer slot's write guard was held across a shutdown
+    # await, blocking every query). That is fixed in crabka-observability and
+    # covered by tests/observability_querier_authorization.rs. A wedged test can
+    # still only cost this job its cap, and the bounded preload below catches
+    # the registry-stall case long before the cap matters.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       # Three pulled images plus llvm-cov profraw and the cargo target dir
@@ -1421,8 +1432,8 @@ jobs:
       # seconds with Docker's own message, but a registry that accepts the
       # connection and then stops making progress needs the explicit bound:
       # `docker pull` has no pull-timeout of its own, so without it a stall
-      # would sit here until the 45-minute job timeout — the exact failure mode
-      # this job exists to avoid. Three minutes is several times the normal
+      # would sit here until the job timeout — the exact failure mode this job
+      # exists to avoid. Three minutes is several times the normal
       # cold-pull time for these images; `timeout-minutes` backstops the loop.
       #
       # Tags mirror the constants in the suites: `LOKI_IMAGE`/`LOKI_TAG` in
