@@ -32,9 +32,8 @@ use serde_json::{Value, json};
 use snap::raw::Encoder as SnappyEncoder;
 use tempfile::TempDir;
 use testcontainers::{
-    GenericImage,
+    ContainerAsync, GenericImage,
     core::{IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
 };
 use tokio::net::TcpListener;
 use tokio_tungstenite::{
@@ -42,6 +41,8 @@ use tokio_tungstenite::{
     tungstenite::{Error as TungsteniteError, client::IntoClientRequest as _},
 };
 use tower::ServiceExt;
+
+mod common;
 
 const LOKI_PORT: u16 = 3100;
 /// The Loki release image that the whole differential suite pins its wire semantics to.
@@ -197,18 +198,29 @@ fn labels<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> 
         .collect()
 }
 
+/// Starts the pinned Loki container and returns it with its base URL.
+///
+/// The start carries the deadline of [`common::start_container`], so a stalled
+/// registry pull fails the test instead of holding the process open. The
+/// caller keeps the container, because dropping it removes the container and
+/// the URL stops working.
+async fn start_loki() -> (ContainerAsync<GenericImage>, String) {
+    let loki = common::start_container(&format!("{LOKI_IMAGE}:{LOKI_TAG}"), || {
+        GenericImage::new(LOKI_IMAGE, LOKI_TAG)
+            .with_exposed_port(LOKI_PORT.tcp())
+            .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS))
+    })
+    .await;
+    let port = loki
+        .get_host_port_ipv4(LOKI_PORT)
+        .await
+        .expect("Loki mapped port");
+    (loki, format!("http://127.0.0.1:{port}"))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_buildinfo_shape() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -227,16 +239,7 @@ async fn real_loki_and_crabka_return_same_buildinfo_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_basic_status_probe_shapes() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -257,16 +260,7 @@ async fn real_loki_and_crabka_return_same_basic_status_probe_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_services_status_shape() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -285,16 +279,7 @@ async fn real_loki_and_crabka_return_same_services_status_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_stable_config_status_lines() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -324,16 +309,7 @@ async fn real_loki_and_crabka_return_same_stable_config_status_lines() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_expose_same_stable_metrics_families() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -352,16 +328,7 @@ async fn real_loki_and_crabka_expose_same_stable_metrics_families() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_log_level_post_shapes() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -399,16 +366,7 @@ async fn real_loki_and_crabka_return_same_log_level_post_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_log_level_post_error_shapes() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -433,16 +391,7 @@ async fn real_loki_and_crabka_return_same_log_level_post_error_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_ingester_control_shapes() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -469,16 +418,7 @@ async fn real_loki_and_crabka_return_same_ingester_control_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_ruler_inventory_shape() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -509,16 +449,7 @@ async fn real_loki_and_crabka_return_same_empty_ruler_inventory_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_ring_status_page_shapes() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -547,16 +478,7 @@ async fn real_loki_and_crabka_return_same_ring_status_page_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_default_delete_api_is_absent_while_crabka_serves_lifecycle() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -619,16 +541,7 @@ async fn real_loki_default_delete_api_is_absent_while_crabka_serves_lifecycle() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_stream_query_range_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -755,16 +668,7 @@ async fn real_loki_and_crabka_return_same_stream_query_range_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_matcher_and_line_filter_results() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -862,16 +766,7 @@ async fn real_loki_and_crabka_return_same_matcher_and_line_filter_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_metric_query_range_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1031,16 +926,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1158,16 +1044,7 @@ async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_byte_metric_results() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1257,16 +1134,7 @@ async fn real_loki_and_crabka_return_same_byte_metric_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_metadata_results() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1456,16 +1324,7 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_metadata_shapes() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1495,16 +1354,7 @@ async fn real_loki_and_crabka_return_same_empty_metadata_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_detected_fields_results() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1566,16 +1416,7 @@ async fn real_loki_and_crabka_return_same_detected_fields_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_default_patterns_endpoint_is_unavailable_while_crabka_serves_patterns() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1691,16 +1532,7 @@ async fn real_loki_default_patterns_endpoint_is_unavailable_while_crabka_serves_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_index_volume_shape() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1786,16 +1618,7 @@ async fn real_loki_and_crabka_return_same_index_volume_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_index_stats_shape() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1880,16 +1703,7 @@ async fn real_loki_and_crabka_return_same_index_stats_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_index_volume_range_shape() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -1985,16 +1799,7 @@ async fn real_loki_and_crabka_return_same_index_volume_range_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_parser_filter_results() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -2828,16 +2633,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_parser_metric_results() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -2958,16 +2754,7 @@ async fn real_loki_and_crabka_return_same_parser_metric_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3233,16 +3020,7 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3280,16 +3058,7 @@ async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_label_replace_vector_function_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3340,16 +3109,7 @@ async fn real_loki_and_crabka_return_same_label_replace_vector_function_result()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_duplicate_query_param_precedence() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3373,16 +3133,7 @@ async fn real_loki_and_crabka_use_same_duplicate_query_param_precedence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_parser_error_labels() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3475,16 +3226,7 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3610,16 +3352,7 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3647,16 +3380,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_query_post_body_precedence() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3692,16 +3416,7 @@ async fn real_loki_and_crabka_use_same_query_post_body_precedence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_tail_query_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3725,16 +3440,7 @@ async fn real_loki_and_crabka_return_same_invalid_tail_query_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_tail_delay_for_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3754,16 +3460,7 @@ async fn real_loki_and_crabka_return_same_invalid_tail_delay_for_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_direction_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3783,16 +3480,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_direction_error() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_step_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3812,16 +3500,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_step_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_step_parse_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3841,16 +3520,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_step_parse_error()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_excessive_query_range_resolution_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3870,16 +3540,7 @@ async fn real_loki_and_crabka_return_same_excessive_query_range_resolution_error
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_query_range_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3899,16 +3560,7 @@ async fn real_loki_and_crabka_return_same_oversized_query_range_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_index_volume_range_step_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3932,16 +3584,7 @@ async fn real_loki_and_crabka_return_same_invalid_index_volume_range_step_error(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_index_volume_aggregate_by_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -3964,16 +3607,7 @@ async fn real_loki_and_crabka_return_same_invalid_index_volume_aggregate_by_erro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_index_volume_bounds_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4024,16 +3658,7 @@ async fn real_loki_and_crabka_return_same_missing_index_volume_bounds_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_index_query_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4058,16 +3683,7 @@ async fn real_loki_and_crabka_return_same_invalid_index_query_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_index_volume_duplicate_query_precedence() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4095,16 +3711,7 @@ async fn real_loki_and_crabka_use_same_index_volume_duplicate_query_precedence()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_index_stats_range_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4132,16 +3739,7 @@ async fn real_loki_and_crabka_return_same_oversized_index_stats_range_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_index_stats_post_body_precedence() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4165,16 +3763,7 @@ async fn real_loki_and_crabka_use_same_index_stats_post_body_precedence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_query_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4215,16 +3804,7 @@ async fn real_loki_and_crabka_return_same_missing_query_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_series_matcher_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4244,16 +3824,7 @@ async fn real_loki_and_crabka_return_same_missing_series_matcher_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_series_post_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4273,16 +3844,7 @@ async fn real_loki_and_crabka_return_same_empty_series_post_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_detected_fields_step_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4313,16 +3875,7 @@ async fn real_loki_and_crabka_return_same_invalid_detected_fields_step_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_detected_fields_query_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4344,16 +3897,7 @@ async fn real_loki_and_crabka_return_same_invalid_detected_fields_query_error() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_detected_endpoint_range_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4380,16 +3924,7 @@ async fn real_loki_and_crabka_return_same_oversized_detected_endpoint_range_erro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_detected_endpoint_duplicate_start_precedence() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4416,16 +3951,7 @@ async fn real_loki_and_crabka_use_same_detected_endpoint_duplicate_start_precede
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_detected_endpoint_post_body_precedence() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4454,16 +3980,7 @@ async fn real_loki_and_crabka_use_same_detected_endpoint_post_body_precedence() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_start_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4483,16 +4000,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_start_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_since_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4512,16 +4020,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_since_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_zero_query_range_interval_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4545,16 +4044,7 @@ async fn real_loki_and_crabka_return_same_zero_query_range_interval_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_negative_query_range_interval_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4578,16 +4068,7 @@ async fn real_loki_and_crabka_return_same_negative_query_range_interval_result()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_limit_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4607,16 +4088,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_limit_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_negative_query_limit_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4636,16 +4108,7 @@ async fn real_loki_and_crabka_return_same_negative_query_limit_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_format_query_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -4934,16 +4397,7 @@ async fn real_loki_and_crabka_return_same_format_query_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_format_query_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5000,16 +4454,7 @@ async fn real_loki_and_crabka_return_same_format_query_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_metadata_query_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5037,16 +4482,7 @@ async fn real_loki_and_crabka_return_same_invalid_metadata_query_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_metadata_range_errors() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5072,16 +4508,7 @@ async fn real_loki_and_crabka_return_same_oversized_metadata_range_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_metadata_post_body_precedence() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5112,16 +4539,7 @@ async fn real_loki_and_crabka_use_same_metadata_post_body_precedence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_push_label_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5159,16 +4577,7 @@ async fn real_loki_and_crabka_return_same_invalid_push_label_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_stale_push_timestamp_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5206,16 +4615,7 @@ async fn real_loki_and_crabka_return_same_stale_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_push_timestamp_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5253,16 +4653,7 @@ async fn real_loki_and_crabka_return_same_invalid_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_string_push_timestamp_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5286,16 +4677,7 @@ async fn real_loki_and_crabka_return_same_non_string_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_deflated_json_push_response() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5327,16 +4709,7 @@ async fn real_loki_and_crabka_return_same_deflated_json_push_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_malformed_gzip_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5355,16 +4728,7 @@ async fn real_loki_and_crabka_return_same_malformed_gzip_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_malformed_deflate_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5383,16 +4747,7 @@ async fn real_loki_and_crabka_return_same_malformed_deflate_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_unsupported_content_encoding_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5422,16 +4777,7 @@ async fn real_loki_and_crabka_return_same_unsupported_content_encoding_push_erro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_snappy_protobuf_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5447,16 +4793,7 @@ async fn real_loki_and_crabka_return_same_invalid_snappy_protobuf_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_protobuf_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5472,16 +4809,7 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_protobuf_push_response() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5500,16 +4828,7 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_push_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_protobuf_label_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5542,16 +4861,7 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_label_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_protobuf_label_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5584,16 +4894,7 @@ async fn real_loki_and_crabka_return_same_duplicate_protobuf_label_push_error() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_protobuf_stream_label_push_response() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5626,16 +4927,7 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_stream_label_push_respo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_string_protobuf_stream_label_push_response() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5668,16 +4960,7 @@ async fn real_loki_and_crabka_return_same_empty_string_protobuf_stream_label_pus
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_protobuf_timestamp_push_response() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5707,16 +4990,7 @@ async fn real_loki_and_crabka_return_same_missing_protobuf_timestamp_push_respon
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_negative_protobuf_timestamp_push_response() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5776,16 +5050,7 @@ async fn real_loki_and_crabka_return_same_negative_protobuf_timestamp_push_respo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_protobuf_structured_metadata_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5828,16 +5093,7 @@ async fn real_loki_and_crabka_return_same_duplicate_protobuf_structured_metadata
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_protobuf_structured_metadata_name_push_response()
 {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5873,16 +5129,7 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_structured_metadata_n
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_protobuf_structured_metadata_name_push_response() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -5918,16 +5165,7 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_structured_metadata_nam
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6018,16 +5256,7 @@ async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_object_push_timestamp_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6051,16 +5280,7 @@ async fn real_loki_and_crabka_return_same_object_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_array_push_timestamp_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6084,16 +5304,7 @@ async fn real_loki_and_crabka_return_same_array_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_push_line_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6131,16 +5342,7 @@ async fn real_loki_and_crabka_return_same_invalid_push_line_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_incomplete_push_value_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6165,16 +5367,7 @@ async fn real_loki_and_crabka_return_same_incomplete_push_value_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_push_value_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6212,16 +5405,7 @@ async fn real_loki_and_crabka_return_same_empty_push_value_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_object_metadata_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6246,16 +5430,7 @@ async fn real_loki_and_crabka_return_same_non_object_metadata_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_extra_push_value_field_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6280,16 +5455,7 @@ async fn real_loki_and_crabka_return_same_extra_push_value_field_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_array_push_value_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6317,16 +5483,7 @@ async fn real_loki_and_crabka_return_same_non_array_push_value_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_object_push_stream_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6345,16 +5502,7 @@ async fn real_loki_and_crabka_return_same_non_object_push_stream_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_array_push_streams_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6371,16 +5519,7 @@ async fn real_loki_and_crabka_return_same_non_array_push_streams_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_array_push_payload_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6395,16 +5534,7 @@ async fn real_loki_and_crabka_return_same_array_push_payload_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_null_push_payload_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6419,16 +5549,7 @@ async fn real_loki_and_crabka_return_same_null_push_payload_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_push_streams_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6443,16 +5564,7 @@ async fn real_loki_and_crabka_return_same_missing_push_streams_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_push_streams_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6469,16 +5581,7 @@ async fn real_loki_and_crabka_return_same_empty_push_streams_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_push_values_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6501,16 +5604,7 @@ async fn real_loki_and_crabka_return_same_missing_push_values_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_array_push_values_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6534,16 +5628,7 @@ async fn real_loki_and_crabka_return_same_non_array_push_values_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_object_push_labels_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6566,16 +5651,7 @@ async fn real_loki_and_crabka_return_same_non_object_push_labels_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_push_labels_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6597,16 +5673,7 @@ async fn real_loki_and_crabka_return_same_missing_push_labels_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_null_push_labels_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6629,16 +5696,7 @@ async fn real_loki_and_crabka_return_same_null_push_labels_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_null_push_values_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6662,16 +5720,7 @@ async fn real_loki_and_crabka_return_same_null_push_values_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_future_push_timestamp_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6710,16 +5759,7 @@ async fn real_loki_and_crabka_return_same_future_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_future_otlp_timestamp_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6772,16 +5812,7 @@ async fn real_loki_and_crabka_return_same_future_otlp_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_push_label_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6819,16 +5850,7 @@ async fn real_loki_and_crabka_return_same_empty_push_label_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_string_structured_metadata_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6866,16 +5888,7 @@ async fn real_loki_and_crabka_return_same_non_string_structured_metadata_push_er
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_structured_metadata_name_push_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6914,16 +5927,7 @@ async fn real_loki_and_crabka_return_same_invalid_structured_metadata_name_push_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_json_structured_metadata_push_response() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 
@@ -6972,16 +5976,7 @@ async fn real_loki_and_crabka_return_same_duplicate_json_structured_metadata_pus
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_push_label_error() {
-    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
-    let loki = image.start().await.expect("start Loki container");
-    let loki_base = format!(
-        "http://127.0.0.1:{}",
-        loki.get_host_port_ipv4(LOKI_PORT)
-            .await
-            .expect("Loki mapped port")
-    );
+    let (_loki, loki_base) = start_loki().await;
     let http = reqwest::Client::new();
     wait_for_loki_ready(&http, &loki_base).await;
 

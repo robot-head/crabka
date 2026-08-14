@@ -25,15 +25,20 @@ use tempfile::TempDir;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{Host, IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
 };
 use tokio::net::TcpListener;
 use tower::ServiceExt;
+
+mod common;
 
 const GRAFANA_PORT: u16 = 3000;
 const GRAFANA_USER: &str = "admin";
 const GRAFANA_PASSWORD: &str = "admin";
 const HOST_ALIAS: &str = "host.testcontainers.internal";
+/// The Grafana release image that this test pins its datasource behaviour to.
+const GRAFANA_IMAGE: &str = "mirror.gcr.io/grafana/grafana";
+/// The Grafana release tag that this test pins its datasource behaviour to.
+const GRAFANA_TAG: &str = "11.5.2";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
@@ -101,16 +106,16 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     let http = reqwest::Client::new();
     wait_for_crabka_ready(&http, querier_addr).await;
 
-    let grafana = GenericImage::new("mirror.gcr.io/grafana/grafana", "11.5.2")
-        .with_exposed_port(GRAFANA_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("GF_SECURITY_ADMIN_USER", GRAFANA_USER)
-        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", GRAFANA_PASSWORD)
-        .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "false")
-        .with_host(HOST_ALIAS, Host::HostGateway)
-        .start()
-        .await
-        .expect("start Grafana container");
+    let grafana = common::start_container(&format!("{GRAFANA_IMAGE}:{GRAFANA_TAG}"), || {
+        GenericImage::new(GRAFANA_IMAGE, GRAFANA_TAG)
+            .with_exposed_port(GRAFANA_PORT.tcp())
+            .with_wait_for(WaitFor::seconds(5))
+            .with_env_var("GF_SECURITY_ADMIN_USER", GRAFANA_USER)
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", GRAFANA_PASSWORD)
+            .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "false")
+            .with_host(HOST_ALIAS, Host::HostGateway)
+    })
+    .await;
     let grafana_base = format!(
         "http://127.0.0.1:{}",
         grafana

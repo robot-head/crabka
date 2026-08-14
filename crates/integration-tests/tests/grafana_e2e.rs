@@ -12,7 +12,6 @@
 
 use std::{
     collections::BTreeMap,
-    future::Future,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -29,19 +28,20 @@ use tempfile::TempDir;
 use testcontainers::{
     ContainerAsync, CopyTargetOptions, GenericImage, ImageExt,
     core::{Host, IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
 };
 use tokio::task::JoinHandle;
+
+mod common;
 
 const LOKI_PORT: u16 = 3100;
 const GRAFANA_PORT: u16 = 3000;
 const TENANT: &str = "tenant-a";
 const CRABKA_UID: &str = "crabka-loki";
 const LOKI_UID: &str = "real-loki";
+const LOKI_IMAGE: &str = "mirror.gcr.io/grafana/loki";
 const LOKI_IMAGE_TAG: &str = "3.4.2";
+const GRAFANA_IMAGE: &str = "mirror.gcr.io/grafana/grafana";
 const GRAFANA_IMAGE_TAG: &str = "12.3.7";
-const CONTAINER_START_ATTEMPTS: usize = 3;
-const CONTAINER_START_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
 // Booted stack
@@ -245,69 +245,6 @@ async fn wait_for_grafana_datasource(http: &reqwest::Client, base: &str, uid: &s
     }
 }
 
-async fn retry_async<T, E, F, Fut>(what: &str, attempts: usize, delay: Duration, mut op: F) -> T
-where
-    E: std::fmt::Debug,
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-{
-    assert2::assert!(attempts > 0);
-
-    let mut last_error = String::new();
-    for attempt in 1..=attempts {
-        match op().await {
-            Ok(value) => return value,
-            Err(err) => {
-                last_error = format!("{err:?}");
-                if attempt < attempts {
-                    eprintln!("{what} attempt {attempt}/{attempts} failed; retrying: {last_error}");
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    }
-
-    panic!("{what} failed after {attempts} attempts: {last_error}");
-}
-
-async fn start_container_with_retry<R, F>(
-    what: &str,
-    mut request: F,
-) -> ContainerAsync<GenericImage>
-where
-    F: FnMut() -> R,
-    R: AsyncRunner<GenericImage>,
-{
-    retry_async(
-        what,
-        CONTAINER_START_ATTEMPTS,
-        CONTAINER_START_RETRY_DELAY,
-        || request().start(),
-    )
-    .await
-}
-
-#[tokio::test]
-async fn container_start_retry_retries_transient_errors_without_docker() {
-    let attempts = std::cell::Cell::new(0);
-
-    let value = retry_async("synthetic container start", 3, Duration::ZERO, || {
-        let attempt = attempts.get() + 1;
-        attempts.set(attempt);
-        async move {
-            if attempt < 3 {
-                Err("not ready")
-            } else {
-                Ok("started")
-            }
-        }
-    })
-    .await;
-
-    assert2::assert!(value == "started");
-    assert2::assert!(attempts.get() == 3);
-}
-
 async fn push_to_loki(http: &reqwest::Client, base: &str, payload: &Value) {
     let resp = http
         .post(format!("{base}/loki/api/v1/push"))
@@ -325,8 +262,8 @@ async fn boot_stack() -> Stack {
     let (payload, start_ns, end_ns) = dataset(base_ns);
 
     // ---- 1. Real Loki ----
-    let loki = start_container_with_retry("start Loki", || {
-        GenericImage::new("mirror.gcr.io/grafana/loki", LOKI_IMAGE_TAG)
+    let loki = common::start_container(&format!("{LOKI_IMAGE}:{LOKI_IMAGE_TAG}"), || {
+        GenericImage::new(LOKI_IMAGE, LOKI_IMAGE_TAG)
             .with_exposed_port(LOKI_PORT.tcp())
             .with_wait_for(WaitFor::seconds(2))
     })
@@ -425,8 +362,8 @@ async fn boot_stack() -> Stack {
          \x20\x20\x20\x20editable: false\n"
     );
 
-    let grafana = start_container_with_retry("start Grafana", || {
-        GenericImage::new("mirror.gcr.io/grafana/grafana", GRAFANA_IMAGE_TAG)
+    let grafana = common::start_container(&format!("{GRAFANA_IMAGE}:{GRAFANA_IMAGE_TAG}"), || {
+        GenericImage::new(GRAFANA_IMAGE, GRAFANA_IMAGE_TAG)
             .with_exposed_port(GRAFANA_PORT.tcp())
             // Container-level wait is just a short settle; real readiness is the
             // `/api/health` == 200 poll below (robust across Grafana log-stream/text changes).
