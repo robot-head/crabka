@@ -3508,8 +3508,13 @@ fn spawn_query_authorizer_connect(
                 }
             }
         };
-        let mut guard = slot.write().await;
-        *guard = Arc::new(authorizer);
+        // Scope the write guard: every query takes a read lock on this slot, so
+        // holding the writer across the `token.cancelled()` await below would
+        // block every query for the life of the service.
+        {
+            let mut guard = slot.write().await;
+            *guard = Arc::new(authorizer);
+        }
         readiness
             .authorization_connected
             .store(true, AtomicOrdering::SeqCst);

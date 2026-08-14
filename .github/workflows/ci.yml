@@ -1398,15 +1398,19 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    # 90-minute budget, measured rather than guessed. The first run of this job
-    # took 38m50s in the suite step and had still not finished when a 45-minute
-    # job cap cut it off: a cold `-C instrument-coverage` build of this crate's
-    # dependency graph (broker, blockstore, observability, logql, datafusion)
-    # dominates, and the 114-test Loki differential then boots one container per
-    # test on top of it. The Swatinem cache makes later runs far cheaper, so this
-    # ceiling is for the cold case; a genuinely wedged run still surfaces well
-    # inside it, and the bounded preload below catches the registry-stall case
-    # long before the cap matters.
+    # 90-minute ceiling for the cold case: a cold `-C instrument-coverage` build
+    # of this crate's dependency graph (broker, blockstore, observability, logql,
+    # datafusion) dominates, and the 114-test Loki differential then boots one
+    # container per test on top of it. The Swatinem cache makes later runs far
+    # cheaper, so this is headroom rather than an expected duration.
+    #
+    # The earlier 45-minute cap was not the real problem: this job's first two
+    # runs blew past it because a querier deadlock wedged individual tests
+    # forever (the authorizer slot's write guard was held across a shutdown
+    # await, blocking every query). That is fixed in crabka-observability and
+    # covered by tests/observability_querier_authorization.rs. A wedged test can
+    # still only cost this job its cap, and the bounded preload below catches
+    # the registry-stall case long before the cap matters.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
