@@ -211,9 +211,7 @@ fn labels<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> 
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker"]
-async fn real_loki_and_crabka_return_same_buildinfo_shape() {
+async fn start_loki() -> ContainerAsync<GenericImage> {
     let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
         .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
@@ -233,6 +231,7 @@ async fn loki_base_url(loki: &ContainerAsync<GenericImage>) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
 async fn real_loki_and_crabka_return_same_buildinfo_shape() {
     let loki = start_loki().await;
     let loki_base = loki_base_url(&loki).await;
