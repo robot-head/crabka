@@ -2,10 +2,7 @@
   "profile": [],
   "proofs": {
     "Coma": {
-      "vc_fetch_visibility": {
-        "prover": "alt-ergo",
-        "time": 0.01
-      }
+      "vc_fetch_visibility": { "prover": "alt-ergo", "time": 0.081 }
     }
   }
 }

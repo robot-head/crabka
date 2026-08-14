@@ -49,7 +49,7 @@ pub fn fetch_visibility(
 ) -> FetchVisibility {
     let upper_bound = if is_follower { log_end } else { hw };
     let effective_lso = if read_committed && !is_follower {
-        lso.min(hw)
+        if lso < hw { lso } else { hw }
     } else {
         lso
     };
@@ -119,12 +119,13 @@ pub fn effective_share_backlog_model(hwm: i64, spso: i64, log_start: i64) -> Int
 #[ensures(result@ == effective_share_backlog_model(hwm, spso, log_start))]
 #[must_use]
 pub fn effective_share_backlog(hwm: i64, spso: i64, log_start: i64) -> i64 {
-    let base = if spso >= 0 {
-        spso.max(log_start)
+    let base = if spso >= 0 && spso > log_start {
+        spso
     } else {
         log_start
     };
-    hwm.saturating_sub(base).max(0)
+    let difference = hwm.saturating_sub(base);
+    if difference > 0 { difference } else { 0 }
 }
 
 #[cfg(test)]

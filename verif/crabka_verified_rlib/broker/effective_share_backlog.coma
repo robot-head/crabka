@@ -1,23 +1,16 @@
-(* #"/workspace/crabka/crates/verified/src/broker.rs" 122 0 122 74 *)
+(* #"/workspace/crates/verified/src/broker.rs" 121 0 121 74 *)
 
-let%span sbroker = "/workspace/crabka/crates/verified/src/broker.rs" 123 26 123 27
-let%span sbroker'0 = "/workspace/crabka/crates/verified/src/broker.rs" 124 8 124 27
-let%span sbroker'1 = "/workspace/crabka/crates/verified/src/broker.rs" 128 4 128 28
-let%span sbroker'2 = "/workspace/crabka/crates/verified/src/broker.rs" 128 33 128 34
-let%span sbroker'3 = "/workspace/crabka/crates/verified/src/broker.rs" 128 4 128 35
-let%span sbroker'4 = "/workspace/crabka/crates/verified/src/broker.rs" 120 10 120 72
-let%span sbroker'5 = "/workspace/crabka/crates/verified/src/broker.rs" 108 8 108 85
-let%span scmp = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/cmp.rs" 66 26 66 66
-let%span scmp'0 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/cmp.rs" 67 26 67 63
-let%span scmp'1 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/cmp.rs" 68 36 68 40
-let%span scmp'2 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/cmp.rs" 69 26 69 30
-let%span scmp'3 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/cmp.rs" 70 75 70 79
+let%span sbroker = "/workspace/crates/verified/src/broker.rs" 122 26 122 27
+let%span sbroker'0 = "/workspace/crates/verified/src/broker.rs" 127 21 127 45
+let%span sbroker'1 = "/workspace/crates/verified/src/broker.rs" 128 20 128 21
+let%span sbroker'2 = "/workspace/crates/verified/src/broker.rs" 128 44 128 45
+let%span sbroker'3 = "/workspace/crates/verified/src/broker.rs" 119 10 119 72
+let%span sbroker'4 = "/workspace/crates/verified/src/broker.rs" 107 8 107 85
 let%span sord = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/logic/ord.rs" 34 8 34 21
 let%span sord'0 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/logic/ord.rs" 22 8 22 20
 let%span snum = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/num.rs" 347 20 348 51
 let%span snum'0 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/num.rs" 351 26 351 83
 let%span snum'1 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/num.rs" 352 26 352 83
-let%span snum'2 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/num.rs" 27 28 27 33
 
 use creusot.int.Int64
 use creusot.prelude.Any
@@ -26,19 +19,6 @@ use int.Int
 predicate ge_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord] other <= self
 
 meta "rewrite_def" predicate ge_log_Int
-
-function deep_model_i64 [@inline:trivial] (self: Int64.t) : int = [%#snum'2] Int64.to_int self
-
-meta "rewrite_def" function deep_model_i64
-
-let max_i64 (self_: Int64.t) (o: Int64.t) (return (x: Int64.t)) = any
-  [ return (result: Int64.t) ->
-  {[@stop_split] [@expl:max_i64 ensures] ([@stop_split] [@expl:max ensures #0] [%#scmp] ge_log_Int (deep_model_i64 result) (deep_model_i64 self_))
-    /\ ([@stop_split] [@expl:max ensures #1] [%#scmp'0] ge_log_Int (deep_model_i64 result) (deep_model_i64 o))
-    /\ ([@stop_split] [@expl:max ensures #2] [%#scmp'1] result = self_ \/ result = o)
-    /\ ([@stop_split] [@expl:max ensures #3] [%#scmp'2] deep_model_i64 self_ <= deep_model_i64 o -> result = o)
-    /\ ([@stop_split] [@expl:max ensures #4] [%#scmp'3] deep_model_i64 o < deep_model_i64 self_ -> result = self_)}
-    (! return {result}) ]
 
 constant const_MIN: Int64.t = (-9223372036854775808: Int64.t)
 
@@ -60,8 +40,8 @@ let saturating_sub (self_: Int64.t) (rhs: Int64.t) (return (x: Int64.t)) = any
       - Int64.to_int rhs) (Int64.to_int const_MAX) -> Int64.to_int result = Int64.to_int const_MAX)}
     (! return {result}) ]
 
-function effective_share_backlog_model [#"/workspace/crabka/crates/verified/src/broker.rs" 106 0 106 80] (hwm: Int64.t) (spso: Int64.t) (log_start: Int64.t) : int
- = [%#sbroker'5] let base = if ge_log_Int (Int64.to_int spso) 0
+function effective_share_backlog_model [#"/workspace/crates/verified/src/broker.rs" 105 0 105 80] (hwm: Int64.t) (spso: Int64.t) (log_start: Int64.t) : int
+ = [%#sbroker'4] let base = if ge_log_Int (Int64.to_int spso) 0
   /\ gt_log_Int (Int64.to_int spso) (Int64.to_int log_start) then
     Int64.to_int spso
   else
@@ -76,24 +56,30 @@ meta "compute_max_steps" 1000000
 
 meta "select_lsinst" "all"
 
-let effective_share_backlog [#"/workspace/crabka/crates/verified/src/broker.rs" 122 0 122 74] (hwm: Int64.t)
-  (spso: Int64.t) (log_start: Int64.t) (return (x: Int64.t)) = (! bb0
+let effective_share_backlog [#"/workspace/crates/verified/src/broker.rs" 121 0 121 74] (hwm: Int64.t) (spso: Int64.t)
+  (log_start: Int64.t) (return (x: Int64.t)) = (! bb0
   [ bb0 = s0
     [ s0 = [ &_9 <- Int64.ge spso ([%#sbroker] (0: Int64.t)) ] s1
-    | s1 = any [ br0 -> {_9 = false} (! bb3) | br1 -> {_9} (! bb1) ] ]
-  | bb1 = s0 [ s0 = max_i64 [%#sbroker'0] {spso} {log_start} (fun (_x: Int64.t) -> [ &base <- _x ] s1) | s1 = bb4 ]
-  | bb3 = s0 [ s0 = [ &base <- log_start ] s1 | s1 = bb4 ]
-  | bb4 = s0
-    [ s0 = saturating_sub [%#sbroker'1] {hwm} {base} (fun (_x: Int64.t) -> [ &_13 <- _x ] s1)
-    | s1 = max_i64 [%#sbroker'3] {_13} {[%#sbroker'2] (0: Int64.t)} (fun (_x: Int64.t) -> [ &_ret <- _x ] s2)
-    | s2 = return {_ret} ] ]
+    | s1 = any [ br0 -> {_9 = false} (! bb5) | br1 -> {_9} (! bb1) ] ]
+  | bb1 = s0
+    [ s0 = [ &_11 <- Int64.gt spso log_start ] s1 | s1 = any [ br0 -> {_11 = false} (! bb5) | br1 -> {_11} (! bb2) ] ]
+  | bb2 = s0 [ s0 = [ &base <- spso ] s1 | s1 = bb6 ]
+  | bb5 = s0 [ s0 = [ &base <- log_start ] s1 | s1 = bb6 ]
+  | bb6 = s0
+    [ s0 = saturating_sub [%#sbroker'0] {hwm} {base} (fun (_x: Int64.t) -> [ &difference <- _x ] s1)
+    | s1 = [ &_17 <- Int64.gt difference ([%#sbroker'1] (0: Int64.t)) ] s2
+    | s2 = any [ br0 -> {_17 = false} (! bb9) | br1 -> {_17} (! bb8) ] ]
+  | bb8 = s0 [ s0 = [ &_ret <- difference ] s1 | s1 = return {_ret} ]
+  | bb9 = s0 [ s0 = [ &_ret <- [%#sbroker'2] (0: Int64.t) ] s1 | s1 = return {_ret} ] ]
   [ & _ret: Int64.t = Any.any_l ()
   | & hwm: Int64.t = hwm
   | & spso: Int64.t = spso
   | & log_start: Int64.t = log_start
   | & base: Int64.t = Any.any_l ()
   | & _9: bool = Any.any_l ()
-  | & _13: Int64.t = Any.any_l () ])
-  [ return (result: Int64.t) -> {[@stop_split] [@expl:effective_share_backlog ensures] [%#sbroker'4] Int64.to_int result
+  | & _11: bool = Any.any_l ()
+  | & difference: Int64.t = Any.any_l ()
+  | & _17: bool = Any.any_l () ])
+  [ return (result: Int64.t) -> {[@stop_split] [@expl:effective_share_backlog ensures] [%#sbroker'3] Int64.to_int result
     = effective_share_backlog_model hwm spso log_start}
     (! return {result}) ]
