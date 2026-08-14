@@ -1358,8 +1358,11 @@ async fn start_observability(
         config.client_metrics_telemetry_max,
         config.client_metrics_default_interval,
         config.client_metrics_otlp_endpoint.clone(),
+        config.client_metrics_otlp_protocol,
         config.client_metrics_otlp_queue_capacity,
         config.client_metrics_prom_snapshot_ttl,
+        metrics.client_metrics_otlp_dropped_total.clone(),
+        metrics.client_metrics_otlp_failed_total.clone(),
     ));
     metrics.registry.lock().await.register_collector(Box::new(
         crate::client_metrics::prometheus_sink::SharedClientMetricsCollector(
@@ -3979,6 +3982,7 @@ impl BrokerHandle {
         }
         crate::future_log::shutdown_moves(&self.broker.future_logs).await;
         shutdown_partition_writers(&self.broker.partitions).await;
+        self.broker.client_metrics.shutdown().await;
         // Shut down the raft engine so this broker's openraft instance stops
         // participating in elections after the broker is logically dead.
         // Without this, a killed broker's in-process raft engine keeps ticking

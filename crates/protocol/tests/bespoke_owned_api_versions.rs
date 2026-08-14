@@ -22,6 +22,18 @@ fn owned_api_versions_request_roundtrip_cases() {
                 client_software_name: "crabka".to_string(),
                 client_software_version: "0.0.0".to_string(),
                 unknown_tagged_fields: UnknownTaggedFields::default(),
+                ..Default::default()
+            },
+        ),
+        (
+            "v5 routing identity",
+            5,
+            ApiVersionsRequest {
+                client_software_name: "crabka".to_string(),
+                client_software_version: "0.0.0".to_string(),
+                cluster_id: Some("cluster".to_string()),
+                node_id: 7,
+                ..Default::default()
             },
         ),
     ] {

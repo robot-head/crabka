@@ -28,19 +28,6 @@ pub struct StatusLabel {
     pub status: String,
 }
 
-/// Per-query-route outcome label.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct RouteStatusLabel {
-    pub route: String,
-    pub status: String,
-}
-
-/// Per-query-route label for the latency histogram family.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct RouteLabel {
-    pub route: String,
-}
-
 /// Per-tenant label for the accepted-series counter family.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct TenantLabel {
@@ -64,9 +51,6 @@ pub struct ServiceMetrics {
     // COMPACTOR role.
     /// Metric blocks written to object storage by the compactor.
     pub blocks_compacted: Counter,
-    // QUERY (querier) role.
-    pub query_requests: Family<RouteStatusLabel, Counter>,
-    pub query_duration: Family<RouteLabel, Histogram>,
 }
 
 impl ServiceMetrics {
@@ -86,11 +70,6 @@ impl ServiceMetrics {
         let ingest_series: Family<TenantLabel, Counter> = Family::default();
 
         let blocks_compacted = Counter::default();
-
-        let query_requests: Family<RouteStatusLabel, Counter> = Family::default();
-        let query_duration: Family<RouteLabel, Histogram> = Family::new_with_constructor(|| {
-            Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0])
-        });
 
         registry.register(
             "ingest_requests",
@@ -127,17 +106,6 @@ impl ServiceMetrics {
             "Metric blocks written to object storage by the compactor.",
             blocks_compacted.clone(),
         );
-        registry.register(
-            "query_requests",
-            "Query requests handled, labelled by route and outcome status.",
-            query_requests.clone(),
-        );
-        registry.register(
-            "query_duration_seconds",
-            "Query handler latency in seconds, labelled by route.",
-            query_duration.clone(),
-        );
-
         Self {
             registry: Arc::new(Mutex::new(registry)),
             ingest_requests,
@@ -147,8 +115,6 @@ impl ServiceMetrics {
             wal_append_failures,
             ingest_series,
             blocks_compacted,
-            query_requests,
-            query_duration,
         }
     }
 
@@ -193,22 +159,6 @@ impl ServiceMetrics {
             return;
         }
         self.blocks_compacted.inc_by(blocks);
-    }
-
-    /// Records one query request outcome on `route` with its latency.
-    pub fn record_query(&self, route: &str, ok: bool, elapsed: Time) {
-        let status = if ok { "ok" } else { "error" };
-        self.query_requests
-            .get_or_create(&RouteStatusLabel {
-                route: route.into(),
-                status: status.into(),
-            })
-            .inc();
-        self.query_duration
-            .get_or_create(&RouteLabel {
-                route: route.into(),
-            })
-            .observe(elapsed.secs_f64());
     }
 }
 
@@ -271,8 +221,6 @@ mod tests {
         m.wal_append_failures.inc();
         m.record_ingest_series("tenant-a", 5);
         m.record_blocks_compacted(3);
-        m.record_query("query", true, millis(50));
-        m.record_query("query_range", false, millis(1500));
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
@@ -285,11 +233,8 @@ mod tests {
             "crabka_metrics_wal_append_failures_total",
             "crabka_metrics_ingest_series_total",
             "crabka_metrics_blocks_compacted_total",
-            "crabka_metrics_query_requests_total",
-            "crabka_metrics_query_duration_seconds",
             "status=\"ok\"",
             "status=\"error\"",
-            "route=\"query\"",
             "tenant=\"tenant-a\"",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
@@ -312,7 +257,6 @@ mod tests {
         // caller's magnitude through unscaled.
         let m = ServiceMetrics::new();
         m.record_ingest(true, mebibytes(2), 1, millis(250));
-        m.record_query("query", true, secs(2));
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
@@ -320,7 +264,6 @@ mod tests {
         for needle in [
             "crabka_metrics_ingest_bytes_total 2097152",
             "crabka_metrics_ingest_duration_seconds_sum 0.25",
-            "crabka_metrics_query_duration_seconds_sum{route=\"query\"} 2.0",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }

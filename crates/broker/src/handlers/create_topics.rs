@@ -58,6 +58,48 @@ pub(crate) fn round_robin_replicas(
         .collect()
 }
 
+fn manual_replicas(
+    topic: &CreatableTopic,
+    brokers: &[crabka_raft::NodeId],
+) -> Result<Vec<Vec<crabka_raft::NodeId>>, i16> {
+    if topic.num_partitions != -1 || topic.replication_factor != -1 {
+        return Err(codes::INVALID_REQUEST);
+    }
+    let mut by_partition = std::collections::BTreeMap::new();
+    let mut replication_factor = None;
+    for assignment in &topic.assignments {
+        if by_partition.contains_key(&assignment.partition_index)
+            || assignment.broker_ids.is_empty()
+        {
+            return Err(codes::INVALID_REPLICA_ASSIGNMENT);
+        }
+        let mut replicas = Vec::with_capacity(assignment.broker_ids.len());
+        for &broker_id in &assignment.broker_ids {
+            let Ok(broker_id) = u64::try_from(broker_id) else {
+                return Err(codes::INVALID_REPLICA_ASSIGNMENT);
+            };
+            let broker_id = crabka_raft::NodeId(broker_id);
+            if !brokers.contains(&broker_id) || replicas.contains(&broker_id) {
+                return Err(codes::INVALID_REPLICA_ASSIGNMENT);
+            }
+            replicas.push(broker_id);
+        }
+        if replication_factor.is_some_and(|expected| expected != replicas.len()) {
+            return Err(codes::INVALID_REPLICA_ASSIGNMENT);
+        }
+        replication_factor = Some(replicas.len());
+        by_partition.insert(assignment.partition_index, replicas);
+    }
+    if by_partition
+        .keys()
+        .copied()
+        .ne(0..i32::try_from(by_partition.len()).unwrap_or(i32::MAX))
+    {
+        return Err(codes::INVALID_REPLICA_ASSIGNMENT);
+    }
+    Ok(by_partition.into_values().collect())
+}
+
 fn topic_error_result(
     name: String,
     error_code: i16,
@@ -174,6 +216,29 @@ pub(crate) async fn handle(
     // sending malformed RPCs). num_partitions == -1 means "use cluster
     // default"; count it as 1 for accounting.
     let mutation_count = mutation_count(&req);
+    let quota = crate::quota::apply_controller_mutation_quota_mode(
+        &image,
+        &broker.quota_buckets,
+        &ctx.principal.name,
+        ctx.client_id,
+        mutation_count,
+        broker.config.controller_mutation_quota_window,
+        broker.config.quota_throttle_max,
+        version >= 6,
+    );
+    if quota.is_rejected() {
+        let results = req
+            .topics
+            .iter()
+            .map(|topic| {
+                topic_error_result(topic.name.clone(), codes::THROTTLING_QUOTA_EXCEEDED, None)
+            })
+            .collect();
+        return encode_response(
+            &create_topics_response(results, crate::quota::throttle_time_ms(quota.delay())),
+            version,
+        );
+    }
 
     let mut results: Vec<CreatableTopicResult> = Vec::with_capacity(req.topics.len());
 
@@ -182,8 +247,9 @@ pub(crate) async fn handle(
         let partition_count = topic_req.num_partitions;
         let replication_factor = topic_req.replication_factor;
 
-        // Reject invalid partition counts before attempting placement.
-        if partition_count <= 0 {
+        // Reject invalid partition counts before attempting automatic placement.
+        // Manual assignments use -1 for both count and replication factor.
+        if topic_req.assignments.is_empty() && partition_count <= 0 {
             results.push(topic_error_result(name, codes::INVALID_PARTITIONS, None));
             continue;
         }
@@ -206,8 +272,17 @@ pub(crate) async fn handle(
         }
         sorted_brokers.sort_unstable();
 
-        let assignments =
-            round_robin_replicas(&sorted_brokers, partition_count, replication_factor);
+        let assignments = if topic_req.assignments.is_empty() {
+            round_robin_replicas(&sorted_brokers, partition_count, replication_factor)
+        } else {
+            match manual_replicas(&topic_req, &sorted_brokers) {
+                Ok(assignments) => assignments,
+                Err(code) => {
+                    results.push(topic_error_result(name, code, None));
+                    continue;
+                }
+            }
+        };
 
         if assignments.is_empty() {
             // RF > broker count. Surface INVALID_REPLICATION_FACTOR per Apache
@@ -291,8 +366,11 @@ pub(crate) async fn handle(
         };
 
         if error_code == codes::NONE {
-            result.num_partitions = partition_count;
-            result.replication_factor = replication_factor;
+            result.num_partitions = i32::try_from(assignments.len()).unwrap_or(i32::MAX);
+            result.replication_factor = assignments
+                .first()
+                .and_then(|replicas| i16::try_from(replicas.len()).ok())
+                .unwrap_or(-1);
             // KIP-525 (v5+): return an empty configs list to satisfy
             // clients that unconditionally call `configs().stream()`.
             result.configs = Some(Vec::new());
@@ -300,7 +378,7 @@ pub(crate) async fn handle(
         results.push(result);
     }
 
-    finish_response(broker, &image, ctx, results, mutation_count, version).await
+    finish_response(broker, ctx, results, quota.delay(), version).await
 }
 
 fn mutation_count(request: &CreateTopicsRequest) -> u64 {
@@ -308,31 +386,26 @@ fn mutation_count(request: &CreateTopicsRequest) -> u64 {
         .topics
         .iter()
         .map(|topic| {
-            u64::try_from(topic.num_partitions.max(1)).expect("mutation count is positive")
+            if topic.assignments.is_empty() {
+                u64::try_from(topic.num_partitions.max(1)).expect("mutation count is positive")
+            } else {
+                u64::try_from(topic.assignments.len()).unwrap_or(u64::MAX)
+            }
         })
         .sum()
 }
 
 async fn finish_response(
     broker: &Broker,
-    image: &crabka_metadata::MetadataImage,
     context: &crate::handlers::RequestContext<'_>,
     results: Vec<CreatableTopicResult>,
-    mutation_count: u64,
+    delay: Time,
     version: i16,
 ) -> Result<Bytes, BrokerError> {
     audit_created_topics(
         broker.audit_log.as_ref(),
         context,
         created_topic_resources(&results),
-    );
-    let delay = crate::quota::consume_controller_mutation_quota(
-        image,
-        &broker.quota_buckets,
-        &context.principal.name,
-        context.client_id,
-        mutation_count,
-        broker.config.quota_throttle_max,
     );
     let response = create_topics_response(results, crate::quota::throttle_time_ms(delay));
     if delay > <Time as TimeExt>::ZERO {
@@ -439,8 +512,11 @@ fn topic_records(
     let mut records = vec![MetadataRecord::V1Topic(TopicRecord {
         name: request.name.clone(),
         topic_id,
-        partitions: request.num_partitions,
-        replication_factor: request.replication_factor,
+        partitions: i32::try_from(assignments.len()).unwrap_or(i32::MAX),
+        replication_factor: assignments
+            .first()
+            .and_then(|replicas| i16::try_from(replicas.len()).ok())
+            .unwrap_or(-1),
     })];
     records.extend(assignments.iter().enumerate().map(|(index, replicas)| {
         MetadataRecord::V1Partition(PartitionRecord {
@@ -478,10 +554,45 @@ fn topic_records(
 #[cfg(test)]
 mod replica_assignment_tests {
     use assert2::assert;
+    use crabka_protocol::owned::create_topics_request::{
+        CreatableReplicaAssignment, CreatableTopic,
+    };
     use crabka_raft::NodeId;
     use crabka_units::{Time, convert::TimeExt, secs};
 
-    use super::round_robin_replicas;
+    use super::{codes, manual_replicas, round_robin_replicas};
+
+    #[test]
+    fn manual_assignments_preserve_partition_order_and_validate_brokers() {
+        let topic = CreatableTopic {
+            num_partitions: -1,
+            replication_factor: -1,
+            assignments: vec![
+                CreatableReplicaAssignment {
+                    partition_index: 1,
+                    broker_ids: vec![2, 1],
+                    ..Default::default()
+                },
+                CreatableReplicaAssignment {
+                    partition_index: 0,
+                    broker_ids: vec![1, 2],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let assignments =
+            manual_replicas(&topic, &[NodeId(1), NodeId(2)]).expect("valid manual assignments");
+        assert!(assignments == vec![vec![NodeId(1), NodeId(2)], vec![NodeId(2), NodeId(1)]]);
+
+        let mut unknown_broker = topic;
+        unknown_broker.assignments[0].broker_ids[0] = 3;
+        assert!(
+            manual_replicas(&unknown_broker, &[NodeId(1), NodeId(2)])
+                == Err(codes::INVALID_REPLICA_ASSIGNMENT)
+        );
+    }
 
     #[test]
     fn three_brokers_three_partitions_rf_three() {
@@ -565,7 +676,7 @@ mod replica_assignment_tests {
 
 #[cfg(test)]
 mod handler_tests {
-    use std::{net::SocketAddr, sync::Arc, time::Duration};
+    use std::{net::SocketAddr, sync::Arc};
 
     use assert2::{assert, check};
     use crabka_protocol::{
@@ -920,7 +1031,7 @@ mod handler_tests {
     }
 
     #[tokio::test]
-    async fn throttled_create_topics_reports_delay_and_waits() {
+    async fn strict_create_topics_rejects_after_quota_exhaustion() {
         let (broker_handle, _dir) =
             start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
         seed_controller_quota(&broker_handle, 2.0).await;
@@ -929,13 +1040,11 @@ mod handler_tests {
         let peer = peer();
         let req = request(vec![topic("throttled", 5, 1)]);
 
-        let started = tokio::time::Instant::now();
         let resp = drive(&broker, &req, &p, &peer).await;
-        let elapsed = started.elapsed();
 
         assert!(resp.topics.len() == 1);
         let expected = CreateTopicsResponse {
-            throttle_time_ms: 1_000,
+            throttle_time_ms: 0,
             topics: vec![CreatableTopicResult {
                 name: "throttled".into(),
                 // Randomly generated per create; copied from the actual response.
@@ -951,10 +1060,18 @@ mod handler_tests {
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
-        assert!(
-            elapsed >= Duration::from_millis(900),
-            "handler must wait for the advertised throttle, elapsed={elapsed:?}"
-        );
+
+        let rejected = drive(&broker, &request(vec![topic("rejected", 1, 1)]), &p, &peer).await;
+        let expected = CreateTopicsResponse {
+            throttle_time_ms: 1_000,
+            topics: vec![CreatableTopicResult {
+                name: "rejected".into(),
+                error_code: codes::THROTTLING_QUOTA_EXCEEDED,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(rejected == expected);
         broker_handle.shutdown().await;
     }
 }

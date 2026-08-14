@@ -6,11 +6,16 @@
 //! anywhere.
 #![doc(html_root_url = "https://docs.rs/crabka-verified/0.4.0")]
 
+pub mod broker;
 pub mod compaction;
 pub mod consensus;
 pub mod log_index;
 pub mod offset_allocator;
 
+pub use broker::{
+    FetchVisibility, delete_records_offset_out_of_range, delete_records_target,
+    effective_share_backlog, fetch_visibility,
+};
 pub use compaction::{
     BatchMeta, RecordMeta, RetainDecision, TxnDataState, compute_horizon, retain_decision,
 };

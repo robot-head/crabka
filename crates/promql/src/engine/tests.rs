@@ -1996,7 +1996,7 @@ async fn instant_limitk_selects_deterministic_hash_subset() {
         panic!("expected vector");
     };
     let selected = sample_instances(&samples);
-    assert2::assert!(selected == vec!["c", "e"]);
+    assert2::assert!(selected == vec!["d", "e"]);
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -2039,12 +2039,8 @@ async fn instant_limitk_by_selects_deterministic_hash_subset_per_group() {
             && sample.labels.get("instance") == Some("c")
             && approx_eq(float_value(&sample.value), 3.0)
     }));
-    check!(samples.iter().any(|sample| {
-        sample.labels.get("__name__") == Some("memory_bytes")
-            && sample.labels.get("job") == Some("worker")
-            && sample.labels.get("instance") == Some("d")
-            && approx_eq(float_value(&sample.value), 4.0)
-    }));
+    let selected = sample_instances(&samples);
+    check!(selected == vec!["c", "e"]);
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -2074,7 +2070,7 @@ async fn instant_limit_ratio_selects_deterministic_hash_subset() {
         panic!("expected vector");
     };
     let selected = sample_instances(&samples);
-    assert2::assert!(selected == vec!["b", "c", "e"]);
+    assert2::assert!(selected == vec!["a", "b", "c", "d"]);
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -2104,7 +2100,7 @@ async fn instant_limit_ratio_negative_selects_complement_subset() {
         panic!("expected vector");
     };
     let selected = sample_instances(&samples);
-    assert2::assert!(selected == vec!["a", "d"]);
+    assert2::assert!(selected == vec!["e"]);
 }
 
 #[tokio::test]

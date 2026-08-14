@@ -921,6 +921,41 @@ mod tests {
     }
 
     #[test]
+    fn group_config_accepts_share_offset_reset_earliest() {
+        use crate::coordinator::unified::streams::config::{
+            KEY_SHARE_AUTO_OFFSET_RESET, StreamsGroupConfig,
+        };
+
+        let resource = AlterConfigsResource {
+            resource_type: RESOURCE_TYPE_GROUP,
+            resource_name: "share-workers".into(),
+            configs: vec![AlterableConfig {
+                name: KEY_SHARE_AUTO_OFFSET_RESET.into(),
+                config_operation: OP_SET,
+                value: Some("earliest".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut out = AlterConfigsResourceResponse::default();
+        let mut records = Vec::new();
+        handle_group_scoped(
+            &resource,
+            &MetadataImage::new(uuid::Uuid::nil()),
+            &StreamsGroupConfig::default(),
+            &mut out,
+            &mut records,
+        );
+        assert!(out.error_code == codes::NONE);
+        assert!(matches!(
+            records.as_slice(),
+            [MetadataRecord::V1GroupConfig(record)]
+                if record.configs.get(KEY_SHARE_AUTO_OFFSET_RESET).map(String::as_str)
+                    == Some("earliest")
+        ));
+    }
+
+    #[test]
     fn group_config_rejects_values_outside_broker_bounds() {
         use crate::coordinator::unified::streams::config::{
             KEY_SESSION_TIMEOUT_MS, StreamsGroupConfig,

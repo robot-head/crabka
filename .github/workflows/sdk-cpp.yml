@@ -56,7 +56,7 @@ jobs:
           toolchain: '1.97.1'
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: '1.23.x'
+          go-version: '1.26.x'
       - name: Generate SDK stubs
         run: |
           go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate

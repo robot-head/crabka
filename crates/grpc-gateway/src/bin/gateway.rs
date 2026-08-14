@@ -608,7 +608,7 @@ async fn run(
     // Membership: tail the routing table, and install the publisher BEFORE the
     // ownership consumer starts so its first assignment is published.
     let membership = Arc::new(MembershipStore::new_with_policy(&config.runtime));
-    spawn_membership_reader(&config, &membership, &node_id, &shutdown);
+    spawn_membership_reader(&config, &membership, &node_id, &shutdown, &readiness);
     let publisher = Arc::new(
         MembershipPublisher::new_with_policy(
             &config.bootstrap,
@@ -623,7 +623,7 @@ async fn run(
     );
     store.set_membership(publisher);
 
-    spawn_ownership_consumer(&config, &store, &shutdown);
+    spawn_ownership_consumer(&config, &store, &shutdown, &readiness);
     spawn_readiness_watcher(
         store.clone(),
         readiness.clone(),
@@ -664,7 +664,7 @@ async fn run(
 
     // Spawn outbound delivery tasks with the shared codec (so `decode_to_json`
     // subscriptions can de-frame Confluent-framed values to JSON).
-    spawn_outbound_subscriptions(&config, &shutdown, codec.clone()).await?;
+    spawn_outbound_subscriptions(&config, &shutdown, &readiness, codec.clone()).await?;
 
     let produce = Box::pin(ProduceCore::new_with_policy(
         &config.bootstrap,
@@ -771,6 +771,7 @@ fn spawn_membership_reader(
     membership: &Arc<MembershipStore>,
     node_id: &str,
     shutdown: &CancellationToken,
+    readiness: &Readiness,
 ) {
     let membership = membership.clone();
     let bootstrap = config.bootstrap.clone();
@@ -780,19 +781,25 @@ fn spawn_membership_reader(
     let shutdown = shutdown.clone();
     let security = config.broker_security.clone();
     let policy = config.runtime.clone();
+    let readiness = readiness.clone();
     tokio::spawn(async move {
-        if let Err(e) = membership
+        let result = membership
             .run_membership_with_policy(
                 bootstrap,
                 client_id,
                 topic,
                 group,
-                shutdown,
+                shutdown.clone(),
                 (security, policy),
             )
-            .await
-        {
-            tracing::error!(error = %e, "membership reader exited with error");
+            .await;
+        if !shutdown.is_cancelled() {
+            readiness.set_not_ready();
+            match result {
+                Ok(()) => tracing::error!("membership reader stopped unexpectedly"),
+                Err(error) => tracing::error!(%error, "membership reader stopped unexpectedly"),
+            }
+            shutdown.cancel();
         }
     });
 }
@@ -801,25 +808,32 @@ fn spawn_ownership_consumer(
     config: &GatewayConfig,
     store: &Arc<DedupStore>,
     shutdown: &CancellationToken,
+    readiness: &Readiness,
 ) {
     let store = store.clone();
     let (bootstrap, client_id, dedup_topic, ownership_group) = ownership_consumer_inputs(config);
     let shutdown = shutdown.clone();
     let security = config.broker_security.clone();
     let policy = config.runtime.clone();
+    let readiness = readiness.clone();
     tokio::spawn(async move {
-        if let Err(e) = store
+        let result = store
             .run_ownership_with_policy(
                 bootstrap,
                 client_id,
                 dedup_topic,
                 ownership_group,
-                shutdown,
+                shutdown.clone(),
                 (security, policy),
             )
-            .await
-        {
-            tracing::error!(error = %e, "dedup ownership task exited with error");
+            .await;
+        if !shutdown.is_cancelled() {
+            readiness.set_not_ready();
+            match result {
+                Ok(()) => tracing::error!("dedup ownership task stopped unexpectedly"),
+                Err(error) => tracing::error!(%error, "dedup ownership task stopped unexpectedly"),
+            }
+            shutdown.cancel();
         }
     });
 }
@@ -852,6 +866,7 @@ fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness, poll_in
 async fn spawn_outbound_subscriptions(
     config: &GatewayConfig,
     shutdown: &CancellationToken,
+    readiness: &Readiness,
     codec: Arc<dyn RecordCodec>,
 ) -> anyhow::Result<()> {
     if config.outbound.is_empty() {
@@ -871,7 +886,14 @@ async fn spawn_outbound_subscriptions(
             .map_err(|e| anyhow::anyhow!("build outbound dlq producer: {e}"))?,
     );
     for sub in &config.outbound {
-        spawn_outbound_delivery(sub, config, dlq_producer.clone(), shutdown, codec.clone());
+        spawn_outbound_delivery(
+            sub,
+            config,
+            dlq_producer.clone(),
+            shutdown,
+            readiness,
+            codec.clone(),
+        );
     }
     Ok(())
 }
@@ -881,6 +903,7 @@ fn spawn_outbound_delivery(
     config: &GatewayConfig,
     dlq_producer: Arc<crabka_client_producer::Producer>,
     shutdown: &CancellationToken,
+    readiness: &Readiness,
     codec: Arc<dyn RecordCodec>,
 ) {
     let sub = sub.clone();
@@ -890,19 +913,27 @@ fn spawn_outbound_delivery(
     let security = config.broker_security.clone();
     let poll_timeout = config.runtime.consumer_poll_timeout;
     let policy = config.runtime.clone();
+    let readiness = readiness.clone();
     tokio::spawn(async move {
-        if let Err(e) = crabka_grpc_gateway::outbound::run_subscription_with_policy(
+        let result = crabka_grpc_gateway::outbound::run_subscription_with_policy(
             sub,
             bootstrap,
             client_id,
             dlq_producer,
-            shutdown,
+            shutdown.clone(),
             (security, poll_timeout, policy),
             codec,
         )
-        .await
-        {
-            tracing::error!(error = %e, "outbound delivery task exited with error");
+        .await;
+        if !shutdown.is_cancelled() {
+            readiness.set_not_ready();
+            match result {
+                Ok(()) => tracing::error!("outbound delivery task stopped unexpectedly"),
+                Err(error) => {
+                    tracing::error!(%error, "outbound delivery task stopped unexpectedly");
+                }
+            }
+            shutdown.cancel();
         }
     });
 }

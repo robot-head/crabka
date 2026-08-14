@@ -2423,6 +2423,7 @@ dependencies = [
  "dashmap",
  "exponential-backoff",
  "futures-util",
+ "hex",
  "java_regex",
  "jsonpath-rust",
  "ktls",
@@ -2462,6 +2463,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "toml",
+ "tonic",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -3751,6 +3753,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tikv-jemallocator",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -3791,6 +3794,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -7291,9 +7295,9 @@ dependencies = [
 
 [[package]]
 name = "http-body-util"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f41fd6a08e4d4ec69df65976da761afd5ad5e58a9d4acb46bd1c953a9e3ff2"
+checksum = "23169fe34a5fbcdd3f3862e78fb9b6fccd5f02a6dc6f732547005d45631ce71c"
 dependencies = [
  "bytes",
  "futures-core",
@@ -13844,7 +13848,7 @@ dependencies = [
 [[package]]
 name = "testcontainers-modules"
 version = "0.15.0"
-source = "git+https://github.com/testcontainers/testcontainers-rs-modules-community?rev=390054380a9c30a5f91051933444ae827b50398b#390054380a9c30a5f91051933444ae827b50398b"
+source = "git+https://github.com/testcontainers/testcontainers-rs-modules-community?rev=d69e3a09397532accea9d9e907fecc280b1513a8#d69e3a09397532accea9d9e907fecc280b1513a8"
 dependencies = [
  "testcontainers",
 ]

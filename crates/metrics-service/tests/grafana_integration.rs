@@ -23,7 +23,7 @@
 //! `with_host(.., Host::HostGateway)`. Docker exposes the host to a container
 //! this way on Linux, macOS, and Windows.
 
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use crabka_metrics::{
@@ -52,6 +52,13 @@ use tokio::sync::oneshot;
 mod diff_corpus;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Tenant header that Grafana forwards to Crabka.
 ///
@@ -1338,7 +1345,8 @@ async fn start_grafana(
 ) -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag =
         std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| GRAFANA_IMAGE_TAG.to_string());
-    Ok(
+    Ok(tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
         GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
             .with_exposed_port(GRAFANA_PORT.tcp())
             // Grafana writes its go logger to STDOUT (verified: the "HTTP Server
@@ -1357,9 +1365,9 @@ async fn start_grafana(
             .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "true")
             .with_env_var("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin")
             .with_env_var("GF_AUTH_BASIC_ENABLED", "false")
-            .start()
-            .await?,
+            .start(),
     )
+    .await??)
 }
 
 async fn mapped_base_url(

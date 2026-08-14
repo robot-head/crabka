@@ -1,16 +1,20 @@
 codecov:
   notify:
-    # Wait for all eighteen coverage uploads before posting. Most flags upload
-    # once; workspace-integration uploads one report from each of two shards.
-    # status checks or PR comments. Otherwise the first upload triggers a
-    # report against the partial coverage, which shows a misleading drop
-    # until the rest of the matrix lands. The flags below must match the
-    # `flags:` values in .github/workflows/ci.yml.
-    after_n_builds: 18
+    # Wait for all nineteen coverage uploads before posting status checks or PR
+    # comments. Most flags upload once; workspace-integration uploads three
+    # reports — one from each of the two `workspace-integration-coverage` shards
+    # plus one from `observability-differential`, which owns the Docker-gated
+    # Loki/Grafana suites but keeps their lines under the same flag. Otherwise
+    # the first upload triggers a report against the partial coverage, which
+    # shows a misleading drop until the rest of the matrix lands. This count and
+    # the flags below must match the `flags:` values in
+    # .github/workflows/ci.yml — adding or removing an upload without updating
+    # it makes codecov wait for a report that never arrives.
+    after_n_builds: 19
     wait_for_ci: true
 
 comment:
-  after_n_builds: 18
+  after_n_builds: 19
   require_changes: false
 
 coverage:

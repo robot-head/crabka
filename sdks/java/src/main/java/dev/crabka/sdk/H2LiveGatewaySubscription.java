@@ -16,6 +16,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import okhttp3.Headers;
+import okhttp3.internal.connection.BufferedSocketKt;
 import okhttp3.internal.concurrent.TaskRunner;
 import okhttp3.internal.http2.ErrorCode;
 import okhttp3.internal.http2.Http2Connection;
@@ -195,7 +196,7 @@ final class H2LiveGatewaySubscription implements LiveSubscription {
         openedSocket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MILLIS);
 
         Http2Connection openedConnection = new Http2Connection.Builder(true, TaskRunner.INSTANCE)
-                .socket(openedSocket, authority)
+                .socket(BufferedSocketKt.asBufferedSocket(openedSocket), authority)
                 .listener(Http2Connection.Listener.REFUSE_INCOMING_STREAMS)
                 .build();
         resources.register(openedConnection::close);

@@ -4470,6 +4470,40 @@ mod tests {
         assert2::assert!(leader.following_leader().is_none());
     }
 
+    #[tokio::test]
+    async fn follower_fetch_redirects_to_current_leader() {
+        let (mut follower, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        follower.on_event(Event::ReceiveBeginQuorumEpoch {
+            leader_id: NodeId(2),
+            leader_epoch: 1,
+        });
+        let (reply, mut response) = oneshot::channel();
+
+        follower.on_inbound(Inbound::Fetch {
+            req: wire::PeerRequest::Fetch {
+                from: NodeId(3),
+                fetch_epoch: 1,
+                fetch_offset: 0,
+            }
+            .encode(),
+            reply,
+        });
+
+        let body = response
+            .try_recv()
+            .expect("follower returned Fetch redirect");
+        let decoded = wire::PeerResponse::decode_fetch(&body).expect("decode Fetch redirect");
+        assert2::assert!(matches!(
+            decoded,
+            wire::PeerResponse::Fetch {
+                leader_id: NodeId(2),
+                leader_epoch: 1,
+                records,
+                ..
+            } if records.is_empty()
+        ));
+    }
+
     #[test]
     fn direct_single_voter_submit_applies_image_and_resolves_waiter() {
         let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);

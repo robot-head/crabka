@@ -7,11 +7,19 @@
 //! ingests identical data into both. It then drives a LogQL corpus THROUGH
 //! Grafana's datasource-proxy and asserts crabka == Loki.
 //!
-//! These are Docker-dependent integration tests. CI runs them with nextest
-//! `--include-ignored`. They are intentionally NOT `#[ignore]`d.
+//! Cargo ignores the three corpus tests by default, because they pull and run
+//! `mirror.gcr.io/grafana/loki` and `mirror.gcr.io/grafana/grafana` under
+//! Docker. The `observability-differential` job in `.github/workflows/ci.yml`
+//! preloads both images and runs them. Run them locally with:
+//!
+//! `cargo test -p crabka-integration-tests --test grafana_e2e -- --ignored --nocapture`
+//!
+//! `container_start_retry_retries_transient_errors_without_docker` exercises the
+//! retry helper against a stub, needs no daemon, and stays un-ignored.
 
 use std::{
     collections::BTreeMap,
+    future::Future,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -28,20 +36,24 @@ use tempfile::TempDir;
 use testcontainers::{
     ContainerAsync, CopyTargetOptions, GenericImage, ImageExt,
     core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
 };
 use tokio::task::JoinHandle;
-
-mod common;
 
 const LOKI_PORT: u16 = 3100;
 const GRAFANA_PORT: u16 = 3000;
 const TENANT: &str = "tenant-a";
 const CRABKA_UID: &str = "crabka-loki";
 const LOKI_UID: &str = "real-loki";
-const LOKI_IMAGE: &str = "mirror.gcr.io/grafana/loki";
 const LOKI_IMAGE_TAG: &str = "3.4.2";
-const GRAFANA_IMAGE: &str = "mirror.gcr.io/grafana/grafana";
 const GRAFANA_IMAGE_TAG: &str = "12.3.7";
+const CONTAINER_START_ATTEMPTS: usize = 3;
+const CONTAINER_START_RETRY_DELAY: Duration = Duration::from_secs(3);
+/// The deadline for one container start attempt, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own, so a
+/// stalled pull never returns and the retry loop never gets a second attempt.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 
 // ---------------------------------------------------------------------------
 // Booted stack
@@ -245,6 +257,81 @@ async fn wait_for_grafana_datasource(http: &reqwest::Client, base: &str, uid: &s
     }
 }
 
+async fn retry_async<T, E, F, Fut>(what: &str, attempts: usize, delay: Duration, mut op: F) -> T
+where
+    E: std::fmt::Debug,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    assert2::assert!(attempts > 0);
+
+    let mut last_error = String::new();
+    for attempt in 1..=attempts {
+        match op().await {
+            Ok(value) => return value,
+            Err(err) => {
+                last_error = format!("{err:?}");
+                if attempt < attempts {
+                    eprintln!("{what} attempt {attempt}/{attempts} failed; retrying: {last_error}");
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    panic!("{what} failed after {attempts} attempts: {last_error}");
+}
+
+async fn start_container_with_retry<R, F>(
+    what: &str,
+    mut request: F,
+) -> ContainerAsync<GenericImage>
+where
+    F: FnMut() -> R,
+    R: AsyncRunner<GenericImage>,
+{
+    retry_async(
+        what,
+        CONTAINER_START_ATTEMPTS,
+        CONTAINER_START_RETRY_DELAY,
+        || {
+            // Build the future outside the async block so the closure holds no
+            // borrow across an await point.
+            let started = request().start();
+            async move {
+                // A stalled pull never returns. Bound the attempt, and let the
+                // retry loop treat the deadline as one more transient failure.
+                match tokio::time::timeout(CONTAINER_START_TIMEOUT, started).await {
+                    Ok(result) => result.map_err(|err| format!("{err:?}")),
+                    Err(elapsed) => Err(format!("container start timed out: {elapsed}")),
+                }
+            }
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn container_start_retry_retries_transient_errors_without_docker() {
+    let attempts = std::cell::Cell::new(0);
+
+    let value = retry_async("synthetic container start", 3, Duration::ZERO, || {
+        let attempt = attempts.get() + 1;
+        attempts.set(attempt);
+        async move {
+            if attempt < 3 {
+                Err("not ready")
+            } else {
+                Ok("started")
+            }
+        }
+    })
+    .await;
+
+    assert2::assert!(value == "started");
+    assert2::assert!(attempts.get() == 3);
+}
+
 async fn push_to_loki(http: &reqwest::Client, base: &str, payload: &Value) {
     let resp = http
         .post(format!("{base}/loki/api/v1/push"))
@@ -262,8 +349,8 @@ async fn boot_stack() -> Stack {
     let (payload, start_ns, end_ns) = dataset(base_ns);
 
     // ---- 1. Real Loki ----
-    let loki = common::start_container(&format!("{LOKI_IMAGE}:{LOKI_IMAGE_TAG}"), || {
-        GenericImage::new(LOKI_IMAGE, LOKI_IMAGE_TAG)
+    let loki = start_container_with_retry("start Loki", || {
+        GenericImage::new("mirror.gcr.io/grafana/loki", LOKI_IMAGE_TAG)
             .with_exposed_port(LOKI_PORT.tcp())
             .with_wait_for(WaitFor::seconds(2))
     })
@@ -335,6 +422,16 @@ async fn boot_stack() -> Stack {
     let querier_task = tokio::spawn(async move {
         let _ = axum::serve(listener, querier).await;
     });
+    // The querier binds before its WAL consumer and its broker-backed query
+    // authorizer connect, and fails closed on every query until both are up.
+    // Provisioning Grafana against it earlier makes the first proxied query
+    // compare an authorization error against a real Loki result.
+    wait_for_http_ok(
+        &http,
+        &format!("http://127.0.0.1:{querier_port}/ready"),
+        "crabka querier",
+    )
+    .await;
 
     // ---- 3. Grafana with both datasources provisioned ----
     let datasources_yaml = format!(
@@ -362,8 +459,8 @@ async fn boot_stack() -> Stack {
          \x20\x20\x20\x20editable: false\n"
     );
 
-    let grafana = common::start_container(&format!("{GRAFANA_IMAGE}:{GRAFANA_IMAGE_TAG}"), || {
-        GenericImage::new(GRAFANA_IMAGE, GRAFANA_IMAGE_TAG)
+    let grafana = start_container_with_retry("start Grafana", || {
+        GenericImage::new("mirror.gcr.io/grafana/grafana", GRAFANA_IMAGE_TAG)
             .with_exposed_port(GRAFANA_PORT.tcp())
             // Container-level wait is just a short settle; real readiness is the
             // `/api/health` == 200 poll below (robust across Grafana log-stream/text changes).
@@ -767,6 +864,7 @@ const METRIC_QUERIES: &[(&str, &str)] = &[
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
 async fn grafana_e2e_log_queries_match_loki() {
     let stack = boot_stack().await;
     let mismatches = run_corpus(&stack, LOG_QUERIES).await;
@@ -777,6 +875,7 @@ async fn grafana_e2e_log_queries_match_loki() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
 async fn grafana_e2e_metric_queries_match_loki() {
     let stack = boot_stack().await;
     let mismatches = run_corpus(&stack, METRIC_QUERIES).await;
@@ -787,6 +886,7 @@ async fn grafana_e2e_metric_queries_match_loki() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
 async fn grafana_e2e_metadata_endpoints_match_loki() {
     let stack = boot_stack().await;
 

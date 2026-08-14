@@ -182,6 +182,8 @@ struct RuntimeArgs {
     operator_recovery_deadline: Option<Time>,
     #[arg(long, env = "CRABKA_QUOTA_THROTTLE_MAX", value_parser = crabka_units::parse::positive_time)]
     quota_throttle_max: Option<Time>,
+    #[arg(long, env = "CRABKA_CONTROLLER_MUTATION_QUOTA_WINDOW", value_parser = crabka_units::parse::positive_time)]
+    controller_mutation_quota_window: Option<Time>,
     #[arg(long, env = "CRABKA_SELF_REGISTRATION_MAX_ATTEMPTS", value_parser = clap::value_parser!(u32).range(1..))]
     self_registration_max_attempts: Option<u32>,
     #[arg(long, env = "CRABKA_OBSERVER_FETCH_MAX", value_parser = crabka_units::parse::positive_byte_size)]
@@ -434,6 +436,7 @@ impl RuntimeArgs {
             unclean_recovery_balanced_deadline,
             operator_recovery_deadline,
             quota_throttle_max,
+            controller_mutation_quota_window,
             offsets_topic_metadata_wait_timeout,
             producer_id_expiration,
             producer_id_expiration_scan_interval,
@@ -946,6 +949,7 @@ impl Args {
         node_id: u64,
         metrics_listen_addr: Option<SocketAddr>,
         client_metrics_otlp_endpoint: Option<String>,
+        client_metrics_otlp_protocol: crabka_broker::telemetry::OtlpProtocol,
     ) -> BrokerConfig {
         BrokerConfig {
             broker_id: self.broker_id,
@@ -971,6 +975,7 @@ impl Args {
             metrics_listen_addr,
             profiling: self.profiling.clone(),
             client_metrics_otlp_endpoint,
+            client_metrics_otlp_protocol,
             delegation_token_secret_key: self
                 .delegation_token_secret_key
                 .take()
@@ -1048,6 +1053,11 @@ async fn broker_main() -> Result<(), Box<dyn std::error::Error>> {
         "crabka-broker",
     )?;
     let client_metrics_otlp_endpoint = otlp.as_ref().map(|cfg| cfg.endpoint.clone());
+    let client_metrics_otlp_protocol = otlp
+        .as_ref()
+        .map_or(crabka_broker::telemetry::OtlpProtocol::Grpc, |cfg| {
+            cfg.protocol
+        });
     let telemetry = crabka_broker::telemetry::init(
         otlp,
         "crabka_broker=info,crabka_log=info,info",
@@ -1103,6 +1113,7 @@ async fn broker_main() -> Result<(), Box<dyn std::error::Error>> {
         node_id,
         metrics_listen_addr,
         client_metrics_otlp_endpoint,
+        client_metrics_otlp_protocol,
     );
     if let Some(roles) = roles {
         config.roles = roles;

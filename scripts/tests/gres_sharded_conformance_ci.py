@@ -21,7 +21,7 @@ def validate(
     required_job = [
         "services:",
         "postgres:",
-        "postgres:18",
+        "postgres:18.4",
         "CRABKA_GRES_SHARDED_CONFORMANCE_MODE: live",
         "./scripts/gres-sharded-conformance.sh",
         "if: ${{ !cancelled() }}",

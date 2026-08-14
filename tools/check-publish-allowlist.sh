@@ -21,7 +21,9 @@ allowlist = {
     "crabka-compression",
     "crabka-connect",
     "crabka-connect-derive",
+    "crabka-ids",
     "crabka-log",
+    "crabka-metadata",
     "crabka-pgcatalog",
     "crabka-pgexec",
     "crabka-pgkv",
@@ -38,6 +40,8 @@ allowlist = {
     # pipeline, stays private.
     "crabka-trace-context",
     "crabka-units",
+    "crabka-verified",
+    "crabka-voters",
 }
 
 metadata_path = pathlib.Path(sys.argv[1])
@@ -53,6 +57,22 @@ publishable = {
 }
 unexpected_publishable = sorted(publishable - allowlist)
 private_allowlisted = sorted(allowlist - publishable)
+private_runtime_dependencies = sorted(
+    f"{name} -> {dependency['name']}"
+    for name in allowlist & packages.keys()
+    for dependency in packages[name]["dependencies"]
+    if dependency["name"] in packages
+    and dependency["name"] not in allowlist
+    and dependency["kind"] != "dev"
+)
+versioned_workspace_dev_dependencies = sorted(
+    f"{name} -> {dependency['name']}"
+    for name in allowlist & packages.keys()
+    for dependency in packages[name]["dependencies"]
+    if dependency["name"] in packages
+    and dependency["kind"] == "dev"
+    and dependency["req"] != "*"
+)
 
 release_plz = tomllib.loads(pathlib.Path("release-plz.toml").read_text())
 release_package_entries = release_plz.get("package", [])
@@ -92,6 +112,16 @@ if private_allowlisted:
     errors.append(
         "allowlisted packages are not publishable in Cargo metadata:\n"
         + "\n".join(private_allowlisted)
+    )
+if private_runtime_dependencies:
+    errors.append(
+        "published packages depend on private workspace packages:\n"
+        + "\n".join(private_runtime_dependencies)
+    )
+if versioned_workspace_dev_dependencies:
+    errors.append(
+        "published packages have versioned workspace dev-dependencies:\n"
+        + "\n".join(versioned_workspace_dev_dependencies)
     )
 if duplicate_release_entries:
     errors.append(

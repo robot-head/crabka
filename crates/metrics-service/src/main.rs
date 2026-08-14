@@ -247,7 +247,7 @@ enum Target {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let _telemetry = crabka_telemetry::init(
+    let telemetry = crabka_telemetry::init(
         OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
             "metrics-service",
@@ -258,21 +258,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "info",
         "crabka-metrics-service",
     )?;
-    let metrics = crabka_promql::metrics::ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin_from_env_with_config(
-        "0.0.0.0:9404",
-        crabka_promql::metrics::metrics_router(metrics.registry.clone()),
-        cli.profiling.clone(),
-    )
-    .await?;
+    let result = async {
+        let metrics = crabka_promql::metrics::ServiceMetrics::new();
+        let admin = crabka_telemetry::profiling::spawn_admin_from_env_with_config(
+            "0.0.0.0:9404",
+            crabka_promql::metrics::metrics_router(metrics.registry.clone()),
+            cli.profiling.clone(),
+        )
+        .await?;
 
-    match cli.target {
-        Target::Querier => run_querier(cli, metrics).await?,
-        Target::QueryFrontend => run_query_frontend(cli, metrics).await?,
-        Target::Ruler => run_ruler(cli, metrics).await?,
+        let role = async {
+            match cli.target {
+                Target::Querier => run_querier(cli, metrics).await?,
+                Target::QueryFrontend => run_query_frontend(cli, metrics).await?,
+                Target::Ruler => run_ruler(cli, metrics).await?,
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        tokio::select! {
+            result = role => result?,
+            result = crabka_telemetry::profiling::await_admin_exit(admin) => result?,
+        }
+        Ok(())
     }
-
-    Ok(())
+    .await;
+    telemetry.shutdown();
+    result
 }
 
 #[tracing::instrument(

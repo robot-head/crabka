@@ -48,19 +48,8 @@ use crate::{
     broker::Broker,
     codes,
     error::BrokerError,
-    handlers::authorized_operations::authorized_operations_bits,
+    handlers::{authorized_operations::authorized_operations_bits, is_internal_topic},
 };
-
-/// Returns `true` for Crabka's three internal topics.
-///
-/// Responses set the `is_internal` flag on these topics, so
-/// `kafka-topics --list` and related tools do not show them by default.
-fn is_internal_topic(name: &str) -> bool {
-    matches!(
-        name,
-        "__consumer_offsets" | "__transaction_state" | "__remote_log_metadata"
-    )
-}
 
 // Read-only handler — never suspends. The `async fn` shape matches the
 // other inline-intercept handlers (DescribeCluster, DescribeGroups) so

@@ -17,7 +17,11 @@ use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_client_producer::{ConsumerGroupMetadata, Producer, ProducerRecord};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    find_coordinator_request::FindCoordinatorRequest,
+    init_producer_id_request::InitProducerIdRequest,
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
 
@@ -56,6 +60,53 @@ async fn create_topic(bootstrap: &str, name: &str) {
         "create_topic {name}: error_code={}",
         cr.topics[0].error_code
     );
+}
+
+async fn init_transaction(
+    client: &crabka_client_core::Client,
+    transactional_id: &str,
+) -> (i64, i16) {
+    let coordinator = client
+        .send(FindCoordinatorRequest {
+            key: transactional_id.into(),
+            key_type: 1,
+            coordinator_keys: vec![transactional_id.into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        coordinator.error_code == 0
+            || coordinator
+                .coordinators
+                .iter()
+                .all(|entry| entry.error_code == 0),
+        "FindCoordinator: {coordinator:?}"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = client
+            .send(InitProducerIdRequest {
+                transactional_id: Some(transactional_id.into()),
+                transaction_timeout_ms: 60_000,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        if response.error_code == 0 {
+            return (response.producer_id, response.producer_epoch);
+        }
+        assert!(
+            response.error_code == 15 || response.error_code == 16,
+            "InitProducerId: {response:?}"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "InitProducerId coordinator did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Boots a single-broker cluster whose only listener is `SASL_PLAINTEXT`, with
@@ -620,12 +671,13 @@ async fn txn_offset_commit_fences_classic_generation_and_member() {
         .build()
         .await
         .unwrap();
+    let (producer_id, producer_epoch) = init_transaction(&client, "fence-tid").await;
 
     let mk = |generation_id: i32, member_id: &str| TxnOffsetCommitRequest {
         transactional_id: "fence-tid".into(),
         group_id: "fence-g".into(),
-        producer_id: 0,
-        producer_epoch: 0,
+        producer_id,
+        producer_epoch,
         generation_id,
         member_id: member_id.into(),
         topics: vec![TxnOffsetCommitRequestTopic {
@@ -695,6 +747,7 @@ async fn txn_offset_commit_fences_next_gen_member_epoch() {
         .build()
         .await
         .unwrap();
+    let (producer_id, producer_epoch) = init_transaction(&client, "ng-tid").await;
 
     // Establish a next-gen group member; after the first heartbeat the member
     // is at epoch 1.
@@ -718,8 +771,8 @@ async fn txn_offset_commit_fences_next_gen_member_epoch() {
     let mk = |epoch_val: i32| TxnOffsetCommitRequest {
         transactional_id: "ng-tid".into(),
         group_id: "ng-g".into(),
-        producer_id: 0,
-        producer_epoch: 0,
+        producer_id,
+        producer_epoch,
         generation_id: epoch_val, // carries the member epoch for next-gen groups
         member_id: member_id.clone(),
         topics: vec![TxnOffsetCommitRequestTopic {

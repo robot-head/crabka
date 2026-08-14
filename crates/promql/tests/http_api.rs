@@ -2692,6 +2692,7 @@ rules:
         rule_id: "InstanceDown\nup > 0".to_string(),
         labels: alert_labels,
         active_since_ms: Some(0),
+        keep_firing_until_ms: None,
     });
 
     let response = app

@@ -1,0 +1,47 @@
+name: Kafka conformance
+
+on:
+  workflow_dispatch:
+    inputs:
+      kafka_ref:
+        description: Apache Kafka commit to test
+        required: true
+        default: b475ce7632bc661a79b61ee8b78124bc53170bca
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kafka-conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kafka-conformance
+      - name: Run Apache Kafka system-test baseline
+        continue-on-error: true
+        env:
+          KAFKA_REF: ${{ inputs.kafka_ref }}
+        run: ./scripts/kafka-conformance.sh
+      - name: Publish score
+        if: always()
+        run: cat target/kafka-conformance/report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kafka-conformance-results
+          path: |
+            target/kafka-conformance/report.md
+            target/kafka-conformance/*.log
+            target/kafka-conformance/kafka-*/results/

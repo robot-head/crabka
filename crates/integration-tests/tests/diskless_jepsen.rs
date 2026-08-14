@@ -9,7 +9,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -35,6 +35,14 @@ const TOPIC: &str = "diskless-jepsen";
 const APPENDERS: u64 = 2;
 const RECORDS_PER_APPENDER: u64 = 4;
 const JVM_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.4.0";
+/// The deadline for a `docker` invocation that only reads local daemon state.
+const DOCKER_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// The deadline for the `docker run` of the JVM console consumer.
+///
+/// The deadline covers the container start and the consumer's own
+/// `--timeout-ms`. It also covers a pull of the roughly 380 MB `JVM_IMAGE`,
+/// because a developer who runs this test outside CI has no preload step.
+const JVM_CONSUME_TIMEOUT: Duration = Duration::from_mins(5);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct AppendOp(Vec<u8>);
@@ -115,7 +123,7 @@ async fn three_broker_fault_schedule_preserves_the_acked_ledger() {
     std::fs::write(&put_blocker, b"force object PUT to fail")
         .expect("install deterministic PUT blocker");
 
-    let gateway = docker_bridge_gateway();
+    let gateway = docker_bridge_gateway().await;
     let mut cluster = start_three_brokers(object_dir.path(), gateway).await;
     for node in &cluster {
         node.handle().wait_until_brokers_registered(3).await;
@@ -307,7 +315,8 @@ async fn three_broker_fault_schedule_preserves_the_acked_ledger() {
         .expect("create object namespace after fault");
     wait_for_wal_object(object_dir.path(), new_partition_leader).await;
 
-    let jvm_stdout = jvm_consume_exact(&cluster[survivors[0]].docker_bootstrap(), ledger.len());
+    let jvm_stdout =
+        jvm_consume_exact(&cluster[survivors[0]].docker_bootstrap(), ledger.len()).await;
     let expected_stdout = expected
         .iter()
         .flat_map(|(_, value)| value.iter().copied().chain(std::iter::once(b'\n')))
@@ -813,18 +822,19 @@ async fn wait_for_wal_object(object_dir: &Path, leader: NodeId) {
     .expect("diskless WAL object PUT did not recover after blocker removal");
 }
 
-fn docker_bridge_gateway() -> IpAddr {
-    let output = Command::new("docker")
-        .args([
+async fn docker_bridge_gateway() -> IpAddr {
+    let output = docker_output(
+        &[
             "network",
             "inspect",
             "bridge",
             "--format",
             "{{(index .IPAM.Config 0).Gateway}}",
-        ])
-        .stderr(Stdio::piped())
-        .output()
-        .expect("run docker network inspect");
+        ],
+        DOCKER_QUERY_TIMEOUT,
+        "docker network inspect",
+    )
+    .await;
     assert!(
         output.status.success(),
         "docker bridge inspection failed: {}",
@@ -837,9 +847,30 @@ fn docker_bridge_gateway() -> IpAddr {
         .expect("docker bridge gateway is an IP address")
 }
 
-fn jvm_consume_exact(bootstrap: &str, expected: usize) -> Vec<u8> {
-    let output = Command::new("docker")
-        .args([
+/// Runs `docker` under a deadline and kills the child when the deadline passes.
+///
+/// `std::process::Command::output` blocks with no deadline of its own, so a
+/// stalled image pull holds the test open until the CI job wall stops it. The
+/// tokio child gives the wait an async deadline, and `kill_on_drop` stops the
+/// `docker` client when the timeout drops the future.
+async fn docker_output(args: &[&str], deadline: Duration, what: &str) -> std::process::Output {
+    let child = tokio::process::Command::new("docker")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn {what}: {err}"));
+    tokio::time::timeout(deadline, child.wait_with_output())
+        .await
+        .unwrap_or_else(|_| panic!("{what} did not finish within {deadline:?}"))
+        .unwrap_or_else(|err| panic!("run {what}: {err}"))
+}
+
+async fn jvm_consume_exact(bootstrap: &str, expected: usize) -> Vec<u8> {
+    let max_messages = expected.to_string();
+    let output = docker_output(
+        &[
             "run",
             "--rm",
             "--add-host=host.docker.internal:host-gateway",
@@ -853,12 +884,14 @@ fn jvm_consume_exact(bootstrap: &str, expected: usize) -> Vec<u8> {
             "0",
             "--from-beginning",
             "--max-messages",
-        ])
-        .arg(expected.to_string())
-        .args(["--timeout-ms", "30000"])
-        .stderr(Stdio::piped())
-        .output()
-        .expect("run JVM console consumer");
+            &max_messages,
+            "--timeout-ms",
+            "30000",
+        ],
+        JVM_CONSUME_TIMEOUT,
+        "JVM console consumer",
+    )
+    .await;
     assert!(
         output.status.success(),
         "JVM consumer failed: stdout={} stderr={}",

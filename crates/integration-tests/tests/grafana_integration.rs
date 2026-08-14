@@ -3,6 +3,13 @@
 //! The test provisions Grafana's built-in Loki datasource against a real Crabka
 //! querier listener. It then queries through Grafana's datasource proxy and
 //! through the backend datasource execution path.
+//!
+//! Cargo ignores this test by default, because it pulls and runs
+//! `mirror.gcr.io/grafana/grafana` under Docker. The
+//! `observability-differential` job in `.github/workflows/ci.yml` preloads that
+//! image and runs the test. Run it locally with:
+//!
+//! `cargo test -p crabka-integration-tests --test grafana_integration -- --ignored --nocapture`
 
 use std::{
     net::SocketAddr,
@@ -25,22 +32,24 @@ use tempfile::TempDir;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
 };
 use tokio::net::TcpListener;
 use tower::ServiceExt;
-
-mod common;
 
 const GRAFANA_PORT: u16 = 3000;
 const GRAFANA_USER: &str = "admin";
 const GRAFANA_PASSWORD: &str = "admin";
 const HOST_ALIAS: &str = "host.testcontainers.internal";
-/// The Grafana release image that this test pins its datasource behaviour to.
-const GRAFANA_IMAGE: &str = "mirror.gcr.io/grafana/grafana";
-/// The Grafana release tag that this test pins its datasource behaviour to.
-const GRAFANA_TAG: &str = "11.5.2";
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
 async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     let (broker, bootstrap, _broker_dir) = boot_crabka().await;
     let data_root = TempDir::new().expect("data root");
@@ -106,16 +115,20 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     let http = reqwest::Client::new();
     wait_for_crabka_ready(&http, querier_addr).await;
 
-    let grafana = common::start_container(&format!("{GRAFANA_IMAGE}:{GRAFANA_TAG}"), || {
-        GenericImage::new(GRAFANA_IMAGE, GRAFANA_TAG)
+    let grafana = tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
+        GenericImage::new("mirror.gcr.io/grafana/grafana", "11.5.2")
             .with_exposed_port(GRAFANA_PORT.tcp())
             .with_wait_for(WaitFor::seconds(5))
             .with_env_var("GF_SECURITY_ADMIN_USER", GRAFANA_USER)
             .with_env_var("GF_SECURITY_ADMIN_PASSWORD", GRAFANA_PASSWORD)
             .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "false")
             .with_host(HOST_ALIAS, Host::HostGateway)
-    })
-    .await;
+            .start(),
+    )
+    .await
+    .expect("Grafana container start timed out")
+    .expect("start Grafana container");
     let grafana_base = format!(
         "http://127.0.0.1:{}",
         grafana

@@ -306,16 +306,13 @@ impl ConsumerRecordAccumulator {
 /// # Errors
 /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesError> {
-    let mut index = match ProfileIndex::load_latest_snapshot_with_max_bytes(
+    let mut index = ProfileIndex::load_latest_snapshot_or_empty_with_max_bytes(
         &config.store,
         &config.index_key,
         config.index_snapshot_max,
     )
     .await
-    {
-        Ok(index) => index,
-        Err(_) => ProfileIndex::new(),
-    };
+    .map_err(|error| ProfilesError::Block(format!("profile index load failed: {error}")))?;
     let mut consumer = Consumer::builder()
         .bootstrap(config.bootstrap)
         .dispatch_queue_capacity(config.client_dispatch_queue_capacity.get())

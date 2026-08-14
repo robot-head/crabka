@@ -1,7 +1,7 @@
 //! Public `TraceQL` engine.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -35,7 +35,7 @@ use crate::{
         COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
         COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
         COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START, EVENT_ATTR_PREFIX,
-        LINK_ATTR_PREFIX,
+        INSTRUMENTATION_ATTR_PREFIX, LINK_ATTR_PREFIX,
     },
     store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore},
 };
@@ -309,12 +309,10 @@ impl<S: SpanStore> TraceqlEngine<S> {
         range: MetricsRange,
         scan_options: ScanOptions,
     ) -> Result<TraceMetricsResponse> {
-        // Validate the selection shape up front so unsupported shapes fail fast
-        // with a clear error. Grafana sends selector / And / Or of comparisons
-        // (e.g. `{ status = error }`); structural ops, parent scope, and nested
-        // event/link scopes are rejected (a per-row, single-span evaluator can't
-        // express cross-span structure).
-        validate_compare_selection(&compare.selection)?;
+        // Simple selections use the inexpensive per-row evaluator. Structural,
+        // parent, event, and link selections are planned normally and reduced
+        // to the selected span identities before the comparison aggregation.
+        let selection_needs_planner = validate_compare_selection(&compare.selection).is_err();
 
         // No attribute projection is added here: the store already supplies
         // every attribute unconditionally. The block attr-list columns
@@ -328,7 +326,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 tenant: tenant.to_string(),
                 start_ns: range.scan_start,
                 end_ns: range.scan_end,
-                scan_options,
+                scan_options: scan_options.clone(),
             },
             &Query {
                 root,
@@ -338,11 +336,34 @@ impl<S: SpanStore> TraceqlEngine<S> {
         )
         .await?;
         let batches = collect_planned_batches(planned).await?;
+        let selected_spans = if selection_needs_planner {
+            let selection = plan_query(
+                self.store.as_ref(),
+                &PlannerContext {
+                    tenant: tenant.to_string(),
+                    start_ns: range.scan_start,
+                    end_ns: range.scan_end,
+                    scan_options,
+                },
+                &Query {
+                    root: compare.selection.clone(),
+                    pipeline: Vec::new(),
+                    hints: QueryHints::default(),
+                },
+            )
+            .await?;
+            Some(compare_span_identities(
+                &collect_planned_batches(selection).await?,
+            )?)
+        } else {
+            None
+        };
         assemble_compare_response(
             &batches,
             &compare,
             range,
             self.opts.compare_max_values_per_attr,
+            selected_spans.as_ref(),
         )
     }
 
@@ -532,7 +553,8 @@ fn nested_metric_projection_matcher(field: &Field) -> Option<SpanMatcher> {
         Scope::Both => (MatchScope::Both, field.key.clone()),
         Scope::Span => (MatchScope::Span, field.key.clone()),
         Scope::Resource => (MatchScope::Resource, field.key.clone()),
-        Scope::Parent | Scope::Instrumentation | Scope::Intrinsic(_) => return None,
+        Scope::Instrumentation => (MatchScope::Instrumentation, field.key.clone()),
+        Scope::Parent | Scope::Intrinsic(_) => return None,
     };
     Some(SpanMatcher {
         scope,
@@ -865,6 +887,7 @@ fn assemble_compare_response(
     compare: &CompareSpec,
     range: MetricsRange,
     max_values_per_attr: usize,
+    selected_spans: Option<&HashSet<([u8; 16], [u8; 8])>>,
 ) -> Result<TraceMetricsResponse> {
     if range.step.0 <= 0 {
         return Err(TraceqlError::Plan("metrics step must be positive".into()));
@@ -875,8 +898,14 @@ fn assemble_compare_response(
     let bucket_count = usize::try_from((range.scan_end.0 - range.scan_start.0) / range.step.0 + 1)
         .map_err(|e| TraceqlError::Plan(e.to_string()))?;
 
-    let (counts, totals) =
-        accumulate_compare_counts(batches, compare, range, bucket_count, max_values_per_attr)?;
+    let (counts, totals) = accumulate_compare_counts(
+        batches,
+        compare,
+        range,
+        bucket_count,
+        max_values_per_attr,
+        selected_spans,
+    )?;
     let series = build_compare_series(counts, &totals, compare.top_n, range, bucket_count);
     Ok(TraceMetricsResponse { series })
 }
@@ -895,6 +924,7 @@ fn accumulate_compare_counts(
     range: MetricsRange,
     bucket_count: usize,
     max_values_per_attr: usize,
+    selected_spans: Option<&HashSet<([u8; 16], [u8; 8])>>,
 ) -> Result<(CompareCounts, CompareTotals)> {
     let mut counts: CompareCounts = BTreeMap::new();
     let mut totals: CompareTotals = BTreeMap::new();
@@ -920,7 +950,15 @@ fn accumulate_compare_counts(
             let bucket = usize::try_from((ts.0 - range.scan_start.0) / range.step.0)
                 .map_err(|e| TraceqlError::Exec(e.to_string()))?;
             let compare_row = compare_row(batch, row, ts)?;
-            let group = compare_group_for_row(&compare_row, compare, &regexes);
+            let selected_by_plan = if let Some(selected) = selected_spans {
+                Some(selected.contains(&(
+                    fixed_16(batch, COL_TRACE_ID, row)?,
+                    fixed_8(batch, COL_SPAN_ID, row)?,
+                )))
+            } else {
+                None
+            };
+            let group = compare_group_for_row(&compare_row, compare, &regexes, selected_by_plan);
             let group_totals = totals.entry(group).or_insert_with(|| vec![0; bucket_count]);
             if let Some(slot) = group_totals.get_mut(bucket) {
                 *slot += 1;
@@ -957,14 +995,28 @@ fn compare_group_for_row(
     row: &CompareRow,
     compare: &CompareSpec,
     regexes: &CompareRegexCache,
+    selected_by_plan: Option<bool>,
 ) -> CompareGroup {
     if compare_row_in_selection_window(row, compare)
-        && spanset_matches_row(&compare.selection, row, regexes)
+        && selected_by_plan.unwrap_or_else(|| spanset_matches_row(&compare.selection, row, regexes))
     {
         CompareGroup::Selection
     } else {
         CompareGroup::Baseline
     }
+}
+
+fn compare_span_identities(batches: &[RecordBatch]) -> Result<HashSet<([u8; 16], [u8; 8])>> {
+    let mut identities = HashSet::new();
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            identities.insert((
+                fixed_16(batch, COL_TRACE_ID, row)?,
+                fixed_8(batch, COL_SPAN_ID, row)?,
+            ));
+        }
+    }
+    Ok(identities)
 }
 
 /// Tells whether the row start time is inside the compare selection window.
@@ -2017,6 +2069,10 @@ fn metric_field_column(field: &Field) -> Result<String> {
         Scope::Both | Scope::Span | Scope::Resource => Ok(format!("{ATTR_PREFIX}{}", field.key)),
         Scope::Event => Ok(format!("{ATTR_PREFIX}{EVENT_ATTR_PREFIX}{}", field.key)),
         Scope::Link => Ok(format!("{ATTR_PREFIX}{LINK_ATTR_PREFIX}{}", field.key)),
+        Scope::Instrumentation => Ok(format!(
+            "{ATTR_PREFIX}{INSTRUMENTATION_ATTR_PREFIX}{}",
+            field.key
+        )),
         Scope::Intrinsic(Intrinsic::Name) => Ok(COL_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::Duration) => Ok(COL_DURATION.to_string()),
         Scope::Intrinsic(Intrinsic::Id) => Ok(COL_SPAN_ID.to_string()),
@@ -2758,6 +2814,13 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn compare_span_identities_reads_every_trace_and_span_id() {
+        let identities = compare_span_identities(&[dictionary_metric_batch()]).unwrap();
+
+        assert!(identities == HashSet::from([([1; 16], [1; 8]), ([2; 16], [2; 8])]));
+    }
+
     #[tokio::test]
     async fn search_selector_returns_matching_trace() {
         let e = engine();
@@ -2977,6 +3040,43 @@ mod tests {
             .unwrap();
         assert!(first.span_sets[0].matched == 2);
         assert!(second.span_sets[0].matched == 1);
+    }
+
+    #[tokio::test]
+    async fn instrumentation_attributes_filter_and_group_metrics() {
+        let mut span = sp_at(1, 1, None, "api", 0);
+        span.attrs.push((
+            format!("{INSTRUMENTATION_ATTR_PREFIX}language"),
+            AttrValue::Str("rust".into()),
+        ));
+        let mut store = InMemorySpanStore::new();
+        store.push_trace("t", "a", "root", vec![span]);
+        let engine = TraceqlEngine::new(Arc::new(store), EngineOpts::default());
+
+        let search = engine
+            .search(
+                "t",
+                "{ instrumentation.language = \"rust\" }",
+                0,
+                60_000,
+                20,
+            )
+            .await
+            .unwrap();
+        assert!(search.traces.len() == 1);
+        let metrics = engine
+            .query_range(
+                "t",
+                "{} | count_over_time() | by(instrumentation.language)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(
+            metrics.series[0].labels == vec![("instrumentation.language".into(), "rust".into())]
+        );
     }
 
     #[tokio::test]
@@ -5953,32 +6053,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compare_rejects_structural_selection() {
+    async fn compare_accepts_structural_selection() {
         let e = engine();
-        let err = e
+        let result = e
             .query_range(
                 "t",
-                "{} | compare({ .a = 1 } >> { .b = 2 }, 10)",
+                "{} | compare({ .svc != nil } >> { .svc != nil }, 10)",
                 0,
                 60_000,
                 60_000,
             )
             .await;
-        assert!(matches!(err, Err(TraceqlError::Unsupported(_))));
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
-    async fn compare_rejects_event_link_and_parent_selection_scopes() {
+    async fn compare_accepts_event_link_and_parent_selection_scopes() {
         let e = engine();
         for query in [
-            "{} | compare({ event.exception.type != nil }, 10)",
+            "{} | compare({ event:name != nil }, 10)",
             "{} | compare({ link.traceID != nil }, 10)",
-            "{} | compare({ parent.name != nil }, 10)",
+            "{} | compare({ parent.svc != nil }, 10)",
         ] {
-            let err = e.query_range("t", query, 0, 60_000, 60_000).await;
+            let result = e.query_range("t", query, 0, 60_000, 60_000).await;
             assert!(
-                matches!(err, Err(TraceqlError::Unsupported(_))),
-                "query should reject unsupported compare selection scope: {query}"
+                result.is_ok(),
+                "query should support compare selection scope: {query}: {result:?}"
             );
         }
     }
@@ -6140,9 +6240,14 @@ mod tests {
             start: None,
             end: None,
         };
-        let resp =
-            assemble_compare_response(&[compare_block_batch()], &compare, compare_range(), 256)
-                .unwrap();
+        let resp = assemble_compare_response(
+            &[compare_block_batch()],
+            &compare,
+            compare_range(),
+            256,
+            None,
+        )
+        .unwrap();
 
         // The lone span falls to baseline (selection is Const(false)).
         for (attr, value) in [
@@ -6180,8 +6285,9 @@ mod tests {
             output_start: UnixNano(0),
             step: DurationNanos(60_000),
         };
-        let resp = assemble_compare_response(&[compare_block_batch()], &compare, equal_range, 256)
-            .unwrap();
+        let resp =
+            assemble_compare_response(&[compare_block_batch()], &compare, equal_range, 256, None)
+                .unwrap();
         assert!(meta_total(&resp, "baseline_total") == 1);
 
         let reversed_range = MetricsRange {
@@ -6191,8 +6297,14 @@ mod tests {
             step: DurationNanos(60_000),
         };
         assert!(
-            assemble_compare_response(&[compare_block_batch()], &compare, reversed_range, 256)
-                .is_err()
+            assemble_compare_response(
+                &[compare_block_batch()],
+                &compare,
+                reversed_range,
+                256,
+                None,
+            )
+            .is_err()
         );
     }
 
@@ -6215,6 +6327,7 @@ mod tests {
             &compare,
             range,
             256,
+            None,
         )
         .unwrap();
         let baseline_total = resp
@@ -6255,7 +6368,7 @@ mod tests {
             end: None,
         };
         let regexes = CompareRegexCache::new();
-        assert!(compare_group_for_row(&row, &neq, &regexes) == CompareGroup::Baseline);
+        assert!(compare_group_for_row(&row, &neq, &regexes, None) == CompareGroup::Baseline);
 
         // `= nil` on the same absent attr DOES match (the only matching op).
         let eq_nil = CompareSpec {
@@ -6266,7 +6379,7 @@ mod tests {
             }),
             ..neq.clone()
         };
-        assert!(compare_group_for_row(&row, &eq_nil, &regexes) == CompareGroup::Selection);
+        assert!(compare_group_for_row(&row, &eq_nil, &regexes, None) == CompareGroup::Selection);
     }
 
     #[test]
@@ -6649,7 +6762,7 @@ mod tests {
 
         // Pre-truncation: distinct span.path values per group are capped.
         let (counts, totals) =
-            accumulate_compare_counts(&[batch], &compare, range, bucket_count, 256).unwrap();
+            accumulate_compare_counts(&[batch], &compare, range, bucket_count, 256, None).unwrap();
         let distinct_paths = counts
             .keys()
             .filter(|(group, attr, _)| *group == CompareGroup::Selection && attr == "span.path")
@@ -6668,6 +6781,7 @@ mod tests {
             range,
             bucket_count,
             17,
+            None,
         )
         .unwrap();
         assert!(
@@ -6682,7 +6796,8 @@ mod tests {
 
         // Post-truncation: the emitted span.path series obey top_n.
         let resp =
-            assemble_compare_response(&[unique_path_batch(1000)], &compare, range, 256).unwrap();
+            assemble_compare_response(&[unique_path_batch(1000)], &compare, range, 256, None)
+                .unwrap();
         let path_series = resp
             .series
             .iter()

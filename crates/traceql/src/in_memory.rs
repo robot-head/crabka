@@ -23,8 +23,8 @@ use crate::{
     error::{Result, TraceqlError},
     result::{AttrValue, EventRef, LinkRef, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue},
     span_columns::{
-        EVENT_ATTR_PREFIX, InputSpan, LINK_ATTR_PREFIX, NestedSet, assign_nested_set,
-        span_schema_with_attrs,
+        EVENT_ATTR_PREFIX, INSTRUMENTATION_ATTR_PREFIX, InputSpan, LINK_ATTR_PREFIX, NestedSet,
+        assign_nested_set, span_schema_with_attrs,
     },
     store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore},
 };
@@ -515,7 +515,13 @@ impl SpanStore for InMemorySpanStore {
         for trace in &traces {
             resource.insert("service.name".to_string());
             for input in &trace.spans {
-                span.extend(input.attrs.iter().map(|(key, _)| key.clone()));
+                for (key, _) in &input.attrs {
+                    if let Some(key) = key.strip_prefix(INSTRUMENTATION_ATTR_PREFIX) {
+                        instrumentation.insert(key.to_string());
+                    } else {
+                        span.insert(key.clone());
+                    }
+                }
                 if !input.events.is_empty() {
                     event.extend(EVENT_TAGS.iter().map(|tag| (*tag).to_string()));
                 }
@@ -599,12 +605,21 @@ impl SpanStore for InMemorySpanStore {
                 collect_span_intrinsic_values(input, &trace.nested, idx, tag, &mut values);
                 collect_event_values(input, tag, &mut values);
                 collect_link_values(input, tag, &mut values);
-                if matches!(attr_scope, None | Some(TagScope::Span)) {
+                if matches!(
+                    attr_scope,
+                    None | Some(TagScope::Span | TagScope::Instrumentation)
+                ) {
                     values.extend(
                         input
                             .attrs
                             .iter()
-                            .filter(|(key, _)| key == attr_tag)
+                            .filter(|(key, _)| {
+                                key == attr_tag
+                                    || (attr_scope == Some(TagScope::Instrumentation)
+                                        && key
+                                            .strip_prefix(INSTRUMENTATION_ATTR_PREFIX)
+                                            .is_some_and(|key| key == attr_tag))
+                            })
                             .map(|(_, value)| typed_value_parts(value)),
                     );
                 }
@@ -622,6 +637,8 @@ fn scoped_attribute_tag(tag: &str) -> (&str, Option<TagScope>) {
         (tag, Some(TagScope::Resource))
     } else if let Some(tag) = tag.strip_prefix("span.") {
         (tag, Some(TagScope::Span))
+    } else if let Some(tag) = tag.strip_prefix("instrumentation.") {
+        (tag, Some(TagScope::Instrumentation))
     } else {
         (tag, None)
     }
@@ -939,7 +956,12 @@ fn instrumentation_matches(span: &InputSpan, matcher: &SpanMatcher) -> bool {
         "version" | "instrumentation:version" => {
             string_matches(&span.instrumentation_version, matcher.op, &matcher.value)
         }
-        _ => nil_matches(matcher.op, &matcher.value),
+        _ => span_attr_matches(
+            span,
+            &format!("{}{}", crate::INSTRUMENTATION_ATTR_PREFIX, matcher.key),
+            matcher.op,
+            &matcher.value,
+        ),
     }
 }
 
@@ -2416,6 +2438,60 @@ mod tests {
                     value: "checkout".into(),
                 }]
         );
+    }
+
+    #[tokio::test]
+    async fn tag_values_separates_span_resource_and_instrumentation_attributes() {
+        let mut input = span(
+            1,
+            None,
+            "root",
+            vec![
+                ("library", AttrValue::Str("span".into())),
+                (
+                    "__instrumentation.library",
+                    AttrValue::Str("instrumentation".into()),
+                ),
+            ],
+        );
+        input.instrumentation_name = "tracer".into();
+        let mut store = InMemorySpanStore::new();
+        store.push_trace("t", "service", "root", vec![input]);
+
+        let span_values = store
+            .tag_values("t", "span.library", 0, 10_000)
+            .await
+            .unwrap();
+        let instrumentation_values = store
+            .tag_values("t", "instrumentation.library", 0, 10_000)
+            .await
+            .unwrap();
+        let resource_values = store
+            .tag_values("t", "resource.library", 0, 10_000)
+            .await
+            .unwrap();
+
+        assert!(
+            span_values
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "span".into(),
+                }]
+        );
+        assert!(
+            instrumentation_values
+                == vec![
+                    TypedValue {
+                        type_: "string".into(),
+                        value: "instrumentation".into(),
+                    },
+                    TypedValue {
+                        type_: "string".into(),
+                        value: "span".into(),
+                    },
+                ]
+        );
+        assert!(resource_values.is_empty());
     }
 
     #[tokio::test]

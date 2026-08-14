@@ -14,7 +14,7 @@ use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::{Buf, BufMut};
 pub const API_KEY: i16 = 18;
 pub const MIN_VERSION: i16 = 0;
-pub const MAX_VERSION: i16 = 4;
+pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 #[inline]
 #[must_use]

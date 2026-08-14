@@ -152,23 +152,29 @@ where
             .active_since_ms
             .entry(key.clone())
             .or_insert(eval_time_ms);
+        if eval_time_ms.saturating_sub(starts_at_ms) < hold_for.millis_i64() {
+            // Still pending: not firing yet, so it cannot be kept firing.
+            state.keep_firing_until_ms.remove(&key);
+            active_records.push(RulerAlertStateRecord {
+                tenant: tenant.to_string(),
+                rule_id: rule_id.clone(),
+                labels: labels.clone(),
+                active_since_ms: Some(starts_at_ms),
+                keep_firing_until_ms: None,
+            });
+            continue;
+        }
+        // Firing: (re)arm the keep-firing deadline so that if the series stops
+        // matching on a later tick the alert keeps firing for `keep_firing_for`.
+        let keep_firing_until_ms = eval_time_ms.saturating_add(keep_firing_for.millis_i64());
+        state.keep_firing_until_ms.insert(key, keep_firing_until_ms);
         active_records.push(RulerAlertStateRecord {
             tenant: tenant.to_string(),
             rule_id: rule_id.clone(),
             labels: labels.clone(),
             active_since_ms: Some(starts_at_ms),
+            keep_firing_until_ms: Some(keep_firing_until_ms),
         });
-        if eval_time_ms.saturating_sub(starts_at_ms) < hold_for.millis_i64() {
-            // Still pending: not firing yet, so it cannot be kept firing.
-            state.keep_firing_until_ms.remove(&key);
-            continue;
-        }
-        // Firing: (re)arm the keep-firing deadline so that if the series stops
-        // matching on a later tick the alert keeps firing for `keep_firing_for`.
-        state.keep_firing_until_ms.insert(
-            key,
-            eval_time_ms.saturating_add(keep_firing_for.millis_i64()),
-        );
         let annotations = expand_alert_label_map(&annotations, value, &sample.labels);
         alerts.push(AlertmanagerAlert {
             labels,
@@ -209,6 +215,7 @@ where
                     rule_id: key.rule_id.clone(),
                     labels: key.labels.clone(),
                     active_since_ms: Some(starts_at_ms),
+                    keep_firing_until_ms: Some(until_ms),
                 });
                 alerts.push(AlertmanagerAlert {
                     labels: key.labels.clone(),
@@ -232,6 +239,7 @@ where
                     rule_id: key.rule_id.clone(),
                     labels: key.labels.clone(),
                     active_since_ms: None,
+                    keep_firing_until_ms: None,
                 });
                 alerts.push(AlertmanagerAlert {
                     labels: key.labels.clone(),
@@ -248,6 +256,7 @@ where
                     rule_id: key.rule_id.clone(),
                     labels: key.labels.clone(),
                     active_since_ms: None,
+                    keep_firing_until_ms: None,
                 });
             }
         }

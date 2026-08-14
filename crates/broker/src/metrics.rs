@@ -337,6 +337,12 @@ pub struct BrokerMetrics {
     pub audit_records_replayed_total: Counter,
     /// Cumulative audit records lost (channel-full or spool-full).
     pub audit_records_dropped_total: Counter,
+    /// KIP-714 client-metric batches dropped because the bounded OTLP queue
+    /// was full or closed.
+    pub client_metrics_otlp_dropped_total: Counter,
+    /// KIP-714 client-metric export attempts rejected by the collector or
+    /// failed at the transport layer.
+    pub client_metrics_otlp_failed_total: Counter,
     /// Cumulative count of completed log-compaction sweeps run by this
     /// broker's cleaner — one increment per `tick_all` pass, whether or
     /// not any partition was eligible. Lets tests (and operators) observe
@@ -410,6 +416,8 @@ impl BrokerMetrics {
             audit_records_spooled_total: Counter::default(),
             audit_records_replayed_total: Counter::default(),
             audit_records_dropped_total: Counter::default(),
+            client_metrics_otlp_dropped_total: Counter::default(),
+            client_metrics_otlp_failed_total: Counter::default(),
             log_cleaner_runs_total: Counter::default(),
             log_compactions_total: Family::default(),
         }
@@ -831,6 +839,17 @@ impl BrokerMetrics {
             "audit_records_dropped",
             "Cumulative audit records lost (channel-full or spool-full)",
             self.audit_records_dropped_total.clone(),
+        );
+
+        registry.register(
+            "client_metrics_otlp_dropped",
+            "Cumulative KIP-714 client-metric batches dropped before OTLP export",
+            self.client_metrics_otlp_dropped_total.clone(),
+        );
+        registry.register(
+            "client_metrics_otlp_failed",
+            "Cumulative failed KIP-714 client-metric OTLP export attempts",
+            self.client_metrics_otlp_failed_total.clone(),
         );
 
         registry.register(

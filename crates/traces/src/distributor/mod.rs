@@ -198,11 +198,13 @@ pub async fn serve(
     let bound = listener.local_addr()?;
     let app = router(state);
     tokio::spawn(async move {
+        let server_shutdown = shutdown.clone();
         let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-            shutdown.cancelled().await;
+            server_shutdown.cancelled().await;
         });
         if let Err(err) = server.await {
-            tracing::warn!(error = %err, "traces distributor server error");
+            tracing::error!(error = %err, "traces distributor server stopped");
+            shutdown.cancel();
         }
     });
     Ok(bound)
@@ -268,7 +270,9 @@ pub async fn serve_jaeger_compact_udp(
                             }
                         }
                         Err(err) => {
-                            tracing::warn!(error = %err, "jaeger compact UDP receive error");
+                            tracing::error!(error = %err, "jaeger compact UDP receiver stopped");
+                            shutdown.cancel();
+                            break;
                         }
                     }
                 }

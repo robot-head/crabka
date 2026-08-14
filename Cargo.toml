@@ -148,7 +148,7 @@ testcontainers = "0.28"
 # The latest crates.io release still requires testcontainers 0.27, whose
 # bollard-stubs version conflicts with testcontainers 0.28. Pin the upstream
 # compatibility update until the next testcontainers-modules release.
-testcontainers-modules = { git = "https://github.com/testcontainers/testcontainers-rs-modules-community", rev = "390054380a9c30a5f91051933444ae827b50398b", features = ["kafka"] }
+testcontainers-modules = { git = "https://github.com/testcontainers/testcontainers-rs-modules-community", rev = "d69e3a09397532accea9d9e907fecc280b1513a8", features = ["kafka"] }
 async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-stream = "0.1"
@@ -256,7 +256,7 @@ lru = "0.18"
 apache-avro = "0.21"
 prost-reflect = "0.16"
 jsonschema = { version = "0.49", default-features = false }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
 
 # Chapter Gres — vendored crabgresql engine (crabgresql@93f3d17).
 bigdecimal = "0.4"

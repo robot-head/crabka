@@ -109,6 +109,8 @@ schemars = { workspace = true }
 crc32c = { workspace = true }
 # KIP-714: decode OTLP MetricsData protobuf payloads in PushTelemetry handler.
 prost = { workspace = true }
+hex = { workspace = true }
+tonic = { workspace = true }
 exponential-backoff = "2.1.0"
 
 # Heap profiling via jemalloc. Unix-only: tikv-jemallocator does not build on

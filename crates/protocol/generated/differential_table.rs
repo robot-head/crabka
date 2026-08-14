@@ -373,6 +373,12 @@ pub const CASES: &[Case] = &[
         kind: Kind::Request,
     },
     Case {
+        name: "ApiVersionsRequest",
+        api_key: 18,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
         name: "ApiVersionsResponse",
         api_key: 18,
         version: 0,
@@ -400,6 +406,12 @@ pub const CASES: &[Case] = &[
         name: "ApiVersionsResponse",
         api_key: 18,
         version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ApiVersionsResponse",
+        api_key: 18,
+        version: 5,
         kind: Kind::Response,
     },
     Case {

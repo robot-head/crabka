@@ -178,6 +178,31 @@ pub(crate) async fn handle(
     // even invalid/rejected requests consume quota (bad-faith clients can't
     // escape throttling by sending malformed RPCs).
     let mutation_count = partition_mutation_count(&req, &image);
+    let quota = crate::quota::apply_controller_mutation_quota_mode(
+        &image,
+        &broker.quota_buckets,
+        ctx.principal.name.as_str(),
+        ctx.client_id,
+        mutation_count,
+        broker.config.controller_mutation_quota_window,
+        broker.config.quota_throttle_max,
+        version >= 3,
+    );
+    if quota.is_rejected() {
+        let results = req
+            .topics
+            .iter()
+            .map(|topic| CreatePartitionsTopicResult {
+                name: topic.name.clone(),
+                error_code: codes::THROTTLING_QUOTA_EXCEEDED,
+                ..Default::default()
+            })
+            .collect();
+        return encode_response(
+            &create_partitions_response(results, crate::quota::throttle_time_ms(quota.delay())),
+            version,
+        );
+    }
 
     // ── ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic name for `Alter`. Topics that come
@@ -303,7 +328,7 @@ pub(crate) async fn handle(
 
     // KIP-599: apply controller_mutation_rate throttle after response assembly,
     // before encoding. Sets throttle_time_ms and sleeps so the client waits.
-    finish_response(broker, &image, ctx, mutation_count, results, version).await
+    finish_response(quota.delay(), results, version).await
 }
 
 fn sorted_brokers(image: &crabka_metadata::MetadataImage, node_id: NodeId) -> Vec<NodeId> {
@@ -449,21 +474,10 @@ fn denied_topics(
 }
 
 async fn finish_response(
-    broker: &Broker,
-    image: &crabka_metadata::MetadataImage,
-    context: &crate::handlers::RequestContext<'_>,
-    mutation_count: u64,
+    delay: Time,
     results: Vec<CreatePartitionsTopicResult>,
     version: i16,
 ) -> Result<Bytes, BrokerError> {
-    let delay = crate::quota::consume_controller_mutation_quota(
-        image,
-        &broker.quota_buckets,
-        context.principal.name.as_str(),
-        context.client_id,
-        mutation_count,
-        broker.config.quota_throttle_max,
-    );
     let resp = create_partitions_response(results, crate::quota::throttle_time_ms(delay));
     if delay > <Time as TimeExt>::ZERO {
         tokio::time::sleep(delay.to_std()).await;
@@ -941,7 +955,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn throttled_create_partitions_counts_only_new_partitions_and_waits() {
+    async fn strict_create_partitions_rejects_after_quota_exhaustion() {
         let (broker_handle, _dir) =
             start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
         seed_topic(&broker_handle, "metered", 2, 1).await;
@@ -951,12 +965,10 @@ mod tests {
         let peer = peer();
         let req = request(vec![topic_req("metered", 5, None)], false);
 
-        let started = tokio::time::Instant::now();
         let resp = drive(&broker, &req, &p, &peer).await;
-        let elapsed = started.elapsed();
 
         let expected = CreatePartitionsResponse {
-            throttle_time_ms: 500,
+            throttle_time_ms: 0,
             results: vec![CreatePartitionsTopicResult {
                 name: "metered".into(),
                 error_code: codes::NONE,
@@ -966,10 +978,25 @@ mod tests {
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
-        check!(
-            elapsed >= std::time::Duration::from_millis(450),
-            "handler must wait for the advertised throttle, elapsed={elapsed:?}"
-        );
+
+        let rejected = drive(
+            &broker,
+            &request(vec![topic_req("metered", 6, None)], false),
+            &p,
+            &peer,
+        )
+        .await;
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: rejected.throttle_time_ms,
+            results: vec![CreatePartitionsTopicResult {
+                name: "metered".into(),
+                error_code: codes::THROTTLING_QUOTA_EXCEEDED,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(rejected == expected);
+        check!(rejected.throttle_time_ms > 0 && rejected.throttle_time_ms <= 500);
         check!(
             broker_handle
                 .controller_image_for_test()
