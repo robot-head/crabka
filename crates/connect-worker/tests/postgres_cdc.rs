@@ -32,6 +32,13 @@ use tokio_util::sync::CancellationToken;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// The deadline for a container to start, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own. A stalled
+/// pull thus holds the test process open until the CI job wall stops it, and
+/// the job log then names no test as the cause.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
+
 const POSTGRES_PORT: u16 = 5432;
 const TOPIC: &str = "db.public.orders";
 const CONNECTOR_ID: &str = "orders-cdc-acceptance";
@@ -141,16 +148,19 @@ fn reserve_address() -> io::Result<std::net::SocketAddr> {
 }
 
 async fn start_postgres() -> TestResult<ContainerAsync<GenericImage>> {
-    Ok(GenericImage::new("postgres", "18")
-        .with_exposed_port(POSTGRES_PORT.tcp())
-        .with_wait_for(WaitFor::message_on_stderr(
-            "database system is ready to accept connections",
-        ))
-        .with_env_var("POSTGRES_PASSWORD", "postgres")
-        .with_env_var("POSTGRES_DB", "app")
-        .with_cmd(["postgres", "-c", "wal_level=logical"])
-        .start()
-        .await?)
+    Ok(tokio::time::timeout(
+        CONTAINER_START_TIMEOUT,
+        GenericImage::new("postgres", "18")
+            .with_exposed_port(POSTGRES_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stderr(
+                "database system is ready to accept connections",
+            ))
+            .with_env_var("POSTGRES_PASSWORD", "postgres")
+            .with_env_var("POSTGRES_DB", "app")
+            .with_cmd(["postgres", "-c", "wal_level=logical"])
+            .start(),
+    )
+    .await??)
 }
 
 async fn connect_postgres(

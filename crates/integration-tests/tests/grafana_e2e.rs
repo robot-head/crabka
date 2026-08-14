@@ -42,6 +42,11 @@ const LOKI_IMAGE_TAG: &str = "3.4.2";
 const GRAFANA_IMAGE_TAG: &str = "12.3.7";
 const CONTAINER_START_ATTEMPTS: usize = 3;
 const CONTAINER_START_RETRY_DELAY: Duration = Duration::from_secs(3);
+/// The deadline for one container start attempt, which includes the image pull.
+///
+/// `AsyncRunner::start` waits for the pull with no bound of its own, so a
+/// stalled pull never returns and the retry loop never gets a second attempt.
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_mins(2);
 
 // ---------------------------------------------------------------------------
 // Booted stack
@@ -282,7 +287,19 @@ where
         what,
         CONTAINER_START_ATTEMPTS,
         CONTAINER_START_RETRY_DELAY,
-        || request().start(),
+        || {
+            // Build the future outside the async block so the closure holds no
+            // borrow across an await point.
+            let started = request().start();
+            async move {
+                // A stalled pull never returns. Bound the attempt, and let the
+                // retry loop treat the deadline as one more transient failure.
+                match tokio::time::timeout(CONTAINER_START_TIMEOUT, started).await {
+                    Ok(result) => result.map_err(|err| format!("{err:?}")),
+                    Err(elapsed) => Err(format!("container start timed out: {elapsed}")),
+                }
+            }
+        },
     )
     .await
 }

@@ -1568,6 +1568,12 @@ jobs:
           cargo llvm-cov nextest --no-report --profile ci -p crabka-broker --tests
           cargo llvm-cov nextest --no-report --profile ci -p crabka-client-admin --tests
           cargo llvm-cov report --lcov --output-path coverage/broker-integration.lcov
+      # `diskless_jepsen` shells out to `docker run` for the JVM console
+      # consumer at the end of its fault schedule. Pull the ~380 MB image here
+      # so the pull is a step of its own, and so a slow registry shows up as a
+      # slow pull rather than as a slow test.
+      - name: Preload Docker images
+        run: docker pull mirror.gcr.io/confluentinc/cp-kafka:7.4.0
       - name: Diskless WAL Slice 6d live shipping gate
         run: |
           # Three in-process brokers plus WAL followers can exceed the default
