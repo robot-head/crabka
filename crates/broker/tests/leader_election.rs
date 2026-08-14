@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use assert2::assert;
 use bytes::Bytes;
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_broker::{BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_protocol::{
     owned::{
@@ -287,7 +287,7 @@ async fn isr_expand_on_catchup() {
         vec![(bootstrap_node_id, bootstrap_controller.to_string())];
     reborn_cfg.bootstrap_servers = vec![bootstrap_controller.to_string()];
     reborn_cfg.auto_join = true;
-    let reborn = Broker::start(reborn_cfg).await.expect("reborn follower");
+    let reborn = support::start_reusing_addrs(&reborn_cfg, "reborn follower").await;
     eprintln!("CRABKA[test] reborn follower {victim_node_id} started");
 
     // 5. Wait for the partition's ISR to expand back to {1, 2, 3}.
