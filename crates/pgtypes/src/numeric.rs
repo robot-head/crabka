@@ -17,6 +17,7 @@
 
 use std::{
     cmp::Ordering,
+    fmt::LowerExp,
     hash::{Hash, Hasher},
 };
 
@@ -925,10 +926,18 @@ pub fn from_i64(n: i64) -> NumericValue {
     NumericValue::Finite(BigDecimal::from(n))
 }
 
-/// `float8 → numeric` through the float's shortest round-tripping text (PostgreSQL
-/// `float8_numeric`), so `0.1::float8::numeric` is `0.1`, not the exact binary
-/// expansion. A non-finite float maps to the matching numeric special
-/// (PostgreSQL 14+ `float8_numeric`).
+/// C's `DBL_DIG` / `FLT_DIG`: the significant-digit counts `float8_numeric` and
+/// `float4_numeric` hand to `snprintf` as the `%g` precision.
+const DBL_DIG: usize = 15;
+const FLT_DIG: usize = 6;
+
+/// `float8 → numeric` (PostgreSQL `float8_numeric`), which converts through
+/// `snprintf("%.*g", DBL_DIG, val)`, which is **fifteen** significant digits, not
+/// the shortest round-tripping text `float8out` emits. That is why
+/// `(1.0/3.0)::float8::numeric` is `0.333333333333333` (fifteen threes, not
+/// sixteen) and `1234567890123456::float8::numeric` is `1234567890123460`. A
+/// non-finite float maps to the matching numeric special. `numeric` gained its
+/// infinities in PostgreSQL 14.
 pub fn from_f64(f: f64) -> NumericValue {
     if f.is_nan() {
         return NumericValue::NaN;
@@ -937,7 +946,8 @@ pub fn from_f64(f: f64) -> NumericValue {
         return NumericValue::infinity_with_sign(if f < 0.0 { -1 } else { 1 });
     }
     NumericValue::Finite(
-        parse_finite(&format!("{f}")).expect("a finite f64 always lands inside the numeric format"),
+        parse_finite(&significant_digits(f, DBL_DIG))
+            .expect("a finite f64 always lands inside the numeric format"),
     )
 }
 
@@ -955,17 +965,27 @@ pub fn from_f32(f: f32) -> NumericValue {
         return NumericValue::infinity_with_sign(if f < 0.0 { -1 } else { 1 });
     }
     NumericValue::Finite(
-        parse_finite(&six_significant_digits(f))
+        parse_finite(&significant_digits(f, FLT_DIG))
             .expect("a finite f32 always lands inside the numeric format"),
     )
 }
 
-/// `%.6g` of `f`, in the scientific spelling `BigDecimal` parses identically to
-/// the fixed one. `{:.5e}` is six significant digits; `%g` then drops the
-/// trailing fractional zeros, which is what keeps the resulting numeric's
-/// display scale down (`0.1::float4::numeric` is `0.1`, not `0.100000`).
-fn six_significant_digits(f: f32) -> String {
-    let scientific = format!("{f:.5e}");
+/// `%.*g` of `f` at `digits` significant digits, in the scientific spelling
+/// `BigDecimal` parses identically to the fixed one. Rust's `{:.p$e}` writes
+/// `p + 1` significant digits; `%g` then drops the trailing fractional zeros,
+/// which is what keeps the resulting numeric's display scale down
+/// (`0.1::float8::numeric` is `0.1`, not `0.100000000000000`).
+///
+/// The two spellings only ever differ in shape. `%g` switches to the fixed style
+/// once the exponent is in `-4..digits`, and PostgreSQL immediately parses the
+/// buffer back with `set_var_from_str`, which reads an exponent as readily as a
+/// decimal point. Rust rounds the exact binary value half-to-even, which is what
+/// glibc's `printf` does too, so the digits themselves agree. They agree on an
+/// exact tie as well: `4429515941059445::float8` goes *down* to
+/// `4429515941059440` in both.
+fn significant_digits<T: LowerExp>(f: T, digits: usize) -> String {
+    let precision = digits - 1;
+    let scientific = format!("{f:.precision$e}");
     let (mantissa, exponent) = scientific
         .split_once('e')
         .expect("Rust's LowerExp always emits an `e`");
@@ -2820,11 +2840,86 @@ mod tests {
         ));
     }
 
+    /// `float8_numeric` converts through `snprintf("%.*g", DBL_DIG, val)`, so a
+    /// float8 reaches numeric with at most **fifteen** significant digits — not
+    /// the seventeen that `float8out` can need to round-trip. Every expectation
+    /// is the pinned PostgreSQL 18.4 answer to `<value>::float8::numeric`, and
+    /// every literal was checked against that server's `float8send` so the two
+    /// sides start from the same bits.
     #[test]
-    fn float_numeric_conversions_use_shortest_text() {
-        assert_eq!(to_text(&from_f64(0.1)), "0.1");
-        assert_eq!(to_text(&from_f64(2.5)), "2.5");
-        assert_eq!(to_f64(&n("1.5")), 1.5);
+    fn float8_to_numeric_rounds_to_fifteen_significant_digits() {
+        use assert2::assert;
+        for (value, expected) in [
+            (0.0, "0"),
+            // numeric has no negative zero.
+            (-0.0, "0"),
+            (0.1, "0.1"),
+            // Fifteen threes, not the sixteen `0.3333333333333333` would give.
+            (1.0 / 3.0, "0.333333333333333"),
+            // The sixteenth digit rounds the fifteenth up.
+            (2.0 / 3.0, "0.666666666666667"),
+            (std::f64::consts::PI, "3.14159265358979"),
+            // The smallest float8 above one loses its whole fractional part.
+            (1.0000000000000002, "1"),
+            (2.5, "2.5"),
+            (1e15, "1000000000000000"),
+            // Sixteen integer digits: the last is zeroed, not preserved.
+            (1_234_567_890_123_456.0, "1234567890123460"),
+            (-1_234_567_890_123_456.0, "-1234567890123460"),
+            (9_007_199_254_740_992.0, "9007199254740990"),
+            // An exact tie at the sixteenth digit. Both PostgreSQL and this go
+            // to even, so `…445` falls to `…440` rather than rising to `…450`.
+            (4_429_515_941_059_445.0, "4429515941059440"),
+            (1.234_567_890_123_456_8e20, "123456789012346000000"),
+            (1e-5, "0.00001"),
+            (0.000_123_456_789_012_345_67, "0.000123456789012346"),
+            (-0.7, "-0.7"),
+        ] {
+            assert!(to_text(&from_f64(value)) == expected);
+        }
+    }
+
+    /// The same rule at both ends of the float8 range, where PostgreSQL's texts
+    /// run to hundreds of characters. Each is spelled as the significant digits
+    /// `%g` keeps — fewer than fifteen once it drops trailing zeros — and the
+    /// run of zeros that places them.
+    #[test]
+    fn float8_to_numeric_holds_fifteen_digits_across_the_double_range() {
+        use assert2::assert;
+        for (value, expected) in [
+            (
+                f64::MIN_POSITIVE,
+                format!("0.{}22250738585072", "0".repeat(307)),
+            ),
+            (5e-324, format!("0.{}494065645841247", "0".repeat(323))),
+            (1e100, format!("1{}", "0".repeat(100))),
+            (f64::MAX, format!("179769313486232{}", "0".repeat(294))),
+        ] {
+            assert!(to_text(&from_f64(value)) == expected);
+        }
+    }
+
+    /// The float4 half of the same `%.*g` rule, at `FLT_DIG` = six digits.
+    /// Expectations are PostgreSQL 18.4's `<value>::float4::numeric`, with the
+    /// literals checked against its `float4send`.
+    #[test]
+    fn float4_to_numeric_rounds_to_six_significant_digits() {
+        use assert2::assert;
+        for (value, expected) in [
+            (0.1, "0.1"),
+            (-0.0, "0"),
+            (1e-5, "0.00001"),
+            // Seven integer digits, so the last is zeroed.
+            (16_777_216.0, "16777200"),
+            (123_456.7, "123457"),
+            (
+                f32::MIN_POSITIVE,
+                "0.0000000000000000000000000000000000000117549",
+            ),
+            (f32::MAX, "340282000000000000000000000000000000000"),
+        ] {
+            assert!(to_text(&from_f32(value)) == expected);
+        }
     }
 
     #[test]

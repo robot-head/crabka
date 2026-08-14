@@ -672,6 +672,20 @@ async fn jsonb_functions() {
         // to_jsonb over each supported scalar shape.
         ("to_jsonb(1)", Some("1".to_string())),
         ("to_jsonb(1.50)", Some("1.50".to_string())),
+        // A float keeps every digit its output function prints, NOT the digits
+        // the `::numeric` cast would leave. That cast is `%.15g` for `double
+        // precision`, so it would answer `0.333333333333333` and
+        // `1234567890123460` here. Both values are `float8_numeric`'s, not
+        // `float8out`'s, and PostgreSQL uses the latter for `to_jsonb`.
+        (
+            "to_jsonb((1.0/3.0)::float8)",
+            Some("0.3333333333333333".to_string()),
+        ),
+        (
+            "to_jsonb(1234567890123456::float8)",
+            Some("1234567890123456".to_string()),
+        ),
+        ("to_jsonb(16777216::float4)", Some("16777216".to_string())),
         ("to_jsonb(true)", Some("true".to_string())),
         ("to_jsonb('x'::text)", Some(r#""x""#.to_string())),
         ("to_jsonb(ARRAY[1,2])", Some("[1, 2]".to_string())),

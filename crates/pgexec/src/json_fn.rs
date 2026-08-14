@@ -2026,18 +2026,19 @@ pub(crate) fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError
         // as JSON *strings* rather than failing.
         Datum::Float4(f) if !f.is_finite() => JsonbValue::String(datum_text(d, ctx)),
         // PostgreSQL runs the value through its OUTPUT function and then
-        // `numeric_in`, so a `real` keeps every digit `float4out` prints
-        // (`to_jsonb(16777216::float4)` is `16777216`). That is deliberately
-        // NOT the `::numeric` cast, which loses digits through `%.6g`.
+        // `numeric_in`, so a float keeps every digit its `*out` function
+        // prints (`to_jsonb(16777216::float4)` is `16777216`, and
+        // `to_jsonb((1.0/3.0)::float8)` is `0.3333333333333333`). Both arms
+        // deliberately avoid the `::numeric` cast, which is `%.6g` for `real`
+        // and `%.15g` for `double precision` and so drops digits the output
+        // function keeps.
         Datum::Float4(_) => JsonbValue::Number(
             numeric::parse_finite(&datum_text(d, ctx))
                 .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?,
         ),
         Datum::Float8(f) if !f.is_finite() => JsonbValue::String(datum_text(d, ctx)),
-        Datum::Float8(f) => JsonbValue::Number(
-            numeric::from_f64(*f)
-                .as_finite()
-                .cloned()
+        Datum::Float8(_) => JsonbValue::Number(
+            numeric::parse_finite(&datum_text(d, ctx))
                 .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?,
         ),
         Datum::Jsonb(j) => j.clone(),
