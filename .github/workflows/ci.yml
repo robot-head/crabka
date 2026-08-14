@@ -1317,7 +1317,10 @@ jobs:
   # `--include-ignored`; keep broad coverage here without coupling ordinary
   # Rust tests to the Java oracle. Packages with external-service or especially
   # heavy suites are excluded because their dedicated coverage jobs above own
-  # those targets.
+  # those targets. Docker-dependent targets are excluded a different way: they
+  # carry `#[ignore = "requires Docker"]`, so this sweep never starts a
+  # container. See `observability-differential` below for the Loki/Grafana
+  # suites that used to leak in here.
   workspace-integration-coverage:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
@@ -1359,6 +1362,104 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/workspace-integration-${{ matrix.shard }}.lcov
+          disable_search: true
+          flags: workspace-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: workspace-integration
+          fail_ci_if_error: false
+
+  # The three Loki/Grafana testcontainers suites in `crates/integration-tests`
+  # (loki_differential, grafana_e2e, grafana_integration).
+  #
+  # These used to be swept up by `workspace-integration-coverage` above, purely
+  # because they were the only Docker-dependent targets in the repo without
+  # `#[ignore = "requires Docker"]` — an oversight, not a decision. It cost the
+  # sweep on both axes. A container contributes zero instrumented lines
+  # (`cargo llvm-cov` measures the Rust process only), so the Docker half bought
+  # no coverage at all; meanwhile ~118 container boots added minutes to every
+  # shard and made the coverage signal hostage to a registry mirror — a stalled
+  # `mirror.gcr.io` pull once hung both shards past the job timeout.
+  #
+  # The tests are `#[ignore]`d like every other Docker suite now and run here,
+  # where the explicit bounded preload turns a registry stall into one failed
+  # step instead of 118 wedged test processes.
+  # Coverage uploads under the `workspace-integration` flag so the lines these
+  # suites really do cover — the in-process distributor/querier/compactor paths
+  # in crabka-observability — stay in that flag's report.
+  observability-differential:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    # The 114-test Loki differential dominates the wall clock: one container
+    # boot per test, all under `-C instrument-coverage`.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      # Three pulled images plus llvm-cov profraw and the cargo target dir
+      # exhaust the ~14 GB free on the default runner; reclaim the unused
+      # preinstalled SDKs like the other Docker-heavy jobs do (leaves Docker
+      # images intact for testcontainers).
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: observability-differential
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      # Pull up front so a registry problem fails this one step, legibly, rather
+      # than inside every test process. A refused or erroring registry fails in
+      # seconds with Docker's own message, but a registry that accepts the
+      # connection and then stops making progress needs the explicit bound:
+      # `docker pull` has no pull-timeout of its own, so without it a stall
+      # would sit here until the 45-minute job timeout — the exact failure mode
+      # this job exists to avoid. Three minutes is several times the normal
+      # cold-pull time for these images; `timeout-minutes` backstops the loop.
+      #
+      # Tags mirror the constants in the suites: `LOKI_IMAGE`/`LOKI_TAG` in
+      # loki_differential.rs, `LOKI_IMAGE_TAG`/`GRAFANA_IMAGE_TAG` in
+      # grafana_e2e.rs, and the inline Grafana image in grafana_integration.rs.
+      # Keep them in lockstep.
+      - name: Preload Docker images
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          for image in \
+            mirror.gcr.io/grafana/loki:3.4.2 \
+            mirror.gcr.io/grafana/grafana:12.3.7 \
+            mirror.gcr.io/grafana/grafana:11.5.2
+          do
+            timeout 180 docker pull "$image" || {
+              echo "::error::docker pull $image failed or stalled past 180s"
+              exit 1
+            }
+          done
+      # `--run-ignored only` opts the Docker-gated tests in (they're skipped
+      # everywhere else). It also excludes grafana_e2e's one Docker-free test —
+      # the container-start retry helper — which stays un-ignored and keeps
+      # running in the workspace sweep above.
+      - name: Loki/Grafana differential suites (Docker, ignored)
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov nextest --locked -p crabka-integration-tests --profile ci \
+            --test loki_differential \
+            --test grafana_e2e \
+            --test grafana_integration \
+            --run-ignored only \
+            --lcov --output-path coverage/observability-differential.lcov
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/observability-differential.lcov
           disable_search: true
           flags: workspace-integration
           fail_ci_if_error: false
@@ -1833,6 +1934,7 @@ jobs:
       - gres-conformance
       - gres-integration
       - workspace-integration-coverage
+      - observability-differential
       - admin-ui-integration
       - broker-jvm-acceptance
       - broker-integration
