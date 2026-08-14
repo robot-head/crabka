@@ -1,0 +1,131 @@
+(* #"/workspace/crates/verified/src/broker.rs" 41 0 49 20 *)
+
+let%span sbroker = "/workspace/crates/verified/src/broker.rs" 74 15 74 59
+let%span sbroker'0 = "/workspace/crates/verified/src/broker.rs" 77 31 77 61
+let%span sbroker'1 = "/workspace/crates/verified/src/broker.rs" 25 11 25 66
+let%span sbroker'2 = "/workspace/crates/verified/src/broker.rs" 26 10 26 61
+let%span sbroker'3 = "/workspace/crates/verified/src/broker.rs" 27 10 28 65
+let%span sbroker'4 = "/workspace/crates/verified/src/broker.rs" 29 10 31 15
+let%span sbroker'5 = "/workspace/crates/verified/src/broker.rs" 32 10 32 74
+let%span sbroker'6 = "/workspace/crates/verified/src/broker.rs" 33 10 33 73
+let%span sbroker'7 = "/workspace/crates/verified/src/broker.rs" 34 10 36 47
+let%span sbroker'8 = "/workspace/crates/verified/src/broker.rs" 37 10 39 14
+let%span sord = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/logic/ord.rs" 34 8 34 21
+
+use creusot.int.Int64
+use creusot.prelude.Any
+use int.Int
+
+type t_FetchVisibility = {
+  out_of_range: bool;
+  empty: bool;
+  limit_offset: Int64.t;
+  effective_lso: Int64.t;
+  read_committed_aborts: bool;
+  response_hw: Int64.t;
+  response_lso: Int64.t }
+
+predicate ge_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord] other <= self
+
+meta "rewrite_def" predicate ge_log_Int
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let fetch_visibility [#"/workspace/crates/verified/src/broker.rs" 41 0 49 20] (is_follower: bool) (read_committed: bool)
+  (log_start: Int64.t) (hw: Int64.t) (lso: Int64.t) (log_end: Int64.t) (fetch_offset: Int64.t)
+  (return (x: t_FetchVisibility)) = {[@stop_split] [@expl:fetch_visibility requires] [%#sbroker'1] 0
+    <= Int64.to_int log_start
+  /\ Int64.to_int log_start <= Int64.to_int hw /\ Int64.to_int hw <= Int64.to_int log_end}
+  (! bb0
+  [ bb0 = any [ br0 -> {is_follower = false} (! bb2) | br1 -> {is_follower} (! bb1) ]
+  | bb1 = s0 [ s0 = [ &upper_bound <- log_end ] s1 | s1 = bb3 ]
+  | bb2 = s0 [ s0 = [ &upper_bound <- hw ] s1 | s1 = bb3 ]
+  | bb3 = any [ br0 -> {read_committed = false} (! bb9) | br1 -> {read_committed} (! bb4) ]
+  | bb4 = any [ br0 -> {is_follower = false} (! bb5) | br1 -> {is_follower} (! bb9) ]
+  | bb5 = s0 [ s0 = [ &_50 <- Int64.lt lso hw ] s1 | s1 = any [ br0 -> {_50 = false} (! bb7) | br1 -> {_50} (! bb6) ] ]
+  | bb6 = s0 [ s0 = [ &effective_lso'0 <- lso ] s1 | s1 = bb10 ]
+  | bb7 = s0 [ s0 = [ &effective_lso'0 <- hw ] s1 | s1 = bb10 ]
+  | bb9 = s0 [ s0 = [ &effective_lso'0 <- lso ] s1 | s1 = bb10 ]
+  | bb10 = any [ br0 -> {is_follower = false} (! bb12) | br1 -> {is_follower} (! bb11) ]
+  | bb11 = s0 [ s0 = [ &response_hw'0 <- log_end ] s1 | s1 = bb13 ]
+  | bb12 = s0 [ s0 = [ &response_hw'0 <- hw ] s1 | s1 = bb13 ]
+  | bb13 = any [ br0 -> {read_committed = false} (! bb16) | br1 -> {read_committed} (! bb14) ]
+  | bb14 = any [ br0 -> {is_follower = false} (! bb15) | br1 -> {is_follower} (! bb16) ]
+  | bb15 = s0 [ s0 = [ &response_lso'0 <- effective_lso'0 ] s1 | s1 = bb20 ]
+  | bb16 = any [ br0 -> {is_follower = false} (! bb18) | br1 -> {is_follower} (! bb17) ]
+  | bb17 = s0 [ s0 = [ &response_lso'0 <- log_end ] s1 | s1 = bb20 ]
+  | bb18 = s0 [ s0 = [ &response_lso'0 <- hw ] s1 | s1 = bb20 ]
+  | bb20 = any [ br0 -> {is_follower = false} (! bb22) | br1 -> {is_follower} (! bb21) ]
+  | bb21 = s0 [ s0 = [ &limit_offset'0 <- log_end ] s1 | s1 = bb26 ]
+  | bb22 = any [ br0 -> {read_committed = false} (! bb24) | br1 -> {read_committed} (! bb23) ]
+  | bb23 = s0 [ s0 = [ &limit_offset'0 <- effective_lso'0 ] s1 | s1 = bb26 ]
+  | bb24 = s0 [ s0 = [ &limit_offset'0 <- hw ] s1 | s1 = bb26 ]
+  | bb26 = s0
+    [ s0 = [ &out_of_range'0 <- Int64.lt fetch_offset log_start ] s1
+    | s1 = any [ br0 -> {out_of_range'0 = false} (! bb27) | br1 -> {out_of_range'0} (! bb28) ] ]
+  | bb28 = s0 [ s0 = [ &_66 <- [%#sbroker] false ] s1 | s1 = bb29 ]
+  | bb27 = s0 [ s0 = [ &_66 <- Int64.ge fetch_offset upper_bound ] s1 | s1 = bb29 ]
+  | bb29 = any [ br0 -> {read_committed = false} (! bb31) | br1 -> {read_committed} (! bb30) ]
+  | bb30 = s0 [ s0 = [ &_72 <- not is_follower ] s1 | s1 = bb32 ]
+  | bb31 = s0 [ s0 = [ &_72 <- [%#sbroker'0] false ] s1 | s1 = bb32 ]
+  | bb32 = s0
+    [ s0 = [ &_ret <- { out_of_range = out_of_range'0;
+                        empty = _66;
+                        limit_offset = limit_offset'0;
+                        effective_lso = effective_lso'0;
+                        read_committed_aborts = _72;
+                        response_hw = response_hw'0;
+                        response_lso = response_lso'0 } ] s1
+    | s1 = return {_ret} ] ]
+  [ & _ret: t_FetchVisibility = Any.any_l ()
+  | & is_follower: bool = is_follower
+  | & read_committed: bool = read_committed
+  | & log_start: Int64.t = log_start
+  | & hw: Int64.t = hw
+  | & lso: Int64.t = lso
+  | & log_end: Int64.t = log_end
+  | & fetch_offset: Int64.t = fetch_offset
+  | & upper_bound: Int64.t = Any.any_l ()
+  | & effective_lso'0: Int64.t = Any.any_l ()
+  | & _50: bool = Any.any_l ()
+  | & response_hw'0: Int64.t = Any.any_l ()
+  | & response_lso'0: Int64.t = Any.any_l ()
+  | & limit_offset'0: Int64.t = Any.any_l ()
+  | & out_of_range'0: bool = Any.any_l ()
+  | & _66: bool = Any.any_l ()
+  | & _72: bool = Any.any_l () ])
+  [ return (result: t_FetchVisibility) ->
+  {[@stop_split] [@expl:fetch_visibility ensures] ([@stop_split] [@expl:fetch_visibility ensures #0] [%#sbroker'2] result.out_of_range
+      = (Int64.to_int fetch_offset < Int64.to_int log_start))
+    /\ ([@stop_split] [@expl:fetch_visibility ensures #1] [%#sbroker'3] result.empty
+      = (not Int64.to_int fetch_offset < Int64.to_int log_start
+      /\ ge_log_Int (Int64.to_int fetch_offset) (if is_follower then Int64.to_int log_end else Int64.to_int hw)))
+    /\ ([@stop_split] [@expl:fetch_visibility ensures #2] [%#sbroker'4] Int64.to_int result.effective_lso
+      = (if read_committed /\ not is_follower then
+        if Int64.to_int lso < Int64.to_int hw then Int64.to_int lso else Int64.to_int hw
+      else
+        Int64.to_int lso
+      ))
+    /\ ([@stop_split] [@expl:fetch_visibility ensures #3] [%#sbroker'5] result.read_committed_aborts
+      = (read_committed /\ not is_follower))
+    /\ ([@stop_split] [@expl:fetch_visibility ensures #4] [%#sbroker'6] Int64.to_int result.response_hw
+      = (if is_follower then Int64.to_int log_end else Int64.to_int hw))
+    /\ ([@stop_split] [@expl:fetch_visibility ensures #5] [%#sbroker'7] Int64.to_int result.response_lso
+      = (if read_committed /\ not is_follower then
+        if Int64.to_int lso < Int64.to_int hw then Int64.to_int lso else Int64.to_int hw
+      else
+        if is_follower then Int64.to_int log_end else Int64.to_int hw
+      ))
+    /\ ([@stop_split] [@expl:fetch_visibility ensures #6] [%#sbroker'8] Int64.to_int result.limit_offset
+    = (if is_follower then
+      Int64.to_int log_end
+    else
+      if read_committed then
+        if Int64.to_int lso < Int64.to_int hw then Int64.to_int lso else Int64.to_int hw
+      else
+        Int64.to_int hw
+
+    ))}
+    (! return {result}) ]

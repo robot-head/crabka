@@ -1,0 +1,11 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_delete_records_offset_out_of_range": {
+        "prover": "alt-ergo",
+        "time": 0.01
+      }
+    }
+  }
+}

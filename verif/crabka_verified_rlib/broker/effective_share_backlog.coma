@@ -1,0 +1,85 @@
+(* #"/workspace/crates/verified/src/broker.rs" 121 0 121 74 *)
+
+let%span sbroker = "/workspace/crates/verified/src/broker.rs" 122 26 122 27
+let%span sbroker'0 = "/workspace/crates/verified/src/broker.rs" 127 21 127 45
+let%span sbroker'1 = "/workspace/crates/verified/src/broker.rs" 128 20 128 21
+let%span sbroker'2 = "/workspace/crates/verified/src/broker.rs" 128 44 128 45
+let%span sbroker'3 = "/workspace/crates/verified/src/broker.rs" 119 10 119 72
+let%span sbroker'4 = "/workspace/crates/verified/src/broker.rs" 107 8 107 85
+let%span sord = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/logic/ord.rs" 34 8 34 21
+let%span sord'0 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/logic/ord.rs" 22 8 22 20
+let%span snum = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/num.rs" 347 20 348 51
+let%span snum'0 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/num.rs" 351 26 351 83
+let%span snum'1 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/std/num.rs" 352 26 352 83
+
+use creusot.int.Int64
+use creusot.prelude.Any
+use int.Int
+
+predicate ge_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord] other <= self
+
+meta "rewrite_def" predicate ge_log_Int
+
+constant const_MIN: Int64.t = (-9223372036854775808: Int64.t)
+
+constant const_MAX: Int64.t = (9223372036854775807: Int64.t)
+
+predicate gt_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord'0] other < self
+
+meta "rewrite_def" predicate gt_log_Int
+
+let saturating_sub (self_: Int64.t) (rhs: Int64.t) (return (x: Int64.t)) = any
+  [ return (result: Int64.t) ->
+  {[@stop_split] [@expl:saturating_sub ensures] ([@stop_split] [@expl:saturating_sub ensures #0] [%#snum] ge_log_Int (Int64.to_int self_
+          - Int64.to_int rhs) (Int64.to_int const_MIN)
+        /\ Int64.to_int self_ - Int64.to_int rhs <= Int64.to_int const_MAX
+      -> Int64.to_int result = Int64.to_int self_ - Int64.to_int rhs)
+    /\ ([@stop_split] [@expl:saturating_sub ensures #1] [%#snum'0] Int64.to_int self_ - Int64.to_int rhs
+        < Int64.to_int const_MIN -> Int64.to_int result = Int64.to_int const_MIN)
+    /\ ([@stop_split] [@expl:saturating_sub ensures #2] [%#snum'1] gt_log_Int (Int64.to_int self_
+      - Int64.to_int rhs) (Int64.to_int const_MAX) -> Int64.to_int result = Int64.to_int const_MAX)}
+    (! return {result}) ]
+
+function effective_share_backlog_model [#"/workspace/crates/verified/src/broker.rs" 105 0 105 80] (hwm: Int64.t) (spso: Int64.t) (log_start: Int64.t) : int
+ = [%#sbroker'4] let base = if ge_log_Int (Int64.to_int spso) 0
+  /\ gt_log_Int (Int64.to_int spso) (Int64.to_int log_start) then
+    Int64.to_int spso
+  else
+    Int64.to_int log_start
+   in let difference = Int64.to_int hwm - base in if difference <= 0 then
+    0
+  else
+    if gt_log_Int difference 9223372036854775807 then 9223372036854775807 else difference
+
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let effective_share_backlog [#"/workspace/crates/verified/src/broker.rs" 121 0 121 74] (hwm: Int64.t) (spso: Int64.t)
+  (log_start: Int64.t) (return (x: Int64.t)) = (! bb0
+  [ bb0 = s0
+    [ s0 = [ &_9 <- Int64.ge spso ([%#sbroker] (0: Int64.t)) ] s1
+    | s1 = any [ br0 -> {_9 = false} (! bb5) | br1 -> {_9} (! bb1) ] ]
+  | bb1 = s0
+    [ s0 = [ &_11 <- Int64.gt spso log_start ] s1 | s1 = any [ br0 -> {_11 = false} (! bb5) | br1 -> {_11} (! bb2) ] ]
+  | bb2 = s0 [ s0 = [ &base <- spso ] s1 | s1 = bb6 ]
+  | bb5 = s0 [ s0 = [ &base <- log_start ] s1 | s1 = bb6 ]
+  | bb6 = s0
+    [ s0 = saturating_sub [%#sbroker'0] {hwm} {base} (fun (_x: Int64.t) -> [ &difference <- _x ] s1)
+    | s1 = [ &_17 <- Int64.gt difference ([%#sbroker'1] (0: Int64.t)) ] s2
+    | s2 = any [ br0 -> {_17 = false} (! bb9) | br1 -> {_17} (! bb8) ] ]
+  | bb8 = s0 [ s0 = [ &_ret <- difference ] s1 | s1 = return {_ret} ]
+  | bb9 = s0 [ s0 = [ &_ret <- [%#sbroker'2] (0: Int64.t) ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: Int64.t = Any.any_l ()
+  | & hwm: Int64.t = hwm
+  | & spso: Int64.t = spso
+  | & log_start: Int64.t = log_start
+  | & base: Int64.t = Any.any_l ()
+  | & _9: bool = Any.any_l ()
+  | & _11: bool = Any.any_l ()
+  | & difference: Int64.t = Any.any_l ()
+  | & _17: bool = Any.any_l () ])
+  [ return (result: Int64.t) -> {[@stop_split] [@expl:effective_share_backlog ensures] [%#sbroker'3] Int64.to_int result
+    = effective_share_backlog_model hwm spso log_start}
+    (! return {result}) ]

@@ -1,0 +1,33 @@
+(* #"/workspace/crabka/crates/verified/src/broker.rs" 98 0 98 89 *)
+
+let%span sbroker = "/workspace/crabka/crates/verified/src/broker.rs" 99 13 99 14
+let%span sbroker'0 = "/workspace/crabka/crates/verified/src/broker.rs" 99 4 99 41
+let%span sbroker'1 = "/workspace/crabka/crates/verified/src/broker.rs" 96 10 96 62
+let%span sord = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.13.0/src/logic/ord.rs" 22 8 22 20
+
+use creusot.int.Int64
+use creusot.prelude.Any
+use int.Int
+
+predicate gt_log_Int [@inline:trivial] (self: int) (other: int) = [%#sord] other < self
+
+meta "rewrite_def" predicate gt_log_Int
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let delete_records_offset_out_of_range [#"/workspace/crabka/crates/verified/src/broker.rs" 98 0 98 89] (target: Int64.t)
+  (log_end_offset: Int64.t) (return (x: bool)) = (! bb0
+  [ bb0 = s0
+    [ s0 = [ &_6 <- Int64.lt target ([%#sbroker] (0: Int64.t)) ] s1
+    | s1 = any [ br0 -> {_6 = false} (! bb2) | br1 -> {_6} (! bb1) ] ]
+  | bb1 = s0 [ s0 = [ &_ret <- [%#sbroker'0] true ] s1 | s1 = return {_ret} ]
+  | bb2 = s0 [ s0 = [ &_ret <- Int64.gt target log_end_offset ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: bool = Any.any_l ()
+  | & target: Int64.t = target
+  | & log_end_offset: Int64.t = log_end_offset
+  | & _6: bool = Any.any_l () ])
+  [ return (result: bool) -> {[@stop_split] [@expl:delete_records_offset_out_of_range ensures] [%#sbroker'1] result
+    = (Int64.to_int target < 0 \/ gt_log_Int (Int64.to_int target) (Int64.to_int log_end_offset))}
+    (! return {result}) ]
