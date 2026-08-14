@@ -23,12 +23,12 @@ path = "src/bin/rebalancer.rs"
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
 bytes.workspace = true
 num-traits.workspace = true
-crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
-crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-protocol = { version = "0.4.1", path = "../protocol", default-features = false }
+crabka-metadata = { version = "0.4.1", path = "../metadata" }
 crabka-units = { workspace = true }
 connectrpc-axum.workspace = true
 prost.workspace = true

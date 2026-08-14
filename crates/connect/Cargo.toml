@@ -25,8 +25,8 @@ assert2 = { workspace = true }
 # The schema-registry serdes back the schema-aware converter. Only the
 # format-agnostic `SchemaSerializer`/`SchemaDeserializer` traits are needed
 # here, so no format feature (avro/protobuf/json) is enabled.
-crabka-schema-serde = { version = "0.4.0", path = "../schema-serde" }
-crabka-connect-derive = { version = "0.4.0", path = "../connect-derive", optional = true }
+crabka-schema-serde = { version = "0.4.1", path = "../schema-serde" }
+crabka-connect-derive = { version = "0.4.1", path = "../connect-derive", optional = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 derive_more = { workspace = true }

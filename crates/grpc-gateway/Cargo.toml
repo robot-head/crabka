@@ -24,13 +24,13 @@ path = "src/bin/gateway.rs"
 [dependencies]
 assert2 = { workspace = true }
 crabka-authz = { version = "0.4.0", path = "../authz" }
-crabka-ids = { version = "0.4.0", path = "../ids" }
+crabka-ids = { version = "0.4.1", path = "../ids" }
 crabka-telemetry = { version = "0.4.0", path = "../telemetry" }
-crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
-crabka-client-consumer = { version = "0.4.0", path = "../client-consumer" }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
-crabka-client-streams = { version = "0.4.0", path = "../client-streams", optional = true, features = ["arrow"] }
-crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-client-producer = { version = "0.4.1", path = "../client-producer" }
+crabka-client-consumer = { version = "0.4.1", path = "../client-consumer" }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
+crabka-client-streams = { version = "0.4.1", path = "../client-streams", optional = true, features = ["arrow"] }
+crabka-metadata = { version = "0.4.1", path = "../metadata" }
 crabka-units = { workspace = true }
 arc-swap = { workspace = true }
 prometheus-client = { workspace = true }
@@ -57,8 +57,8 @@ futures-util = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-crabka-security = { version = "0.4.0", path = "../security" }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-security = { version = "0.4.1", path = "../security" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
 refined_type.workspace = true
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }

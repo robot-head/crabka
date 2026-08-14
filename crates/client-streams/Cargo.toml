@@ -17,13 +17,13 @@ categories = ["api-bindings", "network-programming"]
 workspace = true
 
 [dependencies]
-crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-protocol = { version = "0.4.1", path = "../protocol", default-features = false }
 # Schema-registry serdes (Avro/Protobuf/JSON) are a first-class, always-on part
 # of the streams client — no feature gate.
-crabka-schema-serde = { version = "0.4.0", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-consumer = { version = "0.4.0", path = "../client-consumer" }
-crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
+crabka-schema-serde = { version = "0.4.1", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-client-consumer = { version = "0.4.1", path = "../client-consumer" }
+crabka-client-producer = { version = "0.4.1", path = "../client-producer" }
 crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bon = { workspace = true }
