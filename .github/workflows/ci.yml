@@ -868,7 +868,7 @@ jobs:
           fail_ci_if_error: false
       - name: Schema-serde unit coverage
         run: |
-          cargo llvm-cov nextest -p crabka-schema-serde --all-features --lib --lcov --output-path coverage/schema-serde-unit.lcov
+          cargo llvm-cov nextest -p crabka-schema-serde --all-features --profile ci --lib --lcov --output-path coverage/schema-serde-unit.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
