@@ -163,13 +163,9 @@ async fn a_row_whose_expression_raises_can_still_be_deleted_and_truncated() {
 /// every other reader of the row is asked for, and a row-security `USING` qual
 /// is written in the catalog rather than in the statement.
 ///
-/// A second — a foreign key carried by the generated column itself — is widened
-/// for as well, and is deliberately not asserted here. `PostgreSQL` 18.4
-/// refuses the constraint outright ("foreign key constraints on virtual
-/// generated columns are not supported"); this engine accepts the DDL and then
-/// enforces nothing, because the key it reads out of storage is the NULL
-/// placeholder and a NULL key satisfies every foreign key. Making the widening
-/// observable would mean fixing that first.
+/// It is the only such reader left. A foreign key carried by the generated
+/// column itself used to be a second, and is now refused at DDL time — see
+/// [`a_foreign_key_over_a_virtual_column_is_refused`].
 #[tokio::test]
 async fn a_reader_outside_the_statement_still_sees_the_computed_value() {
     let (_engine, mut session) = engine_with(&[
@@ -333,6 +329,87 @@ async fn update_and_delete_can_qualify_on_a_virtual_column() {
     );
     run(&mut session, "DELETE FROM quals WHERE b = 6").await;
     assert!(query(&mut session, "SELECT * FROM quals ORDER BY a").await == vec!["1,2", "9,18"]);
+}
+
+/// `ON CONFLICT DO UPDATE` binds two rows at once, and both halves have to
+/// report the computed value.
+///
+/// The `EXCLUDED` half is the row the `INSERT` proposed, and that row has been
+/// settled for storage — where a virtual generated column is a NULL
+/// placeholder. Read as a row rather than as storage, it has to carry the
+/// value: upstream's rewriter expands `EXCLUDED.<virtual column>` into the
+/// generation expression, and `set a = excluded.c` therefore assigns 70 rather
+/// than writing NULL over the column.
+///
+/// Every expectation is `PostgreSQL` 18.4's, from its own `gtest34` case.
+#[tokio::test]
+async fn excluded_reads_a_virtual_column_as_its_expression() {
+    let (_engine, mut session) = engine_with(&[
+        "CREATE TABLE gtest34 (id int PRIMARY KEY, a int, \
+         c int GENERATED ALWAYS AS (a * 10) VIRTUAL)",
+        "INSERT INTO gtest34 VALUES (1, 5)",
+    ])
+    .await;
+
+    for (sql, expected) in [
+        (
+            "INSERT INTO gtest34 VALUES (1, 7) \
+             ON CONFLICT (id) DO UPDATE SET a = excluded.c RETURNING *",
+            vec!["1,70,700"],
+        ),
+        // Both halves in one expression: the stored row's own value beside the
+        // proposed row's.
+        (
+            "INSERT INTO gtest34 VALUES (1, 2) \
+             ON CONFLICT (id) DO UPDATE SET a = gtest34.c + excluded.c RETURNING *",
+            vec!["1,720,7200"],
+        ),
+        // And the clause's own WHERE, which is judged over the same bindings.
+        (
+            "INSERT INTO gtest34 VALUES (1, 3) \
+             ON CONFLICT (id) DO UPDATE SET a = 999 WHERE excluded.c > 20 RETURNING *",
+            vec!["1,999,9990"],
+        ),
+    ] {
+        assert!(query(&mut session, sql).await == expected, "{sql}");
+    }
+
+    // The proposed row itself is untouched by that expansion: a conflict-free
+    // row still stores the placeholder and computes its value on read.
+    run(
+        &mut session,
+        "INSERT INTO gtest34 VALUES (2, 4) ON CONFLICT (id) DO UPDATE SET a = excluded.c",
+    )
+    .await;
+    assert!(
+        query(&mut session, "SELECT * FROM gtest34 ORDER BY id").await
+            == vec!["1,999,9990", "2,4,40"]
+    );
+}
+
+/// A generation expression named in a `WHERE` is evaluated for every row the
+/// `WHERE` looks at, so one row that overflows makes the whole qual raise.
+///
+/// This is the control case for narrowing the read: `PostgreSQL` 18.4 raises
+/// here too, because the expression it expands the reference into sits in the
+/// qual and the qual runs over every scanned row. Any narrowing that made this
+/// statement answer instead of raising would have gone past upstream.
+#[tokio::test]
+async fn a_column_named_in_the_qual_is_evaluated_for_every_scanned_row() {
+    let (_engine, mut session) = engine_with(&[
+        "CREATE TABLE ctl (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)",
+        "INSERT INTO ctl (a) VALUES (1), (2000000000)",
+    ])
+    .await;
+
+    assert!(
+        error(&mut session, "SELECT a FROM ctl WHERE b = 2").await
+            == ("22003".to_string(), "integer out of range".to_string())
+    );
+    // The row that overflows is the only reason: without it the same qual
+    // answers.
+    run(&mut session, "DELETE FROM ctl WHERE a = 2000000000").await;
+    assert!(query(&mut session, "SELECT a FROM ctl WHERE b = 2").await == vec!["1"]);
 }
 
 // ── COPY ─────────────────────────────────────────────────────────────────────
@@ -630,6 +707,84 @@ async fn a_virtual_column_cannot_be_indexed() {
 
     // The same index over the plain column is unaffected.
     run(&mut session, "CREATE INDEX ix_a ON ix (a)").await;
+}
+
+/// A virtual column cannot carry a foreign key either, and for a sharper reason
+/// than the index: such a constraint reads as protection and provides none.
+///
+/// The key a write reads out of a stored row is the NULL placeholder the column
+/// occupies, and a NULL key satisfies every foreign key. So the child accepts a
+/// row referencing nothing, and deleting the parent row leaves it standing.
+/// `PostgreSQL` 18.4 refuses the DDL instead, in all three spellings.
+///
+/// Two refusals sit in front of it, over a generated column of *either* kind: a
+/// referential action that writes the referencing columns cannot be applied to
+/// a column the relation computes for itself. `ON DELETE CASCADE` removes the
+/// whole row and writes nothing, so it stays legal — and a `STORED` column,
+/// whose value really is in the row, keys an ordinary foreign key.
+#[tokio::test]
+async fn a_foreign_key_over_a_virtual_column_is_refused() {
+    let (_engine, mut session) = engine_with(&[
+        "CREATE TABLE gtest23a (x int PRIMARY KEY, y int)",
+        "CREATE TABLE fkalt (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)",
+    ])
+    .await;
+
+    let unsupported = "foreign key constraints on virtual generated columns are not supported";
+    for (sql, code, message) in [
+        (
+            "CREATE TABLE gtest23b (a int PRIMARY KEY, \
+             b int GENERATED ALWAYS AS (a * 2) VIRTUAL REFERENCES gtest23a (x))",
+            "0A000",
+            unsupported,
+        ),
+        (
+            "ALTER TABLE fkalt ADD FOREIGN KEY (b) REFERENCES gtest23a (x)",
+            "0A000",
+            unsupported,
+        ),
+        (
+            "ALTER TABLE fkalt ADD CONSTRAINT named FOREIGN KEY (b) REFERENCES gtest23a (x)",
+            "0A000",
+            unsupported,
+        ),
+        (
+            "CREATE TABLE gtest23x (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) \
+             VIRTUAL REFERENCES gtest23a (x) ON UPDATE CASCADE)",
+            "42601",
+            "invalid ON UPDATE action for foreign key constraint containing generated column",
+        ),
+        (
+            "CREATE TABLE gtest23y (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) \
+             STORED REFERENCES gtest23a (x) ON DELETE SET NULL)",
+            "42601",
+            "invalid ON DELETE action for foreign key constraint containing generated column",
+        ),
+    ] {
+        assert!(
+            error(&mut session, sql).await == (code.to_string(), message.to_string()),
+            "{sql}"
+        );
+    }
+
+    // A `STORED` column keys an ordinary foreign key, cascading delete and all,
+    // and the constraint really does bite.
+    run(
+        &mut session,
+        "CREATE TABLE gtest23s (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) \
+         STORED REFERENCES gtest23a (x) ON DELETE CASCADE)",
+    )
+    .await;
+    run(&mut session, "INSERT INTO gtest23a VALUES (2)").await;
+    run(&mut session, "INSERT INTO gtest23s (a) VALUES (1)").await;
+    assert!(
+        error(&mut session, "INSERT INTO gtest23s (a) VALUES (5)")
+            .await
+            .0
+            == "23503"
+    );
+    run(&mut session, "DELETE FROM gtest23a WHERE x = 2").await;
+    assert!(query(&mut session, "SELECT count(*) FROM gtest23s").await == vec!["0"]);
 }
 
 /// A statement may only ever name `DEFAULT` for a generated column, whichever

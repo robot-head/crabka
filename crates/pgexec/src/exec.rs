@@ -824,6 +824,14 @@ pub(crate) fn execute_ddl(
                             self_reference: Some(&relation),
                         },
                     )?;
+                    // After the key resolves, which is where PostgreSQL tests
+                    // it: a `REFERENCES` naming a relation that does not exist,
+                    // or a key no unique index backs, is reported first.
+                    reject_foreign_key_over_generated(
+                        &table.columns,
+                        &pending.columns,
+                        &pending.reference,
+                    )?;
                     ops.extend(crabka_pgcatalog::create_foreign_key_ops(kv, &foreign_key)?);
                 }
             }
@@ -3013,6 +3021,11 @@ fn unsupplied_defaults(
         .collect()
 }
 
+/// Assemble one proposed `INSERT` row: the supplied values coerced into place,
+/// every unsupplied column at its default.
+///
+/// The row is deliberately NOT settled here — see [`finish_written_row`], which
+/// runs after the relation's `BEFORE ROW` triggers have had their say.
 fn build_insert_row(
     table: &Table,
     target_idx: &[usize],
@@ -3042,10 +3055,11 @@ fn build_insert_row(
         };
         row[*slot] = value;
     }
-    finish_written_row(table, &mut row, ctx)?;
     Ok(row)
 }
 
+/// [`build_insert_row`] for one `COPY … FROM` line, and unsettled for the same
+/// reason: the relation's `BEFORE ROW` triggers see the row first.
 fn build_copy_row(
     table: &Table,
     target_idx: &[usize],
@@ -3089,14 +3103,6 @@ fn build_copy_row(
             )
         })?;
     }
-    finish_written_row(table, &mut built, ctx).map_err(|error| {
-        copy_row_context(
-            error,
-            &table.name.name,
-            row,
-            crate::copyfmt::CopyContext::Line { raw: row.raw },
-        )
-    })?;
     Ok(built)
 }
 
@@ -3166,12 +3172,22 @@ pub(crate) fn with_copy_context(error: ExecError, context: String) -> ExecError 
     ExecError::Remote(reported.with_context(stacked))
 }
 
-/// The per-row work every write path shares once the target values are in
-/// place.
+/// The per-row work every write path shares once the row it will actually
+/// store is settled.
 ///
-/// Compute `GENERATED … STORED` columns, then enforce `NOT NULL`, then the
-/// table's `CHECK` constraints. That is `PostgreSQL`'s order, and the reason a
-/// generated column can satisfy a `CHECK` that references it.
+/// Compute `GENERATED … STORED` columns, then enforce the domain, then `NOT
+/// NULL`, then the table's `CHECK` constraints. That is `PostgreSQL`'s order,
+/// and the reason a generated column can satisfy a `CHECK` that references it.
+///
+/// "Actually store" is the whole point of *when* this runs.
+/// [`crate::trigger::fire_before_row`] is the caller for every write path that
+/// fires row triggers, and it calls this AFTER the last `BEFORE ROW` trigger
+/// has returned its replacement row. A generated column settled before the
+/// trigger would keep whatever the trigger then assigned to it — a `STORED`
+/// column holding a value its own expression never produced — and a constraint
+/// checked before the trigger would judge a row nobody stores. The three write
+/// paths that fire no row trigger at all — a view's `INSTEAD OF` insert and
+/// update, and a sharded `COPY` — call it themselves.
 pub(crate) fn finish_written_row(
     table: &Table,
     row: &mut [Datum],
@@ -5933,7 +5949,15 @@ async fn execute_view_dml(
             let mut returned = Vec::new();
             let mut count = 0_u64;
             for row in rows {
-                let proposed = build_insert_row(&view, &targets, &row, ctx)?;
+                // A view reaches no `BEFORE ROW` trigger — its own row trigger
+                // is `INSTEAD OF` — so the settle that
+                // [`crate::trigger::fire_before_row`] performs for a stored
+                // relation is spelled here. A view has no generated column and
+                // no `CHECK` of its own, so this is the domain and `NOT NULL`
+                // of its column types; the view's own `WITH CHECK OPTION` is
+                // judged below, on the row the trigger returns.
+                let mut proposed = build_insert_row(&view, &targets, &row, ctx)?;
+                finish_written_row(&view, &mut proposed, ctx)?;
                 let Some(result) = crate::trigger::fire_instead_row(
                     write_ctx.catalog_kv,
                     &view,
@@ -6017,7 +6041,9 @@ async fn execute_view_dml(
                 else {
                     continue;
                 };
-                let proposed = apply_assignments(&view, &targets, &source.scope, &joined, ctx)?;
+                // Settled here for the reason the insert arm above states.
+                let mut proposed = apply_assignments(&view, &targets, &source.scope, &joined, ctx)?;
+                finish_written_row(&view, &mut proposed, ctx)?;
                 let Some(result) = crate::trigger::fire_instead_row(
                     write_ctx.catalog_kv,
                     &view,
@@ -6448,7 +6474,7 @@ async fn execute_write_body(
             // The virtual generated columns this statement can reach in the row
             // it is about to overwrite. A `SET` right-hand side, the `WHERE`, a
             // `FROM` item's `ON` and a `RETURNING old.…` are all in `refs`.
-            let reads = write_generated_reads(catalog_kv, &t, refs, qualifier)?;
+            let reads = read_generated_reads(&t, Some(refs), qualifier);
             for (rowid, _xmin, scanned_row) in write_candidate_rows(
                 write_ctx,
                 &t,
@@ -6599,7 +6625,7 @@ async fn execute_write_body(
             // `TRUNCATE` desugars to one with none of the three, so it reaches
             // nothing, which is why it can empty a relation holding a row whose
             // generation expression overflows.
-            let reads = write_generated_reads(catalog_kv, &t, refs, qualifier)?;
+            let reads = read_generated_reads(&t, Some(refs), qualifier);
             for (rowid, _xmin, scanned_row) in write_candidate_rows(
                 write_ctx,
                 &t,
@@ -7062,6 +7088,9 @@ fn assignment_arity_error(targets: usize, values: usize) -> ExecError {
 }
 
 /// Apply the resolved assignments to a copy of the target row.
+///
+/// Unsettled, as [`build_insert_row`] is: the post-image an `UPDATE` proposes
+/// reaches its `BEFORE ROW` triggers before [`finish_written_row`] judges it.
 fn apply_assignments(
     table: &Table,
     targets: &[(usize, AssignedValue<'_>)],
@@ -7121,7 +7150,6 @@ fn apply_assignments(
         };
         next[*idx] = coerce(raw, table.columns[*idx].ty, ctx)?;
     }
-    finish_written_row(table, &mut next, ctx)?;
     Ok(next)
 }
 
@@ -8591,7 +8619,19 @@ pub(crate) fn execute_timestamp_copy_write(
     let mut writes = Vec::with_capacity(rows.len());
     for (rowid, copied) in (start..).zip(rows.iter()) {
         copy_row_width(&table, &target_idx, copied)?;
-        let row = build_copy_row(&table, &target_idx, copied, ctx)?;
+        let mut row = build_copy_row(&table, &target_idx, copied, ctx)?;
+        // A sharded `COPY` fires no row trigger at all, so the settle that
+        // [`crate::trigger::fire_before_row`] performs everywhere else is
+        // spelled here — under the same `CONTEXT` line the local path gives a
+        // row its constraints reject.
+        finish_written_row(&table, &mut row, ctx).map_err(|error| {
+            copy_row_context(
+                error,
+                &table.name.name,
+                copied,
+                crate::copyfmt::CopyContext::Line { raw: copied.raw },
+            )
+        })?;
         writes.push(TimestampWrite {
             table_id: table.id,
             bucket: hash_bucket_for_row(&table, &row)?,
@@ -10806,7 +10846,28 @@ async fn apply_insert_conflict_update(
     .permit_row(table, update.cur_row, ctx)?;
     let scope = Scope::insert_conflict(table);
     let mut bindings = update.cur_row.to_vec();
-    bindings.extend_from_slice(update.proposed);
+    // The `excluded` half is the row the INSERT proposed, and it has been
+    // through `finish_written_row`, which blanks every `VIRTUAL` generated
+    // column because that row is the one about to be stored. The `DO UPDATE`
+    // assignments and `WHERE` read it as a row rather than as storage, so its
+    // virtual columns are materialized here — on this copy alone. Expanding
+    // `update.proposed` itself would put a computed value into the row a
+    // fall-through to the insert path writes. `PostgreSQL` draws the same line:
+    // its rewriter expands `EXCLUDED.<virtual column>` into the generation
+    // expression and leaves the tuple it proposes untouched.
+    //
+    // Every column, not the statement's own set: the target half beside it is
+    // read back by `eval_plan_qual` under
+    // [`crate::scope::GeneratedReads::every`], and one half of a scope narrower
+    // than the other would answer `t.c` and `excluded.c` differently.
+    let mut excluded = update.proposed.to_vec();
+    expand_virtual_generated_row(
+        table,
+        &mut excluded,
+        ctx,
+        crate::scope::GeneratedReads::every(),
+    )?;
+    bindings.extend_from_slice(&excluded);
     if !row_matches(update.filter, &scope, &bindings, ctx)? {
         return Ok(None);
     }
@@ -11373,7 +11434,7 @@ fn write_candidate_rows(
     // to hold its value before any of them run — and one none of them can reach
     // must NOT be computed, or a row whose expression raises can never be
     // deleted. What "can reach" means is settled by the caller, in
-    // [`write_generated_reads`], because the row this scan produces is re-read
+    // [`read_generated_reads`], because the row this scan produces is re-read
     // under its lock by `eval_plan_qual` and the two must agree.
     for (_, _, row) in &mut rows {
         expand_virtual_generated_row(table, row, write_ctx.eval_ctx, reads)?;
@@ -11393,6 +11454,18 @@ fn write_candidate_rows(
 ///   which can name a column the statement gives no sign of. The switch is
 ///   tested rather than the decision, so the answer does not depend on which
 ///   role is asking.
+///
+/// A write of the relation asks the same question and takes the same answer.
+/// The row an `UPDATE` or `DELETE` is about to overwrite reaches no reader a
+/// `SELECT` of the same text would not: a row trigger is deliberately NOT one,
+/// because upstream does not let a trigger read a generated column at all and
+/// [`crate::trigger::fire_before_row`] blanks the images it is handed, and a
+/// foreign key cannot carry a virtual generated column because
+/// [`reject_foreign_key_over_generated`] refuses the constraint.
+///
+/// The answer belongs to the statement rather than to one scan of it, because
+/// the candidate row and the version `eval_plan_qual` re-reads under the lock
+/// both reach the same readers and must be materialized alike.
 fn read_generated_reads<'a>(
     table: &Table,
     refs: Option<&'a crate::scope::StatementRefs>,
@@ -11402,49 +11475,6 @@ fn read_generated_reads<'a>(
         Some(refs) if !table.row_security => crate::scope::GeneratedReads::of(refs, qualifier),
         _ => crate::scope::GeneratedReads::every(),
     }
-}
-
-/// [`read_generated_reads`] for the row an `UPDATE` or `DELETE` is about to
-/// overwrite, which one more reader can reach.
-///
-/// A foreign key *carried by* a virtual generated column has its key read out
-/// of the row. `PostgreSQL` refuses such a key outright ("foreign key
-/// constraints on virtual generated columns are not supported") and this engine
-/// accepts it, so the value has to be there. The parent side needs no test: a
-/// referenced key must be backed by a unique index, and
-/// [`reject_index_over_virtual_generated`] keeps a virtual column out of every
-/// index.
-///
-/// A row trigger is deliberately NOT a reason to materialize one. Upstream does
-/// not let a trigger read a generated column at all, and
-/// [`crate::trigger::fire_before_row`] blanks the images it is handed.
-///
-/// The answer belongs to the statement rather than to one scan of it, because
-/// the candidate row and the version `eval_plan_qual` re-reads under the lock
-/// both reach the same readers and must be materialized alike.
-fn write_generated_reads<'a>(
-    catalog_kv: &dyn Kv,
-    table: &Table,
-    refs: &'a crate::scope::StatementRefs,
-    qualifier: &'a str,
-) -> Result<crate::scope::GeneratedReads<'a>, ExecError> {
-    let reads = read_generated_reads(table, Some(refs), qualifier);
-    if !has_virtual_generated(table) {
-        return Ok(reads);
-    }
-    let keyed = crabka_pgcatalog::list_table_foreign_keys(catalog_kv, table.id)?
-        .iter()
-        .flat_map(|key| &key.columns)
-        .any(|column| {
-            table
-                .column_index(column)
-                .is_some_and(|index| table.columns[index].is_virtual_generated())
-        });
-    Ok(if keyed {
-        crate::scope::GeneratedReads::every()
-    } else {
-        reads
-    })
 }
 
 /// The role a timestamp write is authorized as.
@@ -11815,7 +11845,6 @@ fn execute_timestamp_update(
             let value = eval_assignment_value(expr, table.columns[*index].ty, &scope, &row, ctx)?;
             next[*index] = coerce(value, table.columns[*index].ty, ctx)?;
         }
-        finish_written_row(table, &mut next, ctx)?;
         let updated = assignments
             .iter()
             .flat_map(|assignment| assignment.targets.iter().cloned())
@@ -25522,6 +25551,63 @@ fn reject_index_over_virtual_generated(
     ))
 }
 
+/// Reject a `FOREIGN KEY` whose referencing side reads a generated column that
+/// `PostgreSQL` 18 refuses, in upstream's order.
+///
+/// A referential action that WRITES the referencing columns cannot be applied
+/// to a column the relation computes for itself, so `ON UPDATE CASCADE|SET
+/// NULL|SET DEFAULT` and `ON DELETE SET NULL|SET DEFAULT` are 42601 over a
+/// generated column of either kind. `ON DELETE CASCADE` removes the whole row
+/// and writes nothing, so it stays legal.
+///
+/// A key over a `VIRTUAL` column is then 0A000 outright. The value never
+/// reaches storage, so the key read out of a stored row is the NULL placeholder
+/// every row of the column holds, and a NULL key satisfies every foreign key:
+/// the constraint would read as protection and provide none. It is also
+/// unbackable on the parent side, because
+/// [`reject_index_over_virtual_generated`] keeps a virtual column out of every
+/// index.
+fn reject_foreign_key_over_generated(
+    columns: &[Column],
+    keys: &[String],
+    reference: &crabka_pgparser::ast::ForeignKeyRef,
+) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::ReferentialAction;
+
+    for column in keys
+        .iter()
+        .filter_map(|key| columns.iter().find(|column| column.name == *key))
+        .filter(|column| column.generated.is_some())
+    {
+        if matches!(
+            reference.on_update,
+            ReferentialAction::Cascade | ReferentialAction::SetNull | ReferentialAction::SetDefault
+        ) {
+            return Err(generated_column_action_refusal("ON UPDATE"));
+        }
+        if matches!(
+            reference.on_delete,
+            ReferentialAction::SetNull | ReferentialAction::SetDefault
+        ) {
+            return Err(generated_column_action_refusal("ON DELETE"));
+        }
+        if column.is_virtual_generated() {
+            return Err(ExecError::Unsupported(
+                "foreign key constraints on virtual generated columns are not supported".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The 42601 [`reject_foreign_key_over_generated`] raises, worded as
+/// `PostgreSQL` words it: one message with the clause substituted in.
+fn generated_column_action_refusal(clause: &str) -> ExecError {
+    ExecError::Syntax(format!(
+        "invalid {clause} action for foreign key constraint containing generated column"
+    ))
+}
+
 /// Reject a `GENERATED ALWAYS AS (…)` expression `PostgreSQL` refuses at DDL
 /// time, for either kind of generated column.
 ///
@@ -28580,6 +28666,9 @@ fn add_foreign_key_constraint(
             },
         )?
     };
+    // After the key resolves, as `CREATE TABLE` tests it and as PostgreSQL
+    // does: the missing relation and the unbacked key are reported first.
+    reject_foreign_key_over_generated(&state.table.columns, request.columns, request.reference)?;
     if foreign_key.validated {
         validate_foreign_key_against_state(kv, state, &foreign_key, own_xid, ctx)?;
     }

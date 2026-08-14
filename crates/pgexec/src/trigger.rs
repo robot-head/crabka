@@ -1713,6 +1713,32 @@ fn blank_virtual_generated(table: &Table, image: &mut [crabka_pgtypes::Datum]) {
     }
 }
 
+/// Blank every generated column of the `NEW` image, whichever kind it is.
+///
+/// The rule is the one `ddl.sgml` states: a generated column settles after the
+/// `BEFORE` triggers, so before them there is no value and `NEW.b` is NULL. An
+/// `UPDATE` is where the kinds part company from [`blank_virtual_generated`]:
+/// its proposed row is built from the stored row, which carries the `STORED`
+/// column's *old* value, and a trigger that read it would be reading a number
+/// about to be replaced.
+///
+/// Only on the way in. A value a trigger then assigns to a `STORED` column
+/// survives to the next trigger — `PostgreSQL` prints it — and is discarded by
+/// the settle rather than between triggers. A `VIRTUAL` column is the one
+/// upstream re-blanks after every trigger; see [`blank_virtual_generated`].
+fn blank_generated(table: &Table, image: &mut [crabka_pgtypes::Datum]) {
+    for (index, _) in table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.generated.is_some())
+    {
+        if let Some(slot) = image.get_mut(index) {
+            *slot = crabka_pgtypes::Datum::Null;
+        }
+    }
+}
+
 /// [`blank_virtual_generated`] over a borrowed image, which is copied only when
 /// the relation has a virtual generated column to blank.
 fn trigger_image<'a>(
@@ -1728,22 +1754,31 @@ fn trigger_image<'a>(
     Some(std::borrow::Cow::Owned(owned))
 }
 
-/// Fire the relation's `BEFORE ROW` triggers, then judge the row they leave
-/// behind against the target's check.
+/// Fire the relation's `BEFORE ROW` triggers, settle the row they leave behind,
+/// and judge it against the target's check.
 ///
-/// The row-security check lives here rather than in
-/// [`crate::exec::finish_written_row`] because a `BEFORE ROW` trigger returns a
-/// *replacement* row, and the replacement is what actually gets written: a
-/// check that ran before the trigger would let the trigger launder a row past
-/// its own policy. `PostgreSQL` runs `ExecWithCheckOptions` after
-/// `ExecBRInsertTriggers` for the same reason. Every write path in the executor
-/// passes through this one function, so putting it here covers all of them and
-/// makes a new write path that skips the check fail to compile rather than fail
-/// to check.
+/// Both the settling ([`crate::exec::finish_written_row`]: the `STORED`
+/// generated columns, then the domain, `NOT NULL` and `CHECK` constraints) and
+/// the row-security check live *here* rather than in the row builders, because
+/// a `BEFORE ROW` trigger returns a *replacement* row and the replacement is
+/// what actually gets written. Anything judged before the trigger judges a row
+/// nobody stores, and lets the trigger launder its replacement past both.
+/// `PostgreSQL` orders it the same way, for the same reason: `ExecInsert` runs
+/// `ExecBRInsertTriggers`, then `ExecComputeStoredGenerated`, then
+/// `ExecWithCheckOptions` and `ExecConstraints`, and `ddl.sgml` states the rule
+/// outright — "Generated columns are, conceptually, updated after BEFORE
+/// triggers have run".
 ///
-/// A `DELETE` writes no row and carries
-/// [`crate::rls::CheckExemption::RemovesRows`]; its rows were already filtered
-/// by the `USING` qual at `write_candidate_rows`.
+/// Every write path in the executor that fires row triggers passes through this
+/// one function, so putting both here covers all of them at once and makes a
+/// new write path that skips either fail to compile rather than fail to check.
+/// The three that fire no row trigger at all — a view's `INSTEAD OF` insert and
+/// update, and a sharded `COPY` — settle themselves, and are named in
+/// [`crate::exec::finish_written_row`].
+///
+/// A `DELETE` writes no row: it settles nothing, and carries
+/// [`crate::rls::CheckExemption::RemovesRows`] because its rows were already
+/// filtered by the `USING` qual at `write_candidate_rows`.
 pub(crate) fn fire_before_row(
     kv: &dyn Kv,
     target: WriteTarget<'_>,
@@ -1757,7 +1792,7 @@ pub(crate) fn fire_before_row(
     let old_image = trigger_image(table, old);
     let old = old_image.as_deref();
     if let Some(image) = new.as_mut() {
-        blank_virtual_generated(table, image);
+        blank_generated(table, image);
     }
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)? {
         if trigger.timing != TriggerTiming::Before
@@ -1804,8 +1839,10 @@ pub(crate) fn fire_before_row(
     if event == DmlEvent::Delete {
         return Ok(old.map(|row| row.to_vec()));
     }
-    // The row every trigger has had its say about is the one the policy judges.
-    if let Some(row) = &new {
+    // The row every trigger has had its say about is the one that settles, and
+    // the settled row is the one the policy judges.
+    if let Some(row) = &mut new {
+        crate::exec::finish_written_row(table, row, ctx)?;
         check.permit_row(kv, table, row, ctx)?;
     }
     Ok(new)
