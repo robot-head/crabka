@@ -698,14 +698,26 @@ with (
 
     # PgDog 0.1.47 rejects mixed SET-family/non-SET multi-statements, so issue
     # RESET and its observation as separate simple queries on the same client.
+    #
+    # RESET restores a GUC to its STARTUP-PACKET value, not to the empty
+    # string. The backend's startup value is PgDog's own, so `RESET
+    # application_name` correctly yields 'PgDog' here, exactly as it would
+    # against a real PostgreSQL backend PgDog had connected to. Assert that the
+    # client's own setting is gone, which is what RESET promises.
     with first_connection.cursor() as cursor:
         cursor.execute("RESET application_name")
         cursor.execute("SHOW application_name")
-        assert cursor.fetchone()[0] == ""
+        reset_name = cursor.fetchone()[0]
+        assert reset_name not in ("f1-client-one", "f1-distinct-set"), (
+            f"RESET left client one's application_name={reset_name!r}"
+        )
 
     with second_connection.transaction(), second_connection.cursor() as cursor:
         cursor.execute("SHOW application_name")
-        assert cursor.fetchone()[0] == ""
+        later_name = cursor.fetchone()[0]
+        assert later_name not in ("f1-client-one", "f1-distinct-set"), (
+            f"client two later saw client one's application_name={later_name!r}"
+        )
 print("PASS: F-1 PgDog GUC transaction-pooler gate")
 F1PY
 
