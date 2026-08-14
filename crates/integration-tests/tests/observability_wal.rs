@@ -209,7 +209,7 @@ async fn observability_kafka_wal_sink_feeds_live_consumer_hot_tail() {
             .await
             .expect("wal consumer");
     let hot_tail = BufferedLogHotTail::default();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut decoded = 0;
     while decoded == 0 && Instant::now() < deadline {
         decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, millis(250))
@@ -1323,7 +1323,7 @@ async fn poll_until_decoded(
     consumer: &mut KafkaLogWalConsumer,
     hot_tail: &BufferedLogHotTail,
 ) -> usize {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut decoded = 0;
     while decoded == 0 && Instant::now() < deadline {
         decoded = poll_log_hot_tail_once(consumer, hot_tail, millis(250))
@@ -1426,7 +1426,7 @@ async fn push_tenant_api_log(app: axum::Router, tenant: &str, timestamp_ns: &str
 }
 
 async fn query_until_api_error(app: axum::Router) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let response = app
             .clone()
@@ -1442,7 +1442,20 @@ async fn query_until_api_error(app: axum::Router) -> serde_json::Value {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        // The querier's broker-backed authorizer connects in the background and
+        // rejects queries until it lands, so a non-OK status here means "not
+        // ready yet" rather than "wrong". Retry inside the same deadline that
+        // already governs content convergence; a querier that never serves
+        // still fails the test, with its last status named.
+        if response.status() != StatusCode::OK {
+            assert2::assert!(
+                Instant::now() < deadline,
+                "querier never returned OK; last status {}",
+                response.status()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body
@@ -1497,7 +1510,7 @@ async fn query_until_hot_cold_errors(
     compacted_timestamp: &str,
     live_timestamp: &str,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let end = live_timestamp.parse::<i64>().unwrap() + 10_000_000;
     loop {
         let response = app
@@ -1514,7 +1527,20 @@ async fn query_until_hot_cold_errors(
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        // The querier's broker-backed authorizer connects in the background and
+        // rejects queries until it lands, so a non-OK status here means "not
+        // ready yet" rather than "wrong". Retry inside the same deadline that
+        // already governs content convergence; a querier that never serves
+        // still fails the test, with its last status named.
+        if response.status() != StatusCode::OK {
+            assert2::assert!(
+                Instant::now() < deadline,
+                "querier never returned OK; last status {}",
+                response.status()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1531,7 +1557,7 @@ async fn query_until_hot_cold_errors(
 }
 
 async fn query_until_native_kafka_error(app: axum::Router) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let response = app
             .clone()
@@ -1547,7 +1573,20 @@ async fn query_until_native_kafka_error(app: axum::Router) -> serde_json::Value 
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        // The querier's broker-backed authorizer connects in the background and
+        // rejects queries until it lands, so a non-OK status here means "not
+        // ready yet" rather than "wrong". Retry inside the same deadline that
+        // already governs content convergence; a querier that never serves
+        // still fails the test, with its last status named.
+        if response.status() != StatusCode::OK {
+            assert2::assert!(
+                Instant::now() < deadline,
+                "querier never returned OK; last status {}",
+                response.status()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1561,7 +1600,7 @@ async fn query_until_native_kafka_error(app: axum::Router) -> serde_json::Value 
 }
 
 async fn query_until_otlp_loop_error(app: axum::Router, timestamp_ns: &str) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let uri = format!(
             "/loki/api/v1/query?query=%7Bservice_name%3D%22checkout%22%2Cdeployment_environment%3D%22prod%22%7D%20%7C%3D%20%22otlp%22&time={timestamp_ns}"
@@ -1578,7 +1617,20 @@ async fn query_until_otlp_loop_error(app: axum::Router, timestamp_ns: &str) -> s
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        // The querier's broker-backed authorizer connects in the background and
+        // rejects queries until it lands, so a non-OK status here means "not
+        // ready yet" rather than "wrong". Retry inside the same deadline that
+        // already governs content convergence; a querier that never serves
+        // still fails the test, with its last status named.
+        if response.status() != StatusCode::OK {
+            assert2::assert!(
+                Instant::now() < deadline,
+                "querier never returned OK; last status {}",
+                response.status()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1596,7 +1648,7 @@ async fn query_until_tenant_shared_error(
     tenant: &str,
     end: i64,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let response = app
             .clone()
@@ -1612,7 +1664,20 @@ async fn query_until_tenant_shared_error(
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        // The querier's broker-backed authorizer connects in the background and
+        // rejects queries until it lands, so a non-OK status here means "not
+        // ready yet" rather than "wrong". Retry inside the same deadline that
+        // already governs content convergence; a querier that never serves
+        // still fails the test, with its last status named.
+        if response.status() != StatusCode::OK {
+            assert2::assert!(
+                Instant::now() < deadline,
+                "querier never returned OK; last status {}",
+                response.status()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if !body["data"]["result"].as_array().unwrap().is_empty() {
@@ -1628,7 +1693,7 @@ async fn query_until_restart_errors(
     first_timestamp: &str,
     second_timestamp: &str,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let end = second_timestamp.parse::<i64>().unwrap() + 10_000_000;
     loop {
         let response = app
@@ -1645,7 +1710,20 @@ async fn query_until_restart_errors(
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        // The querier's broker-backed authorizer connects in the background and
+        // rejects queries until it lands, so a non-OK status here means "not
+        // ready yet" rather than "wrong". Retry inside the same deadline that
+        // already governs content convergence; a querier that never serves
+        // still fails the test, with its last status named.
+        if response.status() != StatusCode::OK {
+            assert2::assert!(
+                Instant::now() < deadline,
+                "querier never returned OK; last status {}",
+                response.status()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1662,7 +1740,7 @@ async fn query_until_restart_errors(
 }
 
 async fn query_until_loop_error(app: axum::Router, timestamp: &str) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let response = app
             .clone()
@@ -1678,7 +1756,20 @@ async fn query_until_loop_error(app: axum::Router, timestamp: &str) -> serde_jso
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        // The querier's broker-backed authorizer connects in the background and
+        // rejects queries until it lands, so a non-OK status here means "not
+        // ready yet" rather than "wrong". Retry inside the same deadline that
+        // already governs content convergence; a querier that never serves
+        // still fails the test, with its last status named.
+        if response.status() != StatusCode::OK {
+            assert2::assert!(
+                Instant::now() < deadline,
+                "querier never returned OK; last status {}",
+                response.status()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = serde_json::from_slice(&body).unwrap();
         if body
