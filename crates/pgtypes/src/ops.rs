@@ -242,8 +242,8 @@ fn reject_infinite_interval_on_time(
 /// needs the session tz, which is only available in the executor).
 fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     use crate::datetime::{
-        add_interval, combine_date_time, date_plus_days, date_plus_interval, time_plus_interval,
-        timestamp_plus_interval,
+        add_interval, combine_date_time, date_plus_days, date_plus_interval, date_plus_timetz,
+        time_plus_interval, timestamp_plus_interval,
     };
     match (a, b) {
         // date + int4 / int8 → date (add days)
@@ -266,6 +266,14 @@ fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
                 .ok_or_else(|| TypeError::DatetimeOutOfRange {
                     message: "timestamp out of range".to_string(),
                 })
+        }
+        // date + timetz / timetz + date → timestamptz (`datetimetz_timestamptz`).
+        // The offset the `timetz` carries names the zone the reading was taken
+        // in, so the instant follows from the two operands alone. This is the
+        // only operator that produces a `timestamptz` without a session zone,
+        // which is why it belongs here rather than in the executor.
+        (Datum::Date(d), Datum::Timetz(t)) | (Datum::Timetz(t), Datum::Date(d)) => {
+            date_plus_timetz(*d, *t).map(Datum::Timestamptz)
         }
         // time + interval / interval + time → time (uses ONLY the interval micros,
         // wrapping mod 24 h; the interval's days/months are ignored — a Time has no
@@ -304,7 +312,7 @@ fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
 /// `sub` for temporal operand pairs.
 fn temporal_sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     use crate::datetime::{
-        date_diff_days, date_plus_days, neg_interval, sub_interval, timestamp_diff,
+        date_diff_days, date_plus_days, neg_interval, sub_interval, time_diff, timestamp_diff,
         timestamp_plus_interval,
     };
     match (a, b) {
@@ -323,6 +331,10 @@ fn temporal_sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
             let neg = neg_interval(*iv)?;
             crate::datetime::date_plus_interval(*d, neg).map(Datum::Timestamp)
         }
+        // time - time → interval (`time_mi_time`): a signed microsecond count.
+        // It does not wrap the way `time - interval` does, because the answer is
+        // an elapsed span rather than another clock reading.
+        (Datum::Time(a), Datum::Time(b)) => Ok(Datum::Interval(time_diff(*a, *b))),
         // time - interval → time (negate the interval, then add — only the micros
         // matter; the result wraps mod 24 h).
         (Datum::Time(t), Datum::Interval(iv)) => {
@@ -1135,6 +1147,92 @@ mod tests {
         assert!(
             add(&time, &hour).expect("finite shift")
                 == Datum::Time(crate::datetime::parse_time("12:27:42").expect("time"))
+        );
+    }
+
+    /// The three exact `pg_operator` rows over `time` and `timetz`:
+    /// `time_mi_time`, and `datetimetz_timestamptz` in both operand orders.
+    ///
+    /// `time - time` is the one `time` operator whose answer is not a clock
+    /// reading, so it is signed and it does not wrap. `date + timetz` is the
+    /// one `timestamptz`-producing operator that takes no session zone, so it
+    /// lives here rather than in the executor: the offset the `timetz` carries
+    /// is the whole of the zone information.
+    #[test]
+    fn time_and_timetz_answer_their_own_pg_operator_rows() {
+        use assert2::assert;
+
+        let time = |s: &str| Datum::Time(crate::datetime::parse_time(s).expect("time"));
+        let timetz = |s: &str| {
+            Datum::Timetz(
+                crate::datetime::parse_timetz(s, &jiff::tz::TimeZone::UTC).expect("timetz"),
+            )
+        };
+        let date = |s: &str| Datum::Date(crate::datetime::parse_date(s).expect("date"));
+        let interval = |months, days, micros| {
+            Datum::Interval(crate::datetime::Interval {
+                months,
+                days,
+                micros,
+            })
+        };
+        let instant = |s: &str| {
+            Datum::Timestamptz(
+                crate::datetime::parse_timestamptz(s, &jiff::tz::TimeZone::UTC)
+                    .expect("timestamptz"),
+            )
+        };
+
+        // time - time is a signed microsecond count with no months and no days.
+        assert!(
+            sub(&time("01:00"), &time("00:30")).expect("difference")
+                == interval(0, 0, 1_800_000_000)
+        );
+        assert!(
+            sub(&time("00:30"), &time("01:00")).expect("difference")
+                == interval(0, 0, -1_800_000_000)
+        );
+        // `24:00:00` is a legal reading, and the span it ends is a whole day of
+        // microseconds rather than one interval day.
+        assert!(
+            sub(&time("24:00:00"), &time("00:00:00")).expect("difference")
+                == interval(0, 0, 86_400_000_000)
+        );
+
+        // date + timetz reads the offset as the zone the reading was taken in,
+        // so 11:00 at -05 is 16:00 UTC on the given date. The operand order
+        // makes no difference.
+        assert!(
+            add(&date("2000-01-01"), &timetz("11:00-05")).expect("instant")
+                == instant("2000-01-01 16:00:00+00")
+        );
+        assert!(
+            add(&timetz("11:00-05"), &date("2000-01-01")).expect("instant")
+                == instant("2000-01-01 16:00:00+00")
+        );
+        // The same reading at the opposite offset names an instant ten hours
+        // earlier, which is the whole of the difference between them.
+        assert!(
+            add(&date("2000-01-01"), &timetz("11:00+05")).expect("instant")
+                == instant("2000-01-01 06:00:00+00")
+        );
+
+        // An infinite date is carried through rather than computed with.
+        assert!(
+            add(
+                &Datum::Date(crate::datetime::DATE_INFINITY),
+                &timetz("11:00-05")
+            )
+            .expect("infinity")
+                == Datum::Timestamptz(crate::datetime::timestamptz_infinity_of_sign(1))
+        );
+        assert!(
+            add(
+                &Datum::Date(crate::datetime::DATE_NEG_INFINITY),
+                &timetz("11:00-05")
+            )
+            .expect("negative infinity")
+                == Datum::Timestamptz(crate::datetime::timestamptz_infinity_of_sign(-1))
         );
     }
 

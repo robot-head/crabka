@@ -226,7 +226,7 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // function). Together these also cover text→text (already by identity),
         // temporal→text, and text→temporal — all valid explicit casts in PostgreSQL.
         (_, Text) | (Text, _) => true,
-        // SP37: cross-temporal casts. Interval only interconverts with text (above).
+        // SP37: cross-temporal casts.
         // date → {timestamp, timestamptz}
         (Date, Timestamp) | (Date, Timestamptz) => true,
         // timestamp → {date, time, timestamptz}
@@ -237,8 +237,16 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // timestamp carries no offset to attach.
         (Time, ColumnType::Timetz) | (ColumnType::Timetz, Time) => true,
         (Timestamptz, ColumnType::Timetz) => true,
-        // Everything else — including numeric/bool ↔ temporal, interval ↔ temporal,
-        // and time → timestamp/timestamptz: undefined → 42846.
+        // `interval(time)`, the ONE `pg_cast` row that leaves the date/time
+        // category for the timespan one, and the only reason `date - time`
+        // answers a timestamp: the row it resolves to is `date - interval`, so
+        // the `time` has to become an `interval` before the operator runs.
+        // `date`, `timestamp`, `timestamptz` and `timetz` have no interval cast
+        // in either direction.
+        (Time, ColumnType::Interval) => true,
+        // Everything else — including numeric/bool ↔ temporal, the rest of
+        // interval ↔ temporal, and time → timestamp/timestamptz: undefined →
+        // 42846.
         _ => false,
     }
 }
@@ -1063,6 +1071,12 @@ pub fn cast_in(
         }
         (Datum::Text(s), ColumnType::Timetz) => {
             crate::datetime::parse_timetz_in(s, order, tz).map(Datum::Timetz)
+        }
+        // time → interval is `interval(time)`: the reading, read as elapsed
+        // microseconds. `time '24:00:00'` therefore becomes `24:00:00` and not
+        // `1 day` — the conversion sets no days field.
+        (Datum::Time(t), ColumnType::Interval) => {
+            Ok(Datum::Interval(crate::datetime::time_to_interval(*t)))
         }
         // No defined cast.
         (v, to) => Err(cannot_cast(v, to)),
@@ -1919,13 +1933,21 @@ mod tests {
         assert!(cast_allowed(Timestamptz, Date));
         assert!(cast_allowed(Timestamptz, Time));
         assert!(cast_allowed(Timestamptz, Timestamp));
-        // NOT allowed: interval ↔ date/time/timestamp/timestamptz
-        assert!(!cast_allowed(Interval, Date));
+        // `interval(time)` is the ONE `pg_cast` row between the date/time and
+        // timespan categories, and it is implicit — which is what lets
+        // `date - time` resolve to the `date - interval` operator.
+        assert!(cast_allowed(Time, Interval));
+        // The reverse, `time(interval)`, is `pg_cast`'s only other row between
+        // the two categories. It is assignment-level, so `PostgreSQL` accepts
+        // `interval '3 hours'::time`; crabka does not implement it yet, and
+        // this line records the gap rather than claiming a match.
         assert!(!cast_allowed(Interval, Time));
+        // NOT allowed anywhere: every other interval ↔
+        // date/time/timestamp/timestamptz pair.
+        assert!(!cast_allowed(Interval, Date));
         assert!(!cast_allowed(Interval, Timestamp));
         assert!(!cast_allowed(Interval, Timestamptz));
         assert!(!cast_allowed(Date, Interval));
-        assert!(!cast_allowed(Time, Interval));
         assert!(!cast_allowed(Timestamp, Interval));
         assert!(!cast_allowed(Timestamptz, Interval));
         // NOT allowed: numeric/bool ↔ temporal
@@ -3129,6 +3151,39 @@ mod tests {
             cast(&t_back, ColumnType::Text, utc).expect("time->text"),
             Datum::Text("15:30:00".into())
         );
+    }
+
+    /// `interval(time)` is the only `pg_cast` row that leaves the date/time
+    /// category, and it is implicit, so it is what makes `date - time` resolve
+    /// to `date - interval` instead of failing.
+    ///
+    /// The conversion sets microseconds only. `time '24:00:00'` is a legal
+    /// reading, and it becomes the interval `24:00:00` rather than `1 day` —
+    /// `interval` keeps days and microseconds apart, so the two spellings are
+    /// not the same value.
+    #[test]
+    fn a_time_reads_as_an_interval_of_that_many_microseconds() {
+        use assert2::assert;
+
+        let utc = &jiff::tz::TimeZone::UTC;
+        let span = |micros| {
+            Datum::Interval(crate::datetime::Interval {
+                months: 0,
+                days: 0,
+                micros,
+            })
+        };
+        for (reading, expected) in [
+            ("00:00:00", span(0)),
+            ("04:05:06", span(14_706_000_000)),
+            ("04:05:06.789", span(14_706_789_000)),
+            ("24:00:00", span(86_400_000_000)),
+        ] {
+            let time = Datum::Time(crate::datetime::parse_time(reading).expect("time"));
+            let got = cast(&time, ColumnType::Interval, utc).expect("time->interval");
+            assert!(got == expected, "{reading}");
+        }
+        assert!(cast_allowed(ColumnType::Time, ColumnType::Interval));
     }
 
     #[test]

@@ -348,6 +348,66 @@ pub fn date_to_midnight(d: Date) -> DateTime {
     d.to_datetime(Time::midnight())
 }
 
+/// Combine a `Date` and a `timetz` into the instant they name
+/// (`datetimetz_timestamptz`).
+///
+/// The offset the `timetz` carries is the whole of the zone information here:
+/// the reading was taken at that offset, so the instant is the date's midnight
+/// plus the reading less the offset. The session zone is never consulted, which
+/// is why `date + timetz` is the one `timestamptz`-producing operator that needs
+/// no session at all.
+pub fn date_plus_timetz(d: Date, t: TimeTz) -> Result<Timestamp, TypeError> {
+    match date_infinite_sign(d) {
+        0 => {}
+        sign => return Ok(timestamptz_infinity_of_sign(sign)),
+    }
+    // A `date` spans more years than a `timestamp` does, and the offset can push
+    // the instant out of range on its own, so both steps can fail.
+    date_to_midnight(d)
+        .to_zoned(TimeZone::UTC)
+        .map_err(|_| date_out_of_range_for_timestamp())?
+        .timestamp()
+        .checked_add(t.utc_micros().microseconds())
+        .map_err(|_| date_out_of_range_for_timestamp())
+}
+
+/// `date out of range for timestamp`: the 22008 the `date`-to-instant
+/// conversions raise, worded as `datetimetz_timestamptz` words it.
+fn date_out_of_range_for_timestamp() -> TypeError {
+    TypeError::DatetimeOutOfRange {
+        message: "date out of range for timestamp".to_string(),
+    }
+}
+
+/// Subtract two `time` readings (`time_mi_time`).
+///
+/// The answer is a signed microsecond count with no months and no days, so
+/// `time '00:30' - time '01:00'` is `-00:30:00`. It does not wrap the way
+/// `time - interval` does, because the result is no longer a clock reading.
+pub fn time_diff(a: PgTime, b: PgTime) -> Interval {
+    Interval {
+        months: 0,
+        days: 0,
+        // Both readings are in `0..=86_400_000_000`, so the difference cannot
+        // overflow.
+        micros: a.micros_of_day() - b.micros_of_day(),
+    }
+}
+
+/// Read a `time` as an `interval` (`interval(time)`, `pg_cast`'s one implicit
+/// route out of the date/time category).
+///
+/// The reading becomes that many microseconds. `time '24:00:00'` is a legal
+/// reading and becomes the interval `24:00:00`, not one day — `interval` keeps
+/// days and microseconds apart, and this conversion sets no days.
+pub fn time_to_interval(t: PgTime) -> Interval {
+    Interval {
+        months: 0,
+        days: 0,
+        micros: t.micros_of_day(),
+    }
+}
+
 /// Add an `Interval` to a `Date` (PG: promotes date→midnight timestamp first)
 /// and return a `DateTime`. This function applies months, then days, then micros
 /// in order (calendar-aware, with a jiff `Span`).

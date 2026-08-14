@@ -3,7 +3,7 @@
 //! Static result-type inference builds a stable RowDescription before any row
 //! is produced.
 
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use crabka_pgparser::ast::{BinaryOp, Expr, MatchKind, UnaryOp};
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, TypeError, ops};
@@ -1809,6 +1809,61 @@ fn coerce_untyped_literal_operands(
     Ok((convert(left, l, r)?, convert(right, r, l)?))
 }
 
+/// Is this value one of the six date/time types — the gate that decides whether
+/// [`coerce_to_operator_signature`] has anything to do?
+fn is_temporal_datum(value: &Datum) -> bool {
+    matches!(
+        value,
+        Datum::Date(_)
+            | Datum::Time(_)
+            | Datum::Timetz(_)
+            | Datum::Timestamp(_)
+            | Datum::Timestamptz(_)
+            | Datum::Interval(_)
+    )
+}
+
+/// Convert each operand to the declared parameter type of the `pg_operator` row
+/// the call resolves to, which is `PostgreSQL`'s second step after `oper()`
+/// chooses that row.
+///
+/// A row is reachable through an implicit cast, so its parameter types need not
+/// be either operand's own: `date - time` selects `date - interval`, and the
+/// `time` has to *become* an interval before the operator runs. Each operand
+/// that already has the declared type is returned untouched, so the common case
+/// clones nothing.
+///
+/// An operand pair the resolver refuses (42883, 42725) is returned unchanged
+/// rather than raised here. Parse analysis already reports those, from
+/// [`infer_binary_type`], with the operand types the query wrote; a value-time
+/// copy would only restate it per row.
+fn coerce_to_operator_signature<'a>(
+    op: BinaryOp,
+    l: &'a Datum,
+    r: &'a Datum,
+    ctx: &EvalCtx,
+) -> Result<(Cow<'a, Datum>, Cow<'a, Datum>), ExecError> {
+    let unchanged = || (Cow::Borrowed(l), Cow::Borrowed(r));
+    // A NULL carries no type to resolve a row with, and every arithmetic
+    // operator propagates it, so the families below answer it unaided.
+    let (Some(lt), Some(rt)) = (l.column_type(), r.column_type()) else {
+        return Ok(unchanged());
+    };
+    let Some(Ok(signature)) = crate::temporal_arith::resolve(op, lt, rt) else {
+        return Ok(unchanged());
+    };
+    let convert = |value: &'a Datum, from: ColumnType, to: ColumnType| {
+        if from.storage_type().oid() == to.oid() {
+            return Ok(Cow::Borrowed(value));
+        }
+        cast_value(value, to, &ctx.time_zone).map(Cow::Owned)
+    };
+    Ok((
+        convert(l, lt, signature.left)?,
+        convert(r, rt, signature.right)?,
+    ))
+}
+
 /// Apply a binary operator to two already-evaluated operands.
 ///
 /// Scalar `eval` and the SP27 grouped evaluator `agg::eval_grouped` share this
@@ -1819,6 +1874,29 @@ pub(crate) fn apply_binary(
     r: &Datum,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
+    // PostgreSQL resolves a date/time `+ - * /` to a `pg_operator` row and then
+    // coerces both operands to that row's declared parameter types. The row is
+    // `crate::temporal_arith`'s answer and this is the coercion; without it a
+    // row reached through an implicit cast resolves and then fails on the
+    // operand nothing converted.
+    //
+    // It runs BEFORE the timestamptz path below, so an operand the chosen row
+    // widened from `timestamp` to `timestamptz` still reaches the zone-aware
+    // arithmetic rather than the zone-free one.
+    //
+    // The operand test is written out here rather than left to the callee: this
+    // is a PER-ROW path, and hoisting it keeps a row of integers to two inlined
+    // discriminant comparisons with no call at all.
+    let (left, right) = if matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+    ) && (is_temporal_datum(l) || is_temporal_datum(r))
+    {
+        coerce_to_operator_signature(op, l, r, ctx)?
+    } else {
+        (Cow::Borrowed(l), Cow::Borrowed(r))
+    };
+    let (l, r) = (left.as_ref(), right.as_ref());
     // SP37: tz-AWARE temporal arithmetic involving `timestamptz` is computed here
     // (where `ctx.time_zone` is available) — `crabka_pgtypes::ops` would `TypeMismatch` on
     // a `Timestamptz` operand. A non-timestamptz pair falls through to `ops`, so all
@@ -6062,6 +6140,109 @@ mod tests {
             infer_type(&pexpr("ts - ts").expect("parse"), &tstz_scope).expect("infer"),
             ColumnType::Interval
         );
+    }
+
+    /// The pairs that reach their `pg_operator` row only through a coercion.
+    ///
+    /// Each of these resolves to a row neither operand's type spells, so it
+    /// answers nothing at all until `apply_binary` converts the operands to the
+    /// row's declared parameter types. `date - time` runs `date - interval`,
+    /// `timestamptz - timestamp` runs `timestamptz - timestamptz`, and so on.
+    /// The three exact rows the resolver can now select
+    /// (`time - time`, `date + timetz`, `timetz + date`) are here too, because
+    /// selecting a row the value layer does not implement fails the same way.
+    ///
+    /// Every expected value is `PostgreSQL` 18.4's own answer under
+    /// `TimeZone = UTC`. Each case asserts the result TYPE beside the value, so
+    /// a coercion that produced the right text under the wrong type would still
+    /// fail.
+    #[test]
+    fn a_coerced_operand_reaches_the_operator_row_that_resolution_chose() {
+        use assert2::assert;
+
+        let ctx = crate::clock::EvalCtx::test_default();
+        let cases = [
+            (
+                "date '2000-01-01' - time '04:05:06'",
+                "timestamp without time zone",
+                "1999-12-31 19:54:54",
+            ),
+            (
+                "date '2000-01-01' + timetz '11:00-5'",
+                "timestamp with time zone",
+                "2000-01-01 16:00:00+00",
+            ),
+            (
+                "timestamp '2000-01-02' - date '2000-01-01'",
+                "interval",
+                "1 day",
+            ),
+            (
+                "timestamp '2000-01-02 01:00' + time '01:00'",
+                "timestamp without time zone",
+                "2000-01-02 02:00:00",
+            ),
+            (
+                "time '01:00' + timetz '02:00-05'",
+                "time with time zone",
+                "03:00:00-05",
+            ),
+            ("time '01:00' - time '00:30'", "interval", "00:30:00"),
+            (
+                "timetz '01:00-05' - time '00:30'",
+                "time with time zone",
+                "00:30:00-05",
+            ),
+            (
+                "timestamptz '2000-01-01' - timestamp '2000-01-01'",
+                "interval",
+                "00:00:00",
+            ),
+            // `time - time` is signed and does not wrap, unlike the
+            // `time - interval` row that shares its spelling.
+            ("time '00:30' - time '01:00'", "interval", "-00:30:00"),
+            // The offset the `timetz` carries is the whole of the zone
+            // information: no session zone took part in either of these, and
+            // they differ by the ten hours between the two offsets.
+            (
+                "timetz '11:00+05' + date '2000-01-01'",
+                "timestamp with time zone",
+                "2000-01-01 06:00:00+00",
+            ),
+            // A `date` infinity survives the operator rather than being
+            // computed with.
+            (
+                "date 'infinity' + timetz '11:00-05'",
+                "timestamp with time zone",
+                "infinity",
+            ),
+            // `time → interval` also puts `time` inside `interval * float8`,
+            // which is why a clock reading can be scaled at all.
+            ("time '04:05:06' * 3", "interval", "12:15:18"),
+            // A NULL operand carries no type to resolve a row with, so the
+            // coercion stands back and the operator propagates the NULL. The
+            // static type still comes from the row the operand TYPES choose.
+            (
+                "NULL::date + timetz '11:00-05'",
+                "timestamp with time zone",
+                "NULL",
+            ),
+        ];
+        for (sql, expected_type, expected_text) in cases {
+            let inferred = infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect("infer");
+            let value =
+                eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx).expect("eval");
+            let rendered = if value.is_null() {
+                "NULL".to_string()
+            } else {
+                let bytes = crabka_pgtypes::encoding::encode_text(&value, &ctx.time_zone);
+                String::from_utf8(bytes).expect("temporal text is utf-8")
+            };
+            assert!(
+                (inferred.name(), rendered.as_str()) == (expected_type, expected_text),
+                "{sql}"
+            );
+        }
     }
 
     #[test]

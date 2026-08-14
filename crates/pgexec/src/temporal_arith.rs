@@ -15,11 +15,12 @@
 //! * several rows survive and none is better — 42725 `operator is not unique`.
 //!
 //! This module answers *which* row, and the result type of the expression is
-//! that row's. Converting each operand to the row's declared parameter type —
-//! PostgreSQL's second step — is not done yet, so a row reached through a
-//! coercion resolves here and then fails in `crabka_pgtypes::ops`, which knows
-//! only the pairs it implements. That is the same refusal those pairs already
-//! got, with a better-founded plan behind it.
+//! that row's. `PostgreSQL`'s second step — converting each operand to the
+//! row's declared parameter type — belongs to the value path and lives in
+//! [`crate::eval::apply_binary`], which is where the evaluated values and the
+//! session zone are both at hand. The two halves have to agree: a row chosen
+//! here and not coerced there resolves at plan time and then fails at value
+//! time, on every row, over an operand nothing converted.
 //!
 //! `time + time` and `timetz + timetz` are the pair that shows why this cannot
 //! be a table of answers. They are written identically, and `PostgreSQL`
