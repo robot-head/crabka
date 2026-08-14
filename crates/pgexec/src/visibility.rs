@@ -587,11 +587,17 @@ mod tests {
     /// A session context over `kv` whose `search_path` is `path`, spelled the
     /// way `SET search_path = …` spells it.
     fn ctx(kv: &std::sync::Arc<dyn crabka_pgkv::Kv>, path: &[&str]) -> EvalCtx {
+        ctx_as(kv, crate::catalog_fn::OBJECT_OWNER, path)
+    }
+
+    /// [`ctx`] under `user` rather than the bootstrap role, which is what the
+    /// schema `USAGE` test the path walk makes is answered against.
+    fn ctx_as(kv: &std::sync::Arc<dyn crabka_pgkv::Kv>, user: &str, path: &[&str]) -> EvalCtx {
         let scope = ResolutionScope {
             search_path: SearchPath::from_items(
                 &path.iter().map(|part| (*part).into()).collect::<Vec<_>>(),
             ),
-            user: crate::catalog_fn::OBJECT_OWNER.to_string(),
+            user: user.to_string(),
             backend_id: 1,
             ..ResolutionScope::default()
         };
@@ -659,6 +665,49 @@ mod tests {
             assert!(
                 answer == Datum::Bool(expected),
                 "search_path = {path:?}, {schema}.t"
+            );
+        }
+    }
+
+    /// A schema the role holds no `USAGE` on is not on the path at all, so
+    /// nothing in it is visible and nothing in it shadows. `postgres:18.4`
+    /// answers the same three ways for the same setup:
+    ///
+    /// ```text
+    /// SET ROLE lowly; SET search_path = s1, s2;   -- USAGE on s2 only
+    /// pg_table_is_visible(s1.t)  -> false
+    /// pg_table_is_visible(s2.t)  -> true
+    /// pg_table_is_visible(s1.only_s1) -> false
+    /// ```
+    #[test]
+    fn a_relation_in_a_schema_the_role_cannot_search_is_neither_visible_nor_shadowing() {
+        let kv = catalog(&[("s1", "t"), ("s2", "t"), ("s1", "only_s1")]);
+        crabka_pgcatalog::create_role(kv.as_ref(), "lowly", true).expect("role");
+        let ops = crabka_pgcatalog::grant_schema_privileges_ops(
+            kv.as_ref(),
+            &["s2".to_string()],
+            &["lowly".to_string()],
+            &["USAGE".to_string()],
+        )
+        .expect("grant");
+        kv.write_batch(&ops).expect("apply");
+        let lowly = ctx_as(&kv, "lowly", &["s1", "s2"]);
+        let root = ctx(&kv, &["s1", "s2"]);
+        for (schema, name, under_lowly, under_root) in [
+            ("s1", "t", false, true),
+            ("s2", "t", true, false),
+            ("s1", "only_s1", false, true),
+        ] {
+            let oid = oid_of(kv.as_ref(), schema, name);
+            assert!(
+                is_visible(Catalog::Relation, &oid, &lowly).expect("visible")
+                    == Datum::Bool(under_lowly),
+                "{schema}.{name} as lowly"
+            );
+            assert!(
+                is_visible(Catalog::Relation, &oid, &root).expect("visible")
+                    == Datum::Bool(under_root),
+                "{schema}.{name} as the bootstrap role"
             );
         }
     }

@@ -5425,6 +5425,16 @@ pub fn has_schema_privilege(
         return Ok(true);
     }
     let privilege = privilege.to_ascii_uppercase();
+    // `initdb` grants `USAGE` on each of `BOOTSTRAP_SCHEMAS` to `PUBLIC`, so
+    // `postgres:18.4` reports `nspacl` as `{postgres=UC/postgres,=U/postgres}`
+    // for `pg_catalog` and `{pg_database_owner=UC/…,=U/…}` for `public` on a
+    // fresh cluster. crabka synthesises those schemas instead of storing them,
+    // so no stored grant carries that, and it has to be answered here. Only
+    // `USAGE`: `PostgreSQL` 15 removed `PUBLIC`'s `CREATE` on `public`, and
+    // `CREATE` was never granted on the two system schemas.
+    if privilege == "USAGE" && BOOTSTRAP_SCHEMAS.iter().any(|(name, _)| *name == schema) {
+        return Ok(true);
+    }
     if kv
         .get(&schema_privilege_key(schema, "public", &privilege))?
         .is_some()

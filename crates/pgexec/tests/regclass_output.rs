@@ -472,6 +472,44 @@ async fn a_shadowed_relation_prints_qualified() {
     );
 }
 
+// A relation cannot be shadowed out of its bare spelling by a schema the caller
+// is not allowed to search. That is not a cosmetic point: printing
+// `public.pp` instead of `pp` is the engine saying that *something else called
+// `pp` exists earlier on the path*, and the caller has no right to know that
+// `secret.pp` exists. `recomputeNamespacePath` drops the schema before any
+// shadowing question is asked. Verified against `postgres:18.4`, which prints
+// `pp` for the same setup.
+#[tokio::test]
+async fn a_relation_in_an_unsearchable_schema_does_not_shadow_a_name_into_qualification() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE ROLE lowly LOGIN",
+        "CREATE SCHEMA secret",
+        "CREATE TABLE secret.pp (a int)",
+        "CREATE TABLE public.pp (a int)",
+        "SET ROLE lowly",
+        "SET search_path = secret, public",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+
+    assert!(scalar(&mut session, "SELECT 'public.pp'::regclass::text").await == Some("pp".into()));
+
+    // The bootstrap role does reach `secret`, so for it `secret.pp` is the one
+    // that prints bare and `public.pp` is the one that keeps its schema. This
+    // is the same relation and the same path: only the role differs.
+    session
+        .simple_query("RESET ROLE")
+        .await
+        .expect("RESET ROLE");
+    let both = "SELECT 'secret.pp'::regclass::text, 'public.pp'::regclass::text";
+    assert!(
+        row_text(&query(&mut session, both).await, 0)
+            == vec![Some("pp".into()), Some("public.pp".into())]
+    );
+}
+
 // The session's own temporary namespace sits at the front of the search path,
 // exactly as `recomputeNamespacePath` puts it there, so a temporary relation is
 // visible and prints bare rather than as `pg_temp_<backend id>.tt`.

@@ -48,9 +48,9 @@ pub enum SchemaDisposition {
     Utility,
     /// A statement that creates a relation. The schema is resolved strictly,
     /// as for [`SchemaDisposition::Utility`]. But an unqualified name lands in
-    /// the first *existing* explicit search-path entry, and not where it
+    /// the first *searchable* explicit search-path entry, and not where it
     /// already exists. `SET search_path = nosuch, s1, s2` creates in `s1`.
-    /// When the path names no existing entry, the result is
+    /// When the path leaves no such entry, the result is
     /// `3F000 no schema has been selected to create in`.
     Creation,
     /// A `CREATE TEMPORARY`. The search path does not decide where this lands.
@@ -75,7 +75,8 @@ pub enum SchemaDisposition {
 pub struct ResolutionScope {
     /// The session's `search_path`, unexpanded.
     pub search_path: SearchPath,
-    /// `current_user`, which the `"$user"` entry expands to.
+    /// `current_user`: what the `"$user"` entry expands to, and the role whose
+    /// schema `USAGE` decides which of the written entries are searched at all.
     pub user: String,
     /// The backend id the wire layer announced for this session, which names
     /// its temporary schema. 0 outside a session.
@@ -138,8 +139,7 @@ impl ResolutionScope {
         crabka_pgcatalog::temp_schema_name(self.backend_id)
     }
 
-    /// The schemas an unqualified name is looked for in, in order, filtered to
-    /// the ones that exist.
+    /// The schemas an unqualified name is looked for in, in order.
     ///
     /// Two entries are implicit, and you suppress each one when you write it.
     /// The session's temporary namespace comes first, then `pg_catalog`. A path
@@ -152,43 +152,92 @@ impl ResolutionScope {
     /// SET search_path = public, pg_temp;    {pg_catalog,public,pg_temp_1}
     /// ```
     ///
+    /// An implicit entry is added when the *surviving* explicit entries do not
+    /// already hold it, not when the path did not write it. A written
+    /// `pg_catalog` the caller cannot search is dropped by
+    /// [`ResolutionScope::explicit_schemas`] and then comes back implicitly and
+    /// first, which is what `postgres:18.4` reports:
+    ///
+    /// ```text
+    /// REVOKE USAGE ON SCHEMA pg_catalog FROM PUBLIC;
+    /// SET ROLE lowly; SET search_path = pg_catalog, public;
+    /// current_schemas(true)   {pg_catalog,public}
+    /// current_schemas(false)  {public}
+    /// ```
+    ///
+    /// crabka cannot reach that state today, because a `REVOKE` deletes a
+    /// stored grant and `initdb`'s grant on a bootstrap schema is answered
+    /// rather than stored. The membership test is written against the surviving
+    /// entries anyway, because that is the rule and the written list is only
+    /// accidentally the same thing.
+    ///
     /// # Errors
     ///
     /// Returns storage/corruption errors from the catalog KV seam.
     pub fn visible_schemas(&self, kv: &dyn Kv) -> Result<Vec<String>, ExecError> {
         let temp = self.temp_schema();
-        let written = self.search_path.expanded(&self.user, &temp);
-        let mut schemas = Vec::with_capacity(written.len() + 2);
+        let explicit = self.explicit_schemas(kv)?;
+        let mut schemas = Vec::with_capacity(explicit.len() + 2);
         // A session that has created no temporary relation has no temporary
         // namespace, and nothing shadows.
         if !self.search_path.names_temp_schema(&temp) && crabka_pgcatalog::schema_exists(kv, &temp)?
         {
             schemas.push(temp);
         }
-        if !written
+        if !explicit
             .iter()
             .any(|name| name == crate::search_path::PG_CATALOG)
         {
             schemas.push(crate::search_path::PG_CATALOG.to_string());
         }
-        for name in written {
-            if crabka_pgcatalog::schema_exists(kv, &name)? {
-                schemas.push(name);
-            }
-        }
+        schemas.extend(explicit);
         Ok(schemas)
     }
 
-    /// The schemas `current_schemas(false)` reports: the explicit entries that
-    /// exist, without either implicit entry.
+    /// The schemas `current_schemas(false)` reports: the explicit entries this
+    /// scope can actually search, without either implicit entry.
+    ///
+    /// An entry survives when the schema exists *and* the scope's user holds
+    /// `USAGE` on it. `PostgreSQL`'s `recomputeNamespacePath` makes the same two
+    /// tests, and this is the only place either one is made — the whole
+    /// namespace model reads the path through here, so a schema the caller
+    /// cannot search is absent from name resolution, from `current_schemas`,
+    /// from `pg_table_is_visible` and its family, and from the shadowing test
+    /// that decides whether `regclassout` spells a schema out.
+    ///
+    /// That last one is the reason this is not cosmetic. Without the `USAGE`
+    /// test a relation is printed schema-qualified because a same-named
+    /// relation shadows it from a schema the caller cannot reach, which
+    /// discloses that the shadowing relation exists.
     ///
     /// # Errors
     ///
     /// Returns storage/corruption errors from the catalog KV seam.
     pub fn explicit_schemas(&self, kv: &dyn Kv) -> Result<Vec<String>, ExecError> {
+        let role = crate::catalog_fn::effective_privilege_role(&self.user);
+        // `object_aclcheck` answers yes for a superuser without reading an ACL,
+        // and this walk is on the hottest path in the engine: every unqualified
+        // name in every statement, and every row of a `\d` listing. Asking the
+        // catalog per entry for the role that already holds everything would put
+        // a role-catalog scan there for no answer it can change.
+        let unrestricted = role == crabka_pgcatalog::BOOTSTRAP_ROLE;
+        let temp = self.temp_schema();
         let mut schemas = Vec::new();
-        for name in self.search_path.expanded(&self.user, &self.temp_schema()) {
-            if crabka_pgcatalog::schema_exists(kv, &name)? {
+        for name in self.search_path.expanded(&self.user, &temp) {
+            if !crabka_pgcatalog::schema_exists(kv, &name)? {
+                continue;
+            }
+            // The session's own temporary namespace is searched however it was
+            // written. `PostgreSQL` skips the `USAGE` test for the `pg_temp`
+            // alias outright, and `pg_namespace_aclmask` gives the session every
+            // right on its own namespace, so the literal name passes too. Some
+            // *other* session's namespace is an ordinary schema owned by the
+            // bootstrap role, and a role that is not it does not get to search
+            // it — verified against `postgres:18.4`.
+            if unrestricted
+                || name == temp
+                || crabka_pgcatalog::has_schema_privilege(kv, &name, &role, "USAGE")?
+            {
                 schemas.push(name);
             }
         }
@@ -196,8 +245,10 @@ impl ResolutionScope {
     }
 
     /// The schema a `CREATE` with no qualifier lands in: the first explicit
-    /// entry that exists. `None` when the path names none, which is
-    /// `PostgreSQL`'s `no schema has been selected to create in`.
+    /// entry this scope can search. `None` when the path leaves none, which is
+    /// `PostgreSQL`'s `no schema has been selected to create in` — the report
+    /// even when the path names a schema that exists and the caller merely
+    /// cannot search it.
     ///
     /// # Errors
     ///
@@ -674,6 +725,194 @@ mod tests {
         )
         .expect("create table");
         kv.write_batch(&ops).expect("write");
+    }
+
+    /// A role with no rights of its own, which is what every `USAGE` case here
+    /// resolves as. The default scope's user is the bootstrap role, which holds
+    /// everything.
+    const LOWLY: &str = "lowly";
+
+    /// [`scope_over`] under `user` rather than the bootstrap role.
+    fn scope_as(user: &str, entries: &[&str]) -> ResolutionScope {
+        ResolutionScope {
+            user: user.to_string(),
+            ..scope_over(entries)
+        }
+    }
+
+    fn create_role(kv: &MemKv, name: &str) {
+        crabka_pgcatalog::create_role(kv, name, true).expect("role");
+    }
+
+    fn create_schema(kv: &MemKv, name: &str, owner: &str) {
+        let ops = crabka_pgcatalog::create_schema_ops(kv, name, owner).expect("schema");
+        kv.write_batch(&ops).expect("write");
+    }
+
+    fn grant_usage(kv: &MemKv, schema: &str, grantee: &str) {
+        let ops = crabka_pgcatalog::grant_schema_privileges_ops(
+            kv,
+            &[schema.to_string()],
+            &[grantee.to_string()],
+            &["USAGE".to_string()],
+        )
+        .expect("grant");
+        kv.write_batch(&ops).expect("write");
+    }
+
+    /// An entry naming a schema the role holds no `USAGE` on is dropped from
+    /// every view of the path, exactly as a nonexistent one is. Measured
+    /// against `postgres:18.4`, where the same setup reports
+    /// `current_schemas(true) = {pg_catalog,s2}` and `current_schemas(false) =
+    /// {s2}`, and a `CREATE` lands in `s2`.
+    #[test]
+    fn an_entry_the_role_cannot_search_is_dropped_from_every_view_of_the_path() {
+        let kv = with_schemas(&["s1", "s2"]);
+        create_role(&kv, LOWLY);
+        grant_usage(&kv, "s2", LOWLY);
+        let scope = scope_as(LOWLY, &["s1", "s2"]);
+        assert!(scope.explicit_schemas(&kv).expect("explicit") == ["s2"]);
+        assert!(scope.visible_schemas(&kv).expect("visible") == ["pg_catalog", "s2"]);
+        assert!(scope.creation_schema(&kv).expect("creation") == Some("s2".to_string()));
+        // The same path under the bootstrap role keeps both entries, which is
+        // the superuser bypass `object_aclcheck` makes.
+        let root = scope_over(&["s1", "s2"]);
+        assert!(root.explicit_schemas(&kv).expect("explicit") == ["s1", "s2"]);
+    }
+
+    /// A path whose every entry is unsearchable leaves nothing to create in,
+    /// and `postgres:18.4` reports that as the same `3F000 no schema has been
+    /// selected to create in` an empty path reports — not as a permission
+    /// failure naming the schema.
+    #[test]
+    fn a_path_of_unsearchable_entries_has_no_schema_to_create_in() {
+        let kv = with_schemas(&["s1"]);
+        create_role(&kv, LOWLY);
+        let scope = scope_as(LOWLY, &["s1"]);
+        assert!(scope.explicit_schemas(&kv).expect("explicit").is_empty());
+        assert!(scope.visible_schemas(&kv).expect("visible") == ["pg_catalog"]);
+        assert!(scope.creation_schema(&kv).expect("creation").is_none());
+        let error = resolve_relation(
+            &kv,
+            &scope,
+            &RelationRef::bare("t"),
+            SchemaDisposition::Creation,
+        )
+        .expect_err("3F000");
+        assert!(error.into_pg().code == "3F000");
+    }
+
+    /// The filter is name *resolution* and not only reporting. An unqualified
+    /// name skips the unsearchable schema that holds it and lands on the later
+    /// entry, and a name only that schema holds resolves nowhere — which is the
+    /// `42P01 relation "onlysecret" does not exist` `postgres:18.4` raises
+    /// rather than a permission report.
+    #[test]
+    fn an_unsearchable_schema_neither_holds_a_name_nor_shadows_one() {
+        let kv = with_schemas(&["s1", "s2"]);
+        create(&kv, &RelationName::new("s1", "t"));
+        create(&kv, &RelationName::new("s2", "t"));
+        create(&kv, &RelationName::new("s1", "only_s1"));
+        create_role(&kv, LOWLY);
+        grant_usage(&kv, "s2", LOWLY);
+        for (scope, name, expected) in [
+            (
+                scope_as(LOWLY, &["s1", "s2"]),
+                "t",
+                RelationName::new("s2", "t"),
+            ),
+            // Nothing the role can search holds it, so it falls back to the
+            // spelling the 42P01 has to report.
+            (
+                scope_as(LOWLY, &["s1", "s2"]),
+                "only_s1",
+                RelationName::public("only_s1"),
+            ),
+            (scope_over(&["s1", "s2"]), "t", RelationName::new("s1", "t")),
+            (
+                scope_over(&["s1", "s2"]),
+                "only_s1",
+                RelationName::new("s1", "only_s1"),
+            ),
+        ] {
+            let resolved = resolve_relation(
+                &kv,
+                &scope,
+                &RelationRef::bare(name),
+                SchemaDisposition::Reference,
+            )
+            .expect("resolves");
+            assert!(resolved == expected, "{} as {}", name, scope.user);
+        }
+    }
+
+    /// The three schemas the system bootstraps carry `initdb`'s `USAGE` grant
+    /// to `PUBLIC`, so no role needs one of its own for them. A schema the role
+    /// owns needs none either.
+    #[test]
+    fn the_bootstrap_schemas_and_an_owned_schema_need_no_grant() {
+        let kv = with_schemas(&[]);
+        create_role(&kv, LOWLY);
+        create_schema(&kv, "mine", LOWLY);
+        let scope = scope_as(
+            LOWLY,
+            &["public", "information_schema", "pg_catalog", "mine"],
+        );
+        assert!(
+            scope.explicit_schemas(&kv).expect("explicit")
+                == ["public", "information_schema", "pg_catalog", "mine"]
+        );
+        // `pg_catalog` was written, so it stays where it was written and is not
+        // added implicitly in front.
+        assert!(
+            scope.visible_schemas(&kv).expect("visible")
+                == ["public", "information_schema", "pg_catalog", "mine"]
+        );
+    }
+
+    /// The session's own temporary namespace is searched however the path
+    /// writes it, because `PostgreSQL` skips the `USAGE` test for the `pg_temp`
+    /// alias and `pg_namespace_aclmask` gives a session every right on its own
+    /// namespace. Another session's namespace is an ordinary schema owned by
+    /// the bootstrap role, and this role does not get to search it.
+    #[test]
+    fn a_session_searches_its_own_temporary_namespace_but_not_another_sessions() {
+        let kv = with_schemas(&[]);
+        create_role(&kv, LOWLY);
+        with_temp_schema(&kv, "pg_temp_7");
+        with_temp_schema(&kv, OTHER_TEMP);
+        let scope = |entries: &[&str]| ResolutionScope {
+            backend_id: OWN_BACKEND,
+            ..scope_as(LOWLY, entries)
+        };
+        let cases = [
+            (
+                vec!["public", "pg_temp"],
+                vec!["public", "pg_temp_7"],
+                vec!["pg_catalog", "public", "pg_temp_7"],
+            ),
+            (
+                vec!["public", "pg_temp_7"],
+                vec!["public", "pg_temp_7"],
+                vec!["pg_catalog", "public", "pg_temp_7"],
+            ),
+            (
+                vec!["public", OTHER_TEMP],
+                vec!["public"],
+                vec!["pg_temp_7", "pg_catalog", "public"],
+            ),
+        ];
+        for (entries, explicit, visible) in cases {
+            let scope = scope(&entries);
+            assert!(
+                scope.explicit_schemas(&kv).expect("explicit") == explicit,
+                "{entries:?}"
+            );
+            assert!(
+                scope.visible_schemas(&kv).expect("visible") == visible,
+                "{entries:?}"
+            );
+        }
     }
 
     #[test]
