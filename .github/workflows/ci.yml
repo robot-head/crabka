@@ -1389,8 +1389,8 @@ jobs:
   # `mirror.gcr.io` pull once hung both shards past the job timeout.
   #
   # The tests are `#[ignore]`d like every other Docker suite now and run here,
-  # where the explicit preload turns a registry stall into one failed step in
-  # seconds, with Docker's own error, instead of 118 wedged test processes.
+  # where the explicit bounded preload turns a registry stall into one failed
+  # step instead of 118 wedged test processes.
   # Coverage uploads under the `workspace-integration` flag so the lines these
   # suites really do cover — the in-process distributor/querier/compactor paths
   # in crabka-observability — stay in that flag's report.
@@ -1416,16 +1416,33 @@ jobs:
           key: observability-differential
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
-      # Pull up front so a registry stall fails this one step, fast and legibly,
-      # rather than inside every test process. Tags mirror the constants in the
-      # suites: `LOKI_IMAGE`/`LOKI_TAG` in loki_differential.rs,
-      # `LOKI_IMAGE_TAG`/`GRAFANA_IMAGE_TAG` in grafana_e2e.rs, and the inline
-      # Grafana image in grafana_integration.rs. Keep them in lockstep.
+      # Pull up front so a registry problem fails this one step, legibly, rather
+      # than inside every test process. A refused or erroring registry fails in
+      # seconds with Docker's own message, but a registry that accepts the
+      # connection and then stops making progress needs the explicit bound:
+      # `docker pull` has no pull-timeout of its own, so without it a stall
+      # would sit here until the 45-minute job timeout — the exact failure mode
+      # this job exists to avoid. Three minutes is several times the normal
+      # cold-pull time for these images; `timeout-minutes` backstops the loop.
+      #
+      # Tags mirror the constants in the suites: `LOKI_IMAGE`/`LOKI_TAG` in
+      # loki_differential.rs, `LOKI_IMAGE_TAG`/`GRAFANA_IMAGE_TAG` in
+      # grafana_e2e.rs, and the inline Grafana image in grafana_integration.rs.
+      # Keep them in lockstep.
       - name: Preload Docker images
+        timeout-minutes: 12
         run: |
-          docker pull mirror.gcr.io/grafana/loki:3.4.2
-          docker pull mirror.gcr.io/grafana/grafana:12.3.7
-          docker pull mirror.gcr.io/grafana/grafana:11.5.2
+          set -euo pipefail
+          for image in \
+            mirror.gcr.io/grafana/loki:3.4.2 \
+            mirror.gcr.io/grafana/grafana:12.3.7 \
+            mirror.gcr.io/grafana/grafana:11.5.2
+          do
+            timeout 180 docker pull "$image" || {
+              echo "::error::docker pull $image failed or stalled past 180s"
+              exit 1
+            }
+          done
       # `--run-ignored only` opts the Docker-gated tests in (they're skipped
       # everywhere else). It also excludes grafana_e2e's one Docker-free test —
       # the container-start retry helper — which stays un-ignored and keeps
