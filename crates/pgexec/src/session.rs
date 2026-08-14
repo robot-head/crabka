@@ -2789,6 +2789,11 @@ struct SqlCursor {
     /// created in, and `PostgreSQL` drops the cursor with it. Holdability only
     /// decides what survives a *commit*, so it does not save one here.
     declared_depth: usize,
+    /// The stored tables the cursor's query reads, resolved under the scope
+    /// `DECLARE` ran in. `PostgreSQL` keeps each of them open for as long as
+    /// the portal lives, and refuses a same-session `DROP TABLE` or `TRUNCATE`
+    /// on any of them; see [`SqlSession::refuse_relation_pinned_by_cursor`].
+    pinned: Vec<crabka_pgcatalog::RelationName>,
 }
 
 /// S1: one open savepoint level.
@@ -4605,12 +4610,14 @@ impl SqlSession {
             QueryResult::Command { .. } | QueryResult::Empty => (Vec::new(), Vec::new()),
         };
         let position = crate::cursor::CursorPosition::new(rows.len());
+        let pinned = self.cursor_pinned_relations(query);
         self.cursors.insert(
             name.to_string(),
             SqlCursor {
                 fields,
                 rows,
                 position,
+                pinned,
                 // A materialized result always supports a backward scan, so only
                 // an explicit NO SCROLL forbids one.
                 scrollable: scroll != Some(false),
@@ -4680,6 +4687,110 @@ impl SqlSession {
             }
         };
         Ok(QueryResult::Command { tag: tag.into() })
+    }
+
+    /// The stored tables `query` reads, which `PostgreSQL` holds open for as
+    /// long as the cursor's portal lives.
+    ///
+    /// The set comes from the parse tree at `DECLARE` time rather than from the
+    /// scan, because a Gres cursor materializes its rows immediately and keeps
+    /// no reader afterwards. It is deliberately narrower than `PostgreSQL`'s in
+    /// two ways, and each narrowing can only refuse *less* than `PostgreSQL`
+    /// does:
+    ///
+    /// * A view is not recorded. `PostgreSQL` rewrites a view away before it
+    ///   plans, so the portal holds the tables *under* the view open and not
+    ///   the view itself. That is why `DROP VIEW` on a view a cursor reads
+    ///   succeeds on 18.4 while `TRUNCATE` on the table beneath it does not.
+    ///   Recording the view would invert both answers, so the walk stops at the
+    ///   view and the body is not followed.
+    /// * An inheritance descendant is not recorded for a parent written without
+    ///   `ONLY`, although `PostgreSQL`'s scan opens every one of them.
+    ///
+    /// It is wider than `PostgreSQL`'s in one way, which can refuse *more*: a
+    /// relation whose scan the planner proved dead is recorded here but never
+    /// opened there, so 18.4 lets `TRUNCATE t` through under a cursor reading
+    /// `SELECT * FROM t WHERE false`. A qualification that is merely selective,
+    /// or a `LIMIT 0`, still opens the relation on both sides.
+    ///
+    /// A `WITH` name is not a relation, and [`crate::viewdeps::query_sources`]
+    /// already drops the `FROM` items such a name shadows.
+    fn cursor_pinned_relations(&self, query: &QueryExpr) -> Vec<crabka_pgcatalog::RelationName> {
+        let scope = self.resolution_scope();
+        let mut pinned: Vec<crabka_pgcatalog::RelationName> = Vec::new();
+        for source in crate::viewdeps::query_sources(query) {
+            let Ok(name) = crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &scope,
+                source.reference,
+                crate::relname::SchemaDisposition::Reference,
+            ) else {
+                continue;
+            };
+            // `get_table` answers only for a relation with storage, which is
+            // what leaves the views the walk also reports out of the set.
+            if pinned.contains(&name)
+                || crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name).is_err()
+            {
+                continue;
+            }
+            pinned.push(name);
+        }
+        pinned
+    }
+
+    /// `PostgreSQL` refuses `DROP TABLE` and `TRUNCATE` on a relation an open
+    /// cursor of the *same session* is still reading, with 55006.
+    ///
+    /// The refusal comes from the relation's reference count and not from a
+    /// lock: the command already holds `ACCESS EXCLUSIVE`, so no other session
+    /// can be reading, but that lock does not protect the session against its
+    /// own portals. Another session is therefore never a reason to refuse — it
+    /// waits for the lock instead.
+    ///
+    /// Whether the cursor has rows left does not matter. One that was never
+    /// fetched from and one fetched past its last row both still hold the
+    /// relation, and only `CLOSE`, the end of the transaction, or the rollback
+    /// of the sub-transaction that declared it releases it. A `WITH HOLD`
+    /// cursor that has outlived its declaring transaction releases it as well,
+    /// because that commit copied its rows out.
+    fn refuse_relation_pinned_by_cursor(&self, stmt: &Statement) -> Result<(), ExecError> {
+        let (targets, command): (Vec<&crabka_pgparser::ast::RelationRef>, &str) = match stmt {
+            Statement::DropTable { names, .. } => (names.iter().collect(), "DROP TABLE"),
+            Statement::Truncate { targets, .. } => (
+                targets.iter().map(|target| &target.name).collect(),
+                "TRUNCATE",
+            ),
+            _ => return Ok(()),
+        };
+        let scope = self.resolution_scope();
+        for reference in targets {
+            let Ok(name) = crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &scope,
+                reference,
+                crate::relname::SchemaDisposition::Utility,
+            ) else {
+                // A name that does not resolve is the command's own 42P01.
+                continue;
+            };
+            if !self
+                .cursors
+                .values()
+                .any(|cursor| !cursor.session_held && cursor.pinned.contains(&name))
+            {
+                continue;
+            }
+            return Err(ExecError::Remote(PgError::error(
+                "55006",
+                format!(
+                    "cannot {command} \"{}\" because it is being used by \
+                     active queries in this session",
+                    name.name
+                ),
+            )));
+        }
+        Ok(())
     }
 
     // ---- S2: SQL-level PREPARE/EXECUTE/DEALLOCATE -----------------------
@@ -6812,7 +6923,6 @@ impl SqlSession {
             | Statement::AlterIndex { .. }
             | Statement::AlterView { .. }
             | Statement::DropIndex { .. }
-            | Statement::DropTable { .. }
             | Statement::AlterTable { .. }
             | Statement::Comment { .. }
             | Statement::CreateView { .. }
@@ -6877,6 +6987,14 @@ impl SqlSession {
         | Statement::AlterDomain { .. }
         | Statement::DropDomain { .. }
         | Statement::Utility(UtilityStatement::TextSearch(_)) => self.run_ddl(stmt).await,
+        // `DROP TABLE` takes that same path, once the cursors this session
+        // still holds have had their say. The internal drops reach `run_ddl`
+        // directly and are deliberately exempt: a failed `CREATE TABLE AS`
+        // undoing itself, and `ON COMMIT DROP` at the end of a block.
+        Statement::DropTable { .. } => {
+            self.refuse_relation_pinned_by_cursor(stmt)?;
+            self.run_ddl(stmt).await
+        }
         Statement::Call { name, args } => self.run_call(name, args).await,
         Statement::DoBlock { language, body } => {
             crate::plpgsql::execute_do(self, language, body).await
@@ -6890,6 +7008,11 @@ impl SqlSession {
                 // `REFRESH MATERIALIZED VIEW` fills a matview through that very
                 // path: what is forbidden is a *user* write, not every write.
                 self.refuse_materialized_view_write(stmt)?;
+                // Here for the same reason: `ON COMMIT DELETE ROWS` empties a
+                // temporary table through `run_write` at every commit, and a
+                // cursor the committing transaction still holds must not stop
+                // it. Only a user `TRUNCATE` is refused.
+                self.refuse_relation_pinned_by_cursor(stmt)?;
                 self.run_write(stmt).await
             }
             Statement::Cluster(target) => self.run_cluster(stmt, target.as_ref()).await,
