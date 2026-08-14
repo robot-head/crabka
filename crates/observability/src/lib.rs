@@ -3508,8 +3508,14 @@ fn spawn_query_authorizer_connect(
                 }
             }
         };
-        let mut guard = slot.write().await;
-        *guard = Arc::new(authorizer);
+        // Scope the write guard. Holding it across the `cancelled` await below
+        // blocks every reader in `SwappableQueryAuthorizer::check` for the life
+        // of the querier, which deadlocks each query the swap was meant to
+        // unblock.
+        {
+            let mut guard = slot.write().await;
+            *guard = Arc::new(authorizer);
+        }
         readiness
             .authorization_connected
             .store(true, AtomicOrdering::SeqCst);

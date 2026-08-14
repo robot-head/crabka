@@ -71,6 +71,56 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
     assert2::assert!(response.topics[0].error_code == 0);
 }
 
+/// How long a deferred querier gets to connect its WAL consumer and its
+/// broker-backed query authorizer before the test gives up.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Polls `/ready` until the service reports ready.
+///
+/// A querier binds its HTTP port before its WAL consumer and its broker-backed
+/// query authorizer connect, and it fails closed on every query until both are
+/// up. A test that queries before `/ready` returns 200 races that connect and
+/// gets an authorization error instead of a result.
+async fn wait_until_ready(app: &axum::Router) {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    loop {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if response.status() == StatusCode::OK {
+            return;
+        }
+        assert2::assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Polls `/ready` over TCP until the service reports ready.
+///
+/// The listener-backed counterpart of [`wait_until_ready`], for tests that
+/// serve the router on a socket instead of calling it in process.
+async fn wait_until_ready_at(addr: std::net::SocketAddr) {
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/ready");
+    let deadline = Instant::now() + READY_TIMEOUT;
+    loop {
+        if let Ok(response) = client.get(&url).send().await
+            && response.status() == reqwest::StatusCode::OK
+        {
+            return;
+        }
+        assert2::assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 fn current_unix_second_ns() -> i64 {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -619,29 +669,21 @@ async fn config_built_querier_enforces_tenant_read_acl_before_query() {
     .unwrap();
 
     // The querier serves queries through a `SwappableQueryAuthorizer` that begins
-    // permissive (allow-all) and swaps in the real broker-backed authorizer once
-    // it connects in the background ("FIX B2"). A query issued before that swap
-    // completes is allowed, so poll until enforcement is active rather than
-    // racing the swap (the race is marginal and only surfaces under CI's slower
-    // coverage build).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let response = loop {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/loki/api/v1/query?query=%7Bapp%3D%22api%22%7D")
-                    .header("X-Scope-OrgID", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        if response.status() == StatusCode::FORBIDDEN || std::time::Instant::now() >= deadline {
-            break response;
-        }
-        tokio::task::yield_now().await;
-    };
+    // closed and swaps in the real broker-backed authorizer once it connects in
+    // the background. Readiness turns 200 on that swap, so waiting for it makes
+    // ACL enforcement active before the query rather than racing it.
+    wait_until_ready(&app).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=%7Bapp%3D%22api%22%7D")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
     assert2::assert!(response.status() == StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
@@ -686,6 +728,7 @@ async fn config_built_querier_tails_live_wal_into_query_results() {
     )
     .await
     .unwrap();
+    wait_until_ready(&app).await;
 
     let body = query_until_api_error(app).await;
     assert2::assert!(
@@ -747,6 +790,7 @@ async fn configured_listener_tails_live_wal_over_websocket() {
             .await
             .unwrap();
     });
+    wait_until_ready_at(addr).await;
 
     let timestamp = current_fixture_timestamp_ns(20_000_000);
     let end = timestamp.parse::<i64>().unwrap() + 10_000_000;
@@ -878,6 +922,7 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let body = query_until_loop_error(querier, &error_timestamp).await;
     assert2::assert!(
@@ -1002,6 +1047,7 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let body = query_until_otlp_loop_error(querier, &timestamp).await;
     assert2::assert!(
@@ -1086,6 +1132,7 @@ async fn configured_loop_isolates_tenants_sharing_one_wal_topic() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let end = tenant_b_timestamp.parse::<i64>().unwrap() + 10_000_000;
     let tenant_a = query_until_tenant_shared_error(querier.clone(), "tenant-a", end).await;
@@ -1164,6 +1211,7 @@ async fn config_built_querier_merges_compacted_blocks_with_uncompacted_live_tail
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let body = query_until_hot_cold_errors(querier, &compacted_timestamp, &live_timestamp).await;
     assert2::assert!(
@@ -1242,6 +1290,7 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let body = query_until_restart_errors(querier, &first_timestamp, &second_timestamp).await;
     assert2::assert!(
@@ -1301,6 +1350,7 @@ async fn native_kafka_produced_log_flows_through_configured_compactor_and_querie
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let body = query_until_native_kafka_error(querier).await;
     assert2::assert!(

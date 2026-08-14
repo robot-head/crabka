@@ -422,6 +422,16 @@ async fn boot_stack() -> Stack {
     let querier_task = tokio::spawn(async move {
         let _ = axum::serve(listener, querier).await;
     });
+    // The querier binds before its WAL consumer and its broker-backed query
+    // authorizer connect, and fails closed on every query until both are up.
+    // Provisioning Grafana against it earlier makes the first proxied query
+    // compare an authorization error against a real Loki result.
+    wait_for_http_ok(
+        &http,
+        &format!("http://127.0.0.1:{querier_port}/ready"),
+        "crabka querier",
+    )
+    .await;
 
     // ---- 3. Grafana with both datasources provisioned ----
     let datasources_yaml = format!(

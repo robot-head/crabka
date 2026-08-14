@@ -204,6 +204,37 @@ async fn compactor_router_for_status() -> axum::Router {
         .unwrap()
 }
 
+/// How long a deferred querier gets to connect its WAL consumer and its
+/// broker-backed query authorizer before the test gives up.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Polls `/ready` until the querier reports ready.
+///
+/// A querier binds its HTTP port before its WAL consumer and its broker-backed
+/// query authorizer connect, and it fails closed on every query until both are
+/// up. A differential comparison run before `/ready` returns 200 compares an
+/// authorization error against a real Loki result.
+async fn wait_until_ready(app: &axum::Router) {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    loop {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if response.status() == StatusCode::OK {
+            return;
+        }
+        assert2::assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 fn labels<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> {
     pairs
         .into_iter()
@@ -645,6 +676,7 @@ async fn real_loki_and_crabka_return_same_stream_query_range_result() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let query = r#"{app="api",env="prod"} |= "error""#;
     let loki_result =
@@ -785,6 +817,7 @@ async fn real_loki_and_crabka_return_same_matcher_and_line_filter_results() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let query =
         r#"{app=~"api|worker",env!="dev"} |= "differential" != "debug" |~ "error|warn" !~ "warn""#;
@@ -875,6 +908,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let query = r#"count_over_time({app="api",env="prod"} |= "error" [2s])"#;
     let end_ns = base_ns + 3_000_000_000;
@@ -1057,6 +1091,7 @@ async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let end_ns = base_ns + 4_000_000_000;
     for query in [
@@ -1157,6 +1192,7 @@ async fn real_loki_and_crabka_return_same_byte_metric_results() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let end_ns = base_ns + 3_000_000_000;
     let query = r#"bytes_over_time({app="api",env="prod"} [2s])"#;
@@ -1257,6 +1293,7 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let end_ns = base_ns + 2_000_000_000;
     let loki_labels = loki_metadata_result(&http, &loki_base, "labels", base_ns, end_ns).await;
@@ -1980,6 +2017,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let end_ns = base_ns + 14_000_000_000;
     let json_query =
@@ -2776,6 +2814,7 @@ async fn real_loki_and_crabka_return_same_parser_metric_results() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let query =
         r#"count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
@@ -2887,6 +2926,7 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let query =
         r#"count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
@@ -3276,6 +3316,7 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let query = r#"{app="api",format="json"} | json"#;
     let end_ns = base_ns + 2_000_000_000;
@@ -3373,6 +3414,7 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let query = r#"{app="api",format="logfmt"} | logfmt"#;
     let end_ns = base_ns + 3_000_000_000;
@@ -5428,6 +5470,7 @@ async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
     )
     .await
     .unwrap();
+    wait_until_ready(&querier).await;
 
     let query = r#"{app="api"} | parsed_status = "200""#;
     let loki_result =
