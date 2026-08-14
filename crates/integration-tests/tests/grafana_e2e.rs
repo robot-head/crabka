@@ -7,8 +7,15 @@
 //! ingests identical data into both. It then drives a LogQL corpus THROUGH
 //! Grafana's datasource-proxy and asserts crabka == Loki.
 //!
-//! These are Docker-dependent integration tests. CI runs them with nextest
-//! `--include-ignored`. They are intentionally NOT `#[ignore]`d.
+//! Cargo ignores the three corpus tests by default, because they pull and run
+//! `mirror.gcr.io/grafana/loki` and `mirror.gcr.io/grafana/grafana` under
+//! Docker. The `observability-differential` job in `.github/workflows/ci.yml`
+//! preloads both images and runs them. Run them locally with:
+//!
+//! `cargo test -p crabka-integration-tests --test grafana_e2e -- --ignored --nocapture`
+//!
+//! `container_start_retry_retries_transient_errors_without_docker` exercises the
+//! retry helper against a stub, needs no daemon, and stays un-ignored.
 
 use std::{
     collections::BTreeMap,
@@ -830,6 +837,7 @@ const METRIC_QUERIES: &[(&str, &str)] = &[
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
 async fn grafana_e2e_log_queries_match_loki() {
     let stack = boot_stack().await;
     let mismatches = run_corpus(&stack, LOG_QUERIES).await;
@@ -840,6 +848,7 @@ async fn grafana_e2e_log_queries_match_loki() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
 async fn grafana_e2e_metric_queries_match_loki() {
     let stack = boot_stack().await;
     let mismatches = run_corpus(&stack, METRIC_QUERIES).await;
@@ -850,6 +859,7 @@ async fn grafana_e2e_metric_queries_match_loki() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
 async fn grafana_e2e_metadata_endpoints_match_loki() {
     let stack = boot_stack().await;
 
