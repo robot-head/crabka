@@ -504,10 +504,6 @@ fn deparse_with(expr: &Expr, qualify: bool) -> String {
             deparse_with(expr, qualify),
             if *negated { "NOT " } else { "" }
         ),
-        Expr::Unary {
-            op: UnaryOp::Not,
-            expr,
-        } => format!("(NOT {})", deparse_with(expr, qualify)),
         other => deparse_bare_with(other, qualify),
     }
 }
@@ -540,6 +536,35 @@ fn cast_operand(expr: &Expr, qualify: bool) -> String {
         return rendered;
     }
     format!("({rendered})")
+}
+
+/// What a subscript is taken of, parenthesized the way `get_rule_expr` does.
+///
+/// The rule is [`crate::viewdef::subscript_base_is_bare`], which the view
+/// deparser answers against the same oracle: a bare column or a field
+/// selection stands alone, everything else gains a pair. So a plan line reads
+/// `(string_to_array(t, ','::text))[1]`, not `string_to_array(t, ','::text)[1]`.
+fn subscript_base(base: &Expr, qualify: bool) -> String {
+    let text = deparse_bare_with(base, qualify);
+    if crate::viewdef::subscript_base_is_bare(base) {
+        text
+    } else {
+        format!("({text})")
+    }
+}
+
+/// What a field selection is taken of, parenthesized the way `get_rule_expr`
+/// does — [`crate::viewdef::field_base_is_bare`], the mirror image of the
+/// subscript rule. A column base keeps its pair, so a plan line still reads
+/// `(c).f`, but `(c).h.g` and `carr[1].f` shed the one this used to add
+/// unconditionally.
+fn field_base(base: &Expr, qualify: bool) -> String {
+    let text = deparse_bare_with(base, qualify);
+    if crate::viewdef::field_base_is_bare(base) {
+        text
+    } else {
+        format!("({text})")
+    }
 }
 
 /// A call rendered the ordinary way, as `name(args)` with the modifiers that
@@ -595,7 +620,7 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
             _ => name.clone(),
         },
         Expr::FieldSelect { base, field } => {
-            format!("({}).{field}", deparse_bare_with(base, qualify))
+            format!("{}.{field}", field_base(base, qualify))
         }
         Expr::FieldSelectAll(base) => format!("({}).*", deparse_bare_with(base, qualify)),
         Expr::IntLiteral(digits) | Expr::NumericLiteral(digits) => digits.clone(),
@@ -648,12 +673,31 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
         }
         Expr::Func(call) => deparse_plain_call(call, qualify),
         Expr::Cast { expr, ty } => format!("{}::{}", cast_operand(expr, qualify), ty.name()),
-        Expr::Unary { op, expr } => match op {
-            UnaryOp::Neg => format!("-{}", deparse_bare_with(expr, qualify)),
-            UnaryOp::Plus => format!("+{}", deparse_bare_with(expr, qualify)),
-            UnaryOp::Not => format!("(NOT {})", deparse_with(expr, qualify)),
-            other => format!("{other:?} {}", deparse_bare_with(expr, qualify)),
-        },
+        // A sign on a numeric literal is not an operator by the time
+        // PostgreSQL deparses anything: `doNegate` folds it into the literal's
+        // own spelling, so what reaches `ruleutils` is one `Const` and
+        // `get_const_expr` writes `'-3'::integer`. Gres has no typed constant
+        // here — the plan is built from the AST, and the AST does not know
+        // whether `-3` is an `int4`, a `bigint` or a `numeric` — so it cannot
+        // pick the type label, and guessing one has been measured to cost more
+        // corpus lines through psql's ruler than the wrong spelling does.
+        // Folding the sign is the part that is right either way, and it keeps
+        // the operator arm below from claiming `-3` is an operator node.
+        Expr::Unary {
+            op: op @ (UnaryOp::Neg | UnaryOp::Plus),
+            expr,
+        } if matches!(expr.as_ref(), Expr::IntLiteral(_) | Expr::NumericLiteral(_)) => {
+            let sign = if matches!(op, UnaryOp::Neg) { "-" } else { "+" };
+            format!("{sign}{}", deparse_bare_with(expr, qualify))
+        }
+        // Every other unary form is spelled by the one table `pg_get_viewdef`
+        // uses, with `PRETTY_PAREN` cleared because `EXPLAIN` deparses at
+        // `prettyFlags = 0`. That is why a plan line reads `(- q1)` and
+        // `(b IS TRUE)` rather than the `-q1` and `IsTrue b` this arm printed
+        // while it kept a second, incomplete table of its own.
+        Expr::Unary { op, expr } => {
+            crate::viewdef::unary_expr_text(*op, &deparse_bare_with(expr, qualify), false)
+        }
         // Forms that carry their own parentheses: `deparse_with` matches these
         // explicitly, so this delegation terminates.
         Expr::Binary { .. } | Expr::IsNull { .. } => deparse_with(expr, qualify),
@@ -732,11 +776,11 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
         Expr::Row(fields) => format!("ROW({})", expr_list_with(fields, qualify)),
         Expr::Subscript { base, index } => format!(
             "{}[{}]",
-            deparse_bare_with(base, qualify),
+            subscript_base(base, qualify),
             deparse_bare_with(index, qualify)
         ),
         Expr::ArrayRef { base, subscripts } => {
-            let mut text = deparse_bare_with(base, qualify);
+            let mut text = subscript_base(base, qualify);
             for subscript in subscripts {
                 match subscript {
                     ArraySubscript::Index(index) => {
@@ -1234,6 +1278,114 @@ mod tests {
         ];
         for (sql, expected) in cases {
             assert!(plan_text(sql, &costs_off()) == *expected, "{sql}");
+        }
+    }
+
+    /// Every unary form, in `PostgreSQL` 18.4's own `EXPLAIN (COSTS OFF)` text
+    /// over a `d1` that carries a column of each type the operator needs.
+    ///
+    /// `get_oper_expr` writes a prefix operator, one space, then the operand,
+    /// and `EXPLAIN` deparses with the pretty flag off, so the whole node
+    /// carries a pair of parentheses. A `BooleanTest` reads the same way from
+    /// the other side. `IS DOCUMENT` is the one exception in the set, and
+    /// `IS NOT DOCUMENT` is not a node at all — the grammar builds
+    /// `NOT (… IS DOCUMENT)` and the deparser prints that back.
+    #[test]
+    fn unary_operators_match_the_postgres_oracle() {
+        let cases: &[(&str, &str)] = &[
+            ("- id > 0", "  Filter: ((- id) > 0)"),
+            ("+ id > 0", "  Filter: ((+ id) > 0)"),
+            ("@ id > 0", "  Filter: ((@ id) > 0)"),
+            ("~ id > 0", "  Filter: ((~ id) > 0)"),
+            ("b IS TRUE", "  Filter: (b IS TRUE)"),
+            ("b IS NOT TRUE", "  Filter: (b IS NOT TRUE)"),
+            ("b IS FALSE", "  Filter: (b IS FALSE)"),
+            ("b IS NOT FALSE", "  Filter: (b IS NOT FALSE)"),
+            ("b IS UNKNOWN", "  Filter: (b IS UNKNOWN)"),
+            ("b IS NOT UNKNOWN", "  Filter: (b IS NOT UNKNOWN)"),
+            ("NOT b", "  Filter: (NOT b)"),
+            ("x IS DOCUMENT", "  Filter: x IS DOCUMENT"),
+            ("x IS NOT DOCUMENT", "  Filter: (NOT x IS DOCUMENT)"),
+            ("?- l", "  Filter: (?- l)"),
+            ("?| l", "  Filter: (?| l)"),
+            ("(@@ bx) IS NOT NULL", "  Filter: ((@@ bx) IS NOT NULL)"),
+            ("(!! q) IS NOT NULL", "  Filter: ((!! q) IS NOT NULL)"),
+        ];
+        for (predicate, expected) in cases {
+            let lines = plan_text(&format!("SELECT * FROM d1 WHERE {predicate}"), &costs_off());
+            assert!(lines == ["Seq Scan on d1", *expected], "{predicate}");
+        }
+
+        // A `Sort` references the node below it, and `get_special_variable`
+        // parenthesizes a reference that does not land on a plain column — so
+        // each of these carries the operator's own pair inside the sort key's.
+        let keys: &[(&str, &str)] = &[
+            ("- id", "  Sort Key: ((- id))"),
+            ("|/ f", "  Sort Key: ((|/ f))"),
+            ("||/ f", "  Sort Key: ((||/ f))"),
+            ("@-@ l", "  Sort Key: ((@-@ l))"),
+            ("# p", "  Sort Key: ((# p))"),
+        ];
+        for (key, expected) in keys {
+            let lines = plan_text(&format!("SELECT * FROM d1 ORDER BY {key}"), &costs_off());
+            assert!(
+                lines == ["Sort", *expected, "  ->  Seq Scan on d1"],
+                "{key}"
+            );
+        }
+
+        // A sign on a literal is not an operator. PostgreSQL folds it into the
+        // constant and answers `Filter: ((id = '-3'::integer) AND
+        // (n = '-1.5'::numeric))`; this module cannot pick the type label
+        // without knowing the constant's type, so it writes the folded
+        // spelling and no label. What it must not do is print `(- 3)`, which
+        // is neither engine's answer and is wider than both starts of one.
+        let folded = plan_text("SELECT * FROM d1 WHERE id = -3 AND n = -1.5", &costs_off());
+        assert!(folded == ["Seq Scan on d1", "  Filter: ((id = -3) AND (n = -1.5))"]);
+
+        // The node that computes the expression prints it without that extra
+        // pair, exactly as it does for any other grouping key.
+        let grouped = plan_text("SELECT DISTINCT b IS TRUE FROM d1", &costs_off());
+        assert!(
+            grouped
+                == [
+                    "HashAggregate",
+                    "  Group Key: (b IS TRUE)",
+                    "  ->  Seq Scan on d1",
+                ]
+        );
+    }
+
+    /// `get_rule_expr` parenthesizes a subscript's base unless it is a plain
+    /// column or a field selection. Each expectation is `PostgreSQL` 18.4's.
+    #[test]
+    fn a_subscript_base_is_parenthesised_unless_it_is_a_column_or_a_field() {
+        let cases: &[(&str, &str)] = &[
+            ("arr[1] = 1", "  Filter: (arr[1] = 1)"),
+            ("(c).f[1] = 1", "  Filter: ((c).f[1] = 1)"),
+        ];
+        for (predicate, expected) in cases {
+            let lines = plan_text(&format!("SELECT * FROM d1 WHERE {predicate}"), &costs_off());
+            assert!(lines == ["Seq Scan on d1", *expected], "{predicate}");
+        }
+
+        let keys: &[(&str, &str)] = &[
+            ("arr[1:2]", "  Sort Key: (arr[1:2])"),
+            (
+                "(string_to_array(s, ','))[1]",
+                "  Sort Key: ((string_to_array(s, ','::text))[1])",
+            ),
+            (
+                "(string_to_array(s, ','))[1:2]",
+                "  Sort Key: ((string_to_array(s, ','::text))[1:2])",
+            ),
+        ];
+        for (key, expected) in keys {
+            let lines = plan_text(&format!("SELECT * FROM d1 ORDER BY {key}"), &costs_off());
+            assert!(
+                lines == ["Sort", *expected, "  ->  Seq Scan on d1"],
+                "{key}"
+            );
         }
     }
 

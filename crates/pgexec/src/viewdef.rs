@@ -43,9 +43,10 @@
 use std::fmt::Write as _;
 
 use crabka_pgparser::ast::{
-    BinaryOp, DistinctClause, Expr, FrameBound, FrameExclusion, FrameMode, FuncArgs, FuncCall,
-    GroupItem, JoinConstraint, JoinKind, OrderItem, QueryBody, QueryExpr, SelectItem, SelectStmt,
-    SetExpr, SetOp, TableExpr, UnaryOp, ValuesStmt, WindowCall, WindowRef, WindowSpec,
+    ArraySubscript, BinaryOp, DistinctClause, Expr, FrameBound, FrameExclusion, FrameMode,
+    FuncArgs, FuncCall, GroupItem, JoinConstraint, JoinKind, OrderItem, QueryBody, QueryExpr,
+    SelectItem, SelectStmt, SetExpr, SetOp, TableExpr, UnaryOp, ValuesStmt, WindowCall, WindowRef,
+    WindowSpec,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 
@@ -1198,7 +1199,35 @@ fn expr_text_rest(expr: &Expr, ctx: Ctx<'_>) -> String {
                 .join(", ")
         ),
         Expr::Subscript { base, index } => {
-            format!("{}[{}]", expr_text(base, ctx), expr_text(index, ctx))
+            format!(
+                "{}[{}]",
+                subscript_base_text(base, ctx),
+                expr_text(index, ctx)
+            )
+        }
+        Expr::ArrayRef { base, subscripts } => {
+            let mut text = subscript_base_text(base, ctx);
+            for subscript in subscripts {
+                match subscript {
+                    ArraySubscript::Index(index) => {
+                        let _ = write!(text, "[{}]", expr_text(index, ctx));
+                    }
+                    // An omitted bound of a slice stays omitted: `arr[:2]` and
+                    // `arr[2:]` are what `printSubscripts` writes back.
+                    ArraySubscript::Slice { lower, upper } => {
+                        let bound = |bound: &Option<Expr>| {
+                            bound
+                                .as_ref()
+                                .map_or_else(String::new, |bound| expr_text(bound, ctx))
+                        };
+                        let _ = write!(text, "[{}:{}]", bound(lower), bound(upper));
+                    }
+                }
+            }
+            text
+        }
+        Expr::FieldSelect { base, field } => {
+            format!("{}.{}", field_base_text(base, ctx), quote_identifier(field))
         }
         Expr::ScalarSubquery(query) => subquery_text(query, ctx),
         // `ARRAY(…)` is one node in PostgreSQL, printed with the keyword glued
@@ -1292,34 +1321,134 @@ fn subquery_text(query: &QueryExpr, ctx: Ctx<'_>) -> String {
 }
 
 fn unary_text(op: UnaryOp, expr: &Expr, ctx: Ctx<'_>) -> String {
+    unary_expr_text(op, &expr_text(expr, ctx), ctx.pretty)
+}
+
+/// What a subscript is taken of, parenthesized the way `get_rule_expr` does.
+///
+/// The rule is one line of `ruleutils.c` and depends on no pretty flag:
+/// "parenthesize the argument unless it's a simple Var or a `FieldSelect`. (In
+/// particular, if it's another `SubscriptingRef`, we *must* parenthesize to
+/// avoid confusion.)" So `a[1]` and `(c).f[1]` stay bare while
+/// `(string_to_array(t, ','::text))[1]` and `(ARRAY[1, 2])[1]` gain a pair.
+fn subscript_base_text(base: &Expr, ctx: Ctx<'_>) -> String {
+    let text = expr_text(base, ctx);
+    if subscript_base_is_bare(base) {
+        text
+    } else {
+        format!("({text})")
+    }
+}
+
+/// Does a subscript's base print without parentheses of its own?
+///
+/// `pub(crate)` because [`crate::explain`] applies the same rule to the same
+/// AST and must not keep a second copy of it.
+pub(crate) const fn subscript_base_is_bare(base: &Expr) -> bool {
+    matches!(base, Expr::Column { .. } | Expr::FieldSelect { .. })
+}
+
+/// What a field selection is taken of, parenthesized the way `get_rule_expr`
+/// does.
+///
+/// The rule is the mirror image of the subscript one, and `ruleutils.c` spells
+/// out why: "parenthesize the argument unless it's a `SubscriptingRef` or
+/// another `FieldSelect`. Note in particular that it would be WRONG to not
+/// parenthesize a Var argument; simple-looking cases like `x.y.z` turn out not
+/// to work." So a column base keeps its pair — `(c).f` — while `(c).h.g` and
+/// `carr[1].f` need none.
+fn field_base_text(base: &Expr, ctx: Ctx<'_>) -> String {
+    let text = expr_text(base, ctx);
+    if field_base_is_bare(base) {
+        text
+    } else {
+        format!("({text})")
+    }
+}
+
+/// Does a field selection's base print without parentheses of its own?
+///
+/// `pub(crate)` for the same reason [`subscript_base_is_bare`] is.
+pub(crate) const fn field_base_is_bare(base: &Expr) -> bool {
+    matches!(
+        base,
+        Expr::FieldSelect { .. } | Expr::Subscript { .. } | Expr::ArrayRef { .. }
+    )
+}
+
+/// Where `ruleutils.c` writes a unary operator's spelling, and which
+/// parentheses come with it.
+///
+/// This exists so that one table serves both deparsers. `EXPLAIN` renders the
+/// same `UnaryOp` set as `pg_get_viewdef`, and a second table for it drifted
+/// from this one: [`crate::explain`] used to print the Rust `Debug` name of
+/// every variant it had not been taught, so `@ id` came out as `Abs id` and
+/// `id IS TRUE` as `IsTrue id`. Matching on `op` here means the compiler
+/// forces a new variant to be spelled once, for both.
+enum UnaryForm {
+    /// A prefix operator. `get_oper_expr` writes the operator, a space, then
+    /// the operand, and wraps the whole in parentheses unless the pretty flag
+    /// is on.
+    Prefix(&'static str),
+    /// A `BooleanTest`. `get_rule_expr` writes the operand, a space, then the
+    /// keyword, and parenthesizes it exactly as a prefix operator.
+    Postfix(&'static str),
+    /// `IS DOCUMENT`, alone among the postfix predicates an `XmlExpr` rather
+    /// than a `BooleanTest`. `get_rule_expr` gives the predicate no
+    /// parentheses of its own in either mode. In pretty mode it parenthesizes
+    /// the *operand* instead, because it hands `get_rule_expr_paren` the whole
+    /// argument *list* — a `T_List` is never a simple node — so a view over
+    /// `x IS DOCUMENT` reads `x IS DOCUMENT` un-pretty and `(x) IS DOCUMENT`
+    /// pretty.
+    Document,
+    /// `IS NOT DOCUMENT`. The grammar has no such node: it builds
+    /// `NOT (… IS DOCUMENT)`, so the deparser writes the negation outside the
+    /// predicate and never inside it.
+    NotDocument,
+}
+
+/// The spelling `ruleutils.c` gives `op`.
+const fn unary_form(op: UnaryOp) -> UnaryForm {
     match op {
-        UnaryOp::Neg => ctx.paren(format!("- {}", expr_text(expr, ctx))),
-        UnaryOp::Plus => ctx.paren(format!("+ {}", expr_text(expr, ctx))),
-        UnaryOp::Not => ctx.paren(format!("NOT {}", expr_text(expr, ctx))),
-        UnaryOp::Abs => ctx.paren(format!("@ {}", expr_text(expr, ctx))),
-        UnaryOp::Sqrt => ctx.paren(format!("|/ {}", expr_text(expr, ctx))),
-        UnaryOp::Cbrt => ctx.paren(format!("||/ {}", expr_text(expr, ctx))),
-        UnaryOp::IsTrue => ctx.paren(format!("{} IS TRUE", expr_text(expr, ctx))),
-        UnaryOp::IsNotTrue => ctx.paren(format!("{} IS NOT TRUE", expr_text(expr, ctx))),
-        UnaryOp::IsFalse => ctx.paren(format!("{} IS FALSE", expr_text(expr, ctx))),
-        UnaryOp::IsNotFalse => ctx.paren(format!("{} IS NOT FALSE", expr_text(expr, ctx))),
-        UnaryOp::IsUnknown => ctx.paren(format!("{} IS UNKNOWN", expr_text(expr, ctx))),
-        UnaryOp::IsNotUnknown => ctx.paren(format!("{} IS NOT UNKNOWN", expr_text(expr, ctx))),
-        UnaryOp::BitNot => ctx.paren(format!("~ {}", expr_text(expr, ctx))),
-        UnaryOp::TsNot => ctx.paren(format!("!! {}", expr_text(expr, ctx))),
-        // The geometric prefix operators. `get_rule_expr` prints every prefix
+        UnaryOp::Neg => UnaryForm::Prefix("-"),
+        UnaryOp::Plus => UnaryForm::Prefix("+"),
+        UnaryOp::Not => UnaryForm::Prefix("NOT"),
+        UnaryOp::Abs => UnaryForm::Prefix("@"),
+        UnaryOp::Sqrt => UnaryForm::Prefix("|/"),
+        UnaryOp::Cbrt => UnaryForm::Prefix("||/"),
+        UnaryOp::BitNot => UnaryForm::Prefix("~"),
+        UnaryOp::TsNot => UnaryForm::Prefix("!!"),
+        // The geometric prefix operators. `get_oper_expr` prints every prefix
         // operator the same way, so these parenthesize like `@` and `~` do.
-        UnaryOp::NPoints => ctx.paren(format!("# {}", expr_text(expr, ctx))),
-        UnaryOp::Length => ctx.paren(format!("@-@ {}", expr_text(expr, ctx))),
-        UnaryOp::Center => ctx.paren(format!("@@ {}", expr_text(expr, ctx))),
-        UnaryOp::IsHorizontal => ctx.paren(format!("?- {}", expr_text(expr, ctx))),
-        UnaryOp::IsVertical => ctx.paren(format!("?| {}", expr_text(expr, ctx))),
-        // Alone among the postfix predicates, `IS DOCUMENT` is an `XmlExpr` in
-        // PostgreSQL rather than a `BooleanTest`, and `get_rule_expr` adds no
-        // parentheses around it — `SELECT data IS DOCUMENT AS d`, where the
-        // same view over `IS TRUE` would print `((…) IS TRUE)`.
-        UnaryOp::IsDocument => format!("{} IS DOCUMENT", expr_text(expr, ctx)),
-        UnaryOp::IsNotDocument => format!("{} IS NOT DOCUMENT", expr_text(expr, ctx)),
+        UnaryOp::NPoints => UnaryForm::Prefix("#"),
+        UnaryOp::Length => UnaryForm::Prefix("@-@"),
+        UnaryOp::Center => UnaryForm::Prefix("@@"),
+        UnaryOp::IsHorizontal => UnaryForm::Prefix("?-"),
+        UnaryOp::IsVertical => UnaryForm::Prefix("?|"),
+        UnaryOp::IsTrue => UnaryForm::Postfix("IS TRUE"),
+        UnaryOp::IsNotTrue => UnaryForm::Postfix("IS NOT TRUE"),
+        UnaryOp::IsFalse => UnaryForm::Postfix("IS FALSE"),
+        UnaryOp::IsNotFalse => UnaryForm::Postfix("IS NOT FALSE"),
+        UnaryOp::IsUnknown => UnaryForm::Postfix("IS UNKNOWN"),
+        UnaryOp::IsNotUnknown => UnaryForm::Postfix("IS NOT UNKNOWN"),
+        UnaryOp::IsDocument => UnaryForm::Document,
+        UnaryOp::IsNotDocument => UnaryForm::NotDocument,
+    }
+}
+
+/// Apply `op` to an already-rendered `operand`, the way `ruleutils.c` does.
+///
+/// `pretty` is `PRETTY_PAREN`: `pg_get_viewdef(oid, true)` sets it, and both
+/// `pg_get_viewdef(oid)` and every `EXPLAIN` line clear it.
+pub(crate) fn unary_expr_text(op: UnaryOp, operand: &str, pretty: bool) -> String {
+    let paren = |inner: String| if pretty { inner } else { format!("({inner})") };
+    match unary_form(op) {
+        UnaryForm::Prefix(token) => paren(format!("{token} {operand}")),
+        UnaryForm::Postfix(keyword) => paren(format!("{operand} {keyword}")),
+        UnaryForm::Document if pretty => format!("({operand}) IS DOCUMENT"),
+        UnaryForm::Document => format!("{operand} IS DOCUMENT"),
+        UnaryForm::NotDocument if pretty => format!("NOT ({operand}) IS DOCUMENT"),
+        UnaryForm::NotDocument => format!("(NOT {operand} IS DOCUMENT)"),
     }
 }
 
@@ -1776,6 +1905,96 @@ mod tests {
             let view = view(definition, columns);
             assert!(view_definition_text(&view, false) == plain, "{definition}");
             assert!(view_definition_text(&view, true) == pretty, "{definition}");
+        }
+    }
+
+    /// Every unary form, and the text `PostgreSQL` 18.4 answers for
+    /// `pg_get_viewdef(oid)` and `pg_get_viewdef(oid, true)` over it.
+    ///
+    /// A prefix operator and a `BooleanTest` both lose their parentheses under
+    /// the pretty flag. `IS DOCUMENT` is the exception in both directions: it
+    /// never carries parentheses of its own, and in pretty mode it
+    /// parenthesizes its operand instead, because `get_rule_expr` hands the
+    /// argument *list* to `get_rule_expr_paren` and a list is never simple.
+    /// `IS NOT DOCUMENT` is not a node — the grammar builds
+    /// `NOT (… IS DOCUMENT)`, which is what comes back out.
+    #[test]
+    fn deparses_every_unary_operator_the_way_postgres_does() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("- a", "(- a)", "- a"),
+            ("+ a", "(+ a)", "+ a"),
+            ("@ a", "(@ a)", "@ a"),
+            ("|/ f", "(|/ f)", "|/ f"),
+            ("||/ f", "(||/ f)", "||/ f"),
+            ("~ a", "(~ a)", "~ a"),
+            ("!! q", "(!! q)", "!! q"),
+            ("# p", "(# p)", "# p"),
+            ("@-@ l", "(@-@ l)", "@-@ l"),
+            ("@@ bx", "(@@ bx)", "@@ bx"),
+            ("?- l", "(?- l)", "?- l"),
+            ("?| l", "(?| l)", "?| l"),
+            ("NOT b", "(NOT b)", "NOT b"),
+            ("b IS TRUE", "(b IS TRUE)", "b IS TRUE"),
+            ("b IS NOT TRUE", "(b IS NOT TRUE)", "b IS NOT TRUE"),
+            ("b IS FALSE", "(b IS FALSE)", "b IS FALSE"),
+            ("b IS NOT FALSE", "(b IS NOT FALSE)", "b IS NOT FALSE"),
+            ("b IS UNKNOWN", "(b IS UNKNOWN)", "b IS UNKNOWN"),
+            ("b IS NOT UNKNOWN", "(b IS NOT UNKNOWN)", "b IS NOT UNKNOWN"),
+            ("x IS DOCUMENT", "x IS DOCUMENT", "(x) IS DOCUMENT"),
+            (
+                "x IS NOT DOCUMENT",
+                "(NOT x IS DOCUMENT)",
+                "NOT (x) IS DOCUMENT",
+            ),
+        ];
+        for (expression, plain, pretty) in cases {
+            let view = view(&format!("SELECT {expression} AS z FROM t"), &["z"]);
+            assert!(
+                view_definition_text(&view, false) == format!(" SELECT {plain} AS z\n   FROM t;"),
+                "{expression}"
+            );
+            assert!(
+                view_definition_text(&view, true) == format!(" SELECT {pretty} AS z\n   FROM t;"),
+                "{expression}"
+            );
+        }
+    }
+
+    /// `get_rule_expr` parenthesizes a subscript's base unless it is a plain
+    /// column or a field selection, and the rule reads no pretty flag — so
+    /// both forms answer the same text. Each expectation is `PostgreSQL`
+    /// 18.4's.
+    #[test]
+    fn parenthesises_a_subscript_base_that_is_not_a_column() {
+        let cases: &[(&str, &str)] = &[
+            ("arr[1]", "arr[1]"),
+            (
+                "(string_to_array(s, ','))[1]",
+                "(string_to_array(s, ','::text))[1]",
+            ),
+            ("(ARRAY[1,2])[a]", "(ARRAY[1, 2])[a]"),
+            ("arr[1:2]", "arr[1:2]"),
+            ("arr[:2]", "arr[:2]"),
+            ("arr[2:]", "arr[2:]"),
+            // A field selection parenthesizes a column base and nothing else,
+            // so the two rules meet without either adding a pair the other
+            // already supplied.
+            ("(c2).f", "(c2).f"),
+            ("((c2).h).g", "(c2).h.g"),
+            ("(c2).f[1]", "(c2).f[1]"),
+            ("(carr[1]).f", "carr[1].f"),
+        ];
+        for (expression, expected) in cases {
+            let view = view(&format!("SELECT {expression} AS z FROM t"), &["z"]);
+            assert!(
+                view_definition_text(&view, false)
+                    == format!(" SELECT {expected} AS z\n   FROM t;"),
+                "{expression}"
+            );
+            assert!(
+                view_definition_text(&view, true) == format!(" SELECT {expected} AS z\n   FROM t;"),
+                "{expression}"
+            );
         }
     }
 
