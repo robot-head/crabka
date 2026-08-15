@@ -139,10 +139,10 @@
       "sha256": "962795c7ca299575b0ac90465f9761e1b287c8d58265a8bfa4bfa25048f5b163"
     },
     "copyencoding": {
-      "changed_lines": 8,
+      "changed_lines": 4,
       "expected": "copyencoding.out",
       "hunks": 2,
-      "sha256": "b843f7be4bcb548d259cce08df081ae8f9ea5db27d36ee7fc8f5eb1b0bc6a078"
+      "sha256": "035f07c1b7bf1291fd758e03d0d4926fe17424ae0768558c555f6aee237d2aef"
     },
     "create_aggregate": {
       "changed_lines": 95,

@@ -15,7 +15,7 @@ tools/check-pg-compat-matrix.sh
 
 The authoritative PostgreSQL 18.4 core-schedule score is **52 / 231 exact in
 serial**, under the runner's explicit 20 MiB blocking-query memory policy,
-leaving 175 failures across **110,204 changed lines**. Both PostgreSQL
+leaving 175 failures across **110,200 changed lines**. Both PostgreSQL
 self-checks pass 231 / 231, Gres completes all 231 files, and the
 infrastructure report is empty. The checked-in floor in
 [`pg-regress-baseline.json`](../crates/gres-conformance/pg-regress-baseline.json)
@@ -25,7 +25,7 @@ file longer than recorded.
 Parallel mode has not been re-measured since the type-input wave; its last
 certified figure was 22 / 231 at 177,530 changed lines.
 
-### What the remaining 110,204 lines are
+### What the remaining 110,200 lines are
 
 Classified per changed line, not per file — a file is not "an EXPLAIN problem"
 because one hunk of it prints a plan:
