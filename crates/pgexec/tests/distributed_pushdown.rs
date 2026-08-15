@@ -1,14 +1,15 @@
 use std::sync::{Arc, Mutex};
 
+use assert2::check;
 use crabka_pgcatalog::{Column, RelationName, Table};
 use crabka_pgexec::{
     ColumnPredicate, JoinExecutionStrategy, JoinRangeRequest, JoinRangeResult,
     PartialAggregateFunction, PartialAggregateSpec, PredicateOp, PredicatePushdown,
-    ProjectionPushdown, RangeCursor, RangeScanner, ScanPage, ScanRequest, ScannedRow, SqlEngine,
-    TopKColumn, TopKSpec,
+    ProjectionPushdown, RangeCursor, RangeScanner, RuntimePolicy, ScanPage, ScanRequest,
+    ScannedRow, SqlEngine, TopKColumn, TopKSpec,
     plan_dist::{
         CheckpointMetadata, JoinInputs, JoinStrategy, PlannerConfig, SequenceCounters, Stats,
-        plan_join, plan_join_for_tables, plan_scan, strict_predicate_for_filter,
+        StoredRowStats, plan_join, plan_join_for_tables, plan_scan, strict_predicate_for_filter,
     },
     scanner::{
         LocalRangeScanner, apply_executable_scan_pushdown, apply_scan_pushdown,
@@ -166,14 +167,18 @@ use crabka_pgwire::engine::{Engine, QueryResult, Session};
 fn table() -> Table {
     Table {
         id: 42,
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         name: RelationName::public("items"),
         columns: vec![
             Column::new("id", ColumnType::Int4),
             Column::new("name", ColumnType::Text),
         ],
         sharded: true,
+        row_security: false,
+        force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     }
 }
@@ -944,11 +949,15 @@ fn unsupported_predicate_fails_clearly_for_strict_pushdown() {
 fn strict_predicate_rejects_const_types_the_scanner_cannot_execute() {
     let table = Table {
         id: 99,
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         name: RelationName::public("measurements"),
         columns: vec![Column::new("reading", ColumnType::Float8)],
         sharded: true,
+        row_security: false,
+        force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     };
     let filter = Expr::Binary {
@@ -1017,6 +1026,552 @@ impl RangeScanner for RecordingScanner {
             "recording scanner requests deterministic local fallback".into(),
         ))
     }
+}
+
+#[tokio::test]
+async fn correlated_scalar_limit_one_builds_one_lazy_lookup() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    let mut session = engine.connect();
+    session
+        .simple_query(
+            "CREATE TABLE correlated_lookup_inner (k int4, v int4); \
+             CREATE TABLE correlated_lookup_outer (id int4, k int4, expected int4); \
+             INSERT INTO correlated_lookup_inner \
+                 SELECT x, x * 10 FROM generate_series(1, 999) AS g(x); \
+             INSERT INTO correlated_lookup_inner VALUES (1, -1); \
+             INSERT INTO correlated_lookup_outer \
+                 SELECT x, x, x * 10 FROM generate_series(1, 999) AS g(x); \
+             INSERT INTO correlated_lookup_outer VALUES (1000, 2000, NULL)",
+        )
+        .await
+        .expect("seed 1k lookup rows");
+
+    let optimized = cells(
+        session
+            .simple_query(
+                "SELECT o.id FROM correlated_lookup_outer o \
+                 WHERE (SELECT i.v FROM correlated_lookup_inner i \
+                        WHERE i.k = o.k LIMIT 1) \
+                       IS NOT DISTINCT FROM o.expected \
+                 ORDER BY o.id",
+            )
+            .await
+            .expect("cached correlated lookup")
+            .pop()
+            .expect("one optimized result"),
+    );
+    assert_eq!(optimized.len(), 1_000);
+    assert_eq!(optimized.first(), Some(&vec![Some("1".into())]));
+    assert_eq!(optimized.last(), Some(&vec![Some("1000".into())]));
+    let inner_scans = scanner
+        .scans()
+        .into_iter()
+        .filter(|scan| scan.table == RelationName::public("correlated_lookup_inner"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inner_scans.len(),
+        1,
+        "the inner table is materialized once, not once per outer row"
+    );
+    assert_eq!(
+        inner_scans[0].projection,
+        ProjectionPushdown::Columns(vec![0, 1])
+    );
+
+    session
+        .simple_query(
+            "SELECT o.id FROM correlated_lookup_outer o \
+             WHERE CASE WHEN true THEN true ELSE \
+                 (SELECT i.v FROM correlated_lookup_inner i \
+                  WHERE i.k = o.k LIMIT 1) = 0 \
+                 AND (SELECT 1 / 0) = 0 END \
+             LIMIT 1",
+        )
+        .await
+        .expect("dead CASE branch stays lazy");
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("correlated_lookup_inner"))
+            .count(),
+        1,
+        "a dead CASE branch must not initialize its lookup"
+    );
+
+    let fallback = cells(
+        session
+            .simple_query(
+                "SELECT o.id FROM correlated_lookup_outer o \
+                 WHERE (SELECT i.v FROM correlated_lookup_inner i \
+                        WHERE i.k = o.k ORDER BY i.k LIMIT 1) \
+                       IS NOT DISTINCT FROM o.expected \
+                 ORDER BY o.id",
+            )
+            .await
+            .expect("unsupported lookup shape uses scalar fallback")
+            .pop()
+            .expect("one fallback result"),
+    );
+    assert_eq!(
+        optimized, fallback,
+        "duplicates and missing keys keep parity"
+    );
+}
+
+#[tokio::test]
+async fn correlated_exists_equality_builds_one_lazy_lookup() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    let mut session = engine.connect();
+    session
+        .simple_query(
+            "CREATE TABLE tenk1 (unique1 int4, unique2 int4, thousand int4); \
+             CREATE TABLE correlated_exists_empty (k int4); \
+             INSERT INTO tenk1 \
+                 SELECT x, x, x % 1000 FROM generate_series(0, 9999) AS g(x)",
+        )
+        .await
+        .expect("seed correlated EXISTS rows");
+
+    let hotspot = cells(
+        session
+            .simple_query(
+                "SELECT * FROM ( \
+                   SELECT max(unique1) FROM tenk1 AS a \
+                   WHERE EXISTS (SELECT 1 FROM tenk1 AS b \
+                                 WHERE b.thousand = a.unique2) \
+                 ) ss",
+            )
+            .await
+            .expect("cached correlated EXISTS")
+            .pop()
+            .expect("one hotspot result"),
+    );
+    assert_eq!(hotspot, vec![vec![Some("999".into())]]);
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("tenk1"))
+            .count(),
+        2,
+        "one outer scan plus one materialized inner scan"
+    );
+
+    let not_exists = cells(
+        session
+            .simple_query(
+                "SELECT min(unique1) FROM tenk1 AS a \
+                 WHERE NOT EXISTS (SELECT 1 FROM tenk1 AS b \
+                                   WHERE b.thousand = a.unique2)",
+            )
+            .await
+            .expect("cached correlated NOT EXISTS")
+            .pop()
+            .expect("one NOT EXISTS result"),
+    );
+    assert_eq!(not_exists, vec![vec![Some("1000".into())]]);
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("tenk1"))
+            .count(),
+        4,
+        "NOT EXISTS also uses one outer and one inner scan"
+    );
+
+    let scans_before_dead_branch = scanner
+        .scans()
+        .iter()
+        .filter(|scan| scan.table == RelationName::public("tenk1"))
+        .count();
+    session
+        .simple_query(
+            "SELECT unique1 FROM tenk1 AS a \
+             WHERE CASE WHEN true THEN true ELSE \
+                 EXISTS (SELECT 1 FROM tenk1 AS b \
+                         WHERE b.thousand = a.unique2) END \
+             LIMIT 1",
+        )
+        .await
+        .expect("dead EXISTS branch stays lazy");
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("tenk1"))
+            .count(),
+        scans_before_dead_branch + 1,
+        "the dead branch must not scan the inner relation"
+    );
+
+    let empty = cells(
+        session
+            .simple_query(
+                "SELECT max(unique1) FROM tenk1 AS a \
+                 WHERE EXISTS (SELECT 1 FROM correlated_exists_empty AS b \
+                               WHERE b.k = 1 / (a.unique1 - a.unique1))",
+            )
+            .await
+            .expect("an empty inner relation does not evaluate the outer key")
+            .pop()
+            .expect("one empty-inner result"),
+    );
+    assert_eq!(empty, vec![vec![None]]);
+    assert_eq!(
+        scanner
+            .scans()
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("correlated_exists_empty"))
+            .count(),
+        1,
+        "the empty inner relation is scanned once"
+    );
+}
+
+#[tokio::test]
+async fn correlated_exists_inside_or_builds_one_lazy_lookup() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new_with_policy(RuntimePolicy {
+        blocking_query_memory: crabka_units::mebibytes(20),
+        ..RuntimePolicy::default()
+    })
+    .expect("20 MiB runner policy");
+    engine.set_range_scanner(scanner.clone());
+    let mut session = engine.connect();
+    session
+        .simple_query(
+            "CREATE TABLE exists_or_tenk ( \
+                 unique1 int4, unique2 int4, two int4, four int4, ten int4, \
+                 twenty int4, hundred int4, thousand int4, twothousand int4, \
+                 fivethous int4, tenthous int4, odd int4, even int4, \
+                 stringu1 name, stringu2 name, string4 name); \
+             INSERT INTO exists_or_tenk \
+                 SELECT x, x, x % 2, x % 4, x % 10, x % 20, x % 100, \
+                        x % 1000, x % 2000, x % 5000, x % 10000, \
+                        x * 2 + 1, x * 2, 'AAAAAA', 'BBBBBB', 'CCCCxx' \
+                 FROM generate_series(0, 9999) AS g(x); \
+             CREATE INDEX exists_or_unique1 ON exists_or_tenk (unique1); \
+             CREATE INDEX exists_or_unique2 ON exists_or_tenk (unique2); \
+             CREATE INDEX exists_or_hundred ON exists_or_tenk (hundred); \
+             CREATE INDEX exists_or_thousand_tenthous \
+                 ON exists_or_tenk (thousand, tenthous)",
+        )
+        .await
+        .expect("seed PostgreSQL-shaped tenk1 data and indexes");
+
+    let scans_before_direct = scanner
+        .scans()
+        .iter()
+        .filter(|scan| scan.table == RelationName::public("exists_or_tenk"))
+        .count();
+    let direct = cells(
+        session
+            .simple_query(
+                "SELECT count(*) FROM exists_or_tenk t \
+                 WHERE EXISTS (SELECT 1 FROM exists_or_tenk k \
+                               WHERE k.thousand = t.unique2)",
+            )
+            .await
+            .expect("cached direct correlated EXISTS")
+            .pop()
+            .expect("one direct count result"),
+    );
+    assert_eq!(direct, vec![vec![Some("1000".into())]]);
+    let direct_scans = scanner.scans();
+    assert_eq!(
+        direct_scans
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("exists_or_tenk"))
+            .count(),
+        scans_before_direct + 2,
+        "direct EXISTS uses one outer scan plus one materialized inner scan"
+    );
+    assert_eq!(
+        direct_scans.last().expect("direct inner scan").projection,
+        ProjectionPushdown::Columns(vec![7])
+    );
+
+    let scans_before_or = scanner
+        .scans()
+        .iter()
+        .filter(|scan| scan.table == RelationName::public("exists_or_tenk"))
+        .count();
+    let result = cells(
+        session
+            .simple_query(
+                "SELECT count(*) FROM exists_or_tenk t \
+                 WHERE (EXISTS (SELECT 1 FROM exists_or_tenk k \
+                                WHERE k.unique1 = t.unique2) OR ten < 0)",
+            )
+            .await
+            .expect("cached OR-wrapped correlated EXISTS")
+            .pop()
+            .expect("one count result"),
+    );
+    assert_eq!(result, vec![vec![Some("10000".into())]]);
+    let or_scans = scanner.scans();
+    assert_eq!(
+        or_scans
+            .iter()
+            .filter(|scan| scan.table == RelationName::public("exists_or_tenk"))
+            .count(),
+        scans_before_or + 2,
+        "one outer scan plus one materialized inner scan"
+    );
+    assert_eq!(
+        or_scans.last().expect("OR inner scan").projection,
+        ProjectionPushdown::Columns(vec![0])
+    );
+}
+
+/// Read a relation's id the way the planner keys statistics on it.
+fn table_id(engine: &SqlEngine, relname: &str) -> u64 {
+    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public(relname))
+        .expect("relation exists");
+    u64::from(table.id)
+}
+
+async fn run(engine: &SqlEngine, sql: &str) {
+    engine
+        .connect()
+        .simple_query(sql)
+        .await
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"));
+}
+
+#[tokio::test]
+async fn table_statistics_track_the_rows_a_table_holds_not_the_rowids_it_burned() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE t (id int4, k int4)").await;
+    let oid = table_id(&engine, "t");
+    // A threshold of 100 rows, so the rowid counter never proves the table small
+    // on its own and every estimate below is a measurement.
+    let stats = StoredRowStats::new(engine.kv_handle(), 100 * 256);
+    let rows = |bytes: Option<u64>| bytes.map(|bytes| bytes / 256);
+
+    // Empty. The durable rowid counter already reads 1_025 here, because an
+    // insert reserves a block of 1_024 rowids ahead of handing any out.
+    check!(rows(stats.estimated_bytes(oid)) == Some(0));
+
+    run(
+        &engine,
+        "INSERT INTO t SELECT g, 41 - g FROM generate_series(1, 40) AS g; \
+         CREATE INDEX t_k ON t (k)",
+    )
+    .await;
+    check!(rows(stats.estimated_bytes(oid)) == Some(40));
+
+    // CLUSTER rewrites all 40 rows at fresh rowids and permanently vacates the
+    // block they came from. The dead versions are still stored until the sweep
+    // reclaims them, so the estimate doubles first — the safe direction.
+    run(&engine, "CLUSTER t USING t_k").await;
+    check!(rows(stats.estimated_bytes(oid)) == Some(80));
+    engine.vacuum().await.expect("vacuum");
+    check!(rows(stats.estimated_bytes(oid)) == Some(40));
+
+    // The rowid counter reads 2_064 allocations at this point and will never
+    // read less; a second CLUSTER takes it to 4_064. Deleting behaves the same
+    // way round: high until swept, exact after.
+    run(&engine, "DELETE FROM t WHERE id > 4").await;
+    check!(rows(stats.estimated_bytes(oid)) == Some(40));
+    engine.vacuum().await.expect("vacuum");
+    check!(rows(stats.estimated_bytes(oid)) == Some(4));
+}
+
+fn relation(engine: &SqlEngine, relname: &str) -> Table {
+    crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public(relname))
+        .expect("relation exists")
+}
+
+/// Rows the broadcast threshold in `config` allows.
+fn threshold_rows(rows: u64) -> PlannerConfig {
+    PlannerConfig {
+        broadcast_threshold_bytes: rows * 256,
+    }
+}
+
+#[tokio::test]
+async fn a_small_table_is_broadcast_instead_of_gathered_once_its_rows_are_counted() {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        "CREATE TABLE small_t (id int4); \
+         CREATE TABLE big_t (id int4); \
+         INSERT INTO small_t SELECT g FROM generate_series(1, 40) AS g; \
+         INSERT INTO big_t SELECT g FROM generate_series(1, 4000) AS g",
+    )
+    .await;
+    let (small, big) = (relation(&engine, "small_t"), relation(&engine, "big_t"));
+
+    // 40 rows is 10 KiB of allowance against a 128 KiB threshold. The rowid
+    // counter says 1_064 rows and 266 KiB, because inserting reserves a block of
+    // 1_024 rowids ahead of hand-out — no delete and no CLUSTER required.
+    check!(
+        plan_join_for_tables(
+            engine.join_stats().as_ref(),
+            threshold_rows(512),
+            &small,
+            &big,
+            &[],
+            &[],
+        ) == JoinStrategy::Broadcast {
+            small_table_id: u64::from(small.id)
+        }
+    );
+}
+
+#[tokio::test]
+async fn clustering_a_table_does_not_change_how_it_is_joined() {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        "CREATE TABLE t (id int4, k int4); \
+         CREATE TABLE other (id int4); \
+         INSERT INTO t SELECT g, 2001 - g FROM generate_series(1, 2000) AS g; \
+         INSERT INTO other SELECT g FROM generate_series(1, 100000) AS g; \
+         CREATE INDEX t_k ON t (k)",
+    )
+    .await;
+    let (t, other) = (relation(&engine, "t"), relation(&engine, "other"));
+    let strategy = || {
+        plan_join_for_tables(
+            engine.join_stats().as_ref(),
+            threshold_rows(3_100),
+            &t,
+            &other,
+            &[],
+            &[],
+        )
+    };
+    let broadcast_t = JoinStrategy::Broadcast {
+        small_table_id: u64::from(t.id),
+    };
+    check!(strategy() == broadcast_t);
+
+    // CLUSTER burns 2_000 fresh rowids to rewrite 2_000 rows, so the rowid
+    // counter reads 4_000 allocations — past the threshold — for a table holding
+    // exactly the rows it held a moment ago, and it will never read less. What
+    // the table stores comes back to 2_000 as soon as the dead versions are
+    // swept, and this join is planned the same way it was before.
+    run(&engine, "CLUSTER t USING t_k").await;
+    engine.vacuum().await.expect("vacuum");
+    check!(strategy() == broadcast_t);
+}
+
+#[test]
+fn stored_row_counts_bound_estimates_that_the_rowid_counter_cannot() {
+    use crabka_pgexec::plan_dist::StoredRowStats;
+    use crabka_pgkv::{Kv as _, MemKv, key};
+
+    // A sharded table's rowid is a packed clock reading, so its sequence key
+    // holds a number near the top of the domain however few rows it has.
+    let clock_rowid = 7_400_000_000_000_000_000_u64;
+    let cases: [(&str, u64, Vec<u64>, Option<u64>); 5] = [
+        ("no rows and no counter", 0, vec![], Some(0)),
+        (
+            "a counter that outran the rows",
+            1_065,
+            vec![1, 2, 3],
+            Some(3 * 256),
+        ),
+        (
+            "rowids that are clock readings",
+            clock_rowid + 1,
+            vec![clock_rowid - 2, clock_rowid - 1, clock_rowid],
+            Some(3 * 256),
+        ),
+        // The counter still bounds a table whose stored keys outnumber it,
+        // which is what an unvacuumed version chain looks like.
+        (
+            "more rows stored than allocated",
+            3,
+            vec![1, 2, 3, 4, 5],
+            Some(2 * 256),
+        ),
+        // Past the budget the count abstains and the counter's answer stands:
+        // 40 allocated is 39 rows, and a table this far over the threshold is
+        // not a broadcast candidate under either number.
+        (
+            "more rows than the budget reads",
+            40,
+            (1..=40).collect(),
+            Some(39 * 256),
+        ),
+    ];
+
+    for (case, sequence, rowids, expected) in cases {
+        let kv = MemKv::new();
+        if sequence > 0 {
+            kv.put(key::seq_key(7), sequence.to_be_bytes().to_vec())
+                .expect("seed sequence");
+        }
+        for rowid in rowids {
+            let mut version_key = key::row_key(7, rowid);
+            version_key.extend_from_slice(&1_u64.to_be_bytes());
+            kv.put(version_key, vec![0]).expect("seed row version");
+        }
+        // Room for eight rows, so the last case runs past the budget.
+        let stats = StoredRowStats::new(Arc::new(kv), 8 * 256);
+
+        check!(stats.estimated_bytes(7) == expected, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn a_one_row_sharded_table_is_small_enough_to_broadcast() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    run(
+        &engine,
+        "CREATE TABLE left_t (id int4, value text) SHARDED; \
+         CREATE TABLE right_t (id int4, value text) SHARDED; \
+         INSERT INTO left_t VALUES (1, 'l'); \
+         INSERT INTO right_t VALUES (1, 'r'); \
+         SELECT left_t.value, right_t.value FROM left_t JOIN right_t ON left_t.id = right_t.id",
+    )
+    .await;
+
+    // A sharded table's hidden rowid is a leased timestamp rather than a
+    // position in a counter, so reading the counter as a row count values a
+    // one-row table at about 1.9 exabytes: no configurable threshold calls that
+    // small, and this join could never be planned as a broadcast.
+    let strategy = scanner.joins().first().expect("one join dispatch").strategy;
+    check!(
+        strategy == JoinExecutionStrategy::BroadcastLeft
+            || strategy == JoinExecutionStrategy::BroadcastRight
+    );
+}
+
+#[tokio::test]
+async fn a_sharded_table_above_the_threshold_is_still_gathered() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    // Four rows' worth of allowance, so eight rows must not be broadcast.
+    engine.set_join_strategy_config(PlannerConfig {
+        broadcast_threshold_bytes: 4 * 256,
+    });
+    run(
+        &engine,
+        "CREATE TABLE left_t (id int4, value text) SHARDED; \
+         CREATE TABLE right_t (id int4, value text) SHARDED; \
+         INSERT INTO left_t VALUES (1,'l'),(2,'l'),(3,'l'),(4,'l'),(5,'l'),(6,'l'),(7,'l'),(8,'l'); \
+         INSERT INTO right_t VALUES (1,'r'),(2,'r'),(3,'r'),(4,'r'),(5,'r'),(6,'r'),(7,'r'),(8,'r'); \
+         SELECT left_t.value, right_t.value FROM left_t JOIN right_t ON left_t.id = right_t.id",
+    )
+    .await;
+
+    check!(
+        scanner.joins().first().expect("one join dispatch").strategy
+            == JoinExecutionStrategy::Gather
+    );
 }
 
 #[tokio::test]

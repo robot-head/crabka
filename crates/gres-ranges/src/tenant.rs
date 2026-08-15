@@ -3459,6 +3459,17 @@ impl From<PgError> for GlobalCommitError {
 }
 
 impl Session for GatewaySession {
+    /// Every hosted range's session learns the connected database, because any
+    /// of them may be the one that answers a `pg_database` or
+    /// `current_database()` read. A gateway session's range sessions are all
+    /// opened together in `open_session`, so setting them here reaches all of
+    /// them; a range that arrives later is not seated on this connection.
+    fn set_database(&mut self, name: &str) {
+        for session in self.sessions.values_mut() {
+            session.set_database(name);
+        }
+    }
+
     fn take_notifications(&mut self) -> Option<tokio::sync::mpsc::Receiver<Notification>> {
         self.notifications.take()
     }
@@ -3663,7 +3674,12 @@ impl<S: crabka_pgwire::engine::ResultSink> crabka_pgwire::engine::ResultSink
                 result_index, tag, ..
             } => (result_index, tag.is_some()),
             crabka_pgwire::engine::ResultPage::Command { result_index, .. }
-            | crabka_pgwire::engine::ResultPage::Empty { result_index } => (result_index, true),
+            | crabka_pgwire::engine::ResultPage::Empty { result_index }
+            // A copy-out block is one whole result, so it is terminal like a
+            // command tag; only its index needs the offset.
+            | crabka_pgwire::engine::ResultPage::CopyOut { result_index, .. } => {
+                (result_index, true)
+            }
         };
         *index = index
             .checked_add(self.offset)
@@ -6730,6 +6746,22 @@ fn route_statement(
 ) -> Result<StatementRoute, PgError> {
     let normalized = sql.trim_start().to_ascii_lowercase();
     let kind = route_statement_kind(&normalized);
+
+    // `CLUSTER` rewrites a relation's rows at new hidden rowids. It names its
+    // relation with neither `FROM` nor `INTO` nor `UPDATE`, so the token router
+    // below cannot find the table and would classify it `Local` — sending it to
+    // the coordinator's own store, where a relation owned by another range has
+    // no rows at all. That reads as a successful CLUSTER that moved nothing.
+    // Refuse it rather than route it wrongly; a single-range tenant is the one
+    // case where the coordinator really does own everything.
+    if normalized.starts_with("cluster") && range_map.ranges().len() > 1 {
+        return Err(PgError::error(
+            "0A000",
+            "CLUSTER is not supported on a multi-range tenant: the statement does not name its \
+             relation in a form the gateway can route",
+        ));
+    }
+
     if matches!(
         kind,
         StatementKind::Begin
@@ -6751,6 +6783,22 @@ fn route_statement(
                 .route(range_map)
                 .map_err(|error| map_error_to_pg(&error))?
                 .range_id,
+            table_id: None,
+            scatter_ranges: None,
+        });
+    }
+
+    let kind = if starts_with_any(&normalized, &["insert", "update", "delete"]) {
+        StatementKind::Dml
+    } else if normalized.starts_with("select") {
+        StatementKind::Query
+    } else {
+        StatementKind::Local
+    };
+    if kind == StatementKind::Local {
+        return Ok(StatementRoute {
+            kind,
+            range_id: RangeId::COORDINATOR,
             table_id: None,
             scatter_ranges: None,
         });
@@ -7384,10 +7432,21 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         Datum::Int8(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Text(value) => Some(value.as_bytes().to_vec()),
         Datum::Bytea(value) => Some(value.clone()),
+        // `"char"` is one byte, and the byte is the value — not its escaped
+        // `\ooo` text form, which two different bytes could never share but
+        // which would hash four bytes for one.
+        Datum::InternalChar(value) => Some(vec![*value]),
         Datum::Null
         | Datum::Int2(_)
         | Datum::Float4(_)
         | Datum::Float8(_)
+        | Datum::Point(_)
+        | Datum::Path(_)
+        | Datum::Polygon(_)
+        | Datum::Lseg(_)
+        | Datum::Line(_)
+        | Datum::Circle(_)
+        | Datum::Box(_)
         | Datum::Numeric(_)
         | Datum::Date(_)
         | Datum::Time(_)
@@ -7395,13 +7454,31 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Timestamp(_)
         | Datum::Timestamptz(_)
         | Datum::Interval(_)
+        | Datum::Json(_)
+        | Datum::Xml(_)
         | Datum::Jsonb(_)
+        | Datum::JsonPath(_)
         | Datum::Array(_)
+        | Datum::OidVector(_)
         | Datum::Record(_)
         | Datum::Enum(_)
         | Datum::Regclass(_)
         | Datum::TsVector(_)
-        | Datum::TsQuery(_) => None,
+        | Datum::TsQuery(_)
+        | Datum::BitString(_)
+        | Datum::Money(_)
+        | Datum::Inet(_)
+        | Datum::MacAddr(_)
+        | Datum::MacAddr8(_)
+        | Datum::Range(_)
+        | Datum::Multirange(_)
+        | Datum::Oid(_)
+        | Datum::Xid(_)
+        | Datum::Xid8(_)
+        | Datum::Cid(_)
+        | Datum::Tid(_)
+        | Datum::PgLsn(_)
+        | Datum::PgSnapshot(_) => None,
     }
 }
 
@@ -10294,6 +10371,36 @@ mod tests {
                 "unexpected route for {statement}: {route:?}"
             );
         }
+    }
+
+    /// `CLUSTER` names its relation with none of the keywords the token router
+    /// looks for, so it would fall into the `Local` bucket and run against the
+    /// coordinator's own store — reordering nothing, silently, for a relation
+    /// another range owns. It is refused instead.
+    #[tokio::test]
+    async fn cluster_is_refused_rather_than_routed_to_the_coordinator() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("cluster-routing").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, _handles) = MultiRangeTenant::start(config).expect("start");
+        let session = gateway.connect_with_pid(78);
+
+        for statement in [
+            "CLUSTER",
+            "CLUSTER t7 USING t7_pkey",
+            "cluster t7_pkey on t7",
+            "  CLUSTER VERBOSE t7",
+        ] {
+            let error = session
+                .route_statement(statement)
+                .expect_err("CLUSTER must not route");
+            assert!(error.code == "0A000", "{statement}: {error:?}");
+        }
+        // The bucket it would otherwise have joined still works.
+        let route = session.route_statement("LISTEN c").expect("route");
+        assert!(route.kind == StatementKind::Local);
     }
 
     #[tokio::test]

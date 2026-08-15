@@ -1238,6 +1238,7 @@ mod tests {
         );
 
         let table = |id, name: &str, group: &str| crabka_pgcatalog::Table {
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             id,
             name: crabka_pgcatalog::RelationName::public(name),
             columns: vec![crabka_pgcatalog::Column::new(
@@ -1245,6 +1246,8 @@ mod tests {
                 crabka_pgtypes::ColumnType::Int4,
             )],
             sharded: true,
+            row_security: false,
+            force_row_security: false,
             sharding: Some(crabka_pgcatalog::ShardingStrategy::Hash(
                 crabka_pgcatalog::HashSharding {
                     columns: vec!["id".into()],
@@ -1253,6 +1256,7 @@ mod tests {
                 },
             )),
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let left = table(1, "left", "pair");

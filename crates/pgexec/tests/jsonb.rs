@@ -27,6 +27,7 @@ use tokio_postgres::{
 /// The `jsonb` type OID; every jsonb-typed result reports it, including values
 /// that entered through the `json` input alias.
 const JSONB_OID: u32 = 3802;
+const JSON_OID: u32 = 114;
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -574,19 +575,28 @@ async fn literal_insert_coerces_and_round_trips_through_storage() {
 /// `json` is accepted as an input alias for `jsonb`, but nothing ever reports
 /// OID 114 back. The value is canonicalized and typed as jsonb.
 #[tokio::test]
-async fn json_is_an_input_alias_and_output_is_always_jsonb() {
+async fn a_json_column_keeps_its_input_text_and_its_own_oid() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (j json)"]).await;
-    run(&mut s, r#"INSERT INTO t VALUES ('{"b":2,"a":1}')"#).await;
+    run(
+        &mut s,
+        r#"INSERT INTO t VALUES ('{"b":2,   "a":1,  "b":3}')"#,
+    )
+    .await;
 
-    // Stored through a `json` column, read back canonical and typed jsonb.
+    // `json` stores the text exactly as written: no reordering, no respacing,
+    // and duplicate keys survive. `jsonb` is the type that normalises.
     let (value, oid) = typed_scalar(&mut s, "j FROM t").await;
-    assert!((value, oid) == (Some(r#"{"a": 1, "b": 2}"#.to_string()), JSONB_OID));
+    assert!((value, oid) == (Some(r#"{"b":2,   "a":1,  "b":3}"#.to_string()), JSON_OID));
 
-    // The `::json` cast behaves the same way.
-    let (value, oid) = typed_scalar(&mut s, r#"'{"b":2,"a":1}'::json"#).await;
-    assert!((value, oid) == (Some(r#"{"a": 1, "b": 2}"#.to_string()), JSONB_OID));
+    let (value, oid) = typed_scalar(&mut s, r#"'{"b":2,   "a":1,  "b":3}'::json"#).await;
+    assert!((value, oid) == (Some(r#"{"b":2,   "a":1,  "b":3}"#.to_string()), JSON_OID));
 
-    // pg_type still carries real json and jsonb rows with their array partners.
+    // The same text through `jsonb` is decomposed, so the contrast is visible
+    // in one place rather than assumed.
+    let (value, oid) = typed_scalar(&mut s, r#"'{"b":2,   "a":1,  "b":3}'::jsonb"#).await;
+    assert!((value, oid) == (Some(r#"{"a": 1, "b": 3}"#.to_string()), JSONB_OID));
+
+    // pg_type carries real json and jsonb rows with their array partners.
     assert!(
         query(
             &mut s,
@@ -662,6 +672,20 @@ async fn jsonb_functions() {
         // to_jsonb over each supported scalar shape.
         ("to_jsonb(1)", Some("1".to_string())),
         ("to_jsonb(1.50)", Some("1.50".to_string())),
+        // A float keeps every digit its output function prints, NOT the digits
+        // the `::numeric` cast would leave. That cast is `%.15g` for `double
+        // precision`, so it would answer `0.333333333333333` and
+        // `1234567890123460` here. Both values are `float8_numeric`'s, not
+        // `float8out`'s, and PostgreSQL uses the latter for `to_jsonb`.
+        (
+            "to_jsonb((1.0/3.0)::float8)",
+            Some("0.3333333333333333".to_string()),
+        ),
+        (
+            "to_jsonb(1234567890123456::float8)",
+            Some("1234567890123456".to_string()),
+        ),
+        ("to_jsonb(16777216::float4)", Some("16777216".to_string())),
         ("to_jsonb(true)", Some("true".to_string())),
         ("to_jsonb('x'::text)", Some(r#""x""#.to_string())),
         ("to_jsonb(ARRAY[1,2])", Some("[1, 2]".to_string())),

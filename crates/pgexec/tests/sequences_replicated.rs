@@ -482,12 +482,13 @@ async fn copy_only_defaults_the_columns_outside_its_column_list() {
         session
             .copy_in(
                 "COPY t (a, b) FROM STDIN",
+                0,
                 vec![Bytes::from_static(b"500\tx\n501\ty\n")],
             )
             .await
             .expect("copy with explicit ids");
         session
-            .copy_in("COPY t (b) FROM STDIN", vec![Bytes::from_static(b"z\n")])
+            .copy_in("COPY t (b) FROM STDIN", 0, vec![Bytes::from_static(b"z\n")])
             .await
             .expect("copy defaulting the identity");
         assert!(column(&mut session, "SELECT a FROM t ORDER BY a").await == ["1", "500", "501"]);

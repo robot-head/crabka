@@ -4,7 +4,7 @@
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
-use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
+use crabka_pgwire::engine::{Cell, Engine, FieldDescription, QueryResult, Session};
 
 async fn execute(session: &mut SqlSession, sql: &str) -> Vec<QueryResult> {
     session
@@ -32,6 +32,37 @@ async fn scalar(session: &mut SqlSession, sql: &str) -> Option<String> {
 
 fn text(cell: &Cell) -> String {
     String::from_utf8(cell.text.to_vec()).expect("server text is UTF-8")
+}
+
+/// How `sql` describes its single column, and the rows it answers with.
+async fn described(
+    session: &mut SqlSession,
+    sql: &str,
+) -> (FieldDescription, Vec<Vec<Option<String>>>) {
+    let results = execute(session, sql).await;
+    let QueryResult::Rows { fields, rows, .. } = &results[0] else {
+        panic!("`{sql}` did not return rows: {:?}", results[0]);
+    };
+    assert!(fields.len() == 1, "`{sql}` returned {fields:?}");
+    (
+        fields[0].clone(),
+        rows.iter()
+            .map(|row| row.iter().map(|cell| cell.as_ref().map(text)).collect())
+            .collect(),
+    )
+}
+
+/// A `text` column of the given name, as the wire describes it.
+fn text_field(name: &str) -> FieldDescription {
+    FieldDescription {
+        name: name.into(),
+        table_oid: 0,
+        column_id: 0,
+        type_oid: 25,
+        type_size: -1,
+        type_modifier: -1,
+        format: 0,
+    }
 }
 
 fn row(values: &[&str]) -> Vec<Option<String>> {
@@ -745,9 +776,9 @@ async fn set_functions_keep_default_strict_and_recursive_call_semantics() {
             .await
             .is_empty()
     );
-    assert!(
-        query(&mut session, "SELECT * FROM pl_recursive_rows(3)").await
-            == vec![row(&["3"]), row(&["2"]), row(&["1"])]
+    assert_eq!(
+        query(&mut session, "SELECT * FROM pl_recursive_rows(3)").await,
+        vec![row(&["3"]), row(&["2"]), row(&["1"])]
     );
 }
 
@@ -1359,5 +1390,185 @@ async fn current_diagnostics_reports_the_routine_oid() {
         )
         .await
             == Some("t".into())
+    );
+}
+
+/// A NULL reaching a `RAISE` is a rendering question, not an abort.
+///
+/// `PostgreSQL` substitutes `<NULL>` for a NULL format parameter, refuses a NULL
+/// `USING` option outright, and falls back to the default text for a NULL
+/// `ASSERT` message. NULL travels out of band on the wire, so the text output
+/// functions never see one — handing a NULL to one of them aborted the whole
+/// server rather than the statement.
+#[tokio::test]
+async fn a_null_reaching_a_raise_is_rendered_rather_than_fatal() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+
+    execute(&mut session, "DO $$ BEGIN RAISE NOTICE 'v=%', NULL; END $$").await;
+    assert!(notices.try_recv().expect("one notice").message == "v=<NULL>");
+
+    let error = session
+        .simple_query("DO $$ BEGIN RAISE EXCEPTION 'v=%', NULL; END $$")
+        .await
+        .expect_err("RAISE EXCEPTION must fail");
+    assert!(error.message == "v=<NULL>", "{error:?}");
+
+    // A NULL option is an error rather than the word `<NULL>` in the DETAIL.
+    for option in ["DETAIL", "HINT"] {
+        let sql = format!("DO $$ BEGIN RAISE EXCEPTION 'boom' USING {option} = NULL; END $$");
+        let error = session
+            .simple_query(&sql)
+            .await
+            .expect_err("a NULL RAISE option must fail");
+        assert!(error.code == "22004", "{option}: {error:?}");
+        assert!(
+            error.message == "RAISE statement option cannot be null",
+            "{option}: {error:?}"
+        );
+    }
+
+    // A NULL ASSERT message is not rendered at all.
+    let error = session
+        .simple_query("DO $$ BEGIN ASSERT false, NULL; END $$")
+        .await
+        .expect_err("false ASSERT must fail");
+    assert!(error.code == "P0004", "{error:?}");
+    assert!(error.message == "assertion failed", "{error:?}");
+
+    // The session is still usable, which a panicking backend would not be.
+    assert!(scalar(&mut session, "SELECT 1").await == Some("1".into()));
+}
+
+/// The range-table entry a DML statement adds is aliased to the relation's bare
+/// name, whatever schema the statement reached it through.
+#[tokio::test]
+async fn returning_binds_a_schema_qualified_target_under_its_bare_name() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE SCHEMA rq").await;
+    execute(&mut session, "CREATE TABLE rq.t (a int, b text)").await;
+
+    let cases = [
+        ("INSERT INTO rq.t VALUES (1, 'x') RETURNING t.a", "1"),
+        ("UPDATE rq.t SET b = 'y' RETURNING t.b", "y"),
+        ("DELETE FROM rq.t RETURNING t.a", "1"),
+    ];
+    for (sql, expected) in cases {
+        assert!(
+            scalar(&mut session, sql).await == Some(expected.into()),
+            "{sql}"
+        );
+    }
+}
+
+/// A `RETURNS void` call in a select list answers one column named for the
+/// function, one row, and a blank value.
+///
+/// Crabka has no `void` column type, so a void routine answers the empty
+/// `text` its built-in void functions already answer -- blank like
+/// `PostgreSQL`'s void, and *not* NULL, so a `\pset null` marker does not
+/// appear where `PostgreSQL` leaves a blank. The three bodies cover the shapes
+/// that reach different runtimes: falling off the end (`temp`'s helper), a bare
+/// `RETURN`, and a SQL-bearing body, which the session interpreter runs rather
+/// than the row evaluator.
+#[tokio::test]
+async fn a_void_function_answers_one_blank_column_named_for_itself() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE TABLE void_log (n int4)").await;
+
+    let bodies = [
+        ("void_falls_off", "RAISE NOTICE 'no RETURN here';"),
+        ("void_bare_return", "RETURN;"),
+        ("void_runs_sql", "INSERT INTO void_log VALUES (1);"),
+    ];
+    for (name, body) in bodies {
+        execute(
+            &mut session,
+            &format!(
+                "CREATE FUNCTION {name}() RETURNS void LANGUAGE plpgsql AS $$ BEGIN {body} END $$"
+            ),
+        )
+        .await;
+
+        let (field, rows) = described(&mut session, &format!("SELECT {name}()")).await;
+
+        assert!(field == text_field(name), "{name}");
+        assert!(rows == vec![vec![Some(String::new())]], "{name}");
+    }
+
+    // Blank, but not NULL: PostgreSQL's void is a value.
+    assert!(scalar(&mut session, "SELECT void_bare_return() IS NULL").await == Some("f".into()));
+    assert!(
+        scalar(&mut session, "SELECT length(void_bare_return()::text)").await == Some("0".into())
+    );
+}
+
+/// A void call is evaluated once per input row, and its side effects survive.
+#[tokio::test]
+async fn a_void_function_runs_once_for_each_input_row() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE TABLE void_src (n int4)").await;
+    execute(&mut session, "INSERT INTO void_src VALUES (1), (2), (3)").await;
+    execute(&mut session, "CREATE TABLE void_seen (n int4)").await;
+    execute(
+        &mut session,
+        "CREATE FUNCTION void_record(a int4) RETURNS void LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO void_seen VALUES (a); END $$",
+    )
+    .await;
+
+    let (field, rows) = described(&mut session, "SELECT void_record(n) FROM void_src").await;
+
+    assert!(field == text_field("void_record"));
+    assert!(rows == vec![vec![Some(String::new())]; 3]);
+    assert!(scalar(&mut session, "SELECT count(*) FROM void_seen").await == Some("3".into()));
+}
+
+/// A void call inside a transaction leaves the transaction usable. Refusing
+/// the call aborted it instead, and every later statement in the block then
+/// answered `current transaction is aborted` rather than its own result.
+#[tokio::test]
+async fn a_void_call_does_not_abort_the_enclosing_transaction() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE TABLE void_txn (n int4)").await;
+    execute(&mut session, "INSERT INTO void_txn VALUES (7)").await;
+    execute(
+        &mut session,
+        "CREATE FUNCTION void_touch() RETURNS void LANGUAGE plpgsql AS $$ BEGIN END $$",
+    )
+    .await;
+
+    execute(&mut session, "BEGIN").await;
+    assert!(scalar(&mut session, "SELECT void_touch()").await == Some(String::new()));
+    assert!(scalar(&mut session, "SELECT count(*) FROM void_txn").await == Some("1".into()));
+    execute(&mut session, "COMMIT").await;
+}
+
+/// Only `void` may fall off the end. A function that owes a value still has to
+/// return one, and PL/pgSQL's own 2F005 is what says so.
+#[tokio::test]
+async fn a_function_that_owes_a_value_still_needs_a_return() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE FUNCTION owes_a_value() RETURNS int4 LANGUAGE plpgsql AS $$ BEGIN END $$",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT owes_a_value()")
+        .await
+        .expect_err("a non-void function must return a value");
+
+    assert!(error.code == "2F005", "{error:?}");
+    assert!(
+        error.message == "control reached end of function owes_a_value() without RETURN",
+        "{error:?}"
     );
 }

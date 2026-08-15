@@ -67,6 +67,117 @@ async fn printed(client: &mut Client, spelling: &str) -> Option<String> {
         .await
 }
 
+#[tokio::test]
+async fn regtype_resolves_names_and_compares_as_an_oid() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for (sql, expected) in [
+        ("SELECT 'int4'::regtype::text", "integer"),
+        ("SELECT 23::regtype::text", "integer"),
+        ("SELECT 'anyrange'::regtype::text", "anyrange"),
+        ("SELECT 23 = 'integer'::regtype", "t"),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+    assert!(
+        client.fails("SELECT 'nosuch'::regtype").await
+            == ("42704".into(), "type \"nosuch\" does not exist".into())
+    );
+}
+
+#[tokio::test]
+async fn regprocedure_resolves_and_renders_identity_arguments() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client
+        .run("CREATE FUNCTION rp(a int, b text) RETURNS int LANGUAGE sql RETURN a")
+        .await;
+    for (sql, expected) in [
+        (
+            "SELECT 'boolin(cstring)'::regprocedure::text",
+            "boolin(cstring)",
+        ),
+        ("SELECT 1242::regprocedure::text", "boolin(cstring)"),
+        (
+            "SELECT 'rp(int4,text)'::regprocedure::text",
+            "rp(integer,text)",
+        ),
+        ("SELECT 1242 = 'boolin(cstring)'::regprocedure", "t"),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+}
+
+/// `regnamespacein`/`regnamespaceout`. A written name folds and resolves like
+/// any identifier; an oid with no schema prints as the bare number rather than
+/// failing, which is what makes `psql`'s `\d` cast chain safe on a stale row.
+#[tokio::test]
+async fn regnamespace_resolves_names_and_falls_back_to_a_bare_oid() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("CREATE SCHEMA myschema").await;
+    for (sql, expected) in [
+        ("SELECT 'public'::regnamespace::text", "public"),
+        // An unquoted name downcases; a quoted one is literal.
+        ("SELECT 'PUBLIC'::regnamespace::text", "public"),
+        ("SELECT '\"public\"'::regnamespace::text", "public"),
+        ("SELECT '  public  '::regnamespace::text", "public"),
+        ("SELECT 'myschema'::regnamespace::text", "myschema"),
+        // A numeric string is an oid, not a name.
+        ("SELECT '2200'::regnamespace::text", "public"),
+        ("SELECT 11::regnamespace::text", "pg_catalog"),
+        ("SELECT 'public'::regnamespace::oid", "2200"),
+        // Identity is the oid, so comparison crosses the two spellings.
+        ("SELECT 11 = 'pg_catalog'::regnamespace", "t"),
+        // `regnamespaceout` has no name for an unknown oid and prints it bare.
+        ("SELECT 999999::regnamespace::text", "999999"),
+        // The cast chain `psql`'s `\d` runs over `pg_statistic_ext`.
+        (
+            "SELECT 2200::pg_catalog.regnamespace::pg_catalog.text",
+            "public",
+        ),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+    assert!(client.scalar("SELECT NULL::regnamespace").await == None);
+    // A written name that no schema answers to is 3F000, as `regnamespacein`
+    // raises it — unlike an unknown oid, which is not an error at all.
+    assert!(
+        client.fails("SELECT 'nope'::regnamespace").await
+            == ("3F000".into(), "schema \"nope\" does not exist".into())
+    );
+}
+
+#[tokio::test]
+async fn pg_proc_argument_vectors_are_zero_based_arrays() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for (sql, expected) in [
+        (
+            "SELECT array_lower(proargtypes, 1) FROM pg_proc WHERE oid = 1242",
+            "0",
+        ),
+        (
+            "SELECT array_upper(proargtypes, 1) FROM pg_proc WHERE oid = 1242",
+            "0",
+        ),
+        (
+            "SELECT proargtypes[0] FROM pg_proc WHERE oid = 1242",
+            "2275",
+        ),
+        (
+            "SELECT 2275 = ANY (proargtypes) FROM pg_proc WHERE oid = 1242",
+            "t",
+        ),
+        (
+            "SELECT proargtypes::regtype[]::text FROM pg_proc WHERE oid = 1242",
+            "[0:0]={cstring}",
+        ),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+}
+
 // -------------------------------------------------------------- reading a name
 
 /// Every shape `regclassin` accepts, and the relation each one lands on.
@@ -580,4 +691,61 @@ async fn a_regclass_default_prints_its_name_through_returning() {
             .await
             == Some("target".into())
     );
+}
+
+/// `IN` has two spellings and `reg*` is the family that can tell them apart.
+///
+/// `transformAExprIn` builds `x = ANY (ARRAY[…])` when more than one right-hand
+/// item is free of `Var`s, and the array's element type is `select_common_type`
+/// over the operand and the list — so each `unknown` literal reaches `regclass`
+/// through `regclassin`, and resolves as a relation *name*. With one such item
+/// or none it builds an OR-chain of `=` instead, and `regclass`'s equality is
+/// `oideq`, so the literal is read as an oid and a name is a syntax error.
+///
+/// Captured from `postgres:18.4`, which accepts the two-element list and
+/// refuses every one-element form beside it.
+#[tokio::test]
+async fn a_multi_element_in_list_reads_its_literals_as_relation_names() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for ddl in ["CREATE TABLE lhs (a int)", "CREATE TABLE rhs (b int)"] {
+        client.run(ddl).await;
+    }
+
+    for (sql, expected) in [
+        ("SELECT 'lhs'::regclass IN ('lhs', 'rhs')", "t"),
+        ("SELECT 'lhs'::regclass IN ('rhs', 'pg_class')", "f"),
+        ("SELECT 'lhs'::regclass NOT IN ('rhs', 'pg_class')", "t"),
+        // A list of three keeps the array form, and a numeric literal beside a
+        // name is still resolved by the same input function.
+        ("SELECT 'lhs'::regclass IN ('rhs', 'pg_class', 'lhs')", "t"),
+        // The operand carries the type through a cast off a catalog column,
+        // which is the shape `create_misc` writes.
+        (
+            "SELECT count(*)::text FROM pg_class \
+             WHERE oid::regclass IN ('lhs', 'rhs')",
+            "2",
+        ),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+}
+
+/// The OR-chain half of the same rule: one non-`Var` item is not enough for the
+/// array form, so the literal beside a `regclass` is an oid.
+#[tokio::test]
+async fn a_single_element_in_list_reads_its_literal_as_an_oid() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("CREATE TABLE lhs (a int)").await;
+
+    for sql in [
+        "SELECT 'lhs'::regclass = 'lhs'",
+        "SELECT 'lhs'::regclass IN ('lhs')",
+        "SELECT 'lhs'::regclass NOT IN ('lhs')",
+        "SELECT 'lhs'::regclass BETWEEN 'lhs' AND 'lhs'",
+    ] {
+        let (code, message) = client.fails(sql).await;
+        assert!(code == "42804", "{sql}: {code} {message}");
+    }
 }

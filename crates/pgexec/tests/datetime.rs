@@ -719,10 +719,13 @@ async fn error_surface() {
         "42846"
     );
 
-    // A clock field out of its range → 22008; only text that is not a literal
-    // shape at all is 22007.
+    // A clock field out of its range → 22008.
     assert2::assert!(err_code(&client, "SELECT TIME '25:00:00'").await == "22008");
-    assert2::assert!(err_code(&client, "SELECT TIME 'not-a-time'").await == "22007");
+    // A punctuated word is a zone name to the time-only decoder, so failing to
+    // resolve it is 22023 rather than 22007 — `TIME 'not-a-time'` and
+    // `TIMESTAMP 'not-a-time'` disagree in PostgreSQL for exactly this reason.
+    assert2::assert!(err_code(&client, "SELECT TIME 'not-a-time'").await == "22023");
+    assert2::assert!(err_code(&client, "SELECT TIMETZ 'not-a-time'").await == "22023");
 
     // Bad timestamp literal → 22007.
     assert_eq!(

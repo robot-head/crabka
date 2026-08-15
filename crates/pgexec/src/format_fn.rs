@@ -303,8 +303,10 @@ pub(crate) fn eval_format(
                 Some(z) => zone_arg(z, &fc.name)?,
                 None => ctx.time_zone.clone(),
             };
-            dt.to_zoned(zone)
-                .map(|z| Datum::Timestamptz(z.timestamp()))
+            // A reading on a daylight-saving boundary resolves by PostgreSQL's
+            // rule, not jiff's default; see `datetime::zone_offset_for`.
+            datetime::zoned_instant(dt, &zone)
+                .map(Datum::Timestamptz)
                 .map_err(|_| {
                     ExecError::Type(TypeError::DatetimeFieldOverflow {
                         value: format!("{y}-{mo}-{d} {h}:{mi}:{sec}"),
@@ -396,7 +398,41 @@ fn non_finite_to_char(value: &Datum) -> bool {
 /// literals. So a scan of the input alone reproduces PostgreSQL for every
 /// template the corpus uses. Everything else in the numeric template family
 /// agrees.
-fn to_number(input: &str, _template: &str, name: &str) -> Result<Datum, ExecError> {
+fn to_number(input: &str, template: &str, name: &str) -> Result<Datum, ExecError> {
+    match numeric::number_template(template) {
+        numeric::NumberTemplate::Digits => {}
+        numeric::NumberTemplate::Refused(numeric::RomanRefusal::Twice) => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42601",
+                message: "cannot use \"RN\" twice".to_string(),
+            });
+        }
+        numeric::NumberTemplate::Refused(numeric::RomanRefusal::Incompatible) => {
+            return Err(ExecError::FunctionErrorWithDetail {
+                sqlstate: "42601",
+                message: "\"RN\" is incompatible with other formats",
+                detail: "\"RN\" may only be used together with \"FM\".",
+            });
+        }
+        numeric::NumberTemplate::Roman => {
+            // An empty input never reaches PostgreSQL's Roman decoder at all:
+            // the processor stops on the exhausted input and `numeric_in` is
+            // handed the bare sign space instead.
+            if input.is_empty() {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "22P02",
+                    message: "invalid input syntax for type numeric: \" \"".to_string(),
+                });
+            }
+            return match numeric::roman_to_int(input) {
+                Some(value) => Ok(Datum::Numeric(numeric::from_i64(i64::from(value)))),
+                None => Err(ExecError::FunctionError {
+                    sqlstate: "22P02",
+                    message: "invalid Roman numeral".to_string(),
+                }),
+            };
+        }
+    }
     let mut digits = String::with_capacity(input.len());
     let mut seen_decimal = false;
     let mut trailing_negative = false;
@@ -451,10 +487,9 @@ fn to_char(value: &Datum, template: &str, ctx: &EvalCtx, name: &str) -> Result<D
             datetime::format_datetime(template, &fields).map_err(map_type)?
         }
         Datum::Time(t) => {
-            // Only the clock patterns are meaningful for a bare time; combine with a
-            // fixed date so the field struct is well-formed.
-            let dt = datetime::combine_date_time(jiff::civil::date(2000, 1, 1), *t);
-            let fields = datetime::DateTimeFields::from_civil(dt, None);
+            // Only the clock patterns are meaningful for a bare time; the field
+            // struct carries a fixed date so it is well-formed.
+            let fields = datetime::DateTimeFields::from_time(*t, None);
             datetime::format_datetime(template, &fields).map_err(map_type)?
         }
         Datum::Timestamptz(ts) => {
@@ -474,15 +509,17 @@ fn to_char(value: &Datum, template: &str, ctx: &EvalCtx, name: &str) -> Result<D
             numeric::format_numeric(template, &numeric::from_i64(*n)).map_err(map_type)?
         }
         Datum::Numeric(d) => numeric::format_numeric(template, d).map_err(map_type)?,
-        // `float4_to_char` works at the type's own `FLT_DIG` precision, which is
-        // what `from_f32` reproduces.
+        // `float4_to_char` / `float8_to_char` clamp the template's fractional
+        // positions to the type's own decimal digits, which `NumPrecision` carries.
         Datum::Float4(f) => {
             let bd = numeric::from_f32(*f);
-            numeric::format_numeric(template, &bd).map_err(map_type)?
+            numeric::format_numeric_prec(template, &bd, numeric::NumPrecision::Float4)
+                .map_err(map_type)?
         }
         Datum::Float8(f) => {
             let bd = numeric::from_f64(*f);
-            numeric::format_numeric(template, &bd).map_err(map_type)?
+            numeric::format_numeric_prec(template, &bd, numeric::NumPrecision::Float8)
+                .map_err(map_type)?
         }
         _ => return Err(undefined_function(name)),
     };
@@ -514,48 +551,107 @@ fn to_timestamp_epoch(value: &Datum, name: &str) -> Result<Datum, ExecError> {
         })
 }
 
-/// `to_timestamp(input, template)`: parse `input` by `template`, then read the
-/// resulting wall-clock in the session zone → `timestamptz`.
+/// `to_timestamp(input, template)`: parse `input` by `template`, then reduce the
+/// resulting wall-clock to an instant → `timestamptz`.
+///
+/// A template that named a zone (`TZ`, `OF`, `TZH`/`TZM`) fixes the offset
+/// itself; otherwise the reading is local to the session zone, resolved by the
+/// same rule a bare `timestamp` cast uses.
 fn to_timestamp_template(template: &str, input: &str, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let p = datetime::parse_by_template(template, input).map_err(map_type)?;
-    let dt = civil_from_parsed(&p)?;
-    dt.to_zoned(ctx.time_zone.clone())
-        .map(|z| Datum::Timestamptz(z.timestamp()))
-        .map_err(|_| {
-            ExecError::Type(TypeError::DatetimeFieldOverflow {
-                value: input.to_string(),
-            })
-        })
-}
-
-/// `to_date(input, template)`: parse `input` by `template` into a calendar date.
-fn to_date(template: &str, input: &str) -> Result<Datum, ExecError> {
-    let p = datetime::parse_by_template(template, input).map_err(map_type)?;
-    let date = jiff::civil::Date::new(p.year as i16, p.month as i8, p.day as i8).map_err(|_| {
+    let dt = civil_from_parsed(&p, input)?;
+    let out_of_range = || {
         ExecError::Type(TypeError::DatetimeFieldOverflow {
             value: input.to_string(),
         })
-    })?;
-    Ok(Datum::Date(date))
+    };
+    let instant = match p.tz_offset_secs {
+        Some(secs) => jiff::tz::Offset::from_seconds(secs)
+            .and_then(|offset| offset.to_timestamp(dt))
+            .map_err(|_| out_of_range())?,
+        None => datetime::zoned_instant(dt, &ctx.time_zone).map_err(|_| out_of_range())?,
+    };
+    let instant = match p.fractional_precision {
+        Some(precision) => round_to_precision(instant, precision).ok_or_else(out_of_range)?,
+        None => instant,
+    };
+    Ok(Datum::Timestamptz(instant))
 }
 
-/// Build a civil `DateTime` from a `ParsedDateTime`. This function maps a jiff
-/// range or validity error, such as Feb 30, to 22008.
-fn civil_from_parsed(p: &datetime::ParsedDateTime) -> Result<jiff::civil::DateTime, ExecError> {
-    jiff::civil::DateTime::new(
-        p.year as i16,
-        p.month as i8,
-        p.day as i8,
-        p.hour as i8,
-        p.minute as i8,
-        p.second as i8,
-        (p.micros * 1_000) as i32,
-    )
-    .map_err(|_| {
+/// Round an instant to `precision` fractional-second digits.
+///
+/// `PostgreSQL`'s `AdjustTimestampForTypmod`, which is what an `FF`n pattern
+/// ends up applying: the microsecond count is rounded half away from zero, taken
+/// about PostgreSQL's own 2000-01-01 epoch. The epoch matters only for the
+/// tie-breaking direction on instants before it, which is precisely where
+/// rounding about the Unix epoch would disagree.
+fn round_to_precision(instant: jiff::Timestamp, precision: u8) -> Option<jiff::Timestamp> {
+    /// Microseconds between the Unix epoch and PostgreSQL's 2000-01-01 epoch.
+    const PG_EPOCH_MICROS: i64 = 946_684_800 * 1_000_000;
+    if precision >= 6 {
+        return Some(instant);
+    }
+    let scale = 10_i64.checked_pow(6 - u32::from(precision))?;
+    let half = scale / 2;
+    let micros = instant.as_microsecond().checked_sub(PG_EPOCH_MICROS)?;
+    let rounded = if micros >= 0 {
+        micros.checked_add(half)? / scale * scale
+    } else {
+        -((micros.checked_neg()?.checked_add(half)?) / scale * scale)
+    };
+    jiff::Timestamp::from_microsecond(rounded.checked_add(PG_EPOCH_MICROS)?).ok()
+}
+
+/// `to_date(input, template)`: parse `input` by `template` into a calendar date.
+/// Any zone the template named is parsed and discarded, as `PostgreSQL` does —
+/// a `date` has no zone to carry it.
+fn to_date(template: &str, input: &str) -> Result<Datum, ExecError> {
+    let p = datetime::parse_by_template(template, input).map_err(map_type)?;
+    let date = date_from_parsed(&p, input)?;
+    Ok(Datum::Date(date.into()))
+}
+
+/// Build a civil `Date` from a `ParsedDateTime`.
+///
+/// The parse has already range-checked every field, so the only failure left is
+/// a year outside the ±9999 jiff stores a date in — the storage limit that keeps
+/// gres short of PostgreSQL's 294276 AD.
+fn date_from_parsed(
+    p: &datetime::ParsedDateTime,
+    input: &str,
+) -> Result<jiff::civil::Date, ExecError> {
+    let out_of_range = || {
         ExecError::Type(TypeError::DatetimeFieldOverflow {
-            value: format!("{}-{}-{}", p.year, p.month, p.day),
+            value: input.to_string(),
         })
-    })
+    };
+    let year = i16::try_from(p.year).map_err(|_| out_of_range())?;
+    let month = i8::try_from(p.month).map_err(|_| out_of_range())?;
+    let day = i8::try_from(p.day).map_err(|_| out_of_range())?;
+    jiff::civil::Date::new(year, month, day).map_err(|_| out_of_range())
+}
+
+/// Build a civil `DateTime` from a `ParsedDateTime`, on top of
+/// [`date_from_parsed`].
+fn civil_from_parsed(
+    p: &datetime::ParsedDateTime,
+    input: &str,
+) -> Result<jiff::civil::DateTime, ExecError> {
+    let out_of_range = || {
+        ExecError::Type(TypeError::DatetimeFieldOverflow {
+            value: input.to_string(),
+        })
+    };
+    let date = date_from_parsed(p, input)?;
+    let nanos = i32::try_from(p.micros).map_err(|_| out_of_range())? * 1_000;
+    let time = jiff::civil::Time::new(
+        i8::try_from(p.hour).map_err(|_| out_of_range())?,
+        i8::try_from(p.minute).map_err(|_| out_of_range())?,
+        i8::try_from(p.second).map_err(|_| out_of_range())?,
+        nanos,
+    )
+    .map_err(|_| out_of_range())?;
+    Ok(date.to_datetime(time))
 }
 
 // ---- argument helpers ----
@@ -651,8 +747,14 @@ fn interval_value(d: &Datum, name: &str) -> Result<Interval, ExecError> {
     }
 }
 
-/// Resolve a zone-name text value to a jiff `TimeZone`. jiff's tzdb handles
-/// `UTC` and the fixed-offset spellings. An unknown zone is 22023.
+/// Resolve `make_timestamptz`'s zone argument, which `PostgreSQL` reads by
+/// rules of its own (`parse_sane_timezone`).
+///
+/// A numeric offset is tried first and keeps the ISO sign, so `'+2'` is two
+/// hours *east* — the opposite of what the same text means to `AT TIME ZONE`.
+/// To stop the `POSIX` grammar from quietly accepting a spelling the numeric
+/// grammar has already rejected, a leading digit is refused outright rather
+/// than falling through. Everything else resolves the way `AT TIME ZONE` does.
 fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
     let zone = match d {
         Datum::Text(s) => s.as_str(),
@@ -661,9 +763,18 @@ fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
     if zone.eq_ignore_ascii_case("utc") {
         return Ok(jiff::tz::TimeZone::UTC);
     }
-    jiff::tz::TimeZone::get(zone).map_err(|_| {
-        ExecError::InvalidParameterValue(format!("time zone \"{zone}\" not recognized"))
-    })
+    if zone.starts_with(|c: char| c.is_ascii_digit()) {
+        return Err(ExecError::NumericTimeZoneSyntax(zone.to_string()));
+    }
+    match crabka_pgtypes::datetime::decode_numeric_time_zone(zone) {
+        Ok(offset) => return Ok(jiff::tz::TimeZone::fixed(offset)),
+        Err(crabka_pgtypes::datetime::DecodeError::TzDisplacement) => {
+            return Err(ExecError::NumericTimeZoneOutOfRange(zone.to_string()));
+        }
+        Err(_) => {}
+    }
+    crabka_pgtypes::datetime::resolve_time_zone(zone)
+        .ok_or_else(|| ExecError::UnknownTimeZone(zone.to_string()))
 }
 
 #[cfg(test)]
@@ -703,7 +814,37 @@ mod tests {
         .code
     }
 
-    /// `to_number` reads the digits out of a decorated string, and drops the
+    /// An `FF`n pattern does not truncate what it reads — every digit is parsed
+    /// — it asks for the finished instant to be rounded to n fractional digits,
+    /// half away from zero. Expectations are PostgreSQL 18.4's.
+    #[test]
+    fn to_timestamp_rounds_to_the_fractional_precision_the_template_asked_for() {
+        let micros = |sql: &str| match ev(sql) {
+            Datum::Timestamptz(ts) => ts.as_microsecond(),
+            other => panic!("expected timestamptz, got {other:?}"),
+        };
+        for (precision, expected) in [
+            (1, 1_541_162_096_100_000_i64),
+            (2, 1_541_162_096_120_000),
+            (3, 1_541_162_096_123_000),
+            (4, 1_541_162_096_123_500),
+            (5, 1_541_162_096_123_460),
+            (6, 1_541_162_096_123_456),
+        ] {
+            let sql = format!(
+                "to_timestamp('2018-11-02 12:34:56.123456', 'YYYY-MM-DD HH24:MI:SS.FF{precision}')"
+            );
+            assert!(micros(&sql) == expected, "FF{precision}");
+        }
+        // A template that names a zone fixes the offset itself instead of
+        // reading the wall clock as local to the session.
+        assert!(
+            micros("to_timestamp('2011-12-18 11:38 -05', 'YYYY-MM-DD HH12:MI TZH')")
+                == 1_324_226_280_000_000
+        );
+    }
+
+    /// `to_number` reads the digits out of a decorated string, dropping the
     /// decoration a `to_char` template would have emitted. Every expectation is
     /// PostgreSQL 18.4's.
     #[test]
@@ -755,7 +896,7 @@ mod tests {
     fn to_timestamp_to_date_make_justify() {
         assert_eq!(
             ev("to_date('2024-07-04', 'YYYY-MM-DD')"),
-            Datum::Date(jiff::civil::date(2024, 7, 4))
+            Datum::Date(jiff::civil::date(2024, 7, 4).into())
         );
         assert_eq!(
             ty("to_timestamp('2024-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS')"),
@@ -768,7 +909,7 @@ mod tests {
         );
         assert_eq!(
             ev("make_date(2024, 7, 4)"),
-            Datum::Date(jiff::civil::date(2024, 7, 4))
+            Datum::Date(jiff::civil::date(2024, 7, 4).into())
         );
         assert_eq!(
             ev("make_interval(0, 0, 0, 5)"),
@@ -830,11 +971,103 @@ mod tests {
         );
     }
 
+    /// `make_timestamptz` reads its zone by `PostgreSQL`'s
+    /// `parse_sane_timezone` rules, which are neither the setting's nor
+    /// `AT TIME ZONE`'s. A numeric offset keeps the ISO sign — `'+2'` is two
+    /// hours *east*, where `AT TIME ZONE '+2'` would be two hours west — and a
+    /// specification the numeric grammar cannot read falls through to the
+    /// `POSIX` one. Every expectation is `PostgreSQL` 18.4's.
+    #[test]
+    fn make_timestamptz_reads_a_numeric_zone_with_the_iso_sign() {
+        for (expr, expected) in [
+            // Numeric offsets: east.
+            (
+                "make_timestamptz(1973, 7, 15, 8, 15, 55, '+2')",
+                "1973-07-15T06:15:55Z",
+            ),
+            (
+                "make_timestamptz(1973, 7, 15, 8, 15, 55, '-2')",
+                "1973-07-15T10:15:55Z",
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, '-08:00')",
+                "2014-12-10T18:10:10Z",
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, '-08')",
+                "2014-12-10T18:10:10Z",
+            ),
+            // POSIX specifications: west, and daylight-saving aware.
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, 'UTC-2')",
+                "2014-12-10T08:10:10Z",
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, 'PST8PDT,M3.2.0,M11.1.0')",
+                "2014-12-10T18:10:10Z",
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, 'FOO8BAR')",
+                "2014-12-10T18:10:10Z",
+            ),
+            // An abbreviation.
+            (
+                "make_timestamptz(2008, 12, 10, 10, 10, 10, 'EST')",
+                "2008-12-10T15:10:10Z",
+            ),
+        ] {
+            let want = Datum::Timestamptz(expected.parse().expect("expected instant"));
+            assert!(ev(expr) == want, "{expr}");
+        }
+    }
+
+    /// The three ways `make_timestamptz` rejects a zone, each with
+    /// `PostgreSQL`'s own wording. A leading digit is refused outright so the
+    /// `POSIX` grammar cannot accept a spelling the numeric grammar rejected.
+    #[test]
+    fn make_timestamptz_rejects_a_bad_zone_the_way_postgresql_words_it() {
+        for (expr, message, hint) in [
+            (
+                "make_timestamptz(1973, 7, 15, 8, 15, 55, '2')",
+                "invalid input syntax for type numeric time zone: \"2\"",
+                Some("Numeric time zones must have \"-\" or \"+\" as first character."),
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, '+16')",
+                "numeric time zone \"+16\" out of range",
+                None,
+            ),
+            (
+                "make_timestamptz(2014, 12, 10, 10, 10, 10, '-16')",
+                "numeric time zone \"-16\" out of range",
+                None,
+            ),
+            (
+                "make_timestamptz(1910, 12, 24, 0, 0, 0, 'Nehwon/Lankhmar')",
+                "time zone \"Nehwon/Lankhmar\" not recognized",
+                None,
+            ),
+        ] {
+            let error = crate::eval::eval(
+                &crabka_pgparser::parser::parse_expr_for_test(expr).expect("parse"),
+                &Scope::empty(),
+                &[],
+                &EvalCtx::test_default(),
+            )
+            .expect_err("zone should be rejected")
+            .into_pg();
+            assert!(error.code == "22023", "{expr}");
+            assert!(error.message == message, "{expr}: {}", error.message);
+            let got_hint = error.diagnostics.as_ref().and_then(|f| f.hint.clone());
+            assert!(got_hint.as_deref() == hint, "{expr}: {got_hint:?}");
+        }
+    }
+
     #[test]
     fn make_time_make_timestamp_justify_interval() {
         assert_eq!(
             ev("make_time(8, 15, 30)"),
-            Datum::Time(jiff::civil::time(8, 15, 30, 0))
+            Datum::Time(jiff::civil::time(8, 15, 30, 0).into())
         );
         assert_eq!(
             ev("make_timestamp(2024, 7, 4, 13, 45, 6)"),

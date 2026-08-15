@@ -549,3 +549,285 @@ async fn foreign_key_utility_statements_describe_as_zero_field_results() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deferrable PRIMARY KEY and UNIQUE
+
+/// Five rows keyed 0..4 behind a `UNIQUE … DEFERRABLE` constraint, the shape
+/// upstream's `constraints` regression test uses.
+async fn ladder(clause: &str) -> (SqlEngine, SqlSession) {
+    let create = format!("CREATE TABLE unique_tbl (i int UNIQUE {clause}, t text)");
+    engine_with(&[
+        &create,
+        "INSERT INTO unique_tbl VALUES (0, 'one')",
+        "INSERT INTO unique_tbl VALUES (1, 'two')",
+        "INSERT INTO unique_tbl VALUES (2, 'tree')",
+        "INSERT INTO unique_tbl VALUES (3, 'four')",
+        "INSERT INTO unique_tbl VALUES (4, 'five')",
+    ])
+    .await
+}
+
+/// The defect this family exists for: a `DEFERRABLE` key is checked once the
+/// statement's rows are all in place, so a shift that never lands two rows on
+/// one key succeeds even though every intermediate row does collide.
+///
+/// The same statement against a `NOT DEFERRABLE` key is the 23505 it has always
+/// been, which is what makes this a property of the constraint and not of the
+/// statement.
+#[tokio::test]
+async fn a_deferrable_key_is_checked_once_the_statement_is_done() {
+    let (_engine, mut s) = ladder("DEFERRABLE").await;
+    run(&mut s, "UPDATE unique_tbl SET i = i+1").await;
+    assert!(
+        query(&mut s, "SELECT i FROM unique_tbl ORDER BY i").await
+            == [
+                text_row(&["1"]),
+                text_row(&["2"]),
+                text_row(&["3"]),
+                text_row(&["4"]),
+                text_row(&["5"]),
+            ]
+    );
+
+    let (_engine, mut s) = ladder("NOT DEFERRABLE").await;
+    assert!(err_code(&mut s, "UPDATE unique_tbl SET i = i+1").await == "23505");
+}
+
+/// `DEFERRABLE` alone is `INITIALLY IMMEDIATE`: a collision the statement
+/// leaves standing is reported by that statement, not held to `COMMIT`.
+#[tokio::test]
+async fn a_deferrable_key_still_reports_within_the_statement() {
+    let (_engine, mut s) = ladder("DEFERRABLE").await;
+    run(&mut s, "BEGIN").await;
+    let failure = err_message(&mut s, "UPDATE unique_tbl SET i = 1 WHERE i = 0").await;
+    assert!(failure == "duplicate key value violates unique constraint \"unique_tbl_i_key\"");
+    run(&mut s, "ROLLBACK").await;
+}
+
+/// `SET CONSTRAINTS … DEFERRED` names a unique constraint by the same name
+/// `pg_constraint` reports, and moves its check to `COMMIT`. A transaction that
+/// repairs the collision before then commits.
+#[tokio::test]
+async fn set_constraints_defers_a_unique_key_to_commit() {
+    let (_engine, mut s) = ladder("DEFERRABLE").await;
+    run(&mut s, "BEGIN").await;
+    run(&mut s, "SET CONSTRAINTS unique_tbl_i_key DEFERRED").await;
+    run(&mut s, "INSERT INTO unique_tbl VALUES (2, 'two again')").await;
+    run(&mut s, "DELETE FROM unique_tbl WHERE t = 'tree'").await;
+    run(&mut s, "COMMIT").await;
+    assert!(
+        query(&mut s, "SELECT t FROM unique_tbl WHERE i = 2").await == [text_row(&["two again"])]
+    );
+}
+
+/// A collision left standing at `COMMIT` fails the `COMMIT`, and the whole
+/// transaction is discarded with it.
+#[tokio::test]
+async fn an_unrepaired_deferred_key_fails_the_commit() {
+    let (_engine, mut s) = ladder("DEFERRABLE INITIALLY DEFERRED").await;
+    run(&mut s, "BEGIN").await;
+    run(&mut s, "INSERT INTO unique_tbl VALUES (3, 'Three')").await;
+    assert!(err_code(&mut s, "COMMIT").await == "23505");
+    assert!(query(&mut s, "SELECT t FROM unique_tbl WHERE i = 3").await == [text_row(&["four"])]);
+}
+
+/// `SET CONSTRAINTS ALL IMMEDIATE` is a check point of its own: it reports the
+/// violation there, inside the transaction, rather than at `COMMIT`.
+#[tokio::test]
+async fn set_constraints_immediate_drains_a_deferred_unique_key() {
+    let (_engine, mut s) = ladder("DEFERRABLE INITIALLY DEFERRED").await;
+    run(&mut s, "BEGIN").await;
+    run(&mut s, "INSERT INTO unique_tbl VALUES (3, 'Three')").await;
+    assert!(err_code(&mut s, "SET CONSTRAINTS ALL IMMEDIATE").await == "23505");
+    run(&mut s, "ROLLBACK").await;
+}
+
+/// `SET CONSTRAINTS` refuses a unique constraint that was never declared
+/// deferrable, exactly as it refuses a foreign key that was not.
+#[tokio::test]
+async fn set_constraints_refuses_a_key_that_is_not_deferrable() {
+    let (_engine, mut s) = ladder("NOT DEFERRABLE").await;
+    run(&mut s, "BEGIN").await;
+    let failure = err_message(&mut s, "SET CONSTRAINTS unique_tbl_i_key DEFERRED").await;
+    assert!(failure == "constraint \"unique_tbl_i_key\" is not deferrable");
+    run(&mut s, "ROLLBACK").await;
+}
+
+/// The catalog reports the deferrability it was given, through all three of the
+/// places a client reads it: `pg_constraint`, `pg_get_constraintdef`, and
+/// `information_schema.table_constraints`.
+#[tokio::test]
+async fn the_catalog_reports_a_deferrable_key() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE k (a int UNIQUE DEFERRABLE INITIALLY DEFERRED, \
+         b int UNIQUE DEFERRABLE, c int UNIQUE)",
+    ])
+    .await;
+
+    assert!(
+        query(
+            &mut s,
+            "SELECT conname, condeferrable, condeferred, pg_get_constraintdef(oid) \
+             FROM pg_constraint WHERE conrelid = 'k'::regclass ORDER BY conname",
+        )
+        .await
+            == [
+                text_row(&[
+                    "k_a_key",
+                    "t",
+                    "t",
+                    "UNIQUE (a) DEFERRABLE INITIALLY DEFERRED"
+                ]),
+                text_row(&["k_b_key", "t", "f", "UNIQUE (b) DEFERRABLE"]),
+                text_row(&["k_c_key", "f", "f", "UNIQUE (c)"]),
+            ]
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT constraint_name, is_deferrable, initially_deferred \
+             FROM information_schema.table_constraints \
+             WHERE table_name = 'k' ORDER BY constraint_name",
+        )
+        .await
+            == [
+                text_row(&["k_a_key", "YES", "YES"]),
+                text_row(&["k_b_key", "YES", "NO"]),
+                text_row(&["k_c_key", "NO", "NO"]),
+            ]
+    );
+}
+
+/// Speculative insertion has to decide the row's fate before the statement
+/// ends, which is earlier than a deferrable key will answer, so `ON CONFLICT`
+/// refuses one as an arbiter — named or inferred, and for `DO NOTHING` too,
+/// whose arbiter set is every unique index the relation has.
+#[tokio::test]
+async fn on_conflict_refuses_a_deferrable_key_as_an_arbiter() {
+    let (_engine, mut s) = ladder("DEFERRABLE").await;
+    for sql in [
+        "INSERT INTO unique_tbl VALUES (0, 'x') ON CONFLICT (i) DO NOTHING",
+        "INSERT INTO unique_tbl VALUES (0, 'x') ON CONFLICT ON CONSTRAINT unique_tbl_i_key \
+         DO UPDATE SET t = 'x'",
+        "INSERT INTO unique_tbl VALUES (0, 'x') ON CONFLICT DO NOTHING",
+    ] {
+        let error = s.simple_query(sql).await.expect_err("expected error");
+        assert!(error.code == "55000", "{sql}");
+        assert!(
+            error.message
+                == "ON CONFLICT does not support deferrable unique constraints/exclusion \
+                    constraints as arbiters",
+            "{sql}"
+        );
+    }
+}
+
+/// `ALTER TABLE … ADD CONSTRAINT` records deferrability too, and still
+/// back-validates the rows already stored — the index build is what validates
+/// them, and it is not deferrable.
+#[tokio::test]
+async fn alter_table_adds_a_deferrable_key_and_still_back_validates() {
+    let (_engine, mut s) = ladder("NOT DEFERRABLE").await;
+    run(
+        &mut s,
+        "ALTER TABLE unique_tbl DROP CONSTRAINT unique_tbl_i_key",
+    )
+    .await;
+    run(
+        &mut s,
+        "ALTER TABLE unique_tbl ADD CONSTRAINT unique_tbl_i_key UNIQUE (i) \
+         DEFERRABLE INITIALLY DEFERRED",
+    )
+    .await;
+    run(&mut s, "BEGIN").await;
+    run(&mut s, "INSERT INTO unique_tbl VALUES (1, 'five')").await;
+    run(&mut s, "INSERT INTO unique_tbl VALUES (5, 'one')").await;
+    run(&mut s, "DELETE FROM unique_tbl WHERE i = 1 AND t = 'two'").await;
+    run(&mut s, "COMMIT").await;
+
+    run(&mut s, "INSERT INTO unique_tbl VALUES (9, 'nine')").await;
+    run(
+        &mut s,
+        "ALTER TABLE unique_tbl DROP CONSTRAINT unique_tbl_i_key",
+    )
+    .await;
+    run(&mut s, "INSERT INTO unique_tbl VALUES (9, 'nine again')").await;
+    assert!(
+        err_code(
+            &mut s,
+            "ALTER TABLE unique_tbl ADD CONSTRAINT unique_tbl_i_key UNIQUE (i) \
+             DEFERRABLE INITIALLY DEFERRED",
+        )
+        .await
+            == "23505"
+    );
+}
+
+/// Deferring the check to the end of the statement must not lose it. Two rows
+/// of one `INSERT` landing on one key still collide, and so does a `COPY`,
+/// whose whole load is one command.
+#[tokio::test]
+async fn a_deferrable_key_still_catches_a_collision_inside_one_command() {
+    let (_engine, mut s) = ladder("DEFERRABLE").await;
+    assert!(err_code(&mut s, "INSERT INTO unique_tbl VALUES (7, 'a'), (7, 'b')").await == "23505");
+    assert!(
+        query(&mut s, "SELECT i FROM unique_tbl WHERE i = 7")
+            .await
+            .is_empty()
+    );
+
+    // And through a feeding query rather than a VALUES list.
+    assert!(
+        err_code(
+            &mut s,
+            "INSERT INTO unique_tbl SELECT 8, t FROM unique_tbl WHERE i < 2",
+        )
+        .await
+            == "23505"
+    );
+}
+
+/// A `DELETE` in the same statement frees the key an `INSERT` in that statement
+/// takes, which is the end-of-statement check point doing its job rather than
+/// an ordering accident.
+#[tokio::test]
+async fn a_deferrable_key_freed_by_the_same_command_is_available_to_it() {
+    let (_engine, mut s) = ladder("DEFERRABLE").await;
+    run(
+        &mut s,
+        "WITH gone AS (DELETE FROM unique_tbl WHERE i = 2 RETURNING i) \
+         INSERT INTO unique_tbl SELECT i, 'moved' FROM gone",
+    )
+    .await;
+    assert!(query(&mut s, "SELECT t FROM unique_tbl WHERE i = 2").await == [text_row(&["moved"])]);
+}
+
+/// A `DEFERRABLE` key is not unique for the whole of a referencing statement,
+/// so `PostgreSQL` refuses to point a foreign key at one — per the SQL spec,
+/// and to avoid the semantics of a parent that momentarily has two rows.
+#[tokio::test]
+async fn a_foreign_key_cannot_reference_a_deferrable_key() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE p (id int PRIMARY KEY DEFERRABLE, u int UNIQUE DEFERRABLE, v int UNIQUE)",
+        "CREATE TABLE c (a int)",
+    ])
+    .await;
+
+    for (sql, message) in [
+        (
+            "ALTER TABLE c ADD FOREIGN KEY (a) REFERENCES p",
+            "cannot use a deferrable primary key for referenced table \"p\"",
+        ),
+        (
+            "ALTER TABLE c ADD FOREIGN KEY (a) REFERENCES p (u)",
+            "cannot use a deferrable unique constraint for referenced table \"p\"",
+        ),
+    ] {
+        let error = s.simple_query(sql).await.expect_err("expected error");
+        assert!(error.code == "55000", "{sql}");
+        assert!(error.message == message, "{sql}");
+    }
+    // The immediate key on the same relation still works.
+    run(&mut s, "ALTER TABLE c ADD FOREIGN KEY (a) REFERENCES p (v)").await;
+}

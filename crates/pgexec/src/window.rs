@@ -28,7 +28,7 @@ use crabka_pgwire::engine::FieldDescription;
 use crate::{
     clock::EvalCtx,
     error::ExecError,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// Qualifier of the synthetic bindings that carry a grouped query's pre-window
@@ -317,9 +317,13 @@ fn plan_call(
         ));
     }
     let plain = FuncCall {
+        sql_syntax: false,
         name: call.name.clone(),
         distinct: false,
         args: call.args.clone(),
+        // A window call cannot carry a per-call sort: the parser refuses
+        // `agg(x ORDER BY y) OVER (…)` exactly as PostgreSQL does.
+        order_by: Vec::new(),
         filter: None,
     };
     let args = match &plain.args {
@@ -361,6 +365,12 @@ fn plan_call(
             crate::eval::infer_type(&args[0], scope)?
         }
     };
+    for expr in &spec.partition_by {
+        crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+    }
+    for item in &spec.order_by {
+        crate::eval::require_ordering_operator(crate::eval::infer_type(&item.expr, scope)?)?;
+    }
     let range_offset_ty = validate_frame(&spec, scope)?;
     Ok(PlannedCall {
         func,
@@ -468,6 +478,7 @@ fn extend_scope(scope: &Scope, calls: &[PlannedCall], names: &[String]) -> Scope
     let mut extended = scope.clone();
     for (index, (call, label)) in calls.iter().zip(names).enumerate() {
         extended.columns.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(crabka_pgparser::ast::WINDOW_QUALIFIER.to_string()),
             name: crabka_pgparser::ast::window_binding_name(index, label),
             ty: call.result_ty,
@@ -736,6 +747,7 @@ fn lower_over_grouping(
     let mut leaf_scope = Scope::empty();
     for (index, leaf) in leaves.iter().enumerate() {
         leaf_scope.columns.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(GROUPED_QUALIFIER.to_string()),
             name: grouped_binding_name(index),
             ty: crate::eval::infer_type(leaf, scope)?,
@@ -887,9 +899,13 @@ fn split(expr: &Expr, leaves: &mut Vec<Expr>) -> Result<Expr, ExecError> {
                 lowered.push(split(arg, leaves)?);
             }
             Expr::Func(FuncCall {
+                sql_syntax: call.sql_syntax,
                 name: call.name.clone(),
                 distinct: call.distinct,
                 args: FuncArgs::Exprs(lowered),
+                // An aggregate's own sort travels with it when a sibling window
+                // call is lifted out of the same expression.
+                order_by: call.order_by.clone(),
                 filter: call.filter.clone(),
             })
         }
@@ -1035,6 +1051,19 @@ fn evaluate_call(
         let mut ordered = partition;
         ordered.sort_by(|a, b| order_cmp(&sort_keys[*a], &sort_keys[*b], order_by));
         let peers = peer_groups(&ordered, &sort_keys, order_by);
+        let partition = Partition {
+            ordered: &ordered,
+            peers: &peers,
+            sort_keys: &sort_keys,
+        };
+        if let Some(prefix) =
+            evaluate_default_prefix_aggregate(call, &frame, &partition, scope, rows, ctx)?
+        {
+            for (row, value) in prefix {
+                values[row] = value;
+            }
+            continue;
+        }
         // `ntile` is the one window function whose argument PostgreSQL reads
         // once per PARTITION rather than once per row, so its bucket run is
         // carried across the positions below.
@@ -1045,11 +1074,7 @@ fn evaluate_call(
                     call,
                     frame: &frame,
                 },
-                &Partition {
-                    ordered: &ordered,
-                    peers: &peers,
-                    sort_keys: &sort_keys,
-                },
+                &partition,
                 position,
                 &mut buckets,
                 scope,
@@ -1060,6 +1085,70 @@ fn evaluate_call(
         }
     }
     Ok(values)
+}
+
+fn evaluate_default_prefix_aggregate(
+    call: &PlannedCall,
+    frame: &ResolvedFrame,
+    partition: &Partition<'_>,
+    scope: &Scope,
+    rows: &[Vec<Datum>],
+    ctx: &EvalCtx,
+) -> Result<Option<Vec<(usize, Datum)>>, ExecError> {
+    if call.func != WindowFunc::Aggregate
+        || !matches!(frame, ResolvedFrame::Default)
+        || !matches!(call.call.name.as_str(), "count" | "sum")
+    {
+        return Ok(None);
+    }
+    let is_count = call.call.name == "count";
+    let argument = match &call.call.args {
+        FuncArgs::Star if is_count => None,
+        FuncArgs::Exprs(args) => args.first(),
+        FuncArgs::Star => return Ok(None),
+    };
+    let mut count = 0i64;
+    let mut sum: Option<Datum> = None;
+    let mut values = Vec::with_capacity(partition.ordered.len());
+    let mut consumed = 0usize;
+    for &(first, last) in &partition.peers.bounds {
+        for position in consumed..=last {
+            let row = &rows[partition.ordered[position]];
+            if let Some(filter) = &call.filter
+                && crate::eval::eval(filter, scope, row, ctx)? != Datum::Bool(true)
+            {
+                continue;
+            }
+            let value = argument
+                .map(|argument| crate::eval::eval(argument, scope, row, ctx))
+                .transpose()?;
+            if is_count {
+                if value.as_ref().is_none_or(|value| !value.is_null()) {
+                    count = count
+                        .checked_add(1)
+                        .ok_or(crabka_pgtypes::TypeError::Overflow)?;
+                }
+            } else if let Some(value) = value
+                && !value.is_null()
+            {
+                let value = crabka_pgtypes::cast::cast(&value, call.result_ty, &ctx.time_zone)?;
+                sum = Some(match sum {
+                    Some(current) => crabka_pgtypes::ops::add(&current, &value)?,
+                    None => value,
+                });
+            }
+        }
+        consumed = last + 1;
+        let value = if is_count {
+            Datum::Int8(count)
+        } else {
+            sum.clone().unwrap_or(Datum::Null)
+        };
+        for position in first..=last {
+            values.push((partition.ordered[position], value.clone()));
+        }
+    }
+    Ok(Some(values))
 }
 
 /// One partition's rows in window order, with their peer-group structure.
@@ -1135,12 +1224,16 @@ fn eval_key_rows<'a>(
     rows: &[Vec<Datum>],
     ctx: &EvalCtx,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let exprs: Vec<&Expr> = exprs.collect();
+    // PARTITION BY / ORDER BY keys are the same expressions for every row, so
+    // their column references are resolved once here.
+    let exprs: Vec<crate::bind::BoundExpr> = exprs
+        .map(|expr| crate::bind::BoundExpr::new(expr, scope))
+        .collect::<Result<_, _>>()?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut key = Vec::with_capacity(exprs.len());
         for expr in &exprs {
-            key.push(crate::eval::eval(expr, scope, row, ctx)?);
+            key.push(crate::eval::eval(expr.expr(), scope, row, ctx)?);
         }
         out.push(key);
     }
@@ -1178,7 +1271,7 @@ enum ResolvedFrame {
     Explicit {
         mode: FrameMode,
         start: ResolvedBound,
-        end: ResolvedBound,
+        end: Box<ResolvedBound>,
         exclusion: FrameExclusion,
     },
 }
@@ -1266,7 +1359,9 @@ fn resolved_frame(call: &PlannedCall, ctx: &EvalCtx) -> Result<ResolvedFrame, Ex
     Ok(ResolvedFrame::Explicit {
         mode: frame.mode,
         start: resolve_bound(&frame.start, frame.mode, "starting", unknown_ty, ctx)?,
-        end: resolve_bound(&frame.end, frame.mode, "ending", unknown_ty, ctx)?,
+        end: Box::new(resolve_bound(
+            &frame.end, frame.mode, "ending", unknown_ty, ctx,
+        )?),
         exclusion: frame.exclusion,
     })
 }

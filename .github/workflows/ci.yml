@@ -8,9 +8,24 @@ permissions:
   contents: read
 
 # Cancel superseded PR runs; let pushes to main run to completion.
+#
+# The flag must stay conditional. `cancel-in-progress: true` cancels main too,
+# because the group key only separates main from the PR refs -- it does not
+# exempt it. Measured on 2026-08-13 over the last 500 ci runs (2026-08-02 to
+# 2026-08-13): 67 of them were pushes to main, and 28 of those 67 were
+# cancelled. Every cancelled main run is a commit with no coverage report,
+# because `codecov.yml` waits for all 18 uploads. `codecov/project` then has no
+# base to compare a later PR against, and fails that PR for a reason that has
+# nothing to do with its code.
+#
+# `github.ref != 'refs/heads/main'` is the whole predicate, because this
+# workflow has exactly two triggers: `pull_request` (ref `refs/pull/N/merge`)
+# and `push` to main. No tag and no release branch runs it -- confirmed over
+# the same 500 runs, where every push event was on main. Widen this expression
+# if a trigger is ever added.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Coverage builds with full DWARF debuginfo (debug=2) produce enormous
 # `-C instrument-coverage` test binaries that exhaust the runner's disk ("No
@@ -18,6 +33,14 @@ concurrency:
 # source-based coverage maps regions via the embedded `__llvm_covmap` sections,
 # NOT DWARF, so dropping to line tables roughly halves the binaries without
 # changing coverage results. (`line-tables-only` keeps file:line in backtraces.)
+#
+# These two stay environment variables on purpose. They fix a CI-only disk
+# problem. The same `[profile]` keys in `/.cargo/config.toml` would change
+# every local `cargo build` as well, which is not wanted. The git-fetch
+# setting is the other way round, so it lives in that file and not here. The
+# note there records the two libgit2 TLS failures behind it, and why a config
+# file costs less than a `CARGO_*` variable that `Swatinem/rust-cache` hashes
+# into its cache key.
 env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -282,6 +305,10 @@ jobs:
               - 'crates/gres-substrate/**'
               - 'crates/gres-fdw/**'
               - 'crates/gres-conformance/**'
+              - 'scripts/gres-pg-regress-baseline.py'
+              - 'scripts/gres-pg-regress.sh'
+              - 'scripts/tests/gres-pg-regress-behavior.sh'
+              - 'scripts/tests/test_gres_pg_regress_baseline.py'
               - 'scripts/gres-psql-smoke.sh'
               - 'scripts/gres-psql-introspection-smoke.sh'
               - 'scripts/fixtures/gres-psql-introspection.txt'
@@ -318,6 +345,12 @@ jobs:
   rust:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
+    # 90, not 60. Runner speed varies by about 2x for identical work: commit
+    # 13a30156c finished this job in 36 minutes on one run and was killed at
+    # the 60-minute wall on another, and 5699969f5 took 40, 48 and 53 minutes
+    # on three runs of the same tree. With the limit inside that spread the
+    # job failed at random, which reads as a regression in whatever happened
+    # to be pushed. The instrumented coverage build is the slow part.
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -346,9 +379,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}-rust
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      # cargo-llvm-cov and cargo-nextest are pinned here and below, not left
+      # on `@latest`.
+      #
+      # The `taiki-e/install-action@cargo-llvm-cov` tag is a moving tag. It
+      # installs whatever version the action calls latest on the day the job
+      # runs. Coverage is a gate in this workflow (a codecov flag per job), so
+      # a silent cargo-llvm-cov upgrade can move the numbers with no commit to
+      # point at. These pins name the versions CI already installed on
+      # 2026-08-12. Renovate bumps them like any other dependency.
+      #
+      # The pin does NOT protect against a GitHub CDN outage, and it is not
+      # meant to. install-action downloads the release tarball either way, and
+      # it already retries hard: an outer 10-attempt loop around `curl
+      # --retry 10`. In job 94246482239 on 2026-08-12 that spent 66 s on 503
+      # answers before it gave up with curl exit 56. The action's default
+      # `fallback: cargo-binstall` did not help, because the fallback only
+      # runs when the tool or the version is absent from the action's
+      # manifest, never on a download failure. An actions/cache layer was
+      # measured and left out: that download failed once in 27,606 ci jobs
+      # over 24 days, and the install itself takes 211 ms, so a cache would
+      # add a round trip and save nothing.
+      - uses: taiki-e/install-action@v2
         if: matrix.os == 'ubuntu-latest'
-      - uses: taiki-e/install-action@nextest
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
       # rustfmt runs on nightly so `format_code_in_doc_comments` (unstable, set in
       # rustfmt.toml) formats the code inside rustdoc examples too. Run this once
       # on Linux: `cargo fmt --all` can exceed Windows' process command-line limit
@@ -358,10 +416,17 @@ jobs:
       - run: cargo +nightly fmt --all -- --check
         if: matrix.os == 'ubuntu-latest'
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Run WHOLE crates here, never one `--test` target. The raft line used to
+      # read `--test kraft_model`, which is 4 of the crate's 200 tests and one
+      # of the seven files in `crates/raft/tests/`. The other 196 were
+      # invisible to the only job that exists to cover the consensus engine, so
+      # `kraft_engine_sim::repeated_leader_restart_reelects` merged red and
+      # stayed red across several commits. All 200 take about 11 seconds, so a
+      # filter buys no time and hides every file added later.
       - name: Diskless WAL shipping gates
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo nextest run -p crabka-raft --profile ci --test kraft_model
+          cargo nextest run -p crabka-raft --profile ci
           cargo nextest run -p crabka-broker --profile ci --lib diskless
           cargo nextest run -p crabka-verified --profile ci
       # nextest cannot run doctests, so run them explicitly (once, on Linux).
@@ -425,12 +490,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: jvm-differential
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
+          # `cache: gradle` keys a cache of ~/.gradle on tools/oracle's build
+          # scripts and wrapper properties, so a warm run downloads neither the
+          # Gradle distribution nor the oracle's Maven dependencies. Without
+          # it, every run of this job re-downloads both, and that download is
+          # the same single point of failure the pinned tool installs above
+          # describe: on 2026-08-12 it died twice with "curl: (56) Connection
+          # died, tried 5 times before giving up" (jobs 94269069069 and
+          # 94273891809), before a line of Rust or Java was compiled.
+          # `.github/workflows/sdk-java.yml` already caches this way.
+          cache: gradle
       - run: (cd tools/oracle && ./gradlew installDist --no-daemon)
       # Select the JVM-oracle targets explicitly. A workspace-wide
       # `--include-ignored` sweep also runs thousands of ordinary tests and
@@ -715,8 +791,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-core-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Client core integration coverage
         run: |
           mkdir -p coverage
@@ -755,8 +832,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: log-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Log integration coverage
         run: |
           mkdir -p coverage
@@ -797,8 +875,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-consumer-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Client consumer integration coverage
         run: |
           mkdir -p coverage
@@ -840,8 +919,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-streams-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
@@ -916,8 +996,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: grpc-gateway-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: gRPC gateway integration coverage
         run: |
           mkdir -p coverage
@@ -962,8 +1043,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: schema-registry-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Schema registry integration coverage
         run: |
           mkdir -p coverage
@@ -1009,8 +1091,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: traces-conformance
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: TraceQL conformance gate coverage
         run: |
           mkdir -p coverage
@@ -1046,7 +1129,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     services:
       oracle:
         image: postgres:18.4
@@ -1065,7 +1148,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-conformance
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
       - name: Configure end-to-end coverage instrumentation
         run: |
           cargo llvm-cov show-env --sh > "$RUNNER_TEMP/cargo-llvm-cov-env.sh"
@@ -1080,15 +1165,25 @@ jobs:
         run: |
           ./tools/check-pg-compat-matrix.sh --self-test
           ./tools/check-pg-compat-matrix.sh
-      - name: Install psql 18 (pgdg)
+      - name: Install PostgreSQL 18 client and build tools
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update && sudo apt-get install -y postgresql-client-18
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            bison build-essential bzip2 ca-certificates curl flex perl pkg-config \
+            postgresql-client-18
+      - name: pg_regress runner behavior contract
+        run: |
+          bash scripts/tests/gres-pg-regress-behavior.sh
+          python3 -m unittest scripts/tests/test_gres_pg_regress_baseline.py -v
       - name: Install pinned Python PostgreSQL driver
         run: python3 -m pip install --require-hashes --no-deps -r crates/gres-conformance/requirements-driver-smoke.txt
       - run: cargo build --locked -p crabka-cli -p crabka-broker -p crabka-gres -p crabka-gres-activator -p crabka-gres-conformance
+      - name: PostgreSQL 18.4 upstream pg_regress monotone gate
+        env:
+          GRES_PG_REGRESS_ARTIFACT_DIR: target/gres-pg-regress-ci
+        run: ./scripts/gres-pg-regress.sh gres serial
       - name: Captured driver startup replay
         run: CRABKA_GRES_SKIP_BUILD=1 timeout 30s ./scripts/gres-driver-goldens-gate.sh
       - run: ./scripts/gres-psql-smoke.sh
@@ -1114,6 +1209,21 @@ jobs:
           sudo mv /tmp/kind /usr/local/bin/kind
           CRABKA_GRES_KIND_ARTIFACT_DIR=target/gres-coldstart-artifacts \
             ./scripts/gres-coldstart.sh
+      # Gres implements exactly one monetary locale, C -- see the note on
+      # `pgtypes::money`. The service container runs `initdb` under its own
+      # `LANG=en_US.utf8`, so the oracle database inherits `$` as its currency
+      # symbol while Gres, and PostgreSQL's own `NUM_prepare_locale` in the C
+      # locale (formatting.c:5333-5336), emit a single space. That difference
+      # scored six `to_char(..., 'L999')` statements against Gres and measured
+      # the harness rather than the engine. pg_regress avoids it with LC_ALL=C
+      # on its own postmaster, and `scripts/gres-sharded-conformance.sh` already
+      # does this to the sharded oracle. The setting is per-database and is NOT
+      # copied from the template, so the substrate leg's `oracle2` gets its own
+      # `ALTER DATABASE` where it is created.
+      - name: Give the oracle database the one monetary locale Gres has
+        run: |
+          psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+            -v ON_ERROR_STOP=1 -c "ALTER DATABASE postgres SET lc_monetary = 'C'"
       - name: Conformance harness against the parity baseline
         run: |
           ./target/debug/crabka-gres --listen 127.0.0.1:54333 &
@@ -1136,7 +1246,11 @@ jobs:
             --regress-summary regress-parity.md \
             --out parity.json --summary parity.md
       - name: Create a fresh oracle database for the substrate leg
-        run: psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" -c "CREATE DATABASE oracle2"
+        run: |
+          psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+            -v ON_ERROR_STOP=1 -c "CREATE DATABASE oracle2"
+          psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+            -v ON_ERROR_STOP=1 -c "ALTER DATABASE oracle2 SET lc_monetary = 'C'"
       - name: Conformance against the substrate-backed engine
         run: |
           export CRABKA_CLUSTER_ID=00000000-0000-0000-0000-000000000001
@@ -1200,7 +1314,7 @@ jobs:
       - name: Publish parity summary
         if: ${{ !cancelled() }}
         run: cat parity.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish pg_regress adoption summary
+      - name: Publish adopted pg_regress corpus parity summary
         if: ${{ !cancelled() }}
         run: cat regress-parity.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish substrate parity summary
@@ -1256,6 +1370,13 @@ jobs:
           name: gres-coldstart-artifacts
           path: target/gres-coldstart-artifacts
           if-no-files-found: warn
+      - name: Upload PostgreSQL pg_regress artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gres-pg-regress
+          path: target/gres-pg-regress-ci
+          if-no-files-found: error
 
   # Gres integration coverage: the engine, range/control plane, lifecycle
   # services, and CLI have most behavior behind tests/ targets rather than
@@ -1273,8 +1394,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-integration
-      - uses: taiki-e/install-action@nextest
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Gres engine integration coverage
         run: |
           # Range process tests launch the service as a subprocess; nextest
@@ -1325,7 +1447,22 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90 matches the other instrumented-coverage job above, which carries the
+    # same `-C instrument-coverage` build. Do NOT raise this again: 60 was
+    # tried, then 90, and the number is not the problem.
+    #
+    # Measured on 2026-08-13. Both shards were cancelled at 60m, raised to 90m,
+    # and cancelled again at 90m. The runner's own shutdown names the cause:
+    # "Terminate orphan process: ... (loki_differential-...)", four of them
+    # still alive. `crates/integration-tests/tests/loki_differential.rs` starts
+    # a `mirror.gcr.io/grafana/loki` container per test through testcontainers,
+    # and an image pull that never completes has no deadline to stop it. The
+    # job is not slow, it is waiting.
+    #
+    # The fix belongs in the test: a start deadline on the container, or moving
+    # this suite out of the coverage shard. A larger timeout only makes the
+    # wait longer.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -1339,8 +1476,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: workspace-integration-${{ matrix.shard }}
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Build subprocess dependencies
         run: cargo build --locked -p crabka-cli --bin crabka -p crabka-gres --bin crabka-gres
       - name: Workspace integration coverage (shard ${{ matrix.shard }}/2)
@@ -1505,8 +1643,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: admin-ui-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Admin UI integration coverage
         run: |
           mkdir -p coverage
@@ -1598,8 +1737,9 @@ jobs:
       # inside containers resolve the same name via `--add-host`). The
       # host itself has no such resolution on Linux runners, so add it.
       - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Preload Docker images
         run: |
           docker pull mirror.gcr.io/confluentinc/cp-kafka:6.1.1
@@ -1671,8 +1811,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: broker-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Broker + client-admin integration coverage
         run: |
           mkdir -p coverage
@@ -1726,8 +1867,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: operator-integration
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.143
       - name: Operator reconcile integration coverage
         run: |
           mkdir -p coverage
@@ -1791,7 +1933,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: metrics-conformance
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
       - name: PromQL conformance gate
         run: cargo nextest run -p crabka-promql --profile ci --features experimental-functions --test conformance_report
       - name: Upload conformance report

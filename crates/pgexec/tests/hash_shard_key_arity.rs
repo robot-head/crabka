@@ -59,10 +59,14 @@ fn engine_with_catalog_sharding(
         kv.as_ref(),
         &RelationName::public("t"),
         columns,
-        TableOptions { sharded: true },
+        TableOptions {
+            sharded: true,
+            row_security: false,
+            force_row_security: false,
+        },
         Some(sharding),
         Vec::new(),
-        crabka_pgcatalog::TableIdSource::Counter,
+        crabka_pgcatalog::TableCreation::bootstrap(),
     )
     .expect("catalog write batch");
     kv.write_batch(&ops).expect("attach sharding");
@@ -166,7 +170,9 @@ async fn a_regclass_shard_key_hashes_on_the_relation_oid() {
         .await
         .expect("a regclass shard key has a write-path encoding");
 
-    let target_oid = i32::try_from(
+    // A `regclass` value carries the table's `pg_class` oid, which is its
+    // catalog id inside the table oid band — not the bare id.
+    let target_oid = crabka_pgexec::table_relation_oid(
         engine
             .catalog_table(&RelationName::public("target"))
             .expect("catalog")
@@ -196,7 +202,11 @@ fn the_catalog_api_refuses_a_multi_column_hash_shard_key() {
         &kv,
         &RelationName::public("existing"),
         columns.clone(),
-        TableOptions { sharded: true },
+        TableOptions {
+            sharded: true,
+            row_security: false,
+            force_row_security: false,
+        },
     )
     .expect("create the table the sharding is attached to");
 
@@ -205,10 +215,14 @@ fn the_catalog_api_refuses_a_multi_column_hash_shard_key() {
             &kv,
             &RelationName::public("t"),
             columns,
-            TableOptions { sharded: true },
+            TableOptions {
+                sharded: true,
+                row_security: false,
+                force_row_security: false,
+            },
             Some(&hash_sharding(&["a", "b"])),
             Vec::new(),
-            crabka_pgcatalog::TableIdSource::Counter,
+            crabka_pgcatalog::TableCreation::bootstrap(),
         )
         .expect_err("a multi-column hash shard key has no row encoding"),
         crabka_pgcatalog::set_table_sharding_ops(

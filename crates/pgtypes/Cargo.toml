@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 bigdecimal = { workspace = true }
 dashu-float = { workspace = true }
 jiff = { workspace = true }
+quick-xml = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

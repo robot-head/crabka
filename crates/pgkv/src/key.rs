@@ -160,6 +160,19 @@ pub fn table_prefix(table_id: u32) -> Vec<u8> {
     k
 }
 
+/// Exclusive upper bound of a table's primary index: the prefix of the index
+/// that would follow it, which no primary-index key can reach.
+#[must_use]
+pub fn table_prefix_end(table_id: u32) -> Vec<u8> {
+    // Checked at compile time, so the bound needs no runtime fallibility.
+    const AFTER_PRIMARY: u32 = INDEX_PRIMARY + 1;
+
+    let mut k = Vec::with_capacity(8);
+    put_u32(&mut k, table_id);
+    put_u32(&mut k, AFTER_PRIMARY);
+    k
+}
+
 /// Full key for one row: table prefix followed by the order-preserving rowid.
 #[must_use]
 pub fn row_key(table_id: u32, rowid: u64) -> Vec<u8> {
@@ -440,18 +453,66 @@ pub fn meta_next_table_id_key() -> Vec<u8> {
     k
 }
 
-/// Key for a user-defined type stored in the catalog: `/0/usertype/<name>`.
+/// Key for a user-defined type stored in the catalog:
+/// `/0/usertype/<schema><name>`, with both identity parts length-prefixed.
 #[must_use]
-pub fn user_type_key(name: &str) -> Vec<u8> {
+pub fn user_type_key(schema: &str, name: &str) -> Vec<u8> {
+    let mut k = user_type_prefix();
+    push_key_part(&mut k, schema);
+    push_key_part(&mut k, name);
+    k
+}
+
+/// Pre-structured key used by existing catalogs. Callers retain this only as a
+/// read/delete fallback while new records use [`user_type_key`].
+#[must_use]
+pub fn legacy_user_type_key(name: &str) -> Vec<u8> {
     let mut k = user_type_prefix();
     k.extend_from_slice(name.as_bytes());
     k
+}
+
+/// Recover the structured identity from a new-format user-type key.
+#[must_use]
+pub fn user_type_key_parts(key: &[u8]) -> Option<(&str, &str)> {
+    let prefix = user_type_prefix();
+    let suffix = key.strip_prefix(prefix.as_slice())?;
+    let parts = key_parts(suffix, 2)?;
+    Some((parts[0], parts[1]))
 }
 
 /// Shared prefix for every user-defined type, for the hydration scan.
 #[must_use]
 pub fn user_type_prefix() -> Vec<u8> {
     system_prefix("usertype")
+}
+
+/// Key for a `CREATE CAST` conversion: `/0/cast/<source oid><target oid>`,
+/// both big-endian.
+///
+/// `pg_cast` is keyed on the ordered type pair upstream too — `castsource` and
+/// `casttarget` carry the only unique index on the catalog — so the pair *is*
+/// the identity and no oid counter is needed to find a row again.
+#[must_use]
+pub fn cast_key(source: u32, target: u32) -> Vec<u8> {
+    let mut k = cast_prefix();
+    k.extend_from_slice(&source.to_be_bytes());
+    k.extend_from_slice(&target.to_be_bytes());
+    k
+}
+
+/// Shared prefix for every user-defined cast, for the catalog scan.
+#[must_use]
+pub fn cast_prefix() -> Vec<u8> {
+    system_prefix("cast")
+}
+
+/// Key for the global next-cast-oid counter: `/0/meta/next_cast_oid`.
+#[must_use]
+pub fn meta_next_cast_oid_key() -> Vec<u8> {
+    let mut k = system_prefix("meta");
+    k.extend_from_slice(b"next_cast_oid");
+    k
 }
 
 /// Key for the global next-user-type-oid counter: `/0/meta/next_type_oid`.
@@ -752,6 +813,52 @@ mod tests {
         assert!(
             secondary_index_entry_prefix(7, 1, &[iv("1 mon")])
                 != secondary_index_entry_prefix(7, 1, &[iv("31 days")])
+        );
+    }
+
+    /// An index key is the row encoding, so a type that the row encoding cannot
+    /// tell apart is a type the index cannot tell apart either. `oidvector` and
+    /// `integer[]` are different types that no operator compares, and they now
+    /// build different keys — a probe for one can no longer land on a row of
+    /// the other, and a unique index over a vector column no longer shares a
+    /// key space with an array of the same numbers.
+    #[test]
+    fn a_vector_and_an_array_of_the_same_numbers_build_different_index_keys() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayDim, ArrayValue, Datum, ElemType};
+
+        let value = ArrayValue::with_dims(
+            ElemType::Int4,
+            vec![Datum::Int4(1), Datum::Int4(2)],
+            vec![ArrayDim::new(0, 2)],
+        );
+        let vector = Datum::OidVector(value.clone());
+        let array = Datum::Array(value);
+
+        assert!(vector != array);
+        assert!(
+            secondary_index_entry_prefix(7, 1, std::slice::from_ref(&vector))
+                != secondary_index_entry_prefix(7, 1, std::slice::from_ref(&array))
+        );
+        // `int2vector` shares the datum variant, so the element type is what
+        // separates the two vector types — in the key as in the row.
+        let int2vector = Datum::OidVector(ArrayValue::with_dims(
+            ElemType::Int2,
+            vec![Datum::Int2(1), Datum::Int2(2)],
+            vec![ArrayDim::new(0, 2)],
+        ));
+        assert!(
+            secondary_index_entry_prefix(7, 1, std::slice::from_ref(&vector))
+                != secondary_index_entry_prefix(7, 1, std::slice::from_ref(&int2vector))
+        );
+        assert!(
+            secondary_index_rowid_of(
+                7,
+                1,
+                &secondary_index_entry_key(7, 1, std::slice::from_ref(&vector), 5)
+            )
+            .expect("rowid")
+                == 5
         );
     }
 

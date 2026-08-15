@@ -39,7 +39,11 @@ jobs:
         with:
           toolchain: '1.97.1'
           components: clippy
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          # Pinned, not `@latest`: see the note in `ci.yml`. A moving test
+          # runner is a silent change to how the suite is selected and retried.
+          tool: cargo-nextest@0.9.143
       - name: Install nightly rustfmt
         run: rustup toolchain install nightly --profile minimal --component rustfmt
       - name: Verify Rust SDK crates

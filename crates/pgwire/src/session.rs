@@ -14,8 +14,9 @@ use tracing::Instrument as _;
 
 use crate::{
     engine::{
-        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification, QueryResult,
-        ResultPage, ResultSink, Session, TxStatus,
+        BoundParam, CloseTarget, CopyInResponse, CopyOutStream, Engine, ExecuteOutcome,
+        Notification, QueryResult, ReportedParameter, ResultPage, ResultSink, Session,
+        SimpleQueryStop, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
     messages::{
@@ -44,8 +45,10 @@ pub enum AuthMode {
 pub struct SessionConfig {
     pub auth: AuthMode,
     pub max_message_len: usize,
-    /// `ParameterStatus` values announced at session start. Clients parse
-    /// `server_version` and depend on `client_encoding=UTF8`.
+    /// The server-wide floor of the startup `ParameterStatus` burst; see
+    /// [`default_server_params`]. Clients parse `server_version` and depend on
+    /// `client_encoding=UTF8`. A session announces these unless its own
+    /// startup packet or its engine has something truer to say.
     pub server_params: Vec<(String, String)>,
     /// How much of a client-supplied W3C trace context statements on this
     /// connection may inherit. See [`IngressTracePolicy`].
@@ -64,20 +67,124 @@ impl SessionConfig {
     }
 }
 
+/// The static floor of the startup `ParameterStatus` burst.
+///
+/// `PostgreSQL` marks fifteen GUCs `GUC_REPORT` in `guc_tables.c` and announces
+/// every one of them at startup; a live 18.4 backend sends exactly those
+/// fifteen. Twelve are here. The three that are not are the three no gres
+/// session can answer honestly:
+///
+/// * `is_superuser` and `session_authorization` are authorization state the
+///   engine owns, and the engine does not yet learn who connected — the wire
+///   layer never passes `user` down, so a gres session's user is always
+///   `public`. Announcing the startup packet's `user` would contradict
+///   `SELECT session_user` on the very same connection.
+/// * `scram_iterations` sets the iteration count used when *generating* a SCRAM
+///   secret. Gres never generates one; its verifiers arrive already built. The
+///   parameter is not a GUC gres has, so `SHOW scram_iterations` fails, and a
+///   `ParameterStatus` for it would be a claim about a capability that is not
+///   there.
+///
+/// Every parameter that is here is one gres can also answer through `SHOW`,
+/// which is the test each of them had to pass.
+///
+/// The values are the server's, not the session's: a client that set one of
+/// them in its startup packet is answered from
+/// [`Session::reported_parameters`] instead, and for
+/// [`VERBATIM_REPORTED_PARAMS`] from the startup packet itself.
 #[must_use]
 pub fn default_server_params() -> Vec<(String, String)> {
     [
-        ("server_version", "18.0"),
+        // `PQserverVersion` parses this, so it has to name the same release as
+        // `version()` and `server_version_num`, which are both 18.4.
+        ("server_version", "18.4"),
         ("server_encoding", "UTF8"),
         ("client_encoding", "UTF8"),
+        ("application_name", ""),
         ("DateStyle", "ISO, MDY"),
+        ("IntervalStyle", "postgres"),
+        ("TimeZone", "UTC"),
+        ("search_path", "\"$user\", public"),
+        ("default_transaction_read_only", "off"),
+        ("in_hot_standby", "off"),
         ("integer_datetimes", "on"),
         ("standard_conforming_strings", "on"),
-        ("TimeZone", "UTC"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect()
+}
+
+/// Reported parameters an engine stores exactly as the startup packet spelled
+/// them, so the wire layer can announce the client's own value without having
+/// to ask what the engine made of it.
+///
+/// The rest normalise, and only the engine knows the canonical form: measured
+/// against `PostgreSQL` 18.4, a startup `DateStyle=Postgres` is announced as
+/// `Postgres, MDY`, `TimeZone=utc` as `UTC`, and `IntervalStyle=SQL_STANDARD`
+/// as `sql_standard`. Those come from [`Session::reported_parameters`].
+const VERBATIM_REPORTED_PARAMS: [&str; 2] = ["application_name", "search_path"];
+
+/// A connection's `ParameterStatus` bookkeeping: the engine's change stream,
+/// and the value last announced for each reported parameter.
+///
+/// The last-announced map is what makes a change *report* rather than an echo.
+/// `PostgreSQL` keeps a `reported_value` per GUC and stays silent when the
+/// current value already matches it, so rolling a `SET LOCAL` back to the value
+/// the client was already told produces no message at all. Holding the same
+/// map here means an engine can push unconditionally on every assignment and
+/// still put exactly `PostgreSQL`'s messages on the wire.
+#[derive(Debug, Default)]
+struct ParameterReporter {
+    changes: Option<mpsc::Receiver<ReportedParameter>>,
+    /// Keyed by the lowercased name, because GUC names are case-insensitive and
+    /// an engine may not spell `DateStyle` the way the startup burst did. The
+    /// stored name is the spelling this connection has already used, which is
+    /// the one it keeps using.
+    announced: std::collections::HashMap<String, (String, String)>,
+}
+
+impl ParameterReporter {
+    /// Announce a parameter and remember it as this connection's current value.
+    fn announce(&mut self, out: &mut BytesMut, name: &str, value: &str) {
+        let key = name.to_ascii_lowercase();
+        let name = match self.announced.get(&key) {
+            Some((announced_name, announced_value)) => {
+                if announced_value == value {
+                    return;
+                }
+                announced_name.clone()
+            }
+            None => name.to_string(),
+        };
+        backend::parameter_status(out, &name, value);
+        self.announced.insert(key, (name, value.to_string()));
+    }
+
+    /// Drain the engine's queue and write the `ParameterStatus` messages the
+    /// round owes, collapsing repeats of one parameter to its final value.
+    ///
+    /// Order is the order each parameter first moved. A live 18.4 backend emits
+    /// the reverse, because `ReportChangedGUCOptions` walks a list it builds by
+    /// prepending; no client can tell, since the messages name themselves.
+    fn flush(&mut self, out: &mut BytesMut) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        let mut round: Vec<ReportedParameter> = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            match round
+                .iter_mut()
+                .find(|seen| seen.name.eq_ignore_ascii_case(&change.name))
+            {
+                Some(seen) => seen.value = change.value,
+                None => round.push(change),
+            }
+        }
+        for change in round {
+            self.announce(out, &change.name, &change.value);
+        }
+    }
 }
 
 // ── Extended-query state ────────────────────────────────────────────────────
@@ -127,8 +234,14 @@ struct CopyInState {
 /// (simple protocol) or must wait for the client's Sync (extended protocol).
 #[derive(Debug)]
 enum CopyInTarget {
-    /// Simple-protocol Query: complete with [`Session::copy_in`] and the SQL text.
+    /// Simple-protocol Query whose whole text is the copy: complete with
+    /// [`Session::copy_in`] and the SQL text, and owe nothing after it.
     Statement { sql: String },
+    /// A copy the engine stopped at part-way through a multi-statement
+    /// simple-protocol Query: complete it the same way, then resume the query
+    /// string at the statement after `statement_index`. Only the resumption
+    /// finishes the Query, so the `ReadyForQuery` is owed there, not here.
+    Batched { sql: String, statement_index: usize },
     /// Extended-protocol Execute: complete with [`Session::copy_in_portal`].
     Portal { name: String },
 }
@@ -400,7 +513,7 @@ async fn handle_execute<Sess: Session>(
     };
     write_notices(out, notices);
     if let ExecuteOutcome::CopyIn { response } = outcome {
-        write_copy_in_response(out, &response);
+        backend::copy_in_response(out, response.overall_format, &response.column_formats);
         return Ok(Some(CopyInState {
             target: CopyInTarget::Portal {
                 name: portal_name.to_string(),
@@ -418,11 +531,134 @@ async fn handle_execute<Sess: Session>(
     Ok(None)
 }
 
+/// What a simple-protocol Query turned out to be, once the engine has been
+/// asked whether it is a COPY the wire layer must drive itself.
+enum SimpleCopy {
+    /// COPY FROM STDIN: the connection enters copy-in mode.
+    In(CopyInResponse),
+    /// COPY TO STDOUT, already run to completion by the engine.
+    Out(CopyOutStream),
+    /// Ordinary SQL, to be executed through [`Session::simple_query_into`].
+    None,
+}
+
+/// Ask the engine whether `sql` is a COPY, under the same cancellation
+/// discipline as any other engine call: a `CancelRequest` that arrives while
+/// the probe is in flight drops the future and reports `57014`.
+async fn begin_simple_copy<Sess: Session>(
+    session: &mut Sess,
+    sql: &str,
+    cancel: &SessionCancel,
+) -> Result<SimpleCopy, PgError> {
+    let token = cancel.begin_query();
+    let started = tokio::select! {
+        // biased + cancellation-first; see handle_execute.
+        biased;
+        () = token.cancelled() => None,
+        r = session.begin_copy_in(sql) => Some(r),
+    };
+    let Some(started) = started else {
+        session.cancel_current_query().await;
+        return Err(query_canceled());
+    };
+    if let Some(response) = started? {
+        return Ok(SimpleCopy::In(response));
+    }
+
+    let token = cancel.begin_query();
+    let started = tokio::select! {
+        biased;
+        () = token.cancelled() => None,
+        r = session.begin_copy_out(sql) => Some(r),
+    };
+    let Some(started) = started else {
+        session.cancel_current_query().await;
+        return Err(query_canceled());
+    };
+    Ok(started?.map_or(SimpleCopy::None, SimpleCopy::Out))
+}
+
 fn query_canceled() -> PgError {
     PgError::error(
         sqlstate::QUERY_CANCELED,
         "canceling statement due to user request",
     )
+}
+
+/// How a run of a simple-query string ended, and therefore what the connection
+/// loop owes the client next.
+enum BatchOutcome {
+    /// Every remaining statement ran. `ReadyForQuery` is owed.
+    Done,
+    /// A `COPY … FROM STDIN` was reached at this index and its
+    /// `CopyInResponse` is written. Nothing else is owed until the copy
+    /// finishes and the string resumes.
+    CopyIn { statement_index: usize },
+    /// A diagnostic is written. `ReadyForQuery` is owed.
+    Failed,
+    /// A fatal diagnostic is written; the connection is over.
+    Fatal(PgError),
+}
+
+/// Run `sql` from `from_statement` on, writing its results into `out`.
+///
+/// Everything this writes is buffered — the caller flushes, because only the
+/// caller knows whether a `ReadyForQuery` belongs on the end of the same write.
+async fn run_simple_batch<Sess: Session>(
+    session: &mut Sess,
+    sql: &str,
+    from_statement: usize,
+    cancel: &SessionCancel,
+    statement_span: &tracing::Span,
+    notices: &mut Option<mpsc::Receiver<PgError>>,
+    out: &mut BytesMut,
+) -> BatchOutcome {
+    let token = cancel.begin_query();
+    let mut sink = WireResultSink {
+        out,
+        notices: notices.as_mut(),
+        rows: 0,
+        pages: 0,
+    };
+    let outcome = tokio::select! {
+        // biased + cancellation-first; see handle_execute.
+        biased;
+        () = token.cancelled() => None,
+        r = session
+            .simple_query_batch_into(sql, from_statement, 1024, &mut sink)
+            .instrument(statement_span.clone()) => Some(r),
+    };
+    // Read off the sink's running totals before it is dropped: the pages
+    // themselves get no spans, only this one summary.
+    let (rows, pages) = (sink.rows, sink.pages);
+    let outcome = if let Some(outcome) = outcome {
+        outcome
+    } else {
+        session.cancel_current_query().await;
+        Err(query_canceled())
+    };
+    telemetry::record_statement_rows(statement_span, rows, pages);
+    match outcome {
+        Ok(SimpleQueryStop::Done) => BatchOutcome::Done,
+        Ok(SimpleQueryStop::CopyIn {
+            statement_index,
+            response,
+        }) => {
+            write_notices(out, notices.as_mut());
+            backend::copy_in_response(out, response.overall_format, &response.column_formats);
+            BatchOutcome::CopyIn { statement_index }
+        }
+        Err(e) => {
+            telemetry::record_statement_error(statement_span, &e);
+            write_notices(out, notices.as_mut());
+            backend::error_response(out, &e);
+            if e.severity == Severity::Fatal {
+                BatchOutcome::Fatal(e)
+            } else {
+                BatchOutcome::Failed
+            }
+        }
+    }
 }
 
 fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result<(), PgError> {
@@ -439,9 +675,10 @@ fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result
         }
         ExecuteOutcome::CommandComplete { tag } => backend::command_complete(out, &tag),
         ExecuteOutcome::EmptyQuery => backend::empty_query_response(out),
-        ExecuteOutcome::CopyIn { .. }
-        | ExecuteOutcome::CopyOut { .. }
-        | ExecuteOutcome::Notification { .. } => {
+        ExecuteOutcome::CopyOut { stream } => write_copy_out(out, &stream),
+        // CopyIn is intercepted by `handle_execute`, which owns the copy-in
+        // state machine, so it never reaches the encoder.
+        ExecuteOutcome::CopyIn { .. } | ExecuteOutcome::Notification { .. } => {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
                 "execute outcome is reserved for a future protocol extension",
@@ -451,8 +688,22 @@ fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result
     Ok(())
 }
 
-fn write_copy_in_response(out: &mut BytesMut, response: &CopyInResponse) {
-    backend::copy_in_response(out, response.overall_format, &response.column_formats);
+/// Write a whole COPY TO STDOUT exchange: `CopyOutResponse`, one `CopyData` per
+/// row, `CopyDone`, then the `CommandComplete` that ends the command.
+///
+/// The caller owes whatever `ReadyForQuery` the protocol requires — the simple
+/// protocol one immediately, the extended protocol one at the client's Sync.
+fn write_copy_out(out: &mut BytesMut, copy: &CopyOutStream) {
+    backend::copy_out_response(
+        out,
+        copy.response.overall_format,
+        &copy.response.column_formats,
+    );
+    for row in &copy.rows {
+        backend::copy_data(out, row);
+    }
+    backend::copy_done(out);
+    backend::command_complete(out, &copy.tag);
 }
 
 // ── Authentication helpers ──────────────────────────────────────────────────
@@ -595,17 +846,71 @@ fn write_notices(out: &mut BytesMut, notices: Option<&mut mpsc::Receiver<PgError
     }
 }
 
+/// Write the startup `ParameterStatus` burst for one connection.
+///
+/// The burst is the server's static set, with two things laid over it. The
+/// engine's own [`Session::reported_parameters`] win outright, because the
+/// engine is what applied the startup packet and what normalised it. For the
+/// [`VERBATIM_REPORTED_PARAMS`] an engine that reports nothing still gets the
+/// client's own value echoed, which is safe precisely because those two are
+/// stored unchanged. A reported parameter the static set does not carry is
+/// announced after it, so an engine can grow the set without the wire layer
+/// changing.
+fn announce_startup_parameters<Sess: Session>(
+    out: &mut BytesMut,
+    parameters: &mut ParameterReporter,
+    config: &SessionConfig,
+    startup_params: &[(String, String)],
+    session: &Sess,
+) {
+    let from_engine = session.reported_parameters();
+    let lookup = |named: &str, pairs: &[(String, String)]| {
+        pairs
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(named))
+            .map(|(_, value)| value.clone())
+    };
+    for (name, value) in &config.server_params {
+        let announced = from_engine
+            .iter()
+            .find(|reported| reported.name.eq_ignore_ascii_case(name))
+            .map(|reported| reported.value.clone())
+            .or_else(|| {
+                VERBATIM_REPORTED_PARAMS
+                    .iter()
+                    .any(|verbatim| verbatim.eq_ignore_ascii_case(name))
+                    .then(|| lookup(name, startup_params))
+                    .flatten()
+            })
+            .unwrap_or_else(|| value.clone());
+        parameters.announce(out, name, &announced);
+    }
+    for reported in &from_engine {
+        parameters.announce(out, &reported.name, &reported.value);
+    }
+}
+
 /// Write the `ReadyForQuery` that closes an exchange, preceded by any pending
-/// `NoticeResponse` and `NotificationResponse` messages.
+/// `NoticeResponse`, `NotificationResponse` and `ParameterStatus` messages.
 ///
 /// Postgres delivers notifications only between transactions. A session that
 /// is idle *in* a transaction block accumulates them until the block ends, so
 /// this function drains the queue only when the reported status is `Idle`.
+///
+/// Changed `GUC_REPORT` parameters go out last, immediately ahead of
+/// `ReadyForQuery`, which is where a backend puts them:
+/// `ReportChangedGUCOptions` is the last thing `PostgresMain` does before it
+/// calls `ReadyForQuery`. That placement is what batches a multi-statement
+/// `Query` or a pipeline into one report per round instead of one per
+/// statement — measured on 18.4, `SELECT 1; SET application_name='a2';
+/// SELECT 2` puts its single `ParameterStatus` after the *last* statement's
+/// `CommandComplete`.
 fn write_ready<Sess: Session>(
     out: &mut BytesMut,
     session: &Sess,
     notices: Option<&mut mpsc::Receiver<PgError>>,
     notifications: Option<&mut mpsc::Receiver<Notification>>,
+    parameters: &mut ParameterReporter,
 ) {
     write_notices(out, notices);
     let status = session.tx_status();
@@ -621,6 +926,7 @@ fn write_ready<Sess: Session>(
             );
         }
     }
+    parameters.flush(out);
     backend::ready_for_query(out, status);
 }
 
@@ -717,16 +1023,38 @@ where
     if !authenticate(&mut stream, &startup_params, &config, &mut out, &mut inbuf).await? {
         return Ok(());
     }
-    for (name, value) in &config.server_params {
-        backend::parameter_status(&mut out, name, value);
-    }
-    backend::backend_key_data(&mut out, cancel.pid, cancel.secret);
-
     // One session per connection; it owns the (currently trivial) transaction
     // state and is threaded by `&mut` through the message loop. The pid it is
-    // built with is the one just announced in `BackendKeyData`, so a
+    // built with is the one announced in `BackendKeyData` below, so a
     // self-notify reaches the client stamped with its own pid.
+    //
+    // Nothing is announced until the engine has taken the startup packet and
+    // finished starting up, because until then there is nothing truthful to
+    // announce: the engine applies these parameters as the session's defaults
+    // and normalises them on the way in. It is also what a backend does with a
+    // startup packet it rejects — a bad GUC there is fatal *before* the
+    // `ParameterStatus` burst, so the client gets `ErrorResponse` and nothing
+    // else.
     let mut session = engine.connect_with_pid(cancel.pid);
+    // `database` is not a GUC, so it does not go through `startup_parameter`;
+    // it is the session's identity and the engine is told it outright. Dropping
+    // it here is what made every session believe it was in `postgres`.
+    if let Some((_, database)) = startup_params
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("database"))
+    {
+        session.set_database(database);
+    }
+    for (name, value) in &startup_params {
+        if !matches!(name.as_str(), "user" | "database")
+            && let Err(error) = session.startup_parameter(name, value).await
+        {
+            backend::error_response(&mut out, &error);
+            stream.write_all(&out).await?;
+            session.terminate().await;
+            return Ok(());
+        }
+    }
     if let Err(error) = session.startup().await {
         backend::error_response(&mut out, &error);
         stream.write_all(&out).await?;
@@ -737,8 +1065,26 @@ where
     // once here avoids a second borrow of `session` during protocol handling.
     let mut notifications = session.take_notifications();
     let mut notices = session.take_notices();
+    let mut parameters = ParameterReporter {
+        changes: session.take_parameter_changes(),
+        ..ParameterReporter::default()
+    };
+    announce_startup_parameters(
+        &mut out,
+        &mut parameters,
+        &config,
+        &startup_params,
+        &session,
+    );
+    backend::backend_key_data(&mut out, cancel.pid, cancel.secret);
 
-    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+    write_ready(
+        &mut out,
+        &session,
+        notices.as_mut(),
+        notifications.as_mut(),
+        &mut parameters,
+    );
     stream.write_all(&out).await?;
     out.clear();
 
@@ -790,7 +1136,10 @@ where
                             r = async {
                                 match &target {
                                     CopyInTarget::Statement { sql } => {
-                                        session.copy_in(sql, chunks).await
+                                        session.copy_in(sql, 0, chunks).await
+                                    }
+                                    CopyInTarget::Batched { sql, statement_index } => {
+                                        session.copy_in(sql, *statement_index, chunks).await
                                     }
                                     CopyInTarget::Portal { name } => {
                                         session.copy_in_portal(name, chunks).await
@@ -805,6 +1154,7 @@ where
                             Err(query_canceled())
                         };
                         write_notices(&mut out, notices.as_mut());
+                        let copy_succeeded = matches!(outcome, Ok(QueryResult::Command { .. }));
                         match outcome {
                             Ok(QueryResult::Command { tag }) => {
                                 backend::command_complete(&mut out, &tag);
@@ -828,6 +1178,50 @@ where
                                 }
                             }
                         }
+                        // A copy the engine stopped at part-way through a query
+                        // string leaves the rest of that string to run, and the
+                        // rest may hold another copy. Resume until the string is
+                        // finished or stops again; only then is anything owed.
+                        if copy_succeeded
+                            && let CopyInTarget::Batched {
+                                sql,
+                                statement_index,
+                            } = &target
+                        {
+                            let span = telemetry::statement_span(StatementProtocol::Simple);
+                            let batch = run_simple_batch(
+                                &mut session,
+                                sql,
+                                statement_index + 1,
+                                &cancel,
+                                &span,
+                                &mut notices,
+                                &mut out,
+                            )
+                            .await;
+                            match batch {
+                                BatchOutcome::CopyIn {
+                                    statement_index: next,
+                                } => {
+                                    stream.write_all(&out).await?;
+                                    out.clear();
+                                    copy_in = Some(CopyInState {
+                                        target: CopyInTarget::Batched {
+                                            sql: sql.clone(),
+                                            statement_index: next,
+                                        },
+                                        chunks: Vec::new(),
+                                    });
+                                    continue;
+                                }
+                                BatchOutcome::Fatal(e) => {
+                                    telemetry::record_error(&session_span, &e);
+                                    stream.write_all(&out).await?;
+                                    return Ok(());
+                                }
+                                BatchOutcome::Done | BatchOutcome::Failed => {}
+                            }
+                        }
                         // Extended protocol: the client's Sync (sent after
                         // CopyDone) produces ReadyForQuery; simple protocol owes
                         // it now.
@@ -837,6 +1231,7 @@ where
                                 &session,
                                 notices.as_mut(),
                                 notifications.as_mut(),
+                                &mut parameters,
                             );
                         }
                         stream.write_all(&out).await?;
@@ -860,6 +1255,7 @@ where
                                 &session,
                                 notices.as_mut(),
                                 notifications.as_mut(),
+                                &mut parameters,
                             );
                         }
                         stream.write_all(&out).await?;
@@ -890,27 +1286,16 @@ where
                     // the parser skips comments without emitting a token, and it
                     // keeps the original string so a syntax error's byte offset
                     // still points where the client expects.
-                    let _ingress = telemetry::ingress_from_sql(
-                        config.ingress_trace,
-                        &sql,
-                        &statement_span,
-                    );
-                    let token = cancel.begin_query();
-                    let copy_start = tokio::select! {
-                        biased;
-                        () = token.cancelled() => None,
-                        r = session.begin_copy_in(&sql).instrument(statement_span.clone()) => Some(r),
-                    };
-                    let copy_start = if let Some(copy_start) = copy_start {
-                        copy_start
-                    } else {
-                        session.cancel_current_query().await;
-                        Err(query_canceled())
-                    };
-                    match copy_start {
-                        Ok(Some(response)) => {
+                    let _ingress =
+                        telemetry::ingress_from_sql(config.ingress_trace, &sql, &statement_span);
+                    match begin_simple_copy(&mut session, &sql, &cancel).await {
+                        Ok(SimpleCopy::In(response)) => {
                             write_notices(&mut out, notices.as_mut());
-                            write_copy_in_response(&mut out, &response);
+                            backend::copy_in_response(
+                                &mut out,
+                                response.overall_format,
+                                &response.column_formats,
+                            );
                             stream.write_all(&out).await?;
                             out.clear();
                             copy_in = Some(CopyInState {
@@ -919,7 +1304,21 @@ where
                             });
                             continue;
                         }
-                        Ok(None) => {}
+                        Ok(SimpleCopy::Out(copy)) => {
+                            write_notices(&mut out, notices.as_mut());
+                            write_copy_out(&mut out, &copy);
+                            write_ready(
+                                &mut out,
+                                &session,
+                                notices.as_mut(),
+                                notifications.as_mut(),
+                                &mut parameters,
+                            );
+                            stream.write_all(&out).await?;
+                            out.clear();
+                            continue;
+                        }
+                        Ok(SimpleCopy::None) => {}
                         Err(e) => {
                             telemetry::record_statement_error(&statement_span, &e);
                             write_notices(&mut out, notices.as_mut());
@@ -929,54 +1328,53 @@ where
                                 &session,
                                 notices.as_mut(),
                                 notifications.as_mut(),
+                                &mut parameters,
                             );
                             stream.write_all(&out).await?;
                             out.clear();
                             continue;
                         }
                     }
-                    let token = cancel.begin_query();
-                    let mut sink = WireResultSink {
-                        out: &mut out,
-                        notices: notices.as_mut(),
-                        rows: 0,
-                        pages: 0,
-                    };
-                    let outcome = tokio::select! {
-                        // biased + cancellation-first; see handle_execute.
-                        biased;
-                        () = token.cancelled() => None,
-                        r = session
-                            .simple_query_into(&sql, 1024, &mut sink)
-                            .instrument(statement_span.clone()) => Some(r),
-                    };
-                    // Read off the sink's running totals before it is dropped:
-                    // the pages themselves get no spans, only this one summary.
-                    let (rows, pages) = (sink.rows, sink.pages);
-                    let outcome = if let Some(outcome) = outcome {
-                        outcome
-                    } else {
-                        session.cancel_current_query().await;
-                        Err(query_canceled())
-                    };
-                    telemetry::record_statement_rows(&statement_span, rows, pages);
-                    match outcome {
-                        Ok(()) => {}
-                        Err(e) => {
-                            telemetry::record_statement_error(&statement_span, &e);
-                            write_notices(&mut out, notices.as_mut());
-                            backend::error_response(&mut out, &e);
-                            if e.severity == Severity::Fatal {
-                                // A fatal diagnostic ends the connection, so it
-                                // is the session's outcome too — the only thing
-                                // that marks `gres.session` failed.
-                                telemetry::record_error(&session_span, &e);
-                                stream.write_all(&out).await?;
-                                return Ok(());
-                            }
+                    let batch = run_simple_batch(
+                        &mut session,
+                        &sql,
+                        0,
+                        &cancel,
+                        &statement_span,
+                        &mut notices,
+                        &mut out,
+                    )
+                    .await;
+                    match batch {
+                        BatchOutcome::CopyIn { statement_index } => {
+                            stream.write_all(&out).await?;
+                            out.clear();
+                            copy_in = Some(CopyInState {
+                                target: CopyInTarget::Batched {
+                                    sql,
+                                    statement_index,
+                                },
+                                chunks: Vec::new(),
+                            });
+                            continue;
                         }
+                        BatchOutcome::Fatal(e) => {
+                            // A fatal diagnostic ends the connection, so it is
+                            // the session's outcome too — the only thing that
+                            // marks `gres.session` failed.
+                            telemetry::record_error(&session_span, &e);
+                            stream.write_all(&out).await?;
+                            return Ok(());
+                        }
+                        BatchOutcome::Done | BatchOutcome::Failed => {}
                     }
-                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+                    write_ready(
+                        &mut out,
+                        &session,
+                        notices.as_mut(),
+                        notifications.as_mut(),
+                        &mut parameters,
+                    );
                     stream.write_all(&out).await?;
                     out.clear();
                 }
@@ -990,12 +1388,47 @@ where
                     // A statement that outlives a `Sync` is genuinely being
                     // reused; the trace it was prepared under is stale.
                     ext.trace = TraceCarrier::default();
-                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+                    write_ready(
+                        &mut out,
+                        &session,
+                        notices.as_mut(),
+                        notifications.as_mut(),
+                        &mut parameters,
+                    );
                     stream.write_all(&out).await?;
                     out.clear();
                 }
                 // Every arm write_all()s eagerly, so there is never pending response data; Flush has nothing to drain and TcpStream::flush is a no-op.
                 FrontendMessage::Flush => stream.flush().await?,
+                FrontendMessage::FunctionCall => {
+                    if ext.failed {
+                        continue;
+                    }
+                    let e = if session.tx_status() == TxStatus::Failed {
+                        PgError::error(
+                            sqlstate::IN_FAILED_SQL_TRANSACTION,
+                            "current transaction is aborted, commands ignored until end of \
+                             transaction block",
+                        )
+                    } else {
+                        session.mark_statement_failed();
+                        PgError::error(
+                            sqlstate::FEATURE_NOT_SUPPORTED,
+                            "fastpath function calls are not supported",
+                        )
+                    };
+                    write_notices(&mut out, notices.as_mut());
+                    backend::error_response(&mut out, &e);
+                    write_ready(
+                        &mut out,
+                        &session,
+                        notices.as_mut(),
+                        notifications.as_mut(),
+                        &mut parameters,
+                    );
+                    stream.write_all(&out).await?;
+                    out.clear();
+                }
                 FrontendMessage::Parse {
                     name,
                     sql,
@@ -1121,14 +1554,13 @@ where
                     stream.write_all(&out).await?;
                     return Ok(());
                 }
+                // Accepted and ignored, as Postgres does: a COPY that failed
+                // leaves the frontend still streaming frames it had already
+                // queued, and killing the connection over them would strand a
+                // client that is about to recover on its own.
                 FrontendMessage::CopyData(_)
                 | FrontendMessage::CopyDone
-                | FrontendMessage::CopyFail(_) => {
-                    let e = PgError::protocol("COPY message received outside COPY mode");
-                    backend::error_response(&mut out, &e);
-                    stream.write_all(&out).await?;
-                    return Ok(());
-                }
+                | FrontendMessage::CopyFail(_) => {}
             }
         }
     }
@@ -1175,6 +1607,11 @@ impl ResultSink for WireResultSink<'_> {
             }
             ResultPage::Command { tag, .. } => backend::command_complete(self.out, &tag),
             ResultPage::Empty { .. } => backend::empty_query_response(self.out),
+            ResultPage::CopyOut { stream, .. } => {
+                self.rows += stream.rows.len();
+                self.pages += 1;
+                write_copy_out(self.out, &stream);
+            }
         }
         Ok(())
     }
@@ -1187,6 +1624,8 @@ impl ResultSink for WireResultSink<'_> {
 
 #[cfg(test)]
 mod execute_outcome_tests {
+    use assert2::assert;
+
     use super::*;
     use crate::engine::{CopyOutResponse, Notification};
 
@@ -1195,12 +1634,6 @@ mod execute_outcome_tests {
         let outcomes = [
             ExecuteOutcome::CopyIn {
                 response: CopyInResponse {
-                    overall_format: 0,
-                    column_formats: vec![],
-                },
-            },
-            ExecuteOutcome::CopyOut {
-                response: CopyOutResponse {
                     overall_format: 0,
                     column_formats: vec![],
                 },
@@ -1216,7 +1649,92 @@ mod execute_outcome_tests {
         for outcome in outcomes {
             let error = encode_execute_outcome(&mut BytesMut::new(), outcome)
                 .expect_err("reserved outcome must fail");
-            assert_eq!(error.code, sqlstate::FEATURE_NOT_SUPPORTED);
+            assert!(error.code == sqlstate::FEATURE_NOT_SUPPORTED);
         }
+    }
+
+    /// The bytes a pinned `PostgreSQL` 18.4 backend put on the wire for
+    /// `COPY t TO STDOUT` over a two-column table holding `(1, 'one')`,
+    /// `(2, NULL)` and `(3, 'th<tab>ree')`.
+    fn postgres_copy_out_block() -> &'static [u8] {
+        b"H\x00\x00\x00\x0b\x00\x00\x02\x00\x00\x00\x00\
+          d\x00\x00\x00\x0a1\tone\n\
+          d\x00\x00\x00\x092\t\\N\n\
+          d\x00\x00\x00\x0e3\tth\\tree\n\
+          c\x00\x00\x00\x04\
+          C\x00\x00\x00\x0bCOPY 3\0"
+    }
+
+    fn sample_copy_out() -> CopyOutStream {
+        CopyOutStream {
+            response: CopyOutResponse {
+                overall_format: 0,
+                column_formats: vec![0, 0],
+            },
+            rows: vec![
+                Bytes::from_static(b"1\tone\n"),
+                Bytes::from_static(b"2\t\\N\n"),
+                Bytes::from_static(b"3\tth\\tree\n"),
+            ],
+            tag: "COPY 3".into(),
+        }
+    }
+
+    #[test]
+    fn copy_out_execute_outcome_encodes_the_whole_postgres_block() {
+        let mut out = BytesMut::new();
+        encode_execute_outcome(
+            &mut out,
+            ExecuteOutcome::CopyOut {
+                stream: sample_copy_out(),
+            },
+        )
+        .expect("copy-out encodes");
+
+        assert!(&out[..] == postgres_copy_out_block());
+    }
+
+    #[test]
+    fn empty_copy_out_still_frames_a_response_terminator_and_tag() {
+        let mut out = BytesMut::new();
+        write_copy_out(
+            &mut out,
+            &CopyOutStream {
+                response: CopyOutResponse {
+                    overall_format: 0,
+                    column_formats: vec![0],
+                },
+                rows: Vec::new(),
+                tag: "COPY 0".into(),
+            },
+        );
+
+        // Postgres answers `COPY <empty table> TO STDOUT` with exactly these
+        // three messages and no CopyData at all.
+        assert!(
+            &out[..]
+                == &b"H\x00\x00\x00\x09\x00\x00\x01\x00\x00c\x00\x00\x00\x04C\x00\x00\x00\x0bCOPY 0\0"[..]
+        );
+    }
+
+    #[test]
+    fn binary_copy_out_marks_every_column_binary() {
+        let mut out = BytesMut::new();
+        write_copy_out(
+            &mut out,
+            &CopyOutStream {
+                response: CopyOutResponse {
+                    overall_format: 1,
+                    column_formats: vec![1, 1],
+                },
+                rows: vec![Bytes::from_static(b"\xff\xff")],
+                tag: "COPY 0".into(),
+            },
+        );
+
+        assert!(
+            &out[..]
+                == &b"H\x00\x00\x00\x0b\x01\x00\x02\x00\x01\x00\x01d\x00\x00\x00\x06\xff\xffc\x00\x00\x00\x04C\x00\x00\x00\x0bCOPY 0\0"[..]
+        );
     }
 }

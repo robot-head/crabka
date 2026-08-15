@@ -23,16 +23,17 @@ use std::{
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgmvcc::{clog::XidStatus, visibility::Snapshot};
 use crabka_pgparser::ast::{
-    BinaryOp, CopyFormat, CopyStmt, CursorTarget, DiscardTarget, ExplainOptions, Expr,
-    FetchDirection, FuncArgs, IsolationLevel, JoinConstraint, OnConflict, OnConflictAction,
-    OnConflictTarget, QueryBody, QueryExpr, ResetTarget, SelectItem, SetExpr, Statement, TableExpr,
-    TableLockMode, UnaryOp, UnlistenTarget, UtilityStatement,
+    BinaryOp, CopyDestination, CopyDirection, CopySource, CopyStmt, CopyTarget, CursorTarget,
+    DiscardTarget, ExplainOptions, Expr, FetchDirection, FuncArgs, IsolationLevel, JoinConstraint,
+    OnConflict, OnConflictAction, OnConflictTarget, QueryBody, QueryExpr, ResetTarget, SelectItem,
+    SetExpr, Statement, TableExpr, TableLockMode, UnaryOp, UnlistenTarget, UtilityStatement,
 };
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
 use crabka_pgwire::{
     engine::{
-        BoundParam, Cell, CloseTarget, CopyInResponse, ExecuteOutcome, FieldDescription,
-        Notification, PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
+        BoundParam, Cell, CloseTarget, CopyInResponse, CopyOutResponse, CopyOutStream,
+        ExecuteOutcome, FieldDescription, Notification, PortalDescription, PreparedDescription,
+        QueryResult, Session, SimpleQueryStop, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
 };
@@ -51,6 +52,8 @@ use crate::{
 
 /// In-flight transaction context.
 pub(crate) struct TxnCtx {
+    /// Effective role at transaction start, restored by every abort path.
+    pub(crate) role_at_start: String,
     /// Assigned lazily at the first write (None for a read-only transaction).
     pub(crate) xid: Option<u64>,
     /// The visibility snapshot: re-taken per statement under READ COMMITTED,
@@ -100,12 +103,9 @@ pub(crate) struct TxnCtx {
     /// BEGIN). `now()`/`current_timestamp` are PG transaction-stable, so every
     /// statement in this block evaluates them against this single instant.
     pub(crate) txn_now: jiff::Timestamp,
-    /// Held (SHARED) by explicit transactions that have written local tables,
-    /// until COMMIT/ROLLBACK. It never blocks other DML. It lets unique-index
-    /// DDL, which takes the same lock exclusively, wait for this transaction's
-    /// writes before it backfills. Same-key unique conflicts serialize through
-    /// per-key locks in the `RowLockManager` instead.
-    pub(crate) unique_index_guard: Option<UniqueIndexGuard>,
+    /// One SHARED gate per relation an explicit transaction has written, held
+    /// until COMMIT/ROLLBACK so a backfill on that relation waits out the write.
+    pub(crate) unique_index_guards: HashMap<crabka_pgcatalog::TableId, UniqueIndexGuard>,
     /// Held after the first ordinary write until COMMIT/ROLLBACK so conversion
     /// cannot rewrite an in-progress xid version out from under its commit.
     pub(crate) table_write_guard: Option<TableWriteGuard>,
@@ -115,6 +115,16 @@ pub(crate) struct TxnCtx {
     /// Whether a query, DML, or DDL statement has established transaction semantics.
     /// PostgreSQL rejects SET TRANSACTION after this point.
     pub(crate) activity_started: bool,
+    /// Catalog-key before-images for every DDL statement run since `BEGIN`,
+    /// replayed by `ROLLBACK` to undo them.
+    ///
+    /// Rows need no equivalent: a version carries its writer's xid, so aborting
+    /// the xid is what makes them disappear. Catalog records are plain keys with
+    /// no xid to abort, so the only way back is the image they had before. The
+    /// map holds the *first* image of each key, which is what makes a key
+    /// rewritten by several statements in one block unwind to where the block
+    /// found it rather than to some midpoint.
+    pub(crate) catalog_undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 /// Shared physical gate held while a transaction issues ordinary writes.
@@ -125,22 +135,41 @@ pub(crate) enum TableWriteGuard {
     Shared { _guard: OwnedRwLockReadGuard<()> },
 }
 
-/// A DML statement's SHARED hold on the engine's `unique_index_lock`. Unique
+/// A DML statement's SHARED hold on its relation's unique-index gate. Unique
 /// CREATE INDEX backfill (and CREATE TABLE with a unique constraint) takes the
 /// same lock exclusively, so it waits for in-flight writers and blocks new
 /// ones while it scans.
 pub(crate) struct UniqueIndexGuard {
-    _guard: OwnedRwLockReadGuard<()>,
+    gates: Arc<RowLockManager>,
+    table: crabka_pgcatalog::TableId,
+    owner: crate::lockmgr::LockOwner,
+}
+
+impl Drop for UniqueIndexGuard {
+    fn drop(&mut self) {
+        self.gates.release_key_as(
+            &crate::lockmgr::LockKey::UniqueIndexRelation(self.table),
+            self.owner,
+        );
+    }
 }
 
 /// Per-connection transaction state. `Failed` carries the aborted block's
 /// context so its xid (and any row locks it holds) stay held until
 /// COMMIT/ROLLBACK, which records the abort in the clog and releases them.
+///
+/// The context is boxed so this enum stays pointer-sized. `BEGIN`, `COMMIT` and
+/// `ROLLBACK` move it by value, and their futures sit in the statement-dispatch
+/// match that a PL/pgSQL function reproduces on the stack at every level of
+/// recursion — inline, a [`TxnCtx`] is paid for once per nested call, and the
+/// debug-build frame was already within a few bytes of a test thread's 2 MiB
+/// stack at a recursion depth of three. Behind a box, growing `TxnCtx` costs
+/// that path nothing.
 enum TxnState {
     Idle,
-    InTransaction(TxnCtx),
-    Prepared(TxnCtx),
-    Failed(TxnCtx),
+    InTransaction(Box<TxnCtx>),
+    Prepared(Box<TxnCtx>),
+    Failed(Box<TxnCtx>),
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +199,17 @@ impl GucSlot {
         if !local {
             self.txn_session = Some(value);
         }
+    }
+
+    /// Replace this parameter's session default, which is where `RESET` and
+    /// `DISCARD` return to, along with its current value. Any staged assignment
+    /// is discarded: the default is established before the session's first
+    /// statement, so there is nothing legitimate to stage over.
+    fn set_session_default(&mut self, value: GucValue) {
+        self.source = value.clone();
+        self.committed = value;
+        self.txn_current = None;
+        self.txn_session = None;
     }
 
     fn commit(&mut self) {
@@ -1020,7 +1060,11 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         Ok(GucValue::Text(value.to_string()))
     }),
     guc("client_encoding", "string", "UTF8", parse_client_encoding),
-    guc("datestyle", "string", "ISO, MDY", parse_date_style).aliases(&["DateStyle"]),
+    // The canonical spelling is the one `pg_settings.name` reports, which for
+    // these three is the mixed-case one `guc.c` declares — a lookup is
+    // case-insensitive either way, but `WHERE name = 'DateStyle'` only matches
+    // the canonical spelling.
+    guc("DateStyle", "string", "ISO, MDY", parse_date_style).aliases(&["datestyle"]),
     guc(
         "default_text_search_config",
         "string",
@@ -1034,7 +1078,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         parse_extra_float_digits,
     )
     .ranged(None, -15.0, 3.0),
-    guc("intervalstyle", "string", "postgres", parse_interval_style).aliases(&["IntervalStyle"]),
+    guc("IntervalStyle", "string", "postgres", parse_interval_style).aliases(&["intervalstyle"]),
     guc("search_path", "string", "\"$user\", public", |value, _| {
         // Nothing is validated. `SET search_path = '"unbalanced'` succeeds on
         // PostgreSQL 18.4, and a schema that does not exist is silently
@@ -1049,7 +1093,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         0.0,
         2_147_483_647.0,
     ),
-    guc("timezone", "string", "UTC", parse_timezone).aliases(&["TimeZone", "time zone"]),
+    guc("TimeZone", "string", "UTC", parse_timezone).aliases(&["timezone", "time zone"]),
     // ---- F-1 breadth: the parameters real clients and the conformance
     // corpus set. The planner toggles have no planner to affect here; they are
     // accepted, stored, and reported exactly like PostgreSQL's so a corpus
@@ -1079,6 +1123,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc("enable_sort", "bool", "on", parse_bool),
     guc("enable_tidscan", "bool", "on", parse_bool),
     guc("allow_alter_system", "bool", "on", parse_bool).context(GucContext::Sighup),
+    guc("allow_in_place_tablespaces", "bool", "off", parse_bool).context(GucContext::Superuser),
     guc("array_nulls", "bool", "on", parse_bool),
     guc("check_function_bodies", "bool", "on", parse_bool),
     guc("default_transaction_deferrable", "bool", "off", parse_bool),
@@ -1351,34 +1396,24 @@ pub(crate) struct GucSettingRow {
 }
 
 impl Default for GucState {
+    /// Every parameter at its compiled-in boot value. A session's actual
+    /// defaults are laid over this by [`GucState::set_session_default`] as the
+    /// startup packet is applied.
     fn default() -> Self {
-        Self::with_source_values(BTreeMap::new()).expect("compiled GUC defaults are valid")
+        Self {
+            slots: GUC_DEFINITIONS
+                .iter()
+                .map(|definition| {
+                    let value = parse_guc_value(definition, definition.boot_default, None)
+                        .expect("a compiled-in boot value parses");
+                    (definition.name.into(), GucSlot::new(value))
+                })
+                .collect(),
+        }
     }
 }
 
 impl GucState {
-    fn with_source_values(source_values: BTreeMap<String, String>) -> Result<Self, ExecError> {
-        for name in source_values.keys() {
-            if guc_definition(name).is_none() {
-                return Err(ExecError::UnrecognizedParameter(name.clone()));
-            }
-        }
-        let mut slots = BTreeMap::new();
-        for definition in GUC_DEFINITIONS {
-            let source = source_values
-                .iter()
-                .find(|(name, _)| {
-                    guc_definition(name).is_some_and(|found| std::ptr::eq(found, definition))
-                })
-                .map_or(definition.boot_default, |(_, value)| value.as_str());
-            slots.insert(
-                definition.name.into(),
-                GucSlot::new(parse_guc_value(definition, source, None)?),
-            );
-        }
-        Ok(Self { slots })
-    }
-
     pub(crate) fn effective(&self, name: &str) -> Result<String, ExecError> {
         let key = normalize_guc_name(name);
         self.slots
@@ -1386,6 +1421,14 @@ impl GucState {
             .map(GucSlot::effective)
             .map(GucValue::render)
             .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))
+    }
+
+    /// The `row_security` setting as a bool. Unknown or unparseable renders as
+    /// `false`, which fails the statement rather than silently unfiltering it.
+    fn row_security(&self) -> bool {
+        self.slots
+            .get("row_security")
+            .is_some_and(|slot| matches!(slot.effective(), GucValue::Bool(true)))
     }
 
     fn effective_map(&self) -> BTreeMap<String, String> {
@@ -1396,6 +1439,36 @@ impl GucState {
     }
 
     pub(crate) fn set(&mut self, name: &str, value: &str, local: bool) -> Result<(), ExecError> {
+        let (key, value) = self.prepare_assignment(name, value)?;
+        self.slot_for_assignment(key).set(value, local);
+        Ok(())
+    }
+
+    /// Adopt a value as the parameter's *session default* rather than as an
+    /// assignment on top of it, which is what a value supplied in the startup
+    /// packet does.
+    ///
+    /// `PostgreSQL` applies a client-supplied setting with `PGC_S_CLIENT`,
+    /// which ranks at or below `PGC_S_OVERRIDE` and therefore rewrites
+    /// `reset_val` as well as the current value. `RESET`, `SET … TO DEFAULT`,
+    /// `RESET ALL` and `DISCARD ALL` all return to it, never to the compiled-in
+    /// boot value — so a session started with `PGDATESTYLE='Postgres, MDY'`
+    /// still prints `Postgres` dates after `RESET DateStyle`.
+    ///
+    /// The assignment is not transactional: it happens before the first
+    /// statement, so there is no open transaction for a `ROLLBACK` to undo it
+    /// from, and any staged value would be a caller bug.
+    pub(crate) fn set_session_default(&mut self, name: &str, value: &str) -> Result<(), ExecError> {
+        let (key, value) = self.prepare_assignment(name, value)?;
+        self.slot_for_assignment(key).set_session_default(value);
+        Ok(())
+    }
+
+    /// Resolve a parameter name, refuse an assignment its context forbids, and
+    /// parse the value against the parameter's current effective value — which
+    /// a partial assignment such as `DateStyle = 'German'` inherits the rest of
+    /// its components from.
+    fn prepare_assignment(&self, name: &str, value: &str) -> Result<(String, GucValue), ExecError> {
         let key = normalize_guc_name(name);
         // PostgreSQL accepts any two-part `extension.parameter` name as a
         // customized option, creating a placeholder string parameter on first
@@ -1404,11 +1477,7 @@ impl GucState {
             if !is_custom_guc_name(&key) {
                 return Err(ExecError::UnrecognizedParameter(name.to_string()));
             }
-            self.slots
-                .entry(key)
-                .or_insert_with(|| GucSlot::new(GucValue::Text(String::new())))
-                .set(GucValue::Text(value.to_string()), local);
-            return Ok(());
+            return Ok((key, GucValue::Text(value.to_string())));
         };
         if let Some(refusal) = definition.context.refusal(definition.name) {
             return Err(refusal);
@@ -1419,13 +1488,15 @@ impl GucState {
             .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?
             .effective()
             .clone();
-        let value = parse_guc_value(definition, value, Some(&current))?;
-        let slot = self
-            .slots
-            .get_mut(&key)
-            .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
-        slot.set(value, local);
-        Ok(())
+        Ok((key, parse_guc_value(definition, value, Some(&current))?))
+    }
+
+    /// The slot [`Self::prepare_assignment`] resolved to, creating the
+    /// placeholder a first-time customized option needs.
+    fn slot_for_assignment(&mut self, key: String) -> &mut GucSlot {
+        self.slots
+            .entry(key)
+            .or_insert_with(|| GucSlot::new(GucValue::Text(String::new())))
     }
 
     /// Restore one parameter's session default. `PostgreSQL` checks the
@@ -1622,7 +1693,9 @@ fn render_type_oid_array(oids: &[u32]) -> String {
         ColumnType::Bytea,
         ColumnType::Uuid,
         ColumnType::Regclass,
+        ColumnType::Json,
         ColumnType::Jsonb,
+        ColumnType::Xml,
     ];
     let names = oids
         .iter()
@@ -1722,11 +1795,11 @@ fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
 }
 
 fn parse_timezone(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
-    // PostgreSQL accepts the whole zone vocabulary here, not just database
-    // names: abbreviations, POSIX specs and bare signed offsets all work.
-    if value.eq_ignore_ascii_case("UTC")
-        || crabka_pgtypes::datetime::resolve_time_zone(value).is_some()
-    {
+    // The setting's own vocabulary, which is narrower than `AT TIME ZONE`'s: a
+    // plain number of hours, a database name or a POSIX specification, but no
+    // abbreviations. `parse_guc_value` restates the rejection as the 22023 that
+    // names the parameter.
+    if crabka_pgtypes::datetime::resolve_guc_time_zone(value).is_some() {
         Ok(GucValue::Text(value.to_string()))
     } else {
         Err(ExecError::InvalidParameterValue(value.to_string()))
@@ -1746,8 +1819,10 @@ fn parse_client_encoding(value: &str, _: Option<&GucValue>) -> Result<GucValue, 
 
 fn parse_bool(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
     match value.to_ascii_lowercase().as_str() {
-        "on" | "true" | "yes" | "1" => Ok(GucValue::Bool(true)),
-        "off" | "false" | "no" | "0" => Ok(GucValue::Bool(false)),
+        "on" | "t" | "tr" | "tru" | "true" | "y" | "ye" | "yes" | "1" => Ok(GucValue::Bool(true)),
+        "of" | "off" | "f" | "fa" | "fal" | "fals" | "false" | "n" | "no" | "0" => {
+            Ok(GucValue::Bool(false))
+        }
         _ => Err(ExecError::InvalidParameterValue(value.to_string())),
     }
 }
@@ -1769,7 +1844,15 @@ fn parse_date_style(value: &str, current: Option<&GucValue>) -> Result<GucValue,
             "iso" => output = Some(DateOutputStyle::Iso),
             "sql" => output = Some(DateOutputStyle::Sql),
             "postgres" | "postgresql" => output = Some(DateOutputStyle::Postgres),
-            "german" => output = Some(DateOutputStyle::German),
+            "german" => {
+                output = Some(DateOutputStyle::German);
+                // German dates are traditionally day-first, so naming the style
+                // picks the order up as well — but only if the same setting has
+                // not already named one. `'MDY, German'` stays MDY, while
+                // `'German, MDY'` is overridden right back to MDY by the token
+                // that follows.
+                order = order.or(Some(DateOrder::Dmy));
+            }
             "mdy" | "us" | "noneuro" | "noneuropean" => order = Some(DateOrder::Mdy),
             "dmy" | "euro" | "european" => order = Some(DateOrder::Dmy),
             "ymd" => order = Some(DateOrder::Ymd),
@@ -2046,6 +2129,33 @@ fn with_guc_runtime<T>(
     })
 }
 
+/// Which of the two maintenance commands [`SqlSession::run_maintenance`] is
+/// running. They share a grammar and every check, and differ only in what they
+/// call themselves — in the command tag, and in the skip warning's wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaintenanceCommand {
+    Analyze,
+    Vacuum,
+}
+
+impl MaintenanceCommand {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Analyze => "ANALYZE",
+            Self::Vacuum => "VACUUM",
+        }
+    }
+
+    /// The verb inside `cannot analyze non-tables …` / `cannot vacuum
+    /// non-tables …`.
+    fn lowercase(self) -> &'static str {
+        match self {
+            Self::Analyze => "analyze",
+            Self::Vacuum => "vacuum",
+        }
+    }
+}
+
 /// Fold a statement's outcome onto its span: `ERROR` plus the SQLSTATE on
 /// failure, the row counts on success.
 ///
@@ -2090,11 +2200,16 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
         Statement::Delete { .. } => "DELETE",
         Statement::Merge { .. } => "MERGE",
         Statement::Truncate { .. } => "TRUNCATE TABLE",
+        Statement::Cluster(_) => "CLUSTER",
         Statement::CreateTable { .. } | Statement::CreateTableAs { .. } => "CREATE TABLE",
         Statement::CreateIndex { .. } => "CREATE INDEX",
+        Statement::AlterIndex { .. } => "ALTER INDEX",
         Statement::CreateView { .. } => "CREATE VIEW",
+        Statement::AlterView { .. } => "ALTER VIEW",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
         Statement::CreateType { .. } => "CREATE TYPE",
+        Statement::CreateCast { .. } => "CREATE CAST",
+        Statement::DropCast { .. } => "DROP CAST",
         Statement::CreateDomain { .. } => "CREATE DOMAIN",
         Statement::AlterTable { .. } => "ALTER TABLE",
         Statement::DropTable { .. } => "DROP TABLE",
@@ -2112,7 +2227,16 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
 /// undo.
 fn statement_has_effects(stmt: &Statement) -> bool {
     match stmt {
-        Statement::Utility(UtilityStatement::TextSearch(_)) => true,
+        Statement::Utility(
+            UtilityStatement::TextSearch(_)
+            | UtilityStatement::CreateTablespace { .. }
+            | UtilityStatement::DropTablespace { .. }
+            | UtilityStatement::AlterTablespace { .. }
+            | UtilityStatement::CreateOperatorFamily { .. }
+            | UtilityStatement::CreateOperatorClass { .. }
+            | UtilityStatement::AlterOperatorObject { .. }
+            | UtilityStatement::DropOperatorObject { .. },
+        ) => true,
         Statement::Query(_)
         | Statement::Begin { .. }
         | Statement::Commit { .. }
@@ -2122,7 +2246,7 @@ fn statement_has_effects(stmt: &Statement) -> bool {
         | Statement::Reset { .. }
         | Statement::SetRole { .. }
         | Statement::Discard { .. }
-        | Statement::Vacuum
+        | Statement::Vacuum(_)
         | Statement::Listen { .. }
         | Statement::Notify { .. }
         | Statement::Unlisten { .. }
@@ -2149,16 +2273,37 @@ fn statement_has_effects(stmt: &Statement) -> bool {
 /// bypass the transaction-activity rule.
 fn establishes_transaction_activity(stmt: &Statement) -> bool {
     match stmt {
-        Statement::Utility(UtilityStatement::TextSearch(_)) => true,
-        Statement::Query(_)
+        Statement::Utility(
+            UtilityStatement::TextSearch(_)
+            | UtilityStatement::CreateTablespace { .. }
+            | UtilityStatement::DropTablespace { .. }
+            | UtilityStatement::AlterTablespace { .. }
+            | UtilityStatement::CreateOperatorFamily { .. }
+            | UtilityStatement::CreateOperatorClass { .. }
+            | UtilityStatement::AlterOperatorObject { .. }
+            | UtilityStatement::DropOperatorObject { .. },
+        ) => true,
+        // A COPY reads or writes rows, so it establishes transaction semantics
+        // exactly as the SELECT or INSERT it stands for would.
+        Statement::Copy(_)
+        | Statement::Query(_)
         | Statement::Insert { .. }
         | Statement::Update { .. }
         | Statement::Delete { .. }
         | Statement::Merge { .. }
         | Statement::CreateTableAs { .. }
+        // A materialized view's DDL reads rows (`WITH DATA`) or writes them
+        // (`REFRESH`), so all three establish transaction semantics exactly as
+        // the CREATE TABLE AS they are shaped like does.
+        | Statement::CreateMaterializedView { .. }
+        | Statement::RefreshMaterializedView { .. }
+        | Statement::DropMaterializedView { .. }
         | Statement::Truncate { .. }
+        | Statement::Cluster(_)
         | Statement::CreateTable { .. }
         | Statement::CreateIndex { .. }
+        | Statement::AlterIndex { .. }
+        | Statement::AlterView { .. }
         | Statement::DropIndex { .. }
         | Statement::DropTable { .. }
         | Statement::AlterTable { .. }
@@ -2179,22 +2324,35 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::CreateForeignTable { .. }
         | Statement::DropForeignTable { .. }
         | Statement::CreateRole { .. }
+        | Statement::AlterRole { .. }
         | Statement::DropRole { .. }
         | Statement::GrantTablePrivileges { .. }
+        | Statement::GrantSchemaPrivileges { .. }
         | Statement::RevokeTablePrivileges { .. }
+        | Statement::RevokeSchemaPrivileges { .. }
+        | Statement::GrantRoles { .. }
+        | Statement::RevokeRoles { .. }
         | Statement::ImportForeignSchema { .. }
         | Statement::CreateTrigger(_)
         | Statement::AlterTrigger { .. }
         | Statement::DropTrigger { .. }
+        | Statement::CreatePolicy(_)
+        | Statement::AlterPolicy { .. }
+        | Statement::DropPolicy { .. }
         | Statement::CreateEventTrigger(_)
         | Statement::AlterEventTrigger { .. }
         | Statement::DropEventTrigger { .. }
         | Statement::CreateRoutine(_)
         | Statement::DropRoutine { .. }
         | Statement::AlterRoutine { .. }
+        | Statement::CreateAggregate(_)
+        | Statement::DropAggregate { .. }
+        | Statement::AlterAggregate { .. }
         | Statement::CreateType { .. }
         | Statement::AlterType { .. }
         | Statement::DropType { .. }
+        | Statement::CreateCast { .. }
+        | Statement::DropCast { .. }
         | Statement::CreateDomain { .. }
         | Statement::AlterDomain { .. }
         | Statement::DropDomain { .. }
@@ -2209,7 +2367,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::SetRole { .. }
         // VACUUM is refused inside a transaction block, so it never marks one
         // active.
-        | Statement::Vacuum
+        | Statement::Vacuum(_)
         // PostgreSQL deliberately skips the snapshot push for LISTEN/NOTIFY/
         // UNLISTEN (PortalRunUtility's exclusion list), so they never set
         // FirstSnapshotSet and never block a later SET TRANSACTION.
@@ -2421,8 +2579,9 @@ pub struct SqlSession {
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<crate::WriterFence>,
     /// Retains the registry entry while this session can hold a writer lease.
-    _coordination: Arc<crate::EngineCoordination>,
-    unique_index_lock: Arc<tokio::sync::RwLock<()>>,
+    coordination: Arc<crate::EngineCoordination>,
+    unique_index_gates: Arc<RowLockManager>,
+    lock_owner: crate::lockmgr::LockOwner,
     committer: Arc<dyn crate::commit::Committer>,
     linearizer: Arc<dyn crate::read_gate::Linearizer>,
     persist_mode: crate::PersistMode,
@@ -2454,6 +2613,8 @@ pub struct SqlSession {
     /// `EvalCtx`'s `now`/`stmt_now` and `clock_timestamp()`. `SystemClock` in
     /// production; a `FixedClock` in tests for deterministic temporal evaluation.
     clock: Arc<dyn crate::clock::Clock>,
+    /// PostgreSQL keeps one pseudo-random stream per backend session.
+    random: Arc<Mutex<crate::math_fn::Prng>>,
     /// SP37: the transactional `timezone` GUC. `effective()` feeds the per-statement
     /// `EvalCtx`'s `time_zone`; `SET`/`SHOW`/`RESET timezone` mutate/read it, and
     /// COMMIT/ROLLBACK promote/revert it in lockstep with the transaction outcome.
@@ -2503,6 +2664,14 @@ pub struct SqlSession {
     /// value therefore never reaches the client before the op that records it
     /// is durable. That is what makes re-seeding safe for the next writer.
     pending_sequences: Arc<Mutex<crate::seq::PendingSequences>>,
+    /// An xid `pg_current_xact_id()` assigned during expression evaluation and
+    /// the transaction has not adopted yet.
+    ///
+    /// It is the transaction-identity twin of `pending_sequences`: evaluation
+    /// holds the session's context by shared reference, so a function that has
+    /// to allocate stages the result here and
+    /// [`SqlSession::adopt_assigned_xact_id`] moves it across.
+    assigned_xact_id: Arc<Mutex<Option<u64>>>,
     /// This connection's registration on the engine's `LISTEN`/`NOTIFY` bus.
     /// `None` until an owner calls [`SqlSession::register_notify`] or
     /// [`SqlSession::adopt_notify`]; `LISTEN`/`NOTIFY`/`pg_notify` then report a
@@ -2516,6 +2685,15 @@ pub struct SqlSession {
     /// messages (`RAISE NOTICE`, WARNING, and the other PL/pgSQL levels).
     notice_tx: mpsc::Sender<PgError>,
     notice_rx: Option<mpsc::Receiver<PgError>>,
+    /// The parse [`Session::begin_copy_in`] made, kept for
+    /// [`Session::begin_copy_out`] to reuse.
+    ///
+    /// The wire layer asks both questions about the same query string, back to
+    /// back, with nothing run in between — so without this every simple query,
+    /// COPY or not, would be parsed one extra time just to be told it is not a
+    /// copy-out. `begin_copy_in` always overwrites it and `begin_copy_out`
+    /// always takes it, so a stale parse can never be answered from.
+    copy_probe: Option<(String, Vec<Statement>)>,
     /// The open transaction's queued notification work. Shared (not owned)
     /// because the per-statement `EvalCtx` hands it to `pg_notify()`.
     notify_pending: Arc<Mutex<NotifyPending>>,
@@ -2545,8 +2723,22 @@ pub struct SqlSession {
     /// in `BackendKeyData` and stamps on the notifications this session
     /// publishes, and the one `pg_backend_pid()` answers with.
     backend_pid: i32,
+    /// The database this connection asked for in its startup packet.
+    ///
+    /// The engine serves one database per process and does not police the
+    /// name, so this is the connection's name for it rather than the server's:
+    /// `current_database()`, the one `pg_database` row, `pg_stat_activity` and
+    /// the `information_schema` `*_catalog` columns all answer with it, so a
+    /// client is never told it is somewhere other than where it connected. A
+    /// session built without a startup packet keeps
+    /// [`crate::exec::DEFAULT_DATABASE`].
+    database: String,
     session_user: String,
     current_role: String,
+    /// The row-security recursion guard, one per session. A session runs one
+    /// statement at a time and every entry is popped before the statement
+    /// returns, so it is empty again between statements.
+    policy_stack: crate::rls::PolicyStack,
     state: TxnState,
     prepared: HashMap<String, SqlPrepared>,
     portals: HashMap<String, SqlPortal>,
@@ -2597,11 +2789,18 @@ struct SqlCursor {
     /// created in, and `PostgreSQL` drops the cursor with it. Holdability only
     /// decides what survives a *commit*, so it does not save one here.
     declared_depth: usize,
+    /// The stored tables the cursor's query reads, resolved under the scope
+    /// `DECLARE` ran in. `PostgreSQL` keeps each of them open for as long as
+    /// the portal lives, and refuses a same-session `DROP TABLE` or `TRUNCATE`
+    /// on any of them; see [`SqlSession::refuse_relation_pinned_by_cursor`].
+    pinned: Vec<crabka_pgcatalog::RelationName>,
 }
 
 /// S1: one open savepoint level.
 struct SavepointFrame {
     name: String,
+    /// Effective role at `SAVEPOINT`, restored by `ROLLBACK TO`.
+    role: String,
     /// The session configuration as of `SAVEPOINT`, restored by `ROLLBACK TO`.
     guc: GucState,
     /// The `SET CONSTRAINTS` overrides as of `SAVEPOINT`, restored by
@@ -2638,7 +2837,7 @@ pub(crate) struct SqlSessionConfig {
     pub table_write_gate: Arc<tokio::sync::RwLock<()>>,
     pub writer_fence: Arc<crate::WriterFence>,
     pub coordination: Arc<crate::EngineCoordination>,
-    pub unique_index_lock: Arc<tokio::sync::RwLock<()>>,
+    pub unique_index_gates: Arc<RowLockManager>,
     pub committer: Arc<dyn crate::commit::Committer>,
     pub linearizer: Arc<dyn crate::read_gate::Linearizer>,
     pub persist_mode: crate::PersistMode,
@@ -2739,6 +2938,11 @@ struct SqlPrepared {
     /// `None` for one prepared over the extended protocol, which is what
     /// `pg_prepared_statements.from_sql` reports.
     sql_source: Option<String>,
+    /// The text this statement was prepared from, however it was prepared.
+    /// Unlike [`Self::sql_source`] this is never absent, because it answers a
+    /// different question: what the stuck-statement watchdog should name when
+    /// an `Execute` over this statement stops finishing.
+    query_text: Arc<str>,
     /// The parameter type oids the client asked for, kept so a later
     /// re-description is the same computation with the same inputs rather than
     /// one that only resembles it. `0` is "infer it", as on the wire.
@@ -2796,6 +3000,9 @@ struct SqlPortal {
     description: PortalDescription,
     formats: Vec<i16>,
     execution: SqlPortalExecution,
+    /// The text of the prepared statement this portal was bound from, carried
+    /// so `Execute` can name what it is running.
+    query_text: Arc<str>,
     /// Carried from the prepared statement this portal was bound from: whether
     /// the result columns it announced may be held against what `Execute`
     /// actually produces.
@@ -2900,7 +3107,7 @@ impl SqlSession {
             table_write_gate,
             writer_fence,
             coordination,
-            unique_index_lock,
+            unique_index_gates,
             committer,
             linearizer,
             persist_mode,
@@ -2923,15 +3130,25 @@ impl SqlSession {
             backend_pid,
         } = config;
         let session_lock_id = session_locks.next_session_id();
+        let unique_index_owner = coordination
+            .next_unique_index_owner
+            .fetch_add(1, Ordering::Relaxed);
+        let lock_owner = crate::lockmgr::LockOwner::Session(unique_index_owner);
         // The parser resolves a user-defined type *name* through a process-wide
         // registry (it holds no catalog handle), so the registry has to be
         // populated from the durable catalog before this session parses
         // anything — otherwise a type created before a restart, or on another
-        // node, would read as 42704. A failed read leaves the registry as it is:
-        // the type names simply do not resolve, which is the same outcome as an
-        // absent type and never a wrong answer.
+        // node, would read as 42704. Hydration validates the complete catalog
+        // before publishing any definitions; a failed read is logged and
+        // leaves the existing process registry unchanged.
         if let Err(error) = crate::usertype::hydrate(catalog_kv.as_ref()) {
             tracing::warn!(?error, "could not load user-defined types from the catalog");
+        }
+        // A declared cast is invisible to plan-time legality for the same
+        // reason a type name is invisible to the parser, and needs the same
+        // process-wide publication before this session plans anything.
+        if let Err(error) = crate::usercast::hydrate(catalog_kv.as_ref()) {
+            tracing::warn!(?error, "could not load user-defined casts from the catalog");
         }
         let (notice_tx, notice_rx) = mpsc::channel(4096);
         Self {
@@ -2948,8 +3165,9 @@ impl SqlSession {
             on_commit: Vec::new(),
             table_write_gate,
             writer_fence,
-            _coordination: coordination,
-            unique_index_lock,
+            coordination,
+            unique_index_gates,
+            lock_owner,
             committer,
             linearizer,
             persist_mode,
@@ -2958,6 +3176,9 @@ impl SqlSession {
             global_xid: None,
             lock_wait_cap: None,
             clock,
+            random: Arc::new(Mutex::new(crate::math_fn::Prng::seeded(
+                crate::math_fn::entropy_seed(),
+            ))),
             guc: GucState::default(),
             foreign_scanner,
             range_scanner,
@@ -2973,10 +3194,12 @@ impl SqlSession {
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
             pending_sequences: Arc::new(Mutex::new(crate::seq::PendingSequences::default())),
+            assigned_xact_id: Arc::new(Mutex::new(None)),
             notify: None,
             notify_rx: None,
             notice_tx,
             notice_rx: Some(notice_rx),
+            copy_probe: None,
             notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
             notify_reserved: Mutex::new(None),
             deferred_fk: Arc::new(Mutex::new(crate::fk::DeferredConstraints::default())),
@@ -2988,8 +3211,10 @@ impl SqlSession {
             event_trigger: None,
             notify_replication,
             backend_pid,
+            database: crate::exec::DEFAULT_DATABASE.into(),
             session_user: "public".into(),
             current_role: "public".into(),
+            policy_stack: crate::rls::PolicyStack::default(),
             state: TxnState::Idle,
             prepared: HashMap::new(),
             portals: HashMap::new(),
@@ -3019,7 +3244,13 @@ impl SqlSession {
             ),
             user: self.current_role.clone(),
             backend_id: self.backend_pid,
+            database: self.database.clone(),
         }
+    }
+
+    fn type_search_schemas(&self) -> Result<Vec<String>, ExecError> {
+        self.resolution_scope()
+            .visible_schemas(self.catalog_kv.as_ref())
     }
 
     fn register_worker(&mut self) -> (usize, WorkerCancel, WorkerFinished) {
@@ -3109,6 +3340,27 @@ impl SqlSession {
         result
     }
 
+    /// SP37: the session's effective zone, resolved the one way every caller
+    /// shares so that a value `SET TimeZone` accepted can never fail later at
+    /// bind or render time.
+    ///
+    /// `parse_timezone` validates the setting through the same resolver, so the
+    /// `unwrap_or` fallbacks are unreachable rather than lenient. `UTC` is
+    /// special-cased to the const so the common case never touches the zone
+    /// database.
+    fn effective_time_zone(&self) -> jiff::tz::TimeZone {
+        let name = self
+            .guc
+            .effective("TimeZone")
+            .unwrap_or_else(|_| "UTC".into());
+        if name.eq_ignore_ascii_case("UTC") {
+            jiff::tz::TimeZone::UTC
+        } else {
+            crabka_pgtypes::datetime::resolve_guc_time_zone(&name)
+                .unwrap_or(jiff::tz::TimeZone::UTC)
+        }
+    }
+
     /// Build the per-statement evaluation context. `now` is the transaction-start
     /// instant (PG transaction-stable) inside a txn, else this statement's instant.
     fn eval_ctx(&self) -> crate::clock::EvalCtx {
@@ -3117,18 +3369,7 @@ impl SqlSession {
             TxnState::InTransaction(c) | TxnState::Prepared(c) | TxnState::Failed(c) => c.txn_now,
             TxnState::Idle => stmt_now,
         };
-        // SP37: the effective session zone (validated at SET time, so `get`
-        // succeeds; `unwrap_or(UTC)` is a defensive fallback). `UTC` is
-        // special-cased to the const so the common case never touches the tzdb.
-        let tzname = self
-            .guc
-            .effective("timezone")
-            .unwrap_or_else(|_| "UTC".into());
-        let time_zone = if tzname.eq_ignore_ascii_case("UTC") {
-            jiff::tz::TimeZone::UTC
-        } else {
-            crabka_pgtypes::datetime::resolve_time_zone(&tzname).unwrap_or(jiff::tz::TimeZone::UTC)
-        };
+        let time_zone = self.effective_time_zone();
         // `DateStyle` carries two independent settings: the field ordering that
         // decides how an ambiguous all-numeric literal is *read*, and the output
         // format that decides how a date/time value is *spelled*.
@@ -3145,6 +3386,18 @@ impl SqlSession {
             |_| crabka_pgtypes::datetime::IntervalStyle::default(),
             |style| crabka_pgtypes::datetime::IntervalStyle::from_setting(&style),
         );
+        let extra_float_digits = self
+            .guc
+            .effective("extra_float_digits")
+            .ok()
+            .and_then(|setting| setting.parse().ok())
+            .unwrap_or(1);
+        // `bytea_output` is validated to one of these two spellings when it is
+        // set, so an unrecognised value can only mean the GUC is unset.
+        let bytea_output = match self.guc.effective("bytea_output").as_deref() {
+            Ok("escape") => crabka_pgtypes::encoding::ByteaOutput::Escape,
+            _ => crabka_pgtypes::encoding::ByteaOutput::Hex,
+        };
         crate::clock::EvalCtx {
             now,
             stmt_now,
@@ -3152,16 +3405,20 @@ impl SqlSession {
             date_order,
             date_style,
             interval_style,
+            extra_float_digits,
+            bytea_output,
             current_user: self.current_role.clone(),
             session_user: self.session_user.clone(),
             backend_pid: self.backend_pid,
             trigger_depth: self.trigger_depth,
             clock: Arc::clone(&self.clock),
+            random: Some(Arc::clone(&self.random)),
             // A session reads the catalog through `sequence`, which carries
             // the same handle.
             catalog: None,
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
+                data: Arc::clone(&self.kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::clone(&self.sequence_currvals),
                 pending: Arc::clone(&self.pending_sequences),
@@ -3170,6 +3427,65 @@ impl SqlSession {
             notify: Some(Arc::clone(&self.notify_pending)),
             transition_relations: Some(Arc::clone(&self.transition_relations)),
             event_trigger: self.event_trigger.clone(),
+            txn: Some(Arc::new(crate::clock::TxnRuntime {
+                snapshot: self.exported_snapshot(),
+                own_xid: self.local_xid(),
+                procarray: Arc::clone(&self.procarray),
+                assigned: Arc::clone(&self.assigned_xact_id),
+            })),
+        }
+    }
+
+    /// The snapshot `pg_current_snapshot()` exports.
+    ///
+    /// Inside a block this is the transaction's own snapshot, which
+    /// `read_context` re-takes per statement under READ COMMITTED and leaves
+    /// fixed under REPEATABLE READ — so the exported triple tracks what the
+    /// statement can actually see, as `GetActiveSnapshot()` does. Outside one
+    /// there is nothing to export and the caller reads the registry itself;
+    /// every statement runs inside at least an implicit transaction before it
+    /// evaluates anything, so that path is reached only where no transaction
+    /// exists at all.
+    fn exported_snapshot(&self) -> Option<Snapshot> {
+        match &self.state {
+            TxnState::InTransaction(c) | TxnState::Prepared(c) | TxnState::Failed(c) => {
+                Some(c.snapshot.clone())
+            }
+            TxnState::Idle => None,
+        }
+    }
+
+    /// Move an xid that expression evaluation assigned into the transaction
+    /// that now owns it.
+    ///
+    /// `pg_current_xact_id()` can assign the first xid of a transaction that
+    /// has not written, and it runs behind a shared reference, so it stages the
+    /// assignment rather than storing it. Until this runs the xid is registered
+    /// in the `ProcArray` and recorded nowhere else, so every path that can
+    /// finish a statement calls it — an unadopted xid would stay running for
+    /// the life of the process and hold every later snapshot's `xmin` down.
+    fn adopt_assigned_xact_id(&mut self) {
+        let Some(xid) = self
+            .assigned_xact_id
+            .lock()
+            .expect("assigned xact id mutex")
+            .take()
+        else {
+            return;
+        };
+        match &mut self.state {
+            TxnState::InTransaction(c) | TxnState::Prepared(c) | TxnState::Failed(c)
+                if c.xid.is_none() =>
+            {
+                c.xid = Some(xid);
+                if self.implicit_transaction {
+                    self.implicit_xid = Some(xid);
+                }
+            }
+            // The transaction already had an xid, or it ended under the
+            // statement. Either way nothing will ever record this one's
+            // outcome, so deregister it here instead of stranding it.
+            _ => self.procarray.finish(xid),
         }
     }
 
@@ -3178,12 +3494,16 @@ impl SqlSession {
         statement: &WriteStatementContext<'a>,
     ) -> crate::exec::WriteContext<'a> {
         crate::exec::WriteContext {
+            view_checks: &[],
+            merge_target_qual: None,
+            governing: None,
             catalog_kv: self.catalog_kv.as_ref(),
             kv: self.kv.as_ref(),
             global: self.catalog_kv.as_ref(),
             global_snapshot: statement.global_snapshot,
             procarray: self.procarray.as_ref(),
             lockmgr: self.lockmgr.as_ref(),
+            lock_owner: self.lock_owner,
             seq: self.seq.as_ref(),
             snapshot: statement.snapshot,
             xid: statement.xid,
@@ -3191,9 +3511,33 @@ impl SqlSession {
             eval_ctx: statement.eval_ctx,
             prune_horizon: statement.prune_horizon,
             lock_wait_cap: self.lock_wait_cap,
-            fctx: crate::exec::ForeignCtx::none(),
+            fctx: crate::exec::ForeignCtx {
+                // The write path's row-security decisions are made as the
+                // session's own role, not as the `public` placeholder a
+                // context with no scanner otherwise carries.
+                current_user: &self.current_role,
+                session_user: &self.session_user,
+                row_security: self.guc.row_security(),
+                // `INSERT … SELECT` builds its source relation through the
+                // ordinary read path, which resolves an unqualified name
+                // against `fctx.resolution`. `ForeignCtx::none()` carries the
+                // default scope, so without this the feeding query only ever
+                // saw the default schema: `INSERT INTO t SELECT … FROM t` was
+                // `relation "t" does not exist` for a table the session's
+                // `search_path` reaches, even though `SELECT … FROM t` alone
+                // resolved it.
+                resolution: statement.eval_ctx.resolution(),
+                ..crate::exec::ForeignCtx::none()
+            },
             range_scanner: self.range_scanner.as_ref(),
+            blocking_query_memory: self.blocking_query_memory,
             ctes: statement.ctes,
+            // One guard per session: a session runs one statement at a time and
+            // every entry is popped before the statement returns, so the stack
+            // is empty again by the next one. Threading a fresh one through each
+            // statement would put it in an `async fn`'s frame, on the recursion
+            // path of a `plpgsql` function that calls itself.
+            policy_stack: &self.policy_stack,
             // Only an open block has a later statement that could repair a
             // deferred violation, so only an open block promotes checks out of
             // the statement queue. An autocommit statement is its own
@@ -3391,7 +3735,15 @@ impl SqlSession {
         Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, false)).await?
     }
 
+    /// Render a PL/pgSQL value the way a `RAISE` format parameter is rendered.
+    ///
+    /// NULL is `<NULL>` rather than a panic: it travels out of band on the wire,
+    /// so the text output functions never see one and
+    /// [`crabka_pgtypes::encoding::encode_text`] aborts on it.
     pub(crate) fn plpgsql_render(&self, value: &Datum) -> String {
+        if value.is_null() {
+            return crate::plpgsql::NULL_RAISE_PARAMETER.to_string();
+        }
         let ctx = self.eval_ctx();
         String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
             value,
@@ -3431,11 +3783,14 @@ impl SqlSession {
     ) -> Result<(), ExecError> {
         let params = values
             .iter()
-            .map(|(value, ty)| BoundParam {
-                type_oid: Some(ty.oid()),
-                format: 1,
-                value: (!value.is_null())
-                    .then(|| bytes::Bytes::from(crabka_pgtypes::encoding::encode_binary(value))),
+            .map(|(value, ty)| {
+                let value = (!value.is_null())
+                    .then(|| bytes::Bytes::from(crabka_pgtypes::encoding::encode_binary(value)));
+                BoundParam {
+                    type_oid: Some(ty.oid()),
+                    format: 1,
+                    value,
+                }
             })
             .collect::<Vec<_>>();
         self.bind_extended_statement_params(statement, &params)
@@ -3453,6 +3808,16 @@ impl SqlSession {
         let ty = crate::exec::column_type_from_oid(field.type_oid)?;
         let text = std::str::from_utf8(&cell.text)
             .map_err(|error| ExecError::Syntax(format!("invalid UTF-8 query result: {error}")))?;
+        if matches!(
+            ty,
+            ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+        ) {
+            return crate::eval::cast_value(
+                &Datum::Text(text.to_string()),
+                ty,
+                &self.eval_ctx().time_zone,
+            );
+        }
         decode_text_bound_param(text, ty, &self.eval_ctx().time_zone).map_err(ExecError::from)
     }
 
@@ -3798,6 +4163,14 @@ impl SqlSession {
                 crabka_pgcatalog::CatalogError::UndefinedObject(next_role.to_string()).into(),
             );
         }
+        if self.session_user != self.authenticated_user
+            && !crabka_pgcatalog::role_can_set(&*self.catalog_kv, &self.session_user, next_role)?
+        {
+            return Err(ExecError::Remote(PgError::error(
+                "42501",
+                format!("permission denied to set role \"{next_role}\""),
+            )));
+        }
         self.current_role = next_role.to_string();
         Ok(QueryResult::Command {
             tag: reset_or_set_tag(reset),
@@ -3885,10 +4258,7 @@ impl SqlSession {
         require_supported_isolation(level)?;
         if matches!(
             &self.state,
-            TxnState::InTransaction(TxnCtx {
-                activity_started: true,
-                ..
-            })
+            TxnState::InTransaction(ctx) if ctx.activity_started
         ) {
             return Err(ExecError::ActiveSqlTransaction(
                 "SET TRANSACTION ISOLATION LEVEL must be called before any query".into(),
@@ -4006,11 +4376,10 @@ impl SqlSession {
         self.require_transaction_block("SAVEPOINT")?;
         let deferral = self.deferred_constraints().modes().clone();
         let notify_pending = self.pending_notify().clone();
-        let row_locks = self
-            .local_xid()
-            .map_or_else(HashMap::new, |xid| self.lockmgr.held_locks(xid));
+        let row_locks = self.lockmgr.held_locks_as(self.lock_owner);
         self.savepoints.push(SavepointFrame {
             name: name.to_string(),
+            role: self.current_role.clone(),
             guc: self.guc.clone(),
             deferral,
             undo: BTreeMap::new(),
@@ -4113,33 +4482,7 @@ impl SqlSession {
                     .or_insert_with(|| value.clone());
             }
         }
-        let user_type_prefix = crabka_pgkv::key::user_type_prefix();
-        let restored_user_types = catalog_undo
-            .keys()
-            .filter_map(|key| key.strip_prefix(user_type_prefix.as_slice()))
-            .filter_map(|name| std::str::from_utf8(name).ok())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let catalog_undo_ops = catalog_undo
-            .into_iter()
-            .map(|(key, value)| match value {
-                Some(value) => WriteOp::Put { key, value },
-                None => WriteOp::Delete { key },
-            })
-            .collect::<Vec<_>>();
-        if !catalog_undo_ops.is_empty() {
-            if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
-                self.committer.commit(catalog_undo_ops).await?;
-            } else {
-                self.catalog_kv.write_batch(&catalog_undo_ops)?;
-            }
-        }
-        for name in restored_user_types {
-            match crabka_pgcatalog::get_user_type(self.catalog_kv.as_ref(), &name)? {
-                Some(ty) => crabka_pgtypes::usertype::replace(&ty),
-                None => crabka_pgtypes::usertype::unregister(&name),
-            }
-        }
+        self.undo_catalog_writes(catalog_undo).await?;
 
         let (row_locks, table_lock_count, advisory_lock_count) = {
             let frame = &self.savepoints[index];
@@ -4149,8 +4492,18 @@ impl SqlSession {
                 frame.advisory_lock_count,
             )
         };
-        if let Some(xid) = self.local_xid() {
-            self.lockmgr.restore_locks(xid, &row_locks);
+        self.lockmgr.restore_locks_as(self.lock_owner, &row_locks);
+        let retained_unique_relations = row_locks
+            .keys()
+            .filter_map(|key| match key {
+                crate::lockmgr::LockKey::UniqueIndexRelation(table) => Some(*table),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if let TxnState::InTransaction(context) | TxnState::Failed(context) = &mut self.state {
+            context
+                .unique_index_guards
+                .retain(|table, _| retained_unique_relations.contains(table));
         }
         self.session_locks
             .tables
@@ -4160,17 +4513,19 @@ impl SqlSession {
             .restore_transaction_hold_count(self.session_lock_id, advisory_lock_count);
 
         self.savepoints.truncate(index + 1);
-        let (guc, deferral, notify_pending, restore_failed) = {
+        let (role, guc, deferral, notify_pending, restore_failed) = {
             let frame = &mut self.savepoints[index];
             frame.undo.clear();
             frame.catalog_undo.clear();
             (
+                frame.role.clone(),
                 frame.guc.clone(),
                 frame.deferral.clone(),
                 frame.notify_pending.clone(),
                 frame.failed,
             )
         };
+        self.current_role = role;
         self.guc = guc;
         self.deferred_constraints().restore_modes(deferral);
         *self.pending_notify() = notify_pending;
@@ -4255,12 +4610,14 @@ impl SqlSession {
             QueryResult::Command { .. } | QueryResult::Empty => (Vec::new(), Vec::new()),
         };
         let position = crate::cursor::CursorPosition::new(rows.len());
+        let pinned = self.cursor_pinned_relations(query);
         self.cursors.insert(
             name.to_string(),
             SqlCursor {
                 fields,
                 rows,
                 position,
+                pinned,
                 // A materialized result always supports a backward scan, so only
                 // an explicit NO SCROLL forbids one.
                 scrollable: scroll != Some(false),
@@ -4332,6 +4689,110 @@ impl SqlSession {
         Ok(QueryResult::Command { tag: tag.into() })
     }
 
+    /// The stored tables `query` reads, which `PostgreSQL` holds open for as
+    /// long as the cursor's portal lives.
+    ///
+    /// The set comes from the parse tree at `DECLARE` time rather than from the
+    /// scan, because a Gres cursor materializes its rows immediately and keeps
+    /// no reader afterwards. It is deliberately narrower than `PostgreSQL`'s in
+    /// two ways, and each narrowing can only refuse *less* than `PostgreSQL`
+    /// does:
+    ///
+    /// * A view is not recorded. `PostgreSQL` rewrites a view away before it
+    ///   plans, so the portal holds the tables *under* the view open and not
+    ///   the view itself. That is why `DROP VIEW` on a view a cursor reads
+    ///   succeeds on 18.4 while `TRUNCATE` on the table beneath it does not.
+    ///   Recording the view would invert both answers, so the walk stops at the
+    ///   view and the body is not followed.
+    /// * An inheritance descendant is not recorded for a parent written without
+    ///   `ONLY`, although `PostgreSQL`'s scan opens every one of them.
+    ///
+    /// It is wider than `PostgreSQL`'s in one way, which can refuse *more*: a
+    /// relation whose scan the planner proved dead is recorded here but never
+    /// opened there, so 18.4 lets `TRUNCATE t` through under a cursor reading
+    /// `SELECT * FROM t WHERE false`. A qualification that is merely selective,
+    /// or a `LIMIT 0`, still opens the relation on both sides.
+    ///
+    /// A `WITH` name is not a relation, and [`crate::viewdeps::query_sources`]
+    /// already drops the `FROM` items such a name shadows.
+    fn cursor_pinned_relations(&self, query: &QueryExpr) -> Vec<crabka_pgcatalog::RelationName> {
+        let scope = self.resolution_scope();
+        let mut pinned: Vec<crabka_pgcatalog::RelationName> = Vec::new();
+        for source in crate::viewdeps::query_sources(query) {
+            let Ok(name) = crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &scope,
+                source.reference,
+                crate::relname::SchemaDisposition::Reference,
+            ) else {
+                continue;
+            };
+            // `get_table` answers only for a relation with storage, which is
+            // what leaves the views the walk also reports out of the set.
+            if pinned.contains(&name)
+                || crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name).is_err()
+            {
+                continue;
+            }
+            pinned.push(name);
+        }
+        pinned
+    }
+
+    /// `PostgreSQL` refuses `DROP TABLE` and `TRUNCATE` on a relation an open
+    /// cursor of the *same session* is still reading, with 55006.
+    ///
+    /// The refusal comes from the relation's reference count and not from a
+    /// lock: the command already holds `ACCESS EXCLUSIVE`, so no other session
+    /// can be reading, but that lock does not protect the session against its
+    /// own portals. Another session is therefore never a reason to refuse — it
+    /// waits for the lock instead.
+    ///
+    /// Whether the cursor has rows left does not matter. One that was never
+    /// fetched from and one fetched past its last row both still hold the
+    /// relation, and only `CLOSE`, the end of the transaction, or the rollback
+    /// of the sub-transaction that declared it releases it. A `WITH HOLD`
+    /// cursor that has outlived its declaring transaction releases it as well,
+    /// because that commit copied its rows out.
+    fn refuse_relation_pinned_by_cursor(&self, stmt: &Statement) -> Result<(), ExecError> {
+        let (targets, command): (Vec<&crabka_pgparser::ast::RelationRef>, &str) = match stmt {
+            Statement::DropTable { names, .. } => (names.iter().collect(), "DROP TABLE"),
+            Statement::Truncate { targets, .. } => (
+                targets.iter().map(|target| &target.name).collect(),
+                "TRUNCATE",
+            ),
+            _ => return Ok(()),
+        };
+        let scope = self.resolution_scope();
+        for reference in targets {
+            let Ok(name) = crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &scope,
+                reference,
+                crate::relname::SchemaDisposition::Utility,
+            ) else {
+                // A name that does not resolve is the command's own 42P01.
+                continue;
+            };
+            if !self
+                .cursors
+                .values()
+                .any(|cursor| !cursor.session_held && cursor.pinned.contains(&name))
+            {
+                continue;
+            }
+            return Err(ExecError::Remote(PgError::error(
+                "55006",
+                format!(
+                    "cannot {command} \"{}\" because it is being used by \
+                     active queries in this session",
+                    name.name
+                ),
+            )));
+        }
+        Ok(())
+    }
+
     // ---- S2: SQL-level PREPARE/EXECUTE/DEALLOCATE -----------------------
 
     /// What `statement` describes as under this session's current resolution
@@ -4357,17 +4818,7 @@ impl SqlSession {
                 value: None,
             })
             .collect::<Vec<_>>();
-        let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
-        let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-            jiff::tz::TimeZone::UTC
-        } else {
-            jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
-                PgError::error(
-                    "22023",
-                    format!("invalid value for parameter: \"{timezone_name}\""),
-                )
-            })?
-        };
+        let time_zone = self.effective_time_zone();
         let scope = self.resolution_scope();
         let binder = ParamBinder {
             catalog_kv: &*self.catalog_kv,
@@ -4446,6 +4897,7 @@ impl SqlSession {
                     fields: shape.fields.unwrap_or_default(),
                 },
                 sql_source: Some(source.to_string()),
+                query_text: source.into(),
                 param_type_hints,
                 described_scope: shape.scope,
                 fixed_result,
@@ -4610,6 +5062,22 @@ impl SqlSession {
             tables,
             crate::relname::SchemaDisposition::Utility,
         )? {
+            if let Some(error) = crate::exec::lock_wrong_kind(&*self.catalog_kv, &name) {
+                return Err(error);
+            }
+            // A view is lockable in PostgreSQL, which locks it and recursively
+            // what it reads, and so is a synthesised catalog relation. Gres's
+            // relation locks are consulted by `LOCK TABLE` alone — ordinary DML
+            // serializes on row locks — and neither kind holds rows this engine
+            // writes, so neither has a lock identity to take and resolving it is
+            // the whole of the observable behaviour. Every other name still goes
+            // through `get_table`, so one that belongs to nothing keeps its
+            // 42P01.
+            if crabka_pgcatalog::get_view(&*self.catalog_kv, &name).is_ok()
+                || crate::exec::is_virtual_relation(&name)
+            {
+                continue;
+            }
             let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name)?;
             ids.push((name, table.id));
         }
@@ -4629,6 +5097,79 @@ impl SqlSession {
         })
     }
 
+    /// `CLUSTER` — take `PostgreSQL`'s relation lock, then run the reordering
+    /// through the ordinary write path.
+    ///
+    /// `PostgreSQL` holds ACCESS EXCLUSIVE for the whole rewrite. It is taken
+    /// here rather than in the executor because relation locks are held by
+    /// *sessions*, not transactions, and the session is what owns them. It does
+    /// not stand in for the MVCC work the reordering itself does: Gres's
+    /// relation locks are consulted only by `LOCK TABLE`, ordinary DML
+    /// serializing on row locks instead, so what this buys is that an explicit
+    /// `LOCK TABLE` in another session conflicts with a `CLUSTER` exactly as it
+    /// does in `PostgreSQL`.
+    async fn run_cluster(
+        &mut self,
+        stmt: &Statement,
+        target: Option<&crabka_pgparser::ast::ClusterTarget>,
+    ) -> Result<QueryResult, ExecError> {
+        // Every relation the statement will reach, resolved before any of them
+        // is locked, the way `LOCK TABLE` resolves its whole list first.
+        let locked = match target {
+            Some(target) => {
+                let name = crate::relname::resolve_relation(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    &target.table,
+                    crate::relname::SchemaDisposition::Utility,
+                )?;
+                if let Some(error) = crate::exec::cluster_wrong_kind(&*self.catalog_kv, &name) {
+                    return Err(error);
+                }
+                let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name)?;
+                vec![(name, table.id)]
+            }
+            None => {
+                // The bare spelling reclusters every marked relation, so it is
+                // the one spelling whose target list is not written down.
+                // `PostgreSQL` refuses it inside a block, which is also what
+                // keeps this open-ended lock set from outliving one statement.
+                if !matches!(self.state, TxnState::Idle) {
+                    return Err(ExecError::ActiveSqlTransaction(
+                        "CLUSTER cannot run inside a transaction block".into(),
+                    ));
+                }
+                let mut relations = Vec::new();
+                for index in crate::exec::marked_clustered_indexes(&*self.catalog_kv)? {
+                    let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &index.table)?;
+                    relations.push((index.table, table.id));
+                }
+                relations
+            }
+        };
+        for (name, id) in locked {
+            self.session_locks
+                .tables
+                .acquire(id, self.session_lock_id, TableLockMode::AccessExclusive)
+                .map_err(|_| {
+                    ExecError::LockNotAvailable(format!(
+                        "could not obtain lock on relation \"{name}\" (Gres never waits)"
+                    ))
+                })?;
+        }
+        let result = self.run_write(stmt).await?;
+        // The mark lands only once the reordering has: `PostgreSQL` rolls both
+        // back together, and this statement is the only place the two halves
+        // can be sequenced, because a catalog record has no MVCC header to
+        // carry it through the row batch's abort.
+        if let Some(target) = target {
+            let ops =
+                crate::exec::cluster_mark_ops(&*self.catalog_kv, &self.resolution_scope(), target)?;
+            self.commit_catalog_ops(ops).await?;
+        }
+        Ok(result)
+    }
+
     // ---- S6: EXPLAIN ----------------------------------------------------
 
     /// `EXPLAIN [ (options) ] <statement>`.
@@ -4642,7 +5183,12 @@ impl SqlSession {
         // (42P01 / 42703) rather than a plan for a query that cannot run. The
         // plan renderer is purely syntactic and would otherwise happily describe
         // a scan of a table that does not exist.
-        crate::exec::describe_statement(&*self.catalog_kv, &self.resolution_scope(), statement)?;
+        // The scalar runtime has to be installed for this, because resolving a
+        // user-defined routine or aggregate is a catalog read and `describe`
+        // takes no `kv` of its own.
+        crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
+            crate::exec::describe_statement(&*self.catalog_kv, &self.resolution_scope(), statement)
+        })?;
         let mut actual_rows = 0;
         if options.analyze {
             // ANALYZE runs the statement for real, inside the caller's
@@ -4652,7 +5198,11 @@ impl SqlSession {
                 actual_rows = rows.len();
             }
         }
-        let plan = crate::explain::plan_statement(statement);
+        // Deciding whether a call aggregates is a catalog question once a user
+        // can define an aggregate, so the renderer needs the runtime too.
+        let plan = crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
+            crate::explain::plan_statement(statement)
+        });
         let lines = crate::explain::render_with_rows(&plan, options, actual_rows);
         let field = FieldDescription {
             name: "QUERY PLAN".into(),
@@ -4722,23 +5272,1128 @@ impl SqlSession {
         Ok(QueryResult::Command { tag: tag.into() })
     }
 
+    /// `ANALYZE` and `VACUUM`'s shared front half: everything `PostgreSQL`
+    /// checks before it touches the first relation.
+    ///
+    /// Reclamation is autonomous here, so `VACUUM` has nothing left to do once
+    /// the checks pass. `ANALYZE` does: it maintains the two `pg_class` columns
+    /// that record what it saw — see
+    /// [`collect_relation_statistics`](Self::collect_relation_statistics). The
+    /// checks still decide whether `PostgreSQL` reports success at all, and a
+    /// statement that cannot name its target must not answer `ANALYZE`.
+    ///
+    /// The order below is `PostgreSQL`'s, and every step of it is observable:
+    ///
+    /// 1. The column list needs `ANALYZE`, checked on the written statement
+    ///    before any name is looked at — `VACUUM nosuch (a)` is `0A000`, not
+    ///    `42P01`.
+    /// 2. Every name resolves, all of them, before anything else happens.
+    ///    `ANALYZE good, nosuch` collects no statistics for `good`, and a
+    ///    relation that would be skipped further down does not get to warn.
+    /// 3. Then, relation by relation in written order: a kind that cannot be
+    ///    analyzed is skipped with a `WARNING` rather than refused, and only
+    ///    then are its columns checked.
+    /// 4. Only after every check has passed for every named relation are any
+    ///    statistics collected, so `ANALYZE good, nosuch` leaves `good`
+    ///    untouched.
+    async fn run_maintenance(
+        &mut self,
+        command: MaintenanceCommand,
+        stmt: &crabka_pgparser::ast::MaintenanceStmt,
+    ) -> Result<QueryResult, ExecError> {
+        if !stmt.analyze && stmt.targets.iter().any(|t| t.columns.is_some()) {
+            return Err(ExecError::Unsupported(
+                "ANALYZE option must be specified when a column list is provided".into(),
+            ));
+        }
+        let resolution = self.resolution_scope();
+        let mut resolved = Vec::with_capacity(stmt.targets.len());
+        for target in &stmt.targets {
+            let name = crate::relname::resolve_relation(
+                &*self.catalog_kv,
+                &resolution,
+                &target.name,
+                crate::relname::SchemaDisposition::Utility,
+            )?;
+            // A synthesised catalog relation is present without being stored,
+            // and `PostgreSQL` neither refuses nor skips `ANALYZE pg_class`.
+            if !crate::exec::is_virtual_relation(&name)
+                && !crabka_pgcatalog::relation_exists(&*self.catalog_kv, &name)?
+            {
+                return Err(
+                    crabka_pgcatalog::CatalogError::UndefinedTable(name.to_string()).into(),
+                );
+            }
+            resolved.push((name, target));
+        }
+        let mut collect = Vec::new();
+        for (name, target) in resolved {
+            // Only a stored table carries columns to collect statistics for.
+            // Anything else that shares the relation namespace — a view, a
+            // sequence, an index — is skipped, and a foreign table is skipped
+            // by `VACUUM` because there is nothing local to reclaim.
+            let table = if crate::exec::is_virtual_relation(&name) {
+                None
+            } else {
+                let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name).ok();
+                let vacuuming_foreign = command == MaintenanceCommand::Vacuum
+                    && table.as_ref().is_some_and(|t| t.foreign.is_some());
+                if table.is_none() || vacuuming_foreign {
+                    self.plpgsql_notice(PgError::warning(format!(
+                        "skipping \"{}\" --- cannot {} non-tables or special system tables",
+                        name.name,
+                        command.lowercase(),
+                    )))?;
+                    continue;
+                }
+                table
+            };
+            // A relation that got this far is one `ANALYZE` would collect
+            // statistics for. A synthesised catalog relation has no stored rows
+            // to count, so it is accepted and then has nothing done to it.
+            if table.is_some() {
+                collect.push(name.clone());
+            }
+            let (Some(columns), Some(table)) = (target.columns.as_ref(), table) else {
+                continue;
+            };
+            let mut seen: Vec<&str> = Vec::with_capacity(columns.len());
+            for column in columns {
+                if !table.columns.iter().any(|c| &c.name == column) {
+                    return Err(ExecError::UndefinedTableColumn {
+                        column: column.clone(),
+                        table: name.name.clone(),
+                    });
+                }
+                if seen.contains(&column.as_str()) {
+                    return Err(ExecError::RepeatedMaintenanceColumn {
+                        column: column.clone(),
+                        table: name.name.clone(),
+                    });
+                }
+                seen.push(column);
+            }
+        }
+        if stmt.analyze {
+            if stmt.targets.is_empty() {
+                collect = self.database_wide_analyze_targets()?;
+            }
+            Box::pin(self.collect_relation_statistics(collect)).await?;
+        }
+        Ok(QueryResult::Command {
+            tag: command.tag().into(),
+        })
+    }
+
+    /// Every relation a target-less `ANALYZE` visits.
+    ///
+    /// Scoped to `ANALYZE` on purpose. `PostgreSQL`'s target-less `VACUUM`
+    /// visits the same set and refreshes `reltuples` for each, but the only
+    /// bare `VACUUM;` in the regression corpus is `sanity_check`'s first
+    /// statement, and nothing in the corpus reads a count that only a bare
+    /// `VACUUM` could have written. Enumerating there would buy no fidelity the
+    /// corpus can see and would put an exact file on the line, so the no-target
+    /// path stays a no-op for `VACUUM`.
+    ///
+    /// `PostgreSQL` skips relations the caller may not maintain, with a
+    /// `WARNING` per relation — which is why `maintain_every` sets
+    /// `client_min_messages = error` around its bare `ANALYZE`. The skip is
+    /// silent here: nothing in the corpus reads those warnings, and a warning
+    /// per relation in another user's schema is a lot of output to get exactly
+    /// right for no observable gain.
+    fn database_wide_analyze_targets(
+        &self,
+    ) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
+        let kv = self.catalog_kv.as_ref();
+        // The role a relation created now would be owned by, which is the role
+        // ownership has to be compared against: a session that authenticated as
+        // nobody carries `PUBLIC` and acts as the bootstrap superuser.
+        let role = if self.current_role == crabka_pgcatalog::PUBLIC_ROLE {
+            crabka_pgcatalog::BOOTSTRAP_ROLE
+        } else {
+            self.current_role.as_str()
+        };
+        let superuser = crate::rls::role_is_superuser(kv, role)?;
+        let own_temp_schema = crabka_pgcatalog::temp_schema_name(self.backend_pid);
+        let mut targets = Vec::new();
+        for table in crabka_pgcatalog::list_tables(kv)? {
+            // A foreign table has nothing local to sample, and another
+            // session's temporary namespace is not this session's to read.
+            if table.foreign.is_some()
+                || (crabka_pgcatalog::is_temp_schema(&table.name.schema)
+                    && table.name.schema != own_temp_schema)
+                || (!superuser && table.owner != role)
+            {
+                continue;
+            }
+            targets.push(table.name);
+        }
+        Ok(targets)
+    }
+
+    /// Bring `pg_class.reltuples` and `pg_class.relhassubclass` up to date for
+    /// every relation this `ANALYZE` accepted.
+    ///
+    /// Both were measured against `PostgreSQL` 18.4:
+    ///
+    /// * `reltuples` becomes the relation's own live-row count — except for a
+    ///   partitioned relation, which has no rows of its own and takes the count
+    ///   of its whole tree. An inheritance *parent* is not a special case: it
+    ///   reports its own rows and ignores its children's.
+    /// * `relhassubclass` is only ever *cleared* here, and only when the
+    ///   relation has no children left. Nothing else clears it: not `DROP
+    ///   TABLE` of the last child, not `DETACH PARTITION`, not `VACUUM`.
+    ///
+    /// The count runs through the ordinary read path, one statement per
+    /// relation, which is also what gives a target-less `ANALYZE` the
+    /// transaction-per-relation shape `PostgreSQL` calls "use_own_xacts". A
+    /// relation the read path refuses keeps whatever estimate it had rather
+    /// than turning a maintenance command into an error — `PostgreSQL` reads
+    /// the heap directly and has no equivalent failure to report.
+    async fn collect_relation_statistics(
+        &mut self,
+        relations: Vec<crabka_pgcatalog::RelationName>,
+    ) -> Result<(), ExecError> {
+        let mut ops = Vec::new();
+        for name in relations {
+            if let Some(reltuples) = self.count_relation_rows(&name).await {
+                ops.push(crate::relstats::set_reltuples_op(&name, reltuples));
+            }
+            let kv = self.catalog_kv.as_ref();
+            if crate::relstats::of(kv, &name)?.has_subclass
+                && !crate::inheritance::has_children(kv, &name)?
+                && crate::partition::partitions_of(kv, &name)?.is_empty()
+            {
+                ops.push(crate::relstats::clear_has_subclass_op(&name));
+            }
+        }
+        self.commit_catalog_ops(ops).await
+    }
+
+    /// The live-row count `ANALYZE` records for one relation, or `None` when
+    /// the read path could not produce one.
+    async fn count_relation_rows(&mut self, name: &crabka_pgcatalog::RelationName) -> Option<f32> {
+        // A partitioned relation stores nothing itself, so its count is its
+        // tree's; every other relation counts only what it holds, which is what
+        // `ONLY` asks for even when the relation has inheritance children.
+        let only = match crate::partition::is_partitioned(self.catalog_kv.as_ref(), name) {
+            Ok(partitioned) => !partitioned,
+            Err(_) => return None,
+        };
+        let sql = format!(
+            "SELECT count(*) FROM {}{}.{}",
+            if only { "ONLY " } else { "" },
+            crate::catalog_fn::quote_identifier(&name.schema),
+            crate::catalog_fn::quote_identifier(&name.name),
+        );
+        let parsed = crabka_pgparser::parse(&sql).ok()?;
+        let [statement] = parsed.as_slice() else {
+            return None;
+        };
+        let result = Box::pin(self.run_select(statement)).await;
+        let QueryResult::Rows { rows, .. } = result.ok()? else {
+            return None;
+        };
+        let [row] = rows.as_slice() else { return None };
+        let [Some(cell)] = row.as_slice() else {
+            return None;
+        };
+        let count: i64 = std::str::from_utf8(&cell.text).ok()?.parse().ok()?;
+        // `reltuples` is a float4 in PostgreSQL too, so a count past the
+        // 24-bit mantissa loses the same precision there.
+        Some(count as f32)
+    }
+
+    /// `REINDEX`, which rebuilds nothing here and still has to resolve
+    /// everything it names.
+    ///
+    /// Index maintenance is autonomous, so the rebuild itself is an accepted
+    /// hint. What is not a hint is *which* names `PostgreSQL` accepts: a
+    /// relation that is not there, or is there and is the wrong kind, is a
+    /// refusal, and reporting success for it is how a suite silently stops
+    /// testing what it meant to.
+    ///
+    /// The order the checks run in is `PostgreSQL`'s and was measured, not
+    /// derived. The option list is read first, so an unknown option beats even
+    /// the transaction-block guard. `CONCURRENTLY`'s guard comes next and beats
+    /// the tablespace lookup, while `SCHEMA`'s and `DATABASE`'s come *after*
+    /// it — the two guards live on opposite sides of that lookup in
+    /// `ExecReindex`, which is why `BEGIN; REINDEX (TABLESPACE nosuch) SCHEMA s`
+    /// reports the tablespace and `BEGIN; REINDEX (TABLESPACE nosuch) TABLE
+    /// CONCURRENTLY t` reports the block.
+    fn run_reindex(
+        &mut self,
+        stmt: &crabka_pgparser::ast::ReindexStmt,
+    ) -> Result<QueryResult, ExecError> {
+        use crabka_pgparser::ast::ReindexTarget;
+        let options = crate::exec::reindex_options(stmt)?;
+        if options.concurrently {
+            self.prevent_in_transaction_block("REINDEX CONCURRENTLY")?;
+        }
+        if let Some(tablespace) = &options.tablespace {
+            crate::exec::require_tablespace(&*self.catalog_kv, tablespace)?;
+        }
+        match &stmt.target {
+            ReindexTarget::Index(reference) | ReindexTarget::Table(reference) => {
+                let name = crate::relname::resolve_relation(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    reference,
+                    crate::relname::SchemaDisposition::Utility,
+                )?;
+                // One lookup answers both questions the two refusals need, and
+                // it is the only catalog read a `REINDEX` that succeeds pays
+                // for.
+                if crate::exec::relation_kind(&*self.catalog_kv, &name).is_none() {
+                    return Err(
+                        crabka_pgcatalog::CatalogError::UndefinedTable(name.to_string()).into(),
+                    );
+                }
+                let wrong_kind = if matches!(stmt.target, ReindexTarget::Index(_)) {
+                    crate::exec::reindex_index_wrong_kind(&*self.catalog_kv, &name)
+                } else {
+                    crate::exec::reindex_table_wrong_kind(&*self.catalog_kv, &name)
+                };
+                if let Some(error) = wrong_kind {
+                    return Err(error);
+                }
+                if options.concurrently
+                    && let Some(error) = crate::exec::reindex_concurrently_system_catalog(&name)
+                {
+                    return Err(error);
+                }
+            }
+            ReindexTarget::Schema(schema) => {
+                self.prevent_in_transaction_block("REINDEX SCHEMA")?;
+                if !crabka_pgcatalog::schema_exists(&*self.catalog_kv, schema)? {
+                    return Err(
+                        crabka_pgcatalog::CatalogError::UndefinedSchema(schema.clone()).into(),
+                    );
+                }
+            }
+            ReindexTarget::Database(database) => {
+                self.prevent_in_transaction_block("REINDEX DATABASE")?;
+                if let Some(error) =
+                    crate::exec::reindex_other_database(&self.database, database.as_deref())
+                {
+                    return Err(error);
+                }
+            }
+            ReindexTarget::System(database) => {
+                self.prevent_in_transaction_block("REINDEX SYSTEM")?;
+                // Every relation this spelling would reach is a catalog, so the
+                // refusal does not wait to be told which one.
+                if options.concurrently {
+                    return Err(crate::exec::reindex_concurrent_system_refusal());
+                }
+                if let Some(error) =
+                    crate::exec::reindex_other_database(&self.database, database.as_deref())
+                {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(QueryResult::Command {
+            tag: "REINDEX".into(),
+        })
+    }
+
+    /// `PostgreSQL`'s `PreventInTransactionBlock`, which a statement that
+    /// cannot be rolled back calls before it does anything at all.
+    ///
+    /// # Errors
+    ///
+    /// `25001`, naming the statement as `PostgreSQL` names it.
+    fn prevent_in_transaction_block(&self, statement: &str) -> Result<(), ExecError> {
+        if matches!(self.state, TxnState::Idle) {
+            return Ok(());
+        }
+        Err(ExecError::ActiveSqlTransaction(format!(
+            "{statement} cannot run inside a transaction block"
+        )))
+    }
+
     /// The P5/D6/D8 utility bucket: documented mappings and documented refusals.
     async fn utility(&mut self, utility: &UtilityStatement) -> Result<QueryResult, ExecError> {
         match utility {
-            // Reclamation and index maintenance are autonomous here, and there
-            // are no planner statistics to collect, so these are accepted hints.
-            UtilityStatement::Analyze => Ok(QueryResult::Command {
-                tag: "ANALYZE".into(),
-            }),
-            UtilityStatement::Cluster => Ok(QueryResult::Command {
-                tag: "CLUSTER".into(),
-            }),
-            UtilityStatement::Reindex => Ok(QueryResult::Command {
-                tag: "REINDEX".into(),
-            }),
+            UtilityStatement::Analyze(stmt) => {
+                self.run_maintenance(MaintenanceCommand::Analyze, stmt)
+                    .await
+            }
+            UtilityStatement::Reindex(stmt) => self.run_reindex(stmt),
+            // Reclamation is autonomous here, so there is no write-ahead log to
+            // flush and nothing for this to do but say it did it.
             UtilityStatement::Checkpoint => Ok(QueryResult::Command {
                 tag: "CHECKPOINT".into(),
             }),
+            UtilityStatement::Load { filename } => {
+                crate::routine::validate_load_target(filename)?;
+                Ok(QueryResult::Command { tag: "LOAD".into() })
+            }
+            UtilityStatement::SecurityLabel { provider } => {
+                let message = match provider {
+                    Some(provider) => {
+                        format!("security label provider \"{provider}\" is not loaded")
+                    }
+                    None => "no security label providers have been loaded".into(),
+                };
+                Err(ExecError::Remote(PgError::error("22023", message)))
+            }
+            UtilityStatement::CreateTablespace {
+                name,
+                owner,
+                location,
+                options,
+            } => {
+                if location.is_empty() {
+                    if self.guc.effective("allow_in_place_tablespaces")? != "on" {
+                        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                            "42P17",
+                            "tablespace location must be an absolute path",
+                        )));
+                    }
+                } else if !std::path::Path::new(location).is_absolute() {
+                    return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                        "42P17",
+                        "tablespace location must be an absolute path",
+                    )));
+                }
+                validate_tablespace_options(options.iter().map(|(name, _)| name.as_str()))?;
+                let owner = owner.as_deref().unwrap_or(&self.current_role);
+                if !crabka_pgcatalog::role_exists(&*self.catalog_kv, owner)? {
+                    return Err(
+                        crabka_pgcatalog::CatalogError::UndefinedObject(owner.into()).into(),
+                    );
+                }
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let ops = crabka_pgcatalog::create_tablespace_ops(
+                    &*self.catalog_kv,
+                    name,
+                    owner,
+                    location,
+                    options.clone(),
+                )
+                .map_err(|error| match error {
+                    crabka_pgcatalog::CatalogError::DuplicateObject(_) => {
+                        tablespace_duplicate(name)
+                    }
+                    other => other.into(),
+                })?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: "CREATE TABLESPACE".into(),
+                })
+            }
+            UtilityStatement::DropTablespace { name, if_exists } => {
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                match crabka_pgcatalog::drop_tablespace_ops(&*self.catalog_kv, name) {
+                    Ok(ops) => self.commit_catalog(ops).await?,
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => {}
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+                        return Err(tablespace_missing(name));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                Ok(QueryResult::Command {
+                    tag: "DROP TABLESPACE".into(),
+                })
+            }
+            UtilityStatement::AlterTablespace { name, action } => {
+                use crabka_pgparser::ast::TablespaceAlterAction;
+
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let mut tablespace = crabka_pgcatalog::get_tablespace(&*self.catalog_kv, name)
+                    .map_err(|error| match error {
+                        crabka_pgcatalog::CatalogError::UndefinedObject(_) => {
+                            tablespace_missing(name)
+                        }
+                        other => other.into(),
+                    })?;
+                match action {
+                    TablespaceAlterAction::Set(options) => {
+                        validate_tablespace_options(options.iter().map(|(name, _)| name.as_str()))?;
+                        for (name, value) in options {
+                            if let Some(existing) = tablespace
+                                .options
+                                .iter_mut()
+                                .find(|(existing, _)| existing == name)
+                            {
+                                existing.1.clone_from(value);
+                            } else {
+                                tablespace.options.push((name.clone(), value.clone()));
+                            }
+                        }
+                    }
+                    TablespaceAlterAction::Reset(options) => {
+                        validate_tablespace_options(options.iter().map(String::as_str))?;
+                        tablespace
+                            .options
+                            .retain(|(name, _)| !options.contains(name));
+                    }
+                    TablespaceAlterAction::RenameTo(new_name) => {
+                        tablespace.name.clone_from(new_name);
+                    }
+                    TablespaceAlterAction::OwnerTo(owner) => {
+                        let owner = if matches!(owner.as_str(), "current_user" | "user") {
+                            &self.current_role
+                        } else {
+                            owner
+                        };
+                        if !crabka_pgcatalog::role_exists(&*self.catalog_kv, owner)? {
+                            return Err(crabka_pgcatalog::CatalogError::UndefinedObject(
+                                owner.clone(),
+                            )
+                            .into());
+                        }
+                        tablespace.owner.clone_from(owner);
+                    }
+                }
+                let ops =
+                    crabka_pgcatalog::replace_tablespace_ops(&*self.catalog_kv, name, &tablespace)
+                        .map_err(|error| match error {
+                            crabka_pgcatalog::CatalogError::DuplicateObject(_) => {
+                                tablespace_duplicate(&tablespace.name)
+                            }
+                            crabka_pgcatalog::CatalogError::UndefinedObject(_) => {
+                                tablespace_missing(name)
+                            }
+                            other => other.into(),
+                        })?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: "ALTER TABLESPACE".into(),
+                })
+            }
+            UtilityStatement::CreateOperatorFamily { name, method } => {
+                let method = method.to_ascii_lowercase();
+                if crate::catalog_rel::access_method_oid(&method).is_none() {
+                    return Err(ExecError::UndefinedObject(format!(
+                        "access method \"{method}\""
+                    )));
+                }
+                let name = crate::relname::resolve_relation(
+                    self.catalog_kv.as_ref(),
+                    &self.resolution_scope(),
+                    name,
+                    crate::relname::SchemaDisposition::Creation,
+                )?;
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let (_, ops) = crabka_pgcatalog::create_operator_family_ops(
+                    self.catalog_kv.as_ref(),
+                    &name,
+                    &method,
+                    &self.current_role,
+                )?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: "CREATE OPERATOR FAMILY".into(),
+                })
+            }
+            UtilityStatement::CreateOperatorClass {
+                name,
+                default,
+                input_type,
+                method,
+                family,
+                key_type,
+            } => {
+                let method = method.to_ascii_lowercase();
+                if crate::catalog_rel::access_method_oid(&method).is_none() {
+                    return Err(ExecError::UndefinedObject(format!(
+                        "access method \"{method}\""
+                    )));
+                }
+                let scope = self.resolution_scope();
+                let name = crate::relname::resolve_relation(
+                    self.catalog_kv.as_ref(),
+                    &scope,
+                    name,
+                    crate::relname::SchemaDisposition::Creation,
+                )?;
+                let family = family
+                    .as_ref()
+                    .map(|family| {
+                        crate::relname::resolve_relation(
+                            self.catalog_kv.as_ref(),
+                            &scope,
+                            family,
+                            crate::relname::SchemaDisposition::Creation,
+                        )
+                    })
+                    .transpose()?;
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let (_, ops) = crabka_pgcatalog::create_operator_class_ops(
+                    self.catalog_kv.as_ref(),
+                    &name,
+                    &method,
+                    &self.current_role,
+                    family.as_ref(),
+                    input_type.oid(),
+                    *default,
+                    key_type.map_or(0, crabka_pgtypes::ColumnType::oid),
+                )?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: "CREATE OPERATOR CLASS".into(),
+                })
+            }
+            UtilityStatement::AlterOperatorObject {
+                kind,
+                name,
+                method,
+                action,
+            } => {
+                use crabka_pgparser::ast::{OperatorObjectAlterAction, OperatorObjectKind};
+
+                let method = method.to_ascii_lowercase();
+                if crate::catalog_rel::access_method_oid(&method).is_none() {
+                    return Err(operator_access_method_missing(&method));
+                }
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let old_name = resolve_operator_object_name(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    name,
+                    &method,
+                    *kind,
+                )?;
+                let builtin = builtin_operator_object_oid(&old_name, &method, *kind);
+                let (object_oid, owner) = match builtin {
+                    Some(oid) => (oid, crate::catalog_fn::OBJECT_OWNER.to_string()),
+                    None => match kind {
+                        OperatorObjectKind::Class => crabka_pgcatalog::get_operator_class(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &method,
+                        )
+                        .map(|object| (object.oid, object.owner)),
+                        OperatorObjectKind::Family => crabka_pgcatalog::get_operator_family(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &method,
+                        )
+                        .map(|object| (object.oid, object.owner)),
+                    }
+                    .map_err(|_| operator_object_missing(*kind, &name.name, &method))?,
+                };
+                let superuser =
+                    self.current_role == self.authenticated_user || self.current_role == "postgres";
+                let member_action = matches!(
+                    action,
+                    OperatorObjectAlterAction::AddMembers(_)
+                        | OperatorObjectAlterAction::DropMembers(_)
+                );
+                if member_action
+                    && !superuser
+                    && !crabka_pgcatalog::has_schema_privilege(
+                        &*self.catalog_kv,
+                        &old_name.schema,
+                        &self.current_role,
+                        "CREATE",
+                    )?
+                {
+                    return Err(ExecError::Remote(PgError::error(
+                        "42501",
+                        format!("permission denied for schema {}", old_name.schema),
+                    )));
+                }
+                if !member_action
+                    && owner != self.current_role
+                    && !superuser
+                    && !crabka_pgcatalog::role_can_set(
+                        &*self.catalog_kv,
+                        &self.current_role,
+                        &owner,
+                    )?
+                {
+                    return Err(operator_object_not_owner(*kind, &name.name));
+                }
+                if let OperatorObjectAlterAction::AddMembers(members) = action {
+                    if !superuser {
+                        return Err(ExecError::Remote(PgError::error(
+                            "42501",
+                            "must be superuser to alter an operator family",
+                        )));
+                    }
+                    let mut catalog_members = Vec::with_capacity(members.len());
+                    let mut identities = std::collections::HashSet::new();
+                    for member in members {
+                        let catalog_member = match member {
+                            crabka_pgparser::ast::OperatorFamilyMember::Operator {
+                                number,
+                                operator,
+                                left_type,
+                                right_type,
+                                order_family,
+                            } => {
+                                let maximum = if method == "btree" { 5 } else { u16::MAX };
+                                if *number == 0 || *number > maximum {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "22023",
+                                        format!(
+                                            "invalid operator number {number}, must be between 1 and {maximum}"
+                                        ),
+                                    )));
+                                }
+                                if order_family.is_some() && method == "btree" {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "0A000",
+                                        "access method \"btree\" does not support ordering operators",
+                                    )));
+                                }
+                                crabka_pgcatalog::OperatorFamilyMember::Operator {
+                                    number: *number,
+                                    operator: operator.clone(),
+                                    left_type_oid: left_type.oid(),
+                                    right_type_oid: right_type.oid(),
+                                    order_family_oid: match order_family {
+                                        Some(order_family) => resolve_ordering_family_oid(
+                                            &*self.catalog_kv,
+                                            &self.resolution_scope(),
+                                            order_family,
+                                        )?,
+                                        None => 0,
+                                    },
+                                }
+                            }
+                            crabka_pgparser::ast::OperatorFamilyMember::Function {
+                                number,
+                                left_type,
+                                right_type,
+                                function,
+                                argument_types,
+                            } => {
+                                let maximum = match method.as_str() {
+                                    "btree" => 6,
+                                    "hash" => 2,
+                                    _ => u16::MAX,
+                                };
+                                if *number == 0 || *number > maximum {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "22023",
+                                        format!(
+                                            "invalid function number {number}, must be between 1 and {maximum}"
+                                        ),
+                                    )));
+                                }
+                                if method == "gist"
+                                    && left_type.is_none()
+                                    && argument_types.len() >= 2
+                                    && argument_types[0] != argument_types[1]
+                                {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "22023",
+                                        "associated data types must be specified for index support function",
+                                    )));
+                                }
+                                if method == "btree" && *number == 1 && argument_types.len() != 2 {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "42P17",
+                                        "ordering comparison functions must have two arguments",
+                                    )));
+                                }
+                                if method == "hash" && *number == 1 && argument_types.len() != 1 {
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "42P17",
+                                        "hash function 1 must have one argument",
+                                    )));
+                                }
+                                let named = crabka_pgcatalog::routine::routines_named(
+                                    &*self.catalog_kv,
+                                    &function.name,
+                                )?;
+                                if method == "btree" && *number == 5 {
+                                    if left_type.is_some() && left_type != right_type {
+                                        return Err(ExecError::Remote(PgError::error(
+                                            "42P17",
+                                            "left and right associated data types for operator class options parsing functions must match",
+                                        )));
+                                    }
+                                    let valid = argument_types
+                                        == &[crabka_pgparser::ast::OperatorFamilyFunctionType::Internal]
+                                        && named.iter().any(|routine| {
+                                            routine.input_type_names() == ["internal"]
+                                                && crate::routine::declared_returns_void(routine)
+                                        });
+                                    if !valid {
+                                        if left_type.is_none() {
+                                            let signature = argument_types
+                                                .iter()
+                                                .map(|ty| ty.name())
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
+                                            return Err(ExecError::Remote(PgError::error(
+                                                "42883",
+                                                format!(
+                                                    "function {}({signature}) does not exist",
+                                                    function.name
+                                                ),
+                                            )));
+                                        }
+                                        return Err(ExecError::Remote(
+                                            PgError::error(
+                                                "42P17",
+                                                "invalid operator class options parsing function",
+                                            )
+                                            .with_hint(
+                                                "Valid signature of operator class options parsing function is (internal) RETURNS void.",
+                                            ),
+                                        ));
+                                    }
+                                }
+                                let left = left_type
+                                    .as_ref()
+                                    .copied()
+                                    .or_else(|| argument_types.first().and_then(|ty| ty.column()))
+                                    .ok_or_else(|| {
+                                        ExecError::Remote(PgError::error(
+                                            "42601",
+                                            "support function must have an associated data type",
+                                        ))
+                                    })?;
+                                let right = right_type
+                                    .as_ref()
+                                    .copied()
+                                    .or_else(|| argument_types.get(1).and_then(|ty| ty.column()))
+                                    .unwrap_or(left);
+                                if method == "btree" && matches!(*number, 4 | 6) && left != right {
+                                    let message = if *number == 4 {
+                                        "ordering equal image functions must not be cross-type"
+                                    } else {
+                                        "btree skip support functions must not be cross-type"
+                                    };
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "42P17", message,
+                                    )));
+                                }
+                                if matches!((method.as_str(), *number), ("btree", 1) | ("hash", 1))
+                                    && named.iter().any(|routine| {
+                                        routine
+                                            .input_params()
+                                            .map(|param| param.ty.column)
+                                            .eq(argument_types.iter().map(|ty| ty.column()))
+                                    })
+                                    && !named.iter().any(|routine| {
+                                        routine
+                                            .input_params()
+                                            .map(|param| param.ty.column)
+                                            .eq(argument_types.iter().map(|ty| ty.column()))
+                                            && crate::routine::declared_scalar_result_type(routine)
+                                                == Some(crabka_pgtypes::ColumnType::Int4)
+                                    })
+                                {
+                                    let message = if method == "btree" {
+                                        "ordering comparison functions must return integer"
+                                    } else {
+                                        "hash function 1 must return integer"
+                                    };
+                                    return Err(ExecError::Remote(PgError::error(
+                                        "42P17", message,
+                                    )));
+                                }
+                                crabka_pgcatalog::OperatorFamilyMember::Function {
+                                    number: *number,
+                                    function: function.to_string(),
+                                    left_type_oid: left.oid(),
+                                    right_type_oid: right.oid(),
+                                    argument_type_oids: argument_types
+                                        .iter()
+                                        .map(|ty| ty.oid())
+                                        .collect(),
+                                }
+                            }
+                        };
+                        let identity = operator_family_member_identity(&catalog_member);
+                        if !identities.insert(identity) {
+                            return Err(operator_family_member_repeated(identity));
+                        }
+                        if builtin_operator_family_member_exists(object_oid, identity)
+                            || crabka_pgcatalog::operator_family_member_exists(
+                                &*self.catalog_kv,
+                                object_oid,
+                                identity,
+                            )?
+                        {
+                            return Err(operator_family_member_duplicate(identity, &old_name.name));
+                        }
+                        catalog_members.push(catalog_member);
+                    }
+                    let ops = crabka_pgcatalog::add_operator_family_members_ops(
+                        &*self.catalog_kv,
+                        object_oid,
+                        &catalog_members,
+                    )?;
+                    self.commit_catalog(ops).await?;
+                    return Ok(QueryResult::Command {
+                        tag: "ALTER OPERATOR FAMILY".into(),
+                    });
+                }
+                if let OperatorObjectAlterAction::DropMembers(members) = action {
+                    if !superuser {
+                        return Err(ExecError::Remote(PgError::error(
+                            "42501",
+                            "must be superuser to alter an operator family",
+                        )));
+                    }
+                    let members = members
+                        .iter()
+                        .map(|member| match member {
+                            crabka_pgparser::ast::OperatorFamilyMemberKey::Operator {
+                                number,
+                                left_type,
+                                right_type,
+                            } => crabka_pgcatalog::OperatorFamilyMemberKey::Operator {
+                                number: *number,
+                                left_type_oid: left_type.oid(),
+                                right_type_oid: right_type.oid(),
+                            },
+                            crabka_pgparser::ast::OperatorFamilyMemberKey::Function {
+                                number,
+                                left_type,
+                                right_type,
+                            } => crabka_pgcatalog::OperatorFamilyMemberKey::Function {
+                                number: *number,
+                                left_type_oid: left_type.oid(),
+                                right_type_oid: right_type.oid(),
+                            },
+                        })
+                        .collect::<Vec<_>>();
+                    for member in &members {
+                        if !crabka_pgcatalog::operator_family_member_exists(
+                            &*self.catalog_kv,
+                            object_oid,
+                            *member,
+                        )? {
+                            // A member of the built-in fixture is present but
+                            // not removable, which is a different answer from
+                            // "there is no such member".
+                            if builtin_operator_family_member_exists(object_oid, *member) {
+                                return Err(ExecError::Unsupported(format!(
+                                    "operator family \"{}\" is built into this catalog and its \
+                                     own members cannot be dropped",
+                                    old_name.name
+                                )));
+                            }
+                            return Err(operator_family_member_missing(*member, &old_name.name));
+                        }
+                    }
+                    let ops = crabka_pgcatalog::drop_operator_family_members_ops(
+                        &*self.catalog_kv,
+                        object_oid,
+                        &members,
+                    )?;
+                    self.commit_catalog(ops).await?;
+                    return Ok(QueryResult::Command {
+                        tag: "ALTER OPERATOR FAMILY".into(),
+                    });
+                }
+                // Members attach to a built-in family by oid, so they need no
+                // row for it. Renaming, reowning or moving one would, and the
+                // built-in fixture is not writable.
+                if builtin.is_some() {
+                    return Err(ExecError::Unsupported(format!(
+                        "operator {} \"{}\" is built into this catalog and cannot be renamed, reowned or moved",
+                        match kind {
+                            OperatorObjectKind::Class => "class",
+                            OperatorObjectKind::Family => "family",
+                        },
+                        old_name.name
+                    )));
+                }
+                let target_name = match action {
+                    OperatorObjectAlterAction::RenameTo(new_name) => {
+                        crabka_pgcatalog::RelationName::new(old_name.schema.clone(), new_name)
+                    }
+                    OperatorObjectAlterAction::SetSchema(schema) => {
+                        if !crabka_pgcatalog::schema_exists(&*self.catalog_kv, schema)? {
+                            return Err(crabka_pgcatalog::CatalogError::UndefinedSchema(
+                                schema.clone(),
+                            )
+                            .into());
+                        }
+                        crabka_pgcatalog::RelationName::new(schema, old_name.name.clone())
+                    }
+                    OperatorObjectAlterAction::OwnerTo(_) => old_name.clone(),
+                    OperatorObjectAlterAction::AddMembers(_)
+                    | OperatorObjectAlterAction::DropMembers(_) => unreachable!(),
+                };
+                let new_owner = match action {
+                    OperatorObjectAlterAction::OwnerTo(owner) => {
+                        let owner = if matches!(owner.as_str(), "current_user" | "user") {
+                            &self.current_role
+                        } else {
+                            owner
+                        };
+                        if !crabka_pgcatalog::role_exists(&*self.catalog_kv, owner)? {
+                            return Err(crabka_pgcatalog::CatalogError::UndefinedObject(
+                                owner.clone(),
+                            )
+                            .into());
+                        }
+                        if !superuser
+                            && !crabka_pgcatalog::role_can_set(
+                                &*self.catalog_kv,
+                                &self.current_role,
+                                owner,
+                            )?
+                        {
+                            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                                "42501",
+                                format!("must be able to SET ROLE \"{owner}\""),
+                            )));
+                        }
+                        owner.clone()
+                    }
+                    _ => owner,
+                };
+                let ops = match kind {
+                    OperatorObjectKind::Class => {
+                        let mut object = crabka_pgcatalog::get_operator_class(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &method,
+                        )?;
+                        object.name = target_name.clone();
+                        object.owner = new_owner;
+                        crabka_pgcatalog::replace_operator_class_ops(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &object,
+                        )
+                    }
+                    OperatorObjectKind::Family => {
+                        let mut object = crabka_pgcatalog::get_operator_family(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &method,
+                        )?;
+                        object.name = target_name.clone();
+                        object.owner = new_owner;
+                        crabka_pgcatalog::replace_operator_family_ops(
+                            &*self.catalog_kv,
+                            &old_name,
+                            &object,
+                        )
+                    }
+                }
+                .map_err(|error| match error {
+                    crabka_pgcatalog::CatalogError::DuplicateObject(_) => {
+                        operator_object_duplicate(
+                            *kind,
+                            &target_name.name,
+                            &method,
+                            &target_name.schema,
+                        )
+                    }
+                    other => other.into(),
+                })?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: match kind {
+                        OperatorObjectKind::Class => "ALTER OPERATOR CLASS",
+                        OperatorObjectKind::Family => "ALTER OPERATOR FAMILY",
+                    }
+                    .into(),
+                })
+            }
+            UtilityStatement::DropOperatorObject {
+                kind,
+                name,
+                method,
+                if_exists,
+                cascade,
+            } => {
+                use crabka_pgparser::ast::OperatorObjectKind;
+
+                let method = method.to_ascii_lowercase();
+                if crate::catalog_rel::access_method_oid(&method).is_none() {
+                    return Err(operator_access_method_missing(&method));
+                }
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let resolved = resolve_operator_object_name(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    name,
+                    &method,
+                    *kind,
+                )?;
+                let result = match kind {
+                    OperatorObjectKind::Class => crabka_pgcatalog::drop_operator_class_ops(
+                        &*self.catalog_kv,
+                        &resolved,
+                        &method,
+                    ),
+                    OperatorObjectKind::Family => crabka_pgcatalog::drop_operator_family_ops(
+                        &*self.catalog_kv,
+                        &resolved,
+                        &method,
+                        *cascade,
+                    ),
+                };
+                match result {
+                    Ok(ops) => self.commit_catalog(ops).await?,
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => {
+                        let kind = match kind {
+                            OperatorObjectKind::Class => "class",
+                            OperatorObjectKind::Family => "family",
+                        };
+                        self.plpgsql_notice(crabka_pgwire::error::PgError::notice(format!(
+                            "operator {kind} \"{}\" does not exist for access method \"{method}\", skipping",
+                            name.name
+                        )))?;
+                    }
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+                        return Err(operator_object_missing(*kind, &name.name, &method));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                Ok(QueryResult::Command {
+                    tag: match kind {
+                        OperatorObjectKind::Class => "DROP OPERATOR CLASS",
+                        OperatorObjectKind::Family => "DROP OPERATOR FAMILY",
+                    }
+                    .into(),
+                })
+            }
+            UtilityStatement::CreateOperator(stmt) => {
+                // `DefineOperator` warns once per unrecognized attribute and
+                // only then reports what the definition is missing, so the
+                // warnings are emitted before anything can refuse the
+                // statement.
+                for warning in crate::useroperator::unrecognized_attribute_warnings(stmt) {
+                    self.plpgsql_notice(PgError::warning(warning).with_code("42601"))?;
+                }
+                let scope = self.resolution_scope();
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let (result, ops) = crate::useroperator::create(
+                    &*self.catalog_kv,
+                    &scope,
+                    stmt,
+                    &self.current_role,
+                )?;
+                self.commit_catalog(ops).await?;
+                Ok(result)
+            }
+            UtilityStatement::DropOperator {
+                if_exists,
+                operators,
+                cascade,
+            } => {
+                let scope = self.resolution_scope();
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let (result, outcome) = crate::useroperator::drop_operators(
+                    &*self.catalog_kv,
+                    &scope,
+                    *if_exists,
+                    operators,
+                    *cascade,
+                )?;
+                self.commit_catalog(outcome.ops).await?;
+                for notice in outcome.notices {
+                    self.plpgsql_notice(PgError::notice(notice))?;
+                }
+                Ok(result)
+            }
             UtilityStatement::AlterSystem { name } => {
                 // `ALTER SYSTEM` never changes the running session in PostgreSQL
                 // either, but it does validate the parameter name.
@@ -4802,6 +6457,7 @@ impl SqlSession {
             Some(names) => {
                 let catalog = crabka_pgcatalog::list_foreign_keys(self.catalog_kv.as_ref())?;
                 let triggers = crabka_pgcatalog::trigger::list_triggers(self.catalog_kv.as_ref())?;
+                let indexes = crabka_pgcatalog::list_indexes(self.catalog_kv.as_ref())?;
                 let mut store = self.deferred_constraints();
                 for name in names {
                     let mut found = false;
@@ -4812,6 +6468,24 @@ impl SqlSession {
                             )));
                         }
                         store.modes_mut().set_one(fk.table_id, &fk.name, deferred);
+                        found = true;
+                    }
+                    // A `PRIMARY KEY` or `UNIQUE` constraint is named here by
+                    // the index that enforces it, which carries the constraint
+                    // name. An index that backs no constraint is not a
+                    // constraint and is not resolvable.
+                    for index in indexes
+                        .iter()
+                        .filter(|index| index.constraint.is_some() && index.name == *name)
+                    {
+                        if !index.deferral.is_deferrable() {
+                            return Err(ExecError::WrongObjectType(format!(
+                                "constraint \"{name}\" is not deferrable"
+                            )));
+                        }
+                        store
+                            .modes_mut()
+                            .set_one(index.table_id, &index.name, deferred);
                         found = true;
                     }
                     for trigger in triggers
@@ -4838,7 +6512,8 @@ impl SqlSession {
         }
         if !deferred {
             let checks = self.deferred_constraints().take_immediate();
-            self.drain_deferred_checks_now(checks).await?;
+            let unique = self.deferred_constraints().take_immediate_unique();
+            self.drain_deferred_checks_now(checks, unique).await?;
             let mut ready = Vec::new();
             let mut still_deferred = Vec::new();
             let pending = std::mem::take(&mut self.deferred_after_triggers);
@@ -4869,8 +6544,9 @@ impl SqlSession {
     async fn drain_deferred_checks_now(
         &self,
         checks: Vec<crate::fk::PendingCheck>,
+        unique: Vec<crate::fk::PendingUniqueCheck>,
     ) -> Result<(), ExecError> {
-        if checks.is_empty() {
+        if checks.is_empty() && unique.is_empty() {
             return Ok(());
         }
         let TxnState::InTransaction(txn) = &self.state else {
@@ -4881,7 +6557,7 @@ impl SqlSession {
         let xid = txn
             .xid
             .expect("a statement that deferred a check modified rows, which allocates the xid");
-        let mut ops = self.deferred_check_ops(txn, xid, checks).await?;
+        let mut ops = self.deferred_check_ops(txn, xid, checks, unique).await?;
         if ops.is_empty() {
             return Ok(());
         }
@@ -4902,6 +6578,7 @@ impl SqlSession {
         txn: &TxnCtx,
         xid: u64,
         checks: Vec<crate::fk::PendingCheck>,
+        unique: Vec<crate::fk::PendingUniqueCheck>,
     ) -> Result<Vec<WriteOp>, ExecError> {
         let stored = if txn.repeatable_read {
             txn.global_snapshot.as_ref()
@@ -4927,6 +6604,10 @@ impl SqlSession {
             prune_horizon: None,
             ctes: &ctes,
         });
+        // The uniqueness rechecks run first: they produce no ops of their own,
+        // so a violation there leaves nothing half-applied for the referential
+        // drain to have to unwind.
+        crate::exec::drain_deferred_unique_checks(&write_ctx, &unique)?;
         crate::exec::drain_deferred_fk_checks(&write_ctx, checks).await
     }
 
@@ -4936,16 +6617,27 @@ impl SqlSession {
     fn parse_for_session(&mut self, sql: &str) -> Result<Vec<Statement>, PgError> {
         let span = crate::telemetry::parse_span(sql.len());
         let _entered = span.enter();
-        match crabka_pgparser::parse(sql) {
+        let parsed = self.type_search_schemas().and_then(|schemas| {
+            crabka_pgparser::parse_with_type_schemas(sql, &schemas).map_err(ExecError::from)
+        });
+        match parsed {
             Ok(statements) => {
                 crate::telemetry::record_parse_statements(&span, statements.len());
                 Ok(statements)
             }
-            Err(error) => {
-                let error = ExecError::from(error).into_pg();
+            Err(parsed) => {
+                let error = parsed.clone().into_pg();
                 crate::telemetry::record_error(&span, &error.code, &error.message);
                 self.mark_transaction_failed();
-                Err(error)
+                let error = attach_parsed_bit_string_position(sql, &parsed, error);
+                // A qualified interval literal — `interval '1 2' day to minute`
+                // — is decoded here and not at execution time, because the
+                // qualifier is a property of the literal. PostgreSQL still
+                // points its caret at that literal, and this is the only place
+                // the failure passes through, so the run-time attachment in
+                // `attach_known_runtime_diagnostics` never sees it.
+                let error = attach_type_input_literal_position(sql, error);
+                Err(attach_declared_parse_position(sql, &parsed, error))
             }
         }
     }
@@ -4987,17 +6679,7 @@ impl SqlSession {
         stmt: &mut Statement,
         params: &[BoundParam],
     ) -> Result<(), PgError> {
-        let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
-        let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-            jiff::tz::TimeZone::UTC
-        } else {
-            jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
-                PgError::error(
-                    "22023",
-                    format!("invalid value for parameter: \"{timezone_name}\""),
-                )
-            })?
-        };
+        let time_zone = self.effective_time_zone();
         let bind_result = ParamBinder {
             catalog_kv: &*self.catalog_kv,
             resolution: &self.resolution_scope(),
@@ -5026,12 +6708,27 @@ impl SqlSession {
         )))
     }
 
-    /// Run one parsed statement, under a `db.statement` span.
+    /// Publish `sql` as this backend's in-flight statement for as long as the
+    /// returned guard lives.
     ///
-    /// The verbatim SQL is only ever available on the simple-query protocol,
-    /// where the whole query string arrives with the statements it parsed to;
-    /// the extended protocol's `Execute` carries none, and pgwire records the
-    /// text on its own statement span instead.
+    /// Called once per protocol message that runs SQL, never per statement row
+    /// or per operator: the whole cost is one map insert now and one removal
+    /// when the guard drops. Dropping the guard is the only way the entry
+    /// leaves the registry, which is what keeps an error return — or a dropped
+    /// query future — from stranding a permanent false alarm there.
+    fn track_statement(&self, sql: &str) -> crate::watchdog::StatementGuard {
+        self.coordination.statements.begin(
+            self.backend_pid,
+            sql,
+            match self.state {
+                TxnState::Idle => crate::watchdog::TransactionActivity::Idle,
+                TxnState::InTransaction(_) => crate::watchdog::TransactionActivity::InTransaction,
+                TxnState::Prepared(_) => crate::watchdog::TransactionActivity::Prepared,
+                TxnState::Failed(_) => crate::watchdog::TransactionActivity::Failed,
+            },
+        )
+    }
+
     pub(crate) async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         self.run_one_with_source(stmt, None).await
     }
@@ -5210,6 +6907,16 @@ impl SqlSession {
             self.mark_transaction_failed();
             return Err(ExecError::ReadOnlyTransaction(tag));
         }
+        // An `IF NOT EXISTS` create that steps over an existing object says so,
+        // and the skip is invisible afterwards -- the object is there either
+        // way. Asked here rather than on the DDL path because `CREATE TABLE …
+        // AS` and `CREATE MATERIALIZED VIEW` do not take that path, and they
+        // skip too.
+        let skip_notice = crate::exec::skipped_create_notice(
+            &*self.catalog_kv,
+            || self.resolution_scope(),
+            stmt,
+        )?;
         let result = match stmt {
             Statement::CompatibilityRefusal(command) => {
                 Err(ExecError::CompatibilityRefusal(*command))
@@ -5223,12 +6930,16 @@ impl SqlSession {
             Statement::Rollback { chain } => self.rollback_cmd(*chain).await,
             Statement::CreateTable { .. }
             | Statement::CreateIndex { .. }
+            | Statement::AlterIndex { .. }
+            | Statement::AlterView { .. }
             | Statement::DropIndex { .. }
-            | Statement::DropTable { .. }
             | Statement::AlterTable { .. }
             | Statement::Comment { .. }
             | Statement::CreateView { .. }
             | Statement::DropView { .. }
+            // A materialized view drops as a stored relation, so it takes the
+            // same catalog-lock + execute_ddl + commit path a table does.
+            | Statement::DropMaterializedView { .. }
             // D7: schema DDL is an ordinary catalog mutation.
             | Statement::CreateSchema { .. }
             | Statement::AlterSchema { .. }
@@ -5247,13 +6958,21 @@ impl SqlSession {
             | Statement::CreateForeignTable { .. }
             | Statement::DropForeignTable { .. }
             | Statement::CreateRole { .. }
+        | Statement::AlterRole { .. }
             | Statement::DropRole { .. }
             | Statement::GrantTablePrivileges { .. }
+            | Statement::GrantSchemaPrivileges { .. }
             | Statement::RevokeTablePrivileges { .. }
+            | Statement::RevokeSchemaPrivileges { .. }
+            | Statement::GrantRoles { .. }
+            | Statement::RevokeRoles { .. }
             | Statement::ImportForeignSchema { .. }
             | Statement::CreateTrigger(_)
             | Statement::AlterTrigger { .. }
             | Statement::DropTrigger { .. }
+            | Statement::CreatePolicy(_)
+            | Statement::AlterPolicy { .. }
+            | Statement::DropPolicy { .. }
             | Statement::CreateEventTrigger(_)
             | Statement::AlterEventTrigger { .. }
             | Statement::DropEventTrigger { .. }
@@ -5261,15 +6980,31 @@ impl SqlSession {
         | Statement::CreateRoutine(_)
         | Statement::DropRoutine { .. }
         | Statement::AlterRoutine { .. }
+        // P6: aggregates are routines, so they take the same path.
+        | Statement::CreateAggregate(_)
+        | Statement::DropAggregate { .. }
+        | Statement::AlterAggregate { .. }
         // T5: user-defined type DDL shares the catalog-lock + execute_ddl +
         // commit path with every other catalog mutation.
         | Statement::CreateType { .. }
         | Statement::AlterType { .. }
         | Statement::DropType { .. }
+        // A cast names two types and is dropped with them, so it rides the
+        // same catalog-lock + `execute_ddl` + commit path they do.
+        | Statement::CreateCast { .. }
+        | Statement::DropCast { .. }
         | Statement::CreateDomain { .. }
         | Statement::AlterDomain { .. }
         | Statement::DropDomain { .. }
         | Statement::Utility(UtilityStatement::TextSearch(_)) => self.run_ddl(stmt).await,
+        // `DROP TABLE` takes that same path, once the cursors this session
+        // still holds have had their say. The internal drops reach `run_ddl`
+        // directly and are deliberately exempt: a failed `CREATE TABLE AS`
+        // undoing itself, and `ON COMMIT DROP` at the end of a block.
+        Statement::DropTable { .. } => {
+            self.refuse_relation_pinned_by_cursor(stmt)?;
+            self.run_ddl(stmt).await
+        }
         Statement::Call { name, args } => self.run_call(name, args).await,
         Statement::DoBlock { language, body } => {
             crate::plpgsql::execute_do(self, language, body).await
@@ -5278,26 +7013,40 @@ impl SqlSession {
             | Statement::Update { .. }
             | Statement::Delete { .. }
             | Statement::Merge { .. }
-            | Statement::Truncate { .. } => self.run_write(stmt).await,
+            | Statement::Truncate { .. } => {
+                // Refused here rather than inside `run_write`, because
+                // `REFRESH MATERIALIZED VIEW` fills a matview through that very
+                // path: what is forbidden is a *user* write, not every write.
+                self.refuse_materialized_view_write(stmt)?;
+                // Here for the same reason: `ON COMMIT DELETE ROWS` empties a
+                // temporary table through `run_write` at every commit, and a
+                // cursor the committing transaction still holds must not stop
+                // it. Only a user `TRUNCATE` is refused.
+                self.refuse_relation_pinned_by_cursor(stmt)?;
+                self.run_write(stmt).await
+            }
+            Statement::Cluster(target) => self.run_cluster(stmt, target.as_ref()).await,
             Statement::CreateTableAs { .. } => self.run_create_table_as(stmt).await,
-            Statement::Vacuum => {
-                // PostgreSQL refuses VACUUM inside a transaction block. The
-                // reclamation itself is autonomous here (adaptive background
-                // vacuum with idle drain), so outside a block the accepted
-                // hint returns immediately.
+            Statement::CreateMaterializedView { .. } => {
+                self.run_create_materialized_view(stmt).await
+            }
+            Statement::RefreshMaterializedView { .. } => {
+                self.run_refresh_materialized_view(stmt).await
+            }
+            Statement::Vacuum(vacuum) => {
+                // PostgreSQL refuses VACUUM inside a transaction block, and it
+                // refuses it *first*: `VACUUM nosuch` inside a block is 25001,
+                // never the 42P01 the name would earn outside one.
                 if matches!(self.state, TxnState::InTransaction(_)) {
                     return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
                         "25001",
                         "VACUUM cannot run inside a transaction block",
                     )));
                 }
-                Ok(QueryResult::Command {
-                    tag: "VACUUM".into(),
-                })
+                self.run_maintenance(MaintenanceCommand::Vacuum, vacuum)
+                    .await
             }
-            Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL => Err(ExecError::Unsupported(
-                "COPY FROM STDIN requires pgwire CopyData messages".into(),
-            )),
+            Statement::Copy(copy) => self.run_copy(copy).await,
             Statement::Query(q) if q.locking.is_some() => self.run_query_locking(q).await,
             // A `WITH` list that modifies data makes the whole statement a
             // write, even though its outer body is a query.
@@ -5306,9 +7055,10 @@ impl SqlSession {
                     .as_ref()
                     .is_some_and(crabka_pgparser::ast::WithClause::has_data_modifying_cte) =>
             {
+                self.refuse_materialized_view_write(stmt)?;
                 self.run_write(stmt).await
             }
-            Statement::Query(_) => self.run_select(stmt).await,
+            Statement::Query(_) => Box::pin(self.run_select(stmt)).await,
             // SP37: GUC control. These are NOT exempt from the failed-txn guard
             // above (only COMMIT/ROLLBACK are), so a SET in an aborted block is
             // rejected — matching PostgreSQL.
@@ -5376,6 +7126,11 @@ impl SqlSession {
             Statement::Explain { options, statement } => self.explain(options, statement).await,
             Statement::Utility(utility) => self.utility(utility).await,
         };
+        if result.is_ok()
+            && let Some(notice) = skip_notice
+        {
+            self.plpgsql_notice(notice)?;
+        }
         self.finish_statement(stmt, result).await
     }
 
@@ -5414,6 +7169,10 @@ impl SqlSession {
         // holds stay held) until COMMIT/ROLLBACK releases them. Autocommit errors
         // leave us Idle (the statement was its own transaction).
         record_statement_status(&tracing::Span::current(), &result);
+        // Before the block is marked failed, so an xid a failing statement
+        // assigned still reaches the ctx that ROLLBACK writes the abort record
+        // for. Idempotent: the SELECT path has usually adopted already.
+        self.adopt_assigned_xact_id();
         self.record_statement_transaction();
         if result.is_err() {
             self.mark_transaction_failed();
@@ -5466,7 +7225,7 @@ impl SqlSession {
 
     /// Record an aborted transaction's outcome (clog Aborted + deregister) and
     /// release its row locks. Shared by ROLLBACK and COMMIT-of-failed.
-    async fn abort_ctx(&mut self, ctx: TxnCtx) -> Result<(), ExecError> {
+    async fn abort_ctx(&mut self, ctx: Box<TxnCtx>) -> Result<(), ExecError> {
         // Queued notifications, queued LISTEN/UNLISTEN and deferred referential
         // checks all die with the transaction that queued them.
         self.discard_pending_notifications();
@@ -5487,7 +7246,7 @@ impl SqlSession {
             // Committed), so a phantom running xid must not be stranded here.
             self.procarray.finish(xid);
             // Free every row this transaction locked, waking any blocked writers.
-            self.lockmgr.release_all(xid);
+            self.lockmgr.release_all_as(self.lock_owner);
             r?;
         }
         Ok(())
@@ -5602,7 +7361,8 @@ impl SqlSession {
             Some(read_ts) => Some(self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?),
             None => None,
         };
-        self.state = TxnState::InTransaction(TxnCtx {
+        self.state = TxnState::InTransaction(Box::new(TxnCtx {
+            role_at_start: self.current_role.clone(),
             xid: None,
             snapshot,
             _snapshot_pin: snapshot_pin,
@@ -5615,11 +7375,12 @@ impl SqlSession {
             written_rows: Vec::new(),
             // PG transaction-stable `now()`/`current_timestamp`: fix it once at BEGIN.
             txn_now: self.clock.now(),
-            unique_index_guard: None,
+            unique_index_guards: HashMap::new(),
             table_write_guard: None,
             writer_fence_guard: None,
             activity_started: false,
-        });
+            catalog_undo: BTreeMap::new(),
+        }));
         self.sync_transaction_isolation();
         self.guc
             .force("transaction_read_only", GucValue::Bool(read_only));
@@ -5672,6 +7433,7 @@ impl SqlSession {
             TxnState::InTransaction(ctx) => self.commit_open_block(ctx).await,
             // COMMIT of a failed transaction behaves as a ROLLBACK.
             TxnState::Failed(ctx) => {
+                self.current_role.clone_from(&ctx.role_at_start);
                 self.abort_current_global().await?;
                 self.abort_ctx(ctx).await?;
                 // SP37: a failed block discards every staged GUC override.
@@ -5699,10 +7461,12 @@ impl SqlSession {
     /// LISTEN/UNLISTEN are applied *after* it. Any error on the way out drops
     /// the queue, and the unsent [`PreparedPublish`] releases its reservations
     /// as it falls.
-    async fn commit_open_block(&mut self, ctx: TxnCtx) -> Result<QueryResult, ExecError> {
+    async fn commit_open_block(&mut self, ctx: Box<TxnCtx>) -> Result<QueryResult, ExecError> {
+        let role_at_start = ctx.role_at_start.clone();
         let mut reserved = match self.reserve_pending_notifications() {
             Ok(reserved) => reserved,
             Err(e) => {
+                self.current_role.clone_from(&role_at_start);
                 // Nothing is durable yet, so this is an ordinary failed COMMIT:
                 // abort the block and leave no trace of it.
                 let _ = self.abort_current_global().await;
@@ -5716,6 +7480,7 @@ impl SqlSession {
         // commit drained it, a failed one abandoned it.
         self.discard_deferred_constraints();
         if outcome.is_err() {
+            self.current_role = role_at_start;
             self.undo_reserved_notifications(std::mem::take(&mut reserved));
         }
         outcome
@@ -5729,12 +7494,13 @@ impl SqlSession {
         xid: u64,
     ) -> Result<Vec<WriteOp>, ExecError> {
         let checks = self.deferred_constraints().take_all();
-        self.deferred_check_ops(ctx, xid, checks).await
+        let unique = self.deferred_constraints().take_all_unique();
+        self.deferred_check_ops(ctx, xid, checks, unique).await
     }
 
     async fn commit_reserved_block(
         &mut self,
-        ctx: TxnCtx,
+        ctx: Box<TxnCtx>,
         reserved: &mut ReservedNotifications,
     ) -> Result<QueryResult, ExecError> {
         // Empty unless this engine replicates notifications; folded into the
@@ -5766,7 +7532,7 @@ impl SqlSession {
                 );
                 let status = self.commit_global_decision(g, XidStatus::Committed).await?;
                 self.procarray.finish(xid);
-                self.lockmgr.release_all(xid);
+                self.lockmgr.release_all_as(self.lock_owner);
                 if let Some(gtm) = &self.gtm {
                     gtm.finish_global(g);
                 }
@@ -5812,7 +7578,7 @@ impl SqlSession {
             let r = self.committer.commit(ops).await;
             self.procarray.finish(xid);
             // Free every row this transaction locked, waking waiters.
-            self.lockmgr.release_all(xid);
+            self.lockmgr.release_all_as(self.lock_owner);
             r?;
         } else {
             // A block that wrote nothing (`BEGIN; NOTIFY a; COMMIT;`) never
@@ -5844,7 +7610,13 @@ impl SqlSession {
     async fn end_block_rollback(&mut self) -> Result<QueryResult, ExecError> {
         self.finish_transaction_scoped_state(false);
         match std::mem::replace(&mut self.state, TxnState::Idle) {
-            TxnState::InTransaction(ctx) | TxnState::Failed(ctx) => {
+            TxnState::InTransaction(mut ctx) | TxnState::Failed(mut ctx) => {
+                self.current_role.clone_from(&ctx.role_at_start);
+                // Before the xid is aborted, so a catalog record and the rows
+                // filed under it go back together: a restored table whose rows
+                // were still visible would be a table with phantom contents.
+                let catalog_undo = std::mem::take(&mut ctx.catalog_undo);
+                self.undo_catalog_writes(catalog_undo).await?;
                 self.abort_current_global().await?;
                 self.abort_ctx(ctx).await?;
             }
@@ -5920,9 +7692,93 @@ impl SqlSession {
             {
                 return Ok(false);
             }
-            Err(error) => return Err(error.into()),
+            // This pre-check is the first thing a write statement reaches, so a
+            // target of a kind that cannot be written has to be refused here or
+            // it is reported as a relation that does not exist. It is consulted
+            // only once `get_table` has missed, so a write to a table pays
+            // nothing for it.
+            Err(error) => {
+                return Err(
+                    crate::exec::write_wrong_kind(self.catalog_kv.as_ref(), &name)
+                        .unwrap_or_else(|| error.into()),
+                );
+            }
         };
         Ok(crate::exec::table_uses_global_visibility(&table))
+    }
+
+    /// Refuse a user write aimed at a materialized view.
+    ///
+    /// A materialized view is not auto-updatable and has no rewrite rules, so
+    /// PostgreSQL refuses `INSERT`/`UPDATE`/`DELETE` against one with 42809
+    /// `cannot change materialized view "x"` — the only way its contents move is
+    /// `REFRESH`. `MERGE` and `TRUNCATE` carry their own wordings, which are the
+    /// wordings PostgreSQL uses for any relation kind those commands cannot
+    /// reach.
+    ///
+    /// The statement's `WITH` list is checked alongside its body: a
+    /// data-modifying CTE is part of the same command and writes through the
+    /// same path, so a matview named in one is refused for the same reason.
+    fn refuse_materialized_view_write(&self, stmt: &Statement) -> Result<(), ExecError> {
+        let mut targets: Vec<(&crabka_pgparser::ast::RelationRef, &'static str)> = Vec::new();
+        fn collect(stmt: &Statement) -> Option<(&crabka_pgparser::ast::RelationRef, &'static str)> {
+            match stmt {
+                Statement::Insert { table, .. }
+                | Statement::Update { table, .. }
+                | Statement::Delete { table, .. } => Some((table, "change")),
+                Statement::Merge { table, .. } => Some((table, "merge")),
+                _ => None,
+            }
+        }
+        if let Some(found) = collect(stmt) {
+            targets.push(found);
+        }
+        if let Statement::Truncate { targets: names, .. } = stmt {
+            for target in names {
+                targets.push((&target.name, "truncate"));
+            }
+        }
+        if let Some(with) = crate::exec::statement_with_clause(stmt) {
+            for cte in &with.ctes {
+                if let crabka_pgparser::ast::CteBody::Dml(body) = &cte.body
+                    && let Some(found) = collect(body)
+                {
+                    targets.push(found);
+                }
+            }
+        }
+        for (reference, verb) in targets {
+            let Ok(name) = crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &self.resolution_scope(),
+                reference,
+                crate::relname::SchemaDisposition::Reference,
+            ) else {
+                // A name that does not resolve is the write path's own 42P01.
+                continue;
+            };
+            if !crabka_pgcatalog::is_materialized_view(self.catalog_kv.as_ref(), &name)? {
+                continue;
+            }
+            return Err(match verb {
+                "merge" => ExecError::Remote(
+                    PgError::error(
+                        "42809",
+                        format!("cannot execute MERGE on relation \"{}\"", name.name),
+                    )
+                    .with_detail("This operation is not supported for materialized views."),
+                ),
+                // TRUNCATE's refusal is the one it gives for every relation it
+                // cannot empty, so it names the kind it wanted rather than the
+                // kind it found, and carries the DROP-family hint.
+                "truncate" => crate::exec::wrong_relation_kind_write_error(&name),
+                _ => ExecError::WrongObjectType(format!(
+                    "cannot change materialized view \"{}\"",
+                    name.name
+                )),
+            });
+        }
+        Ok(())
     }
 
     fn statement_has_returning(stmt: &Statement) -> bool {
@@ -6033,9 +7889,14 @@ impl SqlSession {
 
     async fn run_select_inner(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let span = crate::telemetry::select_span(false);
-        Box::pin(self.run_select_traced(stmt))
+        let result = Box::pin(self.run_select_traced(stmt))
             .instrument(span)
-            .await
+            .await;
+        // A `SELECT pg_current_xact_id()` assigns the transaction's xid during
+        // evaluation. Adopt it here, inside the implicit transaction
+        // `run_select` opened, so the COMMIT that follows records its outcome.
+        self.adopt_assigned_xact_id();
+        result
     }
 
     async fn run_select_traced(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
@@ -6079,10 +7940,12 @@ impl SqlSession {
         let blocking_query_memory = self.blocking_query_memory;
         let own_start_ts = self.timestamp_own_start_ts;
         let current_role = self.current_role.clone();
+        let session_user = self.session_user.clone();
         let resolution = self.resolution_scope();
         let session_locks = Arc::clone(&self.session_locks);
         let session_lock_id = self.session_lock_id;
         let guc_values = self.guc.effective_map();
+        let row_security = self.guc.row_security();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
         let stmt = stmt.clone();
@@ -6110,11 +7973,14 @@ impl SqlSession {
             let fctx = crate::exec::ForeignCtx {
                 scanner: foreign_scanner.as_ref(),
                 current_user: &current_role,
+                session_user: &session_user,
                 resolution: &resolution,
                 catalog: None,
                 reserved_table_ids: None,
                 own_xid,
+                row_security,
             };
+            let policy_stack = crate::rls::PolicyStack::default();
             let read_ctx = crate::subquery::SubCtx {
                 catalog_kv: catalog_kv.as_ref(),
                 kv: kv.as_ref(),
@@ -6127,6 +7993,9 @@ impl SqlSession {
                 fctx,
                 range_scanner: &statement_scanner,
                 blocking_query_memory,
+                security_role: fctx.effective_role(),
+                policy_stack: &policy_stack,
+                refs: None,
             };
             with_query_cancel_runtime(Some(cancel.canceled), || {
                 with_guc_runtime(guc_values, guc_settings, prepared, || {
@@ -6187,11 +8056,11 @@ impl SqlSession {
                                 ),
                             ),
                             crate::routine::FunctionRequestKind::Scalar => {
-                                crate::plpgsql::execute_scalar_function(
+                                Box::pin(crate::plpgsql::execute_scalar_function(
                                     self,
                                     &request.routine,
                                     &request.values,
-                                )
+                                ))
                                 .await
                                 .map(crate::routine::FunctionRequestResult::Scalar)
                             }
@@ -6202,22 +8071,22 @@ impl SqlSession {
                                 ),
                             ),
                             crate::routine::FunctionRequestKind::Table(columns) => {
-                                crate::plpgsql::execute_table_function(
+                                Box::pin(crate::plpgsql::execute_table_function(
                                     self,
                                     &request.routine,
                                     &request.values,
                                     columns,
-                                )
+                                ))
                                 .await
                                 .map(crate::routine::FunctionRequestResult::Table)
                             }
                             crate::routine::FunctionRequestKind::Trigger(invocation) => {
                                 self.trigger_depth = self.trigger_depth.saturating_add(1);
-                                let result = crate::plpgsql::execute_trigger_function(
+                                let result = Box::pin(crate::plpgsql::execute_trigger_function(
                                     self,
                                     &request.routine,
                                     *invocation,
-                                )
+                                ))
                                 .await;
                                 self.trigger_depth = self.trigger_depth.saturating_sub(1);
                                 result.map(crate::routine::FunctionRequestResult::Scalar)
@@ -6408,10 +8277,12 @@ impl SqlSession {
     async fn run_create_table_as(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let Statement::CreateTableAs {
             name,
+            temporary,
             if_not_exists,
             columns,
             query,
             with_data,
+            tablespace,
         } = stmt
         else {
             return Err(ExecError::Unsupported("not a CREATE TABLE AS".into()));
@@ -6428,7 +8299,14 @@ impl SqlSession {
             self.catalog_kv.as_ref(),
             &self.resolution_scope(),
             name,
-            crate::relname::SchemaDisposition::Creation,
+            // A `TEMP` target lands in the session's temporary namespace, not
+            // the first search-path entry — the same disposition the
+            // column-list spelling of `CREATE TEMP TABLE` resolves under.
+            if *temporary {
+                crate::relname::SchemaDisposition::TemporaryCreation
+            } else {
+                crate::relname::SchemaDisposition::Creation
+            },
         )?;
         let target = crabka_pgparser::ast::RelationRef::qualified(&name.schema, &name.name);
         if *if_not_exists && crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name).is_ok() {
@@ -6462,6 +8340,12 @@ impl SqlSession {
                         .unwrap_or_else(|| f.name.clone()),
                     ty: crate::exec::column_type_from_oid(f.type_oid)?,
                     serial: None,
+                    // `CREATE TABLE AS` derives its columns from the query's
+                    // RowDescription, which carries a name and a type oid and
+                    // no collation, so the new table's columns get the type's
+                    // own — PostgreSQL instead carries the source column's
+                    // collation across.
+                    collation: None,
                     constraints: Vec::new(),
                 })
             })
@@ -6483,12 +8367,13 @@ impl SqlSession {
             sharded: false,
             sharding: None,
             if_not_exists: *if_not_exists,
-            temporary: false,
+            temporary: *temporary,
             like: Vec::new(),
             inherits: Vec::new(),
             on_commit: None,
             partition_by: None,
             partition_of: None,
+            tablespace: tablespace.clone(),
         };
         self.run_ddl(&create).await?;
         if !with_data {
@@ -6531,6 +8416,216 @@ impl SqlSession {
         .unwrap_or(0);
         Ok(QueryResult::Command {
             tag: format!("SELECT {n}"),
+        })
+    }
+
+    /// `CREATE MATERIALIZED VIEW … AS <query> [WITH [NO] DATA]`.
+    ///
+    /// Split the way [`Session::run_create_table_as`] is split, and for the same
+    /// reason: DDL here commits one catalog batch and cannot also carry rows, so
+    /// the relation is created by the DDL path and filled by the ordinary write
+    /// path. What is different is the third step — the population flag is only
+    /// set once the rows are actually there, so a `WITH DATA` create whose query
+    /// fails leaves nothing behind at all rather than an empty relation claiming
+    /// to hold the query's answer.
+    async fn run_create_materialized_view(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<QueryResult, ExecError> {
+        let Statement::CreateMaterializedView {
+            name,
+            if_not_exists,
+            with_data,
+            ..
+        } = stmt
+        else {
+            return Err(ExecError::Unsupported(
+                "not a CREATE MATERIALIZED VIEW".into(),
+            ));
+        };
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+            crate::relname::SchemaDisposition::Creation,
+        )?;
+        if *if_not_exists
+            && crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &resolved).is_ok()
+        {
+            return Ok(QueryResult::Command {
+                tag: "CREATE MATERIALIZED VIEW".into(),
+            });
+        }
+        // Every statement this synthesizes names the target schema-qualified, so
+        // the fill and the undo cannot land on a different relation of the same
+        // name earlier on the search path.
+        let target = crabka_pgparser::ast::RelationRef::qualified(&resolved.schema, &resolved.name);
+        self.run_ddl(stmt).await?;
+        if !*with_data {
+            return Ok(QueryResult::Command {
+                tag: "CREATE MATERIALIZED VIEW".into(),
+            });
+        }
+        let filled = self.fill_materialized_view(&resolved, &target).await;
+        if let Err(error) = filled {
+            // PostgreSQL's CREATE MATERIALIZED VIEW is atomic: a runtime failure
+            // evaluating the query leaves no relation behind. DDL here is not
+            // transactional, so the create is undone explicitly and the original
+            // failure is what the client sees.
+            self.run_ddl(&Statement::DropMaterializedView {
+                names: vec![target],
+                if_exists: true,
+                cascade: false,
+            })
+            .await?;
+            return Err(error);
+        }
+        // PostgreSQL reports the populated form as `SELECT <n>`, exactly as
+        // `CREATE TABLE AS` does — the command that ran is the query.
+        Ok(QueryResult::Command {
+            tag: format!("SELECT {}", filled.unwrap_or(0)),
+        })
+    }
+
+    /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`.
+    ///
+    /// The contents are replaced rather than merged: the heap is emptied and, for
+    /// `WITH DATA`, refilled from the stored query. `CONCURRENTLY` asks
+    /// PostgreSQL to do that without an exclusive lock, which changes the
+    /// locking and not the answer, so it is accepted and the result is the same.
+    ///
+    /// Indexes are not touched. They are ordinary catalog objects over the
+    /// relation, and the refill goes through the write path that maintains them,
+    /// so a refresh leaves every index on the matview both present and correct.
+    ///
+    /// The empty and the refill are one statement, so they run in one
+    /// transaction. PostgreSQL reaches the same place from the other side: it
+    /// builds the new contents into a transient heap and swaps the relfilenodes
+    /// at the end, inside the refresh's own transaction, so a query that raises
+    /// leaves the old contents in place. Without a transaction of its own an
+    /// autocommit refresh commits the empty first, and a query that raises then
+    /// leaves an empty relation the catalog still calls populated.
+    async fn run_refresh_materialized_view(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<QueryResult, ExecError> {
+        // Inside a block the enclosing transaction already makes the whole
+        // refresh one unit, and a nested BEGIN would commit at the inner end.
+        if !matches!(self.state, TxnState::Idle) {
+            return self.refresh_materialized_view_steps(stmt).await;
+        }
+        // A materialized view is never sharded — `CREATE MATERIALIZED VIEW`
+        // has no `SHARDED` spelling — so the writes below never take the
+        // sharded route `run_write_traced` keeps out of an implicit block.
+        self.begin_implicit_transaction(None).await?;
+        let result = Box::pin(self.refresh_materialized_view_steps(stmt)).await;
+        let result = match result {
+            Ok(result) => self.commit_cmd(false).await.map(|_| result),
+            Err(error) => {
+                let _ = self.rollback_cmd(false).await;
+                Err(error)
+            }
+        };
+        self.implicit_transaction = false;
+        self.implicit_xid = None;
+        result
+    }
+
+    /// The work a `REFRESH` does, with no transaction of its own: emptying the
+    /// heap, then either refilling it or marking it unpopulated.
+    async fn refresh_materialized_view_steps(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<QueryResult, ExecError> {
+        let Statement::RefreshMaterializedView {
+            name, with_data, ..
+        } = stmt
+        else {
+            return Err(ExecError::Unsupported(
+                "not a REFRESH MATERIALIZED VIEW".into(),
+            ));
+        };
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+            crate::relname::SchemaDisposition::Utility,
+        )?;
+        // Checked before anything is emptied, so a REFRESH aimed at the wrong
+        // relation kind changes nothing.
+        crate::exec::require_materialized_view(self.catalog_kv.as_ref(), &resolved)?;
+        let target = crabka_pgparser::ast::RelationRef::qualified(&resolved.schema, &resolved.name);
+        self.run_write(&Statement::Delete {
+            table: target.clone(),
+            alias: None,
+            using: Vec::new(),
+            only: false,
+            filter: None,
+            returning: None,
+            with: None,
+        })
+        .await?;
+        if *with_data {
+            self.fill_materialized_view(&resolved, &target).await?;
+        } else {
+            // The relation is empty and stays unreadable: `WITH NO DATA` is the
+            // one way an already-populated matview goes back to being an error
+            // to scan.
+            self.run_ddl(stmt).await?;
+        }
+        Ok(QueryResult::Command {
+            tag: "REFRESH MATERIALIZED VIEW".into(),
+        })
+    }
+
+    /// Run a materialized view's stored query into its heap and mark it
+    /// populated, in that order.
+    ///
+    /// The query is re-parsed from the catalog rather than taken from the
+    /// statement, which is what makes `REFRESH` and `CREATE … WITH DATA` fill a
+    /// relation the same way — and what makes a `REFRESH` see the definition the
+    /// relation actually has rather than one a caller supplied.
+    async fn fill_materialized_view(
+        &mut self,
+        resolved: &crabka_pgcatalog::RelationName,
+        target: &crabka_pgparser::ast::RelationRef,
+    ) -> Result<u64, ExecError> {
+        let table = crate::exec::require_materialized_view(self.catalog_kv.as_ref(), resolved)?;
+        let definition = table
+            .materialized
+            .as_ref()
+            .expect("require_materialized_view returned a materialized view")
+            .definition
+            .clone();
+        let statements = crabka_pgparser::parse(&definition)?;
+        let [Statement::Query(query)] = statements.as_slice() else {
+            return Err(ExecError::Unsupported(
+                "stored materialized view definition is not a query".into(),
+            ));
+        };
+        let inserted = self
+            .run_write(&Statement::Insert {
+                table: target.clone(),
+                columns: None,
+                source: crabka_pgparser::ast::InsertSource::Query(Box::new(query.clone())),
+                on_conflict: None,
+                returning: None,
+                with: None,
+            })
+            .await?;
+        self.run_ddl(&Statement::RefreshMaterializedView {
+            name: target.clone(),
+            concurrently: false,
+            with_data: true,
+        })
+        .await?;
+        Ok(match &inserted {
+            QueryResult::Command { tag } => tag
+                .rsplit(' ')
+                .next()
+                .and_then(|count| count.parse::<u64>().ok())
+                .unwrap_or(0),
+            _ => 0,
         })
     }
 
@@ -6607,6 +8702,21 @@ impl SqlSession {
         Ok(())
     }
 
+    /// Commit a catalog-only cleanup that may remove user types, then publish
+    /// exactly that durable delta. These cleanups do not pass through
+    /// `run_ddl` (`DISCARD TEMP`, session teardown, and stale temp-schema
+    /// reclamation), so they need the same post-commit registry boundary here.
+    async fn commit_catalog_with_user_type_sync(
+        &self,
+        ops: Vec<crabka_pgkv::WriteOp>,
+    ) -> Result<(), ExecError> {
+        let before = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
+        self.commit_catalog(ops).await?;
+        let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
+        crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
+        Ok(())
+    }
+
     /// Make this session's temporary namespace exist and be its own, once.
     ///
     /// Backend ids are reused, and a backend that died without dropping its
@@ -6639,7 +8749,7 @@ impl SqlSession {
             Vec::new()
         };
         ops.push(crabka_pgcatalog::create_temp_schema_op(&schema));
-        self.commit_catalog(ops).await?;
+        self.commit_catalog_with_user_type_sync(ops).await?;
         self.temp_namespace_claim = Some(claim);
         self.temp_schema_ready = true;
         Ok(())
@@ -6694,7 +8804,7 @@ impl SqlSession {
         };
         let result = if unshared {
             let ops = crate::exec::drop_schema_contents_ops(&*self.catalog_kv, &schema)?;
-            self.commit_catalog(ops).await
+            self.commit_catalog_with_user_type_sync(ops).await
         } else {
             tracing::warn!(
                 schema,
@@ -6809,11 +8919,41 @@ impl SqlSession {
                 crabka_pgparser::ast::OnCommitAction::PreserveRows => {}
                 crabka_pgparser::ast::OnCommitAction::Drop => drop.push(reference),
                 crabka_pgparser::ast::OnCommitAction::DeleteRows => {
+                    // A partitioned parent holds no rows, so there is nothing
+                    // here to empty and `PostgreSQL`'s `heap_truncate` skips it
+                    // for exactly that reason. Its partitions are queued in
+                    // their own right and empty themselves only if they
+                    // declared `ON COMMIT DELETE ROWS` too — so emptying the
+                    // parent's tree here would reach a partition that asked to
+                    // `PRESERVE ROWS`, and did.
+                    //
+                    // The statement below says `ONLY` to mean "this relation,
+                    // do not walk its tree", which is the sense the engine's own
+                    // desugarings use; `TRUNCATE ONLY` from a session means
+                    // something else and is refused. Skipping here keeps the two
+                    // apart without teaching `TRUNCATE` a third spelling.
+                    match crate::partition::is_partitioned(
+                        self.catalog_kv.as_ref(),
+                        &entry.relation,
+                    ) {
+                        Ok(true) => {
+                            still_owed.push(entry);
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            failure = failure.or(Some(error));
+                            continue;
+                        }
+                    }
                     // One statement per relation, so an entry that cannot be
                     // emptied costs only its own disposition rather than every
                     // other relation's.
                     let emptied = Box::pin(self.run_write(&Statement::Truncate {
-                        names: vec![reference],
+                        targets: vec![crabka_pgparser::ast::TruncateTarget {
+                            name: reference,
+                            only: true,
+                        }],
                         restart_identity: false,
                         cascade: false,
                     }))
@@ -6888,8 +9028,156 @@ impl SqlSession {
         Ok(())
     }
 
+    /// Put every catalog key back to the image `before` records for it, undoing
+    /// the DDL that ran between then and now.
+    ///
+    /// Shared by the two levels that unwind DDL — `ROLLBACK TO SAVEPOINT` and
+    /// `ROLLBACK` — because the accounting either does everything or is a bug:
+    /// a restore that writes the keys but skips the type-registry delta leaves
+    /// the process disagreeing with its own catalog, and one that skips the
+    /// sequence cache leaves a live entry for a sequence that no longer exists,
+    /// so the next `CREATE SEQUENCE` of that name resumes the dead one's
+    /// counter.
+    async fn undo_catalog_writes(
+        &self,
+        undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    ) -> Result<(), ExecError> {
+        if undo.is_empty() {
+            return Ok(());
+        }
+        let user_type_prefix = crabka_pgkv::key::user_type_prefix();
+        let restores_user_types = undo.keys().any(|key| {
+            crabka_pgkv::key::user_type_key_parts(key).is_some()
+                || key.starts_with(user_type_prefix.as_slice())
+        });
+        let user_types_before = restores_user_types
+            .then(|| crabka_pgcatalog::list_user_types(&*self.catalog_kv))
+            .transpose()?;
+        let undo_ops = undo
+            .into_iter()
+            .map(|(key, value)| match value {
+                Some(value) => WriteOp::Put { key, value },
+                None => WriteOp::Delete { key },
+            })
+            .collect::<Vec<_>>();
+        self.seq.forget_sequences(&undo_ops);
+        if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+            self.committer.commit(undo_ops).await?;
+        } else {
+            self.catalog_kv.write_batch(&undo_ops)?;
+        }
+        if let Some(before) = user_types_before {
+            let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
+            crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
+        }
+        Ok(())
+    }
+
+    async fn restore_catalog_snapshot(
+        &self,
+        before: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    ) -> Result<(), ExecError> {
+        let undo = before
+            .iter()
+            .map(|(key, value)| match value {
+                Some(value) => WriteOp::Put {
+                    key: key.clone(),
+                    value: value.clone(),
+                },
+                None => WriteOp::Delete { key: key.clone() },
+            })
+            .collect::<Vec<_>>();
+        if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+            self.committer.commit(undo).await
+        } else {
+            self.catalog_kv.write_batch(&undo)?;
+            Ok(())
+        }
+    }
+
+    /// The stored value of every key a catalog batch is about to overwrite.
+    ///
+    /// A catalog record carries no MVCC header, so the batch that writes one
+    /// lands the moment it is committed. These images are the only thing
+    /// `ROLLBACK` and `ROLLBACK TO SAVEPOINT` have to undo it with.
+    fn catalog_before_images(
+        &self,
+        ops: &[WriteOp],
+    ) -> Result<BTreeMap<Vec<u8>, Option<Vec<u8>>>, ExecError> {
+        let mut before = BTreeMap::new();
+        for op in ops {
+            let key = match op {
+                WriteOp::Put { key, .. }
+                | WriteOp::ConditionalPut { key, .. }
+                | WriteOp::Delete { key } => key,
+            };
+            if !before.contains_key(key) {
+                before.insert(key.clone(), self.catalog_kv.get(key)?);
+            }
+        }
+        Ok(before)
+    }
+
+    /// File before-images against the open block and its innermost savepoint,
+    /// keeping whichever image was recorded first: the undo has to reach back
+    /// to the state the block or the frame opened in, not to the state before
+    /// the most recent statement.
+    fn record_catalog_undo(&mut self, before: &BTreeMap<Vec<u8>, Option<Vec<u8>>>) {
+        if let Some(frame) = self.savepoints.last_mut() {
+            for (key, value) in before {
+                frame
+                    .catalog_undo
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        if let TxnState::InTransaction(context) | TxnState::Failed(context) = &mut self.state {
+            for (key, value) in before {
+                context
+                    .catalog_undo
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+    }
+
+    /// Commit a catalog batch raised outside [`Self::run_ddl`], recording the
+    /// undo images an open block needs.
+    async fn commit_catalog_ops(&mut self, ops: Vec<WriteOp>) -> Result<(), ExecError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        // Under the same lock DDL commits its batches under, so a catalog
+        // record this batch rewrote cannot have been re-read and rewritten by a
+        // concurrent statement in between.
+        let guard = self.catalog_lock.lock().await;
+        let before = self.catalog_before_images(&ops)?;
+        if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+            self.committer.commit(ops).await?;
+        } else {
+            self.catalog_kv.write_batch(&ops)?;
+        }
+        drop(guard);
+        self.record_catalog_undo(&before);
+        Ok(())
+    }
+
     async fn run_ddl(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let fires_event_triggers = !crate::trigger::event_trigger_ddl_is_excluded(stmt);
+        let publishes_user_casts = matches!(
+            stmt,
+            Statement::CreateCast { .. } | Statement::DropCast { .. } | Statement::DropType { .. }
+        );
+        let publishes_user_types = matches!(
+            stmt,
+            Statement::CreateType { .. }
+                | Statement::AlterType { .. }
+                | Statement::DropType { .. }
+                | Statement::CreateDomain { .. }
+                | Statement::AlterDomain { .. }
+                | Statement::DropDomain { .. }
+                | Statement::DropSchema { .. }
+        );
         let event_tag = crate::trigger::event_command_tag(stmt);
         let drop_event_context = if fires_event_triggers && crate::trigger::is_drop_ddl(stmt) {
             Some(crate::trigger::event_trigger_context(
@@ -6939,32 +9227,92 @@ impl SqlSession {
         {
             context.table_write_guard = None;
         }
-        // The unique-index gate excludes OTHER sessions' in-flight writes from a
-        // backfill; a transaction never has to wait out its own, which are
-        // already complete and which the all-committed backfill snapshot sees.
-        // Dropping this session's shared hold first is therefore what keeps
-        // `BEGIN; INSERT …; CREATE UNIQUE INDEX …` from deadlocking against
-        // itself. A later write in the same transaction re-takes the hold.
-        //
         // The exclusive hold is taken BEFORE the catalog lock so that a DDL
         // statement waiting on a concurrent writer cannot also block unrelated
-        // DDL: `unique_index_lock` before `catalog_lock` is the one order any
+        // DDL: unique-index gate before `catalog_lock` is the one order any
         // path that wants both uses.
-        let _unique_guard = if crate::exec::ddl_requires_unique_local_serialization(stmt) {
+        let unique_target = crate::exec::ddl_unique_local_relation(stmt)
+            .map(|table| {
+                let relation = crate::relname::resolve_relation(
+                    self.catalog_kv.as_ref(),
+                    &self.resolution_scope(),
+                    table,
+                    crate::relname::SchemaDisposition::Reference,
+                )?;
+                let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &relation) {
+                    Ok(table) => Some(table.id),
+                    Err(error @ crabka_pgcatalog::CatalogError::UndefinedTable(_))
+                        if matches!(stmt, Statement::AlterTable { .. }) =>
+                    {
+                        match crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &relation) {
+                            Ok(_) => None,
+                            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+                                return Err(error.into());
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                Ok::<_, ExecError>((relation, table))
+            })
+            .transpose()?;
+        let _unique_guard = if let Some((_, Some(table))) = &unique_target {
+            let owner = self.lock_owner;
+            self.unique_index_gates
+                .acquire_key_as(
+                    crate::lockmgr::LockKey::UniqueIndexRelation(*table),
+                    crate::lockmgr::LockMode::Exclusive,
+                    owner,
+                    self.lock_wait_cap,
+                )
+                .await
+                .map_err(crate::exec::lock_acquire_error)?;
             if let TxnState::InTransaction(context) = &mut self.state {
-                context.unique_index_guard = None;
+                context
+                    .unique_index_guards
+                    .entry(*table)
+                    .or_insert_with(|| UniqueIndexGuard {
+                        gates: Arc::clone(&self.unique_index_gates),
+                        table: *table,
+                        owner,
+                    });
+                None
+            } else {
+                Some(UniqueIndexGuard {
+                    gates: Arc::clone(&self.unique_index_gates),
+                    table: *table,
+                    owner,
+                })
             }
-            Some(Arc::clone(&self.unique_index_lock).write_owned().await)
         } else {
             None
         };
         let _g = self.catalog_lock.lock().await;
+        if let Some((relation, Some(table))) = &unique_target
+            && crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), relation)?.id != *table
+        {
+            return Err(ExecError::SerializationFailure);
+        }
+        if let Some((relation, None)) = &unique_target {
+            match crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), relation) {
+                Ok(_) => {}
+                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+                    return Err(ExecError::SerializationFailure);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let user_types_before = publishes_user_types
+            .then(|| crabka_pgcatalog::list_user_types(&*self.catalog_kv))
+            .transpose()?;
         let resolution = self.resolution_scope();
         // SP40: IMPORT FOREIGN SCHEMA needs the registered scanner + current user
         // to discover foreign tables; the rest of DDL ignores the ForeignCtx.
         let fctx = crate::exec::ForeignCtx {
             scanner: self.foreign_scanner.as_ref(),
             current_user: &self.current_role,
+            session_user: &self.session_user,
             resolution: &resolution,
             catalog: Some(&self.catalog_kv),
             reserved_table_ids: Some(&self.reserved_table_ids),
@@ -6972,24 +9320,35 @@ impl SqlSession {
                 TxnState::InTransaction(ctx) => ctx.xid,
                 _ => None,
             },
+            row_security: self.guc.row_security(),
         };
+        let inheritance_notices =
+            crate::exec::inheritance_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
+        // Computed before the statement for the same reason: the walk has to
+        // see the tree as the ADD COLUMN's first arrival sees it, not after
+        // every descendant already carries the column.
+        let column_merge_notices =
+            crate::exec::add_column_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
+        // Computed before the statement runs: a `CREATE TYPE` that completes a
+        // shell, and a `CREATE FUNCTION` that names one, both change the answer.
+        let shell_notices = crate::routine::shell_type_notices(&*self.catalog_kv, stmt);
+        // Computed before the drop runs, while the dependents still exist.
+        let cascade_notice =
+            crate::exec::cascade_drop_notice(&*self.catalog_kv, &resolution, stmt)?;
         let (result, ops) = crate::exec::execute_ddl(&*self.catalog_kv, stmt, fctx)?;
-        let catalog_before = if self.savepoints.is_empty() && !fires_event_triggers {
-            BTreeMap::new()
-        } else {
-            let mut before = BTreeMap::new();
-            for op in &ops {
-                let key = match op {
-                    WriteOp::Put { key, .. }
-                    | WriteOp::ConditionalPut { key, .. }
-                    | WriteOp::Delete { key } => key,
-                };
-                if !before.contains_key(key) {
-                    before.insert(key.clone(), self.catalog_kv.get(key)?);
-                }
-            }
-            before
-        };
+        // An open block needs the before-images whether or not it has taken a
+        // savepoint: DDL commits its batch here and now, so `ROLLBACK` has
+        // nothing but these images to undo it with.
+        let in_transaction_block = matches!(
+            &self.state,
+            TxnState::InTransaction(_) | TxnState::Failed(_)
+        );
+        let catalog_before =
+            if self.savepoints.is_empty() && !fires_event_triggers && !in_transaction_block {
+                BTreeMap::new()
+            } else {
+                self.catalog_before_images(&ops)?
+            };
         // A data-range session reads schema metadata from range 0. Its committer
         // targets the local data range, so applying a catalog batch through it
         // would create metadata that is neither authoritative nor visible to
@@ -7005,39 +9364,64 @@ impl SqlSession {
         } else {
             self.catalog_kv.write_batch(&ops)?;
         }
-        // Both guards borrow `self`, and the bookkeeping below needs it back.
-        // The batch has landed, so neither has anything left to protect.
-        if let Some(frame) = self.savepoints.last_mut() {
-            for (key, value) in &catalog_before {
-                frame
-                    .catalog_undo
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
+        let committed_user_types = if user_types_before.is_some() {
+            match crabka_pgcatalog::list_user_types(&*self.catalog_kv) {
+                Ok(types) => Some(types),
+                Err(error) => {
+                    self.restore_catalog_snapshot(&catalog_before).await?;
+                    return Err(error.into());
+                }
             }
-        }
-        drop(_g);
-        drop(_id_guard);
-        drop(_unique_guard);
-        let ddl_end_context = if let Some(dropped) = &drop_event_context {
-            Some(Arc::new(crate::clock::EventTriggerContext {
-                event: crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
-                tag: event_tag.to_string(),
-                commands: dropped.dropped.clone(),
-                dropped: Vec::new(),
-                rewrite: None,
-            }))
-        } else if fires_event_triggers {
-            Some(crate::trigger::event_trigger_context(
-                &*self.catalog_kv,
-                &self.resolution_scope(),
-                stmt,
-                crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
-                event_tag,
-            )?)
         } else {
             None
         };
+        let changed_user_type_oids = user_types_before
+            .as_ref()
+            .zip(committed_user_types.as_ref())
+            .map(|(before, after)| {
+                let mut changed = before
+                    .iter()
+                    .chain(after)
+                    .map(|ty| ty.oid)
+                    .collect::<HashSet<_>>();
+                changed.retain(|oid| {
+                    before.iter().find(|ty| ty.oid == *oid)
+                        != after.iter().find(|ty| ty.oid == *oid)
+                });
+                changed
+            });
+        // Both guards borrow `self`, and the bookkeeping below needs it back.
+        // The batch has landed, so neither has anything left to protect.
+        //
+        // The block and the innermost savepoint each keep their own copy rather
+        // than the block deriving one from the frames. `RELEASE` discards a
+        // frame's images — its effects are meant to survive to COMMIT — and a
+        // block that read its undo out of the frames would lose exactly the DDL
+        // a released savepoint performed.
+        drop(_g);
+        drop(_id_guard);
+        drop(_unique_guard);
+        self.record_catalog_undo(&catalog_before);
         let event_result = async {
+            let ddl_end_context = if let Some(dropped) = &drop_event_context {
+                Some(Arc::new(crate::clock::EventTriggerContext {
+                    event: crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
+                    tag: event_tag.to_string(),
+                    commands: dropped.dropped.clone(),
+                    dropped: Vec::new(),
+                    rewrite: None,
+                }))
+            } else if fires_event_triggers {
+                Some(crate::trigger::event_trigger_context(
+                    &*self.catalog_kv,
+                    &self.resolution_scope(),
+                    stmt,
+                    crabka_pgcatalog::trigger::EventTriggerEvent::DdlCommandEnd,
+                    event_tag,
+                )?)
+            } else {
+                None
+            };
             if fires_event_triggers && crate::trigger::is_drop_ddl(stmt) {
                 self.fire_event_triggers(
                     crabka_pgcatalog::trigger::EventTriggerEvent::SqlDrop,
@@ -7072,38 +9456,113 @@ impl SqlSession {
         }
         .await;
         if let Err(error) = event_result {
-            let undo = catalog_before
-                .into_iter()
-                .map(|(key, value)| match value {
-                    Some(value) => WriteOp::Put { key, value },
-                    None => WriteOp::Delete { key },
+            // A hook can run nested type DDL. Capture that committed state
+            // before restoring this statement so the registry publishes the
+            // same inverse delta as the durable catalog.
+            let rejected_user_types = changed_user_type_oids
+                .as_ref()
+                .map(|changed| {
+                    crabka_pgcatalog::list_user_types(&*self.catalog_kv).map(|types| {
+                        types
+                            .into_iter()
+                            .filter(|ty| changed.contains(&ty.oid))
+                            .collect::<Vec<_>>()
+                    })
                 })
-                .collect::<Vec<_>>();
-            if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
-                self.committer.commit(undo).await?;
-            } else {
-                self.catalog_kv.write_batch(&undo)?;
+                .transpose();
+            self.restore_catalog_snapshot(&catalog_before).await?;
+            if let (Some(rejected), Some(changed)) =
+                (rejected_user_types?, changed_user_type_oids.as_ref())
+            {
+                let restored = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?
+                    .into_iter()
+                    .filter(|ty| changed.contains(&ty.oid))
+                    .collect::<Vec<_>>();
+                crabka_pgtypes::usertype::publish_catalog_delta(&rejected, &restored);
             }
             return Err(error);
         }
         self.record_on_commit(stmt)?;
+        for column in inheritance_notices {
+            self.plpgsql_notice(PgError::notice(format!(
+                "merging multiple inherited definitions of column \"{column}\""
+            )))?;
+        }
+        for (column, child) in column_merge_notices {
+            self.plpgsql_notice(PgError::notice(format!(
+                "merging definition of column \"{column}\" for child \"{child}\""
+            )))?;
+        }
+        for notice in shell_notices {
+            self.plpgsql_notice(notice)?;
+        }
+        if let Some((message, detail)) = cascade_notice {
+            let notice = PgError::notice(message);
+            self.plpgsql_notice(match detail {
+                Some(detail) => notice.with_detail(detail),
+                None => notice,
+            })?;
+        }
+        if let (Some(before), Some(changed)) = (&user_types_before, &changed_user_type_oids) {
+            // Hooks can commit nested type DDL after the outer batch. Publish
+            // the final durable state, not the pre-hook snapshot.
+            let before = before
+                .iter()
+                .filter(|ty| changed.contains(&ty.oid))
+                .cloned()
+                .collect::<Vec<_>>();
+            let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?
+                .into_iter()
+                .filter(|ty| changed.contains(&ty.oid))
+                .collect::<Vec<_>>();
+            crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
+        }
+        if publishes_user_casts {
+            crate::usercast::publish(&*self.catalog_kv)?;
+        }
         Ok(result)
     }
 
-    async fn ensure_unique_index_guard(&mut self, mode: UniqueLocalSerialization) {
-        if matches!(mode, UniqueLocalSerialization::None) {
-            return;
-        }
-        match &self.state {
-            TxnState::InTransaction(ctx) if ctx.unique_index_guard.is_none() => {}
-            _ => return,
-        }
-        let guard = UniqueIndexGuard {
-            _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
+    async fn ensure_unique_index_guard(
+        &mut self,
+        mode: UniqueLocalSerialization,
+    ) -> Result<(), ExecError> {
+        let UniqueLocalSerialization::Shared(table) = mode else {
+            return Ok(());
         };
-        if let TxnState::InTransaction(ctx) = &mut self.state {
-            ctx.unique_index_guard = Some(guard);
+        match &self.state {
+            TxnState::InTransaction(ctx) if !ctx.unique_index_guards.contains_key(&table) => {}
+            _ => return Ok(()),
         }
+        let guard = self
+            .acquire_unique_index_guard(table, crate::lockmgr::LockMode::Shared)
+            .await?;
+        if let TxnState::InTransaction(ctx) = &mut self.state {
+            ctx.unique_index_guards.insert(table, guard);
+        }
+        Ok(())
+    }
+
+    async fn acquire_unique_index_guard(
+        &self,
+        table: crabka_pgcatalog::TableId,
+        mode: crate::lockmgr::LockMode,
+    ) -> Result<UniqueIndexGuard, ExecError> {
+        let owner = self.lock_owner;
+        self.unique_index_gates
+            .acquire_key_as(
+                crate::lockmgr::LockKey::UniqueIndexRelation(table),
+                mode,
+                owner,
+                self.lock_wait_cap,
+            )
+            .await
+            .map_err(crate::exec::lock_acquire_error)?;
+        Ok(UniqueIndexGuard {
+            gates: Arc::clone(&self.unique_index_gates),
+            table,
+            owner,
+        })
     }
 
     async fn ensure_table_write_guard(&mut self) {
@@ -7134,6 +9593,10 @@ impl SqlSession {
         let range_scanner = Arc::clone(&self.range_scanner);
         let blocking_query_memory = self.blocking_query_memory;
         let lock_wait_cap = self.lock_wait_cap;
+        let lock_owner = self.lock_owner;
+        let current_role = self.current_role.clone();
+        let session_user = self.session_user.clone();
+        let row_security = self.guc.row_security();
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
         // Re-enter the statement's span on the pool thread; the current-thread
@@ -7156,6 +9619,13 @@ impl SqlSession {
                 .build()
                 .map_err(|error| ExecError::Unsupported(error.to_string()))?;
             let ctes = crate::cte::CteContext::empty();
+            let fctx = crate::exec::ForeignCtx {
+                current_user: &current_role,
+                session_user: &session_user,
+                row_security,
+                ..crate::exec::ForeignCtx::none()
+            };
+            let policy_stack = crate::rls::PolicyStack::default();
             let read_ctx = crate::subquery::SubCtx {
                 catalog_kv: catalog_kv.as_ref(),
                 kv: kv.as_ref(),
@@ -7165,9 +9635,12 @@ impl SqlSession {
                 own: Some(xid),
                 ctes: &ctes,
                 eval_ctx: &eval_ctx,
-                fctx: crate::exec::ForeignCtx::none(),
+                fctx,
                 range_scanner: range_scanner.as_ref(),
                 blocking_query_memory,
+                security_role: fctx.effective_role(),
+                policy_stack: &policy_stack,
+                refs: None,
             };
             crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
                 runtime.block_on(async {
@@ -7181,6 +9654,7 @@ impl SqlSession {
                             &read_ctx,
                             procarray.as_ref(),
                             lockmgr.as_ref(),
+                            lock_owner,
                             repeatable_read,
                             lock_wait_cap,
                             &select,
@@ -7203,10 +9677,15 @@ impl SqlSession {
         let lockmgr = Arc::clone(&self.lockmgr);
         let seq = Arc::clone(&self.seq);
         let range_scanner = Arc::clone(&self.range_scanner);
+        let blocking_query_memory = self.blocking_query_memory;
         let deferred_fk = Arc::clone(&self.deferred_fk);
         let defer_constraints = matches!(self.state, TxnState::InTransaction(_));
         let lock_wait_cap = self.lock_wait_cap;
+        let lock_owner = self.lock_owner;
+        let current_role = self.current_role.clone();
+        let session_user = self.session_user.clone();
         let guc_values = self.guc.effective_map();
+        let row_security = self.guc.row_security();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
         let (request_tx, request_rx) = mpsc::channel(1);
@@ -7239,13 +9718,18 @@ impl SqlSession {
                 }
             };
             let ctes = crate::cte::CteContext::empty();
+            let policy_stack = crate::rls::PolicyStack::default();
             let write_ctx = crate::exec::WriteContext {
+                view_checks: &[],
+                merge_target_qual: None,
+                governing: None,
                 catalog_kv: catalog_kv.as_ref(),
                 kv: kv.as_ref(),
                 global: catalog_kv.as_ref(),
                 global_snapshot: &global_snapshot,
                 procarray: procarray.as_ref(),
                 lockmgr: lockmgr.as_ref(),
+                lock_owner,
                 seq: seq.as_ref(),
                 snapshot: &snapshot,
                 xid,
@@ -7253,10 +9737,27 @@ impl SqlSession {
                 eval_ctx: &eval_ctx,
                 prune_horizon,
                 lock_wait_cap,
-                fctx: crate::exec::ForeignCtx::none(),
+                fctx: crate::exec::ForeignCtx {
+                    current_user: &current_role,
+                    session_user: &session_user,
+                    row_security,
+                    // `INSERT … SELECT` builds its source relation through the
+                    // ordinary read path, which resolves an unqualified name
+                    // against `fctx.resolution`. `ForeignCtx::none()` carries
+                    // the default scope, so the feeding query only ever saw the
+                    // default schema: `INSERT INTO t SELECT … FROM t` was
+                    // `relation "t" does not exist` for a table the session's
+                    // `search_path` reaches, though `SELECT … FROM t` on its
+                    // own resolved it. The same applies to a subquery in an
+                    // `UPDATE`/`DELETE` predicate.
+                    resolution: eval_ctx.resolution(),
+                    ..crate::exec::ForeignCtx::none()
+                },
                 range_scanner: range_scanner.as_ref(),
+                blocking_query_memory,
                 ctes: &ctes,
                 deferred_fk: defer_constraints.then(|| &*deferred_fk),
+                policy_stack: &policy_stack,
             };
             with_guc_runtime(guc_values, guc_settings, prepared, || {
                 crate::trigger::with_after_trigger_queue(|| {
@@ -7291,7 +9792,7 @@ impl SqlSession {
             let pending = std::mem::take(&mut self.pending_after_triggers);
             for pending in pending {
                 let deferred = pending.constraint
-                    && self.deferred_constraints().modes().is_trigger_deferred(
+                    && self.deferred_constraints().modes().is_named_deferred(
                         pending.table_id,
                         &pending.name,
                         pending.deferrable,
@@ -7434,7 +9935,7 @@ impl SqlSession {
                     &self.resolution_scope(),
                     stmt,
                 )?;
-                self.ensure_unique_index_guard(unique_serialization).await;
+                self.ensure_unique_index_guard(unique_serialization).await?;
                 // UPDATE/DELETE's eval_plan_qual re-check reads range 0's global clog
                 // to resolve a cross-range supersede, so catch range 0's replica up
                 // before the gsnap capture. (RR already barriered at BEGIN; the
@@ -7557,9 +10058,10 @@ impl SqlSession {
                     stmt,
                 )? {
                     UniqueLocalSerialization::None => None,
-                    UniqueLocalSerialization::Shared => Some(UniqueIndexGuard {
-                        _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
-                    }),
+                    UniqueLocalSerialization::Shared(table) => Some(
+                        self.acquire_unique_index_guard(table, crate::lockmgr::LockMode::Shared)
+                            .await?,
+                    ),
                 };
                 // Autocommit UPDATE/DELETE's eval_plan_qual re-check reads range 0's
                 // global clog, so catch range 0's replica up before the gsnap capture.
@@ -7618,7 +10120,7 @@ impl SqlSession {
                         abort_ops.extend(self.take_pending_sequence_ops());
                         let _ = self.committer.commit(abort_ops).await;
                         self.procarray.finish(xid);
-                        self.lockmgr.release_all(xid);
+                        self.lockmgr.release_all_as(self.lock_owner);
                         return Err(e);
                     }
                 };
@@ -7639,7 +10141,7 @@ impl SqlSession {
                 // left holding a finished xid on a commit-batch failure.
                 let r = self.committer.commit(ops).await;
                 self.procarray.finish(xid);
-                self.lockmgr.release_all(xid);
+                self.lockmgr.release_all_as(self.lock_owner);
                 r?;
                 self.fire_pending_after_triggers().await?;
                 if let Some(g) = sharded_global {
@@ -7659,6 +10161,369 @@ impl SqlSession {
         }
     }
 
+    /// A `COPY` reaching the executor rather than one of the wire's copy modes:
+    /// a file endpoint on either side, or a `STDIN`/`STDOUT` one on a path that
+    /// cannot stream it.
+    ///
+    /// Split out of `run_one` rather than written inline: `run_one`'s future is
+    /// re-entered once per nested SQL function call, so every local it holds is
+    /// paid for on each level of that recursion, and this arm's file buffer is
+    /// the largest of them.
+    async fn run_copy(&mut self, copy: &CopyStmt) -> Result<QueryResult, ExecError> {
+        // First, before the relation is opened and before either endpoint is
+        // reached, exactly where `DoCopy` puts it.
+        self.require_server_file_endpoint_role(&copy.direction)?;
+        match &copy.direction {
+            CopyDirection::From(source) => self.run_copy_from(copy, source).await,
+            CopyDirection::To(destination) => self.run_copy_to(copy, destination).await,
+        }
+    }
+
+    /// Refuse a server-side file endpoint to a role that may not name one.
+    ///
+    /// A file endpoint runs in the server process, under the server's identity,
+    /// so `COPY … FROM '/path'` reads whatever the server can read and
+    /// `COPY … TO '/path'` creates or truncates whatever the server can write.
+    /// Neither is a table privilege, and no table privilege can stand in for
+    /// one: the rule is about the role, not about the relation.
+    ///
+    /// PostgreSQL gates the two endpoints on the predefined roles
+    /// `pg_read_server_files` and `pg_write_server_files`. This engine has no
+    /// predefined roles, so the only part of that rule it can represent is the
+    /// part a superuser satisfies — a superuser holds the privileges of every
+    /// role — and the gate is therefore superuser-only. The `DETAIL` still names
+    /// PostgreSQL's rule, because that is the rule the client is reading the
+    /// refusal against and the one a grant would have to satisfy.
+    ///
+    /// `STDIN` and `STDOUT` are open to anyone: they move the bytes over the
+    /// connection the caller already has, and read nothing the caller could not
+    /// read through `SELECT`.
+    fn require_server_file_endpoint_role(
+        &self,
+        direction: &CopyDirection,
+    ) -> Result<(), ExecError> {
+        let (message, detail) = match direction {
+            CopyDirection::From(CopySource::File(_)) => (
+                "permission denied to COPY from a file",
+                "Only roles with privileges of the \"pg_read_server_files\" role may COPY from a file.",
+            ),
+            CopyDirection::To(CopyDestination::File(_)) => (
+                "permission denied to COPY to a file",
+                "Only roles with privileges of the \"pg_write_server_files\" role may COPY to a file.",
+            ),
+            CopyDirection::From(CopySource::Stdin) | CopyDirection::To(CopyDestination::Stdout) => {
+                return Ok(());
+            }
+        };
+        // The same `PUBLIC`-to-bootstrap resolution every other decision in this
+        // session makes, so a session that authenticated as nobody is judged as
+        // the role it actually acts as rather than as a pseudo-role that holds
+        // no attributes.
+        let role = self.current_role_for_row_security();
+        if crate::rls::role_is_superuser(self.catalog_kv.as_ref(), &role)? {
+            return Ok(());
+        }
+        Err(ExecError::Remote(
+            PgError::error("42501", message)
+                .with_detail(detail)
+                .with_hint(
+                    r"Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.",
+                ),
+        ))
+    }
+
+    async fn run_copy_from(
+        &mut self,
+        copy: &CopyStmt,
+        source: &CopySource,
+    ) -> Result<QueryResult, ExecError> {
+        // Before the source is even looked at: a `COPY … FROM STDIN` reaching
+        // here came in over the simple-query path, and its refusal has to be
+        // the one the wire path gives before announcing copy-in mode.
+        self.precheck_copy_from(copy)?;
+        match source {
+            CopySource::Stdin => Err(ExecError::Unsupported(
+                "COPY FROM STDIN requires pgwire CopyData messages".into(),
+            )),
+            CopySource::File(path) => {
+                let data = tokio::fs::read(path).await.map_err(|error| {
+                    ExecError::Remote(PgError::error(
+                        "58P01",
+                        format!("could not open file \"{path}\" for reading: {error}"),
+                    ))
+                })?;
+                self.run_copy_in(copy, vec![bytes::Bytes::from(data)]).await
+            }
+        }
+    }
+
+    /// `COPY … TO` on the executor path: a server-side file, or a `STDOUT` that
+    /// reached here instead of [`Session::begin_copy_out`].
+    async fn run_copy_to(
+        &mut self,
+        copy: &CopyStmt,
+        destination: &CopyDestination,
+    ) -> Result<QueryResult, ExecError> {
+        let CopyDestination::File(path) = destination else {
+            // Copy-out mode is a wire state, not a result: only the paths that
+            // own the connection's framing can enter it.
+            return Err(ExecError::Unsupported(
+                "COPY TO STDOUT requires pgwire CopyOut messages".into(),
+            ));
+        };
+        let copied = self.copy_out_rows(copy).await?;
+        let mut payload = Vec::new();
+        for line in &copied.lines {
+            payload.extend_from_slice(line);
+        }
+        tokio::fs::write(path, payload).await.map_err(|error| {
+            ExecError::Remote(
+                PgError::error(
+                    "58P01",
+                    format!("could not open file \"{path}\" for writing: {error}"),
+                )
+                .with_hint(
+                    "COPY TO instructs the server process to write a file. \
+                     You may want a client-side facility such as psql's \\copy.",
+                ),
+            )
+        })?;
+        Ok(QueryResult::Command { tag: copied.tag })
+    }
+
+    /// The statement a `COPY … TO` reads its rows from, and the relation to
+    /// name in a `FORCE_QUOTE` complaint (`None` for the query form, which has
+    /// no relation to name).
+    ///
+    /// The relation form becomes a `SELECT`, which is the whole of this
+    /// engine's answer to "does `COPY` honour row-level security?": there is
+    /// only one read path, the one every query uses, so a policy, a column
+    /// privilege, a partition tree and an inheritance tree all reach a `COPY`
+    /// the way they reach the `SELECT` it is. `PostgreSQL` arrives at the same
+    /// place from the other side — `DoCopy` rewrites `COPY <rel> TO` into
+    /// `COPY (SELECT … FROM <rel>) TO` the moment the relation has a policy —
+    /// and rewriting unconditionally is what removes the second path that could
+    /// disagree with the first.
+    fn copy_out_source(&self, copy: &CopyStmt) -> Result<(Statement, Option<String>), ExecError> {
+        let (name, columns) = match &copy.target {
+            CopyTarget::Query(query) => return Ok(((**query).clone(), None)),
+            CopyTarget::Table { name, columns } => (name, columns),
+        };
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+            crate::relname::SchemaDisposition::Utility,
+        )?;
+        let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &resolved) {
+            Ok(table) => table,
+            // A relation this copy cannot scan row by row. PostgreSQL names the
+            // kind and, for a view, points at the spelling that does work.
+            Err(error) => {
+                if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &resolved).is_ok()
+                    || crate::exec::virtual_relation_kind(&resolved) == Some("view")
+                {
+                    return Err(ExecError::Remote(
+                        PgError::error(
+                            "42809",
+                            format!("cannot copy from view \"{}\"", resolved.name),
+                        )
+                        .with_hint("Try the COPY (SELECT ...) TO variant."),
+                    ));
+                }
+                if crabka_pgcatalog::get_sequence(self.catalog_kv.as_ref(), &resolved).is_ok() {
+                    return Err(ExecError::Remote(PgError::error(
+                        "42809",
+                        format!("cannot copy from sequence \"{}\"", resolved.name),
+                    )));
+                }
+                // An index never reaches a COPY-specific rule: PostgreSQL
+                // refuses it while the relation is still being opened.
+                if let Some(error) =
+                    crate::exec::open_wrong_kind(self.catalog_kv.as_ref(), &resolved)
+                {
+                    return Err(error);
+                }
+                // Only the column list is read from this record, and the
+                // rewritten `SELECT` reads a synthesised catalog relation the
+                // way every other query does, so `COPY pg_class TO` needs
+                // nothing beyond the columns.
+                match crate::exec::virtual_relation_table(&resolved) {
+                    Some(table) => table,
+                    None => return Err(error.into()),
+                }
+            }
+        };
+        // A materialized view that has never been refreshed holds no rows to
+        // copy. The rewritten `SELECT` would refuse it too, and in the same
+        // SQLSTATE — but `PostgreSQL` words this refusal for `COPY`
+        // specifically rather than reusing the read one, so the two do not say
+        // the same thing and the rewrite cannot stand in for it.
+        if table
+            .materialized
+            .as_ref()
+            .is_some_and(|matview| !matview.populated)
+        {
+            return Err(ExecError::Remote(
+                PgError::error(
+                    "0A000",
+                    format!(
+                        "cannot copy from unpopulated materialized view \"{}\"",
+                        table.name.name
+                    ),
+                )
+                .with_hint("Use the REFRESH MATERIALIZED VIEW command."),
+            ));
+        }
+        let named = |column: &str| SelectItem::Expr {
+            expr: Expr::Column {
+                table: None,
+                name: column.to_string(),
+            },
+            alias: None,
+        };
+        let projection = match columns {
+            // No column list is every column in attribute order EXCEPT the
+            // generated ones, which `CopyGetAttnums` skips for both directions.
+            // A wildcard would project them, so the list is spelled out.
+            None => table
+                .columns
+                .iter()
+                .filter(|column| column.generated.is_none())
+                .map(|column| named(&column.name))
+                .collect(),
+            Some(columns) => {
+                let mut seen = HashSet::new();
+                columns
+                    .iter()
+                    .map(|column| {
+                        let Some(index) = table.column_index(column) else {
+                            return Err(ExecError::Remote(PgError::error(
+                                "42703",
+                                format!(
+                                    "column \"{column}\" of relation \"{}\" does not exist",
+                                    resolved.name
+                                ),
+                            )));
+                        };
+                        if table.columns[index].generated.is_some() {
+                            return Err(crate::exec::copy_generated_column(column));
+                        }
+                        if !seen.insert(column.clone()) {
+                            return Err(ExecError::DuplicateOutputColumn(column.clone()));
+                        }
+                        Ok(named(column))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
+        let select = crabka_pgparser::ast::SelectStmt {
+            projection,
+            from: vec![TableExpr::Table {
+                name: name.clone(),
+                only: false,
+                alias: None,
+                columns: None,
+                sample: None,
+            }],
+            filter: None,
+            distinct: crabka_pgparser::ast::DistinctClause::All,
+            group_by: Vec::new(),
+            grouping: None,
+            having: None,
+            windows: Vec::new(),
+            window_calls: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            with_ties: false,
+            locking: None,
+        };
+        Ok((
+            Statement::Query(QueryExpr {
+                with: None,
+                body: SetExpr::Query(QueryBody::Select(Box::new(select))),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                with_ties: false,
+                locking: None,
+            }),
+            Some(resolved.name.clone()),
+        ))
+    }
+
+    /// The character set a copy that names no `ENCODING` of its own reads and
+    /// writes its payload in.
+    ///
+    /// `PostgreSQL` takes this from `client_encoding`, and so does this: the
+    /// setting is read rather than assumed, so that a copy follows it the day
+    /// the wire layer learns to speak anything but UTF-8. Until then the
+    /// setting admits only `UTF8`, and this is the server encoding.
+    fn copy_encoding(&self) -> crate::charset::Charset {
+        self.guc
+            .effective("client_encoding")
+            .ok()
+            .and_then(|name| crate::charset::Charset::from_name(&name))
+            .unwrap_or_default()
+    }
+
+    /// Run a `COPY … TO`'s source and encode every row it produced.
+    ///
+    /// The whole copy is materialised on purpose. `PostgreSQL` buffers a
+    /// copy-out block and flushes it when the statement finishes, so a copy
+    /// whose query fails partway emits an `ErrorResponse` and nothing else —
+    /// never a `CopyOutResponse` followed by the rows that came before the
+    /// failure. Building the payload before anything is framed makes that
+    /// indivisible rather than merely intended.
+    async fn copy_out_rows(&mut self, copy: &CopyStmt) -> Result<CopiedOut, ExecError> {
+        let format = crate::copyfmt::CopyOutFormat::resolve(&copy.options, self.copy_encoding())?;
+        let (source, relation) = self.copy_out_source(copy)?;
+        // Boxed because this is `run_one` calling itself: a COPY of a query is
+        // a statement inside a statement.
+        let result = Box::pin(self.run_one(&source)).await?;
+        let QueryResult::Rows { fields, rows, .. } = result else {
+            // Every source the parser admits is row-producing — a query body,
+            // or a data-modifying statement it required a RETURNING clause of.
+            return Err(ExecError::Syntax(
+                "COPY query must have a result set".into(),
+            ));
+        };
+        let names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
+        let forced = format.forced_columns(&names, relation.as_deref())?;
+        let mut lines = Vec::with_capacity(rows.len() + usize::from(format.header));
+        if let Some(header) = format.header_line(&names) {
+            lines.push(bytes::Bytes::from(format.encode_line(header)?));
+        }
+        let copied = rows.len();
+        for row in &rows {
+            let cells: Vec<Option<&[u8]>> = row
+                .iter()
+                .map(|cell| cell.as_ref().map(|cell| cell.text.as_ref()))
+                .collect();
+            let line = format.encode_line(format.row_line(&cells, &forced))?;
+            lines.push(bytes::Bytes::from(line));
+        }
+        Ok(CopiedOut {
+            lines,
+            columns: names.len(),
+            tag: format!("COPY {copied}"),
+        })
+    }
+
+    /// The copy-out block for a `COPY … TO STDOUT`, ready for the wire layer.
+    async fn copy_out_stream(&mut self, copy: &CopyStmt) -> Result<CopyOutStream, ExecError> {
+        let copied = self.copy_out_rows(copy).await?;
+        Ok(CopyOutStream {
+            response: CopyOutResponse {
+                overall_format: 0,
+                column_formats: vec![0; copied.columns],
+            },
+            rows: copied.lines,
+            tag: copied.tag,
+        })
+    }
+
     async fn run_copy_in(
         &mut self,
         copy: &CopyStmt,
@@ -7667,15 +10532,41 @@ impl SqlSession {
         // Statement-duration garbage-horizon pin — see `run_one`.
         let _statement_pin = matches!(self.state, TxnState::Idle)
             .then(|| self.gc_horizon.pin(self.procarray.snapshot().xmin));
-        if matches!(copy.format, CopyFormat::Csv) {
-            return Err(ExecError::Unsupported("COPY CSV is not supported".into()));
-        }
+        let target = copy_into_target(copy)?;
+        let format = crate::copyfmt::CopyInFormat::resolve(&copy.options, self.copy_encoding())?;
+        // `COPY … FROM 'file'` never enters copy-in mode, so it reaches here
+        // without passing `copy_in_start`. Both entry points must refuse, or
+        // one of them loads rows past a policy.
+        self.precheck_copy_from(copy)?;
+        // Only here, and never in the pre-check: see the refusal's own note on
+        // why `PostgreSQL` raises this one after the client has sent its data.
+        self.refuse_unfreezable_freeze_target(copy)?;
         let data_len = chunks.iter().map(bytes::Bytes::len).sum();
         let mut data = Vec::with_capacity(data_len);
         for chunk in chunks {
             data.extend_from_slice(&chunk);
         }
-        let rows = crate::exec::decode_copy_text(&data)?;
+        // Only `HEADER MATCH` and the two `FORCE_` options read the names, and
+        // resolving them costs a catalog round trip, so the ordinary load does
+        // not pay for it.
+        let (header_columns, force) = if format.needs_column_names() {
+            let lists = self.copy_column_lists(target)?;
+            let force = format.force_flags(&lists.copied, &lists.relation, &lists.relation_name)?;
+            (lists.copied, force)
+        } else {
+            (Vec::new(), crate::copyfmt::CopyForceFlags::default())
+        };
+        // Every failure the decode can raise — a malformed line, a bad header,
+        // an unterminated CSV field — is reported with the same `CONTEXT` a
+        // failing row gets, so the decode is told the relation to name.
+        let text = crate::copyfmt::decode_copy_payload(&data, &format, &target.name.name)?;
+        let rows = crate::copyfmt::decode_copy_rows(
+            &text,
+            &format,
+            &header_columns,
+            &force,
+            &target.name.name,
+        )?;
         match &self.state {
             TxnState::InTransaction(_) => {
                 self.ensure_table_write_guard().await;
@@ -7684,7 +10575,7 @@ impl SqlSession {
                     &crate::relname::resolve_relation(
                         self.catalog_kv.as_ref(),
                         &self.resolution_scope(),
-                        &copy.table,
+                        target.name,
                         crate::relname::SchemaDisposition::Utility,
                     )?,
                 )?) {
@@ -7695,9 +10586,9 @@ impl SqlSession {
                 let unique_serialization = crate::exec::copy_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
                     &self.resolution_scope(),
-                    copy,
+                    target,
                 )?;
-                self.ensure_unique_index_guard(unique_serialization).await;
+                self.ensure_unique_index_guard(unique_serialization).await?;
                 self.ensure_write_xid()?;
                 let xid = match &self.state {
                     TxnState::InTransaction(ctx) => ctx.xid.expect("xid set"),
@@ -7718,7 +10609,7 @@ impl SqlSession {
                     ctes: &statement_ctes,
                 });
                 let (result, mut ops) =
-                    crate::exec::execute_copy_write(&write_ctx, copy, &rows).await?;
+                    crate::exec::execute_copy_write(&write_ctx, target, &rows).await?;
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
@@ -7734,7 +10625,7 @@ impl SqlSession {
                     &crate::relname::resolve_relation(
                         self.catalog_kv.as_ref(),
                         &self.resolution_scope(),
-                        &copy.table,
+                        target.name,
                         crate::relname::SchemaDisposition::Utility,
                     )?,
                 )?;
@@ -7744,7 +10635,7 @@ impl SqlSession {
                         self.catalog_kv.as_ref(),
                         self.kv.as_ref(),
                         self.seq.as_ref(),
-                        copy,
+                        target,
                         &rows,
                         &ctx,
                     )?;
@@ -7765,12 +10656,13 @@ impl SqlSession {
                 let _unique_guard = match crate::exec::copy_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
                     &self.resolution_scope(),
-                    copy,
+                    target,
                 )? {
                     UniqueLocalSerialization::None => None,
-                    UniqueLocalSerialization::Shared => Some(UniqueIndexGuard {
-                        _guard: Arc::clone(&self.unique_index_lock).read_owned().await,
-                    }),
+                    UniqueLocalSerialization::Shared(table) => Some(
+                        self.acquire_unique_index_guard(table, crate::lockmgr::LockMode::Shared)
+                            .await?,
+                    ),
                 };
                 let xid = self.procarray.begin_write()?;
                 let ctx = self.eval_ctx();
@@ -7790,7 +10682,8 @@ impl SqlSession {
                 // Reserved before the batch is durable, as in `run_write`: a
                 // column default that calls `pg_notify()` must not be able to
                 // fail a COPY whose rows are already committed.
-                let outcome = match crate::exec::execute_copy_write(&write_ctx, copy, &rows).await {
+                let outcome = match crate::exec::execute_copy_write(&write_ctx, target, &rows).await
+                {
                     Ok(written) => self.reserve_autocommit_notifications().map(|()| written),
                     Err(error) => Err(error),
                 };
@@ -7803,7 +10696,7 @@ impl SqlSession {
                         let _ = self.committer.commit(abort_ops).await;
                         self.procarray.finish(xid);
                         // Free the unique-key locks the failed COPY acquired.
-                        self.lockmgr.release_all(xid);
+                        self.lockmgr.release_all_as(self.lock_owner);
                         return Err(error);
                     }
                 };
@@ -7815,7 +10708,7 @@ impl SqlSession {
                 let commit = self.committer.commit(ops).await;
                 self.procarray.finish(xid);
                 // Free the unique-key locks this COPY acquired, waking waiters.
-                self.lockmgr.release_all(xid);
+                self.lockmgr.release_all_as(self.lock_owner);
                 if let Err(error) = commit {
                     // Nothing became durable, so the reservation this COPY took
                     // ahead of the batch is released with the queue.
@@ -8260,16 +11153,32 @@ impl SqlSession {
     /// `commit_release`/`abort_release` uses it, because the coordinator
     /// recorded the decision once, globally.
     fn finish_current_txn(&mut self, keep_holdable: bool) {
+        if !keep_holdable
+            && let TxnState::InTransaction(ctx) | TxnState::Failed(ctx) | TxnState::Prepared(ctx) =
+                &self.state
+        {
+            self.current_role.clone_from(&ctx.role_at_start);
+        }
         let implicit_xid = self.implicit_xid.take();
         if let Some(xid) = self.local_xid().or(implicit_xid) {
             self.procarray.finish(xid);
-            self.lockmgr.release_all(xid);
+            self.lockmgr.release_all_as(self.lock_owner);
         }
         self.discard_deferred_constraints();
         self.finish_transaction_scoped_state(keep_holdable);
         self.global_xid = None;
         self.state = TxnState::Idle;
     }
+}
+
+/// A finished `COPY … TO`: its encoded payload, and what closes it.
+struct CopiedOut {
+    /// One encoded line per row, its trailing newline included, preceded by the
+    /// header line when `HEADER` asked for one.
+    lines: Vec<bytes::Bytes>,
+    /// The width of the copied result, which the `CopyOutResponse` announces.
+    columns: usize,
+    tag: String,
 }
 
 impl Drop for SqlSession {
@@ -8287,8 +11196,12 @@ impl Drop for SqlSession {
     }
 }
 
-fn parse_single_extended_statement(sql: &str) -> Result<Statement, PgError> {
-    let statements = crabka_pgparser::parse(sql).map_err(|e| ExecError::from(e).into_pg())?;
+fn parse_single_extended_statement(
+    sql: &str,
+    type_schemas: &[String],
+) -> Result<Statement, PgError> {
+    let statements = crabka_pgparser::parse_with_type_schemas(sql, type_schemas)
+        .map_err(|error| parse_failure(sql, error))?;
     match statements.as_slice() {
         [] => Err(PgError::error(
             sqlstate::SYNTAX_ERROR,
@@ -8302,126 +11215,71 @@ fn parse_single_extended_statement(sql: &str) -> Result<Statement, PgError> {
     }
 }
 
-fn parse_single_copy_statement(sql: &str) -> Result<Option<CopyStmt>, PgError> {
-    let statements = crabka_pgparser::parse(sql).map_err(|e| ExecError::from(e).into_pg())?;
-    match statements.as_slice() {
-        [Statement::Set { name, value, .. }]
-            if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
-        {
-            decode_copy_stmt(value).map(Some)
-        }
-        [_] => Ok(None),
-        [] => Ok(None),
-        statements if statements.iter().any(is_copy_sentinel) => Err(PgError::error(
-            sqlstate::SYNTAX_ERROR,
-            "COPY FROM STDIN must be the only statement in a simple query",
-        )),
-        _ => Ok(None),
+/// The `COPY … FROM STDIN` a one-statement simple query is, if it is one.
+///
+/// A query string holding several statements is not answered here even when one
+/// of them is a copy: copy-in is a connection *mode*, and the statements before
+/// it have to have run and reported before the client may start sending data.
+/// [`SqlSession::run_simple_batch`] drives that case, stopping at the copy and
+/// handing its index back to the wire layer.
+fn single_copy_from_stdin(statements: &[Statement]) -> Option<CopyStmt> {
+    match statements {
+        [stmt] => copy_from_stdin_stmt(stmt).cloned(),
+        _ => None,
     }
 }
 
-fn is_copy_sentinel(stmt: &Statement) -> bool {
-    matches!(stmt, Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL)
-}
-
-/// Decode the COPY statement carried by a parsed COPY FROM STDIN sentinel;
-/// `None` for any other statement.
-fn copy_sentinel_stmt(stmt: &Statement) -> Result<Option<CopyStmt>, PgError> {
+/// The statement as a `COPY … FROM STDIN`, or `None` for anything else — a
+/// `COPY` with a file endpoint included, which runs on the ordinary executor
+/// path and never touches copy-in mode.
+fn copy_from_stdin_stmt(stmt: &Statement) -> Option<&CopyStmt> {
     match stmt {
-        Statement::Set { name, value, .. }
-            if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL =>
+        Statement::Copy(copy)
+            if matches!(copy.direction, CopyDirection::From(CopySource::Stdin)) =>
         {
-            decode_copy_stmt(value).map(Some)
+            Some(copy)
         }
-        _ => Ok(None),
+        _ => None,
     }
 }
 
-fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, PgError> {
-    // The parser encodes the whole statement into a single item, so anything
-    // else reaching here is a hand-written `SET` wearing the sentinel's name
-    // rather than a real `COPY … FROM STDIN`.
-    let crabka_pgparser::ast::SetValue::Value(items) = value else {
-        return Err(PgError::error(
-            sqlstate::SYNTAX_ERROR,
-            "invalid COPY statement",
-        ));
-    };
-    let [encoded] = items.as_slice() else {
-        return Err(PgError::error(
-            sqlstate::SYNTAX_ERROR,
-            "invalid COPY statement",
-        ));
-    };
-    let mut parts = encoded.split('\t');
-    let format = match parts.next() {
-        Some("text") => CopyFormat::Text,
-        Some("csv") => CopyFormat::Csv,
-        _ => {
-            return Err(PgError::error(
-                sqlstate::SYNTAX_ERROR,
-                "invalid COPY format",
-            ));
+/// The single `COPY … TO STDOUT` a simple query may carry, if it carries one.
+///
+/// Copy-out is bounded by the same rule as copy-in for the same reason: the
+/// wire layer writes a whole `CopyOutResponse` … `CopyDone` block, and a second
+/// result in the same query string would have to interleave with it.
+fn copy_to_stdout_stmt(stmt: &Statement) -> Option<&CopyStmt> {
+    match stmt {
+        Statement::Copy(copy)
+            if matches!(copy.direction, CopyDirection::To(CopyDestination::Stdout)) =>
+        {
+            Some(copy)
         }
-    };
-    let table = parts
-        .next()
-        .map(decode_copy_part)
-        .transpose()?
-        .ok_or_else(|| PgError::error(sqlstate::SYNTAX_ERROR, "invalid COPY table"))?;
-    let columns = parts
-        .next()
-        .filter(|columns| !columns.is_empty())
-        .map(|columns| {
-            columns
-                .split(',')
-                .map(decode_copy_part)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?;
-    let schema = parts
-        .next()
-        .filter(|schema| !schema.is_empty())
-        .map(decode_copy_part)
-        .transpose()?;
-    if parts.next().is_some() {
-        return Err(PgError::error(
-            sqlstate::SYNTAX_ERROR,
-            "invalid COPY statement",
-        ));
+        _ => None,
     }
-    Ok(CopyStmt {
-        table: crabka_pgparser::ast::RelationRef {
-            schema,
-            name: table,
-        },
-        columns,
-        format,
-    })
 }
 
-fn decode_copy_part(value: &str) -> Result<String, PgError> {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        let Some(escaped) = chars.next() else {
-            return Err(PgError::error(
-                sqlstate::SYNTAX_ERROR,
-                "invalid COPY escape",
-            ));
-        };
-        out.push(match escaped {
-            't' => '\t',
-            ',' => ',',
-            '\\' => '\\',
-            other => other,
-        });
+/// The three column facts a `COPY … FROM` needs before it reads a byte.
+struct CopyColumnLists {
+    /// The columns the copy fills, in the order its data supplies the fields.
+    copied: Vec<String>,
+    /// Every column the relation has.
+    relation: Vec<String>,
+    /// The relation's own unqualified name, for the messages that quote it.
+    relation_name: String,
+}
+
+/// The relation a `COPY … FROM` loads into.
+///
+/// `PostgreSQL`'s grammar has no `COPY ( <query> ) FROM` spelling — the
+/// parenthesized form is `TO`-only — so a load always names a relation.
+fn copy_into_target(copy: &CopyStmt) -> Result<crate::exec::CopyIntoTarget<'_>, ExecError> {
+    match &copy.target {
+        CopyTarget::Table { name, columns } => Ok(crate::exec::CopyIntoTarget { name, columns }),
+        CopyTarget::Query(_) => Err(ExecError::Syntax(
+            "COPY FROM must name a relation, not a query".into(),
+        )),
     }
-    Ok(out)
 }
 
 struct ParamBinder<'a> {
@@ -8466,6 +11324,8 @@ impl ParamBinder<'_> {
                         }
                     }
                 } else if let crabka_pgparser::ast::InsertSource::Query(query) = source {
+                    let target_types = self.insert_target_types(&name, columns.as_ref())?;
+                    self.bind_untyped_query_params(query, &target_types)?;
                     self.bind_query_expr(query)?;
                 }
                 if on_conflict.is_some() || returning.is_some() {
@@ -8649,6 +11509,58 @@ impl ParamBinder<'_> {
         Ok(())
     }
 
+    /// Give a bare, undeclared `$n` in an `INSERT`'s feeding query the target
+    /// column's type.
+    ///
+    /// `transformInsertStmt` takes a target entry that is a `Const` **or** a
+    /// `Param` whose type is `unknown` and types it by the column it will land
+    /// in. The `Const` half is handled downstream by
+    /// `exec::unknown_literal_columns`, which can look at the statement after
+    /// binding because a written literal is still an `Expr::StringLiteral`
+    /// there. The parameter half cannot wait: binding is what turns `$1` into a
+    /// `Const`, and `bound_param_expr` falls back to `text` when the client
+    /// declared no type and no expected type reached it -- after which nothing
+    /// can tell an undeclared parameter from one the client called `text`.
+    ///
+    /// Only an *undeclared* parameter is retyped. A client that said `text` has
+    /// said what it means, and `text` into a `point` column stays 42804, which
+    /// is what `PostgreSQL` answers for both spellings.
+    ///
+    /// Deliberately narrow: only a bare `$n` at the top level of a plain
+    /// `SELECT`'s projection. A set operation has to agree on its own column
+    /// types before the target is considered, and an expression *containing* a
+    /// parameter is no longer an `unknown` for this rule.
+    fn bind_untyped_query_params(
+        &self,
+        query: &mut crabka_pgparser::ast::QueryExpr,
+        target_types: &[ColumnType],
+    ) -> Result<(), PgError> {
+        use crabka_pgparser::ast::{QueryBody, SelectItem, SetExpr};
+        let SetExpr::Query(QueryBody::Select(select)) = &mut query.body else {
+            return Ok(());
+        };
+        for (idx, item) in select.projection.iter_mut().enumerate() {
+            let SelectItem::Expr { expr, .. } = item else {
+                continue;
+            };
+            let Expr::Param(number) = expr else {
+                continue;
+            };
+            let index = param_index(*number)?;
+            if self
+                .params
+                .get(index)
+                .is_none_or(|param| param.type_oid.is_some())
+            {
+                continue;
+            }
+            if let Some(ty) = target_types.get(idx).copied() {
+                self.bind_expr(expr, Some(ty))?;
+            }
+        }
+        Ok(())
+    }
+
     fn insert_target_types(
         &self,
         table: &crabka_pgcatalog::RelationName,
@@ -8760,10 +11672,10 @@ impl ParamBinder<'_> {
                 let scope = if select.from.is_empty() {
                     crate::scope::Scope::empty()
                 } else {
-                    crate::exec::build_from_schema_with_ctes(
+                    crate::exec::build_from_schema_of_select(
                         self.catalog_kv,
                         self.resolution,
-                        &select.from,
+                        select,
                         ctes,
                     )
                     .map_err(ExecError::into_pg)?
@@ -8822,9 +11734,22 @@ impl ParamBinder<'_> {
                 // A lateral item's outer references are substituted for constants
                 // before execution, so parameter binding still sees the arguments
                 // against an empty scope.
-                for arg in functions.iter_mut().flat_map(|call| call.args.iter_mut()) {
+                for call in functions {
+                    for (index, arg) in call.args.iter_mut().enumerate() {
+                        self.bind_expr_with_scope_and_ctes(
+                            arg,
+                            jsonpath_function_param_type(&call.name, index),
+                            &crate::scope::Scope::empty(),
+                            ctes,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            TableExpr::JsonTable(table) => {
+                for expr in table.exprs_mut() {
                     self.bind_expr_with_scope_and_ctes(
-                        arg,
+                        expr,
                         None,
                         &crate::scope::Scope::empty(),
                         ctes,
@@ -8889,7 +11814,7 @@ impl ParamBinder<'_> {
             }
             1 => {
                 let oid = i32::from_be_bytes(binary_array(value)?);
-                crate::exec::regclass_by_oid(self.catalog_kv, oid)
+                crate::exec::regclass_by_oid(self.catalog_kv, self.resolution, oid)
                     .map(Datum::Regclass)
                     .map_err(ExecError::into_pg)?
             }
@@ -8959,6 +11884,18 @@ impl ParamBinder<'_> {
                     UnaryOp::Plus | UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::Abs => expected,
                     UnaryOp::Sqrt | UnaryOp::Cbrt => Some(ColumnType::Float8),
                     UnaryOp::TsNot => Some(ColumnType::TsQuery),
+                    // `IS DOCUMENT` takes `xml`, so a bare `$1 IS DOCUMENT`
+                    // infers the parameter as `xml` rather than leaving it
+                    // unknown.
+                    UnaryOp::IsDocument | UnaryOp::IsNotDocument => Some(ColumnType::Xml),
+                    // Every geometric prefix operator is declared over two or
+                    // more operand types (`@-@` over lseg and path, `@@` over
+                    // four), so a bare parameter beside one resolves nothing.
+                    UnaryOp::NPoints
+                    | UnaryOp::Length
+                    | UnaryOp::Center
+                    | UnaryOp::IsHorizontal
+                    | UnaryOp::IsVertical => None,
                 };
                 self.bind_expr_with_scope_and_ctes(expr, child_expected, scope, ctes)?;
             }
@@ -8974,16 +11911,21 @@ impl ParamBinder<'_> {
             }
             Expr::Binary { op, left, right } => {
                 let left_expected =
-                    binary_param_type(*op, right, scope).or(expected_for_binary(*op));
+                    binary_param_type(*op, right, true, scope).or(expected_for_binary(*op));
                 let right_expected =
-                    binary_param_type(*op, left, scope).or(expected_for_binary(*op));
+                    binary_param_type(*op, left, false, scope).or(expected_for_binary(*op));
                 self.bind_expr_with_scope_and_ctes(left, left_expected, scope, ctes)?;
                 self.bind_expr_with_scope_and_ctes(right, right_expected, scope, ctes)?;
             }
             Expr::Func(func) => {
                 if let FuncArgs::Exprs(args) = &mut func.args {
-                    for arg in args {
-                        self.bind_expr_with_scope_and_ctes(arg, None, scope, ctes)?;
+                    for (index, arg) in args.iter_mut().enumerate() {
+                        self.bind_expr_with_scope_and_ctes(
+                            arg,
+                            jsonpath_function_param_type(&func.name, index),
+                            scope,
+                            ctes,
+                        )?;
                     }
                 }
             }
@@ -9084,6 +12026,7 @@ impl ParamBinder<'_> {
             Expr::IntLiteral(_)
             | Expr::NumericLiteral(_)
             | Expr::StringLiteral(_)
+            | Expr::BitStringLiteral(_)
             | Expr::BoolLiteral(_)
             | Expr::NullLiteral
             | Expr::Default
@@ -9119,9 +12062,29 @@ fn expected_for_binary(op: BinaryOp) -> Option<ColumnType> {
 fn binary_param_type(
     op: BinaryOp,
     other: &Expr,
+    param_is_left: bool,
     scope: &crate::scope::Scope,
 ) -> Option<ColumnType> {
     match op {
+        // The geometric positional operators take a geometric operand on both
+        // sides; a parameter beside one adopts nothing useful here.
+        BinaryOp::Same
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow => None,
+        // `?#`, `?-`, `?-|`, `?||`, `<^` and `>^` are all same-type geometric
+        // tests, so a parameter beside one adopts its sibling's type.
+        BinaryOp::Intersects
+        | BinaryOp::Horizontal
+        | BinaryOp::Perpendicular
+        | BinaryOp::Parallel
+        | BinaryOp::BelowEq
+        | BinaryOp::AboveEq => infer_param_context_type(other, scope),
+        // `##` has two candidates beside every operand it takes (`lseg ## box`
+        // and `lseg ## lseg`, `point ## line` and `point ## lseg`, …), so
+        // nothing here decides which the parameter is.
+        BinaryOp::ClosestPoint => None,
         // Comparisons and arithmetic take same-family operands, so a
         // parameter adopts its sibling's type — matching PostgreSQL's
         // operator resolution for `int8 + $1` and friends.
@@ -9151,9 +12114,13 @@ fn binary_param_type(
         },
         // Containment and overlap are same-type operators (jsonb @> jsonb,
         // int[] && int[]), so a parameter adopts its sibling's type.
-        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps | BinaryOp::Phrase => {
-            infer_param_context_type(other, scope)
-        }
+        BinaryOp::Contains
+        | BinaryOp::ContainedBy
+        | BinaryOp::Overlaps
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::Adjacent
+        | BinaryOp::Phrase => infer_param_context_type(other, scope),
         // `?` tests one key; `?|`/`?&` and the `#>`/`#>>` path operators take a
         // text[] on the right. A parameter on the LEFT of one of these is
         // meaningless (the left operand is always jsonb), so the asymmetry the
@@ -9166,14 +12133,27 @@ fn binary_param_type(
         // `->`/`->>` take either a text key or an integer index; the operand
         // alone cannot say which, so leave the parameter at its default.
         BinaryOp::JsonGet | BinaryOp::JsonGetText => None,
-        // `@@` also serves full-text search; a vector sibling resolves the
-        // parameter as the query operand instead of jsonpath text.
-        BinaryOp::JsonPathMatch => match infer_param_context_type(other, scope) {
-            Some(ColumnType::TsVector) => Some(ColumnType::TsQuery),
-            Some(ColumnType::TsQuery) => Some(ColumnType::TsVector),
+        // `@@` is overloaded by JSON path and full-text search. PostgreSQL's
+        // side-sensitive operator search is not symmetric: an unconstrained
+        // pair resolves through the text/text overload, while a typed sibling
+        // selects the corresponding jsonb/jsonpath or tsquery/tsvector shape.
+        BinaryOp::JsonPathMatch => match (param_is_left, infer_param_context_type(other, scope)) {
+            (true, Some(ColumnType::JsonPath)) => Some(ColumnType::Jsonb),
+            (false, Some(ColumnType::Jsonb)) => Some(ColumnType::JsonPath),
+            (true, Some(ColumnType::TsVector)) | (false, Some(ColumnType::TsVector)) => {
+                Some(ColumnType::TsQuery)
+            }
+            (false, Some(ColumnType::TsQuery)) => Some(ColumnType::TsVector),
+            // `text @@ tsquery` is the preferred overload for an unknown left
+            // operand; it parses the document text into a tsvector internally.
+            (true, Some(ColumnType::TsQuery)) => Some(ColumnType::Text),
             _ => Some(ColumnType::Text),
         },
-        BinaryOp::JsonPathExists => Some(ColumnType::Text),
+        BinaryOp::JsonPathExists => Some(if param_is_left {
+            ColumnType::Jsonb
+        } else {
+            ColumnType::JsonPath
+        }),
         // The regex-match, bitwise, exponent and modulo operators and the
         // boolean connectives resolve a parameter from nothing but its own
         // default.
@@ -9186,6 +12166,10 @@ fn binary_param_type(
         | BinaryOp::BitXor
         | BinaryOp::Shl
         | BinaryOp::Shr
+        // The network containment operators take `inet` on both sides, so a
+        // parameter beside one adopts its sibling's type.
+        | BinaryOp::ContainedByOrEq
+        | BinaryOp::ContainsOrEq
         | BinaryOp::Pow
         | BinaryOp::Mod
         | BinaryOp::And
@@ -9193,8 +12177,38 @@ fn binary_param_type(
     }
 }
 
-/// The element type of an array-typed expression. This is how `$1 = ANY(tags)`
-/// types its left operand.
+/// Positional type context for the `jsonb_path_*` family. This is used only by
+/// parameter binding; ordinary literal/function resolution remains in
+/// `json_fn` and `srf`.
+fn jsonpath_function_param_type(name: &str, index: usize) -> Option<ColumnType> {
+    let name = name.rsplit('.').next().unwrap_or(name);
+    if !matches!(
+        name,
+        "jsonb_path_exists"
+            | "jsonb_path_exists_tz"
+            | "jsonb_path_match"
+            | "jsonb_path_match_tz"
+            | "jsonb_path_query"
+            | "jsonb_path_query_tz"
+            | "jsonb_path_query_array"
+            | "jsonb_path_query_array_tz"
+            | "jsonb_path_query_first"
+            | "jsonb_path_query_first_tz"
+    ) {
+        return None;
+    }
+    [
+        ColumnType::Jsonb,
+        ColumnType::JsonPath,
+        ColumnType::Jsonb,
+        ColumnType::Bool,
+    ]
+    .get(index)
+    .copied()
+}
+
+/// The element type of an array-typed expression — how `$1 = ANY(tags)` types
+/// its left operand.
 fn array_element_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<ColumnType> {
     match infer_param_context_type(expr, scope) {
         Some(ColumnType::Array(elem)) => Some(elem.column_type()),
@@ -9217,7 +12231,7 @@ fn infer_param_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<
             .ok()
             .map(|idx| scope.ty_at(idx)),
         Expr::IntLiteral(_) => Some(ColumnType::Int4),
-        Expr::StringLiteral(_) => Some(ColumnType::Text),
+        Expr::StringLiteral(_) | Expr::BitStringLiteral(_) => Some(ColumnType::Text),
         Expr::BoolLiteral(_) => Some(ColumnType::Bool),
         Expr::Default => None,
         Expr::Const { ty, .. } | Expr::Cast { ty, .. } => Some(*ty),
@@ -9448,6 +12462,11 @@ fn collect_table_param(table: &TableExpr, max: &mut usize) {
                 collect_expr_param(arg, max);
             }
         }
+        TableExpr::JsonTable(table) => {
+            for expr in table.exprs() {
+                collect_expr_param(expr, max);
+            }
+        }
         TableExpr::Join {
             left,
             right,
@@ -9567,6 +12586,7 @@ fn collect_expr_param(expr: &Expr, max: &mut usize) {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Default
@@ -9597,10 +12617,12 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
     match param.type_oid {
         Some(crabka_pgtypes::oids::INT2) => Ok(Some(ColumnType::Int2)),
         Some(crabka_pgtypes::oids::INT4) => Ok(Some(ColumnType::Int4)),
-        // `oid` aliases Int4 (see ColumnType::from_sql_name): drivers declare
-        // OID parameters in their pg_catalog typeinfo lookups.
-        Some(crabka_pgtypes::oids::OID) => Ok(Some(ColumnType::Int4)),
         Some(crabka_pgtypes::oids::REGCLASS) => Ok(Some(ColumnType::Regclass)),
+        Some(crabka_pgtypes::oids::REGTYPE) => Ok(Some(ColumnType::Regtype)),
+        Some(crabka_pgtypes::oids::REGPROCEDURE) => Ok(Some(ColumnType::Regprocedure)),
+        Some(crabka_pgtypes::oids::REGNAMESPACE) => Ok(Some(ColumnType::Regnamespace)),
+        Some(crabka_pgtypes::oids::OIDVECTOR) => Ok(Some(ColumnType::OidVector)),
+        Some(crabka_pgtypes::oids::INT2VECTOR) => Ok(Some(ColumnType::Int2Vector)),
         Some(crabka_pgtypes::oids::INT8) => Ok(Some(ColumnType::Int8)),
         Some(crabka_pgtypes::oids::TEXT) => Ok(Some(ColumnType::Text)),
         Some(crabka_pgtypes::oids::VARCHAR) => Ok(Some(ColumnType::Varchar(None))),
@@ -9608,6 +12630,8 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::BOOL) => Ok(Some(ColumnType::Bool)),
         Some(crabka_pgtypes::oids::FLOAT4) => Ok(Some(ColumnType::Float4)),
         Some(crabka_pgtypes::oids::FLOAT8) => Ok(Some(ColumnType::Float8)),
+        Some(crabka_pgtypes::oids::POINT) => Ok(Some(ColumnType::Point)),
+        Some(crabka_pgtypes::oids::PATH) => Ok(Some(ColumnType::Path)),
         Some(crabka_pgtypes::oids::NUMERIC) => Ok(Some(ColumnType::Numeric(None))),
         Some(crabka_pgtypes::oids::BYTEA) => Ok(Some(ColumnType::Bytea)),
         Some(crabka_pgtypes::oids::UUID) => Ok(Some(ColumnType::Uuid)),
@@ -9616,16 +12640,28 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::TIMESTAMP) => Ok(Some(ColumnType::Timestamp)),
         Some(crabka_pgtypes::oids::TIMESTAMPTZ) => Ok(Some(ColumnType::Timestamptz)),
         Some(crabka_pgtypes::oids::INTERVAL) => Ok(Some(ColumnType::Interval)),
-        // `json` (114) is an input alias for `jsonb`: a value bound as either is
-        // decomposed on input, and the type is always reported back as 3802.
-        Some(crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB) => {
-            Ok(Some(ColumnType::Jsonb))
-        }
+        Some(crabka_pgtypes::oids::XML) => Ok(Some(ColumnType::Xml)),
+        Some(crabka_pgtypes::oids::JSON) => Ok(Some(ColumnType::Json)),
+        Some(crabka_pgtypes::oids::JSONB) => Ok(Some(ColumnType::Jsonb)),
+        Some(crabka_pgtypes::oids::JSONPATH) => Ok(Some(ColumnType::JsonPath)),
         Some(crabka_pgtypes::oids::TSVECTOR) => Ok(Some(ColumnType::TsVector)),
         Some(crabka_pgtypes::oids::TSQUERY) => Ok(Some(ColumnType::TsQuery)),
+        Some(crabka_pgtypes::oids::INET) => Ok(Some(ColumnType::Inet)),
+        Some(crabka_pgtypes::oids::CIDR) => Ok(Some(ColumnType::Cidr)),
+        Some(crabka_pgtypes::oids::MACADDR) => Ok(Some(ColumnType::MacAddr)),
+        Some(crabka_pgtypes::oids::MACADDR8) => Ok(Some(ColumnType::MacAddr8)),
+        // Drivers declare OID parameters in their pg_catalog typeinfo lookups
+        // (`WHERE t.oid = $1`), so this is a live path, not a formality.
+        Some(crabka_pgtypes::oids::OID) => Ok(Some(ColumnType::Oid)),
+        Some(crabka_pgtypes::oids::XID) => Ok(Some(ColumnType::Xid)),
+        Some(crabka_pgtypes::oids::XID8) => Ok(Some(ColumnType::Xid8)),
+        Some(crabka_pgtypes::oids::CID) => Ok(Some(ColumnType::Cid)),
+        Some(crabka_pgtypes::oids::TID) => Ok(Some(ColumnType::Tid)),
+        Some(crabka_pgtypes::oids::PG_LSN) => Ok(Some(ColumnType::PgLsn)),
+        Some(crabka_pgtypes::oids::PG_SNAPSHOT) => Ok(Some(ColumnType::PgSnapshot)),
+        Some(crabka_pgtypes::oids::TXID_SNAPSHOT) => Ok(Some(ColumnType::TxidSnapshot)),
         Some(0) | None => Ok(None),
-        // Every array OID crabka has an element type for (`_int4`, `_text`, …);
-        // `_json` folds onto `jsonb[]` the same way `json` folds onto `jsonb`.
+        // Every array OID crabka has an element type for (`_int4`, `_text`, …).
         Some(oid) => match ElemType::from_array_oid(oid) {
             Some(elem) => Ok(Some(ColumnType::Array(elem))),
             None => Err(PgError::error(
@@ -9645,6 +12681,13 @@ fn decode_bound_param(
     match param.format {
         0 => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            if matches!(
+                ty,
+                ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
+            ) {
+                return crate::eval::cast_value(&Datum::Text(text.to_string()), ty, time_zone)
+                    .map_err(ExecError::into_pg);
+            }
             decode_text_bound_param(text, ty, time_zone)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
@@ -9659,14 +12702,27 @@ fn decode_bound_param(
 /// Decode one binary-format value of type `ty`: a bind parameter's body, or one
 /// element inside a binary array parameter (the two share PostgreSQL's `*_recv`
 /// representations exactly, which is why array decoding recurses through here).
-fn decode_binary_value(
+pub(crate) fn decode_binary_value(
     value: &[u8],
     ty: ColumnType,
     time_zone: &jiff::tz::TimeZone,
 ) -> Result<Datum, PgError> {
     match ty {
         ColumnType::Int2 => Ok(Datum::Int2(i16::from_be_bytes(binary_array(value)?))),
-        ColumnType::Int4 | ColumnType::Regclass => {
+        // Every `reg*` type's `*_recv` is `oidrecv`, so all eleven decode as the
+        // four-byte oid, exactly like `int4`.
+        ColumnType::Int4
+        | ColumnType::Regclass
+        | ColumnType::Regtype
+        | ColumnType::Regprocedure
+        | ColumnType::Regnamespace
+        | ColumnType::Regproc
+        | ColumnType::Regoper
+        | ColumnType::Regoperator
+        | ColumnType::Regconfig
+        | ColumnType::Regdictionary
+        | ColumnType::Regrole
+        | ColumnType::Regcollation => {
             let bytes = binary_array(value)?;
             Ok(Datum::Int4(i32::from_be_bytes(bytes)))
         }
@@ -9688,10 +12744,186 @@ fn decode_binary_value(
         }
         ColumnType::Float4 => Ok(Datum::Float4(f32::from_be_bytes(binary_array(value)?))),
         ColumnType::Float8 => Ok(Datum::Float8(f64::from_be_bytes(binary_array(value)?))),
+        ColumnType::Point => {
+            let bytes: [u8; 16] = binary_array(value)?;
+            Ok(Datum::Point(crabka_pgtypes::Point {
+                x: f64::from_be_bytes(bytes[..8].try_into().expect("8 bytes")),
+                y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
+            }))
+        }
+        // `box_recv`: high x, high y, low x, low y.
+        ColumnType::Box => {
+            let bytes: [u8; 32] = value.try_into().map_err(|_| malformed_binary_parameter())?;
+            let at = |index: usize| {
+                f64::from_be_bytes(bytes[index * 8..index * 8 + 8].try_into().expect("8 bytes"))
+            };
+            Ok(Datum::Box(crabka_pgtypes::geometry::Box2 {
+                high: crabka_pgtypes::Point { x: at(0), y: at(1) },
+                low: crabka_pgtypes::Point { x: at(2), y: at(3) },
+            }))
+        }
+        // `circle_recv`: centre x, centre y, radius.
+        ColumnType::Circle => {
+            let bytes: [u8; 24] = value.try_into().map_err(|_| malformed_binary_parameter())?;
+            let at = |index: usize| {
+                f64::from_be_bytes(bytes[index * 8..index * 8 + 8].try_into().expect("8 bytes"))
+            };
+            Ok(Datum::Circle(crabka_pgtypes::geometry::Circle {
+                center: crabka_pgtypes::Point { x: at(0), y: at(1) },
+                radius: at(2),
+            }))
+        }
+        // `line_recv`: three float8 coefficients.
+        ColumnType::Line => {
+            let coefficients: [u8; 24] =
+                value.try_into().map_err(|_| malformed_binary_parameter())?;
+            let at = |index: usize| {
+                f64::from_be_bytes(
+                    coefficients[index * 8..index * 8 + 8]
+                        .try_into()
+                        .expect("8 bytes"),
+                )
+            };
+            Ok(Datum::Line(crabka_pgtypes::geometry::Line {
+                a: at(0),
+                b: at(1),
+                c: at(2),
+            }))
+        }
+        // `lseg_recv`: four float8s, start then end.
+        ColumnType::Lseg => {
+            let coordinates: [u8; 32] =
+                value.try_into().map_err(|_| malformed_binary_parameter())?;
+            let at = |index: usize| {
+                f64::from_be_bytes(
+                    coordinates[index * 8..index * 8 + 8]
+                        .try_into()
+                        .expect("8 bytes"),
+                )
+            };
+            Ok(Datum::Lseg(crabka_pgtypes::geometry::Lseg {
+                start: crabka_pgtypes::Point { x: at(0), y: at(1) },
+                end: crabka_pgtypes::Point { x: at(2), y: at(3) },
+            }))
+        }
+        ColumnType::Path => {
+            let Some((&closed, body)) = value.split_first() else {
+                return Err(malformed_binary_parameter());
+            };
+            if !matches!(closed, 0 | 1) || body.len() < 4 {
+                return Err(malformed_binary_parameter());
+            }
+            let count = usize::try_from(i32::from_be_bytes(body[..4].try_into().expect("4 bytes")))
+                .map_err(|_| malformed_binary_parameter())?;
+            if body.len() != 4 + count.saturating_mul(16) {
+                return Err(malformed_binary_parameter());
+            }
+            let points = body[4..]
+                .chunks_exact(16)
+                .map(|bytes| crabka_pgtypes::Point {
+                    x: f64::from_be_bytes(bytes[..8].try_into().expect("8 bytes")),
+                    y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
+                })
+                .collect();
+            Ok(Datum::Path(crabka_pgtypes::Path {
+                closed: closed == 1,
+                points,
+            }))
+        }
+        // `poly_recv`: the point count then the points. There is no closed flag
+        // (a polygon always is) and no bounding box — upstream recomputes it
+        // rather than trusting a transmitted one.
+        ColumnType::Polygon => {
+            if value.len() < 4 {
+                return Err(malformed_binary_parameter());
+            }
+            let count =
+                usize::try_from(i32::from_be_bytes(value[..4].try_into().expect("4 bytes")))
+                    .map_err(|_| malformed_binary_parameter())?;
+            if value.len() != 4 + count.saturating_mul(16) {
+                return Err(malformed_binary_parameter());
+            }
+            let points = value[4..]
+                .chunks_exact(16)
+                .map(|bytes| crabka_pgtypes::Point {
+                    x: f64::from_be_bytes(bytes[..8].try_into().expect("8 bytes")),
+                    y: f64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
+                })
+                .collect();
+            Ok(Datum::Polygon(crabka_pgtypes::Polygon { points }))
+        }
         ColumnType::Numeric(_) => crabka_pgtypes::numeric::from_binary(value)
             .map(Datum::Numeric)
             .ok_or_else(malformed_binary_parameter),
         ColumnType::Bytea => Ok(Datum::Bytea(value.to_vec())),
+        // `inet_recv` / `cidr_recv`: family, netmask, an ignored is_cidr byte,
+        // the address length, then the address.
+        ColumnType::Inet | ColumnType::Cidr => {
+            crabka_pgtypes::Inet::from_binary(value, ty == ColumnType::Cidr)
+                .map(Datum::Inet)
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
+        // `oidrecv` / `xidrecv` / `cidrecv`: a big-endian uint32.
+        ColumnType::Oid | ColumnType::Xid | ColumnType::Cid => {
+            let bits = u32::from_be_bytes(binary_array(value)?);
+            Ok(match ty {
+                ColumnType::Oid => Datum::Oid(bits),
+                ColumnType::Xid => Datum::Xid(bits),
+                _ => Datum::Cid(bits),
+            })
+        }
+        // `xid8recv` / `pg_lsn_recv`: a big-endian uint64.
+        ColumnType::Xid8 | ColumnType::PgLsn => {
+            let bits = u64::from_be_bytes(binary_array(value)?);
+            Ok(if ty == ColumnType::Xid8 {
+                Datum::Xid8(bits)
+            } else {
+                Datum::PgLsn(bits)
+            })
+        }
+        // `tidrecv`: the block number then the offset, each big-endian.
+        ColumnType::Tid => {
+            let bytes: [u8; 6] = value.try_into().map_err(|_| malformed_binary_parameter())?;
+            Ok(Datum::Tid(crabka_pgtypes::Tid {
+                block: u32::from_be_bytes(bytes[..4].try_into().expect("4 bytes")),
+                offset: u16::from_be_bytes(bytes[4..].try_into().expect("2 bytes")),
+            }))
+        }
+        // `cash_recv`: a big-endian int64 count of minor currency units.
+        ColumnType::Money => crabka_pgtypes::money::from_binary(value)
+            .map(Datum::Money)
+            .map_err(ExecError::from)
+            .map_err(ExecError::into_pg),
+        // `charrecv`: one byte, taken with no encoding conversion at all.
+        ColumnType::InternalChar => {
+            let [byte] = binary_array(value)?;
+            Ok(Datum::InternalChar(byte))
+        }
+        // `bit_recv` / `varbit_recv`: an int32 bit count, then the packed
+        // bytes, whose count the receiver checks against it.
+        ColumnType::Bit(_) | ColumnType::VarBit(_) => {
+            crabka_pgtypes::BitString::from_binary(value, matches!(ty, ColumnType::VarBit(_)))
+                .map(Datum::BitString)
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
+        // `macaddr_recv` / `macaddr8_recv`: the raw bytes. A six-byte
+        // `macaddr8` widens to EUI-64, as PostgreSQL's `macaddr8_recv` does.
+        ColumnType::MacAddr => Ok(Datum::MacAddr(crabka_pgtypes::MacAddr(binary_array(
+            value,
+        )?))),
+        ColumnType::MacAddr8 => match value.len() {
+            6 => {
+                let bytes: [u8; 6] = binary_array(value)?;
+                Ok(Datum::MacAddr8(
+                    crabka_pgtypes::MacAddr(bytes).to_macaddr8(),
+                ))
+            }
+            _ => Ok(Datum::MacAddr8(crabka_pgtypes::MacAddr8(binary_array(
+                value,
+            )?))),
+        },
         ColumnType::Uuid => {
             let bytes: [u8; 16] = binary_array(value)?;
             Ok(Datum::Text(
@@ -9738,16 +12970,66 @@ fn decode_binary_value(
                 .map_err(ExecError::into_pg)
         }
         ColumnType::Jsonb => decode_jsonb_binary(value),
+        // `json_recv` is `textrecv` plus a syntax check: no version byte, and
+        // the bytes are kept as sent.
+        ColumnType::Json => {
+            let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            crabka_pgtypes::json::validate(text)
+                .map(|()| Datum::Json(text.to_string()))
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
+        // `xml_recv` parses to validate and then keeps the bytes, so like
+        // `json_recv` it is `textrecv` with a check bolted on.
+        ColumnType::Xml => {
+            let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            crabka_pgtypes::xml::validate(text, crabka_pgtypes::xml::XmlOption::Content)
+                .map(|()| Datum::Xml(text.to_string()))
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
+        ColumnType::JsonPath => decode_jsonpath_binary(value),
+        // `pg_snapshot_recv`, which `txid_snapshot_recv` also is: the count of
+        // running ids, then the window and the ids themselves. Unlike the text
+        // form it is not a re-read of the output function, so it has a reader
+        // of its own.
+        ColumnType::PgSnapshot | ColumnType::TxidSnapshot => {
+            crabka_pgtypes::snapshot::PgSnapshot::from_binary(value)
+                .map(|snapshot| Datum::PgSnapshot(Box::new(snapshot)))
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
         ColumnType::TsVector | ColumnType::TsQuery => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             decode_text_bound_param(text, ty, time_zone)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        ColumnType::Array(elem) => decode_array_binary(value, elem, time_zone),
+        ColumnType::Array(elem) => decode_array_binary(value, elem, elem.oid(), time_zone),
+        ColumnType::OidVector | ColumnType::Int2Vector => {
+            let (elem, elem_oid) = if ty == ColumnType::Int2Vector {
+                (ElemType::Int2, crabka_pgtypes::oids::INT2)
+            } else {
+                (ElemType::Int4, crabka_pgtypes::oids::OID)
+            };
+            decode_array_binary(value, elem, elem_oid, time_zone).map(|value| {
+                let Datum::Array(array) = value else {
+                    unreachable!("array decoder returns an array")
+                };
+                Datum::OidVector(array)
+            })
+        }
+        ColumnType::Range(range) => decode_range_binary(value, range, time_zone),
+        ColumnType::Multirange(multirange) => {
+            decode_multirange_binary(value, multirange, time_zone)
+        }
         // A domain's binary representation is its base type's, so it decodes as
         // the base and picks up its constraints on assignment.
         ColumnType::Domain(domain) => decode_binary_value(value, *domain.base, time_zone),
+        // A user-defined base type is *defined* as its representation type's
+        // bytes, so `recv` is the representation's `recv` — which is exactly
+        // what makes a `WITHOUT FUNCTION` cast between the two a no-op.
+        ColumnType::Base(base) => decode_binary_value(value, *base.representation, time_zone),
         // `record_recv` and `enum_recv` are not implemented: a binary composite
         // parameter carries per-field type oids crabka would have to resolve
         // against its own type catalog, and mis-decoding one would be a silent
@@ -9760,6 +13042,90 @@ fn decode_binary_value(
     }
 }
 
+fn decode_range_binary(
+    value: &[u8],
+    ty: crabka_pgtypes::usertype::RangeRef,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, PgError> {
+    let Some((&flags, mut cur)) = value.split_first() else {
+        return Err(malformed_binary_parameter());
+    };
+    if flags & !0x1f != 0 {
+        return Err(malformed_binary_parameter());
+    }
+    let empty = flags & 0x01 != 0;
+    let mut bound = |infinite: u8| -> Result<Option<Box<Datum>>, PgError> {
+        if empty || flags & infinite != 0 {
+            return Ok(None);
+        }
+        if cur.len() < 4 {
+            return Err(malformed_binary_parameter());
+        }
+        let len = usize::try_from(i32::from_be_bytes(cur[..4].try_into().expect("4 bytes")))
+            .map_err(|_| malformed_binary_parameter())?;
+        cur = &cur[4..];
+        if cur.len() < len {
+            return Err(malformed_binary_parameter());
+        }
+        let (raw, rest) = cur.split_at(len);
+        cur = rest;
+        decode_binary_value(raw, *ty.subtype, time_zone)
+            .map(Box::new)
+            .map(Some)
+    };
+    let lower = bound(0x08)?;
+    let upper = bound(0x10)?;
+    if !cur.is_empty() {
+        return Err(malformed_binary_parameter());
+    }
+    Ok(Datum::Range(crabka_pgtypes::RangeValue {
+        ty,
+        lower,
+        upper,
+        lower_inclusive: !empty && flags & 0x02 != 0,
+        upper_inclusive: !empty && flags & 0x04 != 0,
+        empty,
+    }))
+}
+
+fn decode_multirange_binary(
+    mut value: &[u8],
+    ty: crabka_pgtypes::usertype::MultirangeRef,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, PgError> {
+    if value.len() < 4 {
+        return Err(malformed_binary_parameter());
+    }
+    let count = usize::try_from(i32::from_be_bytes(value[..4].try_into().expect("4 bytes")))
+        .map_err(|_| malformed_binary_parameter())?;
+    value = &value[4..];
+    let mut ranges = Vec::with_capacity(count);
+    for _ in 0..count {
+        if value.len() < 4 {
+            return Err(malformed_binary_parameter());
+        }
+        let len = usize::try_from(i32::from_be_bytes(value[..4].try_into().expect("4 bytes")))
+            .map_err(|_| malformed_binary_parameter())?;
+        value = &value[4..];
+        if value.len() < len {
+            return Err(malformed_binary_parameter());
+        }
+        let (raw, rest) = value.split_at(len);
+        value = rest;
+        let Datum::Range(range) = decode_range_binary(raw, ty.range, time_zone)? else {
+            unreachable!()
+        };
+        ranges.push(range);
+    }
+    if !value.is_empty() {
+        return Err(malformed_binary_parameter());
+    }
+    Ok(Datum::Multirange(crabka_pgtypes::MultirangeValue {
+        ty,
+        ranges,
+    }))
+}
+
 /// The lowest byte a JSON document can start with (`\t`). Every smaller byte is
 /// a control character no JSON text may begin with, so a leading one can only be
 /// a `jsonb` version byte.
@@ -9767,9 +13133,9 @@ const JSON_TEXT_MIN_FIRST_BYTE: u8 = b'\t';
 
 /// `jsonb_recv`: a version byte followed by the JSON text.
 ///
-/// A `json` (OID 114) parameter is the same document with no version byte, and
-/// the two forms are unambiguous, because no JSON document can begin with byte
-/// 0x01.
+/// A driver that declared a parameter `jsonb` but sent the bare document (as
+/// happens when it treated OID 114 and 3802 alike) is still accepted: the two
+/// forms are unambiguous, because no JSON document can begin with byte 0x01.
 fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
     let json = match value.first() {
         Some(&crabka_pgtypes::encoding::JSONB_BINARY_VERSION) => &value[1..],
@@ -9788,7 +13154,22 @@ fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
         .map_err(ExecError::into_pg)
 }
 
-/// `array_recv` for a one-dimensional array: the layout
+/// `jsonpath_recv`: a version byte followed by canonicalizable UTF-8 text.
+fn decode_jsonpath_binary(value: &[u8]) -> Result<Datum, PgError> {
+    let Some((&version, text)) = value.split_first() else {
+        return Err(PgError::protocol("invalid jsonpath binary representation"));
+    };
+    if version != crabka_pgtypes::encoding::JSONPATH_BINARY_VERSION {
+        return Err(PgError::error(
+            "XX000",
+            format!("unsupported jsonpath version number: {version}"),
+        ));
+    }
+    let text = std::str::from_utf8(text).map_err(invalid_parameter_encoding)?;
+    crate::jsonpath::canonical_datum(text).map_err(ExecError::into_pg)
+}
+
+/// `array_recv` for a one-dimensional array — the layout
 /// `crabka_pgtypes::encoding` writes, read back exactly.
 ///
 /// Both spellings of the empty array must land on the zero-dimensional value:
@@ -9801,6 +13182,7 @@ fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
 fn decode_array_binary(
     value: &[u8],
     elem: ElemType,
+    expected_elem_oid: u32,
     time_zone: &jiff::tz::TimeZone,
 ) -> Result<Datum, PgError> {
     let mut reader = BinaryReader::new(value);
@@ -9809,12 +13191,11 @@ fn decode_array_binary(
     // PostgreSQL's own receiver likewise does not trust the flag.
     let _has_null = reader.read_i32()?;
     let elem_oid = reader.read_u32()?;
-    if !array_element_oid_matches(elem, elem_oid) {
+    if elem_oid != expected_elem_oid {
         return Err(PgError::error(
             "42804",
             format!(
-                "binary array parameter has element type {elem_oid}, but {} was expected",
-                elem.oid()
+                "binary array parameter has element type {elem_oid}, but {expected_elem_oid} was expected"
             ),
         ));
     }
@@ -9859,13 +13240,6 @@ fn decode_array_binary(
     Ok(Datum::Array(crabka_pgtypes::ArrayValue::with_dims(
         elem, elems, dims,
     )))
-}
-
-/// Whether a binary array's declared element OID matches the expected element
-/// type. `json` and `jsonb` elements are interchangeable on input for the same
-/// reason the scalar types are.
-fn array_element_oid_matches(elem: ElemType, elem_oid: u32) -> bool {
-    elem_oid == elem.oid() || (elem == ElemType::Jsonb && elem_oid == crabka_pgtypes::oids::JSON)
 }
 
 /// A cursor over a variable-length binary parameter. Every read is
@@ -10019,39 +13393,253 @@ impl SqlSession {
     /// `CopyInResponse` the wire layer answers with before entering copy-in
     /// mode. Shared by the simple-protocol (`begin_copy_in`) and
     /// extended-protocol (`execute` on a COPY portal) start paths.
+    /// Refuse `COPY … FROM` into a relation row security would filter, before
+    /// the statement runs.
+    ///
+    /// `PostgreSQL` refuses it outright — `COPY FROM` bypasses the executor's
+    /// `WITH CHECK` machinery, so it tells the caller to use `INSERT` instead
+    /// rather than loading rows past a policy. The timing matters as much as
+    /// the refusal: this has to fire *before* the `CopyInResponse` goes out,
+    /// because once psql is in copy-in mode it reads every following script
+    /// line as data, and the session and the client stay desynchronised for the
+    /// rest of the file.
+    ///
+    /// With `row_security = off` the answer is the same 42501 every other
+    /// statement gets, since a policy would have applied.
+    /// The `INSERT` privilege rides the same pre-check for the same timing
+    /// reason, which is why this is `precheck_copy_from` rather than a
+    /// row-security-only guard.
+    ///
+    /// Takes the statement rather than a resolved relation so the `Table` it
+    /// reads lives in this frame and not in the caller's: one caller is
+    /// `run_one`, whose future is re-entered once per nested SQL function call,
+    /// and widening it costs stack on every level of that recursion.
+    fn precheck_copy_from(&self, copy: &CopyStmt) -> Result<(), ExecError> {
+        let target = copy_into_target(copy)?;
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            target.name,
+            crate::relname::SchemaDisposition::Utility,
+        )?;
+        // A relation this copy cannot fill row by row. PostgreSQL names the
+        // kind, and for a view points at what would make it work — a refusal
+        // that has to arrive before `CopyInResponse` for the same reason the
+        // privilege test does.
+        if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &resolved).is_ok()
+            || crate::exec::virtual_relation_kind(&resolved) == Some("view")
+        {
+            return Err(ExecError::Remote(
+                PgError::error(
+                    "42809",
+                    format!("cannot copy to view \"{}\"", resolved.name),
+                )
+                .with_hint("To enable copying to a view, provide an INSTEAD OF INSERT trigger."),
+            ));
+        }
+        if crabka_pgcatalog::get_sequence(self.catalog_kv.as_ref(), &resolved).is_ok() {
+            return Err(ExecError::Remote(PgError::error(
+                "42809",
+                format!("cannot copy to sequence \"{}\"", resolved.name),
+            )));
+        }
+        if let Some(error) = crate::exec::open_wrong_kind(self.catalog_kv.as_ref(), &resolved) {
+            return Err(error);
+        }
+        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &resolved)?;
+        // A materialized view holds rows but takes none: PostgreSQL words this
+        // refusal for `COPY` specifically rather than reusing the DML one, and
+        // it belongs in the precheck for the same reason the privilege test
+        // does — after `CopyInResponse` has gone out it is too late.
+        if table.materialized.is_some() {
+            return Err(ExecError::WrongObjectType(format!(
+                "cannot copy to materialized view \"{}\"",
+                table.name.name
+            )));
+        }
+        let role = self.current_role_for_row_security();
+        // The privilege test belongs here rather than only in
+        // `execute_copy_write`: a denial that arrives after `CopyInResponse` has
+        // gone out leaves psql in copy-in mode, feeding the rest of the script
+        // to the server as COPY data. Failing before the mode is entered is the
+        // difference between one error and a desynchronized session.
+        crate::privilege::require(
+            &crate::privilege::PrivilegeCtx::new(self.catalog_kv.as_ref(), &role),
+            &table.name,
+            &table.owner,
+            crate::privilege::RelationKind::Table,
+            crate::privilege::Privilege::Insert,
+        )?;
+        let rls = crate::rls::RlsCtx::new(self.catalog_kv.as_ref(), &role, self.guc.row_security());
+        match crate::rls::decide(
+            &rls,
+            &table,
+            crabka_pgcatalog::policy::PolicyCommand::Insert,
+        )? {
+            crate::rls::RowSecurity::Open => Ok(()),
+            crate::rls::RowSecurity::Refuse { relation } => {
+                Err(ExecError::RowSecurityRefused(relation))
+            }
+            // The hint is a `HINT` field rather than a second sentence in the
+            // message, which is where PostgreSQL puts it.
+            crate::rls::RowSecurity::Restricted { .. } => Err(ExecError::Remote(
+                PgError::error("0A000", "COPY FROM not supported with row-level security")
+                    .with_hint("Use INSERT statements instead."),
+            )),
+        }
+    }
+
+    /// The two relation kinds `COPY … FROM … (FREEZE)` may not name.
+    ///
+    /// `FREEZE` asks for rows stamped as already visible to everyone, which is
+    /// a statement about the relation the rows land in. Neither of these is
+    /// that relation: a partitioned table routes every row to a leaf it has not
+    /// opened, and a foreign table's rows are the remote side's to stamp.
+    ///
+    /// **This one refusal is deliberately late**, and every other one this
+    /// module makes about a `COPY` target is deliberately early. The rest are
+    /// raised before `CopyInResponse` goes out, because a refusal after it
+    /// leaves psql in copy-in mode feeding the script to the server as data.
+    /// `PostgreSQL` raises *these* two in `CopyFrom`, which runs after
+    /// `BeginCopyFrom` has announced copy-in mode — so there the client does
+    /// send its data and its terminator, and `copy.out` records the error alone
+    /// with none of the `invalid command \.` wreckage the early refusals leave
+    /// behind. Moving the check earlier reproduces the message and loses the
+    /// file, which is how this landed here.
+    ///
+    /// The rest of `PostgreSQL`'s `FREEZE` conditions are *not* checked: it
+    /// also refuses a relation that was not created or truncated in the current
+    /// subtransaction, which is a rule about when the optimization is safe to
+    /// apply. Gres applies no optimization — [`crate::copyfmt`] accepts
+    /// `FREEZE` and ignores it — so it has nothing to make unsafe, and refusing
+    /// on that condition would reject the `pgbench -i` that motivated accepting
+    /// the option at all. What is refused here is only what no `FREEZE` could
+    /// mean whatever the engine did with it.
+    fn refuse_unfreezable_freeze_target(&self, copy: &CopyStmt) -> Result<(), ExecError> {
+        if !copy.options.freeze {
+            return Ok(());
+        }
+        let target = copy_into_target(copy)?;
+        let resolved = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            target.name,
+            crate::relname::SchemaDisposition::Utility,
+        )?;
+        let Ok(table) = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &resolved) else {
+            // Every kind with no table record of its own was refused for its
+            // kind before this ran.
+            return Ok(());
+        };
+        let kind = if table.foreign.is_some() {
+            "foreign table"
+        } else if crate::partition::is_partitioned(self.catalog_kv.as_ref(), &resolved)? {
+            "partitioned table"
+        } else {
+            return Ok(());
+        };
+        Err(ExecError::Unsupported(format!(
+            "cannot perform COPY FREEZE on a {kind}"
+        )))
+    }
+
+    /// The role this session's row-security decisions are made under.
+    ///
+    /// The same mapping [`crate::exec::ForeignCtx::effective_role`] applies:
+    /// `PUBLIC` is a pseudo-role that owns nothing and holds no attributes, so
+    /// a session carrying it authenticated as nobody and is acting as the
+    /// bootstrap superuser. Deriving it here rather than reading it off a
+    /// `ForeignCtx` is what lets the COPY pre-check run before any statement
+    /// context exists.
+    fn current_role_for_row_security(&self) -> String {
+        if self.current_role == crabka_pgcatalog::PUBLIC_ROLE {
+            crabka_pgcatalog::BOOTSTRAP_ROLE.to_string()
+        } else {
+            self.current_role.clone()
+        }
+    }
+
+    /// The columns a `COPY … FROM` fills — the statement's own column list, or
+    /// the relation's columns in attribute order when it wrote none —
+    /// alongside every column the relation has and the relation's own name.
+    ///
+    /// `FORCE_NOT_NULL` and `FORCE_NULL` need all three: a name either of them
+    /// carries is an undefined column when the relation does not have it and a
+    /// not-referenced one when the relation has it but the copy does not read
+    /// it, and `PostgreSQL` words those two differently.
+    fn copy_column_lists(
+        &self,
+        target: crate::exec::CopyIntoTarget<'_>,
+    ) -> Result<CopyColumnLists, ExecError> {
+        let table = crabka_pgcatalog::get_table(
+            self.catalog_kv.as_ref(),
+            &crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &self.resolution_scope(),
+                target.name,
+                crate::relname::SchemaDisposition::Utility,
+            )?,
+        )?;
+        let all: Vec<String> = table
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let copied = match target.columns {
+            Some(columns) => columns
+                .iter()
+                .map(|column| {
+                    let index = table
+                        .column_index(column)
+                        .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+                    if table.columns[index].generated.is_some() {
+                        return Err(crate::exec::copy_generated_column(column));
+                    }
+                    Ok(column.clone())
+                })
+                .collect::<Result<Vec<String>, ExecError>>()?,
+            // `CopyGetAttnums`'s default list skips a generated column: its
+            // value is produced by the write, never supplied by the data. A
+            // list that carried it demanded a field per row for a column
+            // nothing may assign — "missing data for column \"b\"" on the very
+            // first line of every `COPY t FROM stdin`.
+            None => table
+                .columns
+                .iter()
+                .filter(|column| column.generated.is_none())
+                .map(|column| column.name.clone())
+                .collect(),
+        };
+        Ok(CopyColumnLists {
+            copied,
+            relation: all,
+            relation_name: table.name.name.clone(),
+        })
+    }
+
     fn copy_in_start(&mut self, copy: &CopyStmt) -> Result<CopyInResponse, PgError> {
         if matches!(self.state, TxnState::Failed(_)) {
             return Err(ExecError::InFailedTransaction.into_pg());
         }
         self.reject_prepared_participant()
             .map_err(ExecError::into_pg)?;
-        if matches!(copy.format, CopyFormat::Csv) {
-            return Err(ExecError::Unsupported("COPY CSV is not supported".into()).into_pg());
-        }
-        let name = crate::relname::resolve_relation(
-            self.catalog_kv.as_ref(),
-            &self.resolution_scope(),
-            &copy.table,
-            crate::relname::SchemaDisposition::Utility,
-        )
-        .map_err(ExecError::into_pg)?;
-        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name)
-            .map_err(ExecError::from)
+        let target = copy_into_target(copy).map_err(ExecError::into_pg)?;
+        // The framing is resolved here and thrown away — `run_copy_in` resolves
+        // it again once the data arrives. What matters is that an option this
+        // engine cannot honour is refused *before* copy-in mode is announced:
+        // afterwards psql reads the rest of the script as data.
+        let format = crate::copyfmt::CopyInFormat::resolve(&copy.options, self.copy_encoding())
             .map_err(ExecError::into_pg)?;
-        let target_count = match &copy.columns {
-            Some(columns) => columns.len(),
-            None => table.columns.len(),
-        };
-        if let Some(columns) = &copy.columns {
-            for column in columns {
-                if table.column_index(column).is_none() {
-                    return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
-                }
-            }
-        }
+        self.precheck_copy_from(copy).map_err(ExecError::into_pg)?;
+        let lists = self.copy_column_lists(target).map_err(ExecError::into_pg)?;
+        // Same timing rule: a `FORCE_NOT_NULL` naming a column this copy does
+        // not read is refused here, not once the first row arrives.
+        format
+            .force_flags(&lists.copied, &lists.relation, &lists.relation_name)
+            .map_err(ExecError::into_pg)?;
         Ok(CopyInResponse {
             overall_format: 0,
-            column_formats: vec![0; target_count],
+            column_formats: vec![0; lists.copied.len()],
         })
     }
 
@@ -10128,6 +13716,7 @@ impl SqlSession {
         let [
             TableExpr::Table {
                 name,
+                only,
                 alias,
                 columns: None,
                 sample: None,
@@ -10180,6 +13769,15 @@ impl SqlSession {
             // A set-returning function in the select list turns one source row
             // into many, which this one-row-in-one-row-out cursor cannot do.
             || crate::srf::projection_contains_srf(&select.projection)
+            // A system column is one the scan below does not build: this cursor
+            // resolves the select list against a bare `Scope::single`, and only
+            // `run_select` stamps the relation's oid and each row's identity
+            // onto it. Streaming it answered 42703 for a column the same query
+            // without the fast path resolves — the identical class of
+            // divergence the matview, partitioned-parent and inheritance-parent
+            // declines above exist to prevent. Tested last: it walks the
+            // statement, and every cheaper shape test has already had its say.
+            || crate::scope::StatementRefs::of_select(&select).reads_system_column()
         {
             return None;
         }
@@ -10193,7 +13791,21 @@ impl SqlSession {
             Err(error) => return Some(Err(error)),
         };
         let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
-            Ok(table) if table.foreign.is_none() => table,
+            // A materialized view whose contents have never been computed is an
+            // error to read, not an empty relation. `exec::require_populated`
+            // refuses it at the one place every stored-relation read passes,
+            // and this cursor is not that place — it streamed the empty row
+            // space and answered zero rows and no error at all. Declining
+            // hands the read to the path that does refuse it.
+            Ok(table)
+                if table.foreign.is_none()
+                    && table
+                        .materialized
+                        .as_ref()
+                        .is_none_or(|matview| matview.populated) =>
+            {
+                table
+            }
             Ok(_) => return None,
             Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return None,
             Err(error) => return Some(Err(error.into())),
@@ -10207,12 +13819,57 @@ impl SqlSession {
             Ok(true) => return None,
             Err(error) => return Some(Err(error)),
         }
+        // An inheritance parent is the same wrong answer with rows in it: it
+        // holds its own rows, *and* its children's are part of the read, so
+        // this cursor answered `SELECT * FROM parent` with the parent's rows
+        // alone while the same query with an `ORDER BY` returned the tree.
+        // `ONLY` asks for exactly the one relation this cursor scans, so it
+        // still streams.
+        match crate::exec::reads_inheritance_children(self.catalog_kv.as_ref(), *only, &name) {
+            Ok(false) => {}
+            Ok(true) => return None,
+            Err(error) => return Some(Err(error)),
+        }
         if crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection)
             .text_search
             .is_some()
         {
             return None;
         }
+        // A `VIRTUAL` generated column is a NULL placeholder in storage and is
+        // produced by evaluating the catalog's expression over the rest of the
+        // row. This cursor streams rows straight out of the scan, so it
+        // answered NULL for every such column: `SELECT * FROM t` reported a
+        // blank where `SELECT * FROM t ORDER BY a` — the same query off this
+        // path — reported the value. Only `exec::expand_virtual_generated`
+        // produces it, and only the materializing path runs it.
+        if crate::exec::has_virtual_generated(&table) {
+            return None;
+        }
+        // The two gates every other stored-relation read passes and this one
+        // did not: the read permit and row security. `UnrestrictedTable::read`
+        // is the pushdowns' form of both — it admits the relation only when the
+        // session holds `SELECT` on it *and* no policy applies, and declines
+        // otherwise instead of raising. Declining is the whole answer here:
+        // `run_select` raises the 42501 itself, in `PostgreSQL`'s order and
+        // naming the relation the query named, and filters the policied rows
+        // through `rls::apply_row_security` with the subquery resolution and
+        // recursion guard a row-at-a-time cursor has no way to run. The cost is
+        // a slower correct answer on exactly the reads that were wrong before.
+        //
+        // The scan below takes its relation from this token rather than from
+        // `table`, so it cannot be reached without the proof — the same
+        // construction that makes the other six pushdowns safe.
+        let role = self.current_role_for_row_security();
+        let unrestricted = match crate::rls::UnrestrictedTable::read(
+            &crate::privilege::PrivilegeCtx::new(self.catalog_kv.as_ref(), &role),
+            &crate::rls::RlsCtx::new(self.catalog_kv.as_ref(), &role, self.guc.row_security()),
+            &table,
+        ) {
+            Ok(Some(unrestricted)) => unrestricted,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error)),
+        };
 
         // The streaming cursor bypasses `run_one`, so it opens its own
         // `db.statement` span. `pg.select` is created while that span is
@@ -10262,12 +13919,16 @@ impl SqlSession {
                 Arc::clone(&self.range_scanner),
                 read_ts,
             );
+            // The gated relation, not the one `get_table` returned: the token
+            // is the only way to name it here, so this scan cannot run without
+            // the permit and the row-security decision that made it.
+            let table = unrestricted.get();
             let qualifier = alias.as_deref().unwrap_or(&table.name.name);
-            let scope = crate::scope::Scope::single(&table, qualifier);
+            let scope = crate::scope::Scope::single(table, qualifier);
             let (fields, expressions, _) =
                 crate::exec::resolve_projection(&select.projection, &scope)?;
             let mut plan =
-                crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection);
+                crate::plan_dist::plan_scan(table, select.filter.as_ref(), &select.projection);
             plan.projection = crate::ProjectionPushdown::All;
             plan.partial_aggregate = None;
             plan.top_k = None;
@@ -10281,7 +13942,7 @@ impl SqlSession {
                     own_xid: own,
                     read_ts: None,
                     own_start_ts: None,
-                    table: &table,
+                    table,
                     interval: crate::scanner::RowInterval::ALL,
                     predicate: plan.predicate,
                     projection: plan.projection,
@@ -10290,6 +13951,13 @@ impl SqlSession {
                 },
             )?;
             let ctx = self.eval_ctx();
+            // The WHERE is the same expression for every page, so it is bound
+            // once here — as the materializing path binds it — rather than
+            // re-resolved by name for every row. Binding it before the first
+            // page is also what reports a reference that does not resolve when
+            // the scan returns no row at all.
+            let bound_filter = crate::bind::bind_optional(select.filter.as_ref(), &scope)?;
+            let bound_filter = bound_filter.as_ref().map(crate::bind::BoundExpr::expr);
             // LIMIT/OFFSET are arbitrary expressions; the streaming cursor
             // needs them as counts, so they are evaluated once up front just
             // as the materializing path does.
@@ -10315,12 +13983,7 @@ impl SqlSession {
                 let page = cursor.next_page(page_rows).await?;
                 let mut source_rows = Vec::with_capacity(page.rows.len());
                 for scanned in page.rows {
-                    if !crate::exec::row_matches(
-                        select.filter.as_ref(),
-                        &scope,
-                        &scanned.row,
-                        &ctx,
-                    )? {
+                    if !crate::exec::row_matches(bound_filter, &scope, &scanned.row, &ctx)? {
                         continue;
                     }
                     if offset > 0 {
@@ -10401,7 +14064,1783 @@ fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
     PgError::error("22021", "invalid byte sequence for encoding \"UTF8\"")
 }
 
+fn validate_tablespace_options<'a>(
+    options: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ExecError> {
+    for option in options {
+        if !matches!(
+            option,
+            "random_page_cost"
+                | "seq_page_cost"
+                | "effective_io_concurrency"
+                | "maintenance_io_concurrency"
+        ) {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "22023",
+                format!("unrecognized parameter \"{option}\""),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn tablespace_missing(name: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42704",
+        format!("tablespace \"{name}\" does not exist"),
+    ))
+}
+
+fn tablespace_duplicate(name: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42710",
+        format!("tablespace \"{name}\" already exists"),
+    ))
+}
+
+fn operator_object_missing(
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+    name: &str,
+    method: &str,
+) -> ExecError {
+    let kind = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Class => "class",
+        crabka_pgparser::ast::OperatorObjectKind::Family => "family",
+    };
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42704",
+        format!("operator {kind} \"{name}\" does not exist for access method \"{method}\""),
+    ))
+}
+
+fn operator_object_duplicate(
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+    name: &str,
+    method: &str,
+    schema: &str,
+) -> ExecError {
+    let kind = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Class => "class",
+        crabka_pgparser::ast::OperatorObjectKind::Family => "family",
+    };
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42710",
+        format!(
+            "operator {kind} \"{name}\" for access method \"{method}\" already exists in schema \"{schema}\""
+        ),
+    ))
+}
+
+fn operator_object_not_owner(
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+    name: &str,
+) -> ExecError {
+    let kind = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Class => "class",
+        crabka_pgparser::ast::OperatorObjectKind::Family => "family",
+    };
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("must be owner of operator {kind} {name}"),
+    ))
+}
+
+fn operator_access_method_missing(method: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42704",
+        format!("access method \"{method}\" does not exist"),
+    ))
+}
+
+fn operator_family_member_identity(
+    member: &crabka_pgcatalog::OperatorFamilyMember,
+) -> crabka_pgcatalog::OperatorFamilyMemberKey {
+    match member {
+        crabka_pgcatalog::OperatorFamilyMember::Operator {
+            number,
+            left_type_oid,
+            right_type_oid,
+            ..
+        } => crabka_pgcatalog::OperatorFamilyMemberKey::Operator {
+            number: *number,
+            left_type_oid: *left_type_oid,
+            right_type_oid: *right_type_oid,
+        },
+        crabka_pgcatalog::OperatorFamilyMember::Function {
+            number,
+            left_type_oid,
+            right_type_oid,
+            ..
+        } => crabka_pgcatalog::OperatorFamilyMemberKey::Function {
+            number: *number,
+            left_type_oid: *left_type_oid,
+            right_type_oid: *right_type_oid,
+        },
+    }
+}
+
+fn operator_family_member_parts(
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+) -> (&'static str, u16, String) {
+    let (kind, number, left, right) = match member {
+        crabka_pgcatalog::OperatorFamilyMemberKey::Operator {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => ("operator", number, left_type_oid, right_type_oid),
+        crabka_pgcatalog::OperatorFamilyMemberKey::Function {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => ("function", number, left_type_oid, right_type_oid),
+    };
+    (
+        kind,
+        number,
+        format!(
+            "({},{})",
+            operator_family_type_name(left),
+            operator_family_type_name(right)
+        ),
+    )
+}
+
+fn operator_family_type_name(oid: u32) -> String {
+    use crabka_pgtypes::ColumnType;
+    [
+        ColumnType::Int2,
+        ColumnType::Int4,
+        ColumnType::Int8,
+        ColumnType::Bool,
+        ColumnType::Text,
+    ]
+    .into_iter()
+    .find(|ty| ty.oid() == oid)
+    .map_or_else(|| oid.to_string(), |ty| ty.name().to_string())
+}
+
+fn operator_family_member_repeated(member: crabka_pgcatalog::OperatorFamilyMemberKey) -> ExecError {
+    let (kind, number, types) = operator_family_member_parts(member);
+    ExecError::Remote(PgError::error(
+        "42710",
+        format!("{kind} number {number} for {types} appears more than once"),
+    ))
+}
+
+fn operator_family_member_duplicate(
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+    family: &str,
+) -> ExecError {
+    let (kind, number, types) = operator_family_member_parts(member);
+    ExecError::Remote(PgError::error(
+        "42710",
+        format!("{kind} {number}{types} already exists in operator family \"{family}\""),
+    ))
+}
+
+fn operator_family_member_missing(
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+    family: &str,
+) -> ExecError {
+    let (kind, number, types) = operator_family_member_parts(member);
+    ExecError::Remote(PgError::error(
+        "42704",
+        format!("{kind} {number}{types} does not exist in operator family \"{family}\""),
+    ))
+}
+
+fn resolve_operator_object_name(
+    kv: &dyn crabka_pgkv::Kv,
+    scope: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+    method: &str,
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    if let Some(schema) = &reference.schema {
+        return Ok(crabka_pgcatalog::RelationName::new(
+            schema,
+            reference.name.clone(),
+        ));
+    }
+    let objects = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Class => {
+            crabka_pgcatalog::list_operator_classes(kv)?
+                .into_iter()
+                .map(|object| (object.name, object.method))
+                .collect::<Vec<_>>()
+        }
+        crabka_pgparser::ast::OperatorObjectKind::Family => {
+            crabka_pgcatalog::list_operator_families(kv)?
+                .into_iter()
+                .map(|object| (object.name, object.method))
+                .collect::<Vec<_>>()
+        }
+    };
+    for schema in scope.visible_schemas(kv)? {
+        if let Some((name, _)) = objects.iter().find(|(name, object_method)| {
+            name.schema == schema && name.name == reference.name && object_method == method
+        }) {
+            return Ok(name.clone());
+        }
+        // The families and classes PostgreSQL ships live in `pg_catalog` and
+        // have no row of their own, so the search path has to reach them from
+        // the built-in fixture instead of from the listing above.
+        if schema == crate::search_path::PG_CATALOG {
+            let builtin = crabka_pgcatalog::RelationName::new(schema, reference.name.clone());
+            if builtin_operator_object_oid(&builtin, method, kind).is_some() {
+                return Ok(builtin);
+            }
+        }
+    }
+    Ok(crabka_pgcatalog::RelationName::public(
+        reference.name.clone(),
+    ))
+}
+
+/// Whether the built-in `pg_amop`/`pg_amproc` fixture already fills a family's
+/// slot.
+///
+/// `pg_amop` is unique on (family, left type, right type, strategy) and
+/// `pg_amproc` on (family, left type, right type, number), so a slot the
+/// fixture fills is taken even though no KV row records it. Without this an
+/// `ADD` against a built-in family writes a second row into a slot that already
+/// has one, and the catalog reports both.
+fn builtin_operator_family_member_exists(
+    family_oid: u32,
+    member: crabka_pgcatalog::OperatorFamilyMemberKey,
+) -> bool {
+    let Ok(family) = i32::try_from(family_oid) else {
+        return false;
+    };
+    let matches = |left: i32,
+                   right: i32,
+                   number: u16,
+                   candidate_left: i32,
+                   candidate_right: i32,
+                   candidate_number: i16| {
+        left == candidate_left
+            && right == candidate_right
+            && i16::try_from(number) == Ok(candidate_number)
+    };
+    match member {
+        crabka_pgcatalog::OperatorFamilyMemberKey::Operator {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => {
+            let (Ok(left), Ok(right)) =
+                (i32::try_from(left_type_oid), i32::try_from(right_type_oid))
+            else {
+                return false;
+            };
+            crate::builtin_amop::BUILTIN_AMOP.iter().any(
+                |(_, candidate_family, candidate_left, candidate_right, strategy, ..)| {
+                    *candidate_family == family
+                        && matches(
+                            left,
+                            right,
+                            number,
+                            *candidate_left,
+                            *candidate_right,
+                            *strategy,
+                        )
+                },
+            )
+        }
+        crabka_pgcatalog::OperatorFamilyMemberKey::Function {
+            number,
+            left_type_oid,
+            right_type_oid,
+        } => {
+            let (Ok(left), Ok(right)) =
+                (i32::try_from(left_type_oid), i32::try_from(right_type_oid))
+            else {
+                return false;
+            };
+            crate::builtin_amproc::BUILTIN_AMPROC.iter().any(
+                |(_, candidate_family, candidate_left, candidate_right, candidate_number, _)| {
+                    *candidate_family == family
+                        && matches(
+                            left,
+                            right,
+                            number,
+                            *candidate_left,
+                            *candidate_right,
+                            *candidate_number,
+                        )
+                },
+            )
+        }
+    }
+}
+
+/// The oid of a `pg_catalog` operator family or class that `PostgreSQL` ships.
+///
+/// A built-in operator object is a fixture row, not a catalog row, so nothing
+/// in the KV answers for it. `ALTER OPERATOR FAMILY` still has to find one:
+/// PostgreSQL's own `equivclass` test hangs cross-type members off the built-in
+/// `integer_ops`, and refusing that is the difference between "the family does
+/// not exist" and the truth, which is that it exists and is not writable here.
+fn builtin_operator_object_oid(
+    name: &crabka_pgcatalog::RelationName,
+    method: &str,
+    kind: crabka_pgparser::ast::OperatorObjectKind,
+) -> Option<u32> {
+    if name.schema != crate::search_path::PG_CATALOG {
+        return None;
+    }
+    let oid = match kind {
+        crabka_pgparser::ast::OperatorObjectKind::Family => {
+            crate::catalog_rel::builtin_operator_family_oid(method, &name.name)?
+        }
+        crabka_pgparser::ast::OperatorObjectKind::Class => {
+            let method_oid = crate::catalog_rel::access_method_oid(method)?;
+            crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+                .iter()
+                .find(|class| class.2 == name.name && class.1 == method_oid)
+                .map(|class| class.0)?
+        }
+    };
+    u32::try_from(oid).ok()
+}
+
+fn resolve_ordering_family_oid(
+    kv: &dyn crabka_pgkv::Kv,
+    scope: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<u32, ExecError> {
+    if reference
+        .schema
+        .as_deref()
+        .is_none_or(|schema| schema == "pg_catalog")
+        && let Some(oid) = crate::catalog_rel::builtin_operator_family_oid("btree", &reference.name)
+    {
+        return u32::try_from(oid)
+            .map_err(|_| ExecError::Unsupported("operator family oid is negative".into()));
+    }
+    let name = resolve_operator_object_name(
+        kv,
+        scope,
+        reference,
+        "btree",
+        crabka_pgparser::ast::OperatorObjectKind::Family,
+    )?;
+    crabka_pgcatalog::get_operator_family(kv, &name, "btree")
+        .map(|family| family.oid)
+        .map_err(|_| {
+            operator_object_missing(
+                crabka_pgparser::ast::OperatorObjectKind::Family,
+                &reference.name,
+                "btree",
+            )
+        })
+}
+
+fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    // `attach_hidden_target_alias_diagnostic` guards on the whole diagnostics
+    // struct rather than on the position, so it has to run before anything that
+    // can create one.
+    let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
+    let error = attach_reg_cast_literal_position(sql, error);
+    // The date/time family first: it owns the temporal operand names, which
+    // `attach_operator_resolution_position` therefore leaves out.
+    let error = crate::temporal_arith::attach_operator_position(sql, error);
+    let error = attach_operator_resolution_position(sql, stmt, error);
+    let error = attach_query_analysis_position(sql, stmt, error);
+    attach_undefined_function_position(
+        sql,
+        stmt,
+        attach_range_literal_position(sql, attach_type_input_literal_position(sql, error)),
+    )
+}
+
+/// The multi-word spellings PostgreSQL accepts for a type name. One word needs
+/// no table — any identifier can name a type — but `time with time zone` has to
+/// be read as one name rather than as the identifier `zone`.
+const MULTI_WORD_TYPE_NAMES: &[&str] = &[
+    "bit varying",
+    "character varying",
+    "double precision",
+    "national character",
+    "national character varying",
+    "time with time zone",
+    "time without time zone",
+    "timestamp with time zone",
+    "timestamp without time zone",
+];
+
+/// The types whose input function reports `date/time field value out of range`.
+/// `interval` is not one of them: SQL99 gives it its own message and SQLSTATE.
+const DATETIME_TYPE_KEYS: &[&str] = &[
+    "date",
+    "time",
+    "time with time zone",
+    "timestamp",
+    "timestamp with time zone",
+];
+
+/// The two types whose input function reports `timestamp out of range`.
+const TIMESTAMP_TYPE_KEYS: &[&str] = &["timestamp", "timestamp with time zone"];
+
+/// `json` and `jsonb` share one lexer, so they share its complaints: a `jsonb`
+/// literal is rejected with `invalid input syntax for type json` as well.
+const JSON_TYPE_KEYS: &[&str] = &["json", "jsonb"];
+
+/// `txid_snapshot_in` **is** `pg_snapshot_in` — one `pg_proc` entry under two
+/// names — so a `txid_snapshot` literal is rejected under the other type's
+/// name. The written type is still what the caret has to be found by, so the
+/// message admits either spelling, exactly as the JSON pair above does.
+const SNAPSHOT_TYPE_KEYS: &[&str] = &["pg_snapshot", "txid_snapshot"];
+
+/// What a type-input message proves about the type that rejected the literal.
+enum RejectedType {
+    /// The message names the type outright.
+    Named(String),
+    /// The message names a family, so any of these canonical keys will do.
+    OneOf(&'static [&'static str]),
+    /// `array_in` names no type, but only an array literal can reach it.
+    AnyArray,
+}
+
+impl RejectedType {
+    /// Whether a literal whose source states `stated` could be the one that the
+    /// input function rejected.
+    fn accepts(&self, stated: &str) -> bool {
+        match self {
+            RejectedType::Named(name) => stated == name,
+            RejectedType::OneOf(keys) => keys.contains(&stated),
+            RejectedType::AnyArray => stated.ends_with("[]"),
+        }
+    }
+}
+
+/// A type-input error decomposed into what it says about the literal that
+/// failed.
+struct RejectedInput<'a> {
+    /// The rejected text, when the message quotes it. `None` when the message
+    /// does not name a value, in which case the stated type is the only
+    /// evidence there is.
+    value: Option<&'a str>,
+    /// The type the failing input function belongs to.
+    expected: RejectedType,
+    /// Whether the caret may go on a literal the source does not hand *straight*
+    /// to that input function — one that states no type, taking it from the
+    /// target column of a `VALUES` row, or one written inside a call. A message
+    /// that quotes the value can afford the latitude, because the value picks
+    /// the literal out. One that quotes nothing cannot: every literal of the
+    /// reported type is otherwise a candidate, and
+    /// `JSON_VALUE(jsonb '"aaa"', '$' RETURNING json)` fails while converting
+    /// the *result*, with a perfectly good `jsonb` literal standing next to it
+    /// and no caret on it.
+    indirect_ok: bool,
+}
+
+/// The rejected value and target type of a type-input error, for every message
+/// shape PostgreSQL's input functions produce that a source literal can be
+/// blamed for.
+fn rejected_input(message: &str) -> Option<RejectedInput<'_>> {
+    /// The `…: "value"` tail these messages end with.
+    fn tail<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+        message
+            .strip_prefix(prefix)?
+            .strip_prefix(": \"")?
+            .strip_suffix('"')
+    }
+
+    /// A message that names both the value and one type.
+    fn named<'a>(value: &'a str, type_name: &str) -> RejectedInput<'a> {
+        RejectedInput {
+            value: Some(value),
+            expected: RejectedType::Named(canonical_type_key(type_name)),
+            indirect_ok: true,
+        }
+    }
+
+    /// A message that names a family of types and quotes the value.
+    fn family<'a>(value: &'a str, keys: &'static [&'static str]) -> RejectedInput<'a> {
+        RejectedInput {
+            value: Some(value),
+            expected: RejectedType::OneOf(keys),
+            indirect_ok: true,
+        }
+    }
+
+    if let Some(rest) = message.strip_prefix("invalid input syntax for type ") {
+        if let Some((type_name, quoted)) = rest.split_once(": \"") {
+            let value = quoted.strip_suffix('"')?;
+            if canonical_type_key(type_name) == "pg_snapshot" {
+                return Some(family(value, SNAPSHOT_TYPE_KEYS));
+            }
+            return Some(named(value, type_name));
+        }
+        // `json_in` names its type but not the value, because the value is
+        // spelled out in the DETAIL and CONTEXT instead. With no value to search
+        // for, only a literal the source *writes* as JSON qualifies.
+        return (rest == "json").then_some(RejectedInput {
+            value: None,
+            expected: RejectedType::OneOf(JSON_TYPE_KEYS),
+            indirect_ok: false,
+        });
+    }
+    if let Some(value) = tail(message, "interval field value out of range") {
+        return Some(named(value, "interval"));
+    }
+    if let Some(value) = tail(message, "date/time field value out of range")
+        .or_else(|| tail(message, "time zone displacement out of range"))
+    {
+        return Some(family(value, DATETIME_TYPE_KEYS));
+    }
+    if let Some(value) = tail(message, "timestamp out of range") {
+        return Some(family(value, TIMESTAMP_TYPE_KEYS));
+    }
+    // `date_in`'s own range complaint. It names one type, not a family: the two
+    // `timestamp` spellings above borrow each other's wording because an offset
+    // plays no part in a day being unreachable, but `date` is only ever `date`.
+    if let Some(value) = tail(message, "date out of range") {
+        return Some(named(value, "date"));
+    }
+    if let Some(value) = tail(message, "malformed array literal") {
+        return Some(RejectedInput {
+            value: Some(value),
+            expected: RejectedType::AnyArray,
+            indirect_ok: true,
+        });
+    }
+    if message == "array bound is out of integer range" {
+        return Some(RejectedInput {
+            value: None,
+            expected: RejectedType::AnyArray,
+            indirect_ok: false,
+        });
+    }
+    if let Some(value) = tail(message, "invalid cidr value") {
+        return Some(named(value, "cidr"));
+    }
+    // `invalid input value for enum rainbow: "mauve"` names the enum itself.
+    if let Some(rest) = message.strip_prefix("invalid input value for enum ") {
+        let (enum_name, quoted) = rest.split_once(": \"")?;
+        return Some(named(quoted.strip_suffix('"')?, enum_name));
+    }
+    // A `\u0000` escape is the one the JSON lexer re-codes to 22P05. It reaches
+    // only a JSON input, so the written type is the whole of the evidence.
+    if message == "unsupported Unicode escape sequence" {
+        return Some(RejectedInput {
+            value: None,
+            expected: RejectedType::OneOf(JSON_TYPE_KEYS),
+            indirect_ok: false,
+        });
+    }
+    // `line_in`'s two specification errors describe the line rather than the
+    // text, so they name neither the value nor the type. They can only come
+    // from a `line` input, so a single directly-coerced literal is the evidence.
+    if message.starts_with("invalid line specification:") {
+        return Some(RejectedInput {
+            value: None,
+            expected: RejectedType::Named("line".to_owned()),
+            indirect_ok: true,
+        });
+    }
+    let quoted = message
+        .strip_prefix("value \"")
+        .or_else(|| message.strip_prefix('"'))?;
+    let (value, type_name) = quoted.rsplit_once("\" is out of range for type ")?;
+    Some(named(value, type_name))
+}
+
+/// PostgreSQL's canonical name for a type however it is spelled, so a written
+/// `int2` compares equal to the `smallint` an input error reports.
+fn canonical_type_key(name: &str) -> String {
+    let lowered = name.trim().to_ascii_lowercase();
+    match lowered.as_str() {
+        "int2" => "smallint".to_owned(),
+        "int" | "int4" => "integer".to_owned(),
+        "int8" => "bigint".to_owned(),
+        "bool" => "boolean".to_owned(),
+        "float4" => "real".to_owned(),
+        "float8" => "double precision".to_owned(),
+        "decimal" => "numeric".to_owned(),
+        "varchar" => "character varying".to_owned(),
+        "bpchar" => "character".to_owned(),
+        "timestamptz" => "timestamp with time zone".to_owned(),
+        "timetz" => "time with time zone".to_owned(),
+        "time without time zone" => "time".to_owned(),
+        "timestamp without time zone" => "timestamp".to_owned(),
+        _ => lowered,
+    }
+}
+
+/// The source words between two offsets, lowercased with runs of whitespace
+/// collapsed, so a type name spelled over several tokens compares as one string.
+fn collapse_words(text: &str) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    for word in text.split_whitespace() {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
+    collapsed.to_ascii_lowercase()
+}
+
+/// The canonical key of the type name written *after* `start`, as `::type` and
+/// `CAST(… AS type)` both spell it, including a trailing `[]` when the target is
+/// an array.
+fn stated_type_after(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    start: usize,
+) -> Option<String> {
+    use crabka_pgparser::token::Token;
+
+    let Some((Token::Ident(head), _)) = tokens.get(start) else {
+        return None;
+    };
+    let mut name = head.clone();
+    let mut end = start + 1;
+    // Longest wins: `time` and `time with time` are not type names, and only the
+    // four-word reading of `time with time zone` is.
+    for words in 2..=4 {
+        let Some(after) = tokens.get(start + words) else {
+            break;
+        };
+        let phrase = collapse_words(&sql[tokens[start].1..after.1]);
+        if MULTI_WORD_TYPE_NAMES.contains(&phrase.as_str()) {
+            name = phrase;
+            end = start + words;
+        }
+    }
+    let mut key = canonical_type_key(&name);
+    if matches!(tokens.get(end), Some((Token::LBracket, _))) {
+        key.push_str("[]");
+    }
+    Some(key)
+}
+
+/// The canonical key of the type name written *before* the literal at `index`,
+/// as the legacy `type 'literal'` spelling puts it.
+fn stated_type_before(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    index: usize,
+) -> Option<String> {
+    use crabka_pgparser::token::Token;
+
+    let literal = tokens[index].1;
+    for words in (2..=4).rev() {
+        let Some(first) = index.checked_sub(words) else {
+            continue;
+        };
+        let phrase = collapse_words(&sql[tokens[first].1..literal]);
+        if MULTI_WORD_TYPE_NAMES.contains(&phrase.as_str()) {
+            return Some(canonical_type_key(&phrase));
+        }
+    }
+    match index.checked_sub(1).map(|prev| &tokens[prev].0) {
+        Some(Token::Ident(name)) => Some(canonical_type_key(name)),
+        _ => None,
+    }
+}
+
+/// The type a source literal is *directly* coerced to, when the statement states
+/// one next to it: `int2 '1'`, `'1'::int2`, `CAST('1' AS int2)`, or the
+/// type-name call `cidr('…')`. A literal in a `VALUES` row states none, and
+/// takes its type from the target column instead.
+fn stated_literal_type(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    index: usize,
+) -> Option<String> {
+    use crabka_pgparser::token::{Keyword, Token};
+
+    // `'x'::type` binds tighter than an enclosing call, so
+    // `to_timestamp('x'::date, …)` is still a coercion of the literal.
+    if matches!(tokens.get(index + 1), Some((Token::TypeCast, _))) {
+        return stated_type_after(sql, tokens, index + 2);
+    }
+    // `CAST('x' AS type)`. The `AS` must belong to a cast rather than a column
+    // alias: `SELECT bool 'test' AS error` names the *output column* `error`,
+    // not a target type.
+    if matches!(
+        (
+            index.checked_sub(2).map(|open| &tokens[open].0),
+            index.checked_sub(1).map(|open| &tokens[open].0),
+            tokens.get(index + 1).map(|next| &next.0),
+        ),
+        (
+            Some(Token::Keyword(Keyword::Cast)),
+            Some(Token::LParen),
+            Some(Token::Keyword(Keyword::As))
+        )
+    ) {
+        return stated_type_after(sql, tokens, index + 2);
+    }
+    // `cidr('…')` — a one-argument call on a *type* name is a coercion, and
+    // PostgreSQL positions it like one. Nothing here decides whether the name
+    // is a type: the caller accepts it only when the failing input function
+    // reported that same type, so an ordinary call such as `abs('zz')` is left
+    // undecorated.
+    if matches!(tokens.get(index + 1), Some((Token::RParen, _)))
+        && matches!(
+            index.checked_sub(1).map(|open| &tokens[open].0),
+            Some(Token::LParen)
+        )
+        && let Some((Token::Ident(name), _)) = index.checked_sub(2).map(|open| &tokens[open])
+    {
+        return Some(canonical_type_key(name));
+    }
+    stated_type_before(sql, tokens, index)
+}
+
+/// Whether the literal at `index` sits inside a function call's argument list.
+///
+/// A function receives the literal as an already-typed value and raises its own
+/// error at execution time — `to_timestamp('97/Feb/16', 'YYMonDD')` reports
+/// `invalid value "/Feb/16" for "Mon"` with no position at all — so these must
+/// stay undecorated. A `VALUES` row is not a call: its parenthesis follows the
+/// `VALUES` keyword rather than a function name, and PostgreSQL does position
+/// the coercion of each item to its target column.
+fn encloses_function_call(tokens: &[(crabka_pgparser::token::Token, usize)], index: usize) -> bool {
+    use crabka_pgparser::token::Token;
+
+    let mut depth = 0_usize;
+    for cursor in (0..index).rev() {
+        match tokens[cursor].0 {
+            Token::RParen => depth += 1,
+            Token::LParen => {
+                if let Some(open) = depth.checked_sub(1) {
+                    depth = open;
+                } else {
+                    // The parenthesis that opens the literal's own argument list.
+                    return matches!(
+                        cursor.checked_sub(1).map(|prev| &tokens[prev].0),
+                        Some(Token::Ident(_))
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// How a source literal can carry the value a type-input message quotes.
+enum LiteralMatch {
+    /// The literal *is* the value, which is how a scalar coercion writes it.
+    Whole,
+    /// The literal writes a composite value and the rejected value is one
+    /// component of it, which is how a component's own input function fails.
+    Component,
+}
+
+/// The characters that bound one component inside a composite literal: the
+/// separators PostgreSQL writes between components, and every delimiter it
+/// opens and closes a container with.
+fn bounds_component(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, ',' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
+}
+
+/// Whether `literal` writes a composite value that has `value` as one of its
+/// components.
+///
+/// The literal must open with a container delimiter, which is what an array
+/// (`{…}`), a range (`[…)`), a row (`(…)`) and every geometric type write, so
+/// that a scalar which merely contains the same characters does not qualify.
+/// The value must then sit *inside* that container, bounded on both sides, so
+/// that `1e+50` does not match the `1e+500` in `(10.0, 1e+500)`.
+fn spells_component(literal: &str, value: &str) -> bool {
+    if value.is_empty() || !literal.starts_with(['(', '[', '{', '<']) {
+        return false;
+    }
+    literal.match_indices(value).any(|(start, _)| {
+        let before = literal[..start].chars().next_back();
+        let after = literal[start + value.len()..].chars().next();
+        matches!((before, after), (Some(open), Some(close))
+            if bounds_component(open) && bounds_component(close))
+    })
+}
+
+/// The one-based positions of every source literal a type-input error can be
+/// blamed on, under one reading of how a literal carries the rejected value.
+fn blamed_literal_positions(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    rejected: &RejectedInput<'_>,
+    reading: LiteralMatch,
+) -> Vec<usize> {
+    use crabka_pgparser::token::Token;
+
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (token, offset))| {
+            let Token::StringLit(candidate) = token else {
+                return None;
+            };
+            let carries = match reading {
+                LiteralMatch::Whole => rejected.value.is_none_or(|value| candidate == value),
+                LiteralMatch::Component => rejected
+                    .value
+                    .is_some_and(|value| spells_component(candidate, value)),
+            };
+            if !carries {
+                return None;
+            }
+            let coerced = match reading {
+                // A component's message names the component's type while the
+                // source states the outer one, so the stated type can neither
+                // confirm nor deny the literal. That leaves the call exclusion
+                // as the whole of the evidence, and it still holds: a function
+                // receives its argument already typed and raises its own error.
+                LiteralMatch::Component => !encloses_function_call(tokens, index),
+                LiteralMatch::Whole => match stated_literal_type(sql, tokens, index) {
+                    Some(stated) => {
+                        rejected.expected.accepts(&stated)
+                            && (rejected.indirect_ok || !encloses_function_call(tokens, index))
+                            && stated_input_function_could_have_raised(&stated, candidate)
+                    }
+                    None => rejected.indirect_ok && !encloses_function_call(tokens, index),
+                },
+            };
+            coerced.then(|| sql[..*offset].chars().count() + 1)
+        })
+        .collect()
+}
+
+/// Could the input function the source states next to this literal be the one
+/// that raised, or did the literal pass it and something later fail?
+///
+/// `json_in` decodes no string escape, so a `json`-stated literal that
+/// `json_in` accepts was never the thing that failed: the complaint came from
+/// an *accessor* reading the value at execution time, and `PostgreSQL` gives
+/// those no caret. `select json '{"a":"\ud83dX"}' -> 'a'` reports its DETAIL
+/// and CONTEXT with no `LINE`, while `SELECT '"\u"'::json` -- which `json_in`
+/// really does reject -- keeps one. A `jsonb`-stated literal needs no such
+/// test, because `jsonb_in` decodes and so every JSON complaint can be its own.
+///
+/// Only the JSON types can be told apart from the literal alone, so only they
+/// are tested; every other type keeps the reading it had.
+fn stated_input_function_could_have_raised(stated: &str, candidate: &str) -> bool {
+    stated != "json" || crabka_pgtypes::json::validate(candidate).is_err()
+}
+
+/// PostgreSQL's input functions run during parse analysis for a *constant*, so
+/// it points its caret at the source literal that failed — for every spelling
+/// of the cast (`int2 '34.5'`, `'34.5'::int2`, `CAST('zz' AS int4)`, and a
+/// `VALUES` item coerced to the target column). A value that was computed
+/// rather than written, such as `('12'||'x')::int4`, has no source literal and
+/// correctly gets no caret.
+///
+/// A literal coerced through an intermediate type, as in
+/// `'  tru e '::text::boolean`, reaches the failing input function at execution
+/// time instead, and PostgreSQL gives it no caret — so require that any type
+/// the source states next to the literal *is* the type that rejected it.
+///
+/// Attach the position only when exactly one string literal in the statement
+/// carries the rejected value; a repeated literal stays undecorated rather than
+/// guessing which occurrence failed.
+///
+/// A message that quotes no value at all — `invalid input syntax for type json`
+/// — has only the written type to go on, so it blames a literal *only* when the
+/// source states that type next to it. A `VALUES` item, which states nothing,
+/// stays undecorated there even though a value-carrying message would claim it.
+///
+/// A *component* can fail inside a composite literal — a `float8` coordinate
+/// overflowing inside a `point`, or an `integer` element inside an `int[]` —
+/// and the message then names the component's type while the source states the
+/// outer one. Read such a literal only when no literal carries the value whole,
+/// so the reading adds carets and never takes one away, and only when the
+/// literal opens a container and bounds the value inside it. The stated type
+/// proves nothing there, so the call exclusion carries the whole weight:
+/// `JSON_VALUE('{"a": 1.234}', '$.a' RETURNING int ERROR ON ERROR)` fails on a
+/// component of a sound literal and stays undecorated, as PostgreSQL leaves it.
+///
+/// Known gap: a literal that writes whitespace before the container delimiter
+/// is not read as a container, and neither is a component the container itself
+/// rewrites before the input function reads it — array syntax strips the quotes
+/// from `'{"1e+500"}'`, so the value the message quotes is no longer bounded
+/// where the source writes it. PostgreSQL attaches a caret to both.
+fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
+    // Every SQLSTATE an input function raises while parse analysis coerces a
+    // written constant: 22P02 invalid_text_representation, 22003
+    // numeric_value_out_of_range, 22007 invalid_datetime_format, 22008
+    // datetime_field_overflow, 22009 invalid_time_zone_displacement_value, 22015
+    // interval_field_overflow, 22P05 untranslatable_character, and 54000
+    // program_limit_exceeded, which is what an array dimension out of `int4`
+    // range raises. Testing the code first keeps the re-lex off the failure path
+    // of every statement that fails for another reason.
+    if !matches!(
+        error.code.as_str(),
+        "22P02" | "22003" | "22007" | "22008" | "22009" | "22015" | "22P05" | "54000"
+    ) || error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Some(rejected) = rejected_input(&error.message) else {
+        return error;
+    };
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let whole = blamed_literal_positions(sql, &tokens, &rejected, LiteralMatch::Whole);
+    // The component reading is a fallback rather than a competitor. Reading it
+    // only when nothing carries the value whole keeps every caret the whole
+    // reading finds today: it can never turn one candidate into two.
+    let positions = if whole.is_empty() {
+        blamed_literal_positions(sql, &tokens, &rejected, LiteralMatch::Component)
+    } else {
+        whole
+    };
+    match positions.as_slice() {
+        [position] => error.with_position(*position),
+        _ => error,
+    }
+}
+
+/// Refine a missing DML target reference when the statement proves an alias
+/// hid that target, and attach PostgreSQL's one-based source position.
+fn attach_hidden_target_alias_diagnostic(
+    sql: &str,
+    stmt: &Statement,
+    mut error: PgError,
+) -> PgError {
+    use crabka_pgparser::{ast::Expr, token::Token};
+
+    if error.code != "42P01" || error.diagnostics.is_some() {
+        return error;
+    }
+    let Some(relation) = error
+        .message
+        .strip_prefix("missing FROM-clause entry for table \"")
+        .and_then(|message| message.strip_suffix('"'))
+        .map(str::to_owned)
+    else {
+        return error;
+    };
+    let (target, alias, filter) = match stmt {
+        Statement::Delete {
+            table,
+            with: None,
+            alias: Some(alias),
+            using,
+            filter: Some(filter),
+            ..
+        } if using.is_empty() => (&table.name, alias, filter),
+        _ => return error,
+    };
+    if target != &relation || alias == target {
+        return error;
+    }
+
+    let mut outer_references = 0;
+    crate::grouping::visit_expr(filter, &mut |node| {
+        if matches!(
+            node,
+            Expr::Column {
+                table: Some(qualifier),
+                ..
+            } if qualifier == &relation
+        ) {
+            outer_references += 1;
+        }
+    });
+    if outer_references != 1 {
+        return error;
+    }
+
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let positions: Vec<usize> = tokens
+        .windows(2)
+        .filter_map(|pair| match (&pair[0].0, &pair[1].0) {
+            (Token::Ident(candidate), Token::Dot) if candidate == &relation => {
+                Some(sql[..pair[0].1].chars().count() + 1)
+            }
+            _ => None,
+        })
+        .collect();
+    let [position] = positions.as_slice() else {
+        return error;
+    };
+
+    error.message = format!("invalid reference to FROM-clause entry for table \"{relation}\"");
+    error
+        .with_hint(format!(
+            "Perhaps you meant to reference the table alias \"{alias}\"."
+        ))
+        .with_position(*position)
+}
+
+/// Point at the call that named a function `PostgreSQL` could not resolve.
+///
+/// A *query* resolves the name during parse analysis and reports the call's
+/// position; a utility statement whose whole subject is a routine looks the
+/// name up afterwards, from a parse tree that no longer carries the source, and
+/// reports no position at all. Measured on 18.4: `DROP FUNCTION nosuch()`,
+/// `ALTER FUNCTION nosuch() RENAME TO …`, `COMMENT ON FUNCTION nosuch()`,
+/// `DROP AGGREGATE nosuch(int)` and `ALTER TABLE t ALTER COLUMN a SET DEFAULT
+/// nosuch()` are all bare, while `SELECT nosuch(1)`, `CREATE TABLE t (a int
+/// DEFAULT nosuch())` and even `CREATE INDEX ON t ((nosuch(a)))` carry a caret.
+fn attach_undefined_function_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    use crabka_pgparser::token::Token;
+
+    if sql
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("alter operator family")
+        || matches!(
+            stmt,
+            Statement::DropRoutine { .. }
+                | Statement::AlterRoutine { .. }
+                | Statement::DropAggregate { .. }
+                | Statement::AlterAggregate { .. }
+                | Statement::AlterTable { .. }
+                | Statement::Comment { .. }
+        )
+    {
+        return error;
+    }
+    if error.code != "42883"
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Some(signature) = error.message.strip_prefix("function ") else {
+        return error;
+    };
+    let Some(name) = signature.split_once('(').map(|(name, _)| name) else {
+        return error;
+    };
+    let name = name.rsplit('.').next().unwrap_or(name);
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let positions: Vec<usize> = tokens
+        .windows(2)
+        .filter_map(|pair| match (&pair[0].0, &pair[1].0) {
+            (Token::Ident(candidate), Token::LParen) if candidate == name => {
+                Some(sql[..pair[0].1].chars().count() + 1)
+            }
+            _ => None,
+        })
+        .collect();
+    match positions.as_slice() {
+        [position] => error.with_position(*position),
+        _ => error,
+    }
+}
+
+/// Carry the position a grammar rule declared `PostgreSQL` also reports.
+///
+/// The parser knows an offset for every error it raises, but only some of those
+/// offsets are `PostgreSQL`'s: a rule has to opt in with
+/// `ParseError::reporting_position`, for the reason recorded there. This is the
+/// step that turns the declaration into the wire's `P` field, which is what
+/// makes psql print the `LINE n:` echo and the caret. Nothing else in the parse
+/// path sets a position, so this never overwrites one.
+fn attach_declared_parse_position(sql: &str, parsed: &ExecError, error: PgError) -> PgError {
+    let ExecError::Parse(parsed) = parsed else {
+        return error;
+    };
+    match parsed.reported_position(sql) {
+        Some(position) => error.with_position(position),
+        None => error,
+    }
+}
+
+/// The wire error a failed parse of `sql` reports, with every position the parse
+/// path can recover attached.
+///
+/// Four of the five parse entry points share this: the extended protocol's
+/// `Parse`, the simple protocol's copy-in and copy-out probes, and the copy-in
+/// data path can all see the same statement text, and a diagnostic that appeared
+/// under one spelling and not the other would be a difference the client cannot
+/// explain. `SqlSession::parse_for_session` runs the same three attachments
+/// inline, because it needs the [`ExecError`] for telemetry before it reports.
+fn parse_failure(sql: &str, error: crabka_pgparser::ParseError) -> PgError {
+    let error = ExecError::from(error);
+    let reported = attach_type_input_literal_position(sql, error.clone().into_pg());
+    let reported = attach_parsed_bit_string_position(sql, &error, reported);
+    attach_declared_parse_position(sql, &error, reported)
+}
+
+/// Point at the bit-string literal whose digits `bit_in` rejected.
+///
+/// A `B'…'`/`X'…'` literal is decoded while the statement is *parsed*, because
+/// `PostgreSQL` runs `bit_in` in its own grammar too, so this failure never
+/// reaches [`attach_known_runtime_diagnostics`] — the same reason a qualified
+/// interval literal is handled on the parse path. The parser already noted
+/// where the literal was written, which is exactly where `PostgreSQL` points;
+/// only the conversion to a wire error dropped it.
+fn attach_parsed_bit_string_position(sql: &str, parsed: &ExecError, error: PgError) -> PgError {
+    let ExecError::Parse(parsed) = parsed else {
+        return error;
+    };
+    if error.code != "22P02"
+        || !(error.message.ends_with("\" is not a valid binary digit")
+            || error
+                .message
+                .ends_with("\" is not a valid hexadecimal digit"))
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Some(prefix) = sql.get(..parsed.position) else {
+        return error;
+    };
+    error.with_position(prefix.chars().count() + 1)
+}
+
+/// Point at the string constant a `reg*` cast could not resolve.
+///
+/// `regclass('pg_classes')` is a cast written in function-call form, so the name
+/// it fails to resolve is a *constant*, not an identifier, and `PostgreSQL`
+/// points at the constant. Every `reg*` input function reports what the name
+/// should have been rather than the usual `invalid input syntax`, which is why
+/// these reach here rather than [`attach_type_input_literal_position`]:
+/// `regrole('nosuch')` is `role "nosuch" does not exist`, `regnamespace` is a
+/// `schema`, `regproc` a `function`, `regoper` an `operator`, `regtype` a `type`
+/// and `regclass` a `relation`.
+///
+/// Only the function-call spelling qualifies. PostgreSQL points at the constant
+/// for `'x'::regclass` and `CAST('x' AS regclass)` just the same, but those two
+/// are how a *query about a relation* names it — `pg_get_indexdef('i'::regclass)`
+/// — so whenever Crabka fails such a query for its own reasons the message ends
+/// in `does not exist` and names the very relation the cast spells. Measured on
+/// the 18.4 corpus, admitting them blames the constant in 104 places where
+/// PostgreSQL raises nothing at all, against 14 places gained; the call spelling
+/// alone gains the same 14 and costs none.
+fn attach_reg_cast_literal_position(sql: &str, error: PgError) -> PgError {
+    use crabka_pgparser::token::Token;
+
+    /// The `reg*` types whose input function resolves a name in the catalog.
+    const REG_TYPES: &[&str] = &[
+        "regclass",
+        "regcollation",
+        "regconfig",
+        "regdictionary",
+        "regnamespace",
+        "regoper",
+        "regoperator",
+        "regproc",
+        "regprocedure",
+        "regrole",
+        "regtype",
+    ];
+
+    // 42P01 undefined_table, 42704 undefined_object, 42883 undefined_function,
+    // 3F000 invalid_schema_name and 42602 invalid_name are the five a `reg*`
+    // lookup can raise.
+    if !matches!(
+        error.code.as_str(),
+        "42P01" | "42704" | "42883" | "3F000" | "42602"
+    ) || !reg_lookup_message(&error.message)
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let is_reg =
+        |token: &Token| matches!(token, Token::Ident(name) if REG_TYPES.contains(&name.as_str()));
+    let positions: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (token, offset))| {
+            if !matches!(token, Token::StringLit(_)) {
+                return None;
+            }
+            index
+                .checked_sub(2)
+                .is_some_and(|name| is_reg(&tokens[name].0) && tokens[name + 1].0 == Token::LParen)
+                .then_some(sql[..*offset].chars().count() + 1)
+        })
+        .collect();
+    match positions.as_slice() {
+        [position] => error.with_position(*position),
+        _ => error,
+    }
+}
+
+/// Does this message read as one a `reg*` input function raises about the name
+/// it was handed?
+///
+/// Most of them end in `does not exist`, and the two that do not are the whole
+/// reason this is a function rather than a suffix test. `regoperin` puts the
+/// name last but not the verb — `operator does not exist: ||//` — and
+/// `regrolein`/`regnamespacein` refuse a dotted name before any lookup happens,
+/// with a message that quotes nothing at all. `PostgreSQL` points at the
+/// constant for all three; measured on the 18.4 corpus, admitting them costs
+/// nothing, because `invalid name syntax` appears only in `regproc.out` and no
+/// file outside it writes a `reg*` call with a string constant.
+fn reg_lookup_message(message: &str) -> bool {
+    message.ends_with(" does not exist")
+        || message.starts_with("operator does not exist: ")
+        || message == "invalid name syntax"
+}
+
+/// The operand type names a caret may be attached for, for
+/// [`attach_operator_resolution_position`].
+///
+/// These are the base types whose operator set crabka mirrors, so a 42883 over
+/// two of them is one `PostgreSQL` raises as well. Every name left out is left
+/// out for a measured reason rather than an oversight:
+///
+/// * an array, a domain or a range operand marks a place where crabka lacks an
+///   operator `PostgreSQL` has — `numeric[] || integer[]`, `dia || integer` and
+///   `int4range || int4range` all succeed upstream;
+/// * `character varying` is the same gap under a base-type name, because
+///   `character varying = integer` succeeds upstream and crabka refuses it;
+/// * `jsonb` and `tsquery` name families crabka has only in part;
+/// * the date/time names belong to
+///   [`crate::temporal_arith::attach_operator_position`], which runs first and
+///   resolves that family on its own terms.
+const RESOLVED_OPERAND_TYPES: &[&str] = &[
+    "bigint",
+    "boolean",
+    "box",
+    "circle",
+    "double precision",
+    "integer",
+    "line",
+    "lseg",
+    "numeric",
+    "path",
+    "point",
+    "polygon",
+    "real",
+    "smallint",
+    "text",
+    "xid",
+];
+
+/// Point `PostgreSQL`'s caret at the operator a query could not resolve.
+///
+/// `PostgreSQL` carries a location on every operator it fails to resolve and
+/// prints `LINE n:` under it. crabka reproduces the location by re-lexing the
+/// statement and finding the one token that spells what the message names.
+///
+/// # Why the guards are this tight
+///
+/// A caret costs two lines wherever crabka raises an error `PostgreSQL` does
+/// not, so the population that matters is not "every 42883" but "every 42883
+/// upstream raises too". Measured on the pinned 18.4 corpus, crabka reports
+/// `operator does not exist` fifty-nine times: thirty-five have no upstream
+/// counterpart at all, eight have one `PostgreSQL` prints bare, and sixteen
+/// have one that carries a caret. The guards below turn away all forty-three
+/// of the first two groups and eight of the sixteen take their caret here. Of
+/// the other eight, six already have one from
+/// [`attach_reg_cast_literal_position`] or
+/// [`crate::temporal_arith::attach_operator_position`], and the two in
+/// `plpgsql` and `polymorphism` stay bare because upstream points into a
+/// function body rather than into the statement the client sent.
+///
+/// *Only a query.* A utility statement that names an operator writes the same
+/// spelling in its text — `DROP OPERATOR === (int4, int4)` — and gets no caret
+/// upstream, because the lookup happens after parse analysis from a tree that
+/// no longer carries the source. Measured bare on 18.4 for `DROP OPERATOR`,
+/// `COMMENT ON OPERATOR` and `ALTER TYPE … ALTER ATTRIBUTE`. A positive list of
+/// query statements is what admits `SELECT`, `INSERT`, `UPDATE`, `DELETE` and
+/// `MERGE` and nothing else.
+///
+/// *Only a resolved operand type.* See [`RESOLVED_OPERAND_TYPES`]. This is the
+/// guard that separates the sixteen from the thirty-five: crabka's invented
+/// rejections are overwhelmingly array, domain, range, `jsonb` and `tsquery`
+/// operands.
+///
+/// *Only one candidate token.* `PostgreSQL` blames the innermost operator that
+/// failed, and a message naming `integer || integer` for `SELECT 1 || 2 || 3`
+/// does not say which `||` that was. Two candidates is a guess, so it stays
+/// bare.
+///
+/// # Shapes this does not reach
+///
+/// A prefix operator leaves the left operand of the message empty, which no
+/// entry of [`RESOLVED_OPERAND_TYPES`] matches, so `SELECT @@@ 1` stays bare.
+/// `OPERATOR(pg_catalog.+)` puts a schema on the spelling, which is not one
+/// operator token, so it stays bare as well — upstream points at the `OPERATOR`
+/// keyword for that form. Neither shape occurs in the corpus with an operand
+/// type this admits.
+fn attach_operator_resolution_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    use crabka_pgparser::token::{Keyword, Token};
+
+    if !matches!(
+        stmt,
+        Statement::Query(_)
+            | Statement::Insert { .. }
+            | Statement::Update { .. }
+            | Statement::Delete { .. }
+            | Statement::Merge { .. }
+    ) || error.code != "42883"
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Some(operands) = error.message.strip_prefix("operator does not exist: ") else {
+        return error;
+    };
+    // `<left type> <spelling> <right type>`, where either type name may hold
+    // spaces (`double precision`) but neither can hold an operator character,
+    // so the one word that lexes as a single operator is the spelling.
+    let words: Vec<&str> = operands.split(' ').collect();
+    let spelled: Vec<(usize, Token)> = words
+        .iter()
+        .enumerate()
+        .filter_map(|(index, word)| sole_operator_token(word).map(|token| (index, token)))
+        .collect();
+    let [(index, wanted)] = spelled.as_slice() else {
+        return error;
+    };
+    if ![words[..*index].join(" "), words[index + 1..].join(" ")]
+        .iter()
+        .all(|name| RESOLVED_OPERAND_TYPES.contains(&name.as_str()))
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let position = |offset: usize| sql[..offset].chars().count() + 1;
+    let written: Vec<usize> = tokens
+        .iter()
+        .filter(|(token, _)| token == wanted)
+        .map(|(_, offset)| position(*offset))
+        .collect();
+    match written.as_slice() {
+        [only] => error.with_position(*only),
+        // An `IN` list lowers to `= ANY`, so the failure reports an `=` the
+        // statement never wrote and `PostgreSQL` points at the `IN` keyword
+        // instead — `select '(0,0)'::point in ('(0,0,0,0)'::box, point(0,0))`
+        // carets the `in`. Only when no `=` is written at all: a statement
+        // holding both leaves which one failed unknowable.
+        [] if *wanted == Token::Eq => match sole_keyword_position(&tokens, Keyword::In, position) {
+            Some(only) => error.with_position(only),
+            None => error,
+        },
+        _ => error,
+    }
+}
+
+/// The one token `spelling` lexes to, when it is an operator.
+///
+/// A message word is the operator only if every character of it is one
+/// `PostgreSQL`'s grammar allows in an operator name *and* crabka's lexer reads
+/// the whole word as a single token. The second half is what rejects a spelling
+/// crabka and `PostgreSQL` tokenise differently: crabka reads `#-` as `#` then
+/// `-` and reports the operator as `#`, and a caret drawn from half an operator
+/// points at the wrong column.
+fn sole_operator_token(spelling: &str) -> Option<crabka_pgparser::token::Token> {
+    /// `PostgreSQL`'s operator character set, from its `op_chars` lexer rule.
+    const OPERATOR_CHARACTERS: &str = "+-*/<>=~!@#%^&|?";
+
+    if spelling.is_empty() || !spelling.chars().all(|c| OPERATOR_CHARACTERS.contains(c)) {
+        return None;
+    }
+    match crabka_pgparser::lexer::lex(spelling).ok()?.as_slice() {
+        [(token, 0), (crabka_pgparser::token::Token::Eof, _)] => Some(token.clone()),
+        _ => None,
+    }
+}
+
+/// Where `keyword` is written, when the statement writes it exactly once.
+fn sole_keyword_position(
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    keyword: crabka_pgparser::token::Keyword,
+    position: impl Fn(usize) -> usize,
+) -> Option<usize> {
+    let written: Vec<usize> = tokens
+        .iter()
+        .filter(|(token, _)| *token == crabka_pgparser::token::Token::Keyword(keyword))
+        .map(|(_, offset)| position(*offset))
+        .collect();
+    match written.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+/// The top-level clause a token sits in, for [`attach_query_analysis_position`].
+///
+/// `PostgreSQL` analyses a `SELECT` one clause at a time and reports the
+/// position of the first reference that fails, so which clause a token belongs
+/// to is what decides the caret. A token inside parentheses keeps the clause
+/// that encloses them — `count(b)` in the target list is a target-list
+/// reference, and `parseCheckAggregates` blames it there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryClause {
+    /// Everything before `FROM`: the target list, which also carries the
+    /// `ORDER BY` expressions as resjunk entries by the time the grouping check
+    /// walks it.
+    Target,
+    From,
+    Where,
+    GroupBy,
+    Having,
+    OrderBy,
+    /// A clause none of these checks reports from (`LIMIT`, `RETURNING`, the
+    /// text before a `CREATE VIEW`'s `SELECT`).
+    Other,
+}
+
+/// Label every token with the top-level clause it belongs to.
+fn query_clauses(tokens: &[(crabka_pgparser::token::Token, usize)]) -> Vec<QueryClause> {
+    use crabka_pgparser::token::{Keyword, Token};
+
+    let mut clause = QueryClause::Other;
+    let mut depth = 0_usize;
+    let mut out = Vec::with_capacity(tokens.len());
+    for (index, (token, _)) in tokens.iter().enumerate() {
+        match token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            // A keyword nested in parentheses belongs to a subquery, whose
+            // clauses are its own; only the outermost level moves this cursor.
+            Token::Keyword(keyword) if depth == 0 => {
+                let followed_by_by = matches!(
+                    tokens.get(index + 1).map(|next| &next.0),
+                    Some(Token::Keyword(Keyword::By))
+                );
+                clause = match keyword {
+                    Keyword::Select => QueryClause::Target,
+                    Keyword::From => QueryClause::From,
+                    Keyword::Where => QueryClause::Where,
+                    Keyword::Group if followed_by_by => QueryClause::GroupBy,
+                    Keyword::Having => QueryClause::Having,
+                    Keyword::Order if followed_by_by => QueryClause::OrderBy,
+                    Keyword::Limit
+                    | Keyword::Offset
+                    | Keyword::Returning
+                    | Keyword::Union
+                    | Keyword::Intersect
+                    | Keyword::Except => QueryClause::Other,
+                    _ => clause,
+                };
+            }
+            _ => {}
+        }
+        out.push(clause);
+    }
+    out
+}
+
+/// The one-based source position of the first reference to `column` inside one
+/// of `clauses`, searched in the order given.
+///
+/// A message that qualifies the column (`"t.b"`) still matches a bare `b` in the
+/// source, because `PostgreSQL` names the range-table entry the reference
+/// resolved to and the query need not have written it. The reverse is guarded:
+/// an `Ident` preceded by a dot is somebody else's qualified reference and never
+/// answers for a bare name.
+fn column_reference_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    labels: &[QueryClause],
+    (qualifier, column): (Option<&str>, &str),
+    clauses: &[QueryClause],
+) -> Option<usize> {
+    use crabka_pgparser::token::Token;
+
+    let is_ident = |index: usize, want: &str| matches!(tokens.get(index).map(|entry| &entry.0), Some(Token::Ident(name)) if name == want);
+    let is_dot = |index: usize| matches!(tokens.get(index).map(|e| &e.0), Some(Token::Dot));
+    let position = |index: usize| sql[..tokens[index].1].chars().count() + 1;
+
+    for wanted in clauses {
+        let mut written = None;
+        let mut bare = None;
+        for (index, label) in labels.iter().enumerate() {
+            if label != wanted {
+                continue;
+            }
+            if written.is_none()
+                && let Some(qualifier) = qualifier
+                && is_ident(index, qualifier)
+                && is_dot(index + 1)
+                && is_ident(index + 2, column)
+            {
+                written = Some(position(index));
+            }
+            if bare.is_none()
+                && is_ident(index, column)
+                && !(index > 0 && is_dot(index - 1))
+                && !is_dot(index + 1)
+            {
+                bare = Some(position(index));
+            }
+        }
+        // A written qualification is the closer match, whichever came first.
+        if let Some(found) = written.or(bare) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Point `PostgreSQL`'s caret at the reference that failed parse analysis, for
+/// the grouping and name-resolution errors it reports from a query's own source.
+///
+/// `PostgreSQL` analyses a `SELECT` in a fixed order — target list, `WHERE`,
+/// `HAVING`, `ORDER BY`, `GROUP BY` (`transformSelectStmt` does `ORDER BY` first
+/// "because both transformGroupClause and transformDistinctClause need the
+/// results") — and reports the first reference that fails. The ungrouped-column
+/// check runs later still, over the target list and then the `HAVING`
+/// qualification, with the `ORDER BY` expressions already appended to the target
+/// list as resjunk entries. Both orders are reproduced here, which is why
+/// `SELECT count(*) FROM t GROUP BY a ORDER BY b` blames the `b` in `ORDER BY`
+/// while `SELECT count(b) FROM x, y GROUP BY x.b/2` blames the one inside
+/// `count`.
+///
+/// # Why the ambiguity family is restricted to queries
+///
+/// A caret costs two lines when the error is one `PostgreSQL` does not raise.
+/// Measured on the 18.4 corpus, `MERGE` and `INSERT … ON CONFLICT` are where
+/// Crabka's own name resolution is over-strict: the twelve ambiguity reports it
+/// raises there have no counterpart upstream, while every ambiguity report it
+/// shares with `PostgreSQL` comes from a plain query. Decorating only the query
+/// form is therefore the whole gain and none of the cost. The grouping families
+/// need no such gate — Crabka raises them only from a query already.
+fn attach_query_analysis_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    if error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let labels = query_clauses(&tokens);
+    let found = match error.code.as_str() {
+        "42803" => ungrouped_column_position(sql, &tokens, &labels, &error.message),
+        "42P10" | "42P01" => group_by_position(sql, &tokens, &labels, &error.message)
+            .or_else(|| from_clause_entry_position(sql, &tokens, &error.message)),
+        "42702" if matches!(stmt, Statement::Query(_)) => {
+            ambiguous_column_position(sql, &tokens, &labels, &error.message)
+        }
+        _ => None,
+    };
+    match found {
+        Some(position) => error.with_position(position),
+        None => error,
+    }
+}
+
+/// `column "t.b" must appear in the GROUP BY clause or be used in an aggregate
+/// function` — reported by `parseCheckAggregates` over the target list (which
+/// carries `ORDER BY` by then) and then the `HAVING` qualification.
+fn ungrouped_column_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    labels: &[QueryClause],
+    message: &str,
+) -> Option<usize> {
+    let reference = message.strip_prefix("column \"")?.strip_suffix(
+        "\" must appear in the GROUP BY clause or be used in an aggregate function",
+    )?;
+    let (qualifier, column) = match reference.rsplit_once('.') {
+        Some((qualifier, column)) => (Some(qualifier), column),
+        None => (None, reference),
+    };
+    column_reference_position(
+        sql,
+        tokens,
+        labels,
+        (qualifier, column),
+        &[
+            QueryClause::Target,
+            QueryClause::OrderBy,
+            QueryClause::Having,
+        ],
+    )
+}
+
+/// `column reference "b" is ambiguous` — reported by the first clause
+/// `transformSelectStmt` resolves it in.
+fn ambiguous_column_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    labels: &[QueryClause],
+    message: &str,
+) -> Option<usize> {
+    let column = message
+        .strip_prefix("column reference \"")?
+        .strip_suffix("\" is ambiguous")?;
+    // A qualified spelling is not ambiguous, so the message never carries one.
+    if column.contains('.') {
+        return None;
+    }
+    column_reference_position(
+        sql,
+        tokens,
+        labels,
+        (None, column),
+        &[
+            QueryClause::Target,
+            QueryClause::Where,
+            QueryClause::Having,
+            QueryClause::OrderBy,
+            QueryClause::GroupBy,
+        ],
+    )
+}
+
+/// `GROUP BY position 3 is not in select list` — the caret goes on the constant
+/// the clause wrote, not on the clause keyword.
+fn group_by_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    labels: &[QueryClause],
+    message: &str,
+) -> Option<usize> {
+    use crabka_pgparser::token::Token;
+
+    let rest = message.strip_suffix(" is not in select list")?;
+    let (clause, wanted) = if let Some(digits) = rest.strip_prefix("GROUP BY position ") {
+        (QueryClause::GroupBy, digits)
+    } else {
+        (
+            QueryClause::OrderBy,
+            rest.strip_prefix("ORDER BY position ")?,
+        )
+    };
+    tokens
+        .iter()
+        .zip(labels)
+        .find(|((token, _), label)| {
+            **label == clause && matches!(token, Token::IntLit(digits) if digits == wanted)
+        })
+        .map(|((_, offset), _)| sql[..*offset].chars().count() + 1)
+}
+
+/// `invalid reference to FROM-clause entry for table "xx1"` — the caret goes on
+/// the qualifier that named the unreachable entry.
+///
+/// `PostgreSQL` also reports this for an *unqualified* reference that resolved
+/// to that entry (`… where f1 = x1` under a `LATERAL`), and the message carries
+/// no column to find it by. Those stay undecorated rather than guessing.
+fn from_clause_entry_position(
+    sql: &str,
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    message: &str,
+) -> Option<usize> {
+    use crabka_pgparser::token::Token;
+
+    let table = message
+        .strip_prefix("invalid reference to FROM-clause entry for table \"")?
+        .strip_suffix('"')?;
+    tokens
+        .windows(2)
+        .find(|pair| {
+            matches!(&pair[0].0, Token::Ident(name) if name == table)
+                && matches!(pair[1].0, Token::Dot)
+        })
+        .map(|pair| sql[..pair[0].1].chars().count() + 1)
+}
+
+/// Add PostgreSQL's caret only when the source proves which range cast failed.
+/// General runtime errors and ambiguous repeated literals remain undecorated.
+///
+/// A multirange is the same shape of failure written against the same shape of
+/// cast — `'{(a,])}'::textmultirange` — and its type name ends in `range` too,
+/// so it needs only its own message prefix.
+fn attach_range_literal_position(sql: &str, error: PgError) -> PgError {
+    use crabka_pgparser::token::Token;
+
+    if error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
+        || !(error.message.starts_with("malformed range literal:")
+            || error.message.starts_with("malformed multirange literal:")
+            || error.message.starts_with("range lower bound must be"))
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let positions: Vec<usize> = tokens
+        .windows(3)
+        .filter_map(|triple| match (&triple[0].0, &triple[1].0, &triple[2].0) {
+            (Token::StringLit(value), Token::TypeCast, Token::Ident(type_name))
+                if type_name.ends_with("range")
+                    && (error.message.starts_with("range lower bound must be")
+                        || error.message.contains(&format!("\"{value}\""))) =>
+            {
+                Some(sql[..triple[0].1].chars().count() + 1)
+            }
+            _ => None,
+        })
+        .collect();
+    match positions.as_slice() {
+        [position] => error.with_position(*position),
+        _ => error,
+    }
+}
+
 impl Session for SqlSession {
+    fn set_database(&mut self, name: &str) {
+        self.database = name.to_string();
+    }
+
+    async fn startup_parameter(&mut self, name: &str, value: &str) -> Result<(), PgError> {
+        if name == "options" {
+            let words = shlex::split(value)
+                .ok_or_else(|| PgError::error("42601", "invalid startup packet options"))?;
+            let mut words = words.iter();
+            while let Some(option) = words.next() {
+                let assignment = if option == "-c" {
+                    words.next().map(String::as_str)
+                } else {
+                    option
+                        .strip_prefix("-c")
+                        .or_else(|| option.strip_prefix("--"))
+                }
+                .ok_or_else(|| {
+                    PgError::error(
+                        "42601",
+                        format!("invalid command-line argument for server process: {option}"),
+                    )
+                })?;
+                let (name, value) = assignment.split_once('=').ok_or_else(|| {
+                    PgError::error(
+                        "42601",
+                        format!("invalid command-line argument for server process: {assignment}"),
+                    )
+                })?;
+                self.guc
+                    .set_session_default(name, value)
+                    .map_err(ExecError::into_pg)?;
+            }
+            // `transaction_isolation` reports `default_transaction_isolation`
+            // outside a block, and the startup packet is one of the places that
+            // default can arrive from.
+            self.sync_transaction_isolation();
+            return Ok(());
+        }
+        self.guc
+            .set_session_default(name, value)
+            .map_err(ExecError::into_pg)?;
+        self.sync_transaction_isolation();
+        Ok(())
+    }
+
     async fn startup(&mut self) -> Result<(), PgError> {
         if !self.login_event_fired {
             self.login_event_fired = true;
@@ -10437,17 +15876,25 @@ impl Session for SqlSession {
         if sql.trim().is_empty() {
             return Ok(vec![QueryResult::Empty]);
         }
+        let _tracked = self.track_statement(sql);
         let statements = self.parse_for_session(sql)?;
         if statements.is_empty() {
             return Ok(vec![QueryResult::Empty]);
         }
         let mut results = Vec::with_capacity(statements.len());
+        let single = statements.len() == 1;
         for stmt in statements {
-            results.push(
-                self.run_one_with_source(&stmt, Some(sql))
-                    .await
-                    .map_err(ExecError::into_pg)?,
-            );
+            match self.run_one_with_source(&stmt, Some(sql)).await {
+                Ok(result) => results.push(result),
+                Err(error) => {
+                    let error = error.into_pg();
+                    return Err(if single {
+                        attach_known_runtime_diagnostics(sql, &stmt, error)
+                    } else {
+                        error
+                    });
+                }
+            }
         }
         Ok(results)
     }
@@ -10458,6 +15905,29 @@ impl Session for SqlSession {
         page_rows: usize,
         sink: &mut S,
     ) -> Result<(), PgError> {
+        match self
+            .simple_query_batch_into(sql, 0, page_rows, sink)
+            .await?
+        {
+            SimpleQueryStop::Done => Ok(()),
+            // Only the wire loop can carry a copy-in: the data arrives as
+            // `CopyData` frames, which no sink delivers. A caller that asked
+            // for the whole string in one call is told so rather than left
+            // waiting for bytes that cannot reach it.
+            SimpleQueryStop::CopyIn { .. } => Err(PgError::error(
+                sqlstate::FEATURE_NOT_SUPPORTED,
+                "COPY FROM STDIN cannot be run through this interface",
+            )),
+        }
+    }
+
+    async fn simple_query_batch_into<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        sql: &str,
+        from_statement: usize,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Result<SimpleQueryStop, PgError> {
         use crabka_pgwire::engine::ResultPage;
 
         if page_rows == 0 {
@@ -10466,13 +15936,45 @@ impl Session for SqlSession {
             ));
         }
         if sql.trim().is_empty() {
-            return sink.send(ResultPage::Empty { result_index: 0 }).await;
+            sink.send(ResultPage::Empty { result_index: 0 }).await?;
+            return Ok(SimpleQueryStop::Done);
         }
+        let _tracked = self.track_statement(sql);
         let statements = self.parse_for_session(sql)?;
         if statements.is_empty() {
-            return sink.send(ResultPage::Empty { result_index: 0 }).await;
+            sink.send(ResultPage::Empty { result_index: 0 }).await?;
+            return Ok(SimpleQueryStop::Done);
         }
-        for (result_index, stmt) in statements.iter().enumerate() {
+        for (result_index, stmt) in statements.iter().enumerate().skip(from_statement) {
+            // A `COPY … FROM STDIN` cannot be run from here at all: its data is
+            // on the wire behind a `CopyInResponse` this loop has no way to
+            // send. Stop and name the statement, so the wire layer can drive
+            // the copy and then resume the string at the next one.
+            if let Some(copy) = copy_from_stdin_stmt(stmt).cloned() {
+                let response = self.copy_in_start(&copy)?;
+                return Ok(SimpleQueryStop::CopyIn {
+                    statement_index: result_index,
+                    response,
+                });
+            }
+            // A `COPY … TO STDOUT` is answered with a copy-out block rather
+            // than rows, and the block is a page like any other, so a query
+            // string may hold one anywhere among its statements. Caught here
+            // rather than in `run_copy_to` because only this loop is on the
+            // wire: a copy inside a SQL function body has no framing to write
+            // into, and `run_copy_to` still refuses it.
+            if let Some(copy) = copy_to_stdout_stmt(stmt).cloned() {
+                let stream = self.copy_out_stream(&copy).await.map_err(|error| {
+                    self.mark_transaction_failed();
+                    error.into_pg()
+                })?;
+                sink.send(ResultPage::CopyOut {
+                    result_index,
+                    stream,
+                })
+                .await?;
+                continue;
+            }
             if let Some(result) = self
                 .stream_eligible_select(stmt, sql, result_index, page_rows, sink)
                 .await
@@ -10480,16 +15982,36 @@ impl Session for SqlSession {
                 // The streaming fast path bypasses `run_one`, so run its
                 // epilogue here — a projected `pg_notify()` must still deliver
                 // at the end of an autocommit statement.
+                //
+                // It bypasses the diagnostics the ordinary path attaches too.
+                // Measured on the 18.4 corpus, closing that gap costs 48 places
+                // and gains none: the failures this cursor reports for a
+                // single-relation select are overwhelmingly ones PostgreSQL
+                // does not report at all, and a caret on an error PostgreSQL
+                // never raises is two more lines of divergence, not fewer.
+                //
+                // The date/time operator family is the one exception, and for
+                // the same measured reason: crabka raises none of those that
+                // PostgreSQL does not, so its caret costs nothing here. See
+                // [`crate::temporal_arith::attach_operator_position`].
                 self.finish_statement(stmt, result.map(|()| QueryResult::Empty))
                     .await
-                    .map_err(ExecError::into_pg)?;
+                    .map_err(ExecError::into_pg)
+                    .map_err(|error| crate::temporal_arith::attach_operator_position(sql, error))?;
                 continue;
             }
-            match self
+            let result = self
                 .run_one_with_source(stmt, Some(sql))
                 .await
-                .map_err(ExecError::into_pg)?
-            {
+                .map_err(ExecError::into_pg)
+                .map_err(|error| {
+                    if statements.len() == 1 {
+                        attach_known_runtime_diagnostics(sql, stmt, error)
+                    } else {
+                        error
+                    }
+                })?;
+            match result {
                 QueryResult::Rows { fields, rows, tag } => {
                     let mut fields = Some(fields);
                     if rows.is_empty() {
@@ -10525,7 +16047,7 @@ impl Session for SqlSession {
                 }
             }
         }
-        Ok(())
+        Ok(SimpleQueryStop::Done)
     }
 
     async fn parse(
@@ -10555,6 +16077,7 @@ impl Session for SqlSession {
                         statement: None,
                         description: description.clone(),
                         sql_source: None,
+                        query_text: sql.into(),
                         param_type_hints: param_types.to_vec(),
                         described_scope: self.resolution_scope(),
                         fixed_result: true,
@@ -10565,7 +16088,8 @@ impl Session for SqlSession {
             self.reject_prepared_participant()
                 .map_err(ExecError::into_pg)?;
             let result = (|| {
-                let statement = parse_single_extended_statement(sql)?;
+                let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+                let statement = parse_single_extended_statement(sql, &type_schemas)?;
                 let shape = self.describe_prepared_shape(&statement, param_types)?;
                 let description = PreparedDescription {
                     fields: shape.fields?,
@@ -10580,6 +16104,7 @@ impl Session for SqlSession {
                     statement: Some(statement),
                     description: description.clone(),
                     sql_source: None,
+                    query_text: sql.into(),
                     param_type_hints: param_types.to_vec(),
                     described_scope: scope,
                     fixed_result: true,
@@ -10658,6 +16183,7 @@ impl Session for SqlSession {
                     description: description.clone(),
                     formats,
                     execution: SqlPortalExecution::NotStarted,
+                    query_text: Arc::clone(&prepared.query_text),
                     fixed_result: prepared.fixed_result,
                 },
             );
@@ -10695,26 +16221,36 @@ impl Session for SqlSession {
     }
 
     async fn execute(&mut self, portal: &str, max_rows: u32) -> Result<ExecuteOutcome, PgError> {
-        let needs_run = matches!(
-            self.portals
-                .get(portal)
-                .ok_or_else(|| PgError::error(
-                    sqlstate::INVALID_CURSOR_NAME,
-                    format!("portal \"{portal}\" does not exist")
-                ))?
-                .execution,
-            SqlPortalExecution::NotStarted
-        );
+        let open = self.portals.get(portal).ok_or_else(|| {
+            PgError::error(
+                sqlstate::INVALID_CURSOR_NAME,
+                format!("portal \"{portal}\" does not exist"),
+            )
+        })?;
+        let needs_run = matches!(open.execution, SqlPortalExecution::NotStarted);
+        let _tracked = needs_run.then(|| {
+            let query_text = Arc::clone(&open.query_text);
+            self.track_statement(&query_text)
+        });
         if needs_run {
             let statement = self.portals.get(portal).and_then(|p| p.statement.clone());
-            if let Some(stmt) = &statement
-                && let Some(copy) = copy_sentinel_stmt(stmt)?
-            {
+            if let Some(copy) = statement.as_ref().and_then(copy_from_stdin_stmt).cloned() {
                 // Extended-protocol COPY FROM STDIN: answer with a
                 // CopyInResponse; the buffered rows arrive via
                 // `copy_in_portal` after CopyDone.
                 let response = self.copy_in_start(&copy)?;
                 return Ok(ExecuteOutcome::CopyIn { response });
+            }
+            if let Some(copy) = statement.as_ref().and_then(copy_to_stdout_stmt).cloned() {
+                // Extended-protocol COPY TO STDOUT. The copy has already run by
+                // the time the outcome exists, so a failure is an ErrorResponse
+                // and no copy-out message is ever framed — which is what
+                // PostgreSQL does with a COPY whose query fails partway.
+                let stream = self
+                    .copy_out_stream(&copy)
+                    .await
+                    .map_err(ExecError::into_pg)?;
+                return Ok(ExecuteOutcome::CopyOut { stream });
             }
             let execution = match statement {
                 None => SqlPortalExecution::Empty,
@@ -10826,24 +16362,71 @@ impl Session for SqlSession {
     }
 
     async fn begin_copy_in(&mut self, sql: &str) -> Result<Option<CopyInResponse>, PgError> {
+        let _tracked = self.track_statement(sql);
         // This is the wire loop's first look at a simple-query string, so a
         // parse failure here is the one the client sees — and PostgreSQL aborts
         // an open transaction block on a syntax error like any other.
-        let parsed = parse_single_copy_statement(sql).inspect_err(|_| {
-            self.mark_transaction_failed();
-        })?;
+        let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+        let statements =
+            crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
+                self.mark_transaction_failed();
+                parse_failure(sql, error)
+            })?;
+        let parsed = single_copy_from_stdin(&statements);
+        self.copy_probe = Some((sql.to_string(), statements));
         let Some(copy) = parsed else {
             return Ok(None);
         };
         self.copy_in_start(&copy).map(Some)
     }
 
+    async fn begin_copy_out(&mut self, sql: &str) -> Result<Option<CopyOutStream>, PgError> {
+        let _tracked = self.track_statement(sql);
+        // `begin_copy_in` ran first on this same string and left its parse
+        // behind; re-parsing only happens if something ever calls this without
+        // it, and a failure there is reported the way that one reports it.
+        let statements = match self.copy_probe.take() {
+            Some((probed, statements)) if probed == sql => statements,
+            _ => {
+                let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+                crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
+                    self.mark_transaction_failed();
+                    parse_failure(sql, error)
+                })?
+            }
+        };
+        let [statement] = statements.as_slice() else {
+            // A COPY TO STDOUT sharing its query string with another statement
+            // is left to the ordinary path, which refuses it: the copy-out
+            // block owns the connection's framing until it is complete, so
+            // there is nowhere for a second result to go.
+            return Ok(None);
+        };
+        let Some(copy) = copy_to_stdout_stmt(statement).cloned() else {
+            return Ok(None);
+        };
+        let result = self.copy_out_stream(&copy).await;
+        if result.is_err() {
+            self.mark_transaction_failed();
+        }
+        result.map(Some).map_err(ExecError::into_pg)
+    }
+
     async fn copy_in(
         &mut self,
         sql: &str,
+        statement_index: usize,
         data: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, PgError> {
-        let Some(copy) = parse_single_copy_statement(sql)? else {
+        let _tracked = self.track_statement(sql);
+        let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+        let statements = crabka_pgparser::parse_with_type_schemas(sql, &type_schemas)
+            .map_err(|error| parse_failure(sql, error))?;
+        let Some(copy) = statements
+            .get(statement_index)
+            .and_then(copy_from_stdin_stmt)
+            .cloned()
+        else {
             return Err(PgError::error(
                 sqlstate::SYNTAX_ERROR,
                 "COPY data received for a non-COPY statement",
@@ -10876,9 +16459,8 @@ impl Session for SqlSession {
             .clone();
         let copy = statement
             .as_ref()
-            .map(copy_sentinel_stmt)
-            .transpose()?
-            .flatten()
+            .and_then(copy_from_stdin_stmt)
+            .cloned()
             .ok_or_else(|| {
                 PgError::error(
                     sqlstate::PROTOCOL_VIOLATION,
@@ -10887,6 +16469,7 @@ impl Session for SqlSession {
             })?;
         self.reject_prepared_participant()
             .map_err(ExecError::into_pg)?;
+        let _tracked = self.track_statement(&format!("COPY portal \"{portal}\""));
         let result = self.run_copy_in(&copy, data).await;
         if result.is_err() {
             self.mark_transaction_failed();
@@ -10976,7 +16559,7 @@ fn row_result_bytes(row: &[Option<crabka_pgwire::engine::Cell>]) -> Result<usize
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        io::Write as _,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicU64, Ordering},
@@ -10988,8 +16571,8 @@ mod tests {
     use crabka_pgwire::engine::{Engine, QueryResult, Session, TxStatus};
 
     use super::{
-        ColumnType, GucState, PgError, RowLockManager, SqlSession, canonical_guc_value,
-        decode_bound_param, guc_default, guc_vartype,
+        ColumnType, GucState, RowLockManager, SqlSession, canonical_guc_value, decode_bound_param,
+        guc_default, guc_vartype,
     };
     use crate::{ExecError, SqlEngine};
 
@@ -11254,6 +16837,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn schema_grants_validate_targets_under_trust_auth() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE SCHEMA app; CREATE ROLE reader; \
+                 GRANT CREATE, USAGE ON SCHEMA public, app TO public, reader; \
+                 REVOKE USAGE ON SCHEMA app FROM public, reader",
+            )
+            .await
+            .expect("schema privilege syntax and targets");
+        assert!(
+            crabka_pgcatalog::has_schema_privilege(
+                &*session.catalog_kv,
+                "app",
+                "reader",
+                "CREATE",
+            )
+            .expect("read schema grant")
+        );
+        assert!(
+            !crabka_pgcatalog::has_schema_privilege(
+                &*session.catalog_kv,
+                "app",
+                "reader",
+                "USAGE",
+            )
+            .expect("read schema revoke")
+        );
+
+        let missing_schema = session
+            .simple_query("GRANT USAGE ON SCHEMA missing TO reader")
+            .await
+            .expect_err("missing schema");
+        assert_eq!(missing_schema.code, "3F000");
+        let missing_role = session
+            .simple_query("GRANT USAGE ON SCHEMA app TO missing")
+            .await
+            .expect_err("missing role");
+        assert_eq!(missing_role.code, "42704");
+    }
+
     struct FailFirstCommitOracle {
         next_start_ts: AtomicU64,
         should_fail_commit: AtomicBool,
@@ -11342,6 +16968,46 @@ mod tests {
         g.reset("timezone").expect("reset");
         g.commit();
         assert_eq!(g.effective("timezone").expect("timezone"), "UTC");
+    }
+
+    /// SP37: the `TimeZone` setting takes a narrower vocabulary than every other
+    /// zone entry point — a plain number of hours, a database name, or a POSIX
+    /// specification, but no abbreviations. A rejection names the parameter the
+    /// way `PostgreSQL` spells it.
+    #[test]
+    fn guc_timezone_accepts_the_settings_own_vocabulary() {
+        use assert2::assert;
+
+        use crate::session::GucState;
+        let mut g = GucState::default();
+        for value in [
+            "America/New_York",
+            "PST8PDT",
+            "-08",
+            "+2",
+            "0",
+            "-1.5",
+            "-08:00",
+            "UTC-2",
+            "CST7CDT,M4.1.0,M10.5.0",
+            "PST8PDT,M3.2.0,M11.1.0",
+        ] {
+            assert!(g.set("TimeZone", value, false).is_ok(), "SET {value}");
+        }
+        // Abbreviations are not part of this parameter's vocabulary, however
+        // freely `AT TIME ZONE` takes them.
+        for value in ["PST", "EDT", "ACST", "Nowhere/Here"] {
+            let error = g
+                .set("TimeZone", value, false)
+                .expect_err("should be rejected")
+                .into_pg();
+            assert!(error.code == "22023", "{value}");
+            assert!(
+                error.message == format!("invalid value for parameter \"TimeZone\": \"{value}\""),
+                "{value}: {}",
+                error.message
+            );
+        }
     }
 
     /// Run `sql`, returning the rows as text (an error becomes its SQLSTATE).
@@ -11439,6 +17105,61 @@ mod tests {
         // Outside a block the rule does not apply at all.
         assert!(sqlstate(&mut s, "SELECT nosuchcolumn").await == "42703");
         assert!(rows_or_sqlstate(&mut s, "SELECT 1").await == Ok(vec![vec!["1".to_string()]]));
+    }
+
+    /// SP37: every `SET TimeZone` spelling the regression suite uses, rendered
+    /// end to end. The rows are `PostgreSQL` 18.4's, and they are what makes the
+    /// two sign conventions visible from SQL: `'-08'` is a number of hours east,
+    /// so it renders `-08`, while `'-13:00'` is a POSIX specification counted
+    /// west, so it renders `+13`.
+    #[tokio::test]
+    async fn setting_the_time_zone_renders_the_offsets_postgresql_renders() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        // value, `OF`, `TZH:TZM`, the rendered timestamptz
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("00:00", "+00", "+00:00", "2014-01-15 12:00:00+00"),
+            ("+02:00", "-02", "-02:00", "2014-01-15 10:00:00-02"),
+            ("-13:00", "+13", "+13:00", "2014-01-16 01:00:00+13"),
+            ("-00:30", "+00:30", "+00:30", "2014-01-15 12:30:00+00:30"),
+            ("00:30", "-00:30", "-00:30", "2014-01-15 11:30:00-00:30"),
+            ("-04:30", "+04:30", "+04:30", "2014-01-15 16:30:00+04:30"),
+            ("04:30", "-04:30", "-04:30", "2014-01-15 07:30:00-04:30"),
+            ("-04:15", "+04:15", "+04:15", "2014-01-15 16:15:00+04:15"),
+            ("04:15", "-04:15", "-04:15", "2014-01-15 07:45:00-04:15"),
+            ("-08", "-08", "-08:00", "2014-01-15 04:00:00-08"),
+            ("+10", "+10", "+10:00", "2014-01-15 22:00:00+10"),
+            ("0", "+00", "+00:00", "2014-01-15 12:00:00+00"),
+            ("-1.5", "-01:30", "-01:30", "2014-01-15 10:30:00-01:30"),
+            ("+2", "+02", "+02:00", "2014-01-15 14:00:00+02"),
+            ("UTC-2", "+02", "+02:00", "2014-01-15 14:00:00+02"),
+            (
+                "CST7CDT,M4.1.0,M10.5.0",
+                "-07",
+                "-07:00",
+                "2014-01-15 05:00:00-07",
+            ),
+        ];
+        for &(value, of, tzh_tzm, rendered) in cases {
+            assert!(
+                sqlstate(&mut s, &format!("SET timezone = '{value}'")).await == "00000",
+                "SET timezone = '{value}'"
+            );
+            let row = rows_or_sqlstate(
+                &mut s,
+                "SELECT to_char(timestamptz '2014-01-15 12:00:00+00', 'OF'), \
+                 to_char(timestamptz '2014-01-15 12:00:00+00', 'TZH:TZM'), \
+                 timestamptz '2014-01-15 12:00:00+00'",
+            )
+            .await;
+            let expected = Ok(vec![vec![
+                of.to_string(),
+                tzh_tzm.to_string(),
+                rendered.to_string(),
+            ]]);
+            assert!(row == expected, "timezone = '{value}': {row:?}");
+        }
     }
 
     #[tokio::test]
@@ -11636,8 +17357,7 @@ mod tests {
             .simple_query("SELECT pg_advisory_xact_lock(42)")
             .await
             .expect("advisory lock");
-        let xid = session.local_xid().expect("locking read allocated xid");
-        assert!(!session.lockmgr.held_locks(xid).is_empty());
+        assert!(!session.lockmgr.held_locks_as(session.lock_owner).is_empty());
         assert!(
             session
                 .session_locks
@@ -11657,7 +17377,7 @@ mod tests {
             .simple_query("ROLLBACK TO lock_boundary")
             .await
             .expect("rollback to");
-        assert!(session.lockmgr.held_locks(xid).is_empty());
+        assert!(session.lockmgr.held_locks_as(session.lock_owner).is_empty());
         assert!(
             session
                 .session_locks
@@ -11929,6 +17649,7 @@ mod tests {
             ("seq_page_cost", "1.5", "1.5"),
             ("bytea_output", "'escape'", "escape"),
             ("max_parallel_workers_per_gather", "0", "0"),
+            ("allow_in_place_tablespaces", "true", "on"),
             ("crabka_test.option", "'value'", "value"),
         ];
         for (name, value, shown) in cases {
@@ -12009,6 +17730,7 @@ mod tests {
             "RESET SESSION AUTHORIZATION",
             "ALTER SYSTEM SET work_mem = '8MB'",
             "ALTER SYSTEM RESET ALL",
+            "LOAD 'regress'",
             "DISCARD PLANS",
             "DISCARD SEQUENCES",
             "DISCARD TEMP",
@@ -12024,9 +17746,51 @@ mod tests {
         ] {
             assert!(sqlstate(&mut s, sql).await == "0A000", "{sql}");
         }
+        let error = s
+            .simple_query("LOAD 'nosuchfile'")
+            .await
+            .expect_err("missing shared object");
+        assert!(error.code == "58P01", "{error:?}");
+        assert!(
+            error.message == "could not access file \"nosuchfile\": No such file or directory",
+            "{error:?}"
+        );
+        let executable = std::env::current_exe().expect("current executable");
+        let sql = format!("LOAD '{}'", executable.display());
+        assert!(sqlstate(&mut s, &sql).await == "0A000", "{sql}");
+        let error = s
+            .simple_query("LOAD '/definitely/missing/regress.so'")
+            .await
+            .expect_err("an unconfigured regress basename is not trusted");
+        assert!(error.code == "58P01", "{error:?}");
         s.simple_query("BEGIN").await.expect("begin");
         assert!(sqlstate(&mut s, "DISCARD ALL").await == "25001");
         s.simple_query("ROLLBACK").await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn security_label_refuses_before_resolving_its_target() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, expected) in [
+            (
+                "SECURITY LABEL ON TABLE no_such_security_label_table IS 'classified'",
+                "no security label providers have been loaded",
+            ),
+            (
+                "SECURITY LABEL FOR 'dummy' ON ROLE no_such_security_label_role IS NULL",
+                "security label provider \"dummy\" is not loaded",
+            ),
+        ] {
+            let error = session
+                .simple_query(sql)
+                .await
+                .expect_err("no security label provider is loaded");
+            assert!(error.code == "22023", "{sql}: {error:?}");
+            assert!(error.message == expected, "{sql}: {error:?}");
+        }
     }
 
     /// Extract the single text cell of a one-row, one-column result.
@@ -12110,20 +17874,27 @@ mod tests {
         }
     }
 
-    async fn wait_until_blocked(
-        query: &mut (impl std::future::Future<Output = Result<Vec<QueryResult>, PgError>> + Unpin),
+    async fn wait_until_blocked<F>(
+        query: &mut F,
         lockmgr: &RowLockManager,
-        holder: u64,
-    ) {
-        loop {
-            if lockmgr.waiter_queue_len(holder) != 0 {
-                return;
+        holder: crate::lockmgr::LockOwner,
+    ) where
+        F: std::future::Future + Unpin,
+        F::Output: std::fmt::Debug,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if lockmgr.waiter_queue_len_as(holder) != 0 {
+                    return;
+                }
+                tokio::select! {
+                    result = &mut *query => panic!("query completed before it blocked: {result:?}"),
+                    () = tokio::task::yield_now() => {}
+                }
             }
-            tokio::select! {
-                result = &mut *query => panic!("query completed before it blocked: {result:?}"),
-                () = tokio::task::yield_now() => {}
-            }
-        }
+        })
+        .await
+        .expect("query did not block on the held row lock");
     }
 
     #[tokio::test]
@@ -12135,7 +17906,7 @@ mod tests {
             .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
             .await
             .expect("hold row lock");
-        let holder = blocker.local_xid().expect("locking select xid");
+        let holder = blocker.lock_owner;
 
         let mut target = engine.connect();
         let lockmgr = Arc::clone(&target.lockmgr);
@@ -12205,7 +17976,7 @@ mod tests {
             .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
             .await
             .expect("hold row lock");
-        let holder = blocker.local_xid().expect("locking select xid");
+        let holder = blocker.lock_owner;
 
         let mut target = engine.connect();
         let lockmgr = Arc::clone(&target.lockmgr);
@@ -12243,7 +18014,7 @@ mod tests {
             .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
             .await
             .expect("hold row lock");
-        let holder = blocker.local_xid().expect("locking select xid");
+        let holder = blocker.lock_owner;
 
         let mut target = engine.connect();
         target
@@ -12260,15 +18031,7 @@ mod tests {
             .expect("bind");
         let lockmgr = Arc::clone(&target.lockmgr);
         let mut execute = Box::pin(target.execute("cancel", 0));
-        loop {
-            if lockmgr.waiter_queue_len(holder) != 0 {
-                break;
-            }
-            tokio::select! {
-                result = &mut execute => panic!("execute completed before it blocked: {result:?}"),
-                () = tokio::task::yield_now() => {}
-            }
-        }
+        wait_until_blocked(&mut execute, lockmgr.as_ref(), holder).await;
         drop(execute);
 
         target.cancel_current_query().await;
@@ -12641,6 +18404,7 @@ mod tests {
         session
             .copy_in(
                 "COPY t (id, note) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"1\thello\\nworld\n2\t\\N\n")],
             )
             .await
@@ -12661,6 +18425,356 @@ mod tests {
         assert!(rows[1][2].is_none());
     }
 
+    /// A simple-query string may carry a `COPY … FROM STDIN` anywhere among its
+    /// statements, and more than one. `simple_query_batch_into` runs up to each
+    /// copy and names its index; `copy_in` completes the copy at that index,
+    /// and the next call resumes the string after it. Every statement runs
+    /// exactly once, and both copies land their own row.
+    ///
+    /// This is `copyselect`'s
+    /// `select 0\; copy test3 from stdin\; copy test3 from stdin\; select 1`.
+    #[tokio::test]
+    async fn a_simple_query_stops_at_each_copy_and_resumes_after_it() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{CollectingResultSink, SimpleQueryStop};
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE test3 (c int)")
+            .await
+            .expect("create");
+
+        let sql = "select 0; copy test3 from stdin; copy test3 from stdin; select 1";
+        let mut stops = Vec::new();
+        let mut tags = Vec::new();
+        let mut from_statement = 0;
+        loop {
+            let mut sink = CollectingResultSink::default();
+            let stop = session
+                .simple_query_batch_into(sql, from_statement, 16, &mut sink)
+                .await
+                .expect("batch runs");
+            let SimpleQueryStop::CopyIn {
+                statement_index, ..
+            } = stop
+            else {
+                break;
+            };
+            stops.push(statement_index);
+            let row = format!("{}\n", stops.len());
+            let result = session
+                .copy_in(sql, statement_index, vec![bytes::Bytes::from(row)])
+                .await
+                .expect("copy completes");
+            let QueryResult::Command { tag } = result else {
+                panic!("a copy answers with a command tag");
+            };
+            tags.push(tag);
+            from_statement = statement_index + 1;
+        }
+
+        assert!(stops == vec![1, 2]);
+        assert!(tags == vec!["COPY 1".to_string(), "COPY 1".to_string()]);
+
+        let rows = session
+            .simple_query("SELECT c FROM test3 ORDER BY c")
+            .await
+            .expect("select");
+        let QueryResult::Rows { rows, .. } = &rows[0] else {
+            panic!("expected rows");
+        };
+        let values: Vec<&str> = rows
+            .iter()
+            .map(|row| row[0].as_ref().expect("c").text.as_ref())
+            .map(|text| std::str::from_utf8(text).expect("utf-8"))
+            .collect();
+        assert!(values == vec!["1", "2"]);
+    }
+
+    /// The copy at the far end of a string is completed with its own index, and
+    /// a `copy_in` naming a statement that is not a copy is refused rather than
+    /// applied to whichever copy the string happens to hold.
+    #[tokio::test]
+    async fn copy_in_names_the_statement_it_completes() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE t (c int)")
+            .await
+            .expect("create");
+
+        let sql = "select 0; copy t from stdin";
+        let refused = session
+            .copy_in(sql, 0, vec![bytes::Bytes::from_static(b"1\n")])
+            .await
+            .expect_err("statement 0 is not a copy");
+        assert!(refused.message == "COPY data received for a non-COPY statement");
+
+        session
+            .copy_in(sql, 1, vec![bytes::Bytes::from_static(b"1\n")])
+            .await
+            .expect("statement 1 is the copy");
+        let out_of_range = session
+            .copy_in(sql, 9, vec![bytes::Bytes::from_static(b"1\n")])
+            .await
+            .expect_err("there is no statement 9");
+        assert!(out_of_range.message == "COPY data received for a non-COPY statement");
+    }
+
+    /// `COPY … (FREEZE)` is refused for the two kinds that hold no rows of
+    /// their own — and refused *late*, after copy-in mode has been announced,
+    /// which is where `PostgreSQL` refuses it and what keeps the client's data
+    /// and terminator from being read back as SQL.
+    #[tokio::test]
+    async fn copy_freeze_is_refused_late_for_a_relation_with_no_rows_of_its_own() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for ddl in [
+            "CREATE TABLE p (a int) PARTITION BY RANGE (a)",
+            "CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10)",
+            "CREATE TABLE plain (a int)",
+            "CREATE FOREIGN DATA WRAPPER w",
+            "CREATE SERVER srv FOREIGN DATA WRAPPER w",
+            "CREATE FOREIGN TABLE f (a int) SERVER srv",
+        ] {
+            session.simple_query(ddl).await.expect("ddl");
+        }
+
+        for (relation, kind) in [("p", "partitioned table"), ("f", "foreign table")] {
+            let sql = format!("COPY {relation} FROM STDIN (FREEZE)");
+            let statement = crabka_pgparser::parse(&sql).expect("parse");
+            let copy = statement
+                .first()
+                .and_then(crate::session::copy_from_stdin_stmt)
+                .expect("copy statement")
+                .clone();
+            // Copy-in mode is announced: the refusal is not a pre-check.
+            session.copy_in_start(&copy).expect("copy-in announced");
+            let refused = session
+                .copy_in(&sql, 0, vec![bytes::Bytes::from_static(b"1\n")])
+                .await
+                .expect_err("freeze refused once the data is in");
+            assert!(refused.message == format!("cannot perform COPY FREEZE on a {kind}"));
+        }
+
+        // An ordinary table still takes the option, which is why it is accepted
+        // and ignored rather than refused outright.
+        session
+            .copy_in(
+                "COPY plain FROM STDIN (FREEZE)",
+                0,
+                vec![bytes::Bytes::from_static(b"1\n")],
+            )
+            .await
+            .expect("freeze on an ordinary table is accepted");
+    }
+
+    /// `COPY <matview> TO` has its own wording for an unpopulated relation, and
+    /// does not fall through to the one a `SELECT` from it reports.
+    #[tokio::test]
+    async fn copy_to_words_an_unpopulated_materialized_view_for_itself() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE MATERIALIZED VIEW mv AS SELECT 1 AS id WITH NO DATA")
+            .await
+            .expect("create");
+
+        let read = session
+            .simple_query("SELECT id FROM mv")
+            .await
+            .expect_err("unpopulated");
+        assert!(read.message == "materialized view \"mv\" has not been populated");
+
+        // Through the server-side file form, which shares `copy_out_source`
+        // with the `STDOUT` one the wire path drives.
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let to_file = format!("COPY mv (id) TO '{}'", file.path().display());
+        let copied = session
+            .simple_query(&to_file)
+            .await
+            .expect_err("unpopulated");
+        assert!(copied.message == "cannot copy from unpopulated materialized view \"mv\"");
+        assert!(
+            copied
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.hint.as_deref())
+                == Some("Use the REFRESH MATERIALIZED VIEW command.")
+        );
+
+        session
+            .simple_query("REFRESH MATERIALIZED VIEW mv")
+            .await
+            .expect("refresh");
+        session
+            .simple_query(&to_file)
+            .await
+            .expect("populated copies");
+    }
+
+    /// Storing a value runs the target type's *input* function, so an ambiguous
+    /// all-numeric date literal is read under the session's `DateStyle` field
+    /// order — the same reading the literal gets when it is written as a typed
+    /// constant. `INSERT`, `UPDATE`, `COPY` and the written cast have to agree.
+    /// Every expectation is PostgreSQL 18.4's.
+    #[tokio::test]
+    async fn every_store_path_reads_the_session_date_order() {
+        use assert2::assert;
+        /// `(DateStyle, the ambiguous literal that spells 1997-02-10 under it)`.
+        const ORDERS: &[(&str, &str)] = &[
+            ("ISO, YMD", "97/02/10"),
+            ("ISO, DMY", "10/02/97"),
+            ("ISO, MDY", "02/10/97"),
+        ];
+        for (style, date) in ORDERS {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            for setup in [
+                format!("SET DateStyle TO '{style}'"),
+                "CREATE TABLE w (t timestamp, d date)".to_string(),
+                // The written cast is the control: it already honoured the order.
+                format!("INSERT INTO w VALUES (timestamp '{date} 17:32:01', date '{date}')"),
+                format!("INSERT INTO w VALUES ('{date} 17:32:01', '{date}')"),
+                "INSERT INTO w VALUES (NULL, NULL)".to_string(),
+                format!("UPDATE w SET t = '{date} 17:32:01', d = '{date}' WHERE t IS NULL"),
+            ] {
+                session
+                    .simple_query(&setup)
+                    .await
+                    .unwrap_or_else(|error| panic!("{style}: {setup}: {error:?}"));
+            }
+            session
+                .copy_in(
+                    "COPY w (t, d) FROM STDIN",
+                    0,
+                    vec![bytes::Bytes::from(format!("{date} 17:32:01\t{date}\n"))],
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{style}: COPY: {error:?}"));
+
+            let stored = rows_or_sqlstate(
+                &mut session,
+                "SELECT DISTINCT t::text || ' / ' || d::text FROM w",
+            )
+            .await
+            .unwrap_or_else(|code| panic!("{style}: SELECT: {code}"));
+            assert!(
+                stored == vec![vec!["1997-02-10 17:32:01 / 1997-02-10".to_string()]],
+                "{style}"
+            );
+        }
+    }
+
+    /// The order is not merely consulted, it is decisive: `31/01/97` is a date
+    /// under `DMY` and out of range under `MDY`, and a store has to say so
+    /// (22008) rather than quietly reading the fields the other way round.
+    #[tokio::test]
+    async fn a_store_refuses_a_literal_the_session_date_order_makes_impossible() {
+        use assert2::assert;
+        for (style, expected) in [("ISO, DMY", "00000"), ("ISO, MDY", "22008")] {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            session
+                .simple_query(&format!(
+                    "SET DateStyle TO '{style}'; CREATE TABLE z (d date)"
+                ))
+                .await
+                .expect("setup");
+            assert!(
+                sqlstate(&mut session, "INSERT INTO z VALUES ('31/01/97')").await == expected,
+                "INSERT under {style}"
+            );
+            let copied = session
+                .copy_in(
+                    "COPY z (d) FROM STDIN",
+                    0,
+                    vec![bytes::Bytes::from_static(b"31/01/97\n")],
+                )
+                .await
+                .err()
+                .map_or_else(|| "00000".to_string(), |error| error.code);
+            assert!(copied == expected, "COPY under {style}");
+        }
+    }
+
+    /// A `COPY` field runs the column type's input function under *assignment*
+    /// rules, so an over-long `varchar(n)` is 22001 — PostgreSQL truncates only
+    /// for an explicit cast. Nothing here is a date: the routing this shares
+    /// with the `DateStyle` fix is every column type's store path.
+    #[tokio::test]
+    async fn copy_from_stdin_applies_assignment_rules_to_bounded_strings() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE b (v varchar(3), c char(3))")
+            .await
+            .expect("create");
+        for (field, expected) in [
+            ("abcd\tabc", "22001"),
+            ("abc\tabcd", "22001"),
+            // Trailing blanks are discarded rather than refused, which is the
+            // one over-long value assignment accepts.
+            ("abc  \tabc  ", "00000"),
+            ("abc\tabc", "00000"),
+        ] {
+            let code = session
+                .copy_in(
+                    "COPY b (v, c) FROM STDIN",
+                    0,
+                    vec![bytes::Bytes::from(format!("{field}\n"))],
+                )
+                .await
+                .err()
+                .map_or_else(|| "00000".to_string(), |error| error.code);
+            assert!(code == expected, "{field:?}");
+        }
+        let stored = rows_or_sqlstate(&mut session, "SELECT v, c FROM b ORDER BY v")
+            .await
+            .expect("select");
+        assert!(
+            stored == vec![vec!["abc".to_string(), "abc".to_string()]; 2],
+            "{stored:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_from_file_reuses_the_text_import_path() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE t (id int4, note text)")
+            .await
+            .expect("create");
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(b"1\tone\n2\t\\N\n").expect("write rows");
+
+        session
+            .simple_query(&format!("COPY t FROM '{}'", file.path().display()))
+            .await
+            .expect("copy file");
+
+        let results = session
+            .simple_query("SELECT id, note FROM t ORDER BY id")
+            .await
+            .expect("select");
+        let QueryResult::Rows { rows, .. } = &results[0] else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].as_ref().expect("id").text, "1");
+        assert_eq!(rows[0][1].as_ref().expect("note").text, "one");
+        assert!(rows[1][1].is_none());
+    }
+
     #[tokio::test]
     async fn copy_from_stdin_not_null_failure_inserts_no_rows() {
         let engine = SqlEngine::new();
@@ -12673,6 +18787,7 @@ mod tests {
         let err = session
             .copy_in(
                 "COPY t (id, name) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"1\tok\n\\N\tbad\n")],
             )
             .await
@@ -12711,6 +18826,7 @@ mod tests {
         session
             .copy_in(
                 "COPY hc (id, value) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from(copy_rows)],
             )
             .await
@@ -12739,6 +18855,7 @@ mod tests {
         let error = session
             .copy_in(
                 "COPY hc (id, value) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"100\tok\n\\N\tbad\n")],
             )
             .await
@@ -12768,6 +18885,7 @@ mod tests {
         let existing_err = session
             .copy_in(
                 "COPY t (id, name) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"2\tnew\n3\texisting\n")],
             )
             .await
@@ -12776,6 +18894,7 @@ mod tests {
         let input_err = session
             .copy_in(
                 "COPY t (id, name) FROM STDIN",
+                0,
                 vec![bytes::Bytes::from_static(b"4\tdup\n5\tdup\n")],
             )
             .await
@@ -12888,6 +19007,104 @@ mod tests {
             .expect("describe bare parameter select");
 
         assert!(parameter_types == vec![crabka_pgtypes::oids::TEXT]);
+    }
+
+    #[tokio::test]
+    async fn extended_describe_infers_jsonpath_operator_and_function_parameters() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, expected) in [
+            (
+                "SELECT $1 @? $2",
+                vec![crabka_pgtypes::oids::JSONB, crabka_pgtypes::oids::JSONPATH],
+            ),
+            (
+                "SELECT $1 @@ $2",
+                vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::TEXT],
+            ),
+            (
+                "SELECT $1::jsonb @@ $2",
+                vec![crabka_pgtypes::oids::JSONB, crabka_pgtypes::oids::JSONPATH],
+            ),
+            (
+                "SELECT $1 @@ $2::jsonpath",
+                vec![crabka_pgtypes::oids::JSONB, crabka_pgtypes::oids::JSONPATH],
+            ),
+            (
+                "SELECT $1::tsquery @@ $2",
+                vec![
+                    crabka_pgtypes::oids::TSQUERY,
+                    crabka_pgtypes::oids::TSVECTOR,
+                ],
+            ),
+            (
+                "SELECT $1 @@ $2::tsvector",
+                vec![
+                    crabka_pgtypes::oids::TSQUERY,
+                    crabka_pgtypes::oids::TSVECTOR,
+                ],
+            ),
+            (
+                "SELECT $1::text @@ $2",
+                vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::TEXT],
+            ),
+        ] {
+            let (_, parameter_types) = session
+                .test_describe_prepared(sql, &[])
+                .await
+                .expect("describe jsonpath operator");
+            assert!(parameter_types == expected, "{sql}");
+        }
+        for (sql, expected) in [
+            (
+                "SELECT $1 @@ 'a'::tsquery",
+                vec![crabka_pgtypes::oids::TEXT],
+            ),
+            (
+                "SELECT 'a'::tsvector @@ $1",
+                vec![crabka_pgtypes::oids::TSQUERY],
+            ),
+        ] {
+            let (_, parameter_types) = session
+                .test_describe_prepared(sql, &[])
+                .await
+                .expect("describe text-search operator");
+            assert!(parameter_types == expected, "{sql}");
+        }
+
+        let expected = vec![
+            crabka_pgtypes::oids::JSONB,
+            crabka_pgtypes::oids::JSONPATH,
+            crabka_pgtypes::oids::JSONB,
+            crabka_pgtypes::oids::BOOL,
+        ];
+        for name in [
+            "jsonb_path_exists",
+            "pg_catalog.jsonb_path_exists",
+            "jsonb_path_exists_tz",
+            "jsonb_path_match",
+            "jsonb_path_match_tz",
+            "jsonb_path_query_array",
+            "jsonb_path_query_array_tz",
+            "jsonb_path_query_first",
+            "jsonb_path_query_first_tz",
+        ] {
+            let sql = format!("SELECT {name}($1, $2, $3, $4)");
+            let (_, parameter_types) = session
+                .test_describe_prepared(&sql, &[])
+                .await
+                .expect("describe scalar jsonpath function");
+            assert!(parameter_types == expected, "{sql}");
+        }
+        for name in ["jsonb_path_query", "jsonb_path_query_tz"] {
+            let sql = format!("SELECT * FROM {name}($1, $2, $3, $4)");
+            let (_, parameter_types) = session
+                .test_describe_prepared(&sql, &[])
+                .await
+                .expect("describe set-returning jsonpath function");
+            assert!(parameter_types == expected, "{sql}");
+        }
     }
 
     #[tokio::test]
@@ -13454,6 +19671,162 @@ mod tests {
         assert_eq!(bad.code, "22023");
     }
 
+    /// Every expected string was read off `PostgreSQL` 18.4 under
+    /// `DateStyle = 'Postgres, MDY'`, the setting `pg_regress` runs with.
+    ///
+    /// The legacy IANA link names (`PST8PDT`, `US/Pacific`, `Navajo`, …) are the
+    /// point of the table: `PostgreSQL` carries them because it ships its own
+    /// copy of the zone database, and gres matches only because it resolves
+    /// through the bundled copy rather than the host's `/usr/share/zoneinfo`,
+    /// which many distributions trim.
+    #[tokio::test]
+    async fn timezone_setting_accepts_and_renders_the_postgresql_zone_vocabulary() {
+        let cases: &[(&str, &str, &str)] = &[
+            // zone, winter render, summer render
+            (
+                "UTC",
+                "Thu Jan 01 00:00:00 1970 UTC",
+                "Sun Jul 01 12:00:00 2001 UTC",
+            ),
+            (
+                "America/Los_Angeles",
+                "Wed Dec 31 16:00:00 1969 PST",
+                "Sun Jul 01 05:00:00 2001 PDT",
+            ),
+            (
+                "Europe/Rome",
+                "Thu Jan 01 01:00:00 1970 CET",
+                "Sun Jul 01 14:00:00 2001 CEST",
+            ),
+            (
+                "EST",
+                "Wed Dec 31 19:00:00 1969 EST",
+                "Sun Jul 01 07:00:00 2001 EST",
+            ),
+            (
+                "PST8PDT",
+                "Wed Dec 31 16:00:00 1969 PST",
+                "Sun Jul 01 05:00:00 2001 PDT",
+            ),
+            (
+                "EST5EDT",
+                "Wed Dec 31 19:00:00 1969 EST",
+                "Sun Jul 01 08:00:00 2001 EDT",
+            ),
+            (
+                "CST6CDT",
+                "Wed Dec 31 18:00:00 1969 CST",
+                "Sun Jul 01 07:00:00 2001 CDT",
+            ),
+            (
+                "MST7MDT",
+                "Wed Dec 31 17:00:00 1969 MST",
+                "Sun Jul 01 06:00:00 2001 MDT",
+            ),
+            (
+                "US/Pacific",
+                "Wed Dec 31 16:00:00 1969 PST",
+                "Sun Jul 01 05:00:00 2001 PDT",
+            ),
+            (
+                "US/Eastern",
+                "Wed Dec 31 19:00:00 1969 EST",
+                "Sun Jul 01 08:00:00 2001 EDT",
+            ),
+            (
+                "Navajo",
+                "Wed Dec 31 17:00:00 1969 MST",
+                "Sun Jul 01 06:00:00 2001 MDT",
+            ),
+            (
+                "Japan",
+                "Thu Jan 01 09:00:00 1970 JST",
+                "Sun Jul 01 21:00:00 2001 JST",
+            ),
+            (
+                "GB",
+                "Thu Jan 01 01:00:00 1970 BST",
+                "Sun Jul 01 13:00:00 2001 BST",
+            ),
+        ];
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("SET DateStyle = 'Postgres, MDY'")
+            .await
+            .expect("datestyle");
+
+        for &(zone, winter, summer) in cases {
+            s.simple_query(&format!("SET timezone = '{zone}'"))
+                .await
+                .unwrap_or_else(|e| panic!("SET timezone = '{zone}': {e:?}"));
+            let shown = s.simple_query("SHOW timezone").await.expect("show");
+            assert!(single_text(&shown) == zone, "SHOW timezone for {zone}");
+
+            let rendered = s
+                .simple_query("SELECT timestamptz '1970-01-01 00:00:00+00'")
+                .await
+                .expect("winter render");
+            assert!(single_text(&rendered) == winter, "winter render for {zone}");
+
+            let rendered = s
+                .simple_query("SELECT timestamptz '2001-07-01 12:00:00+00'")
+                .await
+                .expect("summer render");
+            assert!(single_text(&rendered) == summer, "summer render for {zone}");
+        }
+    }
+
+    /// A zone-bearing literal reaches the decoder lowercased, so the legacy link
+    /// names have to resolve case-insensitively there too — and a name the
+    /// bundled database does not carry stays an error.
+    #[tokio::test]
+    async fn zone_bearing_literals_resolve_legacy_link_names() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("SET DateStyle = 'Postgres, MDY'")
+            .await
+            .expect("datestyle");
+        s.simple_query("SET timezone = 'UTC'")
+            .await
+            .expect("timezone");
+
+        // Every expectation is `PostgreSQL` 18.4's rendering of the same literal.
+        for (literal, expected) in [
+            ("PST8PDT", "Sun Jul 01 19:00:00 2001 UTC"),
+            ("us/pacific", "Sun Jul 01 19:00:00 2001 UTC"),
+            ("America/Los_Angeles", "Sun Jul 01 19:00:00 2001 UTC"),
+            ("Navajo", "Sun Jul 01 18:00:00 2001 UTC"),
+            ("navajo", "Sun Jul 01 18:00:00 2001 UTC"),
+            ("Japan", "Sun Jul 01 03:00:00 2001 UTC"),
+            ("Turkey", "Sun Jul 01 09:00:00 2001 UTC"),
+            // A default-set abbreviation still wins over the same-spelled zone.
+            ("EST", "Sun Jul 01 17:00:00 2001 UTC"),
+        ] {
+            let rendered = s
+                .simple_query(&format!(
+                    "SELECT timestamptz '2001-07-01 12:00:00 {literal}'"
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("literal in {literal}: {e:?}"));
+            assert!(single_text(&rendered) == expected, "literal in {literal}");
+        }
+
+        // A punctuated name the database does not carry is 22023; an unknown
+        // bare word never became a zone at all, so it stays 22007. Both codes
+        // are PostgreSQL 18.4's.
+        let bad = s
+            .simple_query("SELECT timestamptz '2001-07-01 12:00:00 Not/AZone'")
+            .await
+            .expect_err("unknown punctuated zone");
+        assert!(bad.code == "22023");
+        let bad = s
+            .simple_query("SELECT timestamptz '2001-07-01 12:00:00 Navajoo'")
+            .await
+            .expect_err("unknown bare word");
+        assert!(bad.code == "22007");
+    }
+
     #[tokio::test]
     async fn common_gucs_support_preamble_show_reset_and_discard() {
         let engine = SqlEngine::new();
@@ -13641,9 +20014,9 @@ mod tests {
         gucs.commit();
         assert_eq!(gucs.effective("application_name").unwrap(), "session-two");
 
-        let mut source = BTreeMap::new();
-        source.insert("application_name".to_string(), "from-source".to_string());
-        let mut gucs = GucState::with_source_values(source).unwrap();
+        let mut gucs = GucState::default();
+        gucs.set_session_default("application_name", "from-source")
+            .unwrap();
         gucs.set("application_name", "changed", false).unwrap();
         gucs.commit();
         gucs.reset("application_name").unwrap();
@@ -13668,14 +20041,32 @@ mod tests {
         assert!(gucs.set("statement_timeout", "-1", false).is_err());
     }
 
+    /// Every expectation is PostgreSQL 18.4's, read off a live server. The
+    /// `German` rows are the interesting ones: naming that style also picks the
+    /// day-first order up, unless the very same setting already named an order.
     #[test]
     fn datestyle_partial_assignment_inherits_effective_components() {
-        let mut gucs = GucState::default();
-        gucs.set("DateStyle", "SQL, DMY", false).unwrap();
-        gucs.set("DateStyle", "MDY", false).unwrap();
-        assert_eq!(gucs.effective("DateStyle").unwrap(), "SQL, MDY");
-        gucs.set("DateStyle", "German", false).unwrap();
-        assert_eq!(gucs.effective("DateStyle").unwrap(), "German, MDY");
+        use assert2::assert;
+        let assignments: &[(&[&str], &str)] = &[
+            (&["SQL, DMY", "MDY"], "SQL, MDY"),
+            (&["MDY", "German"], "German, DMY"),
+            (&["MDY", "German, MDY"], "German, MDY"),
+            (&["MDY", "MDY, German"], "German, MDY"),
+            (&["German", "SQL"], "SQL, DMY"),
+            (&["German", "ISO, MDY"], "ISO, MDY"),
+            (&["YMD", "Postgres"], "Postgres, YMD"),
+        ];
+        for (sequence, expected) in assignments {
+            let mut gucs = GucState::default();
+            for assignment in *sequence {
+                gucs.set("DateStyle", assignment, false)
+                    .unwrap_or_else(|_| panic!("PostgreSQL accepts {assignment}"));
+            }
+            assert!(
+                gucs.effective("DateStyle").unwrap() == *expected,
+                "{sequence:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -13698,6 +20089,191 @@ mod tests {
             single_text(&session.simple_query("SHOW DateStyle").await.unwrap()),
             "SQL, YMD"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_packet_gucs_apply_before_queries() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .startup_parameter("datestyle", "Postgres, MDY")
+            .await
+            .unwrap();
+        session
+            .startup_parameter("options", "-c intervalstyle=postgres_verbose")
+            .await
+            .unwrap();
+        session
+            .simple_query("SELECT 1 / 0")
+            .await
+            .expect_err("statement error");
+        assert_eq!(
+            single_text(&session.simple_query("SHOW DateStyle").await.unwrap()),
+            "Postgres, MDY"
+        );
+        assert_eq!(
+            single_text(&session.simple_query("SHOW IntervalStyle").await.unwrap()),
+            "postgres_verbose"
+        );
+    }
+
+    /// A startup packet's parameters, and the `-c` assignments inside its
+    /// `options`, are the session's *defaults* — not assignments layered on top
+    /// of the compiled-in ones. Every way back to a default has to land on them:
+    /// `RESET`, `SET … TO DEFAULT`, `RESET ALL`, `DISCARD ALL`, and a rolled-back
+    /// `SET`. Verified against PostgreSQL 18.4 driven with `PGDATESTYLE`/`PGTZ`/
+    /// `PGOPTIONS`, which is exactly how `pg_regress` starts every session.
+    ///
+    /// The parameters span the registry's vartypes deliberately: the rule is a
+    /// property of the GUC machinery, not of the date parameters that exposed it.
+    #[tokio::test]
+    async fn startup_packet_gucs_become_the_session_default() {
+        /// `(parameter, startup value, an unrelated value to assign over it)`.
+        const PARAMETERS: &[(&str, &str, &str)] = &[
+            ("DateStyle", "Postgres, MDY", "ISO, YMD"),
+            ("TimeZone", "America/Los_Angeles", "UTC"),
+            ("IntervalStyle", "postgres_verbose", "sql_standard"),
+            ("application_name", "startup-name", "assigned-name"),
+            ("search_path", "startup_schema", "assigned_schema"),
+            ("work_mem", "16MB", "8MB"),
+            ("extra_float_digits", "3", "0"),
+            ("enable_seqscan", "off", "on"),
+            ("lc_time", "startup_locale", "assigned_locale"),
+        ];
+
+        let engine = SqlEngine::new();
+        for (parameter, startup, assigned) in PARAMETERS {
+            let mut session = engine.connect();
+            session
+                .startup_parameter(parameter, startup)
+                .await
+                .unwrap_or_else(|error| panic!("{parameter} startup parameter: {error:?}"));
+            assert!(
+                shown_setting(&mut session, parameter).await == *startup,
+                "{parameter} at startup"
+            );
+
+            for restore in ["RESET", "SET"] {
+                let restore = if restore == "RESET" {
+                    format!("RESET {parameter}")
+                } else {
+                    format!("SET {parameter} TO DEFAULT")
+                };
+                session
+                    .simple_query(&format!("SET {parameter} TO '{assigned}'"))
+                    .await
+                    .unwrap_or_else(|error| panic!("{parameter} = {assigned}: {error:?}"));
+                assert!(
+                    shown_setting(&mut session, parameter).await == *assigned,
+                    "{parameter} assigned"
+                );
+                session.simple_query(&restore).await.unwrap();
+                assert!(
+                    shown_setting(&mut session, parameter).await == *startup,
+                    "{parameter} {restore}"
+                );
+            }
+
+            for wholesale in ["RESET ALL", "DISCARD ALL"] {
+                session
+                    .simple_query(&format!("SET {parameter} TO '{assigned}'"))
+                    .await
+                    .unwrap();
+                session.simple_query(wholesale).await.unwrap();
+                assert!(
+                    shown_setting(&mut session, parameter).await == *startup,
+                    "{parameter} {wholesale}"
+                );
+            }
+
+            session.simple_query("BEGIN").await.unwrap();
+            session
+                .simple_query(&format!("SET {parameter} TO '{assigned}'"))
+                .await
+                .unwrap();
+            session.simple_query("ROLLBACK").await.unwrap();
+            assert!(
+                shown_setting(&mut session, parameter).await == *startup,
+                "{parameter} rollback"
+            );
+
+            // `pg_settings` separates the two: `boot_val` stays the compiled-in
+            // value while `reset_val` follows the startup packet, so the two
+            // disagree for every parameter here. `setting`/`reset_val` are the
+            // base-unit spellings (`work_mem` is `16384`, not the `16MB` `SHOW`
+            // renders), which is why they are compared with each other rather
+            // than with the startup string.
+            let settings = rows_or_sqlstate(
+                &mut session,
+                &format!(
+                    "SELECT setting, boot_val, reset_val FROM pg_catalog.pg_settings \
+                     WHERE name = '{parameter}'"
+                ),
+            )
+            .await
+            .unwrap_or_else(|code| panic!("pg_settings for {parameter}: {code}"));
+            let [row] = settings.as_slice() else {
+                panic!("expected one pg_settings row for {parameter}: {settings:?}");
+            };
+            assert!(row[1] == guc_default(parameter), "{parameter} boot_val");
+            assert!(
+                row[2] == row[0],
+                "{parameter} reset_val is the current value"
+            );
+            assert!(
+                row[2] != row[1],
+                "{parameter} reset_val is not the boot value"
+            );
+        }
+    }
+
+    /// The same rule for the `-c` assignments carried in `options`, including a
+    /// customized `extension.parameter` option, which has no registry entry and
+    /// so takes a different path through the assignment code.
+    #[tokio::test]
+    async fn startup_options_become_the_session_default() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .startup_parameter(
+                "options",
+                "-c datestyle=Postgres,MDY -c work_mem=16MB --myext.flavour=salty \
+                 -c 'default_transaction_isolation=repeatable read'",
+            )
+            .await
+            .unwrap();
+        session
+            .simple_query(
+                "SET DateStyle TO 'ISO, YMD'; SET work_mem TO '8MB'; \
+                 SET myext.flavour TO 'sour'; RESET ALL",
+            )
+            .await
+            .unwrap();
+        for (parameter, expected) in [
+            ("DateStyle", "Postgres, MDY"),
+            ("work_mem", "16MB"),
+            ("myext.flavour", "salty"),
+            // A derived parameter follows: `transaction_isolation` reports
+            // `default_transaction_isolation` outside a transaction block, so
+            // it has to pick the startup packet's value up as well.
+            ("default_transaction_isolation", "repeatable read"),
+            ("transaction_isolation", "repeatable read"),
+        ] {
+            assert!(
+                shown_setting(&mut session, parameter).await == expected,
+                "{parameter}"
+            );
+        }
+    }
+
+    /// `SHOW <parameter>`'s single cell.
+    async fn shown_setting(session: &mut SqlSession, parameter: &str) -> String {
+        single_text(
+            &session
+                .simple_query(&format!("SHOW {parameter}"))
+                .await
+                .unwrap(),
+        )
     }
 
     #[test]
@@ -13965,12 +20541,12 @@ mod tests {
     async fn source_values_drive_default_reset_all_discard_and_pg_settings() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
-        let mut source = BTreeMap::new();
-        source.insert(
-            "application_name".to_string(),
-            "configured-source".to_string(),
-        );
-        session.guc = GucState::with_source_values(source).unwrap();
+        // The production way a session default is established: the startup
+        // packet, which every libpq client sends `application_name` in.
+        session
+            .startup_parameter("application_name", "configured-source")
+            .await
+            .unwrap();
 
         session
             .simple_query("SET application_name = 'changed'; SET application_name = DEFAULT")
@@ -14205,6 +20781,216 @@ mod tests {
             "payments was not in LIMIT TO and must not be imported"
         );
     }
+
+    /// The hint PostgreSQL gives with both server-file refusals.
+    const SERVER_FILE_HINT: &str =
+        r"Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.";
+
+    /// A server-side `COPY` file endpoint is refused for an ordinary role, in
+    /// both directions, before the file is touched.
+    ///
+    /// The role holds `SELECT` and `INSERT` on the table, so the only thing
+    /// left to refuse it is the file endpoint itself.
+    #[tokio::test]
+    async fn copy_between_a_table_and_a_server_file_is_refused_for_a_non_superuser() {
+        use crabka_pgwire::error::PgError;
+
+        let engine = SqlEngine::new();
+        let mut owner = engine.connect();
+        owner
+            .simple_query(
+                "CREATE TABLE t (id int4); \
+                 INSERT INTO t VALUES (1); \
+                 CREATE ROLE loader; \
+                 GRANT SELECT, INSERT ON TABLE t TO loader",
+            )
+            .await
+            .expect("setup");
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.txt");
+        std::fs::write(&source, b"2\n").expect("write the file the role must not read");
+        let sink = dir.path().join("sink.txt");
+
+        let mut session = engine.connect();
+        session
+            .simple_query("SET SESSION AUTHORIZATION loader")
+            .await
+            .expect("become an ordinary role");
+        for (sql, message, detail) in [
+            (
+                format!("COPY t FROM '{}'", source.display()),
+                "permission denied to COPY from a file",
+                "Only roles with privileges of the \"pg_read_server_files\" role may COPY from a file.",
+            ),
+            (
+                format!("COPY t TO '{}'", sink.display()),
+                "permission denied to COPY to a file",
+                "Only roles with privileges of the \"pg_write_server_files\" role may COPY to a file.",
+            ),
+        ] {
+            let error = session.simple_query(&sql).await.expect_err(&sql);
+            assert!(
+                error
+                    == PgError::error("42501", message)
+                        .with_detail(detail)
+                        .with_hint(SERVER_FILE_HINT),
+                "{sql}"
+            );
+        }
+        // The refusals came before either file was touched: the sink was never
+        // created, and the source's row never reached the table.
+        assert!(!sink.exists());
+        assert!(
+            rows_or_sqlstate(&mut owner, "SELECT id FROM t ORDER BY id").await
+                == Ok(vec![vec!["1".to_string()]])
+        );
+    }
+
+    /// The same two statements still work for a superuser — both the bootstrap
+    /// role a session with no authentication acts as, and a role created with
+    /// the `SUPERUSER` attribute.
+    #[tokio::test]
+    async fn copy_between_a_table_and_a_server_file_still_works_for_a_superuser() {
+        let engine = SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query(
+                "CREATE TABLE bootstrap_target (id int4); \
+                 INSERT INTO bootstrap_target VALUES (1); \
+                 CREATE TABLE admin_target (id int4); \
+                 INSERT INTO admin_target VALUES (1); \
+                 CREATE ROLE admin SUPERUSER",
+            )
+            .await
+            .expect("setup");
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        // A session with no authentication acts as the bootstrap superuser; the
+        // second role is a superuser by attribute instead.
+        for (authorization, table) in [(None, "bootstrap_target"), (Some("admin"), "admin_target")]
+        {
+            let mut session = engine.connect();
+            if let Some(role) = authorization {
+                session
+                    .simple_query(&format!("SET SESSION AUTHORIZATION {role}"))
+                    .await
+                    .expect("become a superuser role");
+            }
+            let path = dir.path().join(format!("{table}.txt"));
+            session
+                .simple_query(&format!("COPY {table} TO '{}'", path.display()))
+                .await
+                .unwrap_or_else(|error| panic!("COPY TO as {authorization:?}: {error:?}"));
+            assert!(
+                std::fs::read(&path).expect("written file") == b"1\n",
+                "{authorization:?}"
+            );
+            session
+                .simple_query(&format!("COPY {table} FROM '{}'", path.display()))
+                .await
+                .unwrap_or_else(|error| panic!("COPY FROM as {authorization:?}: {error:?}"));
+            assert!(
+                rows_or_sqlstate(&mut session, &format!("SELECT id FROM {table}")).await
+                    == Ok(vec![vec!["1".to_string()], vec!["1".to_string()]]),
+                "{authorization:?}"
+            );
+        }
+    }
+
+    /// `REFRESH MATERIALIZED VIEW` is one statement, so a failure while its
+    /// stored query runs leaves the view as it was: still populated, and still
+    /// holding the rows the last good refresh gave it.
+    ///
+    /// The autocommit case is the one that needs a transaction of its own. The
+    /// explicit-transaction case gets its atomicity from the enclosing block,
+    /// and is here so that the wrapper cannot take it away.
+    #[tokio::test]
+    async fn a_failing_refresh_leaves_the_previous_contents_and_the_populated_flag() {
+        for explicit in [false, true] {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            session
+                .simple_query(
+                    "CREATE TABLE base (a int4); \
+                     INSERT INTO base VALUES (1), (2), (3); \
+                     CREATE MATERIALIZED VIEW mv AS SELECT a, 1 / (a - 9) AS q FROM base",
+                )
+                .await
+                .expect("setup");
+            session
+                .simple_query("INSERT INTO base VALUES (9)")
+                .await
+                .expect("make the stored query divide by zero");
+
+            if explicit {
+                session.simple_query("BEGIN").await.expect("begin");
+            }
+            assert!(
+                sqlstate(&mut session, "REFRESH MATERIALIZED VIEW mv").await == "22012",
+                "explicit={explicit}"
+            );
+            if explicit {
+                session.simple_query("ROLLBACK").await.expect("rollback");
+            }
+
+            // A scan answering rows is the populated flag: an unpopulated
+            // materialized view is an error to read, not an empty one.
+            assert!(
+                rows_or_sqlstate(&mut session, "SELECT a FROM mv ORDER BY a").await
+                    == Ok(vec![
+                        vec!["1".to_string()],
+                        vec!["2".to_string()],
+                        vec!["3".to_string()],
+                    ]),
+                "explicit={explicit}"
+            );
+        }
+    }
+
+    /// A refresh that succeeds still replaces the contents and reports the same
+    /// tag, in either transaction mode.
+    #[tokio::test]
+    async fn a_successful_refresh_replaces_the_contents_in_either_transaction_mode() {
+        for explicit in [false, true] {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            session
+                .simple_query(
+                    "CREATE TABLE base (a int4); \
+                     INSERT INTO base VALUES (1), (2); \
+                     CREATE MATERIALIZED VIEW mv AS SELECT a FROM base; \
+                     INSERT INTO base VALUES (3)",
+                )
+                .await
+                .expect("setup");
+
+            if explicit {
+                session.simple_query("BEGIN").await.expect("begin");
+            }
+            let results = session
+                .simple_query("REFRESH MATERIALIZED VIEW mv")
+                .await
+                .unwrap_or_else(|error| panic!("explicit={explicit}: {error:?}"));
+            let [QueryResult::Command { tag }] = results.as_slice() else {
+                panic!("explicit={explicit}: expected one command tag, got {results:?}");
+            };
+            assert!(tag == "REFRESH MATERIALIZED VIEW", "explicit={explicit}");
+            if explicit {
+                session.simple_query("COMMIT").await.expect("commit");
+            }
+
+            assert!(
+                rows_or_sqlstate(&mut session, "SELECT a FROM mv ORDER BY a").await
+                    == Ok(vec![
+                        vec!["1".to_string()],
+                        vec!["2".to_string()],
+                        vec!["3".to_string()],
+                    ]),
+                "explicit={explicit}"
+            );
+        }
+    }
 }
 #[cfg(test)]
 mod compatibility_refusal_tests {
@@ -14308,8 +21094,11 @@ mod notify_and_binary_parameter_tests {
     fn jsonb_and_array_parameter_oids_resolve_to_their_column_types() {
         let cases = [
             (oids::JSONB, ColumnType::Jsonb),
-            // `json` is an input alias for `jsonb`, scalar and array alike.
-            (oids::JSON, ColumnType::Jsonb),
+            // `json` is its own type, scalar and array alike -- it keeps the
+            // text a client sent, where `jsonb` decomposes it.
+            (oids::JSON, ColumnType::Json),
+            (oids::JSONPATH, ColumnType::JsonPath),
+            (oids::JSONPATHARRAY, ColumnType::Array(ElemType::JsonPath)),
             (oids::INT4ARRAY, ColumnType::Array(ElemType::Int4)),
             (oids::INT8ARRAY, ColumnType::Array(ElemType::Int8)),
             (oids::TEXTARRAY, ColumnType::Array(ElemType::Text)),
@@ -14319,7 +21108,7 @@ mod notify_and_binary_parameter_tests {
                 ColumnType::Array(ElemType::Timestamptz),
             ),
             (oids::JSONBARRAY, ColumnType::Array(ElemType::Jsonb)),
-            (oids::JSONARRAY, ColumnType::Array(ElemType::Jsonb)),
+            (oids::JSONARRAY, ColumnType::Array(ElemType::Json)),
         ];
         for (oid, expected) in cases {
             let param = BoundParam {
@@ -14377,6 +21166,57 @@ mod notify_and_binary_parameter_tests {
         let error = decode(&param(oids::JSONB, 1, b"\x02{}"), ColumnType::Jsonb)
             .expect_err("version 2 is not supported");
         assert!(error.message.contains("unsupported jsonb version number 2"));
+    }
+
+    #[test]
+    fn jsonpath_parameters_are_canonicalized_in_both_wire_formats() {
+        let expected = Datum::JsonPath("$.\"a\"".into());
+        let text = decode(&param(oids::JSONPATH, 0, b"lax $.a"), ColumnType::JsonPath);
+        assert!(text.expect("text jsonpath") == expected);
+
+        let binary = decode(
+            &param(oids::JSONPATH, 1, b"\x01lax $.a"),
+            ColumnType::JsonPath,
+        );
+        assert!(binary.expect("binary jsonpath") == expected);
+
+        let invalid = decode(&param(oids::JSONPATH, 0, b""), ColumnType::JsonPath)
+            .expect_err("empty jsonpath");
+        assert!(invalid.code == "22P02");
+
+        let version = decode(&param(oids::JSONPATH, 1, b"\x02$"), ColumnType::JsonPath)
+            .expect_err("version 2");
+        assert!(version.code == "XX000");
+        assert!(
+            version
+                .message
+                .contains("unsupported jsonpath version number: 2")
+        );
+
+        let empty = decode(&param(oids::JSONPATH, 1, b""), ColumnType::JsonPath)
+            .expect_err("empty binary jsonpath");
+        assert!(empty.code == "08P01");
+    }
+
+    #[test]
+    fn jsonpath_array_parameters_use_native_element_identity_and_wire_format() {
+        let expected = Datum::Array(ArrayValue::new(
+            ElemType::JsonPath,
+            vec![Datum::JsonPath("$.\"a\"".into()), Datum::Null],
+        ));
+        let text = decode(
+            &param(oids::JSONPATHARRAY, 0, br#"{"lax $.a",NULL}"#),
+            ColumnType::Array(ElemType::JsonPath),
+        );
+        assert!(text.expect("text jsonpath array") == expected);
+
+        let encoded = encoding::encode_binary(&expected);
+        assert!(u32::from_be_bytes(encoded[8..12].try_into().expect("oid")) == oids::JSONPATH);
+        let binary = decode(
+            &param(oids::JSONPATHARRAY, 1, &encoded),
+            ColumnType::Array(ElemType::JsonPath),
+        );
+        assert!(binary.expect("binary jsonpath array") == expected);
     }
 
     #[test]
@@ -14443,6 +21283,18 @@ mod notify_and_binary_parameter_tests {
     }
 
     #[test]
+    fn oidvector_binary_parameters_use_oid_elements() {
+        let expected = Datum::OidVector(ArrayValue::with_dims(
+            ElemType::Int4,
+            vec![Datum::Int4(23), Datum::Int4(25)],
+            vec![crabka_pgtypes::ArrayDim::new(0, 2)],
+        ));
+        let encoded = encoding::encode_binary(&expected);
+        let decoded = decode(&param(oids::OIDVECTOR, 1, &encoded), ColumnType::OidVector);
+        assert!(decoded.expect("decode") == expected);
+    }
+
+    #[test]
     fn the_empty_array_is_the_twelve_byte_header_with_no_dimension_block() {
         let empty = Datum::Array(ArrayValue::new(ElemType::Text, vec![]));
         let encoded = encoding::encode_binary(&empty);
@@ -14500,18 +21352,33 @@ mod notify_and_binary_parameter_tests {
     }
 
     #[test]
-    fn a_binary_jsonb_array_accepts_json_typed_elements() {
+    fn a_binary_array_element_oid_must_match_the_target_element_type() {
+        // A `json[]` array of `json` elements keeps each element's text.
         let mut bytes = array_header(1, 0, oids::JSON, Some((1, 1)));
-        let element = br#"{"a": 1}"#;
-        push_element(&mut bytes, Some(element));
+        push_element(&mut bytes, Some(br#"{"b":2,   "a":1}"#));
         let decoded = decode(
             &param(oids::JSONARRAY, 1, &bytes),
-            ColumnType::Array(ElemType::Jsonb),
+            ColumnType::Array(ElemType::Json),
         );
         assert!(
             decoded.expect("decode")
-                == Datum::Array(ArrayValue::new(ElemType::Jsonb, vec![jsonb(r#"{"a": 1}"#)]))
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Json,
+                    vec![Datum::Json(r#"{"b":2,   "a":1}"#.to_owned())]
+                ))
         );
+
+        // json and jsonb are separate types, so an array declaring one element
+        // type cannot be read as the other -- PostgreSQL's array_recv checks
+        // the header's element oid the same way.
+        let mut bytes = array_header(1, 0, oids::JSON, Some((1, 1)));
+        push_element(&mut bytes, Some(br#"{"a": 1}"#));
+        let rejected = decode(
+            &param(oids::JSONARRAY, 1, &bytes),
+            ColumnType::Array(ElemType::Jsonb),
+        )
+        .expect_err("a json element cannot fill a jsonb array");
+        assert!(rejected.code == "42804", "{rejected:?}");
     }
 
     /// The fixed part of a binary array: `ndim`, `hasnull`, the element OID and
@@ -15786,6 +22653,8 @@ mod session_conformance_tests {
             ),
             ("SET extra_float_digits = 3", "SHOW extra_float_digits", "3"),
             ("SET geqo_effort = 10", "SHOW geqo_effort", "10"),
+            ("SET enable_seqscan = t", "SHOW enable_seqscan", "on"),
+            ("SET enable_seqscan = f", "SHOW enable_seqscan", "off"),
             // A `real` parameter with a unit renders through the unit table
             // exactly as an integer one does.
             (
@@ -15985,6 +22854,45 @@ mod session_conformance_tests {
     }
 
     #[tokio::test]
+    async fn create_user_in_role_authorizes_set_role() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE ROLE parent_role; \
+                 CREATE USER member_role IN ROLE parent_role; \
+                 CREATE ROLE unrelated_role",
+            )
+            .await
+            .expect("create role membership");
+        session
+            .simple_query("SET SESSION AUTHORIZATION member_role")
+            .await
+            .expect("become member");
+        session
+            .simple_query("SET ROLE parent_role")
+            .await
+            .expect("assume granted role");
+        assert!(scalar(&mut session, "SELECT current_user").await == "parent_role");
+        session
+            .simple_query("RESET ROLE")
+            .await
+            .expect("return to member");
+        assert!(scalar(&mut session, "SELECT current_user").await == "member_role");
+        session
+            .simple_query("BEGIN; SET ROLE parent_role")
+            .await
+            .expect("set role inside transaction");
+        assert!(state(&mut session, "SELECT 1 / 0").await == "22012");
+        session
+            .simple_query("ROLLBACK")
+            .await
+            .expect("rollback role");
+        assert!(scalar(&mut session, "SELECT current_user").await == "member_role");
+        assert!(state(&mut session, "SET ROLE unrelated_role").await == "42501");
+    }
+
+    #[tokio::test]
     async fn transaction_isolation_reports_the_level_the_block_runs_at() {
         let engine = SqlEngine::new();
         let mut s = engine.connect();
@@ -16099,6 +23007,1521 @@ mod session_conformance_tests {
         assert!(state(&mut s, "SELECT pg_advisory_lock('x')").await == "42883");
     }
 
+    #[tokio::test]
+    async fn simple_query_refines_hidden_dml_target_diagnostics() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE alias_target (a int); INSERT INTO alias_target VALUES (1)")
+            .await
+            .expect("table and row");
+
+        for (sql, alias) in [(
+            "DELETE FROM alias_target AS d WHERE alias_target.a > 0",
+            "d",
+        )] {
+            let position = sql[..sql
+                .rfind("alias_target.a")
+                .expect("qualified original target")]
+                .chars()
+                .count()
+                + 1;
+            let error = session
+                .simple_query(sql)
+                .await
+                .expect_err("the original target name is hidden");
+            let expected = crabka_pgwire::error::PgError::error(
+                "42P01",
+                "invalid reference to FROM-clause entry for table \"alias_target\"",
+            )
+            .with_hint(format!(
+                "Perhaps you meant to reference the table alias \"{alias}\"."
+            ))
+            .with_position(position);
+            assert!(error == expected, "{sql}: {error:?}");
+        }
+    }
+
+    /// Every spelling of a failing constant cast carries PostgreSQL's caret at
+    /// the source literal, for any scalar type — while a value that no literal
+    /// spells stays undecorated.
+    #[tokio::test]
+    async fn type_input_errors_point_at_the_source_literal() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE missing (value bool)")
+            .await
+            .expect("table");
+        for (sql, code, position) in [
+            ("SELECT bool 'test'", "22P02", Some(13)),
+            // The alias `AS` must not be read as a cast's target type.
+            ("SELECT bool 'test' AS error", "22P02", Some(13)),
+            ("SELECT '34.5'::int2 AS bad", "22P02", Some(8)),
+            ("INSERT INTO missing VALUES (bool 'XXX')", "22P02", Some(34)),
+            // An ordinary cast is analyzed the same way as the legacy spelling.
+            ("SELECT 'x'::boolean", "22P02", Some(8)),
+            ("SELECT '34.5'::int2", "22P02", Some(8)),
+            ("SELECT CAST('zz' AS int4)", "22P02", Some(13)),
+            // Out of range is positioned too, not just bad syntax.
+            ("SELECT '100000'::int2", "22003", Some(8)),
+            // The datetime family reports 22007 and is positioned the same way.
+            ("SELECT 'zz'::interval", "22007", Some(8)),
+            ("SELECT date 'bad'", "22007", Some(13)),
+            ("SELECT 'bad'::timestamptz", "22007", Some(8)),
+            ("SELECT 'bad'::text::date", "22007", None),
+            // No literal spells "12x", so there is nothing to point at.
+            ("SELECT ('12'||'x')::int4", "22P02", None),
+            // A function argument is raised inside the function, with no
+            // position — but a cast written on that argument still counts.
+            ("SELECT to_timestamp('97/Feb/16', 'YYMonDD')", "22007", None),
+            (
+                "SELECT length(upper('zz'::interval::text))",
+                "22007",
+                Some(21),
+            ),
+            // Coerced through `text`, so `boolin` runs at execution time and
+            // PostgreSQL reports no position.
+            ("SELECT '  tru e '::text::boolean", "22P02", None),
+            ("SELECT ''::text::boolean", "22P02", None),
+            ("SELECT CAST('zz' AS text)::int4", "22P02", None),
+            // A repeated literal is ambiguous and is not guessed.
+            ("SELECT '34.5'::int2, '34.5'::int2", "22P02", None),
+            // A field overflow names no type, but only an `interval` input
+            // raises 22015 and only a date/time input raises 22008.
+            ("SELECT interval '2147483648 years'", "22015", Some(17)),
+            ("SELECT '2147483648 years'::interval", "22015", Some(8)),
+            ("SELECT date '1997-02-29'", "22008", Some(13)),
+            (
+                "SELECT '0 second'::interval, '2001-02-29'::date",
+                "22008",
+                Some(30),
+            ),
+            // A type name spelled in four words is still one name.
+            ("SELECT time with time zone 'T04'", "22007", Some(28)),
+            (
+                "SELECT CAST('x' AS timestamp with time zone)",
+                "22007",
+                Some(13),
+            ),
+            ("SELECT double precision 'zz'", "22P02", Some(25)),
+            // `array_in` names no type either, so the target must be an array.
+            ("SELECT '{{1,2},{3}}'::text[]", "22P02", Some(8)),
+            ("SELECT '{{1,2},{3}}'::text::int[]", "22P02", None),
+            // A one-argument call on a *type* name is a coercion, and
+            // PostgreSQL positions it like one.
+            ("SELECT cidr('192.168.1.2/30')", "22P02", Some(13)),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("input error");
+            assert!(error.code == code, "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// A component that fails inside a composite literal is reported by the
+    /// component's own input function, which names the component's type while
+    /// the source states the outer one. The quoted value is then the only
+    /// thread back to the literal, so follow it — into a container, to a
+    /// component the container itself bounds, and only when no literal carries
+    /// the value whole.
+    #[tokio::test]
+    async fn a_failing_component_points_at_the_composite_literal() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE point_tbl (f1 point)")
+            .await
+            .expect("table");
+        for (sql, code, position) in [
+            // A `VALUES` item states no type of its own and takes one from the
+            // target column, and PostgreSQL still points at it.
+            (
+                "INSERT INTO point_tbl(f1) VALUES ('(10.0, 1e+500)')",
+                "22003",
+                Some(35),
+            ),
+            ("SELECT '(10.0, 1e+500)'::point", "22003", Some(8)),
+            ("SELECT point '(10.0, 1e+500)'", "22003", Some(14)),
+            // Every container spelling reads the same way: the braces of an
+            // array, the brackets of a range, and the geometric types.
+            ("SELECT '{2, 1e+500}'::float8[]", "22003", Some(8)),
+            (
+                "SELECT '{1, 99999999999999999999}'::int[]",
+                "22003",
+                Some(8),
+            ),
+            (
+                "SELECT '[1, 99999999999999999999)'::int4range",
+                "22003",
+                Some(8),
+            ),
+            ("SELECT '{1e+500,2,3}'::line", "22003", Some(8)),
+            ("SELECT '(1e+500,0),(0,0)'::box", "22003", Some(8)),
+            ("SELECT '<(1e+500,0),1>'::circle", "22003", Some(8)),
+            // The call receives a sound `json` value and fails on a component
+            // of it at execution time, so PostgreSQL blames no literal.
+            (
+                "SELECT JSON_VALUE('{\"a\": 1.234}', '$.a' RETURNING int ERROR ON ERROR)",
+                "22P02",
+                None,
+            ),
+            // A literal that opens with no container delimiter writes a scalar,
+            // whatever characters it goes on to contain.
+            (
+                "SELECT '(10.0, 1e+500)'::point, '1e+500 kg'",
+                "22003",
+                Some(8),
+            ),
+            // The `1e+500` inside `1e+5000` is no component of that array.
+            (
+                "SELECT '(10.0, 1e+500)'::point, '{1e+5000}'::text[]",
+                "22003",
+                Some(8),
+            ),
+            // Two containers write the value as a component, and the message
+            // does not say which of them the input function was reading.
+            (
+                "SELECT '(10.0, 1e+500)'::point, '{1e+500}'::text[]",
+                "22003",
+                None,
+            ),
+            // A literal that carries the value *whole* is read first, so the
+            // container standing beside it never becomes a second candidate.
+            (
+                "SELECT '100000'::int2, '{100000}'::text[]",
+                "22003",
+                Some(8),
+            ),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("input error");
+            assert!(error.code == code, "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// `json_in` reports its type but not the rejected value, so the written
+    /// type is the whole of the evidence: a literal the source spells as JSON is
+    /// blamed, and nothing else is.
+    #[tokio::test]
+    async fn json_input_errors_blame_only_a_written_json_literal() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("SELECT '01'::json", Some(8)),
+            ("SELECT '01'::jsonb", Some(8)),
+            ("SELECT jsonb '01'", Some(14)),
+            ("SELECT $$''$$::json", Some(8)),
+            // A second literal that states no type is not a candidate, so the
+            // one that states `json` is still unambiguous.
+            ("SELECT '01'::json, 'plain'", Some(8)),
+            // Coerced through `text`, so `json_in` runs at execution time and
+            // PostgreSQL reports no position.
+            ("SELECT '01'::text::json", None),
+            // The literal is sound and the failure is in converting the
+            // *result* of the call, so PostgreSQL blames neither.
+            (
+                "SELECT JSON_VALUE(jsonb '\"aaa\"', '$' RETURNING json ERROR ON ERROR)",
+                None,
+            ),
+            // Two JSON literals: the message says which type failed but not
+            // which literal, so neither is guessed.
+            ("SELECT '01'::json, '02'::jsonb", None),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("invalid json");
+            assert!(
+                error.message == "invalid input syntax for type json",
+                "{sql}: {error:?}"
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// An interval literal with a field qualifier is decoded while the statement
+    /// is *parsed*, because the qualifier is a property of the literal. That
+    /// failure never reaches the run-time attachment, so the parse path carries
+    /// the caret itself.
+    #[tokio::test]
+    async fn a_qualified_interval_literal_carries_its_caret() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("SELECT interval '1 2' day to minute", Some(17)),
+            ("SELECT interval '123 11' day", Some(17)),
+            // Two qualified literals: which one the parser stopped on is not
+            // knowable from the message, so neither is decorated.
+            ("SELECT interval '1 2' day, interval '1 2' hour", None),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("bad interval");
+            assert!(error.code == "22007", "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+
+        // The wire loop's first look at a simple-query string is the copy-in
+        // probe, and a parse failure there is the one the client is told about.
+        // `simple_query` never reaches it, so pin that path on its own.
+        let probed = session
+            .begin_copy_in("SELECT interval '1 2' day to minute")
+            .await
+            .expect_err("bad interval");
+        assert!(
+            probed
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(17),
+            "{probed:?}"
+        );
+    }
+
+    /// The attachment runs on the failure path of every statement and is applied
+    /// to errors it does not own, so it has to leave those exactly as they were
+    /// — and a statement that succeeds must not notice it at all.
+    #[tokio::test]
+    async fn literal_position_attachment_leaves_other_outcomes_alone() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "SELECT 1",
+            "SELECT interval '1 day'",
+            "SELECT interval '1 2' day to hour",
+            "SELECT '{1,2}'::int[]",
+            "SELECT '{\"a\":1}'::json",
+            "SELECT date '2001-02-28'",
+            "SELECT time with time zone '04:05:06+08'",
+        ] {
+            assert!(session.simple_query(sql).await.is_ok(), "{sql}");
+        }
+
+        let owned =
+            crabka_pgwire::error::PgError::error("22P02", "invalid input syntax for type json");
+        // An error that already carries a position keeps the one it has, even
+        // where this code would have chosen a different literal.
+        let already = super::attach_type_input_literal_position(
+            "SELECT '01'::json",
+            owned.clone().with_position(3),
+        );
+        assert!(
+            already
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(3)
+        );
+        // A SQLSTATE no input function raises is returned untouched, message,
+        // diagnostics and all.
+        let unrelated =
+            crabka_pgwire::error::PgError::error("42601", "invalid input syntax for type json");
+        assert!(
+            super::attach_type_input_literal_position("SELECT '01'::json", unrelated.clone())
+                == unrelated
+        );
+        // So is a message this code does not recognise, under a code it does.
+        let unshaped = crabka_pgwire::error::PgError::error(
+            "22P02",
+            "invalid input syntax for type json path",
+        );
+        assert!(
+            super::attach_type_input_literal_position("SELECT '01'::json", unshaped.clone())
+                == unshaped
+        );
+    }
+
+    #[tokio::test]
+    async fn range_cast_errors_point_at_the_unique_literal() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let error = session
+            .simple_query("SELECT ''::int4range")
+            .await
+            .expect_err("invalid range");
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8)
+        );
+
+        // A multirange fails the same way against the same shape of cast.
+        let multirange = session
+            .simple_query("SELECT '{(a,])}'::int4multirange")
+            .await
+            .expect_err("invalid multirange");
+        assert!(
+            multirange
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8)
+        );
+
+        let undecorated = super::attach_range_literal_position(
+            "SELECT ''::int4range, ''::int4range",
+            crabka_pgwire::error::PgError::error("22P02", "malformed range literal: \"\""),
+        );
+        assert!(
+            undecorated
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none(),
+            "an ambiguous literal is not guessed"
+        );
+        let unrelated = super::attach_range_literal_position(
+            "SELECT make_bad_range('a', 'Z') @> 'b'::text",
+            crabka_pgwire::error::PgError::error(
+                "22000",
+                "range lower bound must be less than or equal to range upper bound",
+            ),
+        );
+        assert!(
+            unrelated
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none(),
+            "an unrelated text cast is not blamed"
+        );
+    }
+
+    #[tokio::test]
+    async fn undefined_function_errors_point_at_the_unique_call() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let error = session
+            .simple_query("SELECT definitely_missing(1)")
+            .await
+            .expect_err("undefined function");
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8)
+        );
+
+        let ambiguous = super::attach_undefined_function_position(
+            "SELECT missing(1), missing(2)",
+            &only_statement("SELECT missing(1), missing(2)"),
+            crabka_pgwire::error::PgError::error(
+                "42883",
+                "function missing(integer) does not exist",
+            ),
+        );
+        assert!(
+            ambiguous
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none(),
+            "an ambiguous call is not guessed"
+        );
+        let family = "ALTER OPERATOR FAMILY f USING btree ADD FUNCTION 5 missing(internal)";
+        let utility_signature = super::attach_undefined_function_position(
+            family,
+            &only_statement(family),
+            crabka_pgwire::error::PgError::error(
+                "42883",
+                "function missing(internal) does not exist",
+            ),
+        );
+        assert!(
+            utility_signature
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                .is_none()
+        );
+    }
+
+    /// The one statement `sql` parses to, for the diagnostics helpers that ask
+    /// what kind of statement raised the error.
+    fn only_statement(sql: &str) -> crabka_pgparser::ast::Statement {
+        let mut statements = crabka_pgparser::parse(sql).expect("parses");
+        assert!(statements.len() == 1, "{sql} is one statement");
+        statements.remove(0)
+    }
+
+    /// A statement whose whole subject is a routine looks its name up after
+    /// parse analysis, from a tree that no longer carries the source, so
+    /// PostgreSQL reports it with no position — measured on 18.4 for `DROP`,
+    /// `ALTER` and `COMMENT ON FUNCTION`, for `DROP AGGREGATE`, and for an
+    /// `ALTER TABLE … SET DEFAULT`. A query naming the same missing function
+    /// still carries its caret.
+    #[tokio::test]
+    async fn a_utility_statement_naming_a_missing_routine_stays_bare() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE bare (a int)")
+            .await
+            .expect("create");
+        for sql in [
+            "DROP FUNCTION definitely_missing()",
+            "DROP PROCEDURE definitely_missing()",
+            "ALTER FUNCTION definitely_missing() RENAME TO other",
+            "COMMENT ON FUNCTION definitely_missing() IS 'x'",
+            "DROP AGGREGATE definitely_missing(int)",
+            "ALTER TABLE bare ALTER COLUMN a SET DEFAULT definitely_missing()",
+        ] {
+            let error = session
+                .simple_query(sql)
+                .await
+                .expect_err("missing routine");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    .is_none(),
+                "{sql}: {error:?}"
+            );
+        }
+        let query = session
+            .simple_query("SELECT definitely_missing(1)")
+            .await
+            .expect_err("missing routine");
+        assert!(
+            query
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8)
+        );
+    }
+
+    /// `PostgreSQL` points at the operator whose resolution failed, and psql
+    /// draws its `LINE n:` echo from the position on the wire. Every column
+    /// asserted here is the pinned 18.4 oracle's.
+    #[tokio::test]
+    async fn an_unresolved_operator_carries_its_caret() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("select '1'::xid < '2'::xid", Some(17)),
+            ("select '1'::xid <= '2'::xid", Some(17)),
+            ("select '1'::xid > '2'::xid", Some(17)),
+            ("select '1'::xid >= '2'::xid", Some(17)),
+            ("select 3 || 4.0", Some(10)),
+            ("SELECT lseg '((1,2),(3,4))' # point '(1,2)'", Some(29)),
+            // An `IN` list lowers to `= ANY`, so the message names an `=` the
+            // statement never wrote and the caret lands on the keyword.
+            (
+                "select '(0,0)'::point in ('(0,0,0,0)'::box, point(0,0))",
+                Some(23),
+            ),
+            // The wire carries a character offset and psql resolves the line
+            // itself: 63 is the `+` on the fourth line, which upstream prints
+            // as `LINE 4:` with the caret in column 13.
+            (
+                "WITH RECURSIVE t(n) AS (\n    SELECT '7'\nUNION ALL\n    SELECT n+1 FROM t WHERE n < 10\n)\nSELECT n, pg_typeof(n) FROM t",
+                Some(63),
+            ),
+            // Which `||` failed is not knowable from `integer || integer`.
+            ("SELECT 1 || 2 || 3", None),
+            // Operand families crabka carries only in part. It refuses these
+            // where PostgreSQL answers them, so a caret would be two more lines
+            // of divergence rather than two fewer.
+            ("select '{\"a\":1}'::jsonb #- '{a}'", None),
+            ("SELECT ARRAY[1.1] || ARRAY[2,3,4]", None),
+            ("SELECT 'a' <-> 'b & d'::tsquery", None),
+        ] {
+            let error = session.simple_query(sql).await.expect_err(sql);
+            assert!(error.code == "42883", "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// A statement whose whole subject is an operator writes the spelling in
+    /// its own text and still gets no caret upstream: the name is looked up
+    /// after parse analysis, from a tree that no longer carries the source.
+    /// Measured bare on 18.4 for `DROP OPERATOR` and `COMMENT ON OPERATOR`,
+    /// against a caret for the query that writes the same operator.
+    #[test]
+    fn a_statement_naming_an_operator_stays_bare() {
+        for (sql, position) in [
+            ("select '1'::xid # '2'::xid", Some(17)),
+            ("DROP OPERATOR # (xid, xid)", None),
+            ("COMMENT ON OPERATOR # (xid, xid) IS 'x'", None),
+        ] {
+            let error = super::attach_operator_resolution_position(
+                sql,
+                &only_statement(sql),
+                crabka_pgwire::error::PgError::error("42883", "operator does not exist: xid # xid"),
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// The operand types decide, not the spelling. The same statement and the
+    /// same operator earn a caret for a pair whose operator set crabka mirrors
+    /// and none for a pair where crabka's own gaps invent the rejection.
+    #[test]
+    fn only_a_mirrored_operand_pair_earns_a_caret() {
+        for (sql, message, position) in [
+            ("select a + b from t", "text + integer", Some(10)),
+            ("select a + b from t", "double precision + bigint", Some(10)),
+            // An array, a domain or a range operand marks a gap: PostgreSQL
+            // answers `numeric[] || integer[]` and `int4range || int4range`.
+            ("select a + b from t", "text[] + integer[]", None),
+            ("select a + b from t", "int4range + integer", None),
+            // The same gap under a base-type name — crabka refuses
+            // `character varying = integer`, which PostgreSQL answers.
+            ("select a + b from t", "character varying + integer", None),
+            // The date/time names belong to `temporal_arith`, which runs first.
+            ("select a + b from t", "date + interval", None),
+            // A prefix operator leaves the left operand of the message empty.
+            ("select a + b from t", "+ integer", None),
+            // crabka reads `#-` as `#` then `-` and reports the operator as
+            // `#`, so a caret drawn from it would point at the wrong column.
+            ("select a #- b from t", "text #- integer", None),
+        ] {
+            let error = super::attach_operator_resolution_position(
+                sql,
+                &only_statement(sql),
+                crabka_pgwire::error::PgError::error(
+                    "42883",
+                    format!("operator does not exist: {message}"),
+                ),
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{message}: {error:?}"
+            );
+        }
+    }
+
+    /// A `reg*` cast resolves a *constant*, so PostgreSQL blames the constant
+    /// rather than any identifier the statement writes.
+    #[tokio::test]
+    async fn a_reg_cast_blames_the_name_it_was_handed() {
+        for (sql, position) in [
+            ("SELECT regclass('pg_classes')", Some(17)),
+            ("SELECT regrole('regress_no_such_role')", Some(16)),
+            // Two casts in one statement: which one failed is not knowable
+            // from the message.
+            ("SELECT regclass('a'), regclass('b')", None),
+            // The cast spellings are PostgreSQL's too, but they are also how a
+            // query about a relation names it, so they are left alone.
+            ("SELECT 'pg_classes'::regclass", None),
+            ("SELECT CAST('pg_classes' AS regclass)", None),
+        ] {
+            let error = super::attach_reg_cast_literal_position(
+                sql,
+                crabka_pgwire::error::PgError::error(
+                    "42P01",
+                    "relation \"pg_classes\" does not exist",
+                ),
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+        // A message under one of those SQLSTATEs that does not report a name is
+        // not a `reg*` failure at all.
+        let unrelated = crabka_pgwire::error::PgError::error("42P01", "relation is not a table");
+        assert!(
+            super::attach_reg_cast_literal_position("SELECT regclass('x')", unrelated.clone())
+                == unrelated
+        );
+    }
+
+    /// `bit_in` quotes the character it choked on, not the literal, so the
+    /// `b`/`x` marker is the only evidence of which literal failed.
+    #[tokio::test]
+    async fn a_bit_string_literal_carries_its_caret() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("SELECT b' 0'", Some(8)),
+            ("SELECT x'0 '", Some(8)),
+            ("SELECT 1, x'0 '", Some(11)),
+            // A binary complaint does not blame a hexadecimal literal.
+            ("SELECT b' 0', x'00'", Some(8)),
+            // Two bad literals need no guess, unlike the run-time attachments:
+            // the parser stopped on the first, which is the one PostgreSQL's
+            // own grammar stops on too.
+            ("SELECT b' 0', b' 1'", Some(8)),
+        ] {
+            let error = session.simple_query(sql).await.expect_err("bad digit");
+            assert!(error.code == "22P02", "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+
+        // The wire loop's first look at a simple-query string is the copy-in
+        // probe, and the parse failure it reports is the one the client sees.
+        // `simple_query` never reaches it, so pin that path on its own.
+        let probed = session
+            .begin_copy_in("SELECT x'0 '")
+            .await
+            .expect_err("bad digit");
+        assert!(
+            probed
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(8),
+            "{probed:?}"
+        );
+    }
+
+    /// The shared attachment runs on the failure path of every statement, so a
+    /// statement that succeeds, an error that already carries a position and an
+    /// error under a SQLSTATE none of the helpers own must all come through
+    /// unchanged.
+    #[tokio::test]
+    async fn the_diagnostics_pass_leaves_other_outcomes_alone() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE untouched (a int)",
+            "INSERT INTO untouched VALUES (1)",
+            "SELECT regclass FROM (SELECT 1 AS regclass) s",
+            "SELECT b'01', x'0f'",
+        ] {
+            assert!(session.simple_query(sql).await.is_ok(), "{sql}");
+        }
+        // A missing relation named by a utility statement is bare, and it is a
+        // `table` rather than a `relation` — both as PostgreSQL 18.4 has them.
+        let dropped = session
+            .simple_query("DROP TABLE definitely_missing")
+            .await
+            .expect_err("missing table");
+        assert!(dropped.message == "table \"definitely_missing\" does not exist");
+        assert!(
+            dropped
+                .diagnostics
+                .as_ref()
+                .and_then(|d| d.position)
+                .is_none()
+        );
+        let altered = session
+            .simple_query("ALTER TABLE definitely_missing ADD COLUMN b int")
+            .await
+            .expect_err("missing relation");
+        assert!(altered.message == "relation \"definitely_missing\" does not exist");
+        assert!(
+            altered
+                .diagnostics
+                .as_ref()
+                .and_then(|d| d.position)
+                .is_none()
+        );
+
+        // A position already chosen by an earlier helper is kept, and an error
+        // that is not a parse failure is left alone even when its message is
+        // one this helper owns.
+        let parsed = crate::error::ExecError::Parse(
+            crabka_pgparser::parse("SELECT b' 0'").expect_err("bad digit"),
+        );
+        let owned =
+            crabka_pgwire::error::PgError::error("22P02", "\" \" is not a valid binary digit");
+        let already = super::attach_parsed_bit_string_position(
+            "SELECT b' 0'",
+            &parsed,
+            owned.clone().with_position(3),
+        );
+        assert!(already.diagnostics.as_ref().and_then(|d| d.position) == Some(3));
+        let unparsed = super::attach_parsed_bit_string_position(
+            "SELECT b' 0'",
+            &crate::error::ExecError::Unsupported("not a parse failure".into()),
+            owned.clone(),
+        );
+        assert!(unparsed == owned);
+    }
+
+    /// An absolute location for `CREATE TABLESPACE`, spelled the way the host
+    /// spells absolute. `Path::is_absolute` is platform-aware -- Windows wants a
+    /// drive letter -- so a hard-coded `/tmp/...` tests the platform, not the
+    /// rule.
+    fn tablespace_location(name: &str) -> String {
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .replace('\'', "''")
+    }
+
+    #[tokio::test]
+    async fn created_tablespaces_are_catalog_visible() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(&format!(
+                "CREATE TABLESPACE user_space LOCATION '{}' \
+                     WITH (random_page_cost = 3.0)",
+                tablespace_location("user_space")
+            ))
+            .await
+            .expect("create tablespace");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT spcname FROM pg_catalog.pg_tablespace \
+                 WHERE spcname = 'user_space'",
+            )
+            .await
+                == "user_space"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT pg_tablespace_location(oid) FROM pg_catalog.pg_tablespace \
+                 WHERE spcname = 'user_space'",
+            )
+            .await
+                == tablespace_location("user_space")
+        );
+        assert!(
+            state(
+                &mut session,
+                &format!(
+                    "CREATE TABLESPACE user_space LOCATION '{}'",
+                    tablespace_location("other_space")
+                ),
+            )
+            .await
+                == "42710"
+        );
+        session
+            .simple_query(
+                "ALTER TABLESPACE user_space SET \
+                 (random_page_cost = 1.0, seq_page_cost = 1.1)",
+            )
+            .await
+            .expect("set tablespace options");
+        session
+            .simple_query("ALTER TABLESPACE user_space RESET (random_page_cost)")
+            .await
+            .expect("reset tablespace option");
+        session
+            .simple_query("ALTER TABLESPACE user_space RENAME TO renamed_space")
+            .await
+            .expect("rename tablespace");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT spcname FROM pg_catalog.pg_tablespace \
+                 WHERE spcname = 'renamed_space'",
+            )
+            .await
+                == "renamed_space"
+        );
+        session
+            .simple_query("DROP TABLESPACE renamed_space")
+            .await
+            .expect("drop tablespace");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_tablespace \
+                 WHERE spcname = 'user_space'",
+            )
+            .await
+                == "0"
+        );
+        session
+            .simple_query("DROP TABLESPACE IF EXISTS user_space")
+            .await
+            .expect("conditional drop");
+    }
+
+    #[tokio::test]
+    async fn relation_tablespace_placement_is_visible_and_blocks_drop() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(&format!(
+                "CREATE TABLESPACE placed LOCATION '{}'",
+                tablespace_location("placed")
+            ))
+            .await
+            .expect("create tablespace");
+        let oid = scalar(
+            &mut session,
+            "SELECT oid FROM pg_catalog.pg_tablespace WHERE spcname = 'placed'",
+        )
+        .await;
+        assert!(
+            state(
+                &mut session,
+                "CREATE TABLE missing_space (id int) TABLESPACE nowhere",
+            )
+            .await
+                == "42704"
+        );
+        assert!(
+            state(
+                &mut session,
+                "CREATE TABLE global_space (id int) TABLESPACE pg_global",
+            )
+            .await
+                == "0A000"
+        );
+        session
+            .simple_query("CREATE TABLE placed_table (id int) TABLESPACE placed")
+            .await
+            .expect("create placed table");
+        session
+            .simple_query("CREATE INDEX placed_index ON placed_table (id) TABLESPACE placed")
+            .await
+            .expect("create placed index");
+        session
+            .simple_query("CREATE TABLE placed_as TABLESPACE placed AS SELECT 1 AS id")
+            .await
+            .expect("create placed table as");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT reltablespace FROM pg_catalog.pg_class WHERE relname = 'placed_table'",
+            )
+            .await
+                == oid
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT reltablespace FROM pg_catalog.pg_class WHERE relname = 'placed_as'",
+            )
+            .await
+                == oid
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT reltablespace FROM pg_catalog.pg_class WHERE relname = 'placed_index'",
+            )
+            .await
+                == oid
+        );
+        assert!(state(&mut session, "DROP TABLESPACE placed").await == "2BP01");
+        session
+            .simple_query("ALTER TABLE placed_table SET TABLESPACE pg_default")
+            .await
+            .expect("move table to default");
+        session
+            .simple_query("ALTER INDEX placed_index SET TABLESPACE pg_default")
+            .await
+            .expect("move index to default");
+        session
+            .simple_query("DROP TABLE placed_as")
+            .await
+            .expect("drop placed table as");
+        session
+            .simple_query("DROP TABLESPACE placed")
+            .await
+            .expect("drop empty tablespace");
+    }
+
+    #[tokio::test]
+    async fn operator_classes_and_families_are_catalog_visible() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query("DROP OPERATOR CLASS IF EXISTS missing_class USING btree")
+            .await
+            .expect("missing class is skipped");
+        assert!(
+            notices.try_recv().expect("skip notice").message
+                == "operator class \"missing_class\" does not exist for access method \"btree\", skipping"
+        );
+        assert!(
+            state(
+                &mut session,
+                "DROP OPERATOR CLASS missing_class USING no_such_am",
+            )
+            .await
+                == "42704"
+        );
+        session
+            .simple_query(
+                "CREATE ROLE operator_owner; \
+                 CREATE USER operator_member IN ROLE operator_owner; \
+                 CREATE ROLE operator_unrelated; \
+                 SET SESSION AUTHORIZATION operator_member",
+            )
+            .await
+            .expect("create operator owner membership");
+        session
+            .simple_query("CREATE OPERATOR FAMILY explicit_family USING hash")
+            .await
+            .expect("create family");
+        session
+            .simple_query(
+                "CREATE OPERATOR CLASS explicit_class FOR TYPE uuid USING hash \
+                 FAMILY explicit_family AS STORAGE uuid",
+            )
+            .await
+            .expect("create class");
+        session
+            .simple_query(
+                "CREATE OPERATOR CLASS implicit_class FOR TYPE int4 USING btree AS STORAGE int4",
+            )
+            .await
+            .expect("create class with implicit family");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opfamily \
+                 WHERE opfname IN ('explicit_family', 'implicit_class')",
+            )
+            .await
+                == "2"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opfamily \
+                 WHERE opfname = 'float_ops' AND opfmethod = 403",
+            )
+            .await
+                == "1"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opclass \
+                 WHERE opcname IN ('explicit_class', 'implicit_class')",
+            )
+            .await
+                == "2"
+        );
+        assert!(scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_amop").await == "945");
+        assert!(scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_amproc").await == "714");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_description WHERE classoid = 1255",
+            )
+            .await
+                == "3397"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_description WHERE classoid = 2617",
+            )
+            .await
+                == "799"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opclass c, pg_catalog.pg_opfamily f \
+                 WHERE c.opcfamily = f.oid AND c.opcname = 'explicit_class' \
+                   AND f.opfname = 'explicit_family'",
+            )
+            .await
+                == "1"
+        );
+        session
+            .simple_query("CREATE SCHEMA operator_archive")
+            .await
+            .expect("create destination schema");
+        assert!(
+            state(
+                &mut session,
+                "ALTER OPERATOR FAMILY explicit_family USING hash OWNER TO operator_unrelated",
+            )
+            .await
+                == "42501"
+        );
+        for sql in [
+            "ALTER OPERATOR FAMILY explicit_family USING hash RENAME TO renamed_family",
+            "ALTER OPERATOR CLASS explicit_class USING hash RENAME TO renamed_class",
+            "ALTER OPERATOR FAMILY renamed_family USING hash SET SCHEMA operator_archive",
+            "ALTER OPERATOR CLASS renamed_class USING hash SET SCHEMA operator_archive",
+            "ALTER OPERATOR FAMILY operator_archive.renamed_family USING hash OWNER TO operator_owner",
+            "ALTER OPERATOR CLASS operator_archive.renamed_class USING hash OWNER TO operator_owner",
+            "ALTER OPERATOR FAMILY operator_archive.renamed_family USING hash SET SCHEMA operator_archive",
+            "ALTER OPERATOR CLASS operator_archive.renamed_class USING hash SET SCHEMA operator_archive",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opclass c, pg_catalog.pg_opfamily f \
+                 WHERE c.opcfamily = f.oid AND c.opcname = 'renamed_class' \
+                   AND f.opfname = 'renamed_family'",
+            )
+            .await
+                == "1"
+        );
+        session
+            .simple_query("RESET SESSION AUTHORIZATION")
+            .await
+            .expect("return to bootstrap role");
+        session
+            .simple_query("CREATE OPERATOR FAMILY member_family USING btree")
+            .await
+            .expect("create member family");
+        session
+            .simple_query(
+                "CREATE OPERATOR FAMILY ordering_family USING gist; \
+                 ALTER OPERATOR FAMILY ordering_family USING gist ADD \
+                 OPERATOR 1 < (int4, int4) FOR ORDER BY float_ops; \
+                 DROP OPERATOR FAMILY ordering_family USING gist",
+            )
+            .await
+            .expect("resolve built-in ordering family");
+        let repeated = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD \
+                 OPERATOR 1 < (int4, int4), OPERATOR 1 < (int4, int4)",
+            )
+            .await
+            .expect_err("duplicate in statement");
+        assert!(
+            repeated.message == "operator number 1 for (integer,integer) appears more than once"
+        );
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD \
+                 OPERATOR 1 < (int4, int2), FUNCTION 1 btint42cmp(int4, int2)",
+            )
+            .await
+            .expect("add family members");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop a, pg_catalog.pg_opfamily f \
+                 WHERE a.amopfamily = f.oid AND f.opfname = 'member_family' \
+                   AND a.amopstrategy = 1 AND a.amopopr = 535 AND a.amopmethod = 403",
+            )
+            .await
+                == "1"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amproc p, pg_catalog.pg_opfamily f \
+                 WHERE p.amprocfamily = f.oid AND f.opfname = 'member_family' \
+                   AND p.amprocnum = 1 AND p.amproc = 2191",
+            )
+            .await
+                == "1"
+        );
+        let duplicate = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD OPERATOR 1 < (int4, int2)",
+            )
+            .await
+            .expect_err("existing member");
+        assert!(
+            duplicate.message
+                == "operator 1(integer,smallint) already exists in operator family \"member_family\""
+        );
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree DROP \
+                 OPERATOR 1 (int4, int2), FUNCTION 1 (int4, int2)",
+            )
+            .await
+            .expect("drop family members");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop a, pg_catalog.pg_opfamily f \
+                 WHERE a.amopfamily = f.oid AND f.opfname = 'member_family'",
+            )
+            .await
+                == "0"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amproc p, pg_catalog.pg_opfamily f \
+                 WHERE p.amprocfamily = f.oid AND f.opfname = 'member_family'",
+            )
+            .await
+                == "0"
+        );
+        let missing = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree DROP FUNCTION 1 (int4, int2)",
+            )
+            .await
+            .expect_err("missing member");
+        assert!(
+            missing.message
+                == "function 1(integer,smallint) does not exist in operator family \"member_family\""
+        );
+        session
+            .simple_query(
+                "CREATE FUNCTION bad_btree(int4, int2) RETURNS int8 \
+                 AS 'SELECT NULL::int8' LANGUAGE SQL",
+            )
+            .await
+            .expect("create validation routine");
+        let bad_result = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD \
+                 FUNCTION 1 bad_btree(int4, int2)",
+            )
+            .await
+            .expect_err("wrong btree result");
+        assert!(bad_result.message == "ordering comparison functions must return integer");
+        session
+            .simple_query(
+                "CREATE FUNCTION options_func(internal) RETURNS void \
+                 AS 'regress', 'test_opclass_options_func' LANGUAGE C; \
+                 CREATE OPERATOR FAMILY options_family USING btree",
+            )
+            .await
+            .expect("create options support function");
+        let cross_type = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 6 (int4, int2) btint4skipsupport(internal)",
+            )
+            .await
+            .expect_err("cross-type skip support");
+        assert!(cross_type.message == "btree skip support functions must not be cross-type");
+        let missing_options = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 5 options_func(internal, text[], bool)",
+            )
+            .await
+            .expect_err("wrong options signature");
+        assert!(
+            missing_options.message
+                == "function options_func(internal, text[], boolean) does not exist"
+        );
+        let invalid_options = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 5 (int4) btint42cmp(int4, int2)",
+            )
+            .await
+            .expect_err("invalid options parser");
+        assert!(invalid_options.message == "invalid operator class options parsing function");
+        assert!(
+            invalid_options
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.hint.as_deref())
+                == Some(
+                    "Valid signature of operator class options parsing function is (internal) RETURNS void."
+                )
+        );
+        let mismatched_options = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 5 (int4, int2) btint42cmp(int4, int2)",
+            )
+            .await
+            .expect_err("mismatched options types");
+        assert!(
+            mismatched_options.message
+                == "left and right associated data types for operator class options parsing functions must match"
+        );
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY options_family USING btree ADD \
+                 FUNCTION 5 (int4) options_func(internal); \
+                 ALTER OPERATOR FAMILY options_family USING btree DROP FUNCTION 5 (int4)",
+            )
+            .await
+            .expect("valid options support function");
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY member_family USING btree ADD OPERATOR 1 < (int4, int2); \
+                 DROP OPERATOR FAMILY member_family USING btree",
+            )
+            .await
+            .expect("re-add member and drop family");
+        assert!(
+            state(
+                &mut session,
+                "ALTER OPERATOR FAMILY implicit_class USING btree ADD OPERATOR 6 < (int4, int4)",
+            )
+            .await
+                == "22023"
+        );
+        assert!(
+            state(
+                &mut session,
+                "DROP OPERATOR FAMILY operator_archive.renamed_family USING hash",
+            )
+            .await
+                == "2BP01"
+        );
+        session
+            .simple_query("DROP OPERATOR CLASS operator_archive.renamed_class USING hash")
+            .await
+            .expect("drop class");
+        session
+            .simple_query("DROP OPERATOR FAMILY operator_archive.renamed_family USING hash")
+            .await
+            .expect("drop family");
+        session
+            .simple_query("DROP OPERATOR FAMILY implicit_class USING btree CASCADE")
+            .await
+            .expect("cascade implicit family");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opclass \
+                 WHERE opcname IN ('renamed_class', 'implicit_class')",
+            )
+            .await
+                == "0"
+        );
+    }
+
+    /// PostgreSQL's own `equivclass` test builds a deliberately incomplete
+    /// cross-type family by hanging members off the *built-in* `integer_ops`,
+    /// so a built-in family has to be a legal `ALTER` target even though it has
+    /// no catalog row of its own — only a fixture entry.
+    /// The alias type, its cast and its cross-type `=`, exactly as
+    /// PostgreSQL's `equivclass` builds them.
+    async fn int8_alias_fixture(session: &mut SqlSession) {
+        for sql in [
+            "CREATE TYPE int8alias1",
+            "CREATE FUNCTION int8alias1in(cstring) RETURNS int8alias1 \
+             STRICT IMMUTABLE LANGUAGE internal AS 'int8in'",
+            "CREATE FUNCTION int8alias1out(int8alias1) RETURNS cstring \
+             STRICT IMMUTABLE LANGUAGE internal AS 'int8out'",
+            "CREATE TYPE int8alias1 (input = int8alias1in, output = int8alias1out, like = int8)",
+            "CREATE FUNCTION int8alias1eq(int8, int8alias1) RETURNS bool \
+             STRICT IMMUTABLE LANGUAGE internal AS 'int8eq'",
+            "CREATE OPERATOR = (procedure = int8alias1eq, leftarg = int8, \
+             rightarg = int8alias1, restrict = eqsel, join = eqjoinsel, merges)",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_built_in_operator_family_accepts_members() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        int8_alias_fixture(&mut session).await;
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree ADD \
+                 OPERATOR 3 = (int8, int8alias1)",
+            )
+            .await
+            .expect("add a member to a built-in family");
+        // 1976 is `pg_catalog.integer_ops` for btree and 403 is btree. The row
+        // has to land *in* the built-in family, carry that family's access
+        // method rather than a zero, and name the user-defined operator rather
+        // than falling back to oid 0.
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop a, pg_catalog.pg_opfamily f, \
+                      pg_catalog.pg_operator o \
+                 WHERE a.amopfamily = f.oid AND a.amopopr = o.oid \
+                   AND f.opfname = 'integer_ops' AND f.oid = 1976 \
+                   AND a.amopstrategy = 3 AND a.amopmethod = 403 \
+                   AND a.amoplefttype = 'int8'::regtype \
+                   AND a.amoprighttype = 'int8alias1'::regtype \
+                   AND o.oprname = '=' AND o.oprright = 'int8alias1'::regtype",
+            )
+            .await
+                == "1"
+        );
+        session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree DROP \
+                 OPERATOR 3 (int8, int8alias1)",
+            )
+            .await
+            .expect("drop the added member");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop \
+                 WHERE amopfamily = 1976 AND amopstrategy = 3 \
+                   AND amoprighttype = 'int8alias1'::regtype",
+            )
+            .await
+                == "0"
+        );
+    }
+
+    /// The fixture rows are the built-in family's real members, so a slot one of
+    /// them fills is taken. Reading only the durable rows lets a second row into
+    /// the same slot, and `pg_amop` then reports both.
+    #[tokio::test]
+    async fn a_built_in_family_slot_is_occupied_by_its_fixture() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let operator = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree ADD OPERATOR 1 < (int4, int2)",
+            )
+            .await
+            .expect_err("strategy 1 for (int4, int2) is a built-in member");
+        assert!(
+            operator.message
+                == "operator 1(integer,smallint) already exists in operator family \"integer_ops\"",
+            "{}",
+            operator.message
+        );
+        let function = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree ADD \
+                 FUNCTION 1 btint42cmp(int4, int2)",
+            )
+            .await
+            .expect_err("support function 1 for (int4, int2) is a built-in member");
+        assert!(
+            function.message
+                == "function 1(integer,smallint) already exists in operator family \"integer_ops\"",
+            "{}",
+            function.message
+        );
+        // Only one row, so the fixture was consulted rather than duplicated.
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop \
+                 WHERE amopfamily = 1976 AND amopstrategy = 1 \
+                   AND amoplefttype = 'int4'::regtype AND amoprighttype = 'int2'::regtype",
+            )
+            .await
+                == "1"
+        );
+        let dropped = session
+            .simple_query(
+                "ALTER OPERATOR FAMILY integer_ops USING btree DROP OPERATOR 1 (int4, int2)",
+            )
+            .await
+            .expect_err("a fixture member cannot be dropped");
+        assert!(
+            dropped.message
+                == "operator family \"integer_ops\" is built into this catalog and its own \
+                    members cannot be dropped",
+            "{}",
+            dropped.message
+        );
+    }
+
+    /// A member joins a built-in family by oid alone, but a rename, a reowning
+    /// or a schema move would need a row the fixture cannot provide. Say so
+    /// rather than claim the family is missing.
+    #[tokio::test]
+    async fn a_built_in_operator_family_refuses_to_be_renamed() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "ALTER OPERATOR FAMILY integer_ops USING btree RENAME TO whole_numbers",
+            "ALTER OPERATOR FAMILY integer_ops USING btree SET SCHEMA public",
+        ] {
+            let refused = session.simple_query(sql).await.expect_err(sql);
+            assert!(
+                refused.message
+                    == "operator family \"integer_ops\" is built into this catalog and cannot \
+                        be renamed, reowned or moved",
+                "{sql}: {}",
+                refused.message
+            );
+        }
+        // The name still resolves to the built-in, not to a phantom in `public`.
+        let missing = session
+            .simple_query("ALTER OPERATOR FAMILY no_such_ops USING btree RENAME TO other_ops")
+            .await
+            .expect_err("no such family");
+        assert!(
+            missing.message
+                == "operator family \"no_such_ops\" does not exist for access method \"btree\"",
+            "{}",
+            missing.message
+        );
+    }
+
+    /// A family member names `any_operator`, so a user-defined symbol like
+    /// `===` has to be sliced out of the source rather than read as one token.
+    #[tokio::test]
+    async fn a_family_member_names_a_multi_character_operator() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE FUNCTION eq_i4_i2(int4, int2) RETURNS bool \
+             STRICT IMMUTABLE LANGUAGE internal AS 'int42eq'",
+            "CREATE OPERATOR === (procedure = eq_i4_i2, leftarg = int4, rightarg = int2)",
+            "CREATE OPERATOR FAMILY cross_type_ops USING btree",
+            "ALTER OPERATOR FAMILY cross_type_ops USING btree ADD OPERATOR 3 === (int4, int2)",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_amop a, pg_catalog.pg_operator o, \
+                      pg_catalog.pg_opfamily f \
+                 WHERE a.amopopr = o.oid AND a.amopfamily = f.oid \
+                   AND f.opfname = 'cross_type_ops' AND o.oprname = '===' \
+                   AND a.amopstrategy = 3 AND a.amopmethod = 403",
+            )
+            .await
+                == "1"
+        );
+    }
+
     #[test]
     fn format_g_matches_cs_percent_g_at_six_significant_digits() {
         let cases = [
@@ -16131,5 +24554,443 @@ mod session_conformance_tests {
                 == "{serializable,\"repeatable read\"}"
         );
         assert!(render_text_array(&["", "null", "a,b"]) == "{\"\",\"null\",\"a,b\"}");
+    }
+
+    /// The fixtures both maintenance-command tests name.
+    async fn maintenance_fixtures(session: &mut SqlSession) {
+        for sql in [
+            "CREATE SCHEMA other",
+            "CREATE TABLE t1 (i int, j text)",
+            "CREATE TABLE t2 (i int)",
+            "CREATE TABLE other.t3 (i int, k int)",
+            "CREATE VIEW v1 AS SELECT * FROM t1",
+            "CREATE SEQUENCE s1",
+            "CREATE INDEX t1_idx ON t1 (i)",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+    }
+
+    /// `ANALYZE` and `VACUUM` resolve their names the way every other
+    /// statement does, and report what `PostgreSQL` reports when a name, a
+    /// schema or a column resolves to nothing.
+    ///
+    /// The ordering cases are the load-bearing ones: each pairs two faults in
+    /// one statement, so it fails if the checks run in the wrong order even
+    /// though every individual check is right.
+    #[tokio::test]
+    async fn maintenance_commands_resolve_every_name_they_are_given() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        maintenance_fixtures(&mut session).await;
+
+        let cases = [
+            // The defect itself: a name that resolves to nothing.
+            ("ANALYZE nope", "42P01"),
+            ("VACUUM nope", "42P01"),
+            ("ANALYZE (VERBOSE) nope", "42P01"),
+            ("VACUUM FULL nope", "42P01"),
+            ("VACUUM (FULL, ANALYZE) nope", "42P01"),
+            ("ANALYZE ONLY nope", "42P01"),
+            ("VACUUM ONLY nope", "42P01"),
+            // A written qualifier is resolved strictly, as for every other
+            // utility statement: the missing schema is reported as such.
+            ("ANALYZE nosch.t", "3F000"),
+            ("VACUUM nosch.t", "3F000"),
+            ("ANALYZE public.nope", "42P01"),
+            // Names that do resolve, including through a qualifier — which
+            // did not even parse before.
+            ("ANALYZE t1", "00000"),
+            ("VACUUM t1", "00000"),
+            ("ANALYZE other.t3", "00000"),
+            ("VACUUM (FULL) other.t3", "00000"),
+            ("ANALYZE", "00000"),
+            ("VACUUM", "00000"),
+            ("ANALYZE t1, t2", "00000"),
+            ("ANALYZE t1, t1", "00000"),
+            // Every name is resolved before any of them is acted on, so the
+            // position of the bad one does not change the answer.
+            ("ANALYZE t1, nope", "42P01"),
+            ("ANALYZE nope, t1", "42P01"),
+            ("VACUUM t1, nope, t2", "42P01"),
+            // Columns, checked left to right: existence before repetition.
+            ("ANALYZE t1 (i)", "00000"),
+            ("ANALYZE t1 (i, j)", "00000"),
+            ("ANALYZE t1 (nosuchcol)", "42703"),
+            ("ANALYZE t1 (i, i)", "42701"),
+            ("ANALYZE t1 (i, i, nosuchcol)", "42701"),
+            ("ANALYZE t1 (nosuchcol, i, i)", "42703"),
+            ("ANALYZE other.t3 (nosuchcol)", "42703"),
+            // A missing relation outranks a bad column, whichever comes first,
+            // because resolution happens before any column is looked at.
+            ("ANALYZE t1 (nosuchcol), nope", "42P01"),
+            ("ANALYZE nope, t1 (nosuchcol)", "42P01"),
+            // A column list is only meaningful with a statistics pass, and
+            // that is settled before any name is resolved.
+            ("VACUUM t1 (i)", "0A000"),
+            ("VACUUM nope (i)", "0A000"),
+            ("VACUUM nosch.t (i)", "0A000"),
+            ("VACUUM FULL t1 (i)", "0A000"),
+            ("VACUUM (ANALYZE FALSE) t1 (i)", "0A000"),
+            ("VACUUM ANALYZE t1 (i)", "00000"),
+            ("VACUUM (ANALYZE) t1 (i)", "00000"),
+            // A synthesised catalog relation is neither missing nor skipped.
+            ("ANALYZE pg_class", "00000"),
+            ("VACUUM pg_class", "00000"),
+            ("ANALYZE pg_catalog.pg_class", "00000"),
+        ];
+        for (sql, expected) in cases {
+            assert!(state(&mut session, sql).await == expected, "case: {sql}");
+        }
+
+        // The messages the two commonest faults produce, which the SQLSTATE
+        // alone would not pin down.
+        assert!(message(&mut session, "ANALYZE nope").await == "relation \"nope\" does not exist");
+        assert!(
+            message(&mut session, "ANALYZE t1 (i, i)").await
+                == "column \"i\" of relation \"t1\" appears more than once"
+        );
+        assert!(
+            message(&mut session, "ANALYZE t1 (nosuchcol)").await
+                == "column \"nosuchcol\" of relation \"t1\" does not exist"
+        );
+    }
+
+    /// `VACUUM` is refused inside a transaction block before its names are
+    /// looked at, so a block turns a would-be `42P01` into `25001`. `ANALYZE`
+    /// is allowed in a block and reports the name fault there as anywhere.
+    #[tokio::test]
+    async fn vacuum_refuses_a_transaction_block_before_resolving_anything() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        maintenance_fixtures(&mut session).await;
+
+        session.simple_query("BEGIN").await.expect("begin");
+        assert!(state(&mut session, "VACUUM nope").await == "25001");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        session.simple_query("BEGIN").await.expect("begin");
+        assert!(state(&mut session, "VACUUM t1").await == "25001");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        session.simple_query("BEGIN").await.expect("begin");
+        assert!(state(&mut session, "ANALYZE nope").await == "42P01");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        session.simple_query("BEGIN").await.expect("begin");
+        assert!(state(&mut session, "ANALYZE t1").await == "00000");
+        session.simple_query("COMMIT").await.expect("commit");
+    }
+
+    /// A relation of a kind that holds no statistics is skipped with a
+    /// `WARNING`, not refused — and only after every name in the statement has
+    /// resolved, so one bad name suppresses the warnings the others would have
+    /// produced.
+    #[tokio::test]
+    async fn maintenance_commands_skip_the_kinds_they_cannot_process() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        maintenance_fixtures(&mut session).await;
+        while notices.try_recv().is_ok() {}
+
+        let cases = [
+            (
+                "ANALYZE v1",
+                "skipping \"v1\" --- cannot analyze non-tables or special system tables",
+            ),
+            (
+                "ANALYZE s1",
+                "skipping \"s1\" --- cannot analyze non-tables or special system tables",
+            ),
+            (
+                "ANALYZE t1_idx",
+                "skipping \"t1_idx\" --- cannot analyze non-tables or special system tables",
+            ),
+            (
+                "VACUUM v1",
+                "skipping \"v1\" --- cannot vacuum non-tables or special system tables",
+            ),
+            (
+                "VACUUM s1",
+                "skipping \"s1\" --- cannot vacuum non-tables or special system tables",
+            ),
+            // The report names the relation, never the qualifier it was
+            // written with.
+            (
+                "VACUUM public.v1",
+                "skipping \"v1\" --- cannot vacuum non-tables or special system tables",
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(state(&mut session, sql).await == "00000", "case: {sql}");
+            let warning = notices.try_recv().expect(sql);
+            assert!(
+                warning.severity == crabka_pgwire::error::Severity::Warning,
+                "case: {sql}"
+            );
+            assert!(warning.message == expected, "case: {sql}");
+            assert!(notices.try_recv().is_err(), "case: {sql}");
+        }
+
+        // A column list on a skipped relation is never reached.
+        assert!(state(&mut session, "ANALYZE v1 (whatever)").await == "00000");
+        assert!(
+            notices
+                .try_recv()
+                .expect("skip warning")
+                .message
+                .starts_with("skipping")
+        );
+
+        // A name that resolves to nothing fails before the skip warning the
+        // earlier target would have emitted.
+        assert!(state(&mut session, "ANALYZE v1, nope").await == "42P01");
+        assert!(notices.try_recv().is_err());
+    }
+
+    /// Assert both `pg_class` columns `ANALYZE` maintains for one relation.
+    ///
+    /// `reltuples` is read as a number rather than compared as the text a
+    /// float4 renders to: that rendering is a platform's business and a test
+    /// that pins it fails somewhere else. Every count these tests use is a
+    /// small exact integer, so "rounds to the same integer" is the widest
+    /// tolerance that can still tell any two of them apart.
+    async fn assert_class_stats(
+        session: &mut SqlSession,
+        relname: &str,
+        reltuples: f64,
+        has_subclass: &str,
+        label: &str,
+    ) {
+        let sql =
+            format!("SELECT reltuples, relhassubclass FROM pg_class WHERE relname = '{relname}'");
+        let rows = run(session, &sql).await.expect(&sql);
+        let [row] = rows.as_slice() else {
+            panic!("expected exactly one pg_class row for {relname}");
+        };
+        let [measured, latched] = row.as_slice() else {
+            panic!("expected exactly two columns from {sql}");
+        };
+        let measured: f64 = measured.parse().expect("reltuples renders as a number");
+        assert!(
+            (measured - reltuples).abs() < 0.5 && latched == has_subclass,
+            "{label}: {relname} reads ({measured}, {latched}), expected ({reltuples}, {has_subclass})"
+        );
+    }
+
+    /// `reltuples` is the relation's *own* live-row count. An inheritance
+    /// parent does not take its children's, which is what separates it from a
+    /// partitioned parent — and `relhassubclass` is already set by the time the
+    /// child exists, before any `ANALYZE` has run.
+    #[tokio::test]
+    async fn analyze_counts_an_inheritance_parents_own_rows_only() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE ipar (i int)",
+            "CREATE TABLE ichi () INHERITS (ipar)",
+            "INSERT INTO ipar VALUES (1), (2), (3)",
+            "INSERT INTO ichi VALUES (9), (9)",
+        ] {
+            run(&mut s, sql).await.expect(sql);
+        }
+
+        // Created, populated, never analyzed: the count is PostgreSQL's
+        // "unknown", and the child has already latched the flag.
+        assert_class_stats(&mut s, "ipar", -1.0, "t", "before ANALYZE").await;
+
+        run(&mut s, "ANALYZE ipar").await.expect("analyze");
+        assert_class_stats(&mut s, "ipar", 3.0, "t", "after ANALYZE").await;
+    }
+
+    /// The window `expected/vacuum.out` reads in: a parent that has just lost
+    /// its last child still reports the pre-drop count and a set
+    /// `relhassubclass`, and only the next `ANALYZE` corrects either. Both
+    /// blocks of that file are here, because the two inheritance flavours
+    /// answer the count differently — a partitioned parent stores nothing and
+    /// counts its tree.
+    #[tokio::test]
+    async fn a_parent_that_lost_its_last_child_stays_stale_until_analyze() {
+        let cases = [
+            ("non-partitioning inheritance", false, 0.0_f64),
+            ("partitioning", true, 2.0_f64),
+        ];
+        for (label, partitioned, analyzed) in cases {
+            let engine = SqlEngine::new();
+            let mut s = engine.connect();
+            let (parent, child, insert_into) = if partitioned {
+                (
+                    "CREATE TABLE par (i int) PARTITION BY LIST (i)",
+                    "CREATE TABLE chi PARTITION OF par FOR VALUES IN (1)",
+                    "par",
+                )
+            } else {
+                (
+                    "CREATE TABLE par (i int)",
+                    "CREATE TABLE chi () INHERITS (par)",
+                    "chi",
+                )
+            };
+            for sql in [
+                parent,
+                child,
+                &format!("INSERT INTO {insert_into} VALUES (1), (1)"),
+                "ANALYZE par",
+            ] {
+                run(&mut s, sql).await.expect(label);
+            }
+            assert_class_stats(&mut s, "par", analyzed, "t", label).await;
+
+            run(&mut s, "DROP TABLE chi").await.expect(label);
+            assert_class_stats(
+                &mut s,
+                "par",
+                analyzed,
+                "t",
+                &format!("{label}: the drop corrects neither column"),
+            )
+            .await;
+
+            run(&mut s, "ANALYZE par").await.expect(label);
+            assert_class_stats(&mut s, "par", 0.0, "f", label).await;
+        }
+    }
+
+    /// `DETACH PARTITION` is the other way a parent loses its last child, and
+    /// it leaves the latch set exactly as `DROP TABLE` does. Re-attaching sets
+    /// it again.
+    #[tokio::test]
+    async fn detaching_the_last_partition_leaves_the_latch_for_analyze() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE dpar (i int) PARTITION BY LIST (i)",
+            "CREATE TABLE dchi PARTITION OF dpar FOR VALUES IN (1)",
+            "ALTER TABLE dpar DETACH PARTITION dchi",
+        ] {
+            run(&mut s, sql).await.expect(sql);
+        }
+        assert_class_stats(&mut s, "dpar", -1.0, "t", "after DETACH").await;
+
+        run(&mut s, "ANALYZE dpar").await.expect("analyze");
+        assert_class_stats(&mut s, "dpar", 0.0, "f", "after ANALYZE").await;
+
+        run(
+            &mut s,
+            "ALTER TABLE dpar ATTACH PARTITION dchi FOR VALUES IN (1)",
+        )
+        .await
+        .expect("attach");
+        assert_class_stats(&mut s, "dpar", 0.0, "t", "after ATTACH").await;
+    }
+
+    /// `VACUUM` shares every line of `run_maintenance` with `ANALYZE` and must
+    /// still move neither column — including the target-less spelling, which is
+    /// the first statement of the `sanity_check` regression test. The same
+    /// statement written with `ANALYZE` does move them.
+    #[tokio::test]
+    async fn vacuum_alone_never_moves_the_analyze_maintained_columns() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE vpar (i int)",
+            "CREATE TABLE vchi () INHERITS (vpar)",
+            "INSERT INTO vpar VALUES (1), (2)",
+            "DROP TABLE vchi",
+        ] {
+            run(&mut s, sql).await.expect(sql);
+        }
+
+        for sql in [
+            "VACUUM vpar",
+            "VACUUM FULL vpar",
+            "VACUUM (FREEZE) vpar",
+            "VACUUM",
+        ] {
+            assert!(state(&mut s, sql).await == "00000", "case: {sql}");
+            assert_class_stats(&mut s, "vpar", -1.0, "t", sql).await;
+        }
+
+        run(&mut s, "VACUUM ANALYZE vpar")
+            .await
+            .expect("vacuum analyze");
+        assert_class_stats(&mut s, "vpar", 2.0, "f", "VACUUM ANALYZE vpar").await;
+    }
+
+    /// A target-less `ANALYZE` visits every relation the session owns, which is
+    /// what `maintain_every`'s bare `ANALYZE;` relies on.
+    #[tokio::test]
+    async fn a_target_less_analyze_visits_every_relation_the_session_owns() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE dw1 (i int)",
+            "CREATE TABLE dw2 (i int)",
+            "INSERT INTO dw1 VALUES (1)",
+            "INSERT INTO dw2 VALUES (1), (2)",
+        ] {
+            run(&mut s, sql).await.expect(sql);
+        }
+
+        run(&mut s, "ANALYZE").await.expect("analyze");
+        assert_class_stats(&mut s, "dw1", 1.0, "f", "bare ANALYZE").await;
+        assert_class_stats(&mut s, "dw2", 2.0, "f", "bare ANALYZE").await;
+    }
+
+    /// Nothing is collected until every check has passed for every named
+    /// relation, and statistics never outlive the relation they describe — a
+    /// new relation reusing a dropped one's name starts from "unknown".
+    #[tokio::test]
+    async fn a_refused_analyze_collects_nothing_and_a_reused_name_starts_over() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run(&mut s, "CREATE TABLE keep (i int)").await.expect("ddl");
+        run(&mut s, "INSERT INTO keep VALUES (1), (2), (3)")
+            .await
+            .expect("seed");
+
+        for (sql, code) in [
+            ("ANALYZE keep, nope", "42P01"),
+            ("ANALYZE nope, keep", "42P01"),
+            ("ANALYZE keep (nosuchcol)", "42703"),
+            ("ANALYZE keep (i, i)", "42701"),
+        ] {
+            assert!(state(&mut s, sql).await == code, "case: {sql}");
+            assert_class_stats(&mut s, "keep", -1.0, "f", sql).await;
+        }
+
+        run(&mut s, "ANALYZE keep").await.expect("analyze");
+        assert_class_stats(&mut s, "keep", 3.0, "f", "ANALYZE keep").await;
+
+        run(&mut s, "DROP TABLE keep").await.expect("drop");
+        run(&mut s, "CREATE TABLE keep (i int)").await.expect("ddl");
+        assert_class_stats(&mut s, "keep", -1.0, "f", "a reused name").await;
+    }
+
+    /// Every other relation kind shares the `pg_class` row builder, and none of
+    /// them has statistics of its own: `ANALYZE` skips them and they keep
+    /// reporting the defaults. A catalog relation is neither skipped nor
+    /// refused, and still has nothing stored to report.
+    #[tokio::test]
+    async fn relations_that_carry_no_statistics_report_the_defaults() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "CREATE TABLE base (i int)",
+            "CREATE VIEW basev AS SELECT i FROM base",
+            "CREATE SEQUENCE baseq",
+            "CREATE INDEX basei ON base (i)",
+            "ANALYZE basev",
+            "ANALYZE baseq",
+            "ANALYZE basei",
+            "ANALYZE pg_class",
+            "ANALYZE",
+        ] {
+            assert!(state(&mut s, sql).await == "00000", "case: {sql}");
+        }
+        for relname in ["basev", "baseq", "basei", "pg_class"] {
+            assert_class_stats(&mut s, relname, -1.0, "f", relname).await;
+        }
     }
 }

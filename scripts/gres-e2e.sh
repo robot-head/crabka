@@ -453,6 +453,13 @@ start_oracle() {
         "$POSTGRES_IMAGE")
     for _ in $(seq 80); do
         if PGAPPNAME= psql "host=127.0.0.1 port=${ORACLE_PORT} user=postgres dbname=postgres" -tAc 'SELECT 1' >/dev/null 2>&1; then
+            # Gres implements one monetary locale, C -- see the note on
+            # `pgtypes::money`. The image runs `initdb` under its own
+            # `LANG=en_US.utf8`, so without this the oracle answers `$ 485` to
+            # `to_char(485, 'L999')` where Gres answers `  485`, and the parity
+            # run scores the harness instead of the engine.
+            PGAPPNAME= psql "host=127.0.0.1 port=${ORACLE_PORT} user=postgres dbname=postgres" \
+                -v ON_ERROR_STOP=1 -c "ALTER DATABASE postgres SET lc_monetary = 'C'" >/dev/null
             return 0
         fi
         sleep 0.5
@@ -664,11 +671,22 @@ with (
 
     # Both logical clients remain connected while PgDog has exactly one backend.
     # Client two must receive a reset backend, not client one's committed value.
+    #
+    # The reset backend reports PgDog's OWN startup value, not an empty string.
+    # PgDog opens its server connection with application_name='PgDog', gres
+    # stores that verbatim (`VERBATIM_REPORTED_PARAMS` in pgwire/session.rs),
+    # and PostgreSQL marks application_name GUC_REPORT in guc_tables.c, so any
+    # conforming server reports it back. This gate asserted `== ""` until
+    # 2026-08-14, which held only while gres failed to announce the parameter
+    # at all. Assert the property the gate is for -- no leak of client one's
+    # session state -- rather than the empty string that defect produced.
     with second_connection.cursor() as cursor:
         cursor.execute("BEGIN")
         cursor.execute("SHOW application_name")
         second_name = cursor.fetchone()[0]
-        assert second_name == "", f"client two inherited application_name={second_name!r}"
+        assert second_name not in ("f1-client-one", "f1-distinct-set"), (
+            f"client two inherited client one's application_name={second_name!r}"
+        )
         cursor.execute("SET LOCAL statement_timeout = 17")
         cursor.execute("SHOW statement_timeout")
         local_timeout = cursor.fetchone()[0]
@@ -687,14 +705,26 @@ with (
 
     # PgDog 0.1.47 rejects mixed SET-family/non-SET multi-statements, so issue
     # RESET and its observation as separate simple queries on the same client.
+    #
+    # RESET restores a GUC to its STARTUP-PACKET value, not to the empty
+    # string. The backend's startup value is PgDog's own, so `RESET
+    # application_name` correctly yields 'PgDog' here, exactly as it would
+    # against a real PostgreSQL backend PgDog had connected to. Assert that the
+    # client's own setting is gone, which is what RESET promises.
     with first_connection.cursor() as cursor:
         cursor.execute("RESET application_name")
         cursor.execute("SHOW application_name")
-        assert cursor.fetchone()[0] == ""
+        reset_name = cursor.fetchone()[0]
+        assert reset_name not in ("f1-client-one", "f1-distinct-set"), (
+            f"RESET left client one's application_name={reset_name!r}"
+        )
 
     with second_connection.transaction(), second_connection.cursor() as cursor:
         cursor.execute("SHOW application_name")
-        assert cursor.fetchone()[0] == ""
+        later_name = cursor.fetchone()[0]
+        assert later_name not in ("f1-client-one", "f1-distinct-set"), (
+            f"client two later saw client one's application_name={later_name!r}"
+        )
 print("PASS: F-1 PgDog GUC transaction-pooler gate")
 F1PY
 

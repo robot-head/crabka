@@ -16,28 +16,37 @@
 //!  LIMIT 5
 //! ```
 //!
-//! Each clause keyword sits at its own fixed indent. Continuation lines of the
-//! select list have an indent of four. Two behaviors depend on the pretty flag.
-//! Without the flag, every operator expression is fully parenthesized and a
-//! join tree is wrapped in parentheses. With the flag, neither is.
-//! `pg_get_viewdef(oid)` is the un-pretty form. `pg_get_viewdef(oid, true)` and
-//! the wrap-column overload are the pretty one.
+//! Each clause keyword sits at its own offset from the indent the query was
+//! entered at; continuation lines of the select list are indented four. Two
+//! behaviors depend on the pretty flag: without it every operator expression is
+//! fully parenthesized and each join node is wrapped in parentheses, with it
+//! neither is. `pg_get_viewdef(oid)` is the un-pretty form;
+//! `pg_get_viewdef(oid, true)` and the wrap-column overload are the pretty one.
 //!
-//! This module reproduces two of PostgreSQL's rules exactly, because they
-//! decide whether the text round-trips:
+//! Three of PostgreSQL's rules are reproduced exactly because they are the ones
+//! that decide whether the text round-trips:
 //!
 //! * **Column qualification.** A reference is written `tbl.col` whenever the
 //!   query has other than exactly one range-table entry, or the query is nested
 //!   inside another. This matches `get_query_def`'s `varprefix`.
 //! * **Output naming.** A bare column reference whose name already equals the
-//!   view's column name is written without `AS`; everything else always carries
-//!   one.
+//!   view's column name is written without `AS`; everything else carries one
+//!   wherever the query's own column names are visible, and inside a sub-select
+//!   — where they are not — only when the label is something other than
+//!   `?column?`.
+//! * **Nesting indent.** Writing `SELECT` deepens `indentLevel` by one
+//!   eight-column step, so every query inside one — a `WITH` body, a derived
+//!   table, a sub-select — is laid out one step further in than the query
+//!   holding it, compounding with depth. `pg_get_expr` never enters a `SELECT`,
+//!   which is why the sub-selects in a stored qual start at column zero.
 
 use std::fmt::Write as _;
 
 use crabka_pgparser::ast::{
-    BinaryOp, DistinctClause, Expr, FuncArgs, FuncCall, JoinConstraint, JoinKind, OrderItem,
-    QueryBody, QueryExpr, SelectItem, SelectStmt, SetExpr, SetOp, TableExpr, UnaryOp, ValuesStmt,
+    ArraySubscript, BinaryOp, DistinctClause, Expr, FrameBound, FrameExclusion, FrameMode,
+    FuncArgs, FuncCall, GroupItem, JoinConstraint, JoinKind, OrderItem, QueryBody, QueryExpr,
+    SelectItem, SelectStmt, SetExpr, SetOp, TableExpr, UnaryOp, ValuesStmt, WindowCall, WindowRef,
+    WindowSpec,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 
@@ -58,7 +67,38 @@ struct Ctx<'a> {
     /// `pg_get_viewdef(oid, integer)` overload. `None`, which is every other
     /// overload, puts one output column per line.
     wrap: Option<usize>,
+    /// `ruleutils.c`'s `colNamesVisible`: whether this query's output column
+    /// names matter to whoever reads it. They do for a view body, a `WITH`
+    /// entry and a derived table, all of which are referenced by name; they do
+    /// not inside a sub-select or on the right of a set operation, where an
+    /// unnamed expression is left unlabelled rather than written out as
+    /// `AS "?column?"`.
+    colnames: bool,
+    /// The `SELECT`'s window calls. Each one is held outside the expression
+    /// tree, with a [`crabka_pgparser::ast::window_placeholder`] standing in
+    /// for it, so rendering a select list needs them alongside.
+    window_calls: &'a [crabka_pgparser::ast::WindowCall],
+    /// `ruleutils.c`'s `indentLevel` at this point in the tree. A query's
+    /// clause keywords sit at the level it was *entered* with; writing `SELECT`
+    /// deepens it by one step, which is why every sub-query — a derived table,
+    /// a sub-select, a `WITH` body — is laid out eight columns further in than
+    /// the query holding it, and `pg_get_expr`, which never enters a `SELECT`,
+    /// lays its sub-selects out at column zero.
+    indent: usize,
+    /// The session's text-output settings. `get_const_expr` prints a constant
+    /// through its type's *output* function, so what a stored `interval`,
+    /// `date` or `timestamptz` constant deparses to depends on `IntervalStyle`,
+    /// `DateStyle` and `TimeZone` at the moment the definition is asked for —
+    /// not at the moment it was stored.
+    style: crabka_pgtypes::encoding::OutputStyle<'a>,
 }
+
+/// `ruleutils.c`'s `PRETTYINDENT_STD`: one nesting step.
+const INDENT_STEP: usize = 8;
+/// `ruleutils.c`'s `PRETTYINDENT_LIMIT`: past this the per-level step is
+/// divided down and wrapped, so a deeply nested tree cannot spend quadratic
+/// space on leading blanks.
+const INDENT_LIMIT: usize = 40;
 
 impl Ctx<'_> {
     /// Wrap `inner` in the parentheses PostgreSQL adds only in un-pretty mode.
@@ -69,6 +109,32 @@ impl Ctx<'_> {
             format!("({inner})")
         }
     }
+
+    /// The context a nested query is written in: one indent step deeper, and
+    /// column references always qualified, because a sub-query is by
+    /// definition not the outermost one.
+    fn nested(self) -> Self {
+        Self {
+            qualify: true,
+            qualifier: None,
+            ..self
+        }
+    }
+}
+
+/// `appendContextKeyword`: a newline, then this clause's own indent.
+///
+/// `level` is the indent the enclosing query was entered at and `plus` the
+/// keyword's `indentPlus` — 2 for `FROM`, 1 for `WHERE`/`GROUP BY`/`ORDER BY`,
+/// 0 for `HAVING`/`LIMIT`/`OFFSET` and a set-operation keyword, 4 for a
+/// continuation line of the select list.
+fn clause_break(level: usize, plus: usize) -> String {
+    let amount = if level < INDENT_LIMIT {
+        level
+    } else {
+        (INDENT_LIMIT + (level - INDENT_LIMIT) / (INDENT_STEP / 2)) % INDENT_LIMIT
+    };
+    format!("\n{:width$}", "", width = amount + plus)
 }
 
 /// Write a whole query expression, and name its output columns from `names`.
@@ -78,26 +144,152 @@ pub(crate) fn write_query(
     names: &[String],
     pretty: bool,
     wrap: Option<usize>,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) {
     let ctx = Ctx {
         pretty,
         qualify: false,
         qualifier: None,
         wrap,
+        colnames: true,
+        window_calls: &[],
+        indent: 0,
+        style,
     };
+    write_query_at(out, query, names, ctx);
+}
+
+/// One whole query at this context's indent — its `WITH` list, its body, and
+/// the `ORDER BY`/`LIMIT`/`OFFSET` that belong to the query rather than to any
+/// one set-operation arm.
+fn write_query_at(out: &mut String, query: &QueryExpr, names: &[String], ctx: Ctx<'_>) {
+    write_with_clause(out, query, ctx);
     write_set_expr(out, &query.body, names, ctx);
-    write_query_tail(out, query, ctx);
+    // `ORDER BY`/`LIMIT`/`OFFSET` belong to the same `Query` node as the select
+    // body, so they see the body's range table: a bare column there is
+    // qualified by the sole FROM item exactly as one in the select list is.
+    let tail = match &query.body {
+        SetExpr::Query(QueryBody::Select(select)) => Ctx {
+            qualify: ctx.qualify || range_table_len(&select.from) != 1,
+            qualifier: sole_from_name(&select.from),
+            ..ctx
+        },
+        _ => ctx,
+    };
+    write_query_tail(out, query, tail);
+}
+
+/// The `WITH` list, laid out as `ruleutils.c`'s `get_with_clause` does: each
+/// entry's body one indent step in, on its own lines, with the closing paren on
+/// a line of its own and the next entry continuing from it.
+fn write_with_clause(out: &mut String, query: &QueryExpr, ctx: Ctx<'_>) {
+    let Some(with) = &query.with else { return };
+    if with.ctes.is_empty() {
+        return;
+    }
+    let body = Ctx {
+        indent: ctx.indent + INDENT_STEP,
+        ..ctx.nested()
+    };
+    let mut separator = if with.recursive {
+        " WITH RECURSIVE "
+    } else {
+        " WITH "
+    };
+    for cte in &with.ctes {
+        out.push_str(separator);
+        separator = ", ";
+        out.push_str(&quote_identifier(&cte.name));
+        if let Some(columns) = &cte.columns {
+            let names = columns
+                .iter()
+                .map(|name| quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(out, "({names})");
+        }
+        out.push_str(" AS ");
+        match cte.materialized {
+            Some(true) => out.push_str("MATERIALIZED "),
+            Some(false) => out.push_str("NOT MATERIALIZED "),
+            None => {}
+        }
+        out.push('(');
+        out.push_str(&clause_break(body.indent, 0));
+        match &cte.body {
+            crabka_pgparser::ast::CteBody::Query(inner) => {
+                write_query_at(out, inner, &[], body);
+            }
+            // A data-modifying entry cannot reach a stored view — `CREATE VIEW`
+            // refuses one — so its text is echoed rather than deparsed.
+            crabka_pgparser::ast::CteBody::Dml(_) => out.push_str("..."),
+        }
+        out.push_str(&clause_break(body.indent, 0));
+        out.push(')');
+    }
+    out.push_str(&clause_break(ctx.indent, 0));
+}
+
+/// Deparse one stored expression, the way `pg_get_expr` renders a qual held in
+/// a catalog column.
+///
+/// PostgreSQL deparses such an expression with `PRETTYFLAG_INDENT` alone — the
+/// same flags `pg_get_viewdef(oid)` uses — so it is the un-pretty form here:
+/// every operator node fully parenthesized, any sub-select laid out on its own
+/// indented lines. `varprefix` starts *false* because the context is built from
+/// the single relation the expression belongs to, which is why a column
+/// reference is bare at the top level and qualified only once a sub-select puts
+/// it a level down.
+pub(crate) fn expression_text(
+    expr: &Expr,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    expr_text(
+        expr,
+        Ctx {
+            pretty: false,
+            qualify: false,
+            qualifier: None,
+            wrap: None,
+            colnames: false,
+            window_calls: &[],
+            indent: 0,
+            style,
+        },
+    )
 }
 
 fn write_query_tail(out: &mut String, query: &QueryExpr, ctx: Ctx<'_>) {
+    // These clauses belong to the query, so they sit at the indent it was
+    // entered with; the expressions in them are written one step deeper,
+    // because `get_select_query_def` has already stepped in by this point.
+    let inner = Ctx {
+        indent: ctx.indent + INDENT_STEP,
+        ..ctx
+    };
     if !query.order_by.is_empty() {
-        let _ = write!(out, "\n  ORDER BY {}", order_list(&query.order_by, ctx));
+        let _ = write!(
+            out,
+            "{} ORDER BY {}",
+            clause_break(ctx.indent, 1),
+            order_list(&query.order_by, inner)
+        );
     }
     if let Some(limit) = &query.limit {
-        let _ = write!(out, "\n LIMIT {}", expr_text(limit, ctx));
+        let _ = write!(
+            out,
+            "{} LIMIT {}",
+            clause_break(ctx.indent, 0),
+            expr_text(limit, inner)
+        );
     }
     if let Some(offset) = &query.offset {
-        let _ = write!(out, "\n OFFSET {}", expr_text(offset, ctx));
+        let _ = write!(
+            out,
+            "{} OFFSET {}",
+            clause_break(ctx.indent, 0),
+            expr_text(offset, inner)
+        );
     }
 }
 
@@ -106,12 +298,7 @@ fn write_set_expr(out: &mut String, body: &SetExpr, names: &[String], ctx: Ctx<'
         SetExpr::Query(QueryBody::Select(select)) => write_select(out, select, names, ctx),
         SetExpr::Query(QueryBody::Values(values)) => write_values(out, values, ctx),
         SetExpr::Query(QueryBody::Nested(query)) => {
-            let nested = Ctx {
-                qualify: true,
-                ..ctx
-            };
-            write_set_expr(out, &query.body, names, nested);
-            write_query_tail(out, query, nested);
+            write_query_at(out, query, names, ctx.nested());
         }
         SetExpr::SetOp {
             op,
@@ -121,24 +308,38 @@ fn write_set_expr(out: &mut String, body: &SetExpr, names: &[String], ctx: Ctx<'
         } => {
             // Every arm of a set operation is a sub-query, which is exactly the
             // condition PostgreSQL qualifies column references under.
-            let arm = Ctx {
-                qualify: true,
-                ..ctx
-            };
+            let arm = ctx.nested();
             write_set_expr(out, left, names, arm);
             let keyword = match op {
                 SetOp::Union => "UNION",
                 SetOp::Intersect => "INTERSECT",
                 SetOp::Except => "EXCEPT",
             };
-            let _ = write!(out, "\n{keyword}{}", if *all { " ALL" } else { "" });
-            out.push('\n');
-            write_set_expr(out, right, names, arm);
+            let _ = write!(
+                out,
+                "{}{keyword}{}{}",
+                clause_break(ctx.indent, 0),
+                if *all { " ALL" } else { "" },
+                clause_break(ctx.indent, 0)
+            );
+            // The right arm's own output names are never the ones anybody
+            // reads, which is `get_setop_query` clearing `colNamesVisible`.
+            write_set_expr(
+                out,
+                right,
+                names,
+                Ctx {
+                    colnames: false,
+                    ..arm
+                },
+            );
         }
     }
 }
 
 fn write_values(out: &mut String, values: &ValuesStmt, ctx: Ctx<'_>) {
+    // PostgreSQL separates the columns of one row with a bare comma and the
+    // rows themselves with a comma and a space.
     let rows = values
         .rows
         .iter()
@@ -147,7 +348,7 @@ fn write_values(out: &mut String, values: &ValuesStmt, ctx: Ctx<'_>) {
                 .iter()
                 .map(|cell| expr_text(cell, ctx))
                 .collect::<Vec<_>>()
-                .join(", ");
+                .join(",");
             format!("({cells})")
         })
         .collect::<Vec<_>>()
@@ -156,46 +357,242 @@ fn write_values(out: &mut String, values: &ValuesStmt, ctx: Ctx<'_>) {
 }
 
 fn write_select(out: &mut String, select: &SelectStmt, names: &[String], ctx: Ctx<'_>) {
+    // The clause keywords sit at the indent this query was entered with;
+    // everything they carry is written one step deeper, exactly as
+    // `get_basic_select_query` deepens `indentLevel` before writing SELECT.
+    let level = ctx.indent;
     let ctx = Ctx {
         qualify: ctx.qualify || range_table_len(&select.from) != 1,
         qualifier: sole_from_name(&select.from),
+        window_calls: &select.window_calls,
+        indent: level + INDENT_STEP,
         ..ctx
     };
     out.push_str(" SELECT");
     write_distinct(out, &select.distinct, ctx);
-    write_target_list(out, &target_list(select, names, ctx), ctx);
+    write_target_list(out, &target_list(select, names, ctx), level, ctx);
     if !select.from.is_empty() {
         let from = select
             .from
             .iter()
             .map(|item| from_text(item, ctx))
             .collect::<Vec<_>>()
-            .join(",\n     ");
-        let _ = write!(out, "\n   FROM {from}");
+            .join(&format!(",{}", clause_break(level, 4)));
+        let _ = write!(out, "{} FROM {from}", clause_break(level, 2));
     }
     if let Some(filter) = &select.filter {
-        let _ = write!(out, "\n  WHERE {}", expr_text(filter, ctx));
+        let _ = write!(
+            out,
+            "{} WHERE {}",
+            clause_break(level, 1),
+            expr_text(filter, ctx)
+        );
     }
     if !select.group_by.is_empty() {
+        let _ = write!(
+            out,
+            "{} GROUP BY {}",
+            clause_break(level, 1),
+            group_by_text(select, ctx)
+        );
+    }
+    if let Some(having) = &select.having {
+        let _ = write!(
+            out,
+            "{} HAVING {}",
+            clause_break(level, 0),
+            expr_text(having, ctx)
+        );
+    }
+    if !select.windows.is_empty() {
         let list = select
+            .windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "{} AS ({})",
+                    quote_identifier(&window.name),
+                    window_spec_text(&window.spec, ctx)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(out, "{} WINDOW {list}", clause_break(level, 1));
+    }
+    if !select.order_by.is_empty() {
+        let _ = write!(
+            out,
+            "{} ORDER BY {}",
+            clause_break(level, 1),
+            order_list(&select.order_by, ctx)
+        );
+    }
+    if let Some(limit) = &select.limit {
+        let _ = write!(
+            out,
+            "{} LIMIT {}",
+            clause_break(level, 0),
+            expr_text(limit, ctx)
+        );
+    }
+    if let Some(offset) = &select.offset {
+        let _ = write!(
+            out,
+            "{} OFFSET {}",
+            clause_break(level, 0),
+            expr_text(offset, ctx)
+        );
+    }
+}
+
+/// The `GROUP BY` list. A plain clause is its expressions; a grouping clause
+/// prints the structure `PostgreSQL` reconstructs from the expanded sets —
+/// `ROLLUP(a, b)`, `CUBE(a, b)`, `GROUPING SETS ((a, b), (a), ())` — over the
+/// same expression list.
+fn group_by_text(select: &SelectStmt, ctx: Ctx<'_>) -> String {
+    let expression = |index: &usize| {
+        select
+            .group_by
+            .get(*index)
+            .map_or_else(String::new, |expr| expr_text(expr, ctx))
+    };
+    let Some(grouping) = &select.grouping else {
+        return select
             .group_by
             .iter()
             .map(|expr| expr_text(expr, ctx))
             .collect::<Vec<_>>()
             .join(", ");
-        let _ = write!(out, "\n  GROUP BY {list}");
+    };
+    let items = grouping
+        .items
+        .iter()
+        .map(|item| group_item_text(item, true, &expression))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if grouping.distinct {
+        format!("DISTINCT {items}")
+    } else {
+        items
     }
-    if let Some(having) = &select.having {
-        let _ = write!(out, "\n HAVING {}", expr_text(having, ctx));
+}
+
+/// One `GROUP BY` element.
+///
+/// `omit_parens` is `get_rule_groupingset`'s: a one-column set keeps its
+/// parentheses only where they carry meaning. They are dropped at the top of
+/// the clause and inside `ROLLUP`/`CUBE`, where a bare column is unambiguous,
+/// and kept inside `GROUPING SETS`, where `(b)` is a set and `b` would not be.
+fn group_item_text(
+    item: &GroupItem,
+    omit_parens: bool,
+    expression: &impl Fn(&usize) -> String,
+) -> String {
+    let list = |items: &[GroupItem], omit: bool| {
+        items
+            .iter()
+            .map(|item| group_item_text(item, omit, expression))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let simple = |columns: String, count: usize| {
+        if omit_parens && count == 1 {
+            columns
+        } else {
+            format!("({columns})")
+        }
+    };
+    match item {
+        GroupItem::Expr(index) => simple(expression(index), 1),
+        GroupItem::Empty => "()".to_string(),
+        GroupItem::Composite(indexes) => simple(
+            indexes
+                .iter()
+                .map(expression)
+                .collect::<Vec<_>>()
+                .join(", "),
+            indexes.len(),
+        ),
+        GroupItem::Rollup(items) => format!("ROLLUP({})", list(items, true)),
+        GroupItem::Cube(items) => format!("CUBE({})", list(items, true)),
+        GroupItem::GroupingSets(items) => format!("GROUPING SETS ({})", list(items, false)),
     }
-    if !select.order_by.is_empty() {
-        let _ = write!(out, "\n  ORDER BY {}", order_list(&select.order_by, ctx));
+}
+
+/// One `f(…) OVER …` call, reconstructed from the placeholder that stands in
+/// for it in the expression tree.
+fn window_call_text(call: &WindowCall, ctx: Ctx<'_>) -> String {
+    let args = match &call.args {
+        FuncArgs::Star => "*".to_string(),
+        FuncArgs::Exprs(args) => args
+            .iter()
+            .map(|argument| expr_text(argument, ctx))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
+        // `get_agg_expr` adds no parentheses of its own around the predicate;
+        // the operator node it holds brings whatever it needs.
+        format!(" FILTER (WHERE {})", expr_text(predicate, ctx))
+    });
+    let over = match &call.over {
+        WindowRef::Named(name) => quote_identifier(name),
+        WindowRef::Spec(spec) => format!("({})", window_spec_text(spec, ctx)),
+    };
+    format!(
+        "{}({}{args}){filter} OVER {over}",
+        call.name,
+        if call.distinct { "DISTINCT " } else { "" }
+    )
+}
+
+fn window_spec_text(spec: &WindowSpec, ctx: Ctx<'_>) -> String {
+    let mut parts = Vec::new();
+    if let Some(base) = &spec.base {
+        parts.push(quote_identifier(base));
     }
-    if let Some(limit) = &select.limit {
-        let _ = write!(out, "\n LIMIT {}", expr_text(limit, ctx));
+    if !spec.partition_by.is_empty() {
+        parts.push(format!(
+            "PARTITION BY {}",
+            spec.partition_by
+                .iter()
+                .map(|expr| expr_text(expr, ctx))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
-    if let Some(offset) = &select.offset {
-        let _ = write!(out, "\n OFFSET {}", expr_text(offset, ctx));
+    if !spec.order_by.is_empty() {
+        parts.push(format!("ORDER BY {}", order_list(&spec.order_by, ctx)));
+    }
+    if let Some(frame) = &spec.frame {
+        let mode = match frame.mode {
+            FrameMode::Rows => "ROWS",
+            FrameMode::Range => "RANGE",
+            FrameMode::Groups => "GROUPS",
+        };
+        let mut text = format!(
+            "{mode} BETWEEN {} AND {}",
+            frame_bound_text(&frame.start, ctx),
+            frame_bound_text(&frame.end, ctx)
+        );
+        match frame.exclusion {
+            FrameExclusion::NoOthers => {}
+            FrameExclusion::CurrentRow => text.push_str(" EXCLUDE CURRENT ROW"),
+            FrameExclusion::Group => text.push_str(" EXCLUDE GROUP"),
+            FrameExclusion::Ties => text.push_str(" EXCLUDE TIES"),
+        }
+        parts.push(text);
+    }
+    parts.join(" ")
+}
+
+fn frame_bound_text(bound: &FrameBound, ctx: Ctx<'_>) -> String {
+    match bound {
+        FrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".to_string(),
+        FrameBound::Preceding(offset) => format!("{} PRECEDING", expr_text(offset, ctx)),
+        FrameBound::CurrentRow => "CURRENT ROW".to_string(),
+        FrameBound::Following(offset) => format!("{} FOLLOWING", expr_text(offset, ctx)),
+        FrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_string(),
     }
 }
 
@@ -254,9 +651,14 @@ fn target_list(select: &SelectStmt, names: &[String], ctx: Ctx<'_>) -> Vec<Strin
             SelectItem::Expr { expr, alias } => {
                 // The view's catalog column list names one output column per
                 // projected item, whether or not the item was written with an
-                // alias — so the cursor advances either way.
-                let catalog_name = next.next().cloned();
-                let target = alias.clone().or(catalog_name).unwrap_or_default();
+                // alias — so the cursor advances either way. It also *wins*
+                // over the alias, the way `resultDesc` wins over `resname` in
+                // `get_target_list`: a renamed view column, and the right arm
+                // of a set operation, are both named by the view.
+                let target = next.next().cloned().or_else(|| alias.clone());
+                // A query with no column list of its own labels each item the
+                // way the parser's `FigureColname` would.
+                let target = target.unwrap_or_else(|| crate::exec::derived_name(expr));
                 out.push(target_item(expr, &target, ctx));
             }
         }
@@ -267,13 +669,12 @@ fn target_list(select: &SelectStmt, names: &[String], ctx: Ctx<'_>) -> Vec<Strin
     out
 }
 
-/// Append the rendered select list.
-///
-/// Without a wrap column, each entry gets its own line at PostgreSQL's
-/// four-space continuation indent. With a wrap column, this function packs
-/// entries greedily and breaks a line before the entry that would cross it.
-fn write_target_list(out: &mut String, items: &[String], ctx: Ctx<'_>) {
+/// Append the rendered select list. Without a wrap column each entry gets its
+/// own line at PostgreSQL's four-space continuation indent; with one, entries
+/// are packed greedily and a line breaks before the entry that would cross it.
+fn write_target_list(out: &mut String, items: &[String], level: usize, ctx: Ctx<'_>) {
     let mut line_start = out.rfind('\n').map_or(0, |at| at + 1);
+    let continuation = clause_break(level, 4);
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -282,8 +683,8 @@ fn write_target_list(out: &mut String, items: &[String], ctx: Ctx<'_>) {
             .wrap
             .is_some_and(|wrap| out.len() - line_start + 1 + item.len() <= wrap);
         if index > 0 && !fits {
-            out.push_str("\n    ");
-            line_start = out.len() - 4;
+            out.push_str(&continuation);
+            line_start = out.len() - continuation.len() + 1;
         } else if index > 0 {
             out.push(' ');
         }
@@ -291,16 +692,25 @@ fn write_target_list(out: &mut String, items: &[String], ctx: Ctx<'_>) {
     }
 }
 
-/// One select-list entry. A bare column reference that already carries the
-/// output name needs no `AS`. PostgreSQL writes one for everything else.
+/// One select-list entry.
+///
+/// `get_target_list` writes `AS` unless the label the reader would infer
+/// already matches. For a column reference that inferred label is the column's
+/// own name. For everything else it is nothing at all when the query's names
+/// are visible — so a view or a `WITH` entry labels every expression, even one
+/// whose label is `?column?` — and `?column?` when they are not, which is what
+/// leaves an unnamed expression inside a sub-select unlabelled.
 fn target_item(expr: &Expr, target: &str, ctx: Ctx<'_>) -> String {
     let text = expr_text(expr, ctx);
     if target.is_empty() {
         return text;
     }
-    if let Expr::Column { name, .. } = expr
-        && name == target
-    {
+    let inferred = match expr {
+        Expr::Column { name, .. } => Some(name.as_str()),
+        _ if ctx.colnames => None,
+        _ => Some("?column?"),
+    };
+    if inferred == Some(target) {
         return text;
     }
     format!("{text} AS {}", quote_identifier(target))
@@ -350,18 +760,21 @@ fn from_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
         TableExpr::Derived {
             subquery,
             alias,
+            columns,
             lateral,
-            ..
         } => {
             let mut inner = String::new();
-            let nested = Ctx {
-                qualify: true,
-                ..ctx
-            };
-            write_set_expr(&mut inner, &subquery.body, &[], nested);
-            write_query_tail(&mut inner, subquery, nested);
+            write_query_at(&mut inner, subquery, &[], ctx.nested());
+            let columns = columns.as_ref().map_or_else(String::new, |columns| {
+                let names = columns
+                    .iter()
+                    .map(|name| quote_identifier(name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({names})")
+            });
             format!(
-                "{}({inner}) {}",
+                "{}({inner}) {}{columns}",
                 if *lateral { "LATERAL " } else { "" },
                 quote_identifier(alias)
             )
@@ -374,24 +787,258 @@ fn from_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
                 format!("({inner})")
             }
         }
-        TableExpr::Function { functions, .. } => functions
-            .iter()
-            .map(|call| {
-                let args = call
-                    .args
-                    .iter()
-                    .map(|arg| expr_text(arg, ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{}({args})", call.name)
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
+        TableExpr::Function {
+            functions,
+            with_ordinality,
+            alias,
+            column_aliases,
+            lateral,
+            rows_from,
+        } => {
+            // A single call carries its column-definition list *inside the
+            // alias parens* (`f(…) t(a integer)`); only `ROWS FROM` writes it as
+            // `AS (…)` per call. The distinction is not cosmetic — neither
+            // spelling parses in the other's position — and getting it wrong is
+            // a stored rule that cannot be replayed.
+            let single = (!*rows_from).then(|| functions.first()).flatten();
+            let inline_defs = single.and_then(|call| call.column_defs.as_deref());
+            let calls: Vec<String> = functions
+                .iter()
+                .map(|call| func_item_text(call, inline_defs.is_none(), ctx))
+                .collect();
+            let mut text = String::new();
+            if *lateral {
+                text.push_str("LATERAL ");
+            }
+            if inline_defs.is_none() && !*rows_from && calls.len() == 1 {
+                text.push_str(&calls[0]);
+            } else if *rows_from || calls.len() > 1 {
+                text.push_str("ROWS FROM(");
+                text.push_str(&calls.join(", "));
+                text.push(')');
+            } else {
+                text.push_str(&calls[0]);
+            }
+            if *with_ordinality {
+                text.push_str(" WITH ORDINALITY");
+            }
+            // PostgreSQL always names the item when it has to print a column
+            // list, falling back to the function's own name — `f(…) (a integer)`
+            // is not grammatical.
+            let alias = alias.as_deref().or_else(|| {
+                (inline_defs.is_some() || column_aliases.is_some())
+                    .then(|| single.map(|call| call.name.as_str()))
+                    .flatten()
+            });
+            if let Some(alias) = alias {
+                text.push(' ');
+                text.push_str(&quote_identifier(alias));
+            }
+            let listed = inline_defs.map_or_else(
+                || {
+                    column_aliases.as_ref().map(|columns| {
+                        columns
+                            .iter()
+                            .map(|name| quote_identifier(name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                },
+                |defs| Some(column_def_text(defs)),
+            );
+            if let Some(listed) = listed {
+                text.push('(');
+                text.push_str(&listed);
+                text.push(')');
+            }
+            text
+        }
+        TableExpr::JsonTable(table) => json_table_text(table, ctx),
     }
+}
+
+/// One call of a FROM function item, with the column-definition list that gives
+/// a record-returning call its row type.
+///
+/// Dropping that list would not merely lose detail: the rendered text would no
+/// longer re-parse, because `json_to_record(…)` without one is a 42601. A stored
+/// rule has to round-trip, so the list is part of the call, not part of the
+/// alias.
+fn func_item_text(
+    call: &crabka_pgparser::ast::TableFuncCall,
+    with_defs: bool,
+    ctx: Ctx<'_>,
+) -> String {
+    let args = call
+        .args
+        .iter()
+        .map(|arg| expr_text(arg, ctx))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut text = format!("{}({args})", call.name);
+    if with_defs && let Some(defs) = &call.column_defs {
+        text.push_str(" AS (");
+        text.push_str(&column_def_text(defs));
+        text.push(')');
+    }
+    text
+}
+
+/// `a integer, b text` — a column-definition list's body.
+fn column_def_text(defs: &[crabka_pgparser::ast::TableFuncColumnDef]) -> String {
+    defs.iter()
+        .map(|def| format!("{} {}", quote_identifier(&def.name), def.ty.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A `JSON_TABLE(…)` FROM item.
+///
+/// `PostgreSQL` lays this out over many lines; crabka prints one, which
+/// round-trips through the parser — the property a stored rule actually needs —
+/// without claiming byte-identical rule text.
+fn json_table_text(table: &crabka_pgparser::ast::JsonTable, ctx: Ctx<'_>) -> String {
+    let mut out = String::from("JSON_TABLE(");
+    let _ = write!(out, "{}, ", expr_text(&table.context, ctx));
+    out.push_str(&quote_json_path(&table.path));
+    if let Some(name) = &table.path_name {
+        let _ = write!(out, " AS {}", quote_identifier(name));
+    }
+    if !table.passing.is_empty() {
+        let passing = table
+            .passing
+            .iter()
+            .map(|(name, value)| format!("{} AS {}", expr_text(value, ctx), quote_identifier(name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(out, " PASSING {passing}");
+    }
+    let _ = write!(
+        out,
+        " COLUMNS ({})",
+        json_table_columns_text(&table.columns, ctx)
+    );
+    if table.error_on_error() {
+        out.push_str(" ERROR ON ERROR");
+    }
+    out.push(')');
+    if let Some(alias) = &table.alias {
+        let _ = write!(out, " {}", quote_identifier(alias));
+        if let Some(columns) = &table.column_aliases {
+            let names = columns
+                .iter()
+                .map(|name| quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(out, "({names})");
+        }
+    }
+    out
+}
+
+fn json_table_columns_text(
+    columns: &[crabka_pgparser::ast::JsonTableColumn],
+    ctx: Ctx<'_>,
+) -> String {
+    use crabka_pgparser::ast::JsonTableColumn;
+
+    columns
+        .iter()
+        .map(|column| match column {
+            JsonTableColumn::Ordinality { name } => {
+                format!("{} FOR ORDINALITY", quote_identifier(name))
+            }
+            JsonTableColumn::Value(value) => json_table_value_column_text(value, ctx),
+            JsonTableColumn::Exists(exists) => {
+                let mut text = format!(
+                    "{} {} EXISTS",
+                    quote_identifier(&exists.name),
+                    exists.ty.name()
+                );
+                if let Some(path) = &exists.path {
+                    let _ = write!(text, " PATH {}", quote_json_path(path));
+                }
+                if let Some(behavior) = &exists.on_error {
+                    let _ = write!(text, " {} ON ERROR", json_behavior_text(behavior, ctx));
+                }
+                text
+            }
+            JsonTableColumn::Nested(nested) => {
+                let mut text = format!("NESTED PATH {}", quote_json_path(&nested.path));
+                if let Some(name) = &nested.name {
+                    let _ = write!(text, " AS {}", quote_identifier(name));
+                }
+                let _ = write!(
+                    text,
+                    " COLUMNS ({})",
+                    json_table_columns_text(&nested.columns, ctx)
+                );
+                text
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn json_table_value_column_text(
+    column: &crabka_pgparser::ast::JsonTableValueColumn,
+    ctx: Ctx<'_>,
+) -> String {
+    use crabka_pgparser::ast::JsonWrapper;
+
+    let mut text = format!("{} {}", quote_identifier(&column.name), column.ty.name());
+    if column.format_json {
+        text.push_str(" FORMAT JSON");
+    }
+    if let Some(path) = &column.path {
+        let _ = write!(text, " PATH {}", quote_json_path(path));
+    }
+    match column.wrapper {
+        None => {}
+        Some(JsonWrapper::Without) => text.push_str(" WITHOUT WRAPPER"),
+        Some(JsonWrapper::Conditional) => text.push_str(" WITH CONDITIONAL WRAPPER"),
+        Some(JsonWrapper::Unconditional) => text.push_str(" WITH UNCONDITIONAL WRAPPER"),
+    }
+    match column.omit_quotes {
+        None => {}
+        Some(true) => text.push_str(" OMIT QUOTES"),
+        Some(false) => text.push_str(" KEEP QUOTES"),
+    }
+    if let Some(behavior) = &column.on_empty {
+        let _ = write!(text, " {} ON EMPTY", json_behavior_text(behavior, ctx));
+    }
+    if let Some(behavior) = &column.on_error {
+        let _ = write!(text, " {} ON ERROR", json_behavior_text(behavior, ctx));
+    }
+    text
+}
+
+fn json_behavior_text(behavior: &crabka_pgparser::ast::JsonBehavior, ctx: Ctx<'_>) -> String {
+    use crabka_pgparser::ast::JsonBehavior;
+
+    match behavior {
+        JsonBehavior::Error => "ERROR".into(),
+        JsonBehavior::Null => "NULL".into(),
+        JsonBehavior::True => "TRUE".into(),
+        JsonBehavior::False => "FALSE".into(),
+        JsonBehavior::Unknown => "UNKNOWN".into(),
+        JsonBehavior::EmptyArray => "EMPTY ARRAY".into(),
+        JsonBehavior::EmptyObject => "EMPTY OBJECT".into(),
+        JsonBehavior::Default(expr) => format!("DEFAULT {}", expr_text(expr, ctx)),
+    }
+}
+
+/// A jsonpath as the string literal it was written as.
+fn quote_json_path(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "''"))
 }
 
 /// A join tree: the left side on the FROM line, each join on its own line at
 /// PostgreSQL's five-space indent.
+///
+/// In un-pretty mode `get_from_clause_item` parenthesizes *every* join node, so
+/// a three-way join reads `((a JOIN b ON …) JOIN c ON …)`. The caller wraps the
+/// outermost node; this wraps each nested one.
 fn join_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
     let TableExpr::Join {
         left,
@@ -401,6 +1048,14 @@ fn join_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
     } = item
     else {
         return from_text(item, ctx);
+    };
+    let left = {
+        let text = join_text(left, ctx);
+        if ctx.pretty || !matches!(**left, TableExpr::Join { .. }) {
+            text
+        } else {
+            format!("({text})")
+        }
     };
     let keyword = match kind {
         JoinKind::Inner => "JOIN",
@@ -423,8 +1078,8 @@ fn join_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
     };
     let natural = matches!(constraint, JoinConstraint::Natural);
     format!(
-        "{}\n     {}{keyword} {}{tail}",
-        join_text(left, ctx),
+        "{left}{} {}{keyword} {}{tail}",
+        clause_break(ctx.indent.saturating_sub(INDENT_STEP), 4),
         if natural { "NATURAL " } else { "" },
         from_text(right, ctx)
     )
@@ -443,19 +1098,29 @@ fn expr_text(expr: &Expr, ctx: Ctx<'_>) -> String {
         Expr::NullLiteral => "NULL::text".to_string(),
         Expr::Default => "DEFAULT".to_string(),
         Expr::Param(n) => format!("${n}"),
+        // A window call is held beside the select list rather than in it, so the
+        // placeholder standing in its place is written back as the call.
+        Expr::Column { .. }
+            if crabka_pgparser::ast::window_placeholder_index(expr)
+                .is_some_and(|index| index < ctx.window_calls.len()) =>
+        {
+            let index = crabka_pgparser::ast::window_placeholder_index(expr)
+                .expect("the guard already matched a placeholder");
+            window_call_text(&ctx.window_calls[index], ctx)
+        }
         Expr::Column { table, name } => match (table.as_deref().or(ctx.qualifier), ctx.qualify) {
             (Some(prefix), true) => {
                 format!("{}.{}", quote_identifier(prefix), quote_identifier(name))
             }
             _ => quote_identifier(name),
         },
-        Expr::Const { value, ty } => const_text(value, *ty),
+        Expr::Const { value, ty } => const_text(value, *ty, ctx.style),
         Expr::Unary { op, expr } => unary_text(*op, expr, ctx),
         Expr::Binary { op, left, right } => ctx.paren(format!(
             "{} {} {}",
-            expr_text(left, ctx),
+            operand_text(left, ctx),
             binary_op_text(*op),
-            expr_text(right, ctx)
+            operand_text(right, ctx)
         )),
         Expr::Func(call) => func_text(call, ctx),
         Expr::IsNull { expr, negated } => ctx.paren(format!(
@@ -534,32 +1199,76 @@ fn expr_text_rest(expr: &Expr, ctx: Ctx<'_>) -> String {
                 .join(", ")
         ),
         Expr::Subscript { base, index } => {
-            format!("{}[{}]", expr_text(base, ctx), expr_text(index, ctx))
+            format!(
+                "{}[{}]",
+                subscript_base_text(base, ctx),
+                expr_text(index, ctx)
+            )
+        }
+        Expr::ArrayRef { base, subscripts } => {
+            let mut text = subscript_base_text(base, ctx);
+            for subscript in subscripts {
+                match subscript {
+                    ArraySubscript::Index(index) => {
+                        let _ = write!(text, "[{}]", expr_text(index, ctx));
+                    }
+                    // An omitted bound of a slice stays omitted: `arr[:2]` and
+                    // `arr[2:]` are what `printSubscripts` writes back.
+                    ArraySubscript::Slice { lower, upper } => {
+                        let bound = |bound: &Option<Expr>| {
+                            bound
+                                .as_ref()
+                                .map_or_else(String::new, |bound| expr_text(bound, ctx))
+                        };
+                        let _ = write!(text, "[{}:{}]", bound(lower), bound(upper));
+                    }
+                }
+            }
+            text
+        }
+        Expr::FieldSelect { base, field } => {
+            format!("{}.{}", field_base_text(base, ctx), quote_identifier(field))
         }
         Expr::ScalarSubquery(query) => subquery_text(query, ctx),
-        Expr::Exists(query) => ctx.paren(format!("EXISTS {}", subquery_text(query, ctx))),
+        // `ARRAY(…)` is one node in PostgreSQL, printed with the keyword glued
+        // to the sub-select's own parenthesis.
+        Expr::ArraySubquery(query) => format!("ARRAY{}", subquery_text(query, ctx)),
+        // `get_sublink_expr` opens a parenthesis of its own before anything
+        // else and closes it after the sub-select, whatever the pretty flag
+        // says — so these three keep their parentheses in both forms.
+        Expr::Exists(query) => format!("(EXISTS {})", subquery_text(query, ctx)),
         Expr::InSubquery {
             expr,
             subquery,
             negated,
-        } => ctx.paren(format!(
-            "{} {}IN {}",
+        } => format!(
+            "({} {}IN {})",
             expr_text(expr, ctx),
             if *negated { "NOT " } else { "" },
             subquery_text(subquery, ctx)
-        )),
+        ),
+        // `get_sublink_expr` spells `= ANY (subquery)` as `IN`, which is the
+        // one quantified form that has a shorter equivalent; every other
+        // operator keeps `ANY`/`ALL`.
         Expr::Quantified {
             expr,
             op,
             all,
             subquery,
-        } => ctx.paren(format!(
-            "{} {} {} {}",
+        } => format!(
+            "({} {} {})",
             expr_text(expr, ctx),
-            binary_op_text(*op),
-            if *all { "ALL" } else { "ANY" },
+            if *all || *op != BinaryOp::Eq {
+                format!(
+                    "{} {}",
+                    binary_op_text(*op),
+                    if *all { "ALL" } else { "ANY" }
+                )
+            } else {
+                "IN".to_string()
+            },
             subquery_text(subquery, ctx)
-        )),
+        ),
         Expr::QuantifiedArray {
             expr,
             op,
@@ -572,41 +1281,213 @@ fn expr_text_rest(expr: &Expr, ctx: Ctx<'_>) -> String {
             if *all { "ALL" } else { "ANY" },
             expr_text(array, ctx)
         )),
+        // `get_rule_expr` always parenthesizes a `CollateExpr`, whatever its
+        // argument is, so `b COLLATE "C"` stored in a view body comes back as
+        // `(b COLLATE "C")` — and an argument that parenthesizes itself keeps
+        // its own, giving `((x || x) COLLATE "POSIX")`.
+        Expr::Collate { expr, collation } => {
+            format!("({} COLLATE \"{collation}\")", expr_text(expr, ctx))
+        }
         _ => "?column?".to_string(),
+    }
+}
+
+/// One operand of a binary operator.
+///
+/// In pretty mode `get_rule_expr` asks `isSimpleNode` whether an argument needs
+/// parentheses of its own, and a sub-select under an operator always does — so
+/// `a > (SELECT …)` keeps a parenthesis the surrounding operator no longer
+/// supplies. In un-pretty mode the operator node parenthesizes everything and
+/// the question is never asked.
+fn operand_text(expr: &Expr, ctx: Ctx<'_>) -> String {
+    let text = expr_text(expr, ctx);
+    if ctx.pretty && matches!(expr, Expr::ScalarSubquery(_) | Expr::ArraySubquery(_)) {
+        format!("({text})")
+    } else {
+        text
     }
 }
 
 fn subquery_text(query: &QueryExpr, ctx: Ctx<'_>) -> String {
     let mut inner = String::new();
+    // Nobody names the columns of a sub-select, so an expression that would
+    // only be labelled `?column?` is left bare.
     let nested = Ctx {
-        qualify: true,
-        ..ctx
+        colnames: false,
+        ..ctx.nested()
     };
-    write_set_expr(&mut inner, &query.body, &[], nested);
-    write_query_tail(&mut inner, query, nested);
+    write_query_at(&mut inner, query, &[], nested);
     format!("({inner})")
 }
 
 fn unary_text(op: UnaryOp, expr: &Expr, ctx: Ctx<'_>) -> String {
-    match op {
-        UnaryOp::Neg => ctx.paren(format!("- {}", expr_text(expr, ctx))),
-        UnaryOp::Plus => ctx.paren(format!("+ {}", expr_text(expr, ctx))),
-        UnaryOp::Not => ctx.paren(format!("NOT {}", expr_text(expr, ctx))),
-        UnaryOp::Abs => ctx.paren(format!("@ {}", expr_text(expr, ctx))),
-        UnaryOp::Sqrt => ctx.paren(format!("|/ {}", expr_text(expr, ctx))),
-        UnaryOp::Cbrt => ctx.paren(format!("||/ {}", expr_text(expr, ctx))),
-        UnaryOp::IsTrue => ctx.paren(format!("{} IS TRUE", expr_text(expr, ctx))),
-        UnaryOp::IsNotTrue => ctx.paren(format!("{} IS NOT TRUE", expr_text(expr, ctx))),
-        UnaryOp::IsFalse => ctx.paren(format!("{} IS FALSE", expr_text(expr, ctx))),
-        UnaryOp::IsNotFalse => ctx.paren(format!("{} IS NOT FALSE", expr_text(expr, ctx))),
-        UnaryOp::IsUnknown => ctx.paren(format!("{} IS UNKNOWN", expr_text(expr, ctx))),
-        UnaryOp::IsNotUnknown => ctx.paren(format!("{} IS NOT UNKNOWN", expr_text(expr, ctx))),
-        UnaryOp::BitNot => ctx.paren(format!("~ {}", expr_text(expr, ctx))),
-        UnaryOp::TsNot => ctx.paren(format!("!! {}", expr_text(expr, ctx))),
+    unary_expr_text(op, &expr_text(expr, ctx), ctx.pretty)
+}
+
+/// What a subscript is taken of, parenthesized the way `get_rule_expr` does.
+///
+/// The rule is one line of `ruleutils.c` and depends on no pretty flag:
+/// "parenthesize the argument unless it's a simple Var or a `FieldSelect`. (In
+/// particular, if it's another `SubscriptingRef`, we *must* parenthesize to
+/// avoid confusion.)" So `a[1]` and `(c).f[1]` stay bare while
+/// `(string_to_array(t, ','::text))[1]` and `(ARRAY[1, 2])[1]` gain a pair.
+fn subscript_base_text(base: &Expr, ctx: Ctx<'_>) -> String {
+    let text = expr_text(base, ctx);
+    if subscript_base_is_bare(base) {
+        text
+    } else {
+        format!("({text})")
     }
 }
 
+/// Does a subscript's base print without parentheses of its own?
+///
+/// `pub(crate)` because [`crate::explain`] applies the same rule to the same
+/// AST and must not keep a second copy of it.
+pub(crate) const fn subscript_base_is_bare(base: &Expr) -> bool {
+    matches!(base, Expr::Column { .. } | Expr::FieldSelect { .. })
+}
+
+/// What a field selection is taken of, parenthesized the way `get_rule_expr`
+/// does.
+///
+/// The rule is the mirror image of the subscript one, and `ruleutils.c` spells
+/// out why: "parenthesize the argument unless it's a `SubscriptingRef` or
+/// another `FieldSelect`. Note in particular that it would be WRONG to not
+/// parenthesize a Var argument; simple-looking cases like `x.y.z` turn out not
+/// to work." So a column base keeps its pair — `(c).f` — while `(c).h.g` and
+/// `carr[1].f` need none.
+fn field_base_text(base: &Expr, ctx: Ctx<'_>) -> String {
+    let text = expr_text(base, ctx);
+    if field_base_is_bare(base) {
+        text
+    } else {
+        format!("({text})")
+    }
+}
+
+/// Does a field selection's base print without parentheses of its own?
+///
+/// `pub(crate)` for the same reason [`subscript_base_is_bare`] is.
+pub(crate) const fn field_base_is_bare(base: &Expr) -> bool {
+    matches!(
+        base,
+        Expr::FieldSelect { .. } | Expr::Subscript { .. } | Expr::ArrayRef { .. }
+    )
+}
+
+/// Where `ruleutils.c` writes a unary operator's spelling, and which
+/// parentheses come with it.
+///
+/// This exists so that one table serves both deparsers. `EXPLAIN` renders the
+/// same `UnaryOp` set as `pg_get_viewdef`, and a second table for it drifted
+/// from this one: [`crate::explain`] used to print the Rust `Debug` name of
+/// every variant it had not been taught, so `@ id` came out as `Abs id` and
+/// `id IS TRUE` as `IsTrue id`. Matching on `op` here means the compiler
+/// forces a new variant to be spelled once, for both.
+enum UnaryForm {
+    /// A prefix operator. `get_oper_expr` writes the operator, a space, then
+    /// the operand, and wraps the whole in parentheses unless the pretty flag
+    /// is on.
+    Prefix(&'static str),
+    /// A `BooleanTest`. `get_rule_expr` writes the operand, a space, then the
+    /// keyword, and parenthesizes it exactly as a prefix operator.
+    Postfix(&'static str),
+    /// `IS DOCUMENT`, alone among the postfix predicates an `XmlExpr` rather
+    /// than a `BooleanTest`. `get_rule_expr` gives the predicate no
+    /// parentheses of its own in either mode. In pretty mode it parenthesizes
+    /// the *operand* instead, because it hands `get_rule_expr_paren` the whole
+    /// argument *list* — a `T_List` is never a simple node — so a view over
+    /// `x IS DOCUMENT` reads `x IS DOCUMENT` un-pretty and `(x) IS DOCUMENT`
+    /// pretty.
+    Document,
+    /// `IS NOT DOCUMENT`. The grammar has no such node: it builds
+    /// `NOT (… IS DOCUMENT)`, so the deparser writes the negation outside the
+    /// predicate and never inside it.
+    NotDocument,
+}
+
+/// The spelling `ruleutils.c` gives `op`.
+const fn unary_form(op: UnaryOp) -> UnaryForm {
+    match op {
+        UnaryOp::Neg => UnaryForm::Prefix("-"),
+        UnaryOp::Plus => UnaryForm::Prefix("+"),
+        UnaryOp::Not => UnaryForm::Prefix("NOT"),
+        UnaryOp::Abs => UnaryForm::Prefix("@"),
+        UnaryOp::Sqrt => UnaryForm::Prefix("|/"),
+        UnaryOp::Cbrt => UnaryForm::Prefix("||/"),
+        UnaryOp::BitNot => UnaryForm::Prefix("~"),
+        UnaryOp::TsNot => UnaryForm::Prefix("!!"),
+        // The geometric prefix operators. `get_oper_expr` prints every prefix
+        // operator the same way, so these parenthesize like `@` and `~` do.
+        UnaryOp::NPoints => UnaryForm::Prefix("#"),
+        UnaryOp::Length => UnaryForm::Prefix("@-@"),
+        UnaryOp::Center => UnaryForm::Prefix("@@"),
+        UnaryOp::IsHorizontal => UnaryForm::Prefix("?-"),
+        UnaryOp::IsVertical => UnaryForm::Prefix("?|"),
+        UnaryOp::IsTrue => UnaryForm::Postfix("IS TRUE"),
+        UnaryOp::IsNotTrue => UnaryForm::Postfix("IS NOT TRUE"),
+        UnaryOp::IsFalse => UnaryForm::Postfix("IS FALSE"),
+        UnaryOp::IsNotFalse => UnaryForm::Postfix("IS NOT FALSE"),
+        UnaryOp::IsUnknown => UnaryForm::Postfix("IS UNKNOWN"),
+        UnaryOp::IsNotUnknown => UnaryForm::Postfix("IS NOT UNKNOWN"),
+        UnaryOp::IsDocument => UnaryForm::Document,
+        UnaryOp::IsNotDocument => UnaryForm::NotDocument,
+    }
+}
+
+/// Apply `op` to an already-rendered `operand`, the way `ruleutils.c` does.
+///
+/// `pretty` is `PRETTY_PAREN`: `pg_get_viewdef(oid, true)` sets it, and both
+/// `pg_get_viewdef(oid)` and every `EXPLAIN` line clear it.
+pub(crate) fn unary_expr_text(op: UnaryOp, operand: &str, pretty: bool) -> String {
+    let paren = |inner: String| if pretty { inner } else { format!("({inner})") };
+    match unary_form(op) {
+        UnaryForm::Prefix(token) => paren(format!("{token} {operand}")),
+        UnaryForm::Postfix(keyword) => paren(format!("{operand} {keyword}")),
+        UnaryForm::Document if pretty => format!("({operand}) IS DOCUMENT"),
+        UnaryForm::Document => format!("{operand} IS DOCUMENT"),
+        UnaryForm::NotDocument if pretty => format!("NOT ({operand}) IS DOCUMENT"),
+        UnaryForm::NotDocument => format!("(NOT {operand} IS DOCUMENT)"),
+    }
+}
+
+/// The keyword spellings PostgreSQL's deparser gives the SQL value functions.
+///
+/// Each is parsed here as a zero-argument function call, but PostgreSQL holds
+/// it as an `SQLValueFunction` node and `get_rule_expr` prints the keyword back
+/// in upper case with no parentheses — `CURRENT_USER`, never `current_user()`.
+/// The parenthesized spellings (`current_timestamp(0)`) carry arguments and are
+/// ordinary calls in both engines, so matching on an empty argument list is
+/// what separates the two.
+const SQL_VALUE_FUNCTIONS: [(&str, &str); 7] = [
+    ("current_date", "CURRENT_DATE"),
+    ("current_time", "CURRENT_TIME"),
+    ("current_timestamp", "CURRENT_TIMESTAMP"),
+    ("current_user", "CURRENT_USER"),
+    ("localtime", "LOCALTIME"),
+    ("localtimestamp", "LOCALTIMESTAMP"),
+    ("session_user", "SESSION_USER"),
+];
+
 fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
+    if call.sql_syntax
+        && let Some(text) = sql_syntax_text(call, ctx)
+    {
+        return text;
+    }
+    if let FuncArgs::Exprs(args) = &call.args
+        && let Some(text) = xml_construct_text(&call.name, args, ColumnType::Text, ctx)
+    {
+        return text;
+    }
+    if matches!(&call.args, FuncArgs::Exprs(args) if args.is_empty())
+        && let Some((_, keyword)) = SQL_VALUE_FUNCTIONS
+            .iter()
+            .find(|(name, _)| *name == call.name)
+    {
+        return (*keyword).to_string();
+    }
     let args = match &call.args {
         FuncArgs::Star => "*".to_string(),
         FuncArgs::Exprs(exprs) => exprs
@@ -615,16 +1496,153 @@ fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
             .collect::<Vec<_>>()
             .join(", "),
     };
+    // An aggregate's sort and its FILTER both change the rows it folds, so both
+    // print: a definition that read them back without one would compute a
+    // different answer from the view it came from.
+    let order_by = if call.order_by.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", order_list(&call.order_by, ctx))
+    };
+    let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
+        // `get_agg_expr` adds no parentheses of its own around the predicate;
+        // the operator node it holds brings whatever it needs.
+        format!(" FILTER (WHERE {})", expr_text(predicate, ctx))
+    });
     format!(
-        "{}({}{args})",
+        "{}({}{args}{order_by}){filter}",
         call.name,
         if call.distinct { "DISTINCT " } else { "" }
     )
 }
 
+/// `ruleutils.c`'s `get_func_sql_syntax`: a call the grammar produced from a
+/// keyword spelling is printed back as that spelling, not as a call.
+///
+/// The parentheses are unconditional — `get_func_sql_syntax` writes them itself
+/// rather than through `get_rule_expr_paren`, so `(f1 AT LOCAL)` keeps them in
+/// pretty mode where an operator expression would lose them.
+///
+/// A call the user really wrote as `timezone(f1)` carries no
+/// [`FuncCall::sql_syntax`] and so never reaches here — which is the whole
+/// point, because it is the identical one-argument call.
+fn sql_syntax_text(call: &FuncCall, ctx: Ctx<'_>) -> Option<String> {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return None;
+    };
+    // `isSimpleNode` gives an operator expression its own parentheses under a
+    // `COERCE_SQL_SYNTAX` parent even in pretty mode, so `(d + i) AT TIME ZONE
+    // z` does not read back as `d + (i AT TIME ZONE z)`. Every other node kind
+    // is simple and stays bare.
+    let operand = |expr: &Expr| {
+        let text = operand_text(expr, ctx);
+        if ctx.pretty && matches!(expr, Expr::Binary { .. } | Expr::Unary { .. }) {
+            format!("({text})")
+        } else {
+            text
+        }
+    };
+    match (call.name.as_str(), args.as_slice()) {
+        // Note the reversed argument order: `timezone` takes the zone first.
+        ("timezone", [zone, value]) => Some(format!(
+            "({} AT TIME ZONE {})",
+            operand(value),
+            operand(zone)
+        )),
+        ("timezone", [value]) => Some(format!("({} AT LOCAL)", operand(value))),
+        _ => None,
+    }
+}
+
+/// `XMLPARSE`, `XMLSERIALIZE` and `XMLCONCAT` reach the executor as ordinary
+/// calls (the parser lowers their keyword grammar onto one), but `ruleutils.c`
+/// holds them as `XmlExpr` nodes and prints the grammar back in upper case.
+/// `xmlcomment` and `xmltext` are real `pg_proc` entries and print like any
+/// other function, which is why they are absent here.
+///
+/// The mode words come out of the literals the parser planted, so a view over
+/// `XMLSERIALIZE(DOCUMENT …)` reads back as one. `XMLPARSE` always prints
+/// `STRIP WHITESPACE`: `PostgreSQL` stores the flag rather than the spelling,
+/// and the grammar's default is to strip.
+fn xml_construct_text(
+    name: &str,
+    args: &[Expr],
+    serialize_type: ColumnType,
+    ctx: Ctx<'_>,
+) -> Option<String> {
+    // The parser's coercion of an untyped literal is a *resolution*, not a
+    // second cast: PostgreSQL holds one `Const` of type xml and prints
+    // `'good'::xml`, never `('good'::text)::xml`.
+    let text = |expr: &Expr| match expr {
+        Expr::Cast { expr, ty } => match (&**expr, ty) {
+            (Expr::StringLiteral(literal), ColumnType::Xml) => {
+                format!("'{}'::xml", literal.replace('\'', "''"))
+            }
+            _ => expr_text(
+                &Expr::Cast {
+                    expr: expr.clone(),
+                    ty: *ty,
+                },
+                ctx,
+            ),
+        },
+        _ => expr_text(expr, ctx),
+    };
+    let mode = |expr: &Expr| match expr {
+        Expr::StringLiteral(word) => Some(word.to_ascii_uppercase()),
+        _ => None,
+    };
+    match (name, args) {
+        ("xmlconcat", args) if !args.is_empty() => Some(format!(
+            "XMLCONCAT({})",
+            args.iter().map(text).collect::<Vec<_>>().join(", ")
+        )),
+        ("xmlparse", [option, value]) => Some(format!(
+            "XMLPARSE({} {} STRIP WHITESPACE)",
+            mode(option)?,
+            text(value)
+        )),
+        ("xmlserialize", [option, value, indent]) => Some(format!(
+            "XMLSERIALIZE({} {} AS {} {})",
+            mode(option)?,
+            text(value),
+            crate::func::format_type_given(
+                i64::from(serialize_type.oid()),
+                i64::from(serialize_type.typmod())
+            ),
+            if matches!(indent, Expr::BoolLiteral(true)) {
+                "INDENT"
+            } else {
+                "NO INDENT"
+            }
+        )),
+        _ => None,
+    }
+}
+
 /// A cast. PostgreSQL parenthesizes the operand in un-pretty mode (`(a)::text`)
 /// and leaves it bare in pretty mode (`a::text`).
 fn cast_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> String {
+    // `XMLSERIALIZE` names its own target type, so the cast the parser wrapped
+    // around it is redundant when that type is `text` -- and PostgreSQL prints
+    // it only when it is not, which is why `xmlview9` has no `::text` and
+    // `xmlview8` has a `::character(10)`.
+    if let Expr::Func(call) = expr
+        && let FuncArgs::Exprs(args) = &call.args
+        && let Some(text) = xml_construct_text(&call.name, args, ty, ctx)
+    {
+        return if ty == ColumnType::Text {
+            text
+        } else {
+            format!(
+                "({text})::{}",
+                crate::func::format_type_given(i64::from(ty.oid()), i64::from(ty.typmod()))
+            )
+        };
+    }
+    if let Some(text) = resolved_literal_text(expr, ty, ctx) {
+        return text;
+    }
     let inner = expr_text(expr, ctx);
     let operand = if ctx.pretty || inner.starts_with('(') {
         inner
@@ -632,6 +1650,75 @@ fn cast_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> String {
         format!("({inner})")
     };
     format!("{operand}::{}", ty.name())
+}
+
+/// `'…'::T`, printed the way `PostgreSQL` prints it: as one constant of type
+/// `T`, in `T`'s own output spelling.
+///
+/// `PostgreSQL` has no cast node here at all. `coerce_type` sees an `UNKNOWN`
+/// string `Const` and applies `T`'s **input** function on the spot, keeping a
+/// single `Const` of type `T`; `get_const_expr` later prints that constant
+/// through `T`'s **output** function. So the literal a view answers is the
+/// type's canonical spelling of the value rather than the text the query wrote
+/// — `INTERVAL '00:00'` reads back as `'@ 0'::interval` — and there is no
+/// `::text` step for it to pass through, because the string was never resolved
+/// to `text` in the first place. The same reasoning is already written out for
+/// the one type that had it hand-coded, in [`xml_construct_text`].
+///
+/// `None` keeps the cast rendering, for the three cases where evaluating the
+/// literal here would not answer what upstream's parse-time fold answered:
+///
+/// * a literal the type cannot read, which upstream would have rejected at
+///   `CREATE VIEW` time and gres apparently did not;
+/// * a length or precision modifier, which upstream applies as a separate
+///   coercion *around* the constant, leaving the constant itself untruncated;
+/// * a clock-relative spelling, which upstream froze when the view was created
+///   and this would re-read now.
+fn resolved_literal_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> Option<String> {
+    let Expr::StringLiteral(literal) = expr else {
+        return None;
+    };
+    if carries_modifier(ty) || reads_the_clock(literal, ty) {
+        return None;
+    }
+    let value = crate::eval::cast_value_in(&Datum::Text(literal.clone()), ty, ctx.style).ok()?;
+    Some(const_text(&value, ty, ctx.style))
+}
+
+/// Does `ty` carry a length or precision modifier?
+///
+/// `coerce_type` passes `-1` to the input function and lets a separate length
+/// coercion truncate afterwards, so the `Const` upstream prints still holds the
+/// whole literal. A domain is excluded outright rather than tested: resolving
+/// one runs its constraints, which is not something printing a definition may
+/// do.
+fn carries_modifier(ty: ColumnType) -> bool {
+    match ty {
+        ColumnType::Varchar(modifier) | ColumnType::Char(modifier) => modifier.is_some(),
+        ColumnType::Bit(modifier) | ColumnType::VarBit(modifier) => modifier.is_some(),
+        ColumnType::Numeric(modifier) => modifier.is_some(),
+        ColumnType::Domain(_) => true,
+        _ => false,
+    }
+}
+
+/// Is this one of the date/time spellings that reads the clock?
+///
+/// `PostgreSQL` reads it once, when the definition is stored, and the view is
+/// frozen at that instant ever after. This deparser runs when the definition is
+/// *asked for*, which is a different instant, so it leaves the word alone.
+fn reads_the_clock(literal: &str, ty: ColumnType) -> bool {
+    matches!(
+        ty,
+        ColumnType::Date
+            | ColumnType::Time
+            | ColumnType::Timetz
+            | ColumnType::Timestamp
+            | ColumnType::Timestamptz
+    ) && matches!(
+        literal.trim().to_ascii_lowercase().as_str(),
+        "now" | "today" | "tomorrow" | "yesterday"
+    )
 }
 
 /// A `CASE` expression, on its own indented lines exactly as PostgreSQL prints
@@ -663,7 +1750,24 @@ fn case_text(
 
 /// A stored constant, in the `value::type` spelling PostgreSQL uses inside a
 /// stored rule or a column default.
-pub(crate) fn const_text(value: &Datum, ty: ColumnType) -> String {
+///
+/// `get_const_expr` renders the value through its type's *output* function, so
+/// `style` is the session's and not a canonical one: the same stored `interval`
+/// prints `00:00:00` under `IntervalStyle = postgres` and `@ 0` under
+/// `postgres_verbose`, and a `date` follows `DateStyle` the same way.
+///
+/// One place this is deliberately not `get_const_expr`: upstream decides
+/// whether to write `::type` from the *`Const`'s* type, and labels everything
+/// but `bool`, `int4` and an unqualified `numeric`. A stored default reaches
+/// here as a bare datum whose literal type is already lost, so a numeric one is
+/// written the way `PostgreSQL` writes the far commoner unlabelled case
+/// (`DEFAULT 9` on a `bigint` column is `9` there too, because the parser holds
+/// an `int4` `Const` under a hidden coercion).
+pub(crate) fn const_text(
+    value: &Datum,
+    ty: ColumnType,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
     match value {
         Datum::Null => format!("NULL::{}", ty.name()),
         Datum::Bool(flag) => (if *flag { "true" } else { "false" }).to_string(),
@@ -674,58 +1778,26 @@ pub(crate) fn const_text(value: &Datum, ty: ColumnType) -> String {
         Datum::Float8(n) => n.to_string(),
         Datum::Numeric(n) => n.to_string(),
         other => {
-            let rendered = crate::func::text_render(other, &jiff::tz::TimeZone::UTC);
-            format!("'{}'::{}", rendered.replace('\'', "''"), ty.name())
+            let rendered = crate::func::text_render_in(other, style);
+            // `bit` is a reserved word, so `pg_get_expr` double-quotes it:
+            // `'1001'::"bit"`, but plain `'1001'::bit varying`.
+            let type_name = match ty {
+                ColumnType::Bit(_) => "\"bit\"",
+                other => other.name(),
+            };
+            format!("'{}'::{type_name}", rendered.replace('\'', "''"))
         }
     }
 }
 
+/// The SQL spelling a binary operator deparses to.
+///
+/// This is `eval::op_spelling`, which the 42883 messages already spell every
+/// operator with. Sharing it is what keeps a view over `~=`, `<->` or any of
+/// the geometric operators round-tripping: the table there is exhaustive over
+/// `BinaryOp`, so a new operator cannot reach `pg_get_viewdef` unspelled.
 fn binary_op_text(op: BinaryOp) -> &'static str {
-    match op {
-        BinaryOp::Add => "+",
-        BinaryOp::Sub => "-",
-        BinaryOp::Mul => "*",
-        BinaryOp::Div => "/",
-        BinaryOp::Mod => "%",
-        BinaryOp::Pow => "^",
-        BinaryOp::Concat => "||",
-        BinaryOp::Eq => "=",
-        BinaryOp::Ne => "<>",
-        BinaryOp::Lt => "<",
-        BinaryOp::Le => "<=",
-        BinaryOp::Gt => ">",
-        BinaryOp::Ge => ">=",
-        BinaryOp::And => "AND",
-        BinaryOp::Or => "OR",
-        BinaryOp::Match => "~",
-        BinaryOp::MatchCi => "~*",
-        BinaryOp::NotMatch => "!~",
-        BinaryOp::NotMatchCi => "!~*",
-        BinaryOp::IsDistinctFrom => "IS DISTINCT FROM",
-        BinaryOp::IsNotDistinctFrom => "IS NOT DISTINCT FROM",
-        _ => binary_op_text_rest(op),
-    }
-}
-
-fn binary_op_text_rest(op: BinaryOp) -> &'static str {
-    match op {
-        BinaryOp::JsonGet => "->",
-        BinaryOp::JsonGetText => "->>",
-        BinaryOp::JsonGetPath => "#>",
-        BinaryOp::JsonGetPathText => "#>>",
-        BinaryOp::Contains => "@>",
-        BinaryOp::ContainedBy => "<@",
-        BinaryOp::KeyExists => "?",
-        BinaryOp::KeyExistsAny => "?|",
-        BinaryOp::KeyExistsAll => "?&",
-        BinaryOp::Overlaps => "&&",
-        BinaryOp::BitAnd => "&",
-        BinaryOp::BitOr => "|",
-        BinaryOp::BitXor => "#",
-        BinaryOp::Shl => "<<",
-        BinaryOp::Shr => ">>",
-        _ => "?",
-    }
+    crate::eval::op_spelling(op)
 }
 
 #[cfg(test)]
@@ -734,16 +1806,28 @@ mod tests {
     use crabka_pgcatalog::{Column, RelationName, View};
     use crabka_pgtypes::ColumnType;
 
-    use crate::catalog_fn::view_definition_text;
+    /// [`crate::catalog_fn::view_definition_text`] in a session that has left
+    /// every output style at its default. A test that needs a *non*-default one
+    /// names it, because that is the whole point of the setting.
+    fn view_definition_text(view: &View, pretty: bool) -> String {
+        let utc = jiff::tz::TimeZone::UTC;
+        crate::catalog_fn::view_definition_text(
+            view,
+            pretty,
+            crabka_pgtypes::encoding::OutputStyle::with_zone(&utc),
+        )
+    }
 
     fn view(definition: &str, columns: &[&str]) -> View {
         View {
             name: RelationName::public("v"),
             definition: definition.into(),
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             columns: columns
                 .iter()
                 .map(|name| Column::new(*name, ColumnType::Int4))
                 .collect(),
+            options: crabka_pgcatalog::ViewOptions::default(),
         }
     }
 
@@ -770,17 +1854,147 @@ mod tests {
                 " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY b\n HAVING (count(*) > 1)\n  ORDER BY b\n LIMIT 5;",
                 " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY b\n HAVING count(*) > 1\n  ORDER BY b\n LIMIT 5;",
             ),
+            // A SQL value function is a keyword, not a call: PostgreSQL holds
+            // it as its own node kind and prints the keyword back in upper
+            // case, so `current_user()` is never what comes out.
+            (
+                "SELECT a FROM t WHERE b = current_user",
+                &["a"][..],
+                " SELECT a\n   FROM t\n  WHERE (b = CURRENT_USER);",
+                " SELECT a\n   FROM t\n  WHERE b = CURRENT_USER;",
+            ),
             (
                 "SELECT DISTINCT b FROM t WHERE a IN (1,2,3)",
                 &["b"][..],
                 " SELECT DISTINCT b\n   FROM t\n  WHERE (a = ANY (ARRAY[1, 2, 3]));",
                 " SELECT DISTINCT b\n   FROM t\n  WHERE a = ANY (ARRAY[1, 2, 3]);",
             ),
+            // `AT TIME ZONE` and `AT LOCAL` are `timezone` calls that print
+            // their grammar back, parentheses and all, in both modes.
+            (
+                "SELECT a AT TIME ZONE 'UTC' AS z FROM t",
+                &["z"][..],
+                " SELECT (a AT TIME ZONE 'UTC'::text) AS z\n   FROM t;",
+                " SELECT (a AT TIME ZONE 'UTC'::text) AS z\n   FROM t;",
+            ),
+            (
+                "SELECT a AT LOCAL AS z FROM t",
+                &["z"][..],
+                " SELECT (a AT LOCAL) AS z\n   FROM t;",
+                " SELECT (a AT LOCAL) AS z\n   FROM t;",
+            ),
+            // The identical one-argument call written as a call stays one:
+            // nothing about the arguments tells the two apart.
+            (
+                "SELECT timezone(a) AS z FROM t",
+                &["z"][..],
+                " SELECT timezone(a) AS z\n   FROM t;",
+                " SELECT timezone(a) AS z\n   FROM t;",
+            ),
+            // An operator operand keeps its own parentheses under the SQL
+            // syntax even in pretty mode, so the value it converts is the sum
+            // rather than the right-hand term.
+            (
+                "SELECT (a + b) AT LOCAL AS z FROM t",
+                &["z"][..],
+                " SELECT ((a + b) AT LOCAL) AS z\n   FROM t;",
+                " SELECT ((a + b) AT LOCAL) AS z\n   FROM t;",
+            ),
         ];
         for (definition, columns, plain, pretty) in cases {
             let view = view(definition, columns);
             assert!(view_definition_text(&view, false) == plain, "{definition}");
             assert!(view_definition_text(&view, true) == pretty, "{definition}");
+        }
+    }
+
+    /// Every unary form, and the text `PostgreSQL` 18.4 answers for
+    /// `pg_get_viewdef(oid)` and `pg_get_viewdef(oid, true)` over it.
+    ///
+    /// A prefix operator and a `BooleanTest` both lose their parentheses under
+    /// the pretty flag. `IS DOCUMENT` is the exception in both directions: it
+    /// never carries parentheses of its own, and in pretty mode it
+    /// parenthesizes its operand instead, because `get_rule_expr` hands the
+    /// argument *list* to `get_rule_expr_paren` and a list is never simple.
+    /// `IS NOT DOCUMENT` is not a node — the grammar builds
+    /// `NOT (… IS DOCUMENT)`, which is what comes back out.
+    #[test]
+    fn deparses_every_unary_operator_the_way_postgres_does() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("- a", "(- a)", "- a"),
+            ("+ a", "(+ a)", "+ a"),
+            ("@ a", "(@ a)", "@ a"),
+            ("|/ f", "(|/ f)", "|/ f"),
+            ("||/ f", "(||/ f)", "||/ f"),
+            ("~ a", "(~ a)", "~ a"),
+            ("!! q", "(!! q)", "!! q"),
+            ("# p", "(# p)", "# p"),
+            ("@-@ l", "(@-@ l)", "@-@ l"),
+            ("@@ bx", "(@@ bx)", "@@ bx"),
+            ("?- l", "(?- l)", "?- l"),
+            ("?| l", "(?| l)", "?| l"),
+            ("NOT b", "(NOT b)", "NOT b"),
+            ("b IS TRUE", "(b IS TRUE)", "b IS TRUE"),
+            ("b IS NOT TRUE", "(b IS NOT TRUE)", "b IS NOT TRUE"),
+            ("b IS FALSE", "(b IS FALSE)", "b IS FALSE"),
+            ("b IS NOT FALSE", "(b IS NOT FALSE)", "b IS NOT FALSE"),
+            ("b IS UNKNOWN", "(b IS UNKNOWN)", "b IS UNKNOWN"),
+            ("b IS NOT UNKNOWN", "(b IS NOT UNKNOWN)", "b IS NOT UNKNOWN"),
+            ("x IS DOCUMENT", "x IS DOCUMENT", "(x) IS DOCUMENT"),
+            (
+                "x IS NOT DOCUMENT",
+                "(NOT x IS DOCUMENT)",
+                "NOT (x) IS DOCUMENT",
+            ),
+        ];
+        for (expression, plain, pretty) in cases {
+            let view = view(&format!("SELECT {expression} AS z FROM t"), &["z"]);
+            assert!(
+                view_definition_text(&view, false) == format!(" SELECT {plain} AS z\n   FROM t;"),
+                "{expression}"
+            );
+            assert!(
+                view_definition_text(&view, true) == format!(" SELECT {pretty} AS z\n   FROM t;"),
+                "{expression}"
+            );
+        }
+    }
+
+    /// `get_rule_expr` parenthesizes a subscript's base unless it is a plain
+    /// column or a field selection, and the rule reads no pretty flag — so
+    /// both forms answer the same text. Each expectation is `PostgreSQL`
+    /// 18.4's.
+    #[test]
+    fn parenthesises_a_subscript_base_that_is_not_a_column() {
+        let cases: &[(&str, &str)] = &[
+            ("arr[1]", "arr[1]"),
+            (
+                "(string_to_array(s, ','))[1]",
+                "(string_to_array(s, ','::text))[1]",
+            ),
+            ("(ARRAY[1,2])[a]", "(ARRAY[1, 2])[a]"),
+            ("arr[1:2]", "arr[1:2]"),
+            ("arr[:2]", "arr[:2]"),
+            ("arr[2:]", "arr[2:]"),
+            // A field selection parenthesizes a column base and nothing else,
+            // so the two rules meet without either adding a pair the other
+            // already supplied.
+            ("(c2).f", "(c2).f"),
+            ("((c2).h).g", "(c2).h.g"),
+            ("(c2).f[1]", "(c2).f[1]"),
+            ("(carr[1]).f", "carr[1].f"),
+        ];
+        for (expression, expected) in cases {
+            let view = view(&format!("SELECT {expression} AS z FROM t"), &["z"]);
+            assert!(
+                view_definition_text(&view, false)
+                    == format!(" SELECT {expected} AS z\n   FROM t;"),
+                "{expression}"
+            );
+            assert!(
+                view_definition_text(&view, true) == format!(" SELECT {expected} AS z\n   FROM t;"),
+                "{expression}"
+            );
         }
     }
 
@@ -810,6 +2024,332 @@ mod tests {
             view_definition_text(&view, true)
                 == " SELECT t.a\n   FROM t\nUNION ALL\n SELECT u.a\n   FROM u;"
         );
+    }
+
+    /// Every shape a widened view body can take, and the exact text
+    /// `PostgreSQL` 18.4 answers for `pg_get_viewdef(oid)` over it.
+    ///
+    /// What these pin is the indentation rule: a nested query — a `WITH` body,
+    /// a derived table, a sub-select — is laid out one eight-column step
+    /// further in than the query holding it, and the step compounds with depth.
+    #[test]
+    fn deparses_the_nested_shapes_at_postgres_indents() {
+        let cases: [(&str, &[&str], &str); 12] = [
+            (
+                "WITH s AS (SELECT a FROM t WHERE a > 1) SELECT a FROM s",
+                &["a"],
+                " WITH s AS (\n         SELECT t.a\n           FROM t\n          WHERE (t.a > 1)\
+                 \n        )\n SELECT a\n   FROM s;",
+            ),
+            (
+                "WITH s AS (SELECT a FROM t), r AS (SELECT a FROM u) \
+                 SELECT s.a FROM s JOIN r ON s.a = r.a",
+                &["a"],
+                " WITH s AS (\n         SELECT t.a\n           FROM t\n        ), r AS (\
+                 \n         SELECT u.a\n           FROM u\n        )\n SELECT s.a\
+                 \n   FROM (s\n     JOIN r ON ((s.a = r.a)));",
+            ),
+            (
+                "WITH s AS MATERIALIZED (SELECT a FROM t) SELECT a FROM s",
+                &["a"],
+                " WITH s AS MATERIALIZED (\n         SELECT t.a\n           FROM t\n        )\
+                 \n SELECT a\n   FROM s;",
+            ),
+            (
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT 2) SELECT i FROM n",
+                &["i"],
+                " WITH RECURSIVE n(i) AS (\n         SELECT 1 AS \"?column?\"\n        UNION ALL\
+                 \n         SELECT 2\n        )\n SELECT i\n   FROM n;",
+            ),
+            (
+                "SELECT a, b FROM (SELECT a, b FROM t WHERE a > 1) s",
+                &["a", "b"],
+                " SELECT a,\n    b\n   FROM ( SELECT t.a,\n            t.b\n           FROM t\
+                 \n          WHERE (t.a > 1)) s;",
+            ),
+            (
+                "SELECT q.a FROM (SELECT p.a FROM (SELECT a FROM t) p) q",
+                &["a"],
+                " SELECT a\n   FROM ( SELECT p.a\n           FROM ( SELECT t.a\
+                 \n                   FROM t) p) q;",
+            ),
+            (
+                "SELECT a, (SELECT max(e) FROM w) AS mx FROM t",
+                &["a", "mx"],
+                " SELECT a,\n    ( SELECT max(w.e) AS max\n           FROM w) AS mx\n   FROM t;",
+            ),
+            (
+                "SELECT ARRAY(SELECT a FROM u ORDER BY a) AS arr",
+                &["arr"],
+                " SELECT ARRAY( SELECT u.a\n           FROM u\n          ORDER BY u.a) AS arr;",
+            ),
+            // `= ANY (subquery)` is the one quantified form PostgreSQL prints
+            // back as `IN`.
+            (
+                "SELECT a FROM t WHERE a = ANY (SELECT a FROM w)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (a IN ( SELECT w.a\n           FROM w));",
+            ),
+            (
+                "SELECT a FROM t WHERE a > ALL (SELECT a FROM w)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (a > ALL ( SELECT w.a\n           FROM w));",
+            ),
+            // Un-pretty mode parenthesizes every join node, so a three-way
+            // join nests its parentheses.
+            (
+                "SELECT t.a FROM t JOIN u ON t.a = u.a JOIN w ON w.a = t.a",
+                &["a"],
+                " SELECT t.a\n   FROM ((t\n     JOIN u ON ((t.a = u.a)))\
+                 \n     JOIN w ON ((w.a = t.a)));",
+            ),
+            (
+                "SELECT t.a, u.d FROM t, u WHERE t.a = u.a",
+                &["a", "d"],
+                " SELECT t.a,\n    u.d\n   FROM t,\n    u\n  WHERE (t.a = u.a);",
+            ),
+        ];
+        for (definition, columns, expected) in cases {
+            let view = view(definition, columns);
+            assert!(
+                view_definition_text(&view, false) == expected,
+                "{definition}"
+            );
+        }
+    }
+
+    /// A typed literal is one constant of that type, printed in the type's own
+    /// output spelling. Neither the `::text` of an unresolved string nor the
+    /// text the query wrote survives.
+    #[test]
+    fn a_typed_literal_prints_through_its_type() {
+        let cases: [(&str, &str); 7] = [
+            // `interval` normalizes: `00:00` is the zero interval, and the
+            // `postgres` style spells that `00:00:00`.
+            (
+                "SELECT f1 AT TIME ZONE INTERVAL '00:00' AS z FROM t",
+                " SELECT (f1 AT TIME ZONE '00:00:00'::interval) AS z\n   FROM t;",
+            ),
+            // The cast spelling of the same literal is the same node, so it
+            // reads back the same way.
+            (
+                "SELECT f1 AT TIME ZONE '00:00'::interval AS z FROM t",
+                " SELECT (f1 AT TIME ZONE '00:00:00'::interval) AS z\n   FROM t;",
+            ),
+            (
+                "SELECT '2022-12-01'::date AS z FROM t",
+                " SELECT '2022-12-01'::date AS z\n   FROM t;",
+            ),
+            // An identity cast is not a second resolution either.
+            (
+                "SELECT 'abcd'::text AS z FROM t",
+                " SELECT 'abcd'::text AS z\n   FROM t;",
+            ),
+            (
+                "SELECT '42'::bigint AS z FROM t",
+                " SELECT 42 AS z\n   FROM t;",
+            ),
+            (
+                "SELECT '\\x00'::bytea AS z FROM t",
+                " SELECT '\\x00'::bytea AS z\n   FROM t;",
+            ),
+            // A clock-relative spelling is frozen upstream when the view is
+            // created, so it is not re-read here.
+            (
+                "SELECT 'now'::timestamp AS z FROM t",
+                " SELECT ('now'::text)::timestamp without time zone AS z\n   FROM t;",
+            ),
+        ];
+        for (definition, expected) in cases {
+            let view = view(definition, &["z"]);
+            assert!(
+                view_definition_text(&view, false) == expected,
+                "{definition}"
+            );
+        }
+    }
+
+    /// The type's output function reads the session, so the same stored
+    /// interval has one spelling per `IntervalStyle` — which is why `pg_regress`
+    /// pins the setting and sees `'@ 0'::interval` where the default sees
+    /// `'00:00:00'::interval`.
+    #[test]
+    fn a_constant_deparses_in_the_sessions_output_style() {
+        let view = view(
+            "SELECT f1 AT TIME ZONE INTERVAL '00:00' AS z FROM t",
+            &["z"],
+        );
+        let utc = jiff::tz::TimeZone::UTC;
+        let verbose = crabka_pgtypes::encoding::OutputStyle {
+            interval_style: crabka_pgtypes::datetime::IntervalStyle::PostgresVerbose,
+            ..crabka_pgtypes::encoding::OutputStyle::with_zone(&utc)
+        };
+        assert!(
+            crate::catalog_fn::view_definition_text(&view, true, verbose)
+                == " SELECT (f1 AT TIME ZONE '@ 0'::interval) AS z\n   FROM t;"
+        );
+    }
+
+    /// A sub-select carries parentheses the pretty flag does not remove:
+    /// `get_sublink_expr` opens one unconditionally, and under an operator
+    /// `isSimpleNode` adds the one the operator itself no longer supplies.
+    #[test]
+    fn a_sublink_keeps_its_parentheses_in_both_forms() {
+        let cases: [(&str, &[&str], &str, &str); 4] = [
+            (
+                "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (EXISTS ( SELECT 1\n           FROM u));",
+                " SELECT a\n   FROM t\n  WHERE (EXISTS ( SELECT 1\n           FROM u));",
+            ),
+            (
+                "SELECT a FROM t WHERE a IN (SELECT a FROM u)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (a IN ( SELECT u.a\n           FROM u));",
+                " SELECT a\n   FROM t\n  WHERE (a IN ( SELECT u.a\n           FROM u));",
+            ),
+            // Un-pretty, the operator node supplies the outer parenthesis;
+            // pretty, it does not, and the operand grows one of its own.
+            (
+                "SELECT b, count(*) FROM t GROUP BY b HAVING count(*) > (SELECT 0)",
+                &["b", "count"],
+                " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY b\
+                 \n HAVING (count(*) > ( SELECT 0));",
+                " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY b\
+                 \n HAVING count(*) > (( SELECT 0));",
+            ),
+            (
+                "SELECT a FROM t WHERE a > ALL (SELECT a FROM u)",
+                &["a"],
+                " SELECT a\n   FROM t\n  WHERE (a > ALL ( SELECT u.a\n           FROM u));",
+                " SELECT a\n   FROM t\n  WHERE (a > ALL ( SELECT u.a\n           FROM u));",
+            ),
+        ];
+        for (definition, columns, plain, pretty) in cases {
+            let view = view(definition, columns);
+            assert!(view_definition_text(&view, false) == plain, "{definition}");
+            assert!(view_definition_text(&view, true) == pretty, "{definition}");
+        }
+    }
+
+    /// A window call lives beside the select list rather than in it, and a
+    /// grouping clause keeps a structure the flat expression list cannot hold.
+    /// Both are written back from where they are actually stored.
+    #[test]
+    fn deparses_window_calls_and_grouping_clauses() {
+        let cases: [(&str, &[&str], &str); 7] = [
+            (
+                "SELECT a, sum(c) OVER (ORDER BY a) AS running FROM t",
+                &["a", "running"],
+                " SELECT a,\n    sum(c) OVER (ORDER BY a) AS running\n   FROM t;",
+            ),
+            (
+                "SELECT a, sum(c) OVER w AS s FROM t WINDOW w AS (PARTITION BY b ORDER BY a)",
+                &["a", "s"],
+                " SELECT a,\n    sum(c) OVER w AS s\n   FROM t\
+                 \n  WINDOW w AS (PARTITION BY b ORDER BY a);",
+            ),
+            (
+                "SELECT a, row_number() OVER (PARTITION BY b ORDER BY a \
+                 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS r FROM t",
+                &["a", "r"],
+                " SELECT a,\n    row_number() OVER (PARTITION BY b ORDER BY a \
+                 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS r\n   FROM t;",
+            ),
+            (
+                "SELECT a, count(*) FILTER (WHERE a > 1) OVER (ORDER BY a) AS n FROM t",
+                &["a", "n"],
+                " SELECT a,\n    count(*) FILTER (WHERE (a > 1)) OVER (ORDER BY a) AS n\
+                 \n   FROM t;",
+            ),
+            (
+                "SELECT b, count(*) FROM t GROUP BY ROLLUP (a, b)",
+                &["b", "count"],
+                " SELECT b,\n    count(*) AS count\n   FROM t\n  GROUP BY ROLLUP(a, b);",
+            ),
+            (
+                "SELECT b, count(*) FROM t GROUP BY GROUPING SETS ((a,b),(a),())",
+                &["b", "count"],
+                " SELECT b,\n    count(*) AS count\n   FROM t\
+                 \n  GROUP BY GROUPING SETS ((a, b), (a), ());",
+            ),
+            (
+                "SELECT b, count(*) FROM t GROUP BY DISTINCT ROLLUP(a), b",
+                &["b", "count"],
+                " SELECT b,\n    count(*) AS count\n   FROM t\
+                 \n  GROUP BY DISTINCT ROLLUP(a), b;",
+            ),
+        ];
+        for (definition, columns, expected) in cases {
+            let view = view(definition, columns);
+            assert!(
+                view_definition_text(&view, false) == expected,
+                "{definition}"
+            );
+        }
+    }
+
+    /// The view's own column list names its output, which is why the right arm
+    /// of a set operation is labelled by the left arm's name rather than its
+    /// own alias. A query nobody names labels each item the way the parser
+    /// would — and inside a sub-select, where the names are invisible, an
+    /// expression that would only be `?column?` is left bare.
+    #[test]
+    fn labels_output_columns_the_way_postgres_does() {
+        let cases: [(&str, &[&str], &str); 4] = [
+            (
+                "SELECT a AS ll FROM t UNION ALL SELECT a AS rr FROM u",
+                &["ll"],
+                " SELECT t.a AS ll\n   FROM t\nUNION ALL\n SELECT u.a AS ll\n   FROM u;",
+            ),
+            (
+                "SELECT (SELECT 1) AS one FROM t",
+                &["one"],
+                " SELECT ( SELECT 1) AS one\n   FROM t;",
+            ),
+            (
+                "SELECT s.n FROM (SELECT count(*) AS n FROM t) s",
+                &["n"],
+                " SELECT n\n   FROM ( SELECT count(*) AS n\n           FROM t) s;",
+            ),
+            (
+                "WITH s AS (SELECT 1) SELECT * FROM s",
+                &["c"],
+                " WITH s AS (\n         SELECT 1 AS \"?column?\"\n        )\n SELECT c\
+                 \n   FROM s;",
+            ),
+        ];
+        for (definition, columns, expected) in cases {
+            let view = view(definition, columns);
+            assert!(
+                view_definition_text(&view, false) == expected,
+                "{definition}"
+            );
+        }
+    }
+
+    /// The expression entry point `pg_get_expr` reaches for a qual stored in a
+    /// catalog column. Column references carry no prefix at the top level —
+    /// the deparse context is the one relation the expression belongs to — and
+    /// pick one up as soon as a sub-select puts them a level down.
+    #[test]
+    fn deparses_a_stored_expression_the_way_pg_get_expr_does() {
+        let cases = [
+            ("a>0", "(a > 0)"),
+            ("t.a > 0", "(a > 0)"),
+            ("a > 0 OR NOT b", "((a > 0) OR (NOT b))"),
+            ("a IN (1, 2)", "(a = ANY (ARRAY[1, 2]))"),
+            (
+                "a <= (SELECT c FROM u WHERE d = session_user)",
+                "(a <= ( SELECT u.c\n   FROM u\n  WHERE (u.d = SESSION_USER)))",
+            ),
+        ];
+        for (source, expected) in cases {
+            let expr = crabka_pgparser::parser::parse_expression(source).expect("parse");
+            let utc = jiff::tz::TimeZone::UTC;
+            let style = crabka_pgtypes::encoding::OutputStyle::with_zone(&utc);
+            assert!(super::expression_text(&expr, style) == expected, "{source}");
+        }
     }
 
     /// An unparseable stored definition still answers a usable statement.

@@ -90,6 +90,20 @@ pub(crate) fn with_scalar_runtime<T>(
     })
 }
 
+/// The catalog the statement runtime exposes, when one is installed.
+///
+/// The aggregate resolver needs a catalog from inside expression walkers that
+/// take no `kv` — the same problem `is_plpgsql_scalar_runtime` solves — and this
+/// is the one seam that answers it.
+pub(crate) fn scalar_runtime_catalog() -> Option<Arc<dyn Kv>> {
+    SCALAR_RUNTIME.with(|runtime| {
+        runtime
+            .borrow()
+            .as_ref()
+            .map(|runtime| Arc::clone(&runtime.catalog))
+    })
+}
+
 pub(crate) fn scalar_runtime_request_sender()
 -> Option<tokio::sync::mpsc::Sender<ScalarFunctionRequest>> {
     SCALAR_RUNTIME.with(|runtime| {
@@ -313,7 +327,126 @@ pub(crate) fn undefined_routine(message: impl Into<String>) -> ExecError {
     ExecError::UndefinedFunction(message.into())
 }
 
-/// 42725: a routine name that more than one routine carries.
+const STATIC_REGRESS_ENTRYPOINTS: &[&str] = &[
+    "binary_coercible",
+    "get_environ",
+    "int44in",
+    "int44out",
+    "interpt_pp",
+    "is_catalog_text_unique_index_oid",
+    "make_tuple_indirect",
+    "overpaid",
+    "pt_in_widget",
+    "regress_setenv",
+    "reverse_name",
+    "test_atomic_ops",
+    "test_bytea_to_text",
+    "test_canonicalize_path",
+    "test_enc_conversion",
+    "test_enc_setup",
+    "test_fdw_handler",
+    "test_mblen_func",
+    "test_opclass_options_func",
+    "test_pglz_compress",
+    "test_pglz_decompress",
+    "test_relpath",
+    "test_support_func",
+    "test_text_to_bytea",
+    "test_text_to_wchars",
+    "test_valid_server_encoding",
+    "test_wchars_to_text",
+    "trigger_return_old",
+    "wait_pid",
+    "widget_in",
+    "widget_out",
+];
+const MAX_PGLZ_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+fn is_static_regress_object(object_file: &str) -> bool {
+    object_file == "regress"
+        || std::env::var_os("CRABKA_PG_REGRESS_LIBRARY")
+            .is_some_and(|configured| configured == std::ffi::OsStr::new(object_file))
+}
+
+fn static_regress_symbol(symbol: &str) -> bool {
+    symbol == "Pg_magic_func"
+        || STATIC_REGRESS_ENTRYPOINTS.contains(&symbol)
+        || symbol
+            .strip_prefix("pg_finfo_")
+            .is_some_and(|entrypoint| STATIC_REGRESS_ENTRYPOINTS.contains(&entrypoint))
+}
+
+fn inaccessible_c_object(object_file: &str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "58P01",
+        message: format!("could not access file \"{object_file}\": No such file or directory"),
+    }
+}
+
+fn unsupported_c_object(object_file: &str) -> ExecError {
+    ExecError::Unsupported(format!(
+        "loading C object file \"{object_file}\" is supported only for PostgreSQL modules"
+    ))
+}
+
+fn unavailable_c_object(object_file: &str) -> ExecError {
+    let path = std::path::Path::new(object_file);
+    let library_name = path
+        .extension()
+        .is_some_and(|extension| extension == "so" || extension == "dylib" || extension == "dll");
+    if !path.is_absolute() || library_name {
+        inaccessible_c_object(object_file)
+    } else {
+        unsupported_c_object(object_file)
+    }
+}
+
+/// Resolve a `LOAD` target to one of the modules compiled into Gres.
+///
+/// The pinned regression module and PL/pgSQL runtime are static compatibility
+/// modules. Unknown relative names behave like missing dynamic libraries.
+/// Absolute paths are rejected without reading server-side files.
+pub(crate) fn validate_load_target(object_file: &str) -> Result<(), ExecError> {
+    if is_static_regress_object(object_file) || object_file == "plpgsql" {
+        Ok(())
+    } else {
+        Err(unavailable_c_object(object_file))
+    }
+}
+
+fn validate_c_routine(routine: &Routine) -> Result<(), ExecError> {
+    let object_file = routine
+        .object_file
+        .as_deref()
+        .ok_or_else(|| invalid_definition("C language function must specify an object file"))?;
+    if !is_static_regress_object(object_file) {
+        return Err(unavailable_c_object(object_file));
+    }
+    if !static_regress_symbol(&routine.body) {
+        return Err(undefined_routine(format!(
+            "could not find function \"{}\" in file \"{object_file}\"",
+            routine.body
+        )));
+    }
+    Ok(())
+}
+
+fn validate_internal_routine(routine: &Routine) -> Result<(), ExecError> {
+    let found = builtin_pg_proc_rows()?.iter().any(|row| {
+        row[4] == Datum::Int4(12)
+            && matches!(&row[25], Datum::Text(source) if source == &routine.body)
+    });
+    if found {
+        Ok(())
+    } else {
+        Err(undefined_routine(format!(
+            "there is no built-in function named \"{}\"",
+            routine.body
+        )))
+    }
+}
+
+/// 42725 — a routine name that more than one routine carries.
 fn ambiguous_routine(name: &str) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "42725",
@@ -322,6 +455,16 @@ fn ambiguous_routine(name: &str) -> ExecError {
 }
 
 /// Resolve a type written in a routine signature against the catalog.
+/// [`resolve_type`] for callers outside this module — the aggregate DDL, which
+/// resolves the same signature vocabulary.
+pub(crate) fn resolve_routine_type(
+    kv: &dyn Kv,
+    ty: &crabka_pgparser::ast::RoutineType,
+    quoted: bool,
+) -> Result<RoutineType, ExecError> {
+    resolve_type(kv, ty, quoted)
+}
+
 fn resolve_type(
     kv: &dyn Kv,
     ty: &crabka_pgparser::ast::RoutineType,
@@ -345,7 +488,74 @@ fn resolve_type(
     {
         return Ok(RoutineType::named(lowered));
     }
+    // A shell type resolves nowhere else — it has no `ColumnType`, so the
+    // parser could not have resolved it — but a routine signature is precisely
+    // what a shell exists to be named in. `CREATE TYPE xfloat4;` then
+    // `xfloat4in(cstring) RETURNS xfloat4` is the two-phase definition every
+    // base type needs, and refusing here would close it before it opened.
+    if shell_type_named(kv, &lowered) {
+        return Ok(RoutineType::named(lowered));
+    }
     Err(undefined_type(&ty.name, quoted))
+}
+
+/// The `NOTICE`s `CREATE FUNCTION` emits when its signature names a shell type.
+///
+/// PostgreSQL reports the two ends differently, and the difference is not
+/// cosmetic: an argument type carries a parse location, so the client draws a
+/// `LINE`/caret under it, while the return type is resolved by
+/// `compute_return_type`, which has none.
+///
+/// Computed from the statement before it runs, like every other precomputed
+/// notice, because a shell that the statement itself completes would no longer
+/// be one afterwards. A catalog read that fails reports no shell rather than
+/// failing the statement: the notice is advisory, and the DDL itself will
+/// raise whatever the same failed read causes there.
+pub(crate) fn shell_type_notices(
+    kv: &dyn Kv,
+    stmt: &crabka_pgparser::ast::Statement,
+) -> Vec<crabka_pgwire::error::PgError> {
+    use crabka_pgparser::ast::{RoutineReturn, Statement};
+    let Statement::CreateRoutine(create) = stmt else {
+        return Vec::new();
+    };
+    let mut notices = Vec::new();
+    if let RoutineReturn::Type { ty, .. } = &create.returns
+        && shell_type_named(kv, &ty.name.to_ascii_lowercase())
+    {
+        notices.push(crabka_pgwire::error::PgError::notice(format!(
+            "return type {} is only a shell",
+            ty.name
+        )));
+    }
+    for arg in &create.args {
+        if !shell_type_named(kv, &arg.ty.name.to_ascii_lowercase()) {
+            continue;
+        }
+        let notice = crabka_pgwire::error::PgError::notice(format!(
+            "argument type {} is only a shell",
+            arg.ty.name
+        ));
+        notices.push(match arg.ty.location {
+            Some(location) => notice.with_position(location),
+            None => notice,
+        });
+    }
+    notices
+}
+
+/// Whether `name` is a registered shell type, matched the way a routine
+/// signature resolves: unqualified names come from `public`.
+pub(crate) fn shell_type_named(kv: &dyn Kv, name: &str) -> bool {
+    let (schema, bare) = match name.split_once('.') {
+        Some((schema, bare)) => (schema, bare),
+        None => (crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA, name),
+    };
+    crabka_pgcatalog::list_user_types(kv).is_ok_and(|types| {
+        types
+            .iter()
+            .any(|ty| ty.is_shell() && ty.schema == schema && ty.name == bare)
+    })
 }
 
 /// The routine kind a `CREATE`/`DROP`/`ALTER` spelling selects.
@@ -434,12 +644,32 @@ impl Options {
     }
 }
 
-/// The body text and form a routine record stores.
-fn body_text(body: &RoutineBody) -> (String, BodyForm) {
+/// The source, external object, and form a routine record stores.
+fn body_parts(
+    body: &RoutineBody,
+    language: &str,
+    routine_name: &str,
+) -> Result<(String, Option<String>, BodyForm), ExecError> {
     match body {
-        RoutineBody::Source(text) => (text.clone(), BodyForm::Source),
-        RoutineBody::Atomic { text, .. } => (text.clone(), BodyForm::Atomic),
-        RoutineBody::Return { text, .. } => (text.clone(), BodyForm::Return),
+        RoutineBody::Source(object_file) if language == "c" => Ok((
+            routine_name.to_string(),
+            Some(object_file.clone()),
+            BodyForm::Source,
+        )),
+        RoutineBody::External {
+            object_file,
+            link_symbol,
+        } if language == "c" => Ok((
+            link_symbol.clone(),
+            Some(object_file.clone()),
+            BodyForm::Source,
+        )),
+        RoutineBody::External { .. } => Err(invalid_definition(format!(
+            "only one AS item needed for language \"{language}\""
+        ))),
+        RoutineBody::Source(text) => Ok((text.clone(), None, BodyForm::Source)),
+        RoutineBody::Atomic { text, .. } => Ok((text.clone(), None, BodyForm::Atomic)),
+        RoutineBody::Return { text, .. } => Ok((text.clone(), None, BodyForm::Return)),
     }
 }
 
@@ -447,18 +677,22 @@ fn body_text(body: &RoutineBody) -> (String, BodyForm) {
 fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<Routine, ExecError> {
     let kind = object_kind(stmt.object).expect("CREATE ROUTINE is not PostgreSQL syntax");
     let options = Options::collect(&stmt.options)?;
-    let language = options
-        .language
-        .ok_or_else(|| invalid_definition("no language specified"))?;
+    let body = options
+        .body
+        .ok_or_else(|| invalid_definition("no function body specified"))?;
+    let language = options.language.unwrap_or_else(|| match body {
+        RoutineBody::Return { .. } => "sql".into(),
+        _ => String::new(),
+    });
+    if language.is_empty() {
+        return Err(invalid_definition("no language specified"));
+    }
     if !LANGUAGES.contains(&language.as_str()) {
         return Err(ExecError::FunctionError {
             sqlstate: "42704",
             message: format!("language \"{language}\" does not exist"),
         });
     }
-    let body = options
-        .body
-        .ok_or_else(|| invalid_definition("no function body specified"))?;
     let mut params = Vec::with_capacity(stmt.args.len());
     let mut seen_default = false;
     for arg in &stmt.args {
@@ -491,10 +725,11 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
                 .collect::<Result<Vec<_>, ExecError>>()?,
         ),
     };
+    validate_polymorphic_range_result(&params, &result)?;
     if kind == RoutineKind::Procedure && !matches!(result, RoutineResult::Unspecified) {
         return Err(invalid_definition("procedures cannot have a return value"));
     }
-    let (body, body_form) = body_text(&body);
+    let (body, object_file, body_form) = body_parts(&body, &language, &stmt.name)?;
     let volatility = options.volatility.unwrap_or('v');
     Ok(Routine {
         oid: 0,
@@ -504,6 +739,7 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
         result,
         language,
         body,
+        object_file,
         body_form,
         volatility,
         parallel: options.parallel.unwrap_or('u'),
@@ -520,7 +756,58 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
             }),
         config: options.config,
         owner: owner.to_string(),
+        aggregate: None,
     })
+}
+
+fn validate_polymorphic_range_result(
+    params: &[RoutineParam],
+    result: &RoutineResult,
+) -> Result<(), ExecError> {
+    let mut outputs = params
+        .iter()
+        .filter(|param| param.mode.is_output())
+        .map(|param| &param.ty)
+        .collect::<Vec<_>>();
+    match result {
+        RoutineResult::Type { ty, .. } => outputs.push(ty),
+        RoutineResult::Table(columns) => outputs.extend(columns.iter().map(|(_, ty)| ty)),
+        RoutineResult::Unspecified => {}
+    }
+    for (result_name, input_names, detail) in [
+        (
+            "anymultirange",
+            ["anyrange", "anymultirange"],
+            "A result of type anymultirange requires at least one input of type anyrange or anymultirange.",
+        ),
+        (
+            "anyrange",
+            ["anyrange", "anymultirange"],
+            "A result of type anyrange requires at least one input of type anyrange or anymultirange.",
+        ),
+        (
+            "anycompatiblemultirange",
+            ["anycompatiblerange", "anycompatiblemultirange"],
+            "A result of type anycompatiblemultirange requires at least one input of type anycompatiblerange or anycompatiblemultirange.",
+        ),
+        (
+            "anycompatiblerange",
+            ["anycompatiblerange", "anycompatiblemultirange"],
+            "A result of type anycompatiblerange requires at least one input of type anycompatiblerange or anycompatiblemultirange.",
+        ),
+    ] {
+        if outputs.iter().any(|ty| ty.name == result_name)
+            && !params
+                .iter()
+                .any(|param| param.mode.is_input() && input_names.contains(&param.ty.name.as_str()))
+        {
+            return Err(ExecError::Remote(
+                crabka_pgwire::error::PgError::error("42P13", "cannot determine result data type")
+                    .with_detail(detail),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parsed_returns_set(returns: &RoutineReturn) -> bool {
@@ -553,6 +840,11 @@ pub(crate) fn create(
             return Err(duplicate_routine(&routine.name));
         }
         check_replaceable(&existing, &routine)?;
+    }
+    match routine.language.as_str() {
+        "c" => validate_c_routine(&routine)?,
+        "internal" => validate_internal_routine(&routine)?,
+        _ => {}
     }
     // A SQL body is checked at definition time, exactly as `PostgreSQL` does
     // with the default `check_function_bodies`.
@@ -805,9 +1097,28 @@ fn signature_type_names(kv: &dyn Kv, args: &[RoutineArg]) -> Result<Vec<String>,
 
 // ------------------------------------------------------------------ calling
 
-/// Is `name` a routine this catalog defines?
+/// Does a user-defined aggregate of this name and arity own the call?
+///
+/// A name may carry both an aggregate and an ordinary function — nothing stops
+/// `CREATE AGGREGATE acc(int4)` next to `CREATE FUNCTION acc(text)` — and the
+/// scalar paths must stand aside when the aggregate is the one being called,
+/// or the query silently returns one row per input instead of aggregating.
+fn shadowing_user_aggregate(kv: &dyn Kv, name: &str, arity: usize) -> bool {
+    routines_named(kv, name).is_ok_and(|found| {
+        found
+            .iter()
+            .any(|routine| routine.is_aggregate() && routine.input_params().count() == arity)
+    })
+}
+
+/// Is `name` a routine this catalog defines that an ordinary call could reach?
+///
+/// A user-defined aggregate does not count. Its `pg_proc` row names the
+/// internal language and a dummy body, so letting one through here would send
+/// every aggregate call into the scalar inliner instead of the aggregate
+/// evaluator.
 pub(crate) fn is_user_routine(kv: &dyn Kv, name: &str) -> bool {
-    routines_named(kv, name).is_ok_and(|found| !found.is_empty())
+    routines_named(kv, name).is_ok_and(|found| found.iter().any(|routine| !routine.is_aggregate()))
 }
 
 /// Resolve a call of `name` with `given` argument types.
@@ -819,7 +1130,11 @@ pub(crate) fn resolve_call(
     name: &str,
     given: &[ArgType],
 ) -> Result<Option<Routine>, ExecError> {
-    let candidates = routines_named(kv, name)?;
+    // An aggregate is never the answer to a scalar call; `agg` resolves those.
+    let candidates: Vec<Routine> = routines_named(kv, name)?
+        .into_iter()
+        .filter(|routine| !routine.is_aggregate())
+        .collect();
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -839,9 +1154,15 @@ pub(crate) fn resolve_call(
         let mut is_coercible = true;
         for (arg, param) in given.iter().zip(params.iter()) {
             let Some(target) = param.ty.column else {
-                // A type Gres does not model can only match an untyped literal.
-                is_exact = false;
-                is_coercible = matches!(arg, ArgType::Unknown | ArgType::Opaque);
+                if is_polymorphic_type(&param.ty.name) {
+                    is_exact &= !matches!(arg, ArgType::Unknown | ArgType::Opaque)
+                        && polymorphic_argument_matches(&param.ty.name, *arg);
+                    is_coercible &= polymorphic_argument_matches(&param.ty.name, *arg);
+                } else {
+                    // A type Gres does not model can only match an untyped literal.
+                    is_exact = false;
+                    is_coercible = matches!(arg, ArgType::Unknown | ArgType::Opaque);
+                }
                 continue;
             };
             match arg {
@@ -855,6 +1176,8 @@ pub(crate) fn resolve_call(
                 ArgType::Unknown | ArgType::Opaque => is_exact = false,
             }
         }
+        is_coercible &= polymorphic_arguments_are_consistent(&params, given);
+        is_exact &= polymorphic_arguments_are_exact(&params, given);
         if is_exact {
             exact.push(routine.clone());
         } else if is_coercible {
@@ -907,8 +1230,152 @@ pub(crate) fn resolve_call(
     )))
 }
 
-/// A resolved routine plus the call arguments, after unknown-literal coercion
-/// and trailing parameter defaults are applied.
+fn is_polymorphic_type(name: &str) -> bool {
+    matches!(
+        name,
+        "anyarray"
+            | "anyelement"
+            | "anynonarray"
+            | "anyrange"
+            | "anymultirange"
+            | "anycompatible"
+            | "anycompatiblearray"
+            | "anycompatiblemultirange"
+            | "anycompatiblenonarray"
+            | "anycompatiblerange"
+    )
+}
+
+fn polymorphic_argument_matches(name: &str, arg: ArgType) -> bool {
+    match arg {
+        ArgType::Unknown | ArgType::Opaque => true,
+        ArgType::Known(ty) => match name {
+            "anyarray" | "anycompatiblearray" => matches!(ty, ColumnType::Array(_)),
+            "anyrange" | "anycompatiblerange" => matches!(ty, ColumnType::Range(_)),
+            "anymultirange" | "anycompatiblemultirange" => {
+                matches!(ty, ColumnType::Multirange(_))
+            }
+            "anynonarray" | "anycompatiblenonarray" => !matches!(ty, ColumnType::Array(_)),
+            "anyelement" | "anycompatible" => true,
+            _ => false,
+        },
+    }
+}
+
+fn polymorphic_base_type(name: &str, arg: ArgType) -> Option<ColumnType> {
+    let ArgType::Known(ty) = arg else {
+        return None;
+    };
+    match name {
+        "anyarray" | "anycompatiblearray" => match ty {
+            ColumnType::Array(elem) => Some(elem.column_type()),
+            _ => None,
+        },
+        "anyrange" | "anycompatiblerange" => match ty {
+            ColumnType::Range(range) => Some(*range.subtype),
+            _ => None,
+        },
+        "anymultirange" | "anycompatiblemultirange" => match ty {
+            ColumnType::Multirange(multirange) => Some(*multirange.range.subtype),
+            _ => None,
+        },
+        "anyelement" | "anynonarray" | "anycompatible" | "anycompatiblenonarray" => Some(ty),
+        _ => None,
+    }
+}
+
+fn polymorphic_range_type(name: &str, arg: ArgType) -> Option<crabka_pgtypes::usertype::RangeRef> {
+    let ArgType::Known(ty) = arg else {
+        return None;
+    };
+    match (name, ty) {
+        ("anyrange" | "anycompatiblerange", ColumnType::Range(range)) => Some(range),
+        ("anymultirange" | "anycompatiblemultirange", ColumnType::Multirange(multirange)) => {
+            Some(multirange.range)
+        }
+        _ => None,
+    }
+}
+
+fn polymorphic_arguments_are_consistent(params: &[&RoutineParam], given: &[ArgType]) -> bool {
+    let mut exact = None;
+    let mut exact_range = None;
+    let mut compatible = None;
+    let mut compatible_range = None;
+    let mut compatible_range_identity = None;
+    let mut compatible_inputs = Vec::new();
+    for (param, arg) in params.iter().zip(given) {
+        let Some(base) = polymorphic_base_type(&param.ty.name, *arg) else {
+            continue;
+        };
+        if param.ty.name.starts_with("anycompatible") {
+            compatible_inputs.push(base);
+            if let Some(range) = polymorphic_range_type(&param.ty.name, *arg) {
+                match compatible_range_identity {
+                    None => compatible_range_identity = Some(range),
+                    Some(current) if current == range => {}
+                    Some(_) => return false,
+                }
+                match compatible_range {
+                    None => compatible_range = Some(base),
+                    Some(current) if current == base => {}
+                    Some(_) => return false,
+                }
+            }
+            compatible = match compatible {
+                None => Some(base),
+                Some(current) if implicitly_coercible(base, current) => Some(current),
+                Some(current) if implicitly_coercible(current, base) => Some(base),
+                Some(_) => return false,
+            };
+        } else if param.ty.name.starts_with("any") {
+            if let Some(range) = polymorphic_range_type(&param.ty.name, *arg) {
+                match exact_range {
+                    None => exact_range = Some(range),
+                    Some(current) if current == range => {}
+                    Some(_) => return false,
+                }
+            }
+            match exact {
+                None => exact = Some(base),
+                Some(current) if current == base => {}
+                Some(_) => return false,
+            }
+        }
+    }
+    match compatible_range {
+        None => true,
+        Some(target) => compatible_inputs
+            .into_iter()
+            .all(|source| implicitly_coercible(source, target)),
+    }
+}
+
+fn polymorphic_arguments_are_exact(params: &[&RoutineParam], given: &[ArgType]) -> bool {
+    let mut traditional = None;
+    let mut compatible = None;
+    for (param, arg) in params.iter().zip(given) {
+        let Some(base) = polymorphic_base_type(&param.ty.name, *arg) else {
+            continue;
+        };
+        let slot = if param.ty.name.starts_with("anycompatible") {
+            &mut compatible
+        } else if param.ty.name.starts_with("any") {
+            &mut traditional
+        } else {
+            continue;
+        };
+        match slot {
+            None => *slot = Some(base),
+            Some(current) if *current == base => {}
+            Some(_) => return false,
+        }
+    }
+    true
+}
+
+/// A resolved routine plus the call arguments after unknown-literal coercion
+/// and trailing parameter defaults have been applied.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundRoutineCall {
     pub routine: Routine,
@@ -1066,7 +1533,10 @@ pub(crate) fn bind_procedure_call(
 /// `f(bigint)` does not match `f(text)` even though the explicit cast exists.
 /// This is the implicit graph restricted to the types Gres models.
 fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bool {
-    use ColumnType::{Char, Float8, Int4, Int8, Numeric, Text, Timestamp, Timestamptz, Varchar};
+    use ColumnType::{
+        Char, Float8, Int2, Int4, Int8, Numeric, Oid, Regclass, Regnamespace, Regprocedure,
+        Regtype, Text, Timestamp, Timestamptz, Varchar,
+    };
     if source == target {
         return true;
     }
@@ -1078,6 +1548,19 @@ fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bool {
             | (Timestamp, Timestamptz)
             | (Text | Varchar(_) | Char(_), Text | Varchar(_) | Char(_))
             | (Numeric(_), Numeric(_))
+            // `pg_cast` marks every integer width implicitly coercible to
+            // `oid`, which is what lets `binary_coercible(23, 23)` — the
+            // `regress.so` helper `type_sanity` calls with bare integer
+            // literals — resolve against its `(oid, oid)` signature.
+            | (Int2 | Int4 | Int8, Oid)
+            | (
+                Oid,
+                Regclass | Regtype | Regprocedure | Regnamespace
+            )
+            | (
+                Regclass | Regtype | Regprocedure | Regnamespace,
+                Oid
+            )
     )
 }
 
@@ -1166,7 +1649,149 @@ fn known_builtin(name: &str) -> bool {
         || crate::json_fn::is_json_func(name)
         || crate::array_fn::is_array_func(name)
         || crate::srf::is_srf(name)
+        // An aggregate belongs here too. Nothing stops `CREATE FUNCTION
+        // sum(text)`, and once one exists every `sum` in the database is a user
+        // routine as far as the inliner is concerned; without this arm
+        // `sum(int4)` stops resolving to the built-in aggregate and reports
+        // 42883 where PostgreSQL still sums.
+        || crate::agg::is_builtin_aggregate_name(name)
         || crate::window::is_window_only_function(name)
+}
+
+fn is_regression_c_entrypoint(routine: &Routine, symbol: &str) -> bool {
+    routine.language == "c"
+        && routine
+            .object_file
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(std::path::Path::file_stem)
+            .is_some_and(|stem| stem == "regress")
+        && routine.body == symbol
+}
+
+/// `pg_type.oid` of `oid` itself, as `pg_proc.proargtypes` records it.
+const OID_TYPE_OID: i32 = 26;
+
+fn is_regression_binary_coercible(routine: &Routine) -> bool {
+    routine.name.eq_ignore_ascii_case("binary_coercible")
+        && is_regression_c_entrypoint(routine, "binary_coercible")
+        // `regress.so` declares it `binary_coercible(oid, oid)`. This read 23
+        // (int4) while `oid` was an alias for `int4`; now that `oid` is its own
+        // type the parameters carry 26, and the old constant would silently
+        // stop recognising the helper.
+        && routine
+            .input_params()
+            .map(|param| type_oid(&param.ty))
+            .eq([OID_TYPE_OID, OID_TYPE_OID])
+        && matches!(
+            &routine.result,
+            RoutineResult::Type { ty, setof: false }
+                if type_oid(ty) == 16
+        )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegressionCAdapter {
+    PglzCompress,
+    PglzDecompress,
+}
+
+fn has_exact_regression_c_signature(routine: &Routine, name: &str, params: &[ColumnType]) -> bool {
+    routine.kind == RoutineKind::Function
+        && routine.name.eq_ignore_ascii_case(name)
+        && is_regression_c_entrypoint(routine, name)
+        && routine.strict
+        && routine.params.len() == params.len()
+        && routine.params.iter().zip(params).all(|(param, ty)| {
+            param.mode == ParamMode::In && param.default.is_none() && param.ty.column == Some(*ty)
+        })
+        && matches!(
+            &routine.result,
+            RoutineResult::Type { ty, setof: false }
+                if ty.column == Some(ColumnType::Bytea)
+        )
+}
+
+fn regression_c_adapter(routine: &Routine) -> Option<RegressionCAdapter> {
+    if has_exact_regression_c_signature(routine, "test_pglz_compress", &[ColumnType::Bytea]) {
+        Some(RegressionCAdapter::PglzCompress)
+    } else if has_exact_regression_c_signature(
+        routine,
+        "test_pglz_decompress",
+        &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+    ) {
+        Some(RegressionCAdapter::PglzDecompress)
+    } else {
+        None
+    }
+}
+
+fn pglz_internal_error(message: &'static str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "XX000",
+        message: message.into(),
+    }
+}
+
+fn pglz_output_limit_error() -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "54000",
+        message: format!(
+            "requested PGLZ output exceeds the {} MiB safety limit",
+            MAX_PGLZ_OUTPUT_BYTES / (1024 * 1024)
+        ),
+    }
+}
+
+fn eval_regression_c_adapter(
+    adapter: RegressionCAdapter,
+    values: &[Datum],
+) -> Result<Datum, ExecError> {
+    match (adapter, values) {
+        (RegressionCAdapter::PglzCompress, [Datum::Bytea(source)]) => {
+            Ok(pglz::compress(source, &pglz::Strategy::ALWAYS).map_or(Datum::Null, Datum::Bytea))
+        }
+        (
+            RegressionCAdapter::PglzDecompress,
+            [
+                Datum::Bytea(source),
+                Datum::Int4(rawsize),
+                Datum::Bool(check_complete),
+            ],
+        ) => {
+            let rawsize = usize::try_from(*rawsize)
+                .map_err(|_| pglz_internal_error("rawsize must not be negative"))?;
+            if rawsize > MAX_PGLZ_OUTPUT_BYTES {
+                return Err(pglz_output_limit_error());
+            }
+            let mut output = Vec::new();
+            output
+                .try_reserve_exact(rawsize)
+                .map_err(|_| pglz_output_limit_error())?;
+            output.resize(rawsize, 0);
+            let written = pglz::decompress_into(source, &mut output, *check_complete)
+                .ok_or_else(|| pglz_internal_error("pglz_decompress failed"))?;
+            output.truncate(written);
+            Ok(Datum::Bytea(output))
+        }
+        _ => Err(ExecError::TypeMismatch(
+            "regression C adapter received values outside its pinned signature".into(),
+        )),
+    }
+}
+
+fn falls_back_to_regression_binary_coercible(kv: &dyn Kv, name: &str, given: &[ArgType]) -> bool {
+    if !name.eq_ignore_ascii_case("binary_coercible")
+        || !routines_named(kv, name)
+            .is_ok_and(|routines| routines.iter().any(is_regression_binary_coercible))
+    {
+        return false;
+    }
+    match resolve_call(kv, name, given) {
+        Ok(Some(routine)) => is_regression_binary_coercible(&routine),
+        Ok(None) | Err(ExecError::UndefinedFunction(_)) => true,
+        Err(_) => false,
+    }
 }
 
 /// The argument types a call carries, as far as they can be known without the
@@ -1204,11 +1829,26 @@ pub(crate) fn inline_scalar(kv: &dyn Kv, call: &FuncCall) -> Result<Option<Expr>
     if !is_user_routine(kv, &call.name) {
         return Ok(None);
     }
+    // A user aggregate of this name and arity owns the call: `agg` evaluates it.
+    // Without this the inliner would bind a same-named ordinary function --
+    // `CREATE AGGREGATE acc(int4)` next to `CREATE FUNCTION acc(text)` -- and
+    // the query would silently return one row per input instead of aggregating.
+    if routines_named(kv, &call.name)?
+        .iter()
+        .any(|routine| routine.is_aggregate() && routine.input_params().count() == args.len())
+    {
+        return Ok(None);
+    }
     let given = best_effort_arg_types(args);
-    // PL/pgSQL is executed by the scalar runtime rather than inlined. Keeping
-    // the call node intact is what lets its arguments vary with each input row.
+    // PL/pgSQL and the pinned regression-C adapters are executed by the scalar
+    // runtime rather than inlined. Keeping the call node intact is what lets
+    // their arguments vary with each input row.
     match resolve_call(kv, &call.name, &given) {
-        Ok(Some(routine)) if routine.language == "plpgsql" => return Ok(None),
+        Ok(Some(routine))
+            if routine.language == "plpgsql" || regression_c_adapter(&routine).is_some() =>
+        {
+            return Ok(None);
+        }
         Err(_)
             if routines_named(kv, &call.name)?
                 .iter()
@@ -1239,13 +1879,19 @@ pub(crate) fn plpgsql_declared_call_type(
     }
     let given = best_effort_arg_types(args);
     let routine = match resolve_call(kv, &call.name, &given) {
-        Ok(Some(routine)) if routine.language == "plpgsql" => routine,
+        Ok(Some(routine))
+            if routine.language == "plpgsql" || regression_c_adapter(&routine).is_some() =>
+        {
+            routine
+        }
         Ok(_) => return Ok(None),
         Err(_) if known_builtin(&call.name) => return Ok(None),
         Err(error) => return Err(error),
     };
-    validate_plpgsql_scalar(&routine)?;
-    declared_scalar_result_type(&routine)
+    if routine.language == "plpgsql" {
+        validate_plpgsql_scalar(&routine)?;
+    }
+    called_scalar_result_type(&routine, &given)
         .ok_or_else(|| {
             ExecError::Unsupported(format!(
                 "function {} has no scalar result type",
@@ -1271,7 +1917,15 @@ pub(crate) fn plpgsql_scalar_result_type(
         if !is_user_routine(runtime.catalog.as_ref(), &call.name) {
             return None;
         }
+        if shadowing_user_aggregate(runtime.catalog.as_ref(), &call.name, args.len()) {
+            return None;
+        }
         let given = crate::eval::static_arg_types(args, scope);
+        if given.as_ref().is_ok_and(|given| {
+            falls_back_to_regression_binary_coercible(runtime.catalog.as_ref(), &call.name, given)
+        }) {
+            return None;
+        }
         let result = given.and_then(|given| {
             let Some(routine) = resolve_call(runtime.catalog.as_ref(), &call.name, &given)? else {
                 return Err(undefined_routine(format!(
@@ -1279,14 +1933,17 @@ pub(crate) fn plpgsql_scalar_result_type(
                     call.name
                 )));
             };
-            if routine.language != "plpgsql" {
+            let adapter = regression_c_adapter(&routine);
+            if routine.language != "plpgsql" && adapter.is_none() {
                 return Err(undefined_routine(format!(
                     "function {} does not exist",
                     call.name
                 )));
             }
-            validate_plpgsql_scalar(&routine)?;
-            declared_scalar_result_type(&routine).ok_or_else(|| {
+            if routine.language == "plpgsql" {
+                validate_plpgsql_scalar(&routine)?;
+            }
+            called_scalar_result_type(&routine, &given).ok_or_else(|| {
                 ExecError::Unsupported(format!(
                     "function {} has no scalar result type",
                     routine.identity()
@@ -1309,8 +1966,11 @@ pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall, scope: &crate::scope::S
         let Ok(given) = crate::eval::static_arg_types(args, scope) else {
             return false;
         };
-        resolve_call(runtime.catalog.as_ref(), &call.name, &given)
-            .is_ok_and(|routine| routine.is_some_and(|routine| routine.language == "plpgsql"))
+        resolve_call(runtime.catalog.as_ref(), &call.name, &given).is_ok_and(|routine| {
+            routine.is_some_and(|routine| {
+                routine.language == "plpgsql" || regression_c_adapter(&routine).is_some()
+            })
+        })
     })
 }
 
@@ -1341,6 +2001,9 @@ pub(crate) fn eval_plpgsql_scalar_with(
         if !is_user_routine(runtime.catalog.as_ref(), &call.name) {
             return None;
         }
+        if shadowing_user_aggregate(runtime.catalog.as_ref(), &call.name, args.len()) {
+            return None;
+        }
         let result = (|| {
             if call.distinct || call.filter.is_some() {
                 return Err(ExecError::Syntax(format!(
@@ -1353,6 +2016,18 @@ pub(crate) fn eval_plpgsql_scalar_with(
                 .map(&mut eval_arg)
                 .collect::<Result<Vec<_>, _>>()?;
             let given = crate::eval::value_arg_types(args, &values);
+            if falls_back_to_regression_binary_coercible(
+                runtime.catalog.as_ref(),
+                &call.name,
+                &given,
+            ) {
+                let mut values = values.into_iter();
+                return crate::func::eval_scalar(call, None, ctx, |_| {
+                    values.next().ok_or_else(|| {
+                        ExecError::Unsupported("binary_coercible argument is missing".into())
+                    })
+                });
+            }
             let Some(BoundRoutineCall {
                 routine,
                 args: bound_args,
@@ -1363,13 +2038,16 @@ pub(crate) fn eval_plpgsql_scalar_with(
                     call.name
                 )));
             };
-            if routine.language != "plpgsql" {
+            let adapter = regression_c_adapter(&routine);
+            if routine.language != "plpgsql" && adapter.is_none() {
                 return Err(undefined_routine(format!(
                     "function {} does not exist",
                     call.name
                 )));
             }
-            validate_plpgsql_scalar(&routine)?;
+            if routine.language == "plpgsql" {
+                validate_plpgsql_scalar(&routine)?;
+            }
             for default in &bound_args[values.len()..] {
                 values.push(eval_arg(default)?);
             }
@@ -1380,6 +2058,9 @@ pub(crate) fn eval_plpgsql_scalar_with(
             crate::eval::coerce_unknown_args(&bound_args, &mut values, &params, ctx)?;
             if routine.strict && values.iter().any(Datum::is_null) {
                 return Ok(Datum::Null);
+            }
+            if let Some(adapter) = adapter {
+                return eval_regression_c_adapter(adapter, &values);
             }
             let _guard = enter_plpgsql_call()?;
             let value = if crate::plpgsql::scalar_function_requires_session(
@@ -1419,11 +2100,8 @@ pub(crate) fn eval_plpgsql_scalar_with(
             } else {
                 crate::plpgsql::eval_scalar_function(&routine, &values, ctx)?
             };
-            match declared_scalar_result_type(&routine) {
-                Some(ty) => {
-                    crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone).map_err(ExecError::from)
-                }
-                None if declared_returns_void(&routine) => Ok(Datum::Null),
+            match called_scalar_result_type(&routine, &given) {
+                Some(ty) => crate::plpgsql::cast_value(&value, ty, ctx),
                 None => Ok(value),
             }
         })();
@@ -1557,12 +2235,25 @@ fn unsafe_to_duplicate(arg: &Expr) -> bool {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Param(_)
         | Expr::Column { .. } => false,
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => unsafe_to_duplicate(expr),
         Expr::Binary { left, right, .. } => unsafe_to_duplicate(left) || unsafe_to_duplicate(right),
+        Expr::Func(call)
+            if call.name.eq_ignore_ascii_case("multirange")
+                || matches!(
+                    ColumnType::from_sql_name(&call.name),
+                    Some(ColumnType::Range(_) | ColumnType::Multirange(_))
+                ) =>
+        {
+            match &call.args {
+                FuncArgs::Exprs(args) => args.iter().any(unsafe_to_duplicate),
+                FuncArgs::Star => true,
+            }
+        }
         // Everything else can reach a function call, so treat it as volatile.
         _ => true,
     }
@@ -1702,6 +2393,7 @@ fn substitute(binding: &Binding, expr: &Expr) -> Result<Expr, ExecError> {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -1722,13 +2414,28 @@ fn substitute(binding: &Binding, expr: &Expr) -> Result<Expr, ExecError> {
             right: boxed(right)?,
         },
         Expr::Func(call) => Expr::Func(FuncCall {
+            sql_syntax: call.sql_syntax,
             name: call.name.clone(),
             distinct: call.distinct,
             args: match &call.args {
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(list(args)?),
             },
-            filter: None,
+            // A routine body may aggregate, so its sort keys and its FILTER are
+            // substituted into like every other sub-expression. Dropping either
+            // would silently change the body's answer rather than fail.
+            order_by: call
+                .order_by
+                .iter()
+                .map(|item| {
+                    Ok(crabka_pgparser::ast::OrderItem {
+                        expr: sub(&item.expr)?,
+                        asc: item.asc,
+                        nulls_first: item.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
+            filter: call.filter.as_deref().map(boxed).transpose()?,
         }),
         Expr::IsNull { expr, negated } => Expr::IsNull {
             expr: boxed(expr)?,
@@ -1933,7 +2640,7 @@ pub(crate) fn inline_scalar_call(
         None => Expr::ScalarSubquery(Box::new(substitute_in_query(&binding, &query)?)),
     };
     binding.reject_repeated_volatile_args()?;
-    let inlined = match declared_scalar_result_type(&routine) {
+    let inlined = match resolved_scalar_result_type(&routine, given) {
         Some(ty) => Expr::Cast {
             expr: Box::new(inlined),
             ty,
@@ -1994,6 +2701,32 @@ pub(crate) fn declared_returns_void(routine: &Routine) -> bool {
     matches!(&routine.result, RoutineResult::Type { ty, setof: false } if ty.is_void())
 }
 
+/// The column type a `RETURNS void` call answers with.
+///
+/// Crabka models no `void` column type, so the built-in void functions --
+/// `setseed` and `pg_notify` -- already answer an empty `text`. A PL/pgSQL
+/// `RETURNS void` function answers the same way, which is what PostgreSQL
+/// prints for its own void: a blank, *non-null* value, so `\pset null` leaves
+/// it blank rather than showing the null marker.
+pub(crate) const VOID_RESULT_TYPE: ColumnType = ColumnType::Text;
+
+/// The value a `RETURNS void` PL/pgSQL call answers with.
+pub(crate) fn void_result_value() -> Datum {
+    Datum::Text(String::new())
+}
+
+/// The result type a *call site* sees, including `RETURNS void`.
+///
+/// [`resolved_scalar_result_type`] answers what the routine's declaration
+/// models, and `void` is modelled by nothing; this answers what the column the
+/// caller reads is made of.
+fn called_scalar_result_type(routine: &Routine, given: &[ArgType]) -> Option<ColumnType> {
+    if declared_returns_void(routine) {
+        return Some(VOID_RESULT_TYPE);
+    }
+    resolved_scalar_result_type(routine, given)
+}
+
 /// The scalar type a routine's result carries, when Gres models it.
 pub(crate) fn declared_scalar_result_type(routine: &Routine) -> Option<ColumnType> {
     match &routine.result {
@@ -2002,6 +2735,66 @@ pub(crate) fn declared_scalar_result_type(routine: &Routine) -> Option<ColumnTyp
             .output_params()
             .next()
             .and_then(|param| param.ty.column),
+        _ => None,
+    }
+}
+
+fn resolved_scalar_result_type(routine: &Routine, given: &[ArgType]) -> Option<ColumnType> {
+    declared_scalar_result_type(routine).or_else(|| {
+        let name = match &routine.result {
+            RoutineResult::Type { ty, setof: false } => &ty.name,
+            RoutineResult::Unspecified if routine.output_params().count() == 1 => {
+                &routine.output_params().next()?.ty.name
+            }
+            _ => return None,
+        };
+        resolved_polymorphic_type(routine, given, name)
+    })
+}
+
+fn resolved_polymorphic_type(
+    routine: &Routine,
+    given: &[ArgType],
+    result_name: &str,
+) -> Option<ColumnType> {
+    let inputs = routine.input_params().zip(given);
+    let mut base = None;
+    let mut range = None;
+    let mut array = None;
+    let mut multirange = None;
+    for (param, arg) in inputs {
+        let Some(candidate) = polymorphic_base_type(&param.ty.name, *arg) else {
+            continue;
+        };
+        base = match base {
+            None => Some(candidate),
+            Some(current) if result_name.starts_with("anycompatible") => {
+                if implicitly_coercible(current, candidate) {
+                    Some(candidate)
+                } else {
+                    Some(current)
+                }
+            }
+            current => current,
+        };
+        let ArgType::Known(ty) = arg else { continue };
+        match ty {
+            ColumnType::Array(_) => array = Some(*ty),
+            ColumnType::Range(found) => range = Some(*found),
+            ColumnType::Multirange(found) => {
+                range = Some(found.range);
+                multirange = Some(*found);
+            }
+            _ => {}
+        }
+    }
+    match result_name {
+        "anyelement" | "anynonarray" | "anycompatible" | "anycompatiblenonarray" => base,
+        "anyarray" | "anycompatiblearray" => array.or_else(|| ColumnType::array_of(base?)),
+        "anyrange" | "anycompatiblerange" => range.map(ColumnType::Range),
+        "anymultirange" | "anycompatiblemultirange" => multirange
+            .map(ColumnType::Multirange)
+            .or_else(|| ColumnType::multirange_for_range(range?)),
         _ => None,
     }
 }
@@ -2526,24 +3319,37 @@ pub(crate) fn render_functiondef(routine: &Routine) -> String {
     for entry in &routine.config {
         let _ = writeln!(out, " SET {entry}");
     }
-    match routine.body_form {
-        BodyForm::Source => {
-            // PostgreSQL tags the quote with the routine's kind.
-            let tag = if routine.kind == RoutineKind::Procedure {
-                "procedure"
-            } else {
-                "function"
-            };
-            let _ = writeln!(out, "AS ${tag}${}${tag}$", routine.body);
-        }
-        BodyForm::Atomic => {
-            let _ = writeln!(out, "BEGIN ATOMIC\n {};\nEND", routine.body);
-        }
-        BodyForm::Return => {
-            let _ = writeln!(out, "RETURN {}", routine.body);
+    if let Some(object_file) = &routine.object_file {
+        let _ = writeln!(
+            out,
+            "AS {}, {}",
+            routine_literal(object_file),
+            routine_literal(&routine.body)
+        );
+    } else {
+        match routine.body_form {
+            BodyForm::Source => {
+                // PostgreSQL tags the quote with the routine's kind.
+                let tag = if routine.kind == RoutineKind::Procedure {
+                    "procedure"
+                } else {
+                    "function"
+                };
+                let _ = writeln!(out, "AS ${tag}${}${tag}$", routine.body);
+            }
+            BodyForm::Atomic => {
+                let _ = writeln!(out, "BEGIN ATOMIC\n {};\nEND", routine.body);
+            }
+            BodyForm::Return => {
+                let _ = writeln!(out, "RETURN {}", routine.body);
+            }
         }
     }
     out
+}
+
+fn routine_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// A `COST`/`ROWS` value the way `PostgreSQL` prints it: whole numbers with no
@@ -2603,6 +3409,18 @@ pub(crate) fn routine_by_reference(
 ///
 /// Propagates catalog read errors.
 pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = builtin_pg_proc_rows()?;
+    rows.extend(user_pg_proc_rows(kv)?);
+    Ok(rows)
+}
+
+/// The `pg_proc` rows for routines this database defines, without the built-in
+/// fixture.
+///
+/// Split out so a caller that only needs the user half -- `reg*` output, which
+/// indexes the built-ins once -- does not pay for cloning several thousand
+/// static rows on every call.
+pub(crate) fn user_pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgtypes::{ArrayValue, ElemType};
 
     let mut rows = Vec::new();
@@ -2616,18 +3434,22 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 routine.result,
                 RoutineResult::Type { .. } | RoutineResult::Unspecified
             );
-        let arg_type_oids: Vec<String> = inputs
+        let arg_type_oids: Vec<Datum> = inputs
             .iter()
-            .map(|param| type_oid(&param.ty).to_string())
+            .map(|param| Datum::Int4(type_oid(&param.ty)))
             .collect();
         let all_types: Vec<Datum> = catalog_all_types(&routine);
         let all_modes: Vec<Datum> = catalog_all_modes(&routine);
-        let arg_names: Vec<Datum> = routine
+        let mut arg_names: Vec<Datum> = routine
             .params
             .iter()
             .map(|param| Datum::Text(param.name.clone().unwrap_or_default()))
             .collect();
-        let has_names = routine.params.iter().any(|param| param.name.is_some());
+        let mut has_names = routine.params.iter().any(|param| param.name.is_some());
+        if let RoutineResult::Table(columns) = &routine.result {
+            arg_names.extend(columns.iter().map(|(name, _)| Datum::Text(name.clone())));
+            has_names = true;
+        }
         rows.push(vec![
             Datum::Int4(i32::try_from(routine.oid).unwrap_or(0)),
             Datum::Text(routine.name.clone()),
@@ -2637,7 +3459,7 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             Datum::Float8(routine.cost),
             Datum::Float8(routine.rows),
             Datum::Int4(0),
-            Datum::Null,
+            Datum::Int4(0),
             Datum::Text(routine.kind.catalog_code().to_string()),
             Datum::Bool(routine.security_definer),
             Datum::Bool(routine.leakproof),
@@ -2648,7 +3470,14 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             Datum::Int2(i16::try_from(inputs.len()).unwrap_or(0)),
             Datum::Int2(i16::try_from(routine.default_count()).unwrap_or(0)),
             Datum::Int4(return_type_oid(&routine)),
-            Datum::Text(arg_type_oids.join(" ")),
+            Datum::OidVector(ArrayValue::with_dims(
+                ElemType::Int4,
+                arg_type_oids,
+                vec![crabka_pgtypes::ArrayDim::new(
+                    0,
+                    i32::try_from(inputs.len()).unwrap_or(i32::MAX),
+                )],
+            )),
             if all_default_modes {
                 Datum::Null
             } else {
@@ -2670,7 +3499,7 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 BodyForm::Source => Datum::Text(routine.body.clone()),
                 BodyForm::Atomic | BodyForm::Return => Datum::Text(String::new()),
             },
-            Datum::Null,
+            routine.object_file.clone().map_or(Datum::Null, Datum::Text),
             match routine.body_form {
                 BodyForm::Source => Datum::Null,
                 BodyForm::Atomic | BodyForm::Return => Datum::Text(routine.body.clone()),
@@ -2693,7 +3522,188 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
-/// `pg_proc.proallargtypes`: every parameter's type, in declaration order.
+/// The decoded built-in `pg_proc` fixture, decompressed and parsed once.
+///
+/// The fixture is immutable static data, but decoding it means zstd over the
+/// whole table and then a parse per line. `reg*` output resolves one oid to a
+/// name per rendered row, so a scan that projects a `reg*` value used to pay
+/// that decode once per row -- around 19 ms each, which turned a 3,400-row
+/// `pg_proc` scan into a minute and a full certification into a timeout.
+static BUILTIN_PG_PROC_ROWS: std::sync::OnceLock<Option<Vec<Vec<Datum>>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    BUILTIN_PG_PROC_ROWS
+        .get_or_init(|| decode_builtin_pg_proc_rows().ok())
+        .clone()
+        .ok_or_else(|| ExecError::Unsupported("built-in pg_proc fixture is corrupt".into()))
+}
+
+fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    let corrupt = || ExecError::Unsupported("built-in pg_proc fixture is corrupt".into());
+    let data = crate::builtin_procs::BUILTIN_PROCS
+        .iter()
+        .map(|data| zstd::decode_all(*data).map_err(|_| corrupt()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let support_oids = data
+        .iter()
+        .flat_map(|data| data.split(|byte| *byte == b'\n'))
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let line = std::str::from_utf8(line).map_err(|_| corrupt())?;
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let oid = fields
+                .first()
+                .ok_or_else(corrupt)?
+                .parse::<i32>()
+                .map_err(|_| corrupt())?;
+            let name = fields.get(1).ok_or_else(corrupt)?;
+            Ok(((*name).to_string(), oid))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, ExecError>>()?;
+    data.iter()
+        .flat_map(|data| data.split(|byte| *byte == b'\n'))
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let line = std::str::from_utf8(line).map_err(|_| corrupt())?;
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let [
+                oid,
+                name,
+                language,
+                cost,
+                result_rows,
+                variadic,
+                support,
+                kind,
+                flags,
+                volatility,
+                parallel,
+                argument_count,
+                default_count,
+                result_type,
+                argument_types,
+                source,
+                argument_modes,
+                all_argument_types,
+                argument_names,
+            ] = fields.as_slice()
+            else {
+                return Err(corrupt());
+            };
+            let int = |value: &str| value.parse::<i32>().map_err(|_| corrupt());
+            let short = |value: &str| value.parse::<i16>().map_err(|_| corrupt());
+            let character =
+                |value: &str| value.parse::<u8>().map(char::from).map_err(|_| corrupt());
+            let flags = flags.as_bytes();
+            if flags.len() != 4 {
+                return Err(corrupt());
+            }
+            let array_items = |value: &str| -> Result<Option<Vec<String>>, ExecError> {
+                if value == "-" {
+                    return Ok(None);
+                }
+                let values = value
+                    .strip_prefix('{')
+                    .and_then(|value| value.strip_suffix('}'))
+                    .ok_or_else(corrupt)?;
+                let items = values
+                    .split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect::<Vec<_>>();
+                if items.is_empty() || items.iter().any(|item| item.is_empty()) {
+                    return Err(corrupt());
+                }
+                Ok(Some(items))
+            };
+            let all_argument_types = array_items(all_argument_types)?;
+            let argument_modes = array_items(argument_modes)?;
+            let argument_names = array_items(argument_names)?;
+            Ok(vec![
+                Datum::Int4(int(oid)?),
+                Datum::Text((*name).to_string()),
+                Datum::Int4(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                Datum::Int4(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                Datum::Int4(int(language)?),
+                Datum::Float8(f64::from(int(cost)?)),
+                Datum::Float8(f64::from(int(result_rows)?)),
+                Datum::Int4(int(variadic)?),
+                Datum::Int4(if *support == "-" || *support == "0" {
+                    0
+                } else {
+                    *support_oids.get(*support).ok_or_else(corrupt)?
+                }),
+                Datum::Text(character(kind)?.to_string()),
+                Datum::Bool(flags[0] == b'1'),
+                Datum::Bool(flags[1] == b'1'),
+                Datum::Bool(flags[2] == b'1'),
+                Datum::Bool(flags[3] == b'1'),
+                Datum::Text(character(volatility)?.to_string()),
+                Datum::Text(character(parallel)?.to_string()),
+                Datum::Int2(short(argument_count)?),
+                Datum::Int2(short(default_count)?),
+                Datum::Int4(int(result_type)?),
+                Datum::OidVector(crabka_pgtypes::ArrayValue::with_dims(
+                    crabka_pgtypes::ElemType::Int4,
+                    argument_types
+                        .split_whitespace()
+                        .map(|value| int(value).map(Datum::Int4))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    vec![crabka_pgtypes::ArrayDim::new(
+                        0,
+                        i32::from(short(argument_count)?),
+                    )],
+                )),
+                match all_argument_types {
+                    Some(types) => Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Int4,
+                        types
+                            .into_iter()
+                            .map(|value| int(&value).map(Datum::Int4))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )),
+                    None => Datum::Null,
+                },
+                match argument_modes {
+                    Some(modes) => {
+                        let modes = modes
+                            .into_iter()
+                            .map(|mode| match mode.as_str() {
+                                "i" | "o" | "b" | "v" | "t" => Ok(Datum::Text(mode)),
+                                _ => Err(corrupt()),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Datum::Array(crabka_pgtypes::ArrayValue::new(
+                            crabka_pgtypes::ElemType::Text,
+                            modes,
+                        ))
+                    }
+                    None => Datum::Null,
+                },
+                match argument_names {
+                    Some(names) => Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Text,
+                        names.into_iter().map(Datum::Text).collect(),
+                    )),
+                    None => Datum::Null,
+                },
+                Datum::Null,
+                Datum::Null,
+                Datum::Text((*source).to_string()),
+                if int(language)? == 13 {
+                    Datum::Text((*name).to_string())
+                } else {
+                    Datum::Null
+                },
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+            ])
+        })
+        .collect()
+}
+
+/// `pg_proc.proallargtypes` — every parameter's type, in declaration order.
 fn catalog_all_types(routine: &Routine) -> Vec<Datum> {
     let mut out: Vec<Datum> = routine
         .params
@@ -2722,8 +3732,8 @@ fn catalog_all_modes(routine: &Routine) -> Vec<Datum> {
 
 /// `pg_type.oid` for every name [`KNOWN_TYPE_NAMES`] accepts, so `pg_proc`
 /// reports the type a routine signature names even when Gres cannot produce a
-/// value of it. These come from PostgreSQL 18.4's own `pg_type`.
-const TYPE_OIDS: &[(&str, i32)] = &[
+/// value of it. Taken from PostgreSQL 18.4's own `pg_type`.
+pub(crate) const TYPE_OIDS: &[(&str, i32)] = &[
     ("aclitem", 1033),
     ("any", 2276),
     ("anyarray", 2277),
@@ -2858,7 +3868,17 @@ fn named_type_oid(name: &str) -> i32 {
         .map_or(0, |(_, oid)| *oid)
 }
 
-/// A signature type's `pg_type.oid`, or `0` for a relation's composite type.
+/// A routine's `pg_proc.proargtypes` — the input parameters' type oids, in
+/// declaration order. The same list [`user_pg_proc_rows`] publishes, so a
+/// caller comparing signatures against `pg_proc` reads the same values.
+pub(crate) fn routine_arg_type_oids(routine: &Routine) -> Vec<i32> {
+    routine
+        .input_params()
+        .map(|param| type_oid(&param.ty))
+        .collect()
+}
+
+/// A signature type's `pg_type.oid`; `0` for a relation's composite type.
 fn type_oid(ty: &RoutineType) -> i32 {
     ty.column.map_or_else(
         || named_type_oid(&ty.name),
@@ -2890,7 +3910,124 @@ mod tests {
 
     use super::*;
 
-    /// Run `sql` as a definition against `kv` and return the completion tag.
+    #[test]
+    fn builtin_c_routines_have_a_nonempty_probin() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        assert!(rows.iter().all(|row| {
+            if row[4] == Datum::Int4(13) {
+                matches!(&row[26], Datum::Text(value) if !value.is_empty() && value != "-")
+            } else {
+                row[26] == Datum::Null
+            }
+        }));
+    }
+
+    #[test]
+    fn builtin_support_functions_are_catalog_oids() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        let starts_with = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(3696))
+            .expect("starts_with row");
+        assert!(starts_with[8] == Datum::Int4(6242));
+        assert!(rows.iter().all(|row| matches!(row[8], Datum::Int4(_))));
+    }
+
+    #[test]
+    fn builtin_routines_preserve_catalog_sources() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        for (oid, source) in [
+            (77, "chartoi4"),
+            (313, "i2toi4"),
+            (668, "bpchar"),
+            (1242, "boolin"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row[0] == Datum::Int4(oid))
+                .expect("catalog routine");
+            assert!(row[25] == Datum::Text(source.to_string()));
+        }
+    }
+
+    #[test]
+    fn builtin_routines_preserve_catalog_argument_modes() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        let concat_ws = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(3059))
+            .expect("concat_ws row");
+        assert!(
+            concat_ws[21]
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Text,
+                    vec![Datum::Text("i".into()), Datum::Text("v".into())],
+                ))
+        );
+        let boolin = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(1242))
+            .expect("boolin row");
+        assert!(boolin[21] == Datum::Null);
+        let aclexplode = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(1689))
+            .expect("aclexplode row");
+        assert!(
+            aclexplode[20]
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Int4,
+                    vec![1034, 26, 26, 25, 16]
+                        .into_iter()
+                        .map(Datum::Int4)
+                        .collect(),
+                ))
+        );
+        assert!(
+            aclexplode[22]
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Text,
+                    [
+                        "acl",
+                        "grantor",
+                        "grantee",
+                        "privilege_type",
+                        "is_grantable"
+                    ]
+                    .into_iter()
+                    .map(|name| Datum::Text(name.into()))
+                    .collect(),
+                ))
+        );
+    }
+
+    #[test]
+    fn returns_table_catalog_names_include_output_columns() {
+        let kv = MemKv::default();
+        define(
+            &kv,
+            "CREATE FUNCTION tab(n int) RETURNS TABLE(a int, b text) AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("define table function");
+        let rows = pg_proc_rows(&kv).expect("pg_proc rows");
+        let row = rows
+            .iter()
+            .find(|row| row[1] == Datum::Text("tab".into()))
+            .expect("table function row");
+        assert!(
+            row[22]
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Text,
+                    vec![
+                        Datum::Text("n".into()),
+                        Datum::Text("a".into()),
+                        Datum::Text("b".into()),
+                    ],
+                ))
+        );
+    }
+
+    /// Run `sql` as a definition against `kv`, returning the completion tag.
     fn define(kv: &MemKv, sql: &str) -> Result<String, ExecError> {
         let statements = crabka_pgparser::parse(sql).expect("definition parses");
         let [Statement::CreateRoutine(stmt)] = statements.as_slice() else {
@@ -2959,6 +4096,16 @@ mod tests {
     }
 
     #[test]
+    fn sql_standard_return_body_implies_sql_language() {
+        let routine = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION f(x int) RETURNS int IMMUTABLE RETURN x + 1",
+        );
+        assert!(routine.language == "sql");
+        assert!(routine.body_form == BodyForm::Return);
+    }
+
+    #[test]
     fn definition_errors_carry_postgresqls_sqlstates() {
         let cases: Vec<(&str, &str, &str)> = vec![
             (
@@ -3009,6 +4156,109 @@ mod tests {
             let error = define(&kv, sql).expect_err(sql);
             assert!(sqlstate(&error) == state, "{sql}");
             assert!(error.clone().into_pg().message.contains(fragment), "{sql}");
+        }
+    }
+
+    #[test]
+    fn external_definition_errors_leave_no_catalog_residue() {
+        let kv = MemKv::default();
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let missing = directory.path().join("missing.so");
+        let cases = [
+            (
+                format!(
+                    "CREATE FUNCTION test1(int) RETURNS int AS '{}' LANGUAGE C",
+                    missing.display()
+                ),
+                "58P01",
+                format!(
+                    "could not access file \"{}\": No such file or directory",
+                    missing.display()
+                ),
+            ),
+            (
+                "CREATE FUNCTION test1(int) RETURNS int AS 'regress', 'nosuchsymbol' LANGUAGE C"
+                    .to_string(),
+                "42883",
+                "could not find function \"nosuchsymbol\" in file \"regress\"".to_string(),
+            ),
+            (
+                "CREATE FUNCTION test1(int) RETURNS int AS 'nosuch' LANGUAGE internal".to_string(),
+                "42883",
+                "there is no built-in function named \"nosuch\"".to_string(),
+            ),
+        ];
+
+        for (sql, state, message) in cases {
+            let error = define(&kv, &sql).expect_err(&sql);
+            let error = error.into_pg();
+            assert!(error.code == state, "{sql}");
+            assert!(error.message == message, "{sql}");
+            assert!(
+                list_routines(&kv)
+                    .expect("catalog remains readable")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn external_sources_project_link_symbol_and_object_file_separately() {
+        let kv = MemKv::default();
+        define(
+            &kv,
+            "CREATE FUNCTION public.binary_coercible(oid, oid) RETURNS bool \
+             AS 'regress' LANGUAGE C",
+        )
+        .expect("one-string C definition");
+        define(
+            &kv,
+            "CREATE FUNCTION c_alias(oid, oid) RETURNS bool \
+             AS 'regress', 'pg_finfo_binary_coercible' LANGUAGE C",
+        )
+        .expect("two-string C definition");
+        define(
+            &kv,
+            "CREATE FUNCTION nth_value(anyelement, int4) RETURNS anyelement \
+             AS 'window_nth_value' LANGUAGE internal",
+        )
+        .expect("pinned internal definition");
+
+        let routines = list_routines(&kv).expect("catalog");
+        let binary = routines
+            .iter()
+            .find(|routine| routine.name == "binary_coercible")
+            .expect("binary_coercible");
+        assert!(binary.name == "binary_coercible");
+        assert!(binary.body == "binary_coercible");
+        assert!(binary.object_file == Some("regress".into()));
+
+        let alias = routines
+            .iter()
+            .find(|routine| routine.name == "c_alias")
+            .expect("alias");
+        assert!(alias.body == "pg_finfo_binary_coercible");
+        assert!(alias.object_file == Some("regress".into()));
+        assert!(render_functiondef(alias).contains("AS 'regress', 'pg_finfo_binary_coercible'"));
+
+        let internal = routines
+            .iter()
+            .find(|routine| routine.name == "nth_value")
+            .expect("internal");
+        assert!(internal.body == "window_nth_value");
+        assert!(internal.object_file.is_none());
+
+        let rows = pg_proc_rows(&kv).expect("pg_proc");
+        for (name, source, binary) in [
+            ("binary_coercible", "binary_coercible", "regress"),
+            ("c_alias", "pg_finfo_binary_coercible", "regress"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row[1] == Datum::Text(name.into()))
+                .expect("projected C routine");
+            assert!(row[25] == Datum::Text(source.into()));
+            assert!(row[26] == Datum::Text(binary.into()));
         }
     }
 
@@ -3084,6 +4334,110 @@ mod tests {
             resolve_call(&kv, "amb", &[ArgType::Unknown, ArgType::Unknown]).expect_err("ambiguous");
         assert!(sqlstate(&error) == "42725");
         assert!(error.into_pg().message == "function amb(unknown, unknown) is not unique");
+    }
+
+    #[test]
+    fn polymorphic_range_signatures_link_arrays_to_range_subtypes() {
+        let kv = MemKv::default();
+        define(
+            &kv,
+            "CREATE FUNCTION exact_poly(a anyarray, r anyrange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("traditional polymorphic function");
+        define(
+            &kv,
+            "CREATE FUNCTION compatible_poly(a anycompatiblearray, r anycompatiblerange) RETURNS anycompatible AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("compatible polymorphic function");
+        define(
+            &kv,
+            "CREATE FUNCTION multirange_poly(a anyarray, r anymultirange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("multirange polymorphic function");
+        define(
+            &kv,
+            "CREATE FUNCTION range_overload(r anyrange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("range overload");
+        define(
+            &kv,
+            "CREATE FUNCTION range_overload(r anymultirange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("multirange overload");
+        let int4range =
+            ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("int4range");
+        let numrange = ColumnType::builtin_range(crabka_pgtypes::oids::NUMRANGE).expect("numrange");
+        let ints = ArgType::Known(ColumnType::Array(crabka_pgtypes::ElemType::Int4));
+
+        assert!(
+            resolve_call(&kv, "exact_poly", &[ints, ArgType::Known(int4range)])
+                .expect("matching subtype")
+                .is_some()
+        );
+        assert!(resolve_call(&kv, "exact_poly", &[ints, ArgType::Known(numrange)]).is_err());
+        let int4multirange = ColumnType::builtin_multirange(crabka_pgtypes::oids::INT4MULTIRANGE)
+            .expect("int4multirange");
+        let nummultirange = ColumnType::builtin_multirange(crabka_pgtypes::oids::NUMMULTIRANGE)
+            .expect("nummultirange");
+        assert!(
+            resolve_call(
+                &kv,
+                "multirange_poly",
+                &[ints, ArgType::Known(int4multirange)]
+            )
+            .expect("matching multirange subtype")
+            .is_some()
+        );
+        assert!(
+            resolve_call(
+                &kv,
+                "multirange_poly",
+                &[ints, ArgType::Known(nummultirange)]
+            )
+            .is_err()
+        );
+        let selected = resolve_call(&kv, "range_overload", &[ArgType::Known(int4multirange)])
+            .expect("unambiguous multirange overload")
+            .expect("multirange overload");
+        assert!(selected.input_type_names() == vec!["anymultirange".to_string()]);
+        assert!(
+            resolve_call(&kv, "compatible_poly", &[ints, ArgType::Known(numrange)])
+                .expect("integer promotes to numeric")
+                .is_some()
+        );
+        let numerics = ArgType::Known(ColumnType::Array(crabka_pgtypes::ElemType::Numeric));
+        assert!(
+            resolve_call(
+                &kv,
+                "compatible_poly",
+                &[numerics, ArgType::Known(int4range)]
+            )
+            .is_err()
+        );
+
+        let error = define(
+            &kv,
+            "CREATE FUNCTION invalid_poly(a anyelement) RETURNS anyrange AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect_err("range result lacks range input");
+        let rendered = error.into_pg();
+        assert!(rendered.code == "42P13");
+        assert!(rendered.message == "cannot determine result data type");
+        assert!(
+            rendered
+                .diagnostics
+                .as_deref()
+                .and_then(|fields| fields.detail.as_deref())
+                == Some(
+                    "A result of type anyrange requires at least one input of type anyrange or anymultirange."
+                )
+        );
+        let error = define(
+            &kv,
+            "CREATE FUNCTION invalid_multi(a anyelement) RETURNS anymultirange AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect_err("multirange result lacks range input");
+        assert!(sqlstate(&error) == "42P13");
     }
 
     #[test]
@@ -3258,12 +4612,14 @@ mod tests {
     fn a_sql_body_inlines_into_the_callers_expression() {
         let kv = seeded();
         let call = FuncCall {
+            sql_syntax: false,
             name: "add2".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![
                 Expr::IntLiteral("1".into()),
                 Expr::IntLiteral("2".into()),
             ]),
+            order_by: Vec::new(),
             filter: None,
         };
         let inlined = inline_scalar(&kv, &call)
@@ -3293,9 +4649,11 @@ mod tests {
         )
         .expect("definition");
         let call = FuncCall {
+            sql_syntax: false,
             name: "named".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("4".into())]),
+            order_by: Vec::new(),
             filter: None,
         };
         let inlined = inline_scalar(&kv, &call)
@@ -3318,12 +4676,326 @@ mod tests {
     fn a_name_that_is_not_a_routine_inlines_to_nothing() {
         let kv = seeded();
         let call = FuncCall {
+            sql_syntax: false,
             name: "upper".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral("x".into())]),
+            order_by: Vec::new(),
             filter: None,
         };
         assert!(inline_scalar(&kv, &call).expect("no error").is_none());
+    }
+
+    #[test]
+    fn a_c_helper_named_like_a_builtin_uses_the_builtin() {
+        let kv = Arc::new(MemKv::default());
+        define(
+            &kv,
+            "CREATE FUNCTION binary_coercible(oid, oid) RETURNS bool \
+             AS 'regress', 'binary_coercible' LANGUAGE C",
+        )
+        .expect("C helper definition");
+        let catalog: Arc<dyn Kv> = kv;
+        let call = Expr::Func(FuncCall {
+            sql_syntax: false,
+            name: "binary_coercible".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![
+                Expr::IntLiteral("23".into()),
+                Expr::IntLiteral("23".into()),
+            ]),
+            order_by: Vec::new(),
+            filter: None,
+        });
+        let scope = crate::scope::Scope::empty();
+        let ctx = crate::clock::EvalCtx::test_default();
+        with_scalar_runtime(&catalog, None, || {
+            assert!(crate::eval::infer_type(&call, &scope).expect("type") == ColumnType::Bool);
+            assert!(
+                crate::eval::eval(&call, &scope, &[], &ctx).expect("value") == Datum::Bool(true)
+            );
+        });
+    }
+
+    #[test]
+    fn unrelated_c_name_collision_does_not_use_the_builtin() {
+        let kv = Arc::new(MemKv::default());
+        define(
+            &kv,
+            "CREATE FUNCTION md5(text) RETURNS text \
+             AS 'regress', 'binary_coercible' LANGUAGE C",
+        )
+        .expect("C helper definition");
+        let catalog: Arc<dyn Kv> = kv;
+        let call = Expr::Func(FuncCall {
+            sql_syntax: false,
+            name: "md5".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![Expr::StringLiteral("value".into())]),
+            order_by: Vec::new(),
+            filter: None,
+        });
+
+        with_scalar_runtime(&catalog, None, || {
+            assert!(crate::eval::infer_type(&call, &crate::scope::Scope::empty()).is_err());
+        });
+    }
+
+    #[test]
+    fn pglz_regression_c_adapters_are_exactly_metadata_gated() {
+        let compress = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION test_pglz_compress(bytea) RETURNS bytea \
+             AS 'regress' LANGUAGE C STRICT",
+        );
+        assert!(regression_c_adapter(&compress) == Some(RegressionCAdapter::PglzCompress));
+
+        for sql in [
+            "CREATE FUNCTION test_pglz_compress(bytea) RETURNS bytea AS 'regress' LANGUAGE C",
+            "CREATE FUNCTION test_pglz_compress(text) RETURNS bytea AS 'regress' LANGUAGE C STRICT",
+            "CREATE FUNCTION test_pglz_compress(bytea) RETURNS text AS 'regress' LANGUAGE C STRICT",
+            "CREATE FUNCTION pglz_alias(bytea) RETURNS bytea \
+             AS 'regress', 'test_pglz_compress' LANGUAGE C STRICT",
+        ] {
+            let routine = defined(&MemKv::default(), sql);
+            assert!(regression_c_adapter(&routine).is_none(), "{sql}");
+        }
+    }
+
+    fn pglz_regression_catalog() -> Arc<dyn Kv> {
+        let kv = Arc::new(MemKv::default());
+        define(
+            &kv,
+            "CREATE FUNCTION test_pglz_compress(bytea) RETURNS bytea \
+             AS 'regress' LANGUAGE C STRICT",
+        )
+        .expect("compression helper");
+        define(
+            &kv,
+            "CREATE FUNCTION test_pglz_decompress(bytea, int4, bool) RETURNS bytea \
+             AS 'regress' LANGUAGE C STRICT",
+        )
+        .expect("decompression helper");
+        kv
+    }
+
+    fn call_regression_c_adapter(
+        catalog: &Arc<dyn Kv>,
+        name: &str,
+        types: &[ColumnType],
+        values: Vec<Datum>,
+    ) -> Result<Datum, ExecError> {
+        let call = FuncCall {
+            sql_syntax: false,
+            name: name.into(),
+            distinct: false,
+            args: FuncArgs::Exprs(
+                types
+                    .iter()
+                    .map(|ty| Expr::Cast {
+                        expr: Box::new(Expr::NullLiteral),
+                        ty: *ty,
+                    })
+                    .collect(),
+            ),
+            order_by: Vec::new(),
+            filter: None,
+        };
+        assert!(inline_scalar(catalog.as_ref(), &call)?.is_none());
+        assert!(plpgsql_declared_call_type(catalog.as_ref(), &call)? == Some(ColumnType::Bytea));
+        let ctx = crate::clock::EvalCtx::test_default();
+        with_scalar_runtime(catalog, None, || {
+            assert!(is_plpgsql_scalar_runtime(
+                &call,
+                &crate::scope::Scope::empty()
+            ));
+            let mut values = values.into_iter();
+            eval_plpgsql_scalar_with(&call, &ctx, |_| {
+                values.next().ok_or_else(|| {
+                    ExecError::Unsupported("test adapter argument is missing".into())
+                })
+            })
+            .expect("the pinned C adapter owns the call")
+        })
+    }
+
+    fn assert_pglz_error(result: Result<Datum, ExecError>, state: &str, message: &str) {
+        let error = result.expect_err(message).into_pg();
+        assert!(error.code == state);
+        assert!(error.message == message);
+    }
+
+    #[test]
+    fn pglz_regression_c_adapters_match_upstream_roundtrips_and_failures() {
+        let catalog = pglz_regression_catalog();
+        let input = b"abcd".repeat(100);
+        let compressed = call_regression_c_adapter(
+            &catalog,
+            "test_pglz_compress",
+            &[ColumnType::Bytea],
+            vec![Datum::Bytea(input.clone())],
+        )
+        .expect("compresses");
+        let Datum::Bytea(compressed) = compressed else {
+            panic!("compressor returned {compressed:?}");
+        };
+
+        for check_complete in [false, true] {
+            assert!(
+                call_regression_c_adapter(
+                    &catalog,
+                    "test_pglz_decompress",
+                    &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+                    vec![
+                        Datum::Bytea(compressed.clone()),
+                        Datum::Int4(400),
+                        Datum::Bool(check_complete),
+                    ],
+                )
+                .expect("roundtrip")
+                    == Datum::Bytea(input.clone())
+            );
+        }
+
+        for rawsize in [500, 100] {
+            assert_pglz_error(
+                call_regression_c_adapter(
+                    &catalog,
+                    "test_pglz_decompress",
+                    &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+                    vec![
+                        Datum::Bytea(compressed.clone()),
+                        Datum::Int4(rawsize),
+                        Datum::Bool(true),
+                    ],
+                ),
+                "XX000",
+                "pglz_decompress failed",
+            );
+        }
+
+        assert!(
+            call_regression_c_adapter(
+                &catalog,
+                "test_pglz_decompress",
+                &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+                vec![
+                    Datum::Bytea(vec![0x01]),
+                    Datum::Int4(1024),
+                    Datum::Bool(false),
+                ],
+            )
+            .expect("permissive control-only stream")
+                == Datum::Bytea(Vec::new())
+        );
+
+        let nested = crabka_pgparser::parser::parse_expression(
+            r"length(test_pglz_decompress('\x01'::bytea, 1024, false))",
+        )
+        .expect("upstream nested expression parses");
+        let ctx = crate::clock::EvalCtx::test_default();
+        with_scalar_runtime(&catalog, None, || {
+            assert!(
+                crate::eval::infer_type(&nested, &crate::scope::Scope::empty()).expect("type")
+                    == ColumnType::Int4
+            );
+            assert!(
+                crate::eval::eval(&nested, &crate::scope::Scope::empty(), &[], &ctx,)
+                    .expect("nested PGLZ call")
+                    == Datum::Int4(0)
+            );
+        });
+
+        for (source, check_complete) in [
+            (vec![0x01], true),
+            (vec![0x01, 0xff], false),
+            (vec![0x01, 0xff], true),
+            (vec![0x01, 0x0f, 0x01], false),
+            (vec![0x01, 0x0f, 0x01], true),
+        ] {
+            assert_pglz_error(
+                call_regression_c_adapter(
+                    &catalog,
+                    "test_pglz_decompress",
+                    &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
+                    vec![
+                        Datum::Bytea(source),
+                        Datum::Int4(1024),
+                        Datum::Bool(check_complete),
+                    ],
+                ),
+                "XX000",
+                "pglz_decompress failed",
+            );
+        }
+    }
+
+    #[test]
+    fn pglz_regression_c_decompress_rejects_negative_and_unbounded_outputs() {
+        assert_pglz_error(
+            eval_regression_c_adapter(
+                RegressionCAdapter::PglzDecompress,
+                &[
+                    Datum::Bytea(Vec::new()),
+                    Datum::Int4(-1),
+                    Datum::Bool(false),
+                ],
+            ),
+            "XX000",
+            "rawsize must not be negative",
+        );
+
+        let error = eval_regression_c_adapter(
+            RegressionCAdapter::PglzDecompress,
+            &[
+                Datum::Bytea(Vec::new()),
+                Datum::Int4(i32::try_from(MAX_PGLZ_OUTPUT_BYTES + 1).expect("test bound fits")),
+                Datum::Bool(false),
+            ],
+        )
+        .expect_err("oversized output is rejected")
+        .into_pg();
+        assert!(error.code == "54000");
+        assert!(error.message.contains("64 MiB safety limit"));
+    }
+
+    #[test]
+    fn binary_coercible_overload_keeps_user_precedence() {
+        let kv = Arc::new(MemKv::default());
+        define(
+            &kv,
+            "CREATE FUNCTION binary_coercible(oid, oid) RETURNS bool \
+             AS 'regress', 'binary_coercible' LANGUAGE C",
+        )
+        .expect("C helper definition");
+        define(
+            &kv,
+            "CREATE FUNCTION binary_coercible(text, text) RETURNS bool \
+             LANGUAGE plpgsql AS $$ BEGIN RETURN false; END $$",
+        )
+        .expect("PL/pgSQL overload definition");
+        let catalog: Arc<dyn Kv> = kv;
+        let text = |value: &str| Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(value.into())),
+            ty: ColumnType::Text,
+        };
+        let call = Expr::Func(FuncCall {
+            sql_syntax: false,
+            name: "binary_coercible".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![text("a"), text("b")]),
+            order_by: Vec::new(),
+            filter: None,
+        });
+        let scope = crate::scope::Scope::empty();
+        let ctx = crate::clock::EvalCtx::test_default();
+
+        with_scalar_runtime(&catalog, None, || {
+            assert!(crate::eval::infer_type(&call, &scope).expect("type") == ColumnType::Bool);
+            assert!(
+                crate::eval::eval(&call, &scope, &[], &ctx).expect("value") == Datum::Bool(false)
+            );
+        });
     }
 
     #[test]
@@ -3443,9 +5115,11 @@ mod tests {
         let kv = MemKv::default();
         define(&kv, "CREATE PROCEDURE p(x int) LANGUAGE sql AS 'SELECT 1'").expect("procedure");
         let call = FuncCall {
+            sql_syntax: false,
             name: "p".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("1".into())]),
+            order_by: Vec::new(),
             filter: None,
         };
         let error = inline_scalar(&kv, &call).expect_err("a procedure is not selectable");
@@ -3513,8 +5187,10 @@ mod tests {
         )
         .expect("definition");
         let rows = pg_proc_rows(&kv).expect("rows");
-        assert!(rows.len() == 1);
-        let row = &rows[0];
+        let row = rows
+            .iter()
+            .find(|row| row[1] == Datum::Text("pp".into()))
+            .expect("stored routine row");
         assert!(row[1] == Datum::Text("pp".into()));
         assert!(row[9] == Datum::Text("f".into()));
         assert!(row[12] == Datum::Bool(true));
@@ -3522,7 +5198,14 @@ mod tests {
         assert!(row[14] == Datum::Text("i".into()));
         assert!(row[16] == Datum::Int2(2));
         assert!(row[17] == Datum::Int2(1));
-        assert!(row[19] == Datum::Text("23 23".into()));
+        assert!(
+            row[19]
+                == Datum::OidVector(crabka_pgtypes::ArrayValue::with_dims(
+                    crabka_pgtypes::ElemType::Int4,
+                    vec![Datum::Int4(23), Datum::Int4(23)],
+                    vec![crabka_pgtypes::ArrayDim::new(0, 2)],
+                ))
+        );
         assert!(row[25] == Datum::Text("SELECT 1".into()));
     }
 

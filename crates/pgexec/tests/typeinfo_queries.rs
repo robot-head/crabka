@@ -1,19 +1,19 @@
 //! Driver type-lookup (typeinfo) queries against the synthesized catalog.
 //!
-//! When tokio-postgres meets an unknown type OID, it prepares a catalog query
-//! that LEFT JOINs `pg_catalog.pg_range`. On `UNDEFINED_TABLE` it falls back to
-//! a variant that casts `NULL::OID`. Both must parse and execute: `pg_range`
-//! is a zero-row virtual catalog relation and `oid` is a type-name alias for
-//! `int4`. The query texts are the verbatim `TYPEINFO_QUERY` /
+//! When tokio-postgres meets an unknown type OID it prepares a catalog query
+//! that LEFT JOINs `pg_catalog.pg_range`, and on `UNDEFINED_TABLE` falls back
+//! to a variant that casts `NULL::OID`. Both must parse and execute: `pg_range`
+//! is a zero-row virtual catalog relation and `oid` is a real unsigned type.
+//! The query texts are the verbatim `TYPEINFO_QUERY` /
 //! `TYPEINFO_FALLBACK_QUERY` from tokio-postgres 0.7.18's `src/prepare.rs`,
 //! with `$1` written as the literal 20 (`int8`).
 //!
-//! Known wire-fidelity gap (out of scope here): the `RowDescription` for these
-//! queries reports int4 (OID 23) for the oid-valued columns and text (OID 25)
-//! for `typtype`, where a real `PostgreSQL` server reports oid (OID 26) and
-//! "char" (OID 18). tokio-postgres's binary decoder checks those OIDs, so full
-//! driver decode compatibility needs per-column type fidelity in the wire
-//! layer. That is a separate design, not per-column overrides in the executor.
+//! Known wire-fidelity gap (out of scope here): the oid-valued **columns** of
+//! the virtual catalog relations are still `int4` (OID 23), and `typtype` is
+//! `text` (OID 25) where a real `PostgreSQL` server reports "char" (OID 18). An
+//! `oid` *expression* now reports 26 correctly; it is the catalog's column
+//! declarations that have not moved, and doing so needs per-column type
+//! fidelity in the wire layer — a separate design.
 
 use assert2::assert;
 use crabka_pgexec::SqlEngine;
@@ -92,25 +92,34 @@ async fn typeinfo_queries_return_full_int8_row() {
     }
 }
 
-/// `oid` casts parse and evaluate.
-///
-/// The alias reports int4 (OID 23) in the `RowDescription`, which matches the
-/// catalog's other oid-valued columns.
+/// `oid` casts parse and evaluate, and describe as `oid` (OID 26) rather than
+/// `int4` — it is its own unsigned type, which is why `CAST(-1 AS oid)` is
+/// 4294967295 here instead of the `-1` an `int4` alias produced.
 #[tokio::test]
-async fn oid_casts_parse_evaluate_and_describe_as_int4() {
+async fn oid_casts_parse_evaluate_and_describe_as_oid() {
     let engine = SqlEngine::new();
     let result = run(
         &engine,
-        "SELECT NULL::oid AS a, CAST(NULL AS oid) AS b, CAST(20 AS oid) AS c",
+        "SELECT NULL::oid AS a, CAST(NULL AS oid) AS b, CAST(20 AS oid) AS c, \
+         CAST(-1 AS oid) AS d, '4294967295'::oid AS e",
     )
     .await;
     assert!(rows(&result).len() == 1);
-    assert!(row_text(&result, 0) == vec![None, None, Some("20".into())]);
+    assert!(
+        row_text(&result, 0)
+            == vec![
+                None,
+                None,
+                Some("20".into()),
+                Some("4294967295".into()),
+                Some("4294967295".into())
+            ]
+    );
     let QueryResult::Rows { fields, .. } = &result else {
         panic!("expected rows, got {result:?}");
     };
     let type_oids: Vec<u32> = fields.iter().map(|field| field.type_oid).collect();
-    assert!(type_oids == vec![23, 23, 23]);
+    assert!(type_oids == vec![26, 26, 26, 26, 26]);
 }
 
 /// `pg_range` exists with zero rows, and a direct `count(*)` over it works.

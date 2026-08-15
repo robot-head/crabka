@@ -42,6 +42,26 @@ pub(crate) struct SubCtx<'a> {
     pub range_scanner: &'a dyn crate::scanner::RangeScanner,
     /// Memory retained by one blocking query operator.
     pub blocking_query_memory: crabka_units::ByteSize,
+    /// The role whose row-security policies this read is subject to.
+    ///
+    /// Ordinarily the session's own role. It lives here rather than being
+    /// re-derived from `fctx.current_user` at each use because `SubCtx` is the
+    /// one value already threaded through every read path: substituting a
+    /// view's owner for the body of that view is then one assignment, not
+    /// twenty extra arguments.
+    pub security_role: &'a str,
+    /// The relations whose policy quals are being evaluated on this read, so a
+    /// policy that reads its own relation reports 42P17 instead of recursing
+    /// until the stack runs out.
+    pub policy_stack: &'a crate::rls::PolicyStack,
+    /// The whole-row references of the statement whose FROM clause is being
+    /// built, which decide the hidden liveness markers an outer join carries.
+    ///
+    /// `None` is "not known here", and marks every qualifier — what every read
+    /// path did before markers became conditional. Each statement overwrites it
+    /// with its own as it starts, so a view body or a subquery is measured by
+    /// its own text and never by the text of whatever reached it.
+    pub refs: Option<&'a crate::scope::StatementRefs>,
 }
 
 impl<'a> SubCtx<'a> {
@@ -61,7 +81,111 @@ impl<'a> SubCtx<'a> {
             fctx: self.fctx,
             range_scanner: self.range_scanner,
             blocking_query_memory: self.blocking_query_memory,
+            security_role: self.security_role,
+            policy_stack: self.policy_stack,
+            refs: self.refs,
         }
+    }
+
+    /// The same read context, measuring outer-join liveness markers against
+    /// `refs` — the references of the statement about to build its FROM clause.
+    ///
+    /// Every statement calls this as it starts, so the narrowing never outlives
+    /// the text it was derived from: a view body, a derived table and a
+    /// correlated subquery each replace it with their own.
+    pub(crate) fn with_refs<'b>(&'b self, refs: &'b crate::scope::StatementRefs) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx {
+            refs: Some(refs),
+            ..*self
+        }
+    }
+
+    /// [`Self::with_refs`] where the caller holds the refs as an `Option`, and
+    /// `None` means "this statement establishes none" rather than "keep
+    /// whatever was here". A DML target with no storage identity — a view —
+    /// passes `None`, and would be given system columns it cannot value if the
+    /// enclosing context's refs leaked in.
+    pub(crate) fn with_refs_opt<'b>(
+        &'b self,
+        refs: Option<&'b crate::scope::StatementRefs>,
+    ) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx { refs, ..*self }
+    }
+
+    /// The same read context, with privilege and row-security decisions made
+    /// as `role` instead.
+    ///
+    /// The one caller is the view-expansion site: a view without
+    /// `security_invoker` runs its body as the role that owns it. Nesting
+    /// shadows rather than stacks, because each expansion derives its context
+    /// from the one it was reached through — a view owned by A over a view
+    /// owned by B evaluates B's body as B, and B's own ACL is checked as A.
+    ///
+    /// `eval_ctx` is deliberately untouched: `CURRENT_USER` reads from there,
+    /// and `PostgreSQL` leaves it naming the invoking role inside a view body.
+    /// Only the identity decisions are made under moves.
+    pub(crate) fn with_security_role<'b>(&'b self, role: &'b str) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx {
+            security_role: role,
+            ..*self
+        }
+    }
+
+    /// The same read context, resolving unqualified relation names in `scope`
+    /// instead of the session's.
+    ///
+    /// The one caller is the view-expansion site, for the same reason
+    /// [`Self::with_security_role`] is called there: a stored body is text, and
+    /// what it names has to be decided by the view rather than by whoever is
+    /// reading it. Nesting shadows rather than stacks — each level's body is
+    /// resolved with *that* level's schema first, so a view in one schema over
+    /// a view in another resolves each body where it was written.
+    pub(crate) fn with_resolution<'b>(
+        &'b self,
+        scope: &'b crate::relname::ResolutionScope,
+    ) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx {
+            fctx: crate::exec::ForeignCtx {
+                resolution: scope,
+                ..self.fctx
+            },
+            ..*self
+        }
+    }
+
+    /// What this statement decides about the joins its FROM clause builds.
+    pub(crate) fn join_policy(&self) -> crate::join::JoinPolicy<'_> {
+        crate::join::JoinPolicy {
+            memory: self.blocking_query_memory,
+            refs: self.refs,
+        }
+    }
+
+    /// The row-security decision context this read makes its decisions in.
+    pub(crate) fn rls(&self) -> crate::rls::RlsCtx<'_> {
+        crate::rls::RlsCtx::new(self.catalog_kv, self.security_role, self.fctx.row_security)
+    }
+
+    /// The privilege decision context this read makes its decisions in.
+    ///
+    /// The same role row security is judged under, deliberately: a view that
+    /// one day runs its body with owner rights must move both together, or a
+    /// role would read a relation under its own grants and someone else's
+    /// policies.
+    pub(crate) fn privileges(&self) -> crate::privilege::PrivilegeCtx<'_> {
+        crate::privilege::PrivilegeCtx::new(self.catalog_kv, self.security_role)
     }
 }
 
@@ -116,23 +240,46 @@ pub(crate) fn resolve_in_select(ctx: &SubCtx, s: &SelectStmt) -> Result<SelectSt
             *filter = resolve_expr(ctx, filter)?;
         }
         if let crabka_pgparser::ast::WindowRef::Spec(spec) = &mut call.over {
-            for expr in &mut spec.partition_by {
-                *expr = resolve_expr(ctx, expr)?;
-            }
-            for item in &mut spec.order_by {
-                item.expr = resolve_expr(ctx, &item.expr)?;
-            }
+            resolve_window_spec(ctx, spec)?;
         }
     }
     for window in &mut out.windows {
-        for expr in &mut window.spec.partition_by {
-            *expr = resolve_expr(ctx, expr)?;
-        }
-        for item in &mut window.spec.order_by {
-            item.expr = resolve_expr(ctx, &item.expr)?;
-        }
+        resolve_window_spec(ctx, &mut window.spec)?;
     }
     Ok(out)
+}
+
+/// Rewrite subqueries everywhere one window specification can hold them.
+///
+/// The frame offsets are here with the partition and ordering keys because a
+/// frame bound is an ordinary expression evaluated once for the whole window —
+/// `ROWS (SELECT …) PRECEDING` is legal `PostgreSQL`. Leaving them out left a
+/// raw subquery node for the scalar evaluator to refuse.
+fn resolve_window_spec(
+    ctx: &SubCtx,
+    spec: &mut crabka_pgparser::ast::WindowSpec,
+) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::FrameBound;
+
+    for expr in &mut spec.partition_by {
+        *expr = resolve_expr(ctx, expr)?;
+    }
+    for item in &mut spec.order_by {
+        item.expr = resolve_expr(ctx, &item.expr)?;
+    }
+    if let Some(frame) = &mut spec.frame {
+        for bound in [&mut frame.start, &mut frame.end] {
+            match bound {
+                FrameBound::Preceding(offset) | FrameBound::Following(offset) => {
+                    *offset = resolve_expr(ctx, offset)?;
+                }
+                FrameBound::UnboundedPreceding
+                | FrameBound::CurrentRow
+                | FrameBound::UnboundedFollowing => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Rewrite subqueries in a query expression's `LIMIT`/`OFFSET` expressions,
@@ -180,27 +327,50 @@ pub(crate) fn resolve_in_values(ctx: &SubCtx, v: &ValuesStmt) -> Result<ValuesSt
 fn resolve_subscript(
     ctx: &SubCtx,
     subscript: &crabka_pgparser::ast::ArraySubscript,
+    should_skip: &mut dyn FnMut(&Expr) -> bool,
 ) -> Result<crabka_pgparser::ast::ArraySubscript, ExecError> {
     use crabka_pgparser::ast::ArraySubscript;
 
     Ok(match subscript {
-        ArraySubscript::Index(index) => ArraySubscript::Index(resolve_expr(ctx, index)?),
-        ArraySubscript::Slice { lower, upper } => {
-            let bound = |e: &Option<Expr>| e.as_ref().map(|e| resolve_expr(ctx, e)).transpose();
-            ArraySubscript::Slice {
-                lower: bound(lower)?,
-                upper: bound(upper)?,
-            }
+        ArraySubscript::Index(index) => {
+            ArraySubscript::Index(resolve_expr_skipping(ctx, index, should_skip)?)
         }
+        ArraySubscript::Slice { lower, upper } => ArraySubscript::Slice {
+            lower: lower
+                .as_ref()
+                .map(|e| resolve_expr_skipping(ctx, e, should_skip))
+                .transpose()?,
+            upper: upper
+                .as_ref()
+                .map(|e| resolve_expr_skipping(ctx, e, should_skip))
+                .transpose()?,
+        },
     })
 }
 
 /// Recursively rewrite subquery nodes in `e`, bottom-up.
 pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
+    resolve_expr_skipping(ctx, e, &mut |_| false)
+}
+
+/// Recursively rewrite subquery nodes except those selected by `should_skip`.
+///
+/// The callback receives each original expression before any of its children
+/// are rewritten. Returning `true` clones that whole node untouched.
+pub(crate) fn resolve_expr_skipping(
+    ctx: &SubCtx,
+    e: &Expr,
+    should_skip: &mut dyn FnMut(&Expr) -> bool,
+) -> Result<Expr, ExecError> {
+    if should_skip(e) {
+        return Ok(e.clone());
+    }
+
     Ok(match e {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -208,39 +378,59 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
         | Expr::Default
         | Expr::Const { .. } => e.clone(),
         Expr::FieldSelect { base, field } => Expr::FieldSelect {
-            base: Box::new(resolve_expr(ctx, base)?),
+            base: Box::new(resolve_expr_skipping(ctx, base, should_skip)?),
             field: field.clone(),
         },
-        Expr::FieldSelectAll(base) => Expr::FieldSelectAll(Box::new(resolve_expr(ctx, base)?)),
+        Expr::FieldSelectAll(base) => {
+            Expr::FieldSelectAll(Box::new(resolve_expr_skipping(ctx, base, should_skip)?))
+        }
         Expr::Unary { op, expr } => Expr::Unary {
             op: *op,
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
         },
         Expr::Collate { expr, collation } => Expr::Collate {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             collation: collation.clone(),
         },
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,
-            left: Box::new(resolve_expr(ctx, left)?),
-            right: Box::new(resolve_expr(ctx, right)?),
+            left: Box::new(resolve_expr_skipping(ctx, left, should_skip)?),
+            right: Box::new(resolve_expr_skipping(ctx, right, should_skip)?),
         },
         Expr::Func(fc) => {
             let call = FuncCall {
+                sql_syntax: fc.sql_syntax,
                 name: fc.name.clone(),
                 distinct: fc.distinct,
                 args: match &fc.args {
                     FuncArgs::Star => FuncArgs::Star,
                     FuncArgs::Exprs(args) => FuncArgs::Exprs(
                         args.iter()
-                            .map(|a| resolve_expr(ctx, a))
+                            .map(|a| resolve_expr_skipping(ctx, a, should_skip))
                             .collect::<Result<_, _>>()?,
                     ),
                 },
+                // An aggregate's sort keys resolve like its arguments — they
+                // may name the very columns this pass rewrites.
+                order_by: fc
+                    .order_by
+                    .iter()
+                    .map(|item| {
+                        Ok(crabka_pgparser::ast::OrderItem {
+                            expr: resolve_expr_skipping(ctx, &item.expr, should_skip)?,
+                            asc: item.asc,
+                            nulls_first: item.nulls_first,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?,
                 // The FILTER predicate resolves like an argument; dropping it here
                 // would silently turn a filtered aggregate into an unfiltered one.
                 filter: match &fc.filter {
-                    Some(predicate) => Some(Box::new(resolve_expr(ctx, predicate)?)),
+                    Some(predicate) => Some(Box::new(resolve_expr_skipping(
+                        ctx,
+                        predicate,
+                        should_skip,
+                    )?)),
                     None => None,
                 },
             };
@@ -251,13 +441,13 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
                 // become a scalar subquery, so it goes back through this pass.
                 Some(inlined) => {
                     let _guard = crate::routine::enter_inline()?;
-                    resolve_expr(ctx, &inlined)?
+                    resolve_expr_skipping(ctx, &inlined, should_skip)?
                 }
                 None => Expr::Func(call),
             }
         }
         Expr::IsNull { expr, negated } => Expr::IsNull {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             negated: *negated,
         },
         Expr::InList {
@@ -265,10 +455,10 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             list,
             negated,
         } => Expr::InList {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             list: list
                 .iter()
-                .map(|x| resolve_expr(ctx, x))
+                .map(|x| resolve_expr_skipping(ctx, x, should_skip))
                 .collect::<Result<_, _>>()?,
             negated: *negated,
         },
@@ -278,9 +468,9 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             high,
             negated,
         } => Expr::Between {
-            expr: Box::new(resolve_expr(ctx, expr)?),
-            low: Box::new(resolve_expr(ctx, low)?),
-            high: Box::new(resolve_expr(ctx, high)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
+            low: Box::new(resolve_expr_skipping(ctx, low, should_skip)?),
+            high: Box::new(resolve_expr_skipping(ctx, high, should_skip)?),
             negated: *negated,
         },
         Expr::Like {
@@ -290,12 +480,12 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             kind,
             escape,
         } => Expr::Like {
-            expr: Box::new(resolve_expr(ctx, expr)?),
-            pattern: Box::new(resolve_expr(ctx, pattern)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
+            pattern: Box::new(resolve_expr_skipping(ctx, pattern, should_skip)?),
             negated: *negated,
             kind: *kind,
             escape: match escape {
-                Some(e) => Some(Box::new(resolve_expr(ctx, e)?)),
+                Some(e) => Some(Box::new(resolve_expr_skipping(ctx, e, should_skip)?)),
                 None => None,
             },
         },
@@ -305,25 +495,32 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             else_result,
         } => Expr::Case {
             operand: match operand {
-                Some(o) => Some(Box::new(resolve_expr(ctx, o)?)),
+                Some(o) => Some(Box::new(resolve_expr_skipping(ctx, o, should_skip)?)),
                 None => None,
             },
             whens: whens
                 .iter()
-                .map(|(c, r)| Ok((resolve_expr(ctx, c)?, resolve_expr(ctx, r)?)))
+                .map(|(c, r)| {
+                    Ok((
+                        resolve_expr_skipping(ctx, c, should_skip)?,
+                        resolve_expr_skipping(ctx, r, should_skip)?,
+                    ))
+                })
                 .collect::<Result<_, ExecError>>()?,
             else_result: match else_result {
-                Some(o) => Some(Box::new(resolve_expr(ctx, o)?)),
+                Some(o) => Some(Box::new(resolve_expr_skipping(ctx, o, should_skip)?)),
                 None => None,
             },
         },
         Expr::Cast { expr, ty } => Expr::Cast {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             ty: *ty,
         },
-        Expr::SqlJson(json) => Expr::SqlJson(Box::new(
-            json.map_children(|child| resolve_expr(ctx, child))?,
-        )),
+        Expr::SqlJson(json) => {
+            Expr::SqlJson(Box::new(json.map_children(|child| {
+                resolve_expr_skipping(ctx, child, should_skip)
+            })?))
+        }
         // The array expression forms carry ordinary child expressions, any of
         // which may contain a subquery (`ARRAY[(SELECT …)]`, `arr[(SELECT …)]`,
         // `x = ANY((SELECT …))`), so they recurse like every other node — the
@@ -331,24 +528,24 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
         Expr::ArrayLiteral(items) => Expr::ArrayLiteral(
             items
                 .iter()
-                .map(|item| resolve_expr(ctx, item))
+                .map(|item| resolve_expr_skipping(ctx, item, should_skip))
                 .collect::<Result<_, _>>()?,
         ),
         Expr::Row(items) => Expr::Row(
             items
                 .iter()
-                .map(|item| resolve_expr(ctx, item))
+                .map(|item| resolve_expr_skipping(ctx, item, should_skip))
                 .collect::<Result<_, _>>()?,
         ),
         Expr::Subscript { base, index } => Expr::Subscript {
-            base: Box::new(resolve_expr(ctx, base)?),
-            index: Box::new(resolve_expr(ctx, index)?),
+            base: Box::new(resolve_expr_skipping(ctx, base, should_skip)?),
+            index: Box::new(resolve_expr_skipping(ctx, index, should_skip)?),
         },
         Expr::ArrayRef { base, subscripts } => Expr::ArrayRef {
-            base: Box::new(resolve_expr(ctx, base)?),
+            base: Box::new(resolve_expr_skipping(ctx, base, should_skip)?),
             subscripts: subscripts
                 .iter()
-                .map(|s| resolve_subscript(ctx, s))
+                .map(|s| resolve_subscript(ctx, s, should_skip))
                 .collect::<Result<_, _>>()?,
         },
         Expr::QuantifiedArray {
@@ -357,10 +554,10 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             all,
             array,
         } => Expr::QuantifiedArray {
-            expr: Box::new(resolve_expr(ctx, expr)?),
+            expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             op: *op,
             all: *all,
-            array: Box::new(resolve_expr(ctx, array)?),
+            array: Box::new(resolve_expr_skipping(ctx, array, should_skip)?),
         },
         // ---- the subquery nodes: run once, fold to constants ----
         Expr::ScalarSubquery(s) => {
@@ -393,7 +590,7 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
         } => {
             let (ty, values) = run_single_column(ctx, subquery)?;
             Expr::InList {
-                expr: Box::new(resolve_expr(ctx, expr)?),
+                expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
                 list: values
                     .into_iter()
                     .map(|value| Expr::Const { value, ty })
@@ -408,7 +605,7 @@ pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             subquery,
         } => {
             let (ty, values) = run_single_column(ctx, subquery)?;
-            let lhs = resolve_expr(ctx, expr)?;
+            let lhs = resolve_expr_skipping(ctx, expr, should_skip)?;
             lower_quantified(&lhs, *op, *all, ty, values)
         }
     })
@@ -555,72 +752,109 @@ pub(crate) fn resolve_types_in_values_with_ctes(
     })
 }
 
-/// Recursively replace scalar subqueries with `Const { Null, <type> }`. This is
-/// type-only.
+/// Recursively replace scalar subqueries with `Const { Null, <type> }` (type-only).
+///
+/// The walk is [`crate::grouping::rewrite`], the crate's one exhaustive [`Expr`]
+/// fold, rather than a match written out again here. Only the two nodes this pass
+/// actually decides — a scalar subquery, and a routine call whose body it inlines —
+/// are handled in the fold; every other node reaches its children through the
+/// shared walk. That is what fixes the class of bug this replaced: a hand-written
+/// match that ended in a catch-all left a scalar subquery nested under any
+/// unlisted node (`CASE`, `BETWEEN`, `COALESCE`'s arguments, an array literal, …)
+/// unresolved, and `eval::infer_type` refuses a `ScalarSubquery` it is handed.
+///
+/// EXISTS / IN / quantified subqueries stay as they are: they infer as `bool`
+/// without substitution, and the shared walk already leaves their inner queries
+/// (separate scopes) alone while still descending into their outer operands.
 fn resolve_types_in_expr(
     catalog_kv: &dyn crabka_pgkv::Kv,
     resolution: &crate::relname::ResolutionScope,
     e: &Expr,
     ctes: &crate::cte::CteContext,
 ) -> Result<Expr, ExecError> {
-    Ok(match e {
-        Expr::ScalarSubquery(s) => Expr::Const {
-            value: Datum::Null,
-            ty: scalar_subquery_type(catalog_kv, resolution, s, ctes)?,
-        },
-        Expr::Unary { op, expr } => Expr::Unary {
-            op: *op,
-            expr: Box::new(resolve_types_in_expr(catalog_kv, resolution, expr, ctes)?),
-        },
-        Expr::Binary { op, left, right } => Expr::Binary {
-            op: *op,
-            left: Box::new(resolve_types_in_expr(catalog_kv, resolution, left, ctes)?),
-            right: Box::new(resolve_types_in_expr(catalog_kv, resolution, right, ctes)?),
-        },
-        Expr::Cast { expr, ty } => Expr::Cast {
-            expr: Box::new(resolve_types_in_expr(catalog_kv, resolution, expr, ctes)?),
-            ty: *ty,
-        },
-        // P2: the describe path inlines a user-defined SQL function's body the
-        // same way execution does, so a `Describe` reports the type the rows
-        // will carry.
-        Expr::Func(fc) => {
-            let call = FuncCall {
-                name: fc.name.clone(),
-                distinct: fc.distinct,
-                args: match &fc.args {
-                    FuncArgs::Star => FuncArgs::Star,
-                    FuncArgs::Exprs(args) => FuncArgs::Exprs(
-                        args.iter()
-                            .map(|a| resolve_types_in_expr(catalog_kv, resolution, a, ctes))
-                            .collect::<Result<_, _>>()?,
-                    ),
-                },
-                filter: match &fc.filter {
-                    Some(predicate) => Some(Box::new(resolve_types_in_expr(
-                        catalog_kv, resolution, predicate, ctes,
-                    )?)),
-                    None => None,
-                },
-            };
-            if let Some(ty) = crate::routine::plpgsql_declared_call_type(catalog_kv, &call)? {
-                Expr::Const {
+    crate::grouping::rewrite(
+        e,
+        &mut |node| match node {
+            Expr::ScalarSubquery(s) => Ok(Some(Expr::Const {
+                value: Datum::Null,
+                ty: scalar_subquery_type(catalog_kv, resolution, s, ctes)?,
+            })),
+            // `ARRAY(subquery)` types as an array OF the subquery's one column,
+            // matching what execution folds it to in `resolve_expr_skipping`.
+            Expr::ArraySubquery(s) => {
+                let ty = scalar_subquery_type(catalog_kv, resolution, s, ctes)?;
+                let elem = ElemType::from_column_type(ty).ok_or_else(|| {
+                    ExecError::Unsupported(format!("arrays of {} are not supported", ty.name()))
+                })?;
+                Ok(Some(Expr::Const {
                     value: Datum::Null,
-                    ty,
-                }
-            } else {
-                match crate::routine::inline_scalar(catalog_kv, &call)? {
-                    Some(inlined) => {
-                        let _guard = crate::routine::enter_inline()?;
-                        resolve_types_in_expr(catalog_kv, resolution, &inlined, ctes)?
-                    }
-                    None => Expr::Func(call),
-                }
+                    ty: ColumnType::Array(elem),
+                }))
             }
+            Expr::Func(call) => Ok(Some(resolve_types_in_call(
+                catalog_kv, resolution, call, ctes,
+            )?)),
+            _ => Ok(None),
+        },
+        // An aggregate's arguments are ordinary expressions for typing purposes, so
+        // a subquery inside one resolves like any other.
+        true,
+    )
+}
+
+/// The type-only resolution of one function call: arguments and FILTER first, then
+/// the routine catalog.
+///
+/// P2: the describe path inlines a user-defined SQL function's body the same way
+/// execution does, so a `Describe` reports the type the rows will carry.
+fn resolve_types_in_call(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
+    fc: &FuncCall,
+    ctes: &crate::cte::CteContext,
+) -> Result<Expr, ExecError> {
+    let call = FuncCall {
+        sql_syntax: fc.sql_syntax,
+        name: fc.name.clone(),
+        distinct: fc.distinct,
+        args: match &fc.args {
+            FuncArgs::Star => FuncArgs::Star,
+            FuncArgs::Exprs(args) => FuncArgs::Exprs(
+                args.iter()
+                    .map(|a| resolve_types_in_expr(catalog_kv, resolution, a, ctes))
+                    .collect::<Result<_, _>>()?,
+            ),
+        },
+        order_by: fc
+            .order_by
+            .iter()
+            .map(|item| {
+                Ok(crabka_pgparser::ast::OrderItem {
+                    expr: resolve_types_in_expr(catalog_kv, resolution, &item.expr, ctes)?,
+                    asc: item.asc,
+                    nulls_first: item.nulls_first,
+                })
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
+        filter: match &fc.filter {
+            Some(predicate) => Some(Box::new(resolve_types_in_expr(
+                catalog_kv, resolution, predicate, ctes,
+            )?)),
+            None => None,
+        },
+    };
+    if let Some(ty) = crate::routine::plpgsql_declared_call_type(catalog_kv, &call)? {
+        return Ok(Expr::Const {
+            value: Datum::Null,
+            ty,
+        });
+    }
+    Ok(match crate::routine::inline_scalar(catalog_kv, &call)? {
+        Some(inlined) => {
+            let _guard = crate::routine::enter_inline()?;
+            resolve_types_in_expr(catalog_kv, resolution, &inlined, ctes)?
         }
-        // Everything else (incl. EXISTS / IN / quantified, which infer as bool) is
-        // typed directly by `infer_type` without substitution.
-        other => other.clone(),
+        None => Expr::Func(call),
     })
 }
 

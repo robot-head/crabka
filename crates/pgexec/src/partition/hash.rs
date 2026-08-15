@@ -73,6 +73,13 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         // hashes as 0xffffffff rather than 0x0000ffff.
         Datum::Int2(v) => hash_uint32_extended(i32::from(*v).cast_unsigned(), seed),
         Datum::Int4(v) => hash_uint32_extended(v.cast_unsigned(), seed),
+        // `hashcharextended` casts through the platform's `char`, which on
+        // every platform PostgreSQL's own hash tests pin is signed, so `\377`
+        // hashes as 0xffffffff and not 0x000000ff — the same sign extension
+        // `hashint2extended` does above.
+        Datum::InternalChar(v) => {
+            hash_uint32_extended(i32::from(v.cast_signed()).cast_unsigned(), seed)
+        }
         // `regclass` hashes through the oid operator family, whose
         // `hashoidextended` is `hashint4extended` over the oid bits.
         Datum::Regclass(v) => hash_uint32_extended(v.oid.cast_unsigned(), seed),
@@ -83,6 +90,14 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         // `char(n)` partition key would need that trim adding here, alongside
         // whatever carries the type distinction.
         Datum::Text(v) => hash_bytes_extended(v.as_bytes(), seed)?,
+        Datum::JsonPath(_) => return Err(unsupported("jsonpath")),
+        // `json` has no hash operator class in PostgreSQL — it has no equality
+        // operator to build one on — so it cannot be a hash partition key there
+        // either.
+        Datum::Json(_) => return Err(unsupported("json")),
+        // `xml` has no hash opclass in PostgreSQL for the same reason `json`
+        // has none: no equality operator to build one on.
+        Datum::Xml(_) => return Err(unsupported("xml")),
         Datum::Bytea(v) => hash_bytes_extended(v, seed)?,
         // The date/time types hash their internal representation, which the
         // binary send functions already produce: days or microseconds relative
@@ -104,15 +119,66 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         ),
         Datum::Float4(_) => return Err(unsupported("real")),
         Datum::Float8(_) => return Err(unsupported("double precision")),
+        Datum::Point(_) => return Err(unsupported("point")),
+        Datum::Path(_) => return Err(unsupported("path")),
+        // `polygon` joins the other six: PostgreSQL gives no geometric type a
+        // hash operator class, because none of them has an equality operator a
+        // hash could be consistent with.
+        Datum::Polygon(_) => return Err(unsupported("polygon")),
+        Datum::Lseg(_) => return Err(unsupported("lseg")),
+        Datum::Line(_) => return Err(unsupported("line")),
+        Datum::Circle(_) => return Err(unsupported("circle")),
+        Datum::Box(_) => return Err(unsupported("box")),
         Datum::Numeric(_) => return Err(unsupported("numeric")),
         Datum::Timetz(_) => return Err(unsupported("time with time zone")),
         Datum::Interval(_) => return Err(unsupported("interval")),
         Datum::Jsonb(_) => return Err(unsupported("jsonb")),
         Datum::Array(_) => return Err(unsupported("array")),
+        Datum::OidVector(_) => return Err(unsupported("oidvector")),
         Datum::Record(_) => return Err(unsupported("record")),
         Datum::Enum(_) => return Err(unsupported("enum")),
         Datum::TsVector(_) => return Err(unsupported("tsvector")),
         Datum::TsQuery(_) => return Err(unsupported("tsquery")),
+        Datum::Inet(value) => {
+            return Err(unsupported(if value.is_cidr { "cidr" } else { "inet" }));
+        }
+        Datum::MacAddr(_) => return Err(unsupported("macaddr")),
+        Datum::MacAddr8(_) => return Err(unsupported("macaddr8")),
+        // `pg_snapshot` and `txid_snapshot` have no hash operator family, and
+        // no equality operator to build one on, so `PostgreSQL` cannot
+        // partition by one either.
+        Datum::PgSnapshot(_) => return Err(unsupported("pg_snapshot")),
+        // `money` hashes through `hashint8extended`, as `pg_amproc` records
+        // for its default operator family.
+        Datum::Money(value) => hash_int64_extended(*value, seed),
+        // `hashoidextended` / `hashxidextended` / `hashcidextended` are all
+        // `hash_uint32_extended` over the unsigned value.
+        Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => {
+            hash_uint32_extended(*value, seed)
+        }
+        // `hashxid8extended` and `pg_lsn_hash_extended` both delegate to
+        // `hashint8extended`, which reads the 64 bits as a signed integer.
+        Datum::Xid8(value) | Datum::PgLsn(value) => hash_int64_extended(value.cast_signed(), seed),
+        // `hashtidextended` hashes the six bytes of an `ItemPointerData` as
+        // they sit in memory: a `BlockIdData` of two `uint16` halves, high
+        // first, then the `OffsetNumber` — each in host byte order.
+        Datum::Tid(value) => {
+            let block = value.block.to_le_bytes();
+            let offset = value.offset.to_le_bytes();
+            hash_bytes_extended(
+                &[block[2], block[3], block[0], block[1], offset[0], offset[1]],
+                seed,
+            )?
+        }
+        Datum::BitString(value) => {
+            return Err(unsupported(if value.varying {
+                "bit varying"
+            } else {
+                "bit"
+            }));
+        }
+        Datum::Range(range) => return Err(unsupported(range.ty.name)),
+        Datum::Multirange(multirange) => return Err(unsupported(multirange.ty.name)),
     };
     Ok(Some(hash))
 }
@@ -476,7 +542,7 @@ mod tests {
             ((1, 1, 1), -7_515_971_407_706_873_240),
         ];
         for ((year, month, day), expected) in vectors {
-            let value = Datum::Date(jiff::civil::date(year, month, day));
+            let value = Datum::Date(jiff::civil::date(year, month, day).into());
             assert!(hash_of(value) == expected.cast_unsigned());
         }
     }
@@ -525,7 +591,7 @@ mod tests {
             ((23, 59, 59, 999_999_000), 9_209_345_884_917_619_299),
         ];
         for ((hour, minute, second, nanos), expected) in vectors {
-            let value = Datum::Time(jiff::civil::time(hour, minute, second, nanos));
+            let value = Datum::Time(jiff::civil::time(hour, minute, second, nanos).into());
             assert!(hash_of(value) == expected.cast_unsigned());
         }
     }
@@ -606,7 +672,7 @@ mod tests {
         let values = [
             Datum::Int4(42),
             Datum::Text("hello".to_string()),
-            Datum::Date(jiff::civil::date(2026, 7, 29)),
+            Datum::Date(jiff::civil::date(2026, 7, 29).into()),
             Datum::Bool(true),
             Datum::Int8(-1),
         ];
@@ -625,7 +691,7 @@ mod tests {
                 vec![
                     Datum::Int4(42),
                     Datum::Text("hello".to_string()),
-                    Datum::Date(jiff::civil::date(2026, 7, 29)),
+                    Datum::Date(jiff::civil::date(2026, 7, 29).into()),
                     Datum::Bool(true),
                     Datum::Int8(-1),
                 ],
@@ -638,6 +704,62 @@ mod tests {
         }
     }
 
+    /// `PostgreSQL` gives none of the seven geometric types a hash operator
+    /// class — none of them has an equality operator a hash could be consistent
+    /// with — so none can be a hash partition key.
+    #[test]
+    fn no_geometric_type_is_a_hash_partition_key() {
+        let point = crabka_pgtypes::Point { x: 1.0, y: 2.0 };
+        let vectors: [(Datum, &str); 7] = [
+            (Datum::Point(point), "point"),
+            (
+                Datum::Box(crabka_pgtypes::geometry::Box2 {
+                    high: point,
+                    low: point,
+                }),
+                "box",
+            ),
+            (
+                Datum::Circle(crabka_pgtypes::geometry::Circle {
+                    center: point,
+                    radius: 1.0,
+                }),
+                "circle",
+            ),
+            (
+                Datum::Line(crabka_pgtypes::geometry::Line {
+                    a: 1.0,
+                    b: -1.0,
+                    c: 0.0,
+                }),
+                "line",
+            ),
+            (
+                Datum::Lseg(crabka_pgtypes::geometry::Lseg {
+                    start: point,
+                    end: point,
+                }),
+                "lseg",
+            ),
+            (
+                Datum::Path(crabka_pgtypes::Path {
+                    closed: false,
+                    points: vec![point],
+                }),
+                "path",
+            ),
+            (
+                Datum::Polygon(crabka_pgtypes::Polygon {
+                    points: vec![point],
+                }),
+                "polygon",
+            ),
+        ];
+        for (value, type_name) in vectors {
+            assert!(partition_hash(&[value]) == Err(unsupported(type_name)));
+        }
+    }
+
     #[test]
     fn unsupported_key_types_are_refused() {
         let vectors: [(Datum, &str); 9] = [
@@ -646,7 +768,7 @@ mod tests {
             (Datum::Numeric(NumericValue::from(1_i64)), "numeric"),
             (
                 Datum::Timetz(TimeTz {
-                    time: jiff::civil::time(1, 2, 3, 0),
+                    time: jiff::civil::time(1, 2, 3, 0).into(),
                     offset: jiff::tz::Offset::UTC,
                 }),
                 "time with time zone",

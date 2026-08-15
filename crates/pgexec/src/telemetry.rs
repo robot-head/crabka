@@ -177,7 +177,7 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::Delete { .. } => "DELETE",
         Statement::Merge { .. } => "MERGE",
         Statement::CreateTableAs { .. } => "CREATE TABLE AS",
-        Statement::Vacuum => "VACUUM",
+        Statement::Vacuum(_) => "VACUUM",
         Statement::Truncate { .. } => "TRUNCATE TABLE",
         Statement::Set { .. } => "SET",
         Statement::Show { .. } => "SHOW",
@@ -237,20 +237,59 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::Call { .. } => "CALL",
         Statement::DoBlock { .. } => "DO",
         Statement::CreateType { .. } => "CREATE TYPE",
+        Statement::CreateCast { .. } => "CREATE CAST",
+        Statement::DropCast { .. } => "DROP CAST",
         Statement::AlterType { .. } => "ALTER TYPE",
         Statement::DropType { .. } => "DROP TYPE",
         Statement::CreateDomain { .. } => "CREATE DOMAIN",
         Statement::AlterDomain { .. } => "ALTER DOMAIN",
         Statement::DropDomain { .. } => "DROP DOMAIN",
+        Statement::Cluster(_) => "CLUSTER",
+        Statement::AlterRole { .. } => "ALTER ROLE",
+        Statement::GrantSchemaPrivileges { .. } => "GRANT",
+        Statement::RevokeSchemaPrivileges { .. } => "REVOKE",
+        Statement::GrantRoles { .. } => "GRANT ROLES",
+        Statement::RevokeRoles { .. } => "REVOKE ROLES",
+        Statement::AlterIndex { .. } => "ALTER INDEX",
+        Statement::AlterView { .. } => "ALTER VIEW",
+        Statement::CreateMaterializedView { .. } => "CREATE MATERIALIZED VIEW",
+        Statement::RefreshMaterializedView { .. } => "REFRESH MATERIALIZED VIEW",
+        Statement::DropMaterializedView { .. } => "DROP MATERIALIZED VIEW",
+        Statement::Copy(_) => "COPY",
+        Statement::CreateAggregate(_) => "CREATE AGGREGATE",
+        Statement::DropAggregate { .. } => "DROP AGGREGATE",
+        Statement::AlterAggregate { .. } => "ALTER AGGREGATE",
+        Statement::CreatePolicy(_) => "CREATE POLICY",
+        Statement::AlterPolicy { .. } => "ALTER POLICY",
+        Statement::DropPolicy { .. } => "DROP POLICY",
         Statement::Utility(utility) => match utility {
-            UtilityStatement::Analyze => "ANALYZE",
-            UtilityStatement::Cluster => "CLUSTER",
-            UtilityStatement::Reindex => "REINDEX",
+            UtilityStatement::Analyze(_) => "ANALYZE",
+            UtilityStatement::Reindex(_) => "REINDEX",
+            UtilityStatement::CreateOperatorFamily { .. } => "CREATE OPERATOR FAMILY",
+            UtilityStatement::CreateOperatorClass { .. } => "CREATE OPERATOR CLASS",
+            // The operator *objects* are not the operator: their tags name the
+            // kind, and the bare `ALTER`/`DROP OPERATOR` tags belong to the
+            // operator itself.
+            UtilityStatement::AlterOperatorObject { kind, .. } => match kind {
+                crabka_pgparser::ast::OperatorObjectKind::Class => "ALTER OPERATOR CLASS",
+                crabka_pgparser::ast::OperatorObjectKind::Family => "ALTER OPERATOR FAMILY",
+            },
+            UtilityStatement::DropOperatorObject { kind, .. } => match kind {
+                crabka_pgparser::ast::OperatorObjectKind::Class => "DROP OPERATOR CLASS",
+                crabka_pgparser::ast::OperatorObjectKind::Family => "DROP OPERATOR FAMILY",
+            },
+            UtilityStatement::CreateOperator(_) => "CREATE OPERATOR",
+            UtilityStatement::DropOperator { .. } => "DROP OPERATOR",
+            UtilityStatement::Load { .. } => "LOAD",
+            UtilityStatement::SecurityLabel { .. } => "SECURITY LABEL",
+            UtilityStatement::CreateTablespace { .. } => "CREATE TABLESPACE",
+            UtilityStatement::DropTablespace { .. } => "DROP TABLESPACE",
+            UtilityStatement::AlterTablespace { .. } => "ALTER TABLESPACE",
+            UtilityStatement::TextSearch(_) => "TEXT SEARCH",
             UtilityStatement::Checkpoint => "CHECKPOINT",
             UtilityStatement::AlterSystem { .. } => "ALTER SYSTEM",
             UtilityStatement::SetConstraints { .. } => "SET CONSTRAINTS",
             UtilityStatement::SetSessionAuthorization { .. } => "SET SESSION AUTHORIZATION",
-            UtilityStatement::TextSearch(_) => "TEXT SEARCH",
         },
     }
 }
@@ -273,9 +312,9 @@ pub fn statement_relation(stmt: &Statement) -> Option<&RelationRef> {
         | Statement::AlterTable { table, .. }
         | Statement::AlterTrigger { table, .. }
         | Statement::DropTrigger { table, .. }
-        | Statement::CreateIndex { table, .. }
-        | Statement::GrantTablePrivileges { table, .. }
-        | Statement::RevokeTablePrivileges { table, .. } => Some(table),
+        | Statement::CreateIndex { table, .. } => Some(table),
+        Statement::GrantTablePrivileges { tables, .. }
+        | Statement::RevokeTablePrivileges { tables, .. } => tables.first(),
         Statement::CreateTable { name, .. }
         | Statement::CreateTableAs { name, .. }
         | Statement::CreateView { name, .. }
@@ -287,8 +326,8 @@ pub fn statement_relation(stmt: &Statement) -> Option<&RelationRef> {
         | Statement::AlterType { name, .. }
         | Statement::CreateDomain { name, .. }
         | Statement::AlterDomain { name, .. } => Some(name),
+        Statement::Truncate { targets, .. } => targets.first().map(|t| &t.name),
         Statement::DropTable { names, .. }
-        | Statement::Truncate { names, .. }
         | Statement::LockTable { tables: names, .. }
         | Statement::DropType { names, .. }
         | Statement::DropDomain { names, .. } => names.first(),
@@ -323,7 +362,7 @@ fn query_relation(query: &QueryExpr) -> Option<&RelationRef> {
             TableExpr::Table { name, .. } => Some(name),
             TableExpr::Join { left, .. } => from_table_expr(left),
             TableExpr::Derived { subquery, .. } => from_set_expr(&subquery.body),
-            TableExpr::Function { .. } => None,
+            TableExpr::Function { .. } | TableExpr::JsonTable(_) => None,
         }
     }
 
@@ -623,16 +662,29 @@ pub fn record_error(span: &tracing::Span, sqlstate: &str, message: &str) {
     span.record("error.type", sqlstate);
 }
 
+/// Test-only scaffolding shared with the other span tests in this crate.
+///
+/// See [`tests::install_interest_floor`].
+#[cfg(test)]
+pub(crate) use tests::install_interest_floor;
+
 #[cfg(test)]
 mod tests {
     use std::{
         collections::BTreeMap,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex, Once,
+            atomic::{AtomicBool, Ordering},
+            mpsc::sync_channel,
+        },
     };
 
     use assert2::check;
     use crabka_pgparser::parse;
-    use tracing::field::{Field, Visit};
+    use tracing::{
+        field::{Field, Visit},
+        subscriber::Interest,
+    };
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     use super::*;
@@ -674,6 +726,65 @@ mod tests {
         }
     }
 
+    /// A subscriber that collects nothing and enables nothing, installed once
+    /// as the default for the whole test binary.
+    ///
+    /// `tracing` caches each callsite's [`Interest`] in a slot that belongs to
+    /// the process, not to a subscriber. A cached `never` stops the span macro
+    /// before it asks any subscriber at all, so a thread-local subscriber
+    /// cannot overrule it. The thread that reaches a callsite first fills that
+    /// slot, and a test thread with no subscriber of its own answers through
+    /// `NoSubscriber`, whose answer is `never`. A span test on another thread
+    /// then builds the same span under a perfectly good capturing subscriber
+    /// and captures nothing.
+    ///
+    /// `InterestFloor` answers `sometimes` for every callsite, and
+    /// `Interest::and` widens any disagreement to `sometimes`, so no callsite
+    /// in this binary can be cached as `never`. Each span creation therefore
+    /// asks the subscriber that is current *on the building thread*. A thread
+    /// with no subscriber of its own reaches `enabled` here, which is `false`,
+    /// so it still builds nothing.
+    struct InterestFloor;
+
+    impl tracing::Subscriber for InterestFloor {
+        fn register_callsite(&self, _: &'static tracing::Metadata<'static>) -> Interest {
+            Interest::sometimes()
+        }
+
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, _: &tracing::Event<'_>) {}
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Put the [`InterestFloor`] under every callsite in the test binary.
+    ///
+    /// Call this before you install a thread-local subscriber and read spans
+    /// back from it. Registering a subscriber rebuilds the cached interest of
+    /// every callsite already known to `tracing`, so the first call also
+    /// repairs any callsite that a subscriber-less thread already cached as
+    /// `never`. Later calls do nothing.
+    pub(crate) fn install_interest_floor() {
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| {
+            tracing::subscriber::set_global_default(InterestFloor)
+                .expect("the lib test binary installs no other global subscriber");
+        });
+    }
+
     /// Build a span under a capturing subscriber and return the fields that
     /// reached it.
     ///
@@ -681,16 +792,97 @@ mod tests {
     /// declared, so this helper proves that the declarations and the recordings
     /// agree.
     fn captured(build: impl FnOnce()) -> Fields {
+        install_interest_floor();
         let fields = Arc::new(Mutex::new(Fields::new()));
         let subscriber = tracing_subscriber::registry().with(
             Capture(Arc::clone(&fields))
                 .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
         );
         tracing::subscriber::with_default(subscriber, build);
-        Arc::into_inner(fields)
-            .expect("no subscriber outlives the closure")
-            .into_inner()
-            .expect("captured fields")
+        // The subscriber is thread-local and dies with the closure, so nothing
+        // can add to `fields` from here on. Sole ownership of the buffer is a
+        // different question, and not one this helper may ask: `tracing_core`
+        // keeps a weak reference to every live dispatcher and upgrades it,
+        // briefly and from whichever thread happens to be registering a
+        // subscriber of its own. Take the contents, not the allocation.
+        std::mem::take(&mut *fields.lock().expect("captured fields"))
+    }
+
+    /// A callsite of this test's own, so that no other test decides its cached
+    /// interest first. See [`InterestFloor`].
+    fn isolated_probe_span() -> tracing::Span {
+        tracing::debug_span!(target: STATEMENT_TARGET, "pg.test.probe", pg.probe = 7_i64)
+    }
+
+    /// A neighbour registering a subscriber of its own must not cost this test
+    /// its captured fields.
+    ///
+    /// Every `Dispatch::new` anywhere in the process walks the registry of live
+    /// dispatchers and upgrades each weak reference in turn, so the strong
+    /// count of a subscriber this thread has already dropped is not this
+    /// thread's to predict. The loop below forces that overlap rather than
+    /// waiting for it.
+    #[test]
+    fn a_neighbours_subscriber_does_not_strand_the_captured_fields() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let neighbours: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        drop(tracing::Dispatch::new(tracing_subscriber::registry()));
+                    }
+                })
+            })
+            .collect();
+
+        for _ in 0..2048 {
+            let fields = captured(|| {
+                let _span = parse_span(11);
+            });
+            check!(fields.get("pg.sql.bytes").map(String::as_str) == Some("11"));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for neighbour in neighbours {
+            neighbour
+                .join()
+                .expect("the neighbour thread does not panic");
+        }
+    }
+
+    /// A subscriber-less neighbour that reaches a callsite first must not
+    /// silence it for a thread that is capturing.
+    ///
+    /// The two channels pin the order that the flake used to reach by luck: the
+    /// capturing subscriber is already installed here, then the bare thread
+    /// registers the callsite, and only then does this thread build the span.
+    #[test]
+    fn a_subscriber_less_neighbour_cannot_silence_a_captured_callsite() {
+        let (installed_tx, installed_rx) = sync_channel::<()>(0);
+        let (registered_tx, registered_rx) = sync_channel::<()>(0);
+        let neighbour = std::thread::spawn(move || {
+            installed_rx
+                .recv()
+                .expect("the capturing subscriber is installed");
+            // This thread has no subscriber, so it answers for the callsite
+            // through the process default and not through the capture below.
+            let _span = isolated_probe_span();
+            registered_tx.send(()).expect("the callsite is registered");
+        });
+
+        let fields = captured(|| {
+            installed_tx
+                .send(())
+                .expect("the capturing subscriber is installed");
+            registered_rx.recv().expect("the callsite is registered");
+            let _span = isolated_probe_span();
+        });
+
+        neighbour
+            .join()
+            .expect("the neighbour thread does not panic");
+        check!(fields.get("pg.probe").map(String::as_str) == Some("7"));
     }
 
     fn only(sql: &str) -> Statement {

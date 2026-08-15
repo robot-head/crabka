@@ -75,6 +75,15 @@ impl From<String> for RelationRef {
     }
 }
 
+/// The relation name `CREATE SEQUENCE` writes into the `table` field of
+/// [`Statement::CreateIndex`], which is how that shared variant tells a
+/// sequence from an index.
+///
+/// It is not a name any statement can write: the lexer folds an unquoted
+/// spelling to lowercase and a quoted one keeps its quotes, so no user
+/// identifier collides with it.
+pub const SEQUENCE_RELATION: &str = "__crabka_sequence__";
+
 /// The point at which an ordinary trigger fires relative to its event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerTiming {
@@ -135,6 +144,72 @@ pub enum AlterTriggerAction {
     DependsOnExtension { extension: String, dependent: bool },
 }
 
+/// A row-security policy qual, kept both parsed and exactly as written.
+///
+/// The catalog stores the source text, so it needs no parser of its own; the
+/// executor needs the parsed form to evaluate the qual, and `pg_policy.polqual`
+/// re-parses the text and deparses it. Capturing both here — the way
+/// [`CreateTrigger::when`] and [`CreateTrigger::when_source`] do — means the
+/// two can never disagree about what the user wrote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicyQual {
+    pub expr: Expr,
+    /// Exact source of the qual, without its enclosing parentheses.
+    pub source: String,
+}
+
+/// The command a `CREATE POLICY … FOR <cmd>` names.
+///
+/// `ALL` is not a shorthand for the other four: `PostgreSQL` applies an `ALL`
+/// policy to every command *in addition to* any command-specific policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyCommand {
+    All,
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+/// `CREATE POLICY name ON table [AS {PERMISSIVE|RESTRICTIVE}] [FOR cmd]
+/// [TO role[, …]] [USING (expr)] [WITH CHECK (expr)]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreatePolicy {
+    pub name: String,
+    pub table: RelationRef,
+    /// `AS PERMISSIVE` (the default) ORs into a row's visibility; `AS
+    /// RESTRICTIVE` ANDs onto it and can only ever remove rows.
+    pub permissive: bool,
+    pub command: PolicyCommand,
+    /// The roles named by `TO`. **Empty means `PUBLIC`** — every role — which
+    /// is also how the catalog encodes it.
+    pub roles: Vec<String>,
+    pub using: Option<PolicyQual>,
+    pub with_check: Option<PolicyQual>,
+}
+
+/// The actions `ALTER POLICY` supports in `PostgreSQL` 18.
+///
+/// `PostgreSQL` has no syntax for changing a policy's command or its
+/// permissive/restrictive kind after creation, and none for *removing* a qual,
+/// so neither is representable here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterPolicyAction {
+    RenameTo(String),
+    /// `[TO roles] [USING (expr)] [WITH CHECK (expr)]`.
+    Change(Box<AlterPolicyChange>),
+}
+
+/// The fields one `ALTER POLICY … TO/USING/WITH CHECK` rewrites. `None` leaves
+/// the stored value alone; an empty `roles` vector is the meaningful value
+/// `TO PUBLIC`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterPolicyChange {
+    pub roles: Option<Vec<String>>,
+    pub using: Option<PolicyQual>,
+    pub with_check: Option<PolicyQual>,
+}
+
 /// Events supported by `CREATE EVENT TRIGGER` in `PostgreSQL` 18.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventTriggerEvent {
@@ -185,6 +260,261 @@ pub enum AlterEventTriggerAction {
     RenameTo(String),
 }
 
+/// A role named in a position `PostgreSQL`'s grammar spells `RoleSpec`: a
+/// grantee, a `GRANT`/`REVOKE ROLE` member, an `OWNER TO` recipient, a
+/// `CREATE SCHEMA AUTHORIZATION`.
+///
+/// The keyword spellings are settled here rather than downstream because only
+/// the parser can still see how the name was written. `CURRENT_USER` and
+/// `"current_user"` are different roles to `PostgreSQL` — the first is the
+/// session's, the second is an ordinary name nobody holds — and by the time a
+/// name has been folded to a `String` the two are the same six characters. The
+/// engine has no `pg_authid` row to tell them apart with either, so a
+/// `String` grantee cannot be resolved correctly at all.
+///
+/// Which role each keyword *means* is deliberately not decided here. The
+/// parser has no session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleSpec {
+    /// A written name, folded by the lexer's usual identifier rules.
+    Name(String),
+    /// `CURRENT_USER`.
+    CurrentUser,
+    /// `CURRENT_ROLE`, `PostgreSQL`'s synonym for `CURRENT_USER`.
+    CurrentRole,
+    /// `SESSION_USER` — the role the session authenticated as, which `SET ROLE`
+    /// does not move.
+    SessionUser,
+    /// `PUBLIC`, the pseudo-role. Reached from the bare keyword and from the
+    /// exact written name `public`, quoted or not, because `gram.y` folds that
+    /// one spelling and no other: `"PUBLIC"` stays an ordinary name.
+    Public,
+}
+
+/// One entry of a `GRANT`/`REVOKE` privilege list, with the columns that
+/// entry alone names.
+///
+/// `PostgreSQL` hangs the column list off each privilege and not off the
+/// statement, so `GRANT SELECT (a), UPDATE (b) ON t TO r` grants `SELECT` on
+/// `a` and `UPDATE` on `b`, and neither privilege reaches the other's column.
+/// A relation-wide grant leaves `columns` empty, which is a different thing
+/// from a grant on no column: an empty written list is a syntax error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegeSpec {
+    /// The privilege keyword, upper-cased the way the parser already
+    /// upper-cases a bare privilege name.
+    pub name: String,
+    /// The columns the privilege is granted on, empty for a relation-wide
+    /// grant. Written in the order the statement wrote them.
+    pub columns: Vec<String>,
+}
+
+/// The boolean attributes a `CREATE`/`ALTER ROLE … WITH` list may set. `None`
+/// leaves the current value alone, which is what `ALTER ROLE` needs: only the
+/// options actually written are applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoleOptions {
+    pub superuser: Option<bool>,
+    pub inherit: Option<bool>,
+    pub createrole: Option<bool>,
+    pub createdb: Option<bool>,
+    pub login: Option<bool>,
+    pub replication: Option<bool>,
+    pub bypassrls: Option<bool>,
+}
+
+/// One relation named by `TRUNCATE`. `ONLY` binds to a single name, so
+/// `TRUNCATE ONLY a, b` restricts `a` and not `b`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateTarget {
+    pub name: RelationRef,
+    /// `TRUNCATE ONLY t` — see [`Statement::Delete`]'s `only` for what the
+    /// executor does with it today.
+    pub only: bool,
+}
+
+/// One `[ONLY] name [ ( column, … ) ]` entry of an `ANALYZE` or `VACUUM`
+/// target list.
+///
+/// `ONLY` and the column list both bind to a single name, so
+/// `ANALYZE ONLY a, b (c)` restricts `a` alone and lists a column for `b`
+/// alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceTarget {
+    pub name: RelationRef,
+    /// `ANALYZE ONLY t` — the named relation alone, without descending into
+    /// its partitions or inheritance children.
+    pub only: bool,
+    /// The columns written after the name, when any were. Never `Some` of an
+    /// empty list: `PostgreSQL` reads `t ()` as a syntax error and so does
+    /// this grammar.
+    pub columns: Option<Vec<String>>,
+}
+
+/// What `ANALYZE` and `VACUUM` carry, which is the same thing twice: both take
+/// the `[ONLY] name [ ( column, … ) ]` target list, and `VACUUM ANALYZE` is
+/// `VACUUM` with the statistics pass switched on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaintenanceStmt {
+    /// The targets in written order. Empty for the bare `ANALYZE` / `VACUUM`,
+    /// which stand for every relation the caller may touch rather than for
+    /// none.
+    pub targets: Vec<MaintenanceTarget>,
+    /// Whether statistics were asked for: always true for `ANALYZE`, and true
+    /// for `VACUUM` only when `ANALYZE` was written, as an option or as the
+    /// bare keyword. It is what decides whether a column list is legal.
+    pub analyze: bool,
+}
+
+/// A parenthesised `name [value]` utility option list, exactly as written.
+///
+/// The value is `None` when the option was written bare, because that is a
+/// distinction the reader needs: `REINDEX (VERBOSE)` means `VERBOSE true`,
+/// while `REINDEX (TABLESPACE)` is `tablespace requires a parameter`.
+pub type UtilityOptionList = Vec<(String, Option<String>)>;
+
+/// What a `REINDEX` names.
+///
+/// The five spellings do not share one name shape, so the target cannot be a
+/// kind beside a string. `INDEX` and `TABLE` name a relation, which may carry a
+/// schema qualifier and resolves against the search path. `SCHEMA` names a
+/// namespace, which never does. `DATABASE` and `SYSTEM` name the open database
+/// and may leave the name out entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReindexTarget {
+    /// `REINDEX INDEX <index>`.
+    Index(RelationRef),
+    /// `REINDEX TABLE <table>`.
+    Table(RelationRef),
+    /// `REINDEX SCHEMA <schema>`.
+    Schema(String),
+    /// `REINDEX DATABASE [<database>]`.
+    Database(Option<String>),
+    /// `REINDEX SYSTEM [<database>]`.
+    System(Option<String>),
+}
+
+/// `REINDEX [ ( option … ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM }
+/// [CONCURRENTLY] [name]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReindexStmt {
+    pub target: ReindexTarget,
+    /// The bare `CONCURRENTLY` keyword, which is the older of the two
+    /// spellings. The `(CONCURRENTLY [ <boolean> ])` option lands in
+    /// [`Self::options`] instead, and the executor reads both.
+    pub concurrently: bool,
+    /// The option list uninterpreted, because which names are legal and what a
+    /// bad value is called are `PostgreSQL` refusals the executor words — the
+    /// same division `CREATE TABLESPACE`'s options already follow.
+    pub options: UtilityOptionList,
+}
+
+/// The relation `CLUSTER` was pointed at, plus the index to order it by.
+///
+/// `PostgreSQL` accepts three spellings that all land here: `CLUSTER t USING i`,
+/// the pre-8.3 `CLUSTER i ON t`, and `CLUSTER t`, which reuses whichever index
+/// the relation already records as clustered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterTarget {
+    pub table: RelationRef,
+    /// `None` for the bare `CLUSTER <table>` spelling; the executor then looks
+    /// up the recorded `pg_index.indisclustered` index and refuses when the
+    /// relation has none.
+    pub index: Option<String>,
+}
+
+/// The reloptions a view carries, gathered from wherever they were written:
+/// the `WITH (…)` list on `CREATE VIEW`, and — for `check_option` alone — the
+/// trailing `WITH … CHECK OPTION` clause, which is the same setting under a
+/// second spelling. The defaults are what `PostgreSQL` gives a view written
+/// with none of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ViewOptions {
+    /// `security_invoker` — the view's body is checked against the *querying*
+    /// role's permissions and row-security policies rather than the owner's.
+    pub security_invoker: bool,
+    /// `security_barrier` — a user-supplied qualifier may not be evaluated
+    /// before the view's own, so a leaky function cannot observe rows the view
+    /// was written to hide.
+    pub security_barrier: bool,
+    /// `WITH [LOCAL | CASCADED] CHECK OPTION`, or the `check_option` reloption
+    /// that spells the same thing. `None` is a view that accepts whatever row
+    /// a write through it produces, including one it can no longer see.
+    pub check_option: Option<ViewCheckOption>,
+}
+
+/// `WITH [LOCAL | CASCADED] CHECK OPTION` — a row written through the view
+/// must satisfy the view's own qualification, so an `INSERT` or `UPDATE`
+/// through the view cannot produce a row the view would not show back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewCheckOption {
+    /// Only this view's own qualification is checked. A view underneath it is
+    /// still checked if *that* view asked to be, so `LOCAL` narrows what this
+    /// view adds rather than switching the whole stack off.
+    Local,
+    /// This view's qualification and those of every view beneath it are all
+    /// checked. Both the SQL standard and `PostgreSQL` default here, so a bare
+    /// `WITH CHECK OPTION` means `Cascaded`.
+    Cascaded,
+}
+
+/// One reloption a view's `WITH (…)`/`SET (…)`/`RESET (…)` list may name.
+///
+/// Spelled as a closed set rather than a string so an `ALTER VIEW … SET (…)`
+/// cannot carry a parameter no writer knows about: an unrecognized name is
+/// refused where it is written, exactly as `CREATE VIEW`'s list refuses one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewOptionName {
+    SecurityInvoker,
+    SecurityBarrier,
+    /// The reloption spelling of `WITH [LOCAL | CASCADED] CHECK OPTION`; see
+    /// [`ViewCheckOption`]. `RESET` returns it to unset, not to a level.
+    CheckOption,
+}
+
+/// One entry in a view's `WITH (…)`/`SET (…)` list, carried with its value.
+///
+/// The value's type follows the option and not the list: two of the three
+/// reloptions are booleans while `check_option` is an enum, so a name paired
+/// with a lone `bool` would leave `check_option = local` unrepresentable and
+/// `security_barrier = cascaded` representable — exactly backwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewOptionSetting {
+    SecurityInvoker(bool),
+    SecurityBarrier(bool),
+    CheckOption(ViewCheckOption),
+}
+
+/// What one `ALTER VIEW` statement does. `PostgreSQL` allows a single
+/// subcommand per statement, so this is a field and not a list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterViewAction {
+    /// `OWNER TO role` — moves the identity the view's body runs under.
+    OwnerTo(RoleSpec),
+    /// `SET (name = value, …)`; a bare boolean name is `true`, as in
+    /// `CREATE VIEW`.
+    SetOptions(Vec<ViewOptionSetting>),
+    /// `RESET (name, …)` — each named option returns to its default: `false`
+    /// for the booleans, unset for `check_option`.
+    ResetOptions(Vec<ViewOptionName>),
+}
+
+/// What one `ALTER INDEX` statement does. `PostgreSQL` allows a single
+/// subcommand per statement, as it does for `ALTER VIEW`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterIndexAction {
+    SetTablespace(String),
+    /// `SET (name = value, …)` — the index's storage parameters. The list has
+    /// already been checked against the reloption catalog, against *every*
+    /// index access method's options: the statement names no method, and the
+    /// one the index was built with is only in the catalog.
+    SetStorageParameters(Vec<(String, Option<String>)>),
+    /// `RESET (name, …)`. The names are unchecked, because `PostgreSQL` removes
+    /// them from the stored list and validates what is left — which is the only
+    /// way to clear an option the catalog no longer recognizes.
+    ResetStorageParameters(Vec<String>),
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -199,6 +529,18 @@ pub enum Statement {
         action: AlterTriggerAction,
     },
     DropTrigger {
+        name: String,
+        table: RelationRef,
+        if_exists: bool,
+        cascade: bool,
+    },
+    CreatePolicy(CreatePolicy),
+    AlterPolicy {
+        name: String,
+        table: RelationRef,
+        action: AlterPolicyAction,
+    },
+    DropPolicy {
         name: String,
         table: RelationRef,
         if_exists: bool,
@@ -238,6 +580,8 @@ pub enum Statement {
         /// `PARTITION OF <parent> <bound>`: the relation is a leaf (or an
         /// intermediate parent, when `partition_by` is also set).
         partition_of: Option<PartitionOf>,
+        /// Explicit non-default relation placement.
+        tablespace: Option<String>,
     },
     CreateIndex {
         /// An index name is never schema-qualified in `PostgreSQL`'s grammar,
@@ -257,6 +601,7 @@ pub enum Statement {
         include: Vec<String>,
         /// Source text of a partial index's `WHERE` predicate.
         predicate: Option<String>,
+        tablespace: Option<String>,
     },
     /// `COMMENT ON <kind> <name> IS {'text' | NULL}`.
     Comment {
@@ -273,6 +618,17 @@ pub enum Statement {
         /// the drop being refused with 2BP01. `RESTRICT` is the default and is
         /// accepted as the explicit spelling of it.
         cascade: bool,
+    },
+    /// `ALTER INDEX name <action>`.
+    AlterIndex {
+        name: RelationRef,
+        action: AlterIndexAction,
+    },
+    /// `ALTER VIEW [IF EXISTS] name <action>`.
+    AlterView {
+        name: RelationRef,
+        if_exists: bool,
+        action: AlterViewAction,
     },
     CreateView {
         name: RelationRef,
@@ -292,6 +648,10 @@ pub enum Statement {
         /// The optional `VIEW name (a, b, c)` alias list, which renames the
         /// query's output columns positionally.
         columns: Option<Vec<String>>,
+        /// The reloptions written on the view, from the `WITH (…)` list before
+        /// `AS` and the `WITH … CHECK OPTION` clause after the query. The
+        /// trailing clause is not part of `definition`.
+        options: ViewOptions,
     },
     DropTable {
         /// One entry per name in `DROP TABLE a, b, c`; the drop is
@@ -310,12 +670,52 @@ pub enum Statement {
         /// accepted as the explicit spelling of it.
         cascade: bool,
     },
+    /// `CREATE MATERIALIZED VIEW [IF NOT EXISTS] name [(col, …)] AS <query>
+    /// [WITH [NO] DATA]` — a stored relation whose contents come from a query it
+    /// keeps, so it has both a heap and a definition.
+    CreateMaterializedView {
+        name: RelationRef,
+        if_not_exists: bool,
+        /// An explicit output column list, which renames the query's columns.
+        columns: Option<Vec<String>>,
+        /// Exact query text following `AS`, retained for durable catalog storage
+        /// exactly as [`Statement::CreateView`]'s is. `REFRESH` re-runs it, so
+        /// the *written* text is what has to survive: a re-rendered form would
+        /// lose whatever schema qualification the author supplied, and a refresh
+        /// resolving under a different search path would then read a different
+        /// relation — or none.
+        definition: String,
+        query: Box<QueryExpr>,
+        /// `WITH DATA` (the default) runs the query and populates the relation;
+        /// `WITH NO DATA` leaves it unpopulated, and scanning one is an error
+        /// until `REFRESH` runs.
+        with_data: bool,
+        tablespace: Option<String>,
+    },
+    /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]` — re-run
+    /// the stored query and replace the contents. `WITH NO DATA` instead empties
+    /// the relation and marks it unpopulated.
+    RefreshMaterializedView {
+        name: RelationRef,
+        /// `CONCURRENTLY` — `PostgreSQL` refreshes without an exclusive lock,
+        /// which requires a unique index. Parsed so the executor can decide.
+        concurrently: bool,
+        with_data: bool,
+    },
+    /// `DROP MATERIALIZED VIEW [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
+    DropMaterializedView {
+        /// One entry per name in the list; the drop is all-or-nothing across it,
+        /// matching `PostgreSQL`.
+        names: Vec<RelationRef>,
+        if_exists: bool,
+        cascade: bool,
+    },
     /// `CREATE SCHEMA [IF NOT EXISTS] [name] [AUTHORIZATION role] [<element>…]`.
     CreateSchema {
         /// `None` for `CREATE SCHEMA AUTHORIZATION role`, whose schema takes
         /// the role's own name.
         name: Option<String>,
-        authorization: Option<String>,
+        authorization: Option<RoleSpec>,
         if_not_exists: bool,
         /// The `CREATE TABLE`/`CREATE VIEW`/`GRANT` statements written inside
         /// the `CREATE SCHEMA`, in order. They run after the schema exists.
@@ -338,6 +738,9 @@ pub enum Statement {
     AlterTable {
         table: RelationRef,
         if_exists: bool,
+        /// `ONLY name` — the column-shape subcommands stop at this relation
+        /// instead of reaching its partitions and inheritance children.
+        only: bool,
         actions: Vec<AlterTableAction>,
     },
     Insert {
@@ -372,6 +775,9 @@ pub enum Statement {
     },
     Update {
         table: RelationRef,
+        /// `UPDATE ONLY t …` — the statement stops at `t` instead of descending
+        /// into its inheritance children. See [`Statement::Delete`]'s `only`.
+        only: bool,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
         /// `UPDATE t AS x …`: the target's alias, which replaces the table name
@@ -386,6 +792,14 @@ pub enum Statement {
     },
     Delete {
         table: RelationRef,
+        /// `DELETE FROM ONLY t …` — the statement stops at `t` instead of
+        /// descending into its inheritance children.
+        ///
+        /// The executor does not descend either way yet, so today the flag
+        /// records what was written rather than changing what is deleted; the
+        /// scan it feeds is pinned in `crabka_pgexec`. It is carried here so
+        /// that the day DML recursion lands there is a flag to honour.
+        only: bool,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
         /// `DELETE FROM t AS x …`: see [`Statement::Update`]'s `alias`.
@@ -411,6 +825,9 @@ pub enum Statement {
     /// `CREATE TABLE … AS <query>` and its `SELECT … INTO <table>` spelling.
     CreateTableAs {
         name: RelationRef,
+        /// `CREATE TEMP TABLE … AS`, which creates the result in the session's
+        /// temporary namespace exactly as the column-list spelling does.
+        temporary: bool,
         if_not_exists: bool,
         /// An explicit output column list, which renames the query's columns.
         columns: Option<Vec<String>>,
@@ -418,15 +835,25 @@ pub enum Statement {
         /// `WITH DATA` (the default) populates the table; `WITH NO DATA` creates
         /// it empty.
         with_data: bool,
+        tablespace: Option<String>,
     },
-    /// `VACUUM` with any option/table tail, accepted as a hint: reclamation is
-    /// autonomous (adaptive background vacuum with idle drain), so the command
-    /// carries no payload.
-    Vacuum,
+    /// `VACUUM [ ( option [, …] ) ] [FULL] [FREEZE] [VERBOSE] [ANALYZE]
+    /// [ [ONLY] table [ ( column, … ) ] [, …] ]`.
+    ///
+    /// Reclamation is autonomous here (adaptive background vacuum with idle
+    /// drain), so the options say nothing this engine acts on. The *names* are
+    /// kept all the same: `PostgreSQL` resolves and checks them before it
+    /// reclaims anything, so they decide whether the statement succeeds at all.
+    Vacuum(MaintenanceStmt),
+    /// `COPY … FROM …` / `COPY … TO …`, in either the table or the
+    /// parenthesized-query spelling. Boxed because [`CopyStmt`] is by far the
+    /// widest variant and every other statement would otherwise carry its size.
+    Copy(Box<CopyStmt>),
     Truncate {
         /// One entry per name in `TRUNCATE a, b, c`; the statement is
-        /// all-or-nothing across the list, matching `PostgreSQL`.
-        names: Vec<RelationRef>,
+        /// all-or-nothing across the list, matching `PostgreSQL`. `ONLY` is
+        /// per-name, so each target carries its own flag.
+        targets: Vec<TruncateTarget>,
         /// `RESTART IDENTITY` was given (`CONTINUE IDENTITY` is the default).
         restart_identity: bool,
         /// `CASCADE` was given, widening the truncated set to every table
@@ -436,6 +863,10 @@ pub enum Statement {
         /// `ON DELETE` actions; it only enlarges the set.
         cascade: bool,
     },
+    /// `CLUSTER` — rewrite a table's heap in the order of one of its indexes.
+    /// `None` is the bare `CLUSTER`, which reclusters every table the current
+    /// role owns that already records a clustered index.
+    Cluster(Option<ClusterTarget>),
     /// SP37: `SET [LOCAL] <name> = <value>` / `SET <name> TO <value>` / `SET TIME ZONE ...`.
     Set {
         local: bool,
@@ -453,19 +884,65 @@ pub enum Statement {
     /* SQL parity matrix row: CREATE ROLE / CREATE USER. */ CreateRole {
         name: String,
         can_login: bool,
+        member_of: Vec<String>,
+        options: RoleOptions,
+    },
+    /* SQL parity matrix row: ALTER ROLE / ALTER USER. */ AlterRole {
+        name: String,
+        options: RoleOptions,
     },
     /* SQL parity matrix row: DROP ROLE / DROP USER. */ DropRole {
         name: String,
+        if_exists: bool,
     },
     /* SQL parity matrix row: GRANT. */ GrantTablePrivileges {
+        /// Each privilege carries its own column list, because that is where
+        /// `PostgreSQL`'s grammar attaches one. See [`PrivilegeSpec`].
+        privileges: Vec<PrivilegeSpec>,
+        /// One statement may name several relations, and `PostgreSQL` applies
+        /// the whole privilege set to each of them.
+        tables: Vec<RelationRef>,
+        grantees: Vec<RoleSpec>,
+    },
+    /* SQL parity matrix row: GRANT. */ GrantSchemaPrivileges {
         privileges: Vec<String>,
-        table: RelationRef,
-        grantees: Vec<String>,
+        schemas: Vec<String>,
+        grantees: Vec<RoleSpec>,
     },
     /* SQL parity matrix row: REVOKE. */ RevokeTablePrivileges {
+        /// Each privilege carries its own column list, because that is where
+        /// `PostgreSQL`'s grammar attaches one. See [`PrivilegeSpec`].
+        privileges: Vec<PrivilegeSpec>,
+        /// One statement may name several relations, and `PostgreSQL` applies
+        /// the whole privilege set to each of them.
+        tables: Vec<RelationRef>,
+        grantees: Vec<RoleSpec>,
+    },
+    /* SQL parity matrix row: REVOKE. */ RevokeSchemaPrivileges {
         privileges: Vec<String>,
-        table: RelationRef,
-        grantees: Vec<String>,
+        schemas: Vec<String>,
+        grantees: Vec<RoleSpec>,
+    },
+    /// `GRANT <role> [, …] TO <member> [, …] [WITH ADMIN OPTION]` — role
+    /// membership, which shares its storage with `CREATE ROLE … IN ROLE`.
+    /* SQL parity matrix row: GRANT. */ GrantRoles {
+        /// The roles being handed out; each member gains their privileges.
+        roles: Vec<String>,
+        /// The roles receiving the membership.
+        members: Vec<RoleSpec>,
+        /// `WITH ADMIN OPTION` was written. The catalog has no column for it —
+        /// membership is a bare key with no payload — so it is parsed for
+        /// fidelity and discarded by the executor.
+        admin_option: bool,
+    },
+    /// `REVOKE [ADMIN OPTION FOR] <role> [, …] FROM <member> [, …]`.
+    /* SQL parity matrix row: REVOKE. */ RevokeRoles {
+        roles: Vec<String>,
+        members: Vec<RoleSpec>,
+        /// `ADMIN OPTION FOR` was written, which in `PostgreSQL` strips the
+        /// admin right and leaves the membership. Nothing stores the admin
+        /// right here, so see [`Statement::GrantRoles`].
+        admin_option: bool,
     },
     /* SQL parity matrix row: SET ROLE. */ SetRole {
         role: Option<String>,
@@ -656,6 +1133,19 @@ pub enum Statement {
         routine: RoutineSignature,
         action: AlterRoutineAction,
     },
+    /// `CREATE [OR REPLACE] AGGREGATE name (…) ( option = value [, …] )`.
+    CreateAggregate(Box<CreateAggregateStmt>),
+    /// `DROP AGGREGATE [IF EXISTS] name (aggsig) [, …] [CASCADE | RESTRICT]`.
+    DropAggregate {
+        if_exists: bool,
+        aggregates: Vec<AggregateSignature>,
+        cascade: bool,
+    },
+    /// `ALTER AGGREGATE name (aggsig) { RENAME TO | OWNER TO | SET SCHEMA } …`.
+    AlterAggregate {
+        aggregate: AggregateSignature,
+        action: AlterRoutineAction,
+    },
     /// P2: `CALL name ( [arg, …] )`.
     Call {
         name: String,
@@ -687,6 +1177,11 @@ pub enum Statement {
     CreateDomain {
         name: RelationRef,
         base: ColumnType,
+        /// `COLLATE "name"`, when written. The engine's collations all order
+        /// text by byte value, so the name has no effect on the domain — but
+        /// writing one over a non-collatable base is still `PostgreSQL`'s 42804,
+        /// which only the executor knows the base type well enough to report.
+        collation: Option<String>,
         constraints: Vec<DomainConstraint>,
     },
     /// `ALTER DOMAIN name <action>`.
@@ -697,6 +1192,20 @@ pub enum Statement {
     /// `DROP DOMAIN [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
     DropDomain {
         names: Vec<RelationRef>,
+        if_exists: bool,
+        cascade: bool,
+    },
+    /// `CREATE CAST (source AS target) …`.
+    CreateCast {
+        source: ColumnType,
+        target: ColumnType,
+        method: CastMethod,
+        context: CastContext,
+    },
+    /// `DROP CAST [IF EXISTS] (source AS target) [CASCADE | RESTRICT]`.
+    DropCast {
+        source: ColumnType,
+        target: ColumnType,
         if_exists: bool,
         cascade: bool,
     },
@@ -713,11 +1222,73 @@ pub enum CreateTypeDefinition {
     /// `AS ENUM ('a', 'b', …)`: the labels in declaration order, which is the
     /// order `<` uses. The list may be empty.
     Enum(Vec<String>),
-    /// `AS RANGE (SUBTYPE = …, …)`: parsed so the statement is recognised and
-    /// refused with a clear message rather than a syntax error.
-    Range,
-    /// A bare `CREATE TYPE name`: a shell type.
+    /// `AS RANGE (SUBTYPE = …, …)`.
+    Range {
+        subtype: ColumnType,
+        collation: Option<String>,
+        multirange_type_name: Option<RelationRef>,
+    },
+    /// `CREATE TYPE name (option = value, …)`: a user-defined base type. The
+    /// options are carried through verbatim, in written order, because which of
+    /// them a given server honours is the executor's business, not the
+    /// grammar's.
+    Base(Vec<BaseTypeOption>),
+    /// A bare `CREATE TYPE name` — a shell type.
     Shell,
+}
+
+/// One `option = value` pair of a base-type `CREATE TYPE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseTypeOption {
+    /// The option name, lowercased (`input`, `output`, `like`,
+    /// `internallength`, …).
+    pub name: String,
+    pub value: BaseTypeOptionValue,
+}
+
+/// The right-hand side of a base-type option, matching `PostgreSQL`'s `def_arg`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseTypeOptionValue {
+    /// A bare or qualified name: a function name, a type name, `double`, `main`.
+    Name(String),
+    /// A string literal.
+    Str(String),
+    /// A signed integer literal.
+    Int(i64),
+    /// `TRUE` / `FALSE`.
+    Bool(bool),
+    /// The keyword `NONE`.
+    None,
+    /// The option was written with no `=` at all (`PASSEDBYVALUE`), which
+    /// `PostgreSQL` records as a null `DefElem.arg`. Distinct from the `NONE`
+    /// keyword, which is a written value.
+    Omitted,
+}
+
+/// How a `CREATE CAST` performs the conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CastMethod {
+    /// `WITH FUNCTION name(argtype, …)`: the named routine does the work. The
+    /// argument types are the names `PostgreSQL` spells back, so a built-in
+    /// written `int4` is recorded as `integer`. An empty list is the
+    /// no-parentheses spelling, which names the routine alone.
+    WithFunction { name: String, args: Vec<String> },
+    /// `WITHOUT FUNCTION`: the two types share a physical representation and
+    /// the value passes through unchanged.
+    WithoutFunction,
+    /// `WITH INOUT`: the source's output function feeds the target's input one.
+    WithInout,
+}
+
+/// `pg_cast.castcontext`: where the cast may be applied implicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastContext {
+    /// The default: only an explicit `CAST`/`::` invokes it.
+    Explicit,
+    /// `AS ASSIGNMENT`: also invoked when storing into a target column.
+    Assignment,
+    /// `AS IMPLICIT`: invoked anywhere a conversion is needed.
+    Implicit,
 }
 
 /// One field of a `CREATE TYPE … AS (…)` composite.
@@ -733,6 +1304,8 @@ pub struct CompositeFieldDef {
 /// An `ALTER TYPE` action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterTypeAction {
+    /// `ADD ATTRIBUTE name type [COLLATE collation]`.
+    AddAttribute(CompositeFieldDef),
     /// `ADD VALUE [IF NOT EXISTS] 'label' [{BEFORE | AFTER} 'existing']`.
     AddValue {
         label: String,
@@ -799,17 +1372,96 @@ pub enum AlterDomainAction {
 /// A `PostgreSQL` utility command accepted as a documented mapping or refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UtilityStatement {
-    /// `ANALYZE [ ( option … ) ] [VERBOSE] [table [(cols)] [, …]]`.
-    Analyze,
-    /// `CLUSTER [VERBOSE] [table [USING index]]`.
-    Cluster,
-    /// `REINDEX [ ( option … ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM } [CONCURRENTLY] [name]`.
-    Reindex,
+    /// `ANALYZE [ ( option … ) ] [VERBOSE]
+    /// [ [ONLY] table [ ( column, … ) ] [, …] ]`.
+    ///
+    /// There are no planner statistics to collect, but the names and columns
+    /// are still resolved and checked, because that is what decides whether
+    /// `PostgreSQL` reports success.
+    Analyze(MaintenanceStmt),
+    /// `REINDEX [ ( option … ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM }
+    /// [CONCURRENTLY] [name]`.
+    ///
+    /// There are no indexes to rebuild, but the name is still resolved and
+    /// checked, because that is what decides whether `PostgreSQL` reports
+    /// success — the same reason [`UtilityStatement::Analyze`] carries its
+    /// targets.
+    Reindex(ReindexStmt),
     /// `CHECKPOINT`.
     Checkpoint,
+    /// `LOAD 'filename'`.
+    Load {
+        filename: String,
+    },
+    /// `SECURITY LABEL [FOR provider] ON { TABLE | ROLE } object IS { label | NULL }`.
+    /// Object and label are intentionally discarded: without a loaded provider,
+    /// `PostgreSQL` fails before resolving either one.
+    SecurityLabel {
+        provider: Option<String>,
+    },
+    /// `CREATE TABLESPACE name [OWNER role] LOCATION 'path' [WITH (...)]`.
+    CreateTablespace {
+        name: String,
+        owner: Option<String>,
+        location: String,
+        options: OptionList,
+    },
+    /// `DROP TABLESPACE [IF EXISTS] name`.
+    DropTablespace {
+        name: String,
+        if_exists: bool,
+    },
+    /// `ALTER TABLESPACE` catalog metadata changes.
+    AlterTablespace {
+        name: String,
+        action: TablespaceAlterAction,
+    },
+    CreateOperatorFamily {
+        name: RelationRef,
+        method: String,
+    },
+    CreateOperatorClass {
+        name: RelationRef,
+        default: bool,
+        input_type: ColumnType,
+        method: String,
+        family: Option<RelationRef>,
+        key_type: Option<ColumnType>,
+    },
+    AlterOperatorObject {
+        kind: OperatorObjectKind,
+        name: RelationRef,
+        method: String,
+        action: OperatorObjectAlterAction,
+    },
+    /// `DROP OPERATOR { CLASS | FAMILY } …` — an index access method's operator
+    /// *object*, not an operator. The bare `DROP OPERATOR` is
+    /// [`UtilityStatement::DropOperator`].
+    DropOperatorObject {
+        kind: OperatorObjectKind,
+        name: RelationRef,
+        method: String,
+        if_exists: bool,
+        cascade: bool,
+    },
+    /// `CREATE OPERATOR [schema.]symbol ( attribute [, …] )`. Boxed because its
+    /// eleven attributes make it twice the size of any other variant here.
+    CreateOperator(Box<CreateOperatorStmt>),
+    /// `DROP OPERATOR [IF EXISTS] signature [, …] [CASCADE | RESTRICT]`.
+    ///
+    /// The operator *objects* — `DROP OPERATOR CLASS`/`FAMILY` — are
+    /// [`UtilityStatement::DropOperatorObject`] instead.
+    DropOperator {
+        if_exists: bool,
+        /// One entry per comma-separated signature; never empty.
+        operators: Vec<OperatorSignature>,
+        cascade: bool,
+    },
     /// `ALTER SYSTEM SET <name> = <value>` / `ALTER SYSTEM RESET { <name> | ALL }`.
     /// `name` is `None` for `RESET ALL`.
-    AlterSystem { name: Option<String> },
+    AlterSystem {
+        name: Option<String>,
+    },
     /// `SET CONSTRAINTS { ALL | name [, …] } { DEFERRED | IMMEDIATE }`.
     SetConstraints {
         /// The named constraints in written order, or `None` for the `ALL`
@@ -831,6 +1483,189 @@ pub enum UtilityStatement {
     /// SQL-managed text-search configurations and dictionaries. Parser and
     /// template objects remain explicit C-bound non-goals.
     TextSearch(TextSearchDdl),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TablespaceAlterAction {
+    Set(OptionList),
+    Reset(Vec<String>),
+    RenameTo(String),
+    OwnerTo(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorObjectKind {
+    Class,
+    Family,
+}
+
+/// An operator's own name: the symbol, plus the schema qualifier when one was
+/// written.
+///
+/// Deliberately not a [`RelationRef`]. An operator name is a run of operator
+/// characters that no `ColId` can spell, it lives in `pg_operator` rather than
+/// `pg_class`, and it is overloaded on its operand types, so nothing that
+/// resolves a relation can resolve one of these.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct OperatorName {
+    /// The qualifier, when one was written. `None` resolves against the search
+    /// path.
+    pub schema: Option<String>,
+    /// The symbol itself, without the qualifier: `===`, `<|`, `=`.
+    pub symbol: String,
+}
+
+impl OperatorName {
+    /// An unqualified operator name: `===`.
+    #[must_use]
+    pub fn bare(symbol: impl Into<String>) -> Self {
+        Self {
+            schema: None,
+            symbol: symbol.into(),
+        }
+    }
+
+    /// A schema-qualified operator name: `s.===`.
+    #[must_use]
+    pub fn qualified(schema: impl Into<String>, symbol: impl Into<String>) -> Self {
+        Self {
+            schema: Some(schema.into()),
+            symbol: symbol.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for OperatorName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.schema {
+            Some(schema) => write!(f, "{schema}.{}", self.symbol),
+            None => f.write_str(&self.symbol),
+        }
+    }
+}
+
+/// The body of [`UtilityStatement::CreateOperator`].
+///
+/// Every attribute is optional *in the grammar*. `PostgreSQL` collects the list
+/// into `DefElem`s and only `DefineOperator` decides what is missing, which
+/// matters because it warns once per unrecognized attribute *before* it reports
+/// the missing function. Refusing an incomplete definition at parse time would
+/// swallow those warnings, so the parse tree carries the holes and the executor
+/// reports them in `PostgreSQL`'s order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOperatorStmt {
+    pub name: OperatorName,
+    /// `FUNCTION = f`, or its `PROCEDURE = f` synonym. `PostgreSQL` reads both
+    /// into one attribute, so the written spelling is not kept.
+    pub function: Option<RelationRef>,
+    /// `LEFTARG = t`. `None` is a prefix operator, which has no left operand —
+    /// and also the malformed form that names no operand at all.
+    pub left_type: Option<RoutineType>,
+    /// `RIGHTARG = t`. `PostgreSQL` requires it, and reports its absence from
+    /// `DefineOperator` rather than from the grammar.
+    pub right_type: Option<RoutineType>,
+    /// `COMMUTATOR = op`. May name the operator being defined, which is how a
+    /// self-commutator is written.
+    pub commutator: Option<OperatorName>,
+    pub negator: Option<OperatorName>,
+    pub restrict: Option<RelationRef>,
+    pub join: Option<RelationRef>,
+    /// `HASHES` was written.
+    pub hashes: bool,
+    /// `MERGES` was written.
+    pub merges: bool,
+    /// The attributes `PostgreSQL` does not recognize, in written order and
+    /// with their written spelling. `DefineOperator` warns once per name and
+    /// then ignores it, so the long-dead `SORT1` and a case-preserving
+    /// `"Leftarg"` both land here instead of failing the statement. The
+    /// spelling is kept because the warning quotes it.
+    pub unrecognized_options: Vec<String>,
+}
+
+/// One operator named the way `DROP OPERATOR` names it: a symbol and both
+/// operand types, because the symbol alone is ambiguous.
+///
+/// `PostgreSQL`'s `oper_argtypes` has no one-operand and no zero-operand form.
+/// The absent operand of a prefix operator is written `NONE` and arrives here
+/// as `None`, never as a type named `none`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorSignature {
+    pub name: OperatorName,
+    pub left_type: Option<RoutineType>,
+    pub right_type: Option<RoutineType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorObjectAlterAction {
+    RenameTo(String),
+    OwnerTo(String),
+    SetSchema(String),
+    AddMembers(Vec<OperatorFamilyMember>),
+    DropMembers(Vec<OperatorFamilyMemberKey>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorFamilyMember {
+    Operator {
+        number: u16,
+        operator: String,
+        left_type: ColumnType,
+        right_type: ColumnType,
+        order_family: Option<RelationRef>,
+    },
+    Function {
+        number: u16,
+        left_type: Option<ColumnType>,
+        right_type: Option<ColumnType>,
+        function: RelationRef,
+        argument_types: Vec<OperatorFamilyFunctionType>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorFamilyFunctionType {
+    Builtin(ColumnType),
+    Internal,
+}
+
+impl OperatorFamilyFunctionType {
+    #[must_use]
+    pub fn oid(self) -> u32 {
+        match self {
+            Self::Builtin(ty) => ty.oid(),
+            Self::Internal => 2281,
+        }
+    }
+
+    #[must_use]
+    pub const fn column(self) -> Option<ColumnType> {
+        match self {
+            Self::Builtin(ty) => Some(ty),
+            Self::Internal => None,
+        }
+    }
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Builtin(ty) => ty.name(),
+            Self::Internal => "internal",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorFamilyMemberKey {
+    Operator {
+        number: u16,
+        left_type: ColumnType,
+        right_type: ColumnType,
+    },
+    Function {
+        number: u16,
+        left_type: ColumnType,
+        right_type: ColumnType,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1132,6 +1967,10 @@ pub enum OnConflictTarget {
 }
 
 /// What to do with a row that conflicts.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing public AST variants would cascade API changes through parser and executor consumers"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum OnConflictAction {
     /// `DO NOTHING`: skip the row.
@@ -1242,19 +2081,16 @@ pub enum NonGoalCommand {
     AlterPublication,
     AlterRule,
     AlterSubscription,
-    AlterTablespace,
     AlterTextSearchParser,
     AlterTextSearchTemplate,
     CreateAccessMethod,
     CreateConversion,
     CreateLanguage,
     CreateOperator,
-    CreateOperatorClass,
     CreateOperatorFamily,
     CreatePublication,
     CreateRule,
     CreateSubscription,
-    CreateTablespace,
     CreateTextSearchParser,
     CreateTextSearchTemplate,
     CreateTransform,
@@ -1267,12 +2103,9 @@ pub enum NonGoalCommand {
     DropPublication,
     DropRule,
     DropSubscription,
-    DropTablespace,
     DropTextSearchParser,
     DropTextSearchTemplate,
     DropTransform,
-    Load,
-    SecurityLabel,
 }
 
 impl NonGoalCommand {
@@ -1288,19 +2121,16 @@ impl NonGoalCommand {
             Self::AlterPublication => "ALTER PUBLICATION",
             Self::AlterRule => "ALTER RULE",
             Self::AlterSubscription => "ALTER SUBSCRIPTION",
-            Self::AlterTablespace => "ALTER TABLESPACE",
             Self::AlterTextSearchParser => "ALTER TEXT SEARCH PARSER",
             Self::AlterTextSearchTemplate => "ALTER TEXT SEARCH TEMPLATE",
             Self::CreateAccessMethod => "CREATE ACCESS METHOD",
             Self::CreateConversion => "CREATE CONVERSION",
             Self::CreateLanguage => "CREATE LANGUAGE",
             Self::CreateOperator => "CREATE OPERATOR",
-            Self::CreateOperatorClass => "CREATE OPERATOR CLASS",
             Self::CreateOperatorFamily => "CREATE OPERATOR FAMILY",
             Self::CreatePublication => "CREATE PUBLICATION",
             Self::CreateRule => "CREATE RULE",
             Self::CreateSubscription => "CREATE SUBSCRIPTION",
-            Self::CreateTablespace => "CREATE TABLESPACE",
             Self::CreateTextSearchParser => "CREATE TEXT SEARCH PARSER",
             Self::CreateTextSearchTemplate => "CREATE TEXT SEARCH TEMPLATE",
             Self::CreateTransform => "CREATE TRANSFORM",
@@ -1313,12 +2143,9 @@ impl NonGoalCommand {
             Self::DropPublication => "DROP PUBLICATION",
             Self::DropRule => "DROP RULE",
             Self::DropSubscription => "DROP SUBSCRIPTION",
-            Self::DropTablespace => "DROP TABLESPACE",
             Self::DropTextSearchParser => "DROP TEXT SEARCH PARSER",
             Self::DropTextSearchTemplate => "DROP TEXT SEARCH TEMPLATE",
             Self::DropTransform => "DROP TRANSFORM",
-            Self::Load => "LOAD",
-            Self::SecurityLabel => "SECURITY LABEL",
         }
     }
 
@@ -1336,7 +2163,6 @@ impl NonGoalCommand {
             | Self::AlterOperatorClass
             | Self::AlterOperatorFamily
             | Self::CreateOperator
-            | Self::CreateOperatorClass
             | Self::CreateOperatorFamily
             | Self::DropOperator
             | Self::DropOperatorClass
@@ -1350,9 +2176,6 @@ impl NonGoalCommand {
             Self::AlterRule | Self::CreateRule | Self::DropRule => {
                 "the legacy rewrite rule system is not supported"
             }
-            Self::AlterTablespace | Self::CreateTablespace | Self::DropTablespace => {
-                "tablespaces are not part of the chapter storage model"
-            }
             Self::AlterTextSearchParser
             | Self::AlterTextSearchTemplate
             | Self::CreateTextSearchParser
@@ -1365,8 +2188,6 @@ impl NonGoalCommand {
             Self::CreateTransform | Self::DropTransform => {
                 "C-bound transform objects are not supported"
             }
-            Self::Load => "C-bound code loading is not supported",
-            Self::SecurityLabel => "C-bound security labels are not supported",
         }
     }
 }
@@ -1399,18 +2220,9 @@ non_goal_specs!(
         AlterOperator,
         "ALTER OPERATOR +(integer, integer) OWNER TO postgres"
     ),
-    (
-        AlterOperatorClass,
-        "ALTER OPERATOR CLASS opc USING btree RENAME TO opc2"
-    ),
-    (
-        AlterOperatorFamily,
-        "ALTER OPERATOR FAMILY opf USING btree RENAME TO opf2"
-    ),
     (AlterPublication, "ALTER PUBLICATION pub ADD TABLE t"),
     (AlterRule, "ALTER RULE r ON t RENAME TO r2"),
     (AlterSubscription, "ALTER SUBSCRIPTION sub DISABLE"),
-    (AlterTablespace, "ALTER TABLESPACE ts RENAME TO ts2"),
     (
         AlterTextSearchParser,
         "ALTER TEXT SEARCH PARSER p RENAME TO p2"
@@ -1428,18 +2240,6 @@ non_goal_specs!(
         "CREATE CONVERSION conv FOR 'UTF8' TO 'LATIN1' FROM func"
     ),
     (CreateLanguage, "CREATE LANGUAGE lang"),
-    (
-        CreateOperator,
-        "CREATE OPERATOR === (FUNCTION = int4eq, LEFTARG = integer, RIGHTARG = integer)"
-    ),
-    (
-        CreateOperatorClass,
-        "CREATE OPERATOR CLASS opc FOR TYPE integer USING btree AS OPERATOR 1 < (integer, integer)"
-    ),
-    (
-        CreateOperatorFamily,
-        "CREATE OPERATOR FAMILY opf USING btree"
-    ),
     (CreatePublication, "CREATE PUBLICATION pub"),
     (
         CreateRule,
@@ -1449,7 +2249,6 @@ non_goal_specs!(
         CreateSubscription,
         "CREATE SUBSCRIPTION sub CONNECTION 'host=x' PUBLICATION pub"
     ),
-    (CreateTablespace, "CREATE TABLESPACE ts LOCATION '/tmp/ts'"),
     (
         CreateTextSearchParser,
         "CREATE TEXT SEARCH PARSER p (START = f, GETTOKEN = f, END = f, LEXTYPES = f)"
@@ -1465,18 +2264,12 @@ non_goal_specs!(
     (DropAccessMethod, "DROP ACCESS METHOD am"),
     (DropConversion, "DROP CONVERSION conv"),
     (DropLanguage, "DROP LANGUAGE lang"),
-    (DropOperator, "DROP OPERATOR +(integer, integer)"),
-    (DropOperatorClass, "DROP OPERATOR CLASS opc USING btree"),
-    (DropOperatorFamily, "DROP OPERATOR FAMILY opf USING btree"),
     (DropPublication, "DROP PUBLICATION pub"),
     (DropRule, "DROP RULE r ON t"),
     (DropSubscription, "DROP SUBSCRIPTION sub"),
-    (DropTablespace, "DROP TABLESPACE ts"),
     (DropTextSearchParser, "DROP TEXT SEARCH PARSER p"),
     (DropTextSearchTemplate, "DROP TEXT SEARCH TEMPLATE t"),
     (DropTransform, "DROP TRANSFORM FOR integer LANGUAGE sql"),
-    (Load, "LOAD 'lib'"),
-    (SecurityLabel, "SECURITY LABEL ON TABLE t IS 'label'"),
 );
 
 /// One `ALTER TABLE` subcommand.
@@ -1498,13 +2291,35 @@ pub enum AlterTableAction {
         expr: Expr,
     },
     DropDefault(String),
-    /// `ALTER [COLUMN] c TYPE t [USING expr]`.
+    /// `ALTER [COLUMN] c SET EXPRESSION AS (<expr>)` — replace a generated
+    /// column's generation expression.
+    SetExpression {
+        column: String,
+        predicate: CheckPredicate,
+    },
+    /// `ALTER [COLUMN] c DROP EXPRESSION [IF EXISTS]` — turn a generated column
+    /// back into an ordinary one.
+    DropExpression {
+        column: String,
+        if_exists: bool,
+    },
+    /// `ALTER [COLUMN] c TYPE t [COLLATE "name"] [USING expr]`.
     SetType {
         column: String,
         ty: ColumnType,
+        /// `COLLATE "name"`, when written — the collation the column carries
+        /// after the change. Omitting it resets the column to the type's own
+        /// default collation, which is what `PostgreSQL` does.
+        collation: Option<String>,
         using: Option<Expr>,
     },
     AddConstraint(TableConstraint),
+    /// `ALTER CONSTRAINT <name> <attributes>` — change the properties of a
+    /// constraint that already exists, without dropping it.
+    AlterConstraint {
+        name: String,
+        spec: AlterConstraintSpec,
+    },
     DropConstraint {
         name: String,
         if_exists: bool,
@@ -1526,7 +2341,8 @@ pub enum AlterTableAction {
     SetStorageParameters(Vec<(String, Option<String>)>),
     /// `RESET (param, …)`.
     ResetStorageParameters(Vec<String>),
-    OwnerTo(String),
+    SetTablespace(String),
+    OwnerTo(RoleSpec),
     SetTriggerMode {
         selector: TriggerSelector,
         mode: TriggerEnableMode,
@@ -1542,9 +2358,21 @@ pub enum AlterTableAction {
         concurrently: bool,
         finalize: bool,
     },
-    /// `SET SCHEMA name`, `SET TABLESPACE name`, `SET {LOGGED|UNLOGGED}`,
-    /// `CLUSTER ON`, `SET WITHOUT CLUSTER`, `{EN,DIS}ABLE TRIGGER`, and the
-    /// other subcommands that parse but have no counterpart in Crabka's storage
+    /// `ENABLE ROW LEVEL SECURITY`.
+    EnableRowSecurity,
+    /// `DISABLE ROW LEVEL SECURITY`.
+    DisableRowSecurity,
+    /// `FORCE ROW LEVEL SECURITY` — the owner stops bypassing its own policies.
+    ForceRowSecurity,
+    /// `NO FORCE ROW LEVEL SECURITY`.
+    NoForceRowSecurity,
+    /// `CLUSTER ON <index>` — record the index a later bare `CLUSTER <table>`
+    /// reorders by (`pg_index.indisclustered`).
+    ClusterOn(String),
+    /// `SET WITHOUT CLUSTER` — clear the recorded clustered index.
+    SetWithoutCluster,
+    /// `SET SCHEMA name`, `SET {LOGGED|UNLOGGED}`, `{EN,DIS}ABLE TRIGGER`, … —
+    /// the subcommands that parse but have no counterpart in Crabka's storage
     /// model. `label` is the `PostgreSQL` subcommand text for the refusal.
     Unsupported(String),
 }
@@ -1579,10 +2407,21 @@ pub struct PartitionKeyElem {
 pub struct PartitionOf {
     pub parent: RelationRef,
     pub bound: PartitionBound,
-    /// `(a NOT NULL, b WITH OPTIONS DEFAULT 0)`: extra constraints on columns
+    /// `(a NOT NULL, b WITH OPTIONS DEFAULT 0)` — extra qualifiers on columns
     /// the partition inherits from its parent. A partition declares no types of
     /// its own, so only the qualifier list is written.
-    pub column_options: Vec<(String, Vec<ColumnConstraint>)>,
+    pub column_options: Vec<PartitionColumnOption>,
+}
+
+/// One element of a partition's `(a NOT NULL, b COLLATE "C")` qualifier list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartitionColumnOption {
+    /// The inherited column the qualifiers apply to.
+    pub column: String,
+    /// `COLLATE "name"`, when written. `PostgreSQL` parses it and then ignores
+    /// it: a partition's column always keeps the collation the parent declared.
+    pub collation: Option<String>,
+    pub constraints: Vec<ColumnConstraint>,
 }
 
 /// A partition's bound specification, as written.
@@ -1617,7 +2456,7 @@ pub enum RangeBoundValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterSchemaAction {
     RenameTo(String),
-    OwnerTo(String),
+    OwnerTo(RoleSpec),
 }
 
 /// `ON COMMIT` disposition for a temporary table.
@@ -1680,25 +2519,143 @@ pub struct IndexKey {
     pub column: Option<String>,
     /// Source text of the key: the column name, or the expression as written.
     pub text: String,
+    /// The operator-class name, when written.
+    pub opclass: Option<String>,
     pub descending: bool,
     /// `NULLS FIRST` (`Some(true)`) / `NULLS LAST` (`Some(false)`); `None` when
     /// the clause is absent and `PostgreSQL`'s direction-derived default applies.
     pub nulls_first: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A `COPY` statement: rows moving between a [`CopyTarget`] and an endpoint
+/// outside the database, in the direction [`CopyDirection`] names.
+///
+/// Not `Eq`: the query form nests a whole [`Statement`], whose expressions may
+/// hold float literals.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CopyStmt {
-    pub table: RelationRef,
-    pub columns: Option<Vec<String>>,
-    pub format: CopyFormat,
+    /// The rows the statement moves.
+    pub target: CopyTarget,
+    /// Which way they move, and the endpoint at the far side.
+    pub direction: CopyDirection,
+    /// The option list, already folded from whichever of `PostgreSQL`'s two
+    /// spellings it was written in.
+    pub options: CopyOptions,
 }
 
-pub const COPY_FROM_STDIN_SENTINEL: &str = "__copy_from_stdin";
+/// What a `COPY` reads from or writes out.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CopyTarget {
+    /// `COPY t [(a, b)] …` — a relation, optionally restricted to a column
+    /// list. `None` columns means every column, in attribute order.
+    Table {
+        name: RelationRef,
+        columns: Option<Vec<String>>,
+    },
+    /// `COPY ( <query> ) TO …` — a parenthesized `SELECT`/`VALUES`/`TABLE`, or
+    /// an `INSERT`/`UPDATE`/`DELETE`/`MERGE … RETURNING`. Only ever paired with
+    /// [`CopyDirection::To`]; `PostgreSQL`'s grammar has no `FROM` spelling for
+    /// it.
+    Query(Box<Statement>),
+}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which way a `COPY` moves rows, and the endpoint at the far side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyDirection {
+    From(CopySource),
+    To(CopyDestination),
+}
+
+/// Where `COPY … FROM` reads its rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopySource {
+    Stdin,
+    File(String),
+}
+
+/// Where `COPY … TO` writes its rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyDestination {
+    Stdout,
+    File(String),
+}
+
+/// The `COPY` option list. `PostgreSQL` accepts two spellings — the modern
+/// `(name value, …)` list and the legacy bare-keyword tail (`WITH CSV HEADER`)
+/// — and both land here, so consumers never see the difference.
+///
+/// Every field is the option *as written*: defaults that depend on the format
+/// (a text `COPY`'s `\t` delimiter, a CSV one's `"` quote) are deliberately not
+/// filled in, because resolving them is the executor's job and `None` is what
+/// distinguishes "not given" from "given the default value".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CopyOptions {
+    pub format: CopyFormat,
+    /// `FREEZE` — a load-time visibility hint, always false for `COPY TO`.
+    pub freeze: bool,
+    pub delimiter: Option<String>,
+    /// The `NULL 'str'` sentinel.
+    pub null: Option<String>,
+    /// The `DEFAULT 'str'` sentinel (`COPY FROM` only).
+    pub default: Option<String>,
+    pub header: Option<CopyHeader>,
+    pub quote: Option<String>,
+    pub escape: Option<String>,
+    pub force_quote: Option<CopyColumns>,
+    pub force_not_null: Option<CopyColumns>,
+    pub force_null: Option<CopyColumns>,
+    /// `PostgreSQL`'s undocumented `CONVERT_SELECTIVELY` filter — the columns a
+    /// binary `COPY FROM` converts, the rest arriving as nulls. Parsed so the
+    /// option list behaves the way `PostgreSQL`'s does; an empty list is the
+    /// bare spelling and is legal.
+    pub convert_selectively: Option<Vec<String>>,
+    /// The encoding *name* as written; validity is checked where encodings are
+    /// known, not in the parser.
+    pub encoding: Option<String>,
+    pub on_error: Option<CopyOnError>,
+    pub log_verbosity: Option<CopyLogVerbosity>,
+    pub reject_limit: Option<i64>,
+}
+
+/// The wire format a `COPY` reads or writes. `BINARY` is a `PostgreSQL` format
+/// this parser refuses outright, so it has no variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CopyFormat {
+    #[default]
     Text,
     Csv,
+}
+
+/// The `HEADER` option. `MATCH` — verify the incoming header against the column
+/// list — is `COPY FROM` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyHeader {
+    False,
+    True,
+    Match,
+}
+
+/// The argument of a `FORCE_QUOTE` / `FORCE_NOT_NULL` / `FORCE_NULL` option:
+/// either a named column list or `*` for all of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyColumns {
+    All,
+    Named(Vec<String>),
+}
+
+/// The `ON_ERROR` option: what a `COPY FROM` does with a row it cannot convert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyOnError {
+    Stop,
+    Ignore,
+}
+
+/// The `LOG_VERBOSITY` option: how loudly a `COPY FROM` reports skipped rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyLogVerbosity {
+    Silent,
+    Default,
+    Verbose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1807,6 +2764,15 @@ pub struct ColumnDef {
     pub name: String,
     pub ty: ColumnType,
     pub serial: Option<SerialKind>,
+    /// `COLLATE "name"`, when written. `PostgreSQL`'s grammar admits the clause
+    /// anywhere in the qualifier list, so `b text NOT NULL COLLATE "C"` parses
+    /// like `b text COLLATE "C" NOT NULL`; it is recorded here rather than as a
+    /// [`ColumnConstraint`] because at most one may be written and it is a
+    /// property of the column, not a constraint on its values.
+    ///
+    /// Every collation this engine has orders text by byte value, so the name
+    /// only ever changes what the catalog reports, never how rows compare.
+    pub collation: Option<String>,
     pub constraints: Vec<ColumnConstraint>,
 }
 
@@ -1893,6 +2859,9 @@ pub struct ForeignKeyRef {
     /// The referenced columns as written, or empty when the list was omitted
     /// and the referenced table's primary key is meant.
     pub columns: Vec<String>,
+    /// `PERIOD` was written on the last referenced column — the temporal
+    /// spelling `REFERENCES t (id, PERIOD valid_at)`.
+    pub period: bool,
     pub match_type: MatchType,
     pub on_delete: ReferentialAction,
     pub on_update: ReferentialAction,
@@ -1906,8 +2875,9 @@ pub struct ForeignKeyRef {
 /// The trailing attributes any constraint may carry: `[NOT] DEFERRABLE`,
 /// `INITIALLY { DEFERRED | IMMEDIATE }`, and `NOT VALID`.
 ///
-/// `PostgreSQL` also accepts `ENFORCED` / `NOT ENFORCED` and `NO INHERIT` here;
-/// those are consumed and dropped.
+/// `PostgreSQL` also accepts `ENFORCED` / `NOT ENFORCED` and `NO INHERIT` here.
+/// `NO INHERIT` reaches [`TableConstraintKind::NotNull`], the one kind Crabka
+/// reads it on; the rest are consumed and dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConstraintAttributes {
     /// `NOT VALID` was written. In `ALTER TABLE … ADD CONSTRAINT` this skips
@@ -1924,12 +2894,45 @@ pub struct ConstraintAttributes {
     pub initially_deferred: bool,
 }
 
+/// Which properties an `ALTER TABLE … ALTER CONSTRAINT` writes, and their new
+/// values.
+///
+/// `PostgreSQL` alters only the properties the statement names, so each field is
+/// `None` when the matching clause was absent. A spec with every field `None` —
+/// `ALTER CONSTRAINT c` with no attribute at all — is legal grammar and a no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AlterConstraintSpec {
+    /// `(deferrable, initially_deferred)` when any of `DEFERRABLE`, `NOT
+    /// DEFERRABLE`, `INITIALLY DEFERRED` or `INITIALLY IMMEDIATE` was written.
+    pub deferrability: Option<(bool, bool)>,
+    /// `Some(false)` for `NOT ENFORCED`, `Some(true)` for `ENFORCED`.
+    pub enforced: Option<bool>,
+    /// `Some(false)` for `NO INHERIT`, `Some(true)` for the bare `INHERIT`.
+    pub inherit: Option<bool>,
+}
+
 /// `GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [( <sequence options> )]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentitySpec {
     /// True for `GENERATED ALWAYS`, false for `GENERATED BY DEFAULT`.
     pub always: bool,
     pub options: SequenceOptions,
+}
+
+/// Whether a generated column's value is kept in the row (`STORED`) or
+/// recomputed on every read (`VIRTUAL`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratedKind {
+    Stored,
+    /// `PostgreSQL` 18's default when neither keyword is written.
+    Virtual,
+}
+
+/// `GENERATED ALWAYS AS (<expr>) [STORED | VIRTUAL]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedSpec {
+    pub predicate: CheckPredicate,
+    pub kind: GeneratedKind,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1957,8 +2960,8 @@ pub enum ColumnConstraintKind {
     Check(CheckPredicate),
     References(ForeignKeyRef),
     Identity(IdentitySpec),
-    /// `GENERATED ALWAYS AS (<expr>) STORED`.
-    Generated(CheckPredicate),
+    /// `GENERATED ALWAYS AS (<expr>) [STORED | VIRTUAL]`.
+    Generated(GeneratedSpec),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1972,16 +2975,47 @@ pub struct TableConstraint {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableConstraintKind {
-    PrimaryKey(Vec<String>),
+    PrimaryKey {
+        columns: Vec<String>,
+        /// `PostgreSQL` 18's `WITHOUT OVERLAPS`, written on the last key
+        /// column: that column is compared with `&&` instead of `=`, turning
+        /// the key into a temporal one.
+        without_overlaps: bool,
+    },
     Unique {
         columns: Vec<String>,
         nulls_not_distinct: bool,
+        /// See [`TableConstraintKind::PrimaryKey::without_overlaps`].
+        without_overlaps: bool,
     },
     Check(CheckPredicate),
+    /// `NOT NULL <column>` — `PostgreSQL` 17's table-constraint spelling of a
+    /// column's not-null, which is what gives the constraint a name of its own.
+    /// It carries exactly one column: `NOT NULL (a, b)` is not grammar.
+    NotNull {
+        column: String,
+        /// `NO INHERIT` was written in the constraint's attribute tail. It is
+        /// lifted out of [`ConstraintAttributes`] because a not-null is the only
+        /// kind Crabka reads it on.
+        no_inherit: bool,
+    },
     ForeignKey {
         columns: Vec<String>,
+        /// `PERIOD` was written on the last referencing column — the temporal
+        /// spelling `FOREIGN KEY (id, PERIOD valid_at)`.
+        period: bool,
         references: ForeignKeyRef,
     },
+    Exclude {
+        method: String,
+        elements: Vec<ExclusionElement>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExclusionElement {
+    pub column: String,
+    pub operator: BinaryOp,
 }
 
 /// `PostgreSQL`'s four row-lock strengths, ordered weakest to strongest so a
@@ -2290,6 +3324,8 @@ pub enum SelectItem {
 pub enum TableExpr {
     Table {
         name: RelationRef,
+        /// `ONLY relation` excludes inheritance descendants.
+        only: bool,
         alias: Option<String>,
         /// The alias's column list (`t AS q(x, y)`), which renames the leading
         /// columns. Shorter than the relation is allowed; longer is `42P10`.
@@ -2335,6 +3371,189 @@ pub enum TableExpr {
         alias: Option<String>,
         column_aliases: Option<Vec<String>>,
     },
+    /// `JSON_TABLE(context, path COLUMNS (…))` — a FROM item that turns one
+    /// JSON document into rows. Boxed because its payload dwarfs every other
+    /// variant's.
+    JsonTable(Box<JsonTable>),
+}
+
+/// A `JSON_TABLE(…)` FROM item.
+///
+/// The row pattern is applied to `context`; each item it matches produces one
+/// row, whose columns are each an independent `JSON_VALUE`/`JSON_QUERY`/
+/// `JSON_EXISTS` over that item. `NESTED PATH` columns expand further, joining
+/// to their parent row with `PostgreSQL`'s default plan: siblings are unioned
+/// and each nested set is OUTER-joined to its parent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonTable {
+    /// The document expression. Implicitly `LATERAL`, like a function item's
+    /// arguments, so it may reference FROM items to its left.
+    pub context: Expr,
+    /// The row-pattern jsonpath. `PostgreSQL`'s grammar restricts this to a
+    /// string constant, so it is stored already-extracted.
+    pub path: String,
+    /// `AS name` on the row pattern, which shares one namespace with the column
+    /// names.
+    pub path_name: Option<String>,
+    /// `PASSING v AS name, …` — jsonpath variables, visible to the row pattern
+    /// and to every column and nested path below it.
+    pub passing: Vec<(String, Expr)>,
+    pub columns: Vec<JsonTableColumn>,
+    /// The `ON ERROR` clause as written. Only `ERROR` and `EMPTY [ARRAY]` are
+    /// meaningful here — the default, `EMPTY`, swallows a row-pattern error into
+    /// zero rows — but the grammar accepts every behavior word and leaves the
+    /// rejection to parse analysis.
+    pub on_error: Option<JsonBehavior>,
+    pub alias: Option<String>,
+    pub column_aliases: Option<Vec<String>>,
+    /// Explicit `LATERAL`. Like a function item, the executor also treats an
+    /// unmarked `JSON_TABLE` whose context or `PASSING` expressions reference an
+    /// earlier FROM item as lateral; this records only what was written.
+    pub lateral: bool,
+}
+
+/// One entry of a `COLUMNS (…)` list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonTableColumn {
+    /// `name FOR ORDINALITY` — an `integer` counting the rows of the scan level
+    /// it is declared in, from 1.
+    Ordinality { name: String },
+    /// A value column: `JSON_VALUE` semantics normally, `JSON_QUERY` semantics
+    /// when `FORMAT JSON`, a wrapper, a quotes clause or a composite-ish return
+    /// type asks for them.
+    Value(Box<JsonTableValueColumn>),
+    /// `name type EXISTS [PATH 'p'] [behavior ON ERROR]` — `JSON_EXISTS`.
+    Exists(Box<JsonTableExistsColumn>),
+    /// `NESTED [PATH] 'p' [AS name] COLUMNS (…)`.
+    Nested(Box<JsonTableNestedColumns>),
+}
+
+/// A `JSON_TABLE` value column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonTableValueColumn {
+    pub name: String,
+    pub ty: ColumnType,
+    /// `FORMAT JSON` was written, which forces `JSON_QUERY` semantics.
+    pub format_json: bool,
+    /// `PATH 'p'`. Absent, the column's path is `$."name"`.
+    pub path: Option<String>,
+    /// `WITH [CONDITIONAL|UNCONDITIONAL] WRAPPER` / `WITHOUT WRAPPER`, or `None`
+    /// when unwritten — which is what distinguishes a plain scalar column from a
+    /// formatted one.
+    pub wrapper: Option<JsonWrapper>,
+    /// `OMIT QUOTES` (`Some(true)`) / `KEEP QUOTES` (`Some(false)`), or `None`
+    /// when unwritten.
+    pub omit_quotes: Option<bool>,
+    pub on_empty: Option<JsonBehavior>,
+    pub on_error: Option<JsonBehavior>,
+}
+
+impl JsonTableValueColumn {
+    /// Does this column run as `JSON_QUERY` rather than `JSON_VALUE`?
+    ///
+    /// `PostgreSQL` promotes a column to the formatted form when `FORMAT JSON`
+    /// is written, when a wrapper or quotes clause is, or when the return type
+    /// is one a single SQL scalar cannot carry.
+    #[must_use]
+    pub fn is_formatted(&self) -> bool {
+        self.format_json
+            || self.wrapper.is_some()
+            || self.omit_quotes.is_some()
+            || json_table_composite_type(self.ty)
+    }
+}
+
+/// `PostgreSQL`'s `isCompositeType` test, which decides whether a `JSON_TABLE`
+/// column is better served by `JSON_QUERY`: `json`/`jsonb`, `record`, any array,
+/// any named composite, or a domain over one of those.
+#[must_use]
+pub fn json_table_composite_type(ty: ColumnType) -> bool {
+    match ty {
+        ColumnType::Json | ColumnType::Jsonb | ColumnType::Record(_) | ColumnType::Array(_) => true,
+        ColumnType::Domain(domain) => json_table_composite_type(*domain.base),
+        _ => false,
+    }
+}
+
+/// A `JSON_TABLE` `EXISTS` column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonTableExistsColumn {
+    pub name: String,
+    pub ty: ColumnType,
+    pub path: Option<String>,
+    pub on_error: Option<JsonBehavior>,
+}
+
+/// A `NESTED PATH … COLUMNS (…)` entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonTableNestedColumns {
+    pub path: String,
+    pub name: Option<String>,
+    pub columns: Vec<JsonTableColumn>,
+}
+
+impl JsonTable {
+    /// Does the `ON ERROR` clause say `ERROR`? Every other spelling this item
+    /// accepts leaves a failing row pattern producing no rows.
+    #[must_use]
+    pub fn error_on_error(&self) -> bool {
+        matches!(self.on_error, Some(JsonBehavior::Error))
+    }
+
+    /// Every expression this item evaluates, in evaluation order. Column paths
+    /// are string constants, so only the context item, the `PASSING` values and
+    /// the `DEFAULT` behavior expressions appear.
+    #[must_use]
+    pub fn exprs(&self) -> Vec<&Expr> {
+        let mut out = vec![&self.context];
+        out.extend(self.passing.iter().map(|(_, e)| e));
+        collect_column_exprs(&self.columns, &mut out);
+        out
+    }
+
+    /// The mutable counterpart of [`JsonTable::exprs`], in the same order.
+    #[must_use]
+    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        let mut out = vec![&mut self.context];
+        out.extend(self.passing.iter_mut().map(|(_, e)| e));
+        collect_column_exprs_mut(&mut self.columns, &mut out);
+        out
+    }
+}
+
+fn collect_column_exprs<'a>(columns: &'a [JsonTableColumn], out: &mut Vec<&'a Expr>) {
+    for column in columns {
+        match column {
+            JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists(_) => {}
+            JsonTableColumn::Value(value) => {
+                for behavior in [&value.on_empty, &value.on_error].into_iter().flatten() {
+                    if let JsonBehavior::Default(expr) = behavior {
+                        out.push(expr);
+                    }
+                }
+            }
+            JsonTableColumn::Nested(nested) => collect_column_exprs(&nested.columns, out),
+        }
+    }
+}
+
+fn collect_column_exprs_mut<'a>(columns: &'a mut [JsonTableColumn], out: &mut Vec<&'a mut Expr>) {
+    for column in columns {
+        match column {
+            JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists(_) => {}
+            JsonTableColumn::Value(value) => {
+                for behavior in [&mut value.on_empty, &mut value.on_error]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let JsonBehavior::Default(expr) = behavior {
+                        out.push(expr);
+                    }
+                }
+            }
+            JsonTableColumn::Nested(nested) => collect_column_exprs_mut(&mut nested.columns, out),
+        }
+    }
 }
 
 /// One function call inside a FROM-position function item.
@@ -2441,6 +3660,11 @@ pub enum Expr {
     /// is now scale-faithful `numeric`, and `float8` needs an explicit cast).
     NumericLiteral(String),
     StringLiteral(String),
+    /// A `B'…'` / `X'…'` bit-string literal, already decoded to its binary
+    /// digits. `PostgreSQL` gives these the type `bit` with no length modifier
+    /// and, being a constant rather than a cast, no column label of their own —
+    /// `SELECT B'101'` is `?column?`, not `bit`.
+    BitStringLiteral(String),
     BoolLiteral(bool),
     NullLiteral,
     /// SP33: a column reference, optionally table-qualified (`a.col`). `table` is
@@ -2724,10 +3948,14 @@ impl SqlJsonExpr {
     pub fn result_type(&self) -> ColumnType {
         match self {
             SqlJsonExpr::IsJson { .. } => ColumnType::Bool,
+            // The SQL/JSON constructors default to `json`, not `jsonb`:
+            // `JSON_OBJECT('a': 1)` is `{"a" : 1}` of type json, and
+            // `JSON('{"b":1,  "a":2}')` keeps its spacing. Only `JSON_QUERY`
+            // below defaults to `jsonb`.
             SqlJsonExpr::Object { returning, .. } | SqlJsonExpr::Array { returning, .. } => {
-                returning.unwrap_or(ColumnType::Jsonb)
+                returning.unwrap_or(ColumnType::Json)
             }
-            SqlJsonExpr::Scalar(_) | SqlJsonExpr::Parse { .. } => ColumnType::Jsonb,
+            SqlJsonExpr::Scalar(_) | SqlJsonExpr::Parse { .. } => ColumnType::Json,
             SqlJsonExpr::Serialize { returning, .. } => returning.unwrap_or(ColumnType::Text),
             SqlJsonExpr::Query(q) => match q.op {
                 JsonQueryOp::Exists => q.returning.unwrap_or(ColumnType::Bool),
@@ -2826,15 +4054,34 @@ pub struct FuncCall {
     /// `true` for `f(DISTINCT …)`. `ALL` (the default) parses to `false`.
     pub distinct: bool,
     pub args: FuncArgs,
-    /// `agg(args) FILTER (WHERE predicate)`: the aggregate receives only the
-    /// rows for which the predicate is true. `None` when the call had no
-    /// clause.
+    /// `agg(args ORDER BY key [, …])` — the order the rows are fed to the
+    /// aggregate in, within each group. Empty when the call had no clause.
+    ///
+    /// The items are the very same [`OrderItem`]s a query-level `ORDER BY`
+    /// produces, so the executor sorts an aggregate's input with the identical
+    /// key evaluation, direction and NULL placement it sorts a result set with.
+    /// Only an aggregate may carry one; a scalar call with a sort is `42809`.
+    pub order_by: Vec<OrderItem>,
+    /// `agg(args) FILTER (WHERE predicate)` — only rows for which the predicate
+    /// is true are fed to the aggregate. `None` when the call had no clause.
     ///
     /// Meaningful only for an aggregate (and, in `PostgreSQL`, an aggregate used
     /// as a window function). A plain scalar call cannot carry one, and any
     /// path that cannot honour it refuses and never drops it without a
     /// message.
     pub filter: Option<Box<Expr>>,
+    /// `pg_proc`'s `funcformat = COERCE_SQL_SYNTAX`: the call was written in
+    /// SQL's own grammar rather than as `name(args)`.
+    ///
+    /// `PostgreSQL` lowers several keyword spellings onto ordinary functions
+    /// and remembers which spelling it read, because the rule deparser prints
+    /// the grammar back: `x AT TIME ZONE z` and `x AT LOCAL` both become a
+    /// `timezone` call, and `pg_get_viewdef` reprints them as `(x AT TIME ZONE
+    /// z)` and `(x AT LOCAL)` while an explicitly written `timezone(z, x)` or
+    /// `timezone(x)` stays a call. Nothing about the arguments separates the
+    /// two — `timezone(f1)` and `f1 AT LOCAL` are the same one-argument call —
+    /// so the spelling has to be carried.
+    pub sql_syntax: bool,
 }
 
 /// SP27: a function call's argument list. `Star` is the `f(*)` form (only
@@ -2994,9 +4241,13 @@ pub enum MatchKind {
 }
 
 /// A one-operand operator: the prefix forms (`NOT`, unary `-`, `~`, `@`, `|/`,
-/// `||/`) and SQL's six postfix boolean tests. The tests belong here because
-/// that is exactly what they are: one boolean operand in, one never-NULL
-/// boolean out.
+/// `||/`, and the geometric `#`, `@-@`, `@@`, `?-`, `?|`) and SQL's six postfix
+/// boolean tests. The tests belong here because that is exactly what they are —
+/// one boolean operand in, one never-NULL boolean out.
+///
+/// Four of the geometric spellings are shared with an infix operator (`#`,
+/// `@@`, `?-`, `?|`); the parser picks the reading from the position, and the
+/// executor picks the implementation from the operand type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
@@ -3016,6 +4267,12 @@ pub enum UnaryOp {
     IsNotFalse,
     /// `expr IS UNKNOWN`: `IS NULL` restricted to a boolean operand.
     IsUnknown,
+    /// `expr IS DOCUMENT` — is this `xml` value a single-rooted document?
+    /// Never raises on a malformed value: anything that fails the document
+    /// grammar is simply not a document.
+    IsDocument,
+    /// `expr IS NOT DOCUMENT`
+    IsNotDocument,
     /// `expr IS NOT UNKNOWN`
     IsNotUnknown,
     /// Prefix `~`: bitwise NOT. Spelled like the infix regex-match operator;
@@ -3029,6 +4286,24 @@ pub enum UnaryOp {
     Cbrt,
     /// Prefix `!!`: tsquery boolean negation.
     TsNot,
+    /// Prefix `#` — the number of points in a path or polygon. Spelled like the
+    /// infix XOR/geometric-intersection operator; only the position tells them
+    /// apart.
+    NPoints,
+    /// Prefix `@-@` — the length of an lseg or path. `PostgreSQL` has no infix
+    /// `@-@`, so this spelling is unambiguous once the lexer munches it whole:
+    /// `@-@ x` is a length, never `@(-(@x))`.
+    Length,
+    /// Prefix `@@` — the centre of a box, circle, lseg or polygon. Spelled like
+    /// the infix jsonpath-match operator.
+    Center,
+    /// Prefix `?-` — is this line or lseg horizontal? Spelled like the infix
+    /// "these two points share a `y`" operator.
+    IsHorizontal,
+    /// Prefix `?|` — is this line or lseg vertical? Spelled like the infix
+    /// jsonb "any key exists" and geometric "these two points share an `x`"
+    /// operators.
+    IsVertical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3055,7 +4330,10 @@ pub enum BinaryOp {
     ContainedBy,
     /// jsonb `?`: the string exists as a top-level key (or array element).
     KeyExists,
-    /// jsonb `?|`: any of the given strings exist as top-level keys.
+    /// jsonb `?|` — any of the given strings exist as top-level keys. Also the
+    /// geometric `point ?| point` (do the two points share an `x`?): one
+    /// spelling, one `BinaryOp`, and the operand types choose the meaning at
+    /// evaluation time.
     KeyExistsAny,
     /// jsonb `?&`: all of the given strings exist as top-level keys.
     KeyExistsAll,
@@ -3065,7 +4343,40 @@ pub enum BinaryOp {
     JsonPathMatch,
     /// array `&&`: the two arrays have at least one element in common.
     Overlaps,
-    /// `tsquery <-> tsquery`: adjacent phrase composition.
+    /// Range does not extend right of the other range (`&<`).
+    /// Geometric `~=` (same as), `<<|` (strictly below), `|>>` (strictly
+    /// above).
+    Same,
+    StrictlyBelow,
+    StrictlyAbove,
+    /// Geometric `&<|` (does not extend above), `|&>` (does not extend below).
+    DoesNotExtendAbove,
+    DoesNotExtendBelow,
+    DoesNotExtendRight,
+    /// Range does not extend left of the other range (`&>`).
+    DoesNotExtendLeft,
+    /// Geometric `##` — the point on the right-hand operand closest to the
+    /// left-hand one.
+    ClosestPoint,
+    /// Geometric `?#` — do the two operands intersect?
+    Intersects,
+    /// Geometric `point ?- point` — do the two points share a `y`? The same
+    /// spelling is the prefix [`UnaryOp::IsHorizontal`].
+    Horizontal,
+    /// Geometric `?-|` — are the two lines (or lsegs) perpendicular?
+    Perpendicular,
+    /// Geometric `?||` — are the two lines (or lsegs) parallel?
+    Parallel,
+    /// Geometric `<^` — `point` strictly below, `box` below or level with.
+    BelowEq,
+    /// Geometric `>^` — `point` strictly above, `box` above or level with.
+    AboveEq,
+    /// Ranges are adjacent (`-|-`).
+    Adjacent,
+    /// `tsquery <-> tsquery` — adjacent phrase composition. Also the geometric
+    /// distance operator (`point <-> box` and its two dozen siblings), which
+    /// `PostgreSQL` spells the same way; the operand types disambiguate at
+    /// evaluation time, not at parse time.
     Phrase,
     /// `~`: the left string matches the POSIX regular expression on the right.
     Match,
@@ -3079,13 +4390,21 @@ pub enum BinaryOp {
     BitAnd,
     /// `|`: bitwise OR on two integers of the same width.
     BitOr,
-    /// `#`: bitwise XOR on two integers of the same width.
+    /// `#` — bitwise XOR on two integers of the same width. Also the geometric
+    /// intersection point (`box # box`, `line # line`, `lseg # lseg`); the
+    /// operand types disambiguate at evaluation time.
     BitXor,
     /// `<<`: bitwise left shift.
     Shl,
     /// `>>`: bitwise (arithmetic) right shift.
     Shr,
-    /// `^`: exponentiation. `float8` unless an operand is `numeric`, and
+    /// `<<=` — the `inet`/`cidr` network on the left is contained by or equals
+    /// the one on the right.
+    ContainedByOrEq,
+    /// `>>=` — the `inet`/`cidr` network on the left contains or equals the one
+    /// on the right.
+    ContainsOrEq,
+    /// `^` — exponentiation. `float8` unless an operand is `numeric`, and
     /// LEFT-associative in `PostgreSQL` (`2^3^2` is 64, not 512).
     Pow,
     /// `%`: modulo. Integer and `numeric` only; `float8` has no `%`.
@@ -3197,13 +4516,30 @@ pub struct RoutineArg {
 /// cannot resolve. The parser carries those names through as
 /// [`RoutineType::Named`], and the catalog resolves them when the routine is
 /// created.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RoutineType {
     /// The resolved built-in type, absent when the name is not a built-in.
     pub resolved: Option<ColumnType>,
     /// The type name as `PostgreSQL` spells it back.
     pub name: String,
+    /// One-based character offset of the type name in the statement text, when
+    /// this type was written in a signature rather than synthesised.
+    ///
+    /// `CREATE FUNCTION f(shell_type)` reports `NOTICE: argument type … is only
+    /// a shell` with the `LINE`/caret context a client draws from the error
+    /// position, so the offset has to survive parsing. Excluded from equality:
+    /// two signatures naming the same types are the same signature wherever
+    /// they were written.
+    pub location: Option<usize>,
 }
+
+impl PartialEq for RoutineType {
+    fn eq(&self, other: &Self) -> bool {
+        self.resolved == other.resolved && self.name == other.name
+    }
+}
+
+impl Eq for RoutineType {}
 
 impl RoutineType {
     /// A built-in type resolved by the parser.
@@ -3212,6 +4548,7 @@ impl RoutineType {
         Self {
             resolved: Some(ty),
             name,
+            location: None,
         }
     }
 
@@ -3221,7 +4558,15 @@ impl RoutineType {
         Self {
             resolved: None,
             name,
+            location: None,
         }
+    }
+
+    /// The same type, remembering where it was written.
+    #[must_use]
+    pub const fn at(mut self, location: usize) -> Self {
+        self.location = Some(location);
+        self
     }
 }
 
@@ -3291,6 +4636,11 @@ impl RoutineParallel {
 pub enum RoutineBody {
     /// `AS 'text'` / `AS $$ … $$`: the body exactly as written.
     Source(String),
+    /// `AS 'object_file', 'link_symbol'` for a dynamically loaded routine.
+    External {
+        object_file: String,
+        link_symbol: String,
+    },
     /// `PostgreSQL` 14's `BEGIN ATOMIC … END` SQL body, parsed at definition
     /// time. `text` is the source of the statement list, used to render
     /// `pg_get_functiondef`.
@@ -3365,6 +4715,10 @@ pub enum PlPgSqlVariableConflict {
 }
 
 /// One entry in a PL/pgSQL `DECLARE` section.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing public AST variants would cascade API changes through parser and executor consumers"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlPgSqlDeclaration {
     Variable {
@@ -3480,6 +4834,10 @@ pub enum PlPgSqlStatement {
 }
 
 /// The source iterated by a PL/pgSQL loop.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing public AST variants would cascade API changes through parser and executor consumers"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlPgSqlLoop {
     Unconditional,
@@ -3557,4 +4915,75 @@ pub enum AlterRoutineAction {
         name: String,
         no: bool,
     },
+}
+
+/// The argument list of an aggregate: `(*)` (zero-argument), or a type list.
+///
+/// The old-style `CREATE AGGREGATE name (BASETYPE = …, …)` spelling has no
+/// argument list at all — its one argument comes from
+/// [`AggregateOption::BaseType`] — which is why
+/// [`CreateAggregateStmt::args`] is an `Option`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateArgs {
+    /// `(*)` — the aggregate takes no arguments, as `count(*)` does.
+    Star,
+    /// A written argument list, which may be empty.
+    Args(Vec<RoutineArg>),
+}
+
+/// One `option = value` pair from an aggregate definition.
+///
+/// `PostgreSQL` spells every one of these as an unreserved word followed by
+/// `=`, so none of them is a keyword in this lexer. The numbered spellings
+/// (`SFUNC1`, `STYPE1`, `INITCOND1`) that survive from `PostgreSQL` 7 are folded
+/// onto the unnumbered variants; they mean exactly the same thing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateOption {
+    /// `SFUNC`/`SFUNC1` — the state transition function.
+    SFunc(String),
+    /// `STYPE`/`STYPE1` — the state value's type.
+    SType(RoutineType),
+    /// `FINALFUNC` — the function that turns the final state into the result.
+    FinalFunc(String),
+    /// `INITCOND`/`INITCOND1` — the state's initial value as external text, so
+    /// `initcond = 0` and `initcond = '0'` are the same value. `NULL` (the
+    /// default) is `None`.
+    InitCond(Option<String>),
+    /// Old-style `BASETYPE` — the aggregate's single argument type. `'ANY'` in
+    /// any spelling or quoting is `PostgreSQL`'s way of writing "no declared
+    /// argument type" and arrives as `None`.
+    BaseType(Option<RoutineType>),
+    /// An option this engine records but does not execute — the moving-aggregate
+    /// family (`MSFUNC`, `MINVFUNC`, `MSTYPE`, `MINITCOND`, …), `COMBINEFUNC`,
+    /// `SERIALFUNC`, `DESERIALFUNC`, `PARALLEL`, `SORTOP`, `SSPACE`,
+    /// `FINALFUNC_EXTRA`, `FINALFUNC_MODIFY` and anything else.
+    ///
+    /// `name` is the word as written, so a quoted mixed-case spelling such as
+    /// `"Sfunc1"` — which `PostgreSQL` does *not* recognise — is reported
+    /// verbatim. `value` is the right-hand side rendered the way
+    /// `PostgreSQL`'s `defGetString` renders it: a string literal without its
+    /// quotes, a type or function name without its parenthesised modifiers.
+    Unimplemented { name: String, value: String },
+    /// The bare `HYPOTHETICAL` marker, which carries no `= value`.
+    Hypothetical,
+}
+
+/// `CREATE [OR REPLACE] AGGREGATE name (…) ( option = value [, …] )`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateAggregateStmt {
+    pub name: String,
+    pub or_replace: bool,
+    /// `None` for the old-style form, whose argument comes from `BASETYPE`.
+    pub args: Option<AggregateArgs>,
+    pub options: Vec<AggregateOption>,
+}
+
+/// `name ( * )` or `name ( argtypes )` — an aggregate named for `DROP`/`ALTER`.
+///
+/// Unlike [`RoutineSignature`] the argument list is mandatory: `PostgreSQL` has
+/// no no-parentheses spelling for an aggregate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateSignature {
+    pub name: String,
+    pub args: AggregateArgs,
 }

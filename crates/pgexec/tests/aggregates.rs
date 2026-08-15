@@ -195,3 +195,57 @@ async fn for_update_with_group_by_errors_0a000() {
         .expect_err("for update + group by");
     assert_eq!(err.as_db_error().expect("db").code().code(), "0A000");
 }
+
+/// A `FILTER` predicate decides which rows an aggregate folds, so every path
+/// that stores or rebuilds a call has to carry it. Two of them did not: a stored
+/// view read back its aggregates unfiltered, and a SQL routine body inlined
+/// into a caller lost its predicate and counted every row. Neither involves an
+/// aggregate `ORDER BY`; both share the machinery that carries one.
+#[tokio::test]
+async fn a_filter_predicate_survives_a_view_definition_and_a_routine_body() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE ft (k int, a int);
+             INSERT INTO ft VALUES (1,1),(1,2),(1,3),(2,5),(2,6);
+             CREATE VIEW fv AS SELECT k, count(*) FILTER (WHERE a > 1) AS n, \
+                                      sum(a) FILTER (WHERE a > 2) AS s \
+                               FROM ft GROUP BY k;
+             CREATE FUNCTION big(lim int) RETURNS bigint LANGUAGE sql \
+               AS 'SELECT count(*) FILTER (WHERE a > lim) FROM ft'",
+        )
+        .await
+        .expect("seed");
+
+    let definition: String = client
+        .query_one("SELECT pg_get_viewdef('fv'::regclass, true)", &[])
+        .await
+        .expect("viewdef")
+        .get(0);
+    assert!(
+        definition.contains("count(*) FILTER (WHERE a > 1) AS n"),
+        "{definition}"
+    );
+    assert!(
+        definition.contains("sum(a) FILTER (WHERE a > 2) AS s"),
+        "{definition}"
+    );
+
+    let through_view: Vec<(i32, i64, Option<i64>)> = client
+        .query("SELECT k, n, s FROM fv ORDER BY k", &[])
+        .await
+        .expect("select from view")
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert!(through_view == vec![(1, 2, Some(3)), (2, 2, Some(11))]);
+
+    let inlined = client
+        .query_one("SELECT big(1), big(3), big(9)", &[])
+        .await
+        .expect("routine");
+    let counted: (i64, i64, i64) = (inlined.get(0), inlined.get(1), inlined.get(2));
+    assert!(counted == (4, 2, 0));
+}

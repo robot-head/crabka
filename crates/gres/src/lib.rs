@@ -20,8 +20,8 @@ use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, FjallOptions, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
 use crabka_pgwire::{
     engine::{
-        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification,
-        PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
+        BoundParam, CloseTarget, CopyInResponse, CopyOutStream, Engine, ExecuteOutcome,
+        Notification, PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
     },
     session::{AuthMode, SessionConfig},
     telemetry::{DEFAULT_SAMPLE_RATIO, IngressTracePolicy},
@@ -889,6 +889,17 @@ pub struct PgExecRuntimeOptions {
     /// Lag retained behind the timestamp GC floor.
     #[arg(long = "pgexec-ts-gc-floor-lag", env = "CRABKA_GRES_PGEXEC_TS_GC_FLOOR_LAG", value_parser = parse_pgexec_gc_floor_lag)]
     pub ts_gc_floor_lag: Option<Time>,
+    /// How long a statement may run before the watchdog reports it. Diagnostic
+    /// only: the watchdog logs and never cancels, so this is not a timeout.
+    #[arg(long = "pgexec-stuck-statement-threshold", env = "CRABKA_GRES_PGEXEC_STUCK_STATEMENT_THRESHOLD", value_parser = crabka_units::parse::positive_time)]
+    pub stuck_statement_threshold: Option<Time>,
+    /// How often the stuck-statement watchdog scans the in-flight statements.
+    #[arg(long = "pgexec-stuck-statement-poll", env = "CRABKA_GRES_PGEXEC_STUCK_STATEMENT_POLL", value_parser = crabka_units::parse::positive_time)]
+    pub stuck_statement_poll: Option<Time>,
+    /// How long after reporting a stuck statement the watchdog reports it
+    /// again, if it is still running.
+    #[arg(long = "pgexec-stuck-statement-repeat", env = "CRABKA_GRES_PGEXEC_STUCK_STATEMENT_REPEAT", value_parser = crabka_units::parse::positive_time)]
+    pub stuck_statement_repeat: Option<Time>,
 }
 
 fn parse_pgexec_gc_floor_lag(value: &str) -> Result<Time, String> {
@@ -929,6 +940,17 @@ impl PgExecRuntimeOptions {
                 PositiveUsize::into_value,
             ),
             ts_gc_floor_lag: self.ts_gc_floor_lag.unwrap_or(defaults.ts_gc_floor_lag),
+            stuck_statement: crabka_pgexec::watchdog::StuckStatementPolicy {
+                threshold: self
+                    .stuck_statement_threshold
+                    .unwrap_or(defaults.stuck_statement.threshold),
+                poll_interval: self
+                    .stuck_statement_poll
+                    .unwrap_or(defaults.stuck_statement.poll_interval),
+                repeat_interval: self
+                    .stuck_statement_repeat
+                    .unwrap_or(defaults.stuck_statement.repeat_interval),
+            },
         }
     }
 }
@@ -2753,17 +2775,28 @@ impl Engine for RuntimeEngine {
 }
 
 impl Session for RuntimeSession {
+    fn set_database(&mut self, name: &str) {
+        match self {
+            Self::Single(session) => session.set_database(name),
+            Self::Multi(session) => session.set_database(name),
+        }
+    }
+
+    async fn startup_parameter(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> Result<(), crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.startup_parameter(name, value).await,
+            Self::Multi(session) => session.startup_parameter(name, value).await,
+        }
+    }
+
     async fn startup(&mut self) -> Result<(), crabka_pgwire::error::PgError> {
         match self {
             Self::Single(session) => session.startup().await,
             Self::Multi(session) => session.startup().await,
-        }
-    }
-
-    async fn terminate(&mut self) {
-        match self {
-            Self::Single(session) => session.terminate().await,
-            Self::Multi(session) => session.terminate().await,
         }
     }
 
@@ -2791,6 +2824,31 @@ impl Session for RuntimeSession {
         match self {
             Self::Single(session) => session.simple_query_into(sql, page_rows, sink).await,
             Self::Multi(session) => session.simple_query_into(sql, page_rows, sink).await,
+        }
+    }
+
+    /// Forwarded for the same reason as [`Session::simple_query_into`], and for
+    /// one more: the trait default cannot stop at a `COPY … FROM STDIN`, so a
+    /// runtime that inherited it would refuse every copy that shares its query
+    /// string with another statement.
+    async fn simple_query_batch_into<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        sql: &str,
+        from_statement: usize,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Result<crabka_pgwire::engine::SimpleQueryStop, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => {
+                session
+                    .simple_query_batch_into(sql, from_statement, page_rows, sink)
+                    .await
+            }
+            Self::Multi(session) => {
+                session
+                    .simple_query_batch_into(sql, from_statement, page_rows, sink)
+                    .await
+            }
         }
     }
 
@@ -2888,11 +2946,22 @@ impl Session for RuntimeSession {
     async fn copy_in(
         &mut self,
         sql: &str,
+        statement_index: usize,
         data: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, crabka_pgwire::error::PgError> {
         match self {
-            Self::Single(session) => session.copy_in(sql, data).await,
-            Self::Multi(session) => session.copy_in(sql, data).await,
+            Self::Single(session) => session.copy_in(sql, statement_index, data).await,
+            Self::Multi(session) => session.copy_in(sql, statement_index, data).await,
+        }
+    }
+
+    async fn begin_copy_out(
+        &mut self,
+        sql: &str,
+    ) -> Result<Option<CopyOutStream>, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.begin_copy_out(sql).await,
+            Self::Multi(session) => session.begin_copy_out(sql).await,
         }
     }
 
@@ -12053,6 +12122,9 @@ mod tests {
             "--pgexec-rowid-reservation=39",
             "--pgexec-ts-prune-versions-per-row=40",
             "--pgexec-ts-gc-floor-lag=41ms",
+            "--pgexec-stuck-statement-threshold=42ms",
+            "--pgexec-stuck-statement-poll=43ms",
+            "--pgexec-stuck-statement-repeat=44ms",
         ])
         .expect("PgExec runtime policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -12070,7 +12142,15 @@ mod tests {
                     rowid_reservation: 39,
                     ts_prune_versions_per_row: 40,
                     ts_gc_floor_lag: crabka_units::millis(41),
+                    stuck_statement: crabka_pgexec::watchdog::StuckStatementPolicy {
+                        threshold: crabka_units::millis(42),
+                        poll_interval: crabka_units::millis(43),
+                        repeat_interval: crabka_units::millis(44),
+                    },
                 }
+        );
+        assert!(
+            Cli::try_parse_from(["crabka-gres", "--pgexec-stuck-statement-threshold=0s"]).is_err()
         );
         assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-notify-queue-capacity=0"]).is_err());
         assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-ts-gc-floor-lag=-1ms"]).is_err());

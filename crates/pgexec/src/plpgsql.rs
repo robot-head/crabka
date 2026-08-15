@@ -55,6 +55,16 @@ fn declaration_type(
     })
 }
 
+pub(crate) fn cast_value(
+    value: &Datum,
+    ty: ColumnType,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Datum, ExecError> {
+    let value = crate::eval::cast_value(value, ty, &ctx.time_zone)?;
+    crate::usertype::check_domain(ty, &value, ctx)?;
+    Ok(value)
+}
+
 #[derive(Default)]
 struct Frame {
     label: Option<String>,
@@ -280,15 +290,11 @@ pub(crate) async fn execute_scalar_function(
         routine_oid: routine.oid,
     };
     match interpreter.exec_block(&block).await? {
-        Flow::Return(value) => Ok(value),
-        Flow::Next if interpreter.output_slot.is_some() => Ok(interpreter.output_value()),
-        Flow::Next => Err(ExecError::FunctionError {
-            sqlstate: "2F005",
-            message: format!(
-                "control reached end of function {} without RETURN",
-                routine.identity()
-            ),
-        }),
+        Flow::Return(value) => scalar_function_result(routine, Some(value)),
+        Flow::Next if interpreter.output_slot.is_some() => {
+            scalar_function_result(routine, Some(interpreter.output_value()))
+        }
+        Flow::Next => scalar_function_result(routine, None),
         Flow::LoopControl { .. } => Err(ExecError::Syntax(
             "EXIT or CONTINUE cannot be used outside a loop".into(),
         )),
@@ -301,6 +307,16 @@ pub(crate) async fn execute_trigger_function(
     invocation: crate::trigger::TriggerInvocation,
 ) -> Result<Datum, ExecError> {
     let block = crate::routine::parse_plpgsql_body(routine)?;
+    let is_event_trigger = invocation.event.is_some();
+    // An event trigger's body can raise the event that fired it -- a DROP inside
+    // an `ON sql_drop` body is enough -- and nothing on this path counts the
+    // nesting. `trigger::invoke` guards the row-trigger path, but
+    // `fire_event_triggers` reaches this function directly, so an unguarded
+    // event trigger recurses until the stack is gone and the process aborts,
+    // taking every other connection with it.
+    let _event_call_depth = is_event_trigger
+        .then(|| session.plpgsql_enter_call())
+        .transpose()?;
     let mut frame = root_frame();
     frame.label = Some(routine.name.clone());
     let record_types: Arc<[ColumnType]> = Arc::from(invocation.column_types);
@@ -372,6 +388,7 @@ pub(crate) async fn execute_trigger_function(
     };
     match interpreter.exec_block(&block).await? {
         Flow::Return(value) => Ok(value),
+        Flow::Next if is_event_trigger => Ok(Datum::Null),
         Flow::Next => Err(ExecError::FunctionError {
             sqlstate: "2F005",
             message: "control reached end of trigger procedure without RETURN".to_string(),
@@ -455,19 +472,35 @@ pub(crate) fn eval_scalar_function(
         context: format!("PL/pgSQL function {}", routine.identity()),
     };
     match interpreter.exec_block(&block)? {
-        ScalarFlow::Return(value) => Ok(value),
-        ScalarFlow::Next if interpreter.output_slot.is_some() => Ok(interpreter.output_value()),
-        ScalarFlow::Next => Err(ExecError::FunctionError {
-            sqlstate: "2F005",
-            message: format!(
-                "control reached end of function {} without RETURN",
-                routine.identity()
-            ),
-        }),
+        ScalarFlow::Return(value) => scalar_function_result(routine, Some(value)),
+        ScalarFlow::Next if interpreter.output_slot.is_some() => {
+            scalar_function_result(routine, Some(interpreter.output_value()))
+        }
+        ScalarFlow::Next => scalar_function_result(routine, None),
         ScalarFlow::LoopControl { .. } => Err(ExecError::Syntax(
             "EXIT or CONTINUE cannot be used outside a loop".into(),
         )),
     }
+}
+
+/// Fold a scalar body's exit into the function's answer. `returned` is `None`
+/// when control fell off the end of the body.
+///
+/// A `RETURNS void` function is allowed to fall off the end: PostgreSQL's
+/// PL/pgSQL compiler appends the missing `RETURN` to a void body rather than
+/// leaving the runtime to complain. Its answer is the void value however the
+/// body left, because a bare `RETURN;` carries nothing to answer with.
+fn scalar_function_result(routine: &Routine, returned: Option<Datum>) -> Result<Datum, ExecError> {
+    if crate::routine::declared_returns_void(routine) {
+        return Ok(crate::routine::void_result_value());
+    }
+    returned.ok_or_else(|| ExecError::FunctionError {
+        sqlstate: "2F005",
+        message: format!(
+            "control reached end of function {} without RETURN",
+            routine.identity()
+        ),
+    })
 }
 
 /// Whether a scalar body needs the owning SQL session rather than the pure
@@ -692,8 +725,12 @@ fn bind_scalar_parameters(
         ..Frame::default()
     };
     for (index, (param, value)) in inputs.iter().zip(values).enumerate() {
-        let ty = param.ty.column.unwrap_or(ColumnType::Text);
-        let value = crabka_pgtypes::cast::cast(value, ty, &ctx.time_zone)?;
+        let ty = param
+            .ty
+            .column
+            .or_else(|| value.column_type())
+            .unwrap_or(ColumnType::Text);
+        let value = cast_value(value, ty, ctx)?;
         let positional = format!("${}", index + 1);
         frame.slots.insert(
             positional.clone(),
@@ -1065,8 +1102,9 @@ impl ScalarInterpreter<'_> {
                         .as_ref()
                         .map(|expr| self.eval(expr))
                         .transpose()?
+                        .filter(|value| !value.is_null())
                         .map_or_else(
-                            || "assertion failed".into(),
+                            || DEFAULT_ASSERT_MESSAGE.to_string(),
                             |value| {
                                 String::from_utf8_lossy(
                                     &crabka_pgtypes::encoding::encode_text(
@@ -1222,7 +1260,7 @@ impl ScalarInterpreter<'_> {
                     .map(|expr| self.eval(expr))
                     .transpose()?
                     .unwrap_or(Datum::Null);
-                let value = crabka_pgtypes::cast::cast(&value, ty, &self.ctx.time_zone)?;
+                let value = cast_value(&value, ty, self.ctx)?;
                 if *not_null && value.is_null() {
                     return Err(ExecError::FunctionError {
                         sqlstate: "23502",
@@ -1303,9 +1341,7 @@ impl ScalarInterpreter<'_> {
 
     fn integer(&self, expr: &Expr) -> Result<i32, ExecError> {
         let value = self.eval(expr)?;
-        let Datum::Int4(value) =
-            crabka_pgtypes::cast::cast(&value, ColumnType::Int4, &self.ctx.time_zone)?
-        else {
+        let Datum::Int4(value) = cast_value(&value, ColumnType::Int4, self.ctx)? else {
             unreachable!("int4 cast returned another datum type");
         };
         Ok(value)
@@ -1379,7 +1415,7 @@ impl ScalarInterpreter<'_> {
                     .or_else(|| record.values[index].column_type());
                 record.values[index] = if subscripts.is_empty() {
                     match field_type {
-                        Some(ty) => crabka_pgtypes::cast::cast(&value, ty, &self.ctx.time_zone)?,
+                        Some(ty) => cast_value(&value, ty, self.ctx)?,
                         None => value,
                     }
                 } else {
@@ -1409,7 +1445,7 @@ impl ScalarInterpreter<'_> {
                         message: format!("variable \"{name}\" is declared CONSTANT"),
                     });
                 }
-                let value = crabka_pgtypes::cast::cast(&value, slot.ty, &self.ctx.time_zone)?;
+                let value = cast_value(&value, slot.ty, self.ctx)?;
                 if slot.not_null && value.is_null() {
                     return Err(ExecError::FunctionError {
                         sqlstate: "23502",
@@ -1462,6 +1498,9 @@ impl ScalarInterpreter<'_> {
             .iter()
             .map(|expr| {
                 self.eval(expr).map(|value| {
+                    if value.is_null() {
+                        return NULL_RAISE_PARAMETER.to_string();
+                    }
                     String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
                         &value,
                         &self.ctx.time_zone,
@@ -1474,18 +1513,18 @@ impl ScalarInterpreter<'_> {
             .options
             .iter()
             .map(|(name, expr)| {
-                self.eval(expr).map(|value| {
-                    (
-                        name.as_str(),
-                        String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
-                            &value,
-                            &self.ctx.time_zone,
-                        ))
-                        .into_owned(),
-                    )
-                })
+                let value = self.eval(expr)?;
+                reject_null_raise_option(&value)?;
+                Ok((
+                    name.as_str(),
+                    String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
+                        &value,
+                        &self.ctx.time_zone,
+                    ))
+                    .into_owned(),
+                ))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, ExecError>>()?;
         let diagnostic =
             build_raise_diagnostic(raise, &values, options)?.with_context(self.context.clone());
         Err(ExecError::Remote(diagnostic))
@@ -1732,11 +1771,11 @@ impl Interpreter<'_> {
                         Ok(Flow::Next)
                     } else {
                         let message = match message {
-                            Some(expr) => {
-                                let value = self.eval_async(expr).await?.0;
-                                self.session.plpgsql_render(&value)
-                            }
-                            None => "assertion failed".into(),
+                            Some(expr) => match self.eval_async(expr).await?.0 {
+                                Datum::Null => DEFAULT_ASSERT_MESSAGE.to_string(),
+                                value => self.session.plpgsql_render(&value),
+                            },
+                            None => DEFAULT_ASSERT_MESSAGE.to_string(),
                         };
                         Err(ExecError::FunctionError {
                             sqlstate: "P0004",
@@ -1854,7 +1893,7 @@ impl Interpreter<'_> {
                             let ty = ty.resolved.unwrap_or(ColumnType::Text);
                             let value = self.eval_async(expression).await?.0;
                             let ctx = self.session.plpgsql_eval_context();
-                            let value = crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone)?;
+                            let value = cast_value(&value, ty, &ctx)?;
                             frame.slots.insert(
                                 name.clone(),
                                 Slot {
@@ -2201,6 +2240,8 @@ impl Interpreter<'_> {
                     }
                     None => Datum::Null,
                 };
+                let ctx = self.session.plpgsql_eval_context();
+                let value = cast_value(&value, ty, &ctx)?;
                 if *not_null && matches!(value, Datum::Null) {
                     return Err(ExecError::FunctionError {
                         sqlstate: "23502",
@@ -2306,9 +2347,8 @@ impl Interpreter<'_> {
 
     async fn integer_async(&mut self, expr: &Expr) -> Result<i32, ExecError> {
         let value = self.eval_async(expr).await?.0;
-        let time_zone = self.session.plpgsql_eval_context().time_zone;
-        let Datum::Int4(value) = crabka_pgtypes::cast::cast(&value, ColumnType::Int4, &time_zone)?
-        else {
+        let ctx = self.session.plpgsql_eval_context();
+        let Datum::Int4(value) = cast_value(&value, ColumnType::Int4, &ctx)? else {
             unreachable!("int4 cast returned another datum type");
         };
         Ok(value)
@@ -2387,7 +2427,7 @@ impl Interpreter<'_> {
                     .or_else(|| record.values[index].column_type());
                 record.values[index] = if subscripts.is_empty() {
                     match field_type {
-                        Some(ty) => crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone)?,
+                        Some(ty) => cast_value(&value, ty, &ctx)?,
                         None => value,
                     }
                 } else {
@@ -2409,7 +2449,7 @@ impl Interpreter<'_> {
 
     fn assign_name(&mut self, name: &str, value: Datum) -> Result<(), ExecError> {
         let name = self.resolve_alias(name);
-        let time_zone = self.session.plpgsql_eval_context().time_zone;
+        let ctx = self.session.plpgsql_eval_context();
         for frame in self.frames.iter_mut().rev() {
             if let Some(slot) = frame.slots.get_mut(&name) {
                 if slot.constant {
@@ -2418,7 +2458,7 @@ impl Interpreter<'_> {
                         message: format!("variable \"{name}\" is declared CONSTANT"),
                     });
                 }
-                let value = crabka_pgtypes::cast::cast(&value, slot.ty, &time_zone)?;
+                let value = cast_value(&value, slot.ty, &ctx)?;
                 if slot.not_null && matches!(value, Datum::Null) {
                     return Err(ExecError::FunctionError {
                         sqlstate: "23502",
@@ -2498,7 +2538,7 @@ impl Interpreter<'_> {
     }
 
     fn push_set_row(&mut self, row: Vec<Datum>) -> Result<(), ExecError> {
-        let time_zone = self.session.plpgsql_eval_context().time_zone;
+        let ctx = self.session.plpgsql_eval_context();
         let collector = self
             .set_results
             .as_mut()
@@ -2516,9 +2556,7 @@ impl Interpreter<'_> {
         let row = row
             .into_iter()
             .zip(&collector.columns)
-            .map(|(value, (_, ty))| {
-                crabka_pgtypes::cast::cast(&value, *ty, &time_zone).map_err(ExecError::from)
-            })
+            .map(|(value, (_, ty))| cast_value(&value, *ty, &ctx))
             .collect::<Result<Vec<_>, _>>()?;
         collector.rows.push(row);
         Ok(())
@@ -2661,6 +2699,7 @@ impl Interpreter<'_> {
         let mut options = Vec::with_capacity(raise.options.len());
         for (name, value) in &raise.options {
             let value = self.eval_async(value).await?.0;
+            reject_null_raise_option(&value)?;
             let value = self.session.plpgsql_render(&value);
             options.push((name.as_str(), value));
         }
@@ -2765,6 +2804,30 @@ fn call_output_target(expr: &Expr) -> Option<PlPgSqlTarget> {
         _ => None,
     }
 }
+
+/// The spelling `PostgreSQL` substitutes for a NULL `RAISE` format parameter.
+///
+/// `RAISE NOTICE '%', NULL` prints `<NULL>` there. A NULL is not a value the
+/// text output functions can render — it travels out of band on the wire — so
+/// every rendering path in a `RAISE` has to name it explicitly rather than hand
+/// it to `encode_text`, which panics on one.
+pub(crate) const NULL_RAISE_PARAMETER: &str = "<NULL>";
+
+/// A NULL `USING` option value is an error, not a `<NULL>`: `PostgreSQL` reports
+/// 22004 rather than putting the word into the DETAIL or HINT.
+fn reject_null_raise_option(value: &Datum) -> Result<(), ExecError> {
+    if value.is_null() {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22004",
+            message: "RAISE statement option cannot be null".into(),
+        });
+    }
+    Ok(())
+}
+
+/// `ASSERT cond, message` with a NULL message falls back to the default text,
+/// exactly as `PostgreSQL` does — the NULL is not rendered at all.
+const DEFAULT_ASSERT_MESSAGE: &str = "assertion failed";
 
 fn build_raise_diagnostic<'a>(
     raise: &PlPgSqlRaise,
@@ -3021,12 +3084,13 @@ fn rewrite_expr_with(
         Expr::Column { table, name } => {
             column(table.as_deref(), name)?.unwrap_or_else(|| expr.clone())
         }
+        Expr::Param(index) => column(None, &format!("${index}"))?.unwrap_or_else(|| expr.clone()),
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
-        | Expr::Param(_)
         | Expr::Default
         | Expr::Const { .. } => expr.clone(),
         Expr::Unary { op, expr } => Expr::Unary {
@@ -3039,12 +3103,26 @@ fn rewrite_expr_with(
             right: boxed(right)?,
         },
         Expr::Func(call) => Expr::Func(crabka_pgparser::ast::FuncCall {
+            sql_syntax: call.sql_syntax,
             name: call.name.clone(),
             distinct: call.distinct,
             args: match &call.args {
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(list(args)?),
             },
+            // An aggregate's sort keys may name the very variables this rewrite
+            // substitutes, so they travel through it like the arguments.
+            order_by: call
+                .order_by
+                .iter()
+                .map(|item| {
+                    Ok(crabka_pgparser::ast::OrderItem {
+                        expr: one(&item.expr)?,
+                        asc: item.asc,
+                        nulls_first: item.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
             filter: call.filter.as_deref().map(boxed).transpose()?,
         }),
         Expr::IsNull { expr, negated } => Expr::IsNull {
@@ -3341,6 +3419,7 @@ fn rewrite_statement_with_ctes(
             let source_table = match source {
                 crabka_pgparser::ast::MergeSource::Table { name, alias } => TableExpr::Table {
                     name: name.clone(),
+                    only: false,
                     alias: alias.clone(),
                     columns: None,
                     sample: None,
@@ -3757,6 +3836,7 @@ impl SqlBinder<'_, '_> {
                 .into_iter()
                 .map(|field| {
                     Ok(crate::scope::ColumnBinding {
+                        exposure: crate::scope::Exposure::Output,
                         qualifier: None,
                         name: field.name,
                         ty: crate::exec::column_type_from_oid(field.type_oid)?,
@@ -3774,13 +3854,21 @@ impl SqlBinder<'_, '_> {
         for item in projection {
             match item {
                 SelectItem::Wildcard => {
-                    columns.extend(input.columns.iter().map(|column| {
-                        crate::scope::ColumnBinding {
-                            qualifier: None,
-                            name: column.name.clone(),
-                            ty: column.ty,
-                        }
-                    }));
+                    // Skips a USING/NATURAL join's retained input columns for
+                    // the same reason the real projection does, so this name
+                    // scope keeps agreeing with the projection's width.
+                    columns.extend(
+                        input
+                            .columns
+                            .iter()
+                            .filter(|column| !column.is_join_input())
+                            .map(|column| crate::scope::ColumnBinding {
+                                exposure: crate::scope::Exposure::Output,
+                                qualifier: None,
+                                name: column.name.clone(),
+                                ty: column.ty,
+                            }),
+                    );
                 }
                 SelectItem::QualifiedWildcard(qualifier) => columns.extend(
                     input
@@ -3788,6 +3876,7 @@ impl SqlBinder<'_, '_> {
                         .iter()
                         .filter(|column| column.qualifier.as_deref() == Some(qualifier))
                         .map(|column| crate::scope::ColumnBinding {
+                            exposure: crate::scope::Exposure::Output,
                             qualifier: None,
                             name: column.name.clone(),
                             ty: column.ty,
@@ -3795,6 +3884,7 @@ impl SqlBinder<'_, '_> {
                 ),
                 SelectItem::Expr { expr, alias } => {
                     columns.push(crate::scope::ColumnBinding {
+                        exposure: crate::scope::Exposure::Output,
                         qualifier: None,
                         name: alias
                             .clone()
@@ -3885,6 +3975,14 @@ impl SqlBinder<'_, '_> {
                 } else {
                     self.rewrite_query(subquery, ctes)?
                 };
+            }
+            // A `JSON_TABLE` item is implicitly lateral, so its context and
+            // `PASSING` expressions are rewritten against the outer scope
+            // exactly as a function item's arguments are.
+            TableExpr::JsonTable(table) => {
+                for expr in table.exprs_mut() {
+                    *expr = self.rewrite_expr_outer(expr, outer, query_outers, ctes)?;
+                }
             }
             TableExpr::Join {
                 left,
@@ -4220,6 +4318,24 @@ mod tests {
             .await
             .expect("OUT function");
         assert!(first_text(&rows[1..]) == "18");
+    }
+
+    #[tokio::test]
+    async fn scalar_function_binds_positional_parameters() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let rows = session
+            .simple_query(
+                "CREATE FUNCTION pl_multirange(i anyrange) RETURNS anymultirange LANGUAGE plpgsql AS $$
+                 BEGIN
+                   RETURN multirange($1);
+                 END
+                 $$; \
+                 SELECT pl_multirange(int4range(1, 4))",
+            )
+            .await
+            .expect("positional parameter");
+        assert!(first_text(&rows[1..]) == "{[1,4)}");
     }
 
     #[tokio::test]

@@ -422,6 +422,105 @@ async fn drop_schema_without_cascade_refuses_and_drops_nothing() {
     .await;
 }
 
+/// User types occupy a schema even though they are stored outside the relation
+/// key families. A range's generated multirange may occupy a different schema
+/// from its primary row, and user types in still-live schemas may depend on
+/// either identity. The same cleanup batch also owns temporary namespace type
+/// removal, so that path is exercised sequentially here: user-type parser state
+/// is process-wide, while each test engine has an independent OID counter.
+#[tokio::test]
+async fn schema_user_types_require_cascade_and_drop_dependents() {
+    const SCHEMA_TYPES: &str = "SELECT n.nspname, t.typname FROM pg_type t \
+                                JOIN pg_namespace n ON n.oid = t.typnamespace \
+                                WHERE t.typname IN \
+                                ('root_e', 'local_range', 'local_multirange', \
+                                 'dep_pair', 'external_range', 'generated_mr', \
+                                 'range_dep', 'multirange_dep') \
+                                ORDER BY 1, 2";
+    const TEMP_TYPES: &str = "SELECT typname FROM pg_type WHERE typname IN \
+                              ('discard_temp_e', 'discard_temp_dep', \
+                               'discard_temp_range', 'discard_temp_multirange') \
+                              ORDER BY 1";
+    run_cases(vec![
+        Case {
+            why: "RESTRICT sees type-only contents; CASCADE drops primary and generated type \
+                  rows, including dependents in another schema",
+            setup: &[
+                "CREATE SCHEMA type_drop_s",
+                "CREATE SCHEMA type_drop_o",
+                "CREATE TYPE type_drop_s.root_e AS ENUM ('x')",
+                "CREATE TYPE type_drop_s.local_range AS RANGE (SUBTYPE = int4)",
+                "CREATE TYPE type_drop_o.dep_pair AS (value type_drop_s.root_e)",
+                "CREATE TYPE type_drop_o.external_range AS RANGE \
+                 (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = type_drop_s.generated_mr)",
+                "CREATE TYPE type_drop_o.range_dep AS (value type_drop_o.external_range)",
+                "CREATE TYPE type_drop_o.multirange_dep AS \
+                 (value type_drop_s.local_multirange)",
+            ],
+            script: &[
+                "DROP SCHEMA type_drop_s",
+                SCHEMA_TYPES,
+                "DROP SCHEMA type_drop_s CASCADE",
+                SCHEMA_TYPES,
+                "SELECT NULL::type_drop_s.root_e",
+                "SELECT NULL::type_drop_s.generated_mr",
+                "SELECT NULL::type_drop_o.dep_pair",
+            ],
+            expect: vec![
+                error(
+                    "2BP01",
+                    "cannot drop schema type_drop_s because other objects depend on it",
+                ),
+                rows(&[
+                    &["type_drop_o", "dep_pair"],
+                    &["type_drop_o", "external_range"],
+                    &["type_drop_o", "multirange_dep"],
+                    &["type_drop_o", "range_dep"],
+                    &["type_drop_s", "generated_mr"],
+                    &["type_drop_s", "local_multirange"],
+                    &["type_drop_s", "local_range"],
+                    &["type_drop_s", "root_e"],
+                ]),
+                tag("DROP SCHEMA"),
+                empty(),
+                error("42704", "type \"type_drop_s.root_e\" does not exist"),
+                error("42704", "type \"type_drop_s.generated_mr\" does not exist"),
+                error("42704", "type \"type_drop_o.dep_pair\" does not exist"),
+            ],
+        },
+        Case {
+            why: "DISCARD TEMP removes durable rows and parser registry identities for all temp \
+                  types",
+            setup: &[
+                "CREATE TEMP TABLE temp_type_seed (id int4)",
+                "CREATE TYPE pg_temp.discard_temp_e AS ENUM ('x')",
+                "CREATE TYPE pg_temp.discard_temp_dep AS (value discard_temp_e)",
+                "CREATE TYPE pg_temp.discard_temp_range AS RANGE (SUBTYPE = int4)",
+            ],
+            script: &[
+                TEMP_TYPES,
+                "DISCARD TEMP",
+                TEMP_TYPES,
+                "SELECT NULL::discard_temp_e",
+                "SELECT NULL::discard_temp_multirange",
+            ],
+            expect: vec![
+                rows(&[
+                    &["discard_temp_dep"],
+                    &["discard_temp_e"],
+                    &["discard_temp_multirange"],
+                    &["discard_temp_range"],
+                ]),
+                tag("DISCARD TEMP"),
+                empty(),
+                error("42704", "type \"discard_temp_e\" does not exist"),
+                error("42704", "type \"discard_temp_multirange\" does not exist"),
+            ],
+        },
+    ])
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // A session's own temporary namespace
 // ---------------------------------------------------------------------------
@@ -467,4 +566,248 @@ async fn discarding_temporary_relations_leaves_permanent_views_alone() {
         },
     ])
     .await;
+}
+
+/// A `CASCADE` drop reports what it took with it.
+///
+/// `PostgreSQL` names a single dependent inline and several as a count plus one
+/// `DETAIL` line each, ordered depth-first: a view reading another view is
+/// reported directly after it, before the next sibling. Every string here was
+/// captured from `PostgreSQL` 18.4.
+#[tokio::test]
+async fn a_cascade_drop_reports_the_objects_it_removes() {
+    async fn go(session: &mut SqlSession, sql: &str) {
+        session
+            .simple_query(sql)
+            .await
+            .unwrap_or_else(|err| panic!("{sql} failed: {err:?}"));
+    }
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+
+    // m3 reads m1, so it is reported between the two direct dependents.
+    go(&mut session, "CREATE TABLE m(a int, b int)").await;
+    go(&mut session, "CREATE VIEW m1 AS SELECT a FROM m").await;
+    go(&mut session, "CREATE VIEW m2 AS SELECT b FROM m").await;
+    go(&mut session, "CREATE VIEW m3 AS SELECT a FROM m1").await;
+    go(&mut session, "DROP TABLE m CASCADE").await;
+
+    let notice = notices.try_recv().expect("a cascade notice");
+    assert!(
+        notice.message == "drop cascades to 3 other objects",
+        "{notice:?}"
+    );
+    let fields = notice.diagnostics.expect("structured fields");
+    assert!(
+        fields.detail.as_deref()
+            == Some("drop cascades to view m1\ndrop cascades to view m3\ndrop cascades to view m2"),
+        "{fields:?}"
+    );
+
+    // One dependent is named inline, with no DETAIL at all.
+    go(&mut session, "CREATE TABLE s(a int)").await;
+    go(&mut session, "CREATE VIEW s1 AS SELECT a FROM s").await;
+    go(&mut session, "DROP TABLE s CASCADE").await;
+    let notice = notices.try_recv().expect("a cascade notice");
+    assert!(notice.message == "drop cascades to view s1", "{notice:?}");
+    assert!(notice.diagnostics.is_none(), "{notice:?}");
+
+    // DROP VIEW cascades the same way.
+    go(&mut session, "CREATE TABLE v(a int)").await;
+    go(&mut session, "CREATE VIEW v1 AS SELECT a FROM v").await;
+    go(&mut session, "CREATE VIEW v2 AS SELECT a FROM v1").await;
+    go(&mut session, "DROP VIEW v1 CASCADE").await;
+    let notice = notices.try_recv().expect("a cascade notice");
+    assert!(notice.message == "drop cascades to view v2", "{notice:?}");
+
+    // A drop that cascades to nothing says nothing.
+    go(&mut session, "CREATE TABLE q(a int)").await;
+    go(&mut session, "DROP TABLE q CASCADE").await;
+    assert!(notices.try_recv().is_err());
+}
+
+/// `DROP SCHEMA … CASCADE` reports what it removed, which is every object the
+/// schema held and everything outside it that depended on one.
+///
+/// Each object is named with *its own* kind word — a sequence is a sequence and
+/// a materialized view is a materialized view, not "view" for all of them — and
+/// is schema-qualified exactly when the search path does not make it visible.
+/// Every string here was captured from `PostgreSQL` 18.4.
+#[tokio::test]
+async fn dropping_a_schema_reports_the_objects_it_removes() {
+    struct Case {
+        name: &'static str,
+        setup: &'static [&'static str],
+        drop: &'static str,
+        message: &'static str,
+        detail: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            name: "each kind is named with its own word, and qualified when not on the path",
+            setup: &[
+                "CREATE SCHEMA a",
+                "CREATE TABLE a.t (x int)",
+                "CREATE SEQUENCE a.q",
+                "CREATE VIEW a.v AS SELECT 1",
+            ],
+            drop: "DROP SCHEMA a CASCADE",
+            message: "drop cascades to 3 other objects",
+            detail: Some(
+                "drop cascades to table a.t\n\
+                 drop cascades to sequence a.q\n\
+                 drop cascades to view a.v",
+            ),
+        },
+        Case {
+            name: "a single object is named inline with no DETAIL",
+            setup: &["CREATE SCHEMA b", "CREATE TABLE b.t1 (x int)"],
+            drop: "DROP SCHEMA b CASCADE",
+            message: "drop cascades to table b.t1",
+            detail: None,
+        },
+        Case {
+            name: "a materialized view keeps its own two-word kind",
+            setup: &[
+                "CREATE SCHEMA c",
+                "CREATE TABLE c.t (x int)",
+                "CREATE MATERIALIZED VIEW c.m AS SELECT x FROM c.t",
+            ],
+            drop: "DROP SCHEMA c CASCADE",
+            message: "drop cascades to 2 other objects",
+            detail: Some("drop cascades to table c.t\ndrop cascades to materialized view c.m"),
+        },
+        Case {
+            name: "a composite, an enum and a domain are all `type`",
+            setup: &[
+                "CREATE SCHEMA d",
+                "CREATE TYPE d.ty AS (x int)",
+                "CREATE TYPE d.en AS ENUM ('a', 'b')",
+                "CREATE DOMAIN d.dm AS int",
+            ],
+            drop: "DROP SCHEMA d CASCADE",
+            message: "drop cascades to 3 other objects",
+            detail: Some(
+                "drop cascades to type d.ty\n\
+                 drop cascades to type d.en\n\
+                 drop cascades to type d.dm",
+            ),
+        },
+        Case {
+            name: "a dependent outside the schema goes with it and is reported",
+            setup: &[
+                "CREATE SCHEMA e",
+                "CREATE SCHEMA f",
+                "CREATE TABLE e.base (x int)",
+                "CREATE VIEW f.over_base AS SELECT x FROM e.base",
+            ],
+            drop: "DROP SCHEMA e CASCADE",
+            message: "drop cascades to 2 other objects",
+            detail: Some("drop cascades to table e.base\ndrop cascades to view f.over_base"),
+        },
+        Case {
+            name: "a name that would not read back bare is quoted, in both parts",
+            setup: &[
+                "CREATE SCHEMA \"g X\"",
+                "CREATE TABLE \"g X\".\"T-1\" (x int)",
+            ],
+            drop: "DROP SCHEMA \"g X\" CASCADE",
+            message: "drop cascades to table \"g X\".\"T-1\"",
+            detail: None,
+        },
+        Case {
+            name: "an empty schema cascades to nothing and says nothing",
+            setup: &["CREATE SCHEMA h"],
+            drop: "DROP SCHEMA h CASCADE",
+            message: "",
+            detail: None,
+        },
+    ];
+
+    for case in cases {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        for sql in case.setup {
+            session
+                .simple_query(sql)
+                .await
+                .unwrap_or_else(|error| panic!("{}: {sql} failed: {error:?}", case.name));
+        }
+        session
+            .simple_query(case.drop)
+            .await
+            .unwrap_or_else(|error| panic!("{}: {} failed: {error:?}", case.name, case.drop));
+
+        if case.message.is_empty() {
+            assert!(notices.try_recv().is_err(), "{}", case.name);
+            continue;
+        }
+        let notice = notices
+            .try_recv()
+            .unwrap_or_else(|_| panic!("{}: expected a notice", case.name));
+        let detail = notice
+            .diagnostics
+            .as_ref()
+            .and_then(|fields| fields.detail.clone());
+        assert!(
+            (notice.message.as_str(), detail.as_deref()) == (case.message, case.detail),
+            "{}",
+            case.name
+        );
+    }
+}
+
+/// Past a hundred objects the `DETAIL` stops listing and summarizes the rest,
+/// while the count above it still names the *total*. `PostgreSQL` caps the
+/// client-visible list at `MAX_REPORTED_DEPS` because "client software may not
+/// deal well with enormous error strings"; the server log keeps the whole list,
+/// which is what the summary line points at.
+#[tokio::test]
+async fn a_cascade_over_a_hundred_objects_summarizes_the_surplus() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    session
+        .simple_query("CREATE SCHEMA many")
+        .await
+        .expect("create schema");
+    for index in 1..=102 {
+        let sql = format!("CREATE TABLE many.t{index} (x int)");
+        session
+            .simple_query(&sql)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error:?}"));
+    }
+    session
+        .simple_query("DROP SCHEMA many CASCADE")
+        .await
+        .expect("drop schema");
+
+    let notice = notices.try_recv().expect("a cascade notice");
+    let detail = notice
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.detail.clone())
+        .expect("a detail");
+    assert!(
+        notice.message == "drop cascades to 102 other objects",
+        "{notice:?}"
+    );
+    let lines: Vec<&str> = detail.lines().collect();
+    assert!(lines.len() == 101, "{}", lines.len());
+    assert!(
+        lines[100] == "and 2 other objects (see server log for list)",
+        "{:?}",
+        lines[100]
+    );
+    assert!(
+        lines[..100]
+            .iter()
+            .all(|line| line.starts_with("drop cascades to table many.t")),
+        "{detail}"
+    );
 }

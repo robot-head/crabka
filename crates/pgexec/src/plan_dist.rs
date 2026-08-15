@@ -56,7 +56,25 @@ impl Stats for CombinedStats {
     }
 }
 
-/// Live per-table byte estimates derived from monotonic sequence counters.
+/// Encoded-row allowance applied to a row count to reach a byte estimate. The
+/// gateway still checks the exact materialized wire request before
+/// broadcasting, so this only has to be the right order of magnitude.
+const ASSUMED_ROW_BYTES: u64 = 256;
+
+/// Upper limit on the keys one estimate reads, however large the configured
+/// broadcast threshold is.
+///
+/// It is the gateway's own cap on a broadcast side
+/// ([`crate::scanner::MAX_JOIN_BROADCAST_ROWS`]): a table holding more rows than
+/// that has its broadcast rejected at execution whatever the planner decided, so
+/// reading past it cannot change an outcome. Reaching it makes the measurement
+/// abstain, which costs a broadcast opportunity and never a wrong one — and
+/// bounds one estimate at a few thousand keys rather than the quarter of a
+/// million the default threshold would otherwise allow, which measured two
+/// orders of magnitude slower.
+const MAX_MEASURED_KEYS: usize = crate::scanner::MAX_JOIN_BROADCAST_ROWS;
+
+/// Fixed per-table byte estimates supplied by the caller.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SequenceCounters(BTreeMap<u64, u64>);
 
@@ -72,29 +90,98 @@ impl Stats for SequenceCounters {
     }
 }
 
-/// Read-only statistics adapter over the engine's authoritative durable
-/// per-table next-rowid keys. It deliberately reads the applied KV on every
-/// estimate, so sessions observe commits and replicated apply with no refresh.
+/// Read-only statistics adapter over the engine's own applied row storage.
+///
+/// Two independent upper bounds on a table's live rows are cheap to obtain, and
+/// this reports the smaller of them:
+///
+/// * **Rowids allocated** — the durable next-rowid counter, minus one. Every
+///   live row consumed a rowid, so this bounds them, but it only ever counts
+///   upwards: it measures every row the table has *ever* held. A delete never
+///   lowers it. `CLUSTER` raises it by the whole live row count on each run,
+///   because it rewrites every row at a fresh rowid and permanently vacates the
+///   block it came from — so a table that never grew doubles its estimate per
+///   `CLUSTER`. On a sharded table the hidden rowid is a packed clock reading
+///   rather than a position in a counter, and this bound saturates for a table
+///   of any size at all.
+/// * **Rows stored** — the number of distinct row prefixes in the table's
+///   primary index, counted straight out of the store. Every live row holds at
+///   least one version key, so this bounds them too, and unlike the counter it
+///   is a measurement: it drops when deleted rows are vacuumed away, it does
+///   not move when `CLUSTER` renumbers rows in place, and it does not care what
+///   a rowid means. It costs one bounded keys-only scan and no value reads.
+///
+/// Counting is the expensive half, so it is bounded: it reads at most the rows
+/// the broadcast threshold could hold, and never more than the gateway would
+/// accept in a broadcast, past which it abstains and the counter's answer
+/// stands. A table that far over the threshold is not a broadcast candidate
+/// under any number. One estimate therefore costs a bounded scan whatever the
+/// table's real size — measured at 1.2ms against the durable store and 65us in
+/// memory, against about 1us for the counter alone.
+///
+/// Both bounds read the applied KV on every estimate, so sessions observe
+/// commits and replicated apply without refresh.
 #[derive(Clone)]
-pub struct DurableSequenceStats {
+pub struct StoredRowStats {
     kv: Arc<dyn crabka_pgkv::Kv>,
+    key_budget: usize,
 }
 
-impl DurableSequenceStats {
+impl StoredRowStats {
+    /// Count only what `broadcast_threshold_bytes` makes worth counting.
     #[must_use]
-    pub fn new(kv: Arc<dyn crabka_pgkv::Kv>) -> Self {
-        Self { kv }
+    pub fn new(kv: Arc<dyn crabka_pgkv::Kv>, broadcast_threshold_bytes: u64) -> Self {
+        let budget = (broadcast_threshold_bytes / ASSUMED_ROW_BYTES).saturating_add(1);
+        Self {
+            kv,
+            key_budget: usize::try_from(budget)
+                .unwrap_or(MAX_MEASURED_KEYS)
+                .min(MAX_MEASURED_KEYS),
+        }
+    }
+
+    /// Count the distinct row prefixes stored for `table_id`, or abstain when
+    /// there are more of them than the budget permits reading.
+    ///
+    /// A row's version keys are adjacent, so distinctness is a comparison
+    /// against the previous key rather than a set, and the whole count needs one
+    /// key buffer rather than one per key.
+    fn stored_rows(&self, table_id: u32) -> Option<u64> {
+        let mut rows = 0_u64;
+        let mut previous: Vec<u8> = Vec::new();
+        let seen = self
+            .kv
+            .for_each_key(
+                &crabka_pgkv::key::table_prefix(table_id),
+                &crabka_pgkv::key::table_prefix_end(table_id),
+                self.key_budget,
+                &mut |key| {
+                    // A key too short to carry a version suffix belongs to no
+                    // row this can name, so it counts as one of its own: the
+                    // bound has to stay above the truth, never under it.
+                    let prefix = crabka_pgmvcc::version::row_prefix_of(key).unwrap_or(key);
+                    if previous != prefix {
+                        rows = rows.saturating_add(1);
+                        previous.clear();
+                        previous.extend_from_slice(prefix);
+                    }
+                },
+            )
+            .ok()?;
+        (seen < self.key_budget).then_some(rows)
     }
 }
 
-impl Stats for DurableSequenceStats {
+impl Stats for StoredRowStats {
     fn estimated_bytes(&self, table_id: u64) -> Option<u64> {
         let table_id = u32::try_from(table_id).ok()?;
-        let next = crate::exec::read_seq_kv(self.kv.as_ref(), table_id).ok()?;
-        // The counter is a row cardinality source, not a byte counter. Use a
-        // conservative encoded-row allowance; the gateway still checks the
-        // exact materialized wire request before broadcasting.
-        Some(next.saturating_sub(1).saturating_mul(256))
+        let allocated = crate::exec::read_seq_kv(self.kv.as_ref(), table_id)
+            .ok()?
+            .saturating_sub(1);
+        let rows = self
+            .stored_rows(table_id)
+            .map_or(allocated, |stored| stored.min(allocated));
+        Some(rows.saturating_mul(ASSUMED_ROW_BYTES))
     }
 }
 
@@ -505,8 +592,11 @@ pub(crate) fn partial_aggregate_for_call(
 ) -> Option<PartialAggregateSpec> {
     // A FILTER predicate is evaluated per row against the full scope, which the
     // scan-level partial aggregate cannot do — pushing the call down without it
-    // would aggregate every row and silently ignore the filter.
-    if call.distinct || call.filter.is_some() {
+    // would aggregate every row and silently ignore the filter. A sort is the
+    // same kind of loss: the partial states merge in range order, so a call that
+    // asks for a fold order the pushdown cannot promise stays on the general
+    // path instead.
+    if call.distinct || call.filter.is_some() || !call.order_by.is_empty() {
         return None;
     }
     let column = match &call.args {

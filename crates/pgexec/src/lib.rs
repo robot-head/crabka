@@ -41,10 +41,26 @@
 
 mod agg;
 mod array_fn;
+mod bind;
+mod bit_fn;
+mod builtin_aggregates;
+mod builtin_amop;
+mod builtin_amproc;
+mod builtin_casts;
+mod builtin_conversions;
+mod builtin_opclasses;
+mod builtin_operator_descriptions;
+mod builtin_operators;
+mod builtin_opfamilies;
+mod builtin_proc_descriptions;
+mod builtin_procs;
+mod bytea_fn;
 mod catalog_fn;
 mod catalog_rel;
+mod charset;
 pub mod clock;
 mod commit;
+mod copyfmt;
 mod cte;
 mod cursor;
 mod datetime_fn;
@@ -56,63 +72,90 @@ pub mod fk;
 pub mod foreign;
 mod format_fn;
 mod func;
+mod geometry_fn;
 mod grouping;
 mod gtm;
 pub mod hlc;
 pub mod hlc_source;
+mod inheritance;
 mod join;
 mod json_fn;
+mod json_record;
 mod jsonpath;
+mod jsontable;
 mod local_sequence;
 mod lockmgr;
 mod math_fn;
+mod money_fn;
+mod network_fn;
 pub mod notify;
 mod partition;
 mod pattern;
 pub mod plan_dist;
 mod plpgsql;
 mod plpgsql_sqlstate;
+mod policy_ddl;
+mod privilege;
 mod procarray;
 mod query;
 mod read_gate;
+mod reg_fn;
 mod regexp_fn;
 mod relname;
+mod relstats;
+pub mod rls;
 mod routine;
 mod rowexpr;
 pub mod scanner;
+mod schema_element;
 mod scope;
 mod search_path;
 mod seq;
 mod session;
 mod setops;
+mod snapshot_fn;
 mod sql92;
 mod srf;
 mod string_fn;
 mod subquery;
+mod sysid_fn;
 pub mod telemetry;
+mod temporal_arith;
 mod text_search_catalog;
 mod text_search_fn;
+mod tid_fn;
 pub mod timestamp_txn;
 mod trigger;
 pub mod ts_gc;
+mod useragg;
+mod usercast;
+mod useroperator;
 mod usertype;
 mod values;
 mod viewdef;
+mod viewdeps;
+mod viewwrite;
+mod visibility;
+pub mod watchdog;
 mod window;
+mod xml_fn;
 
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicU64},
 };
 
+/// The `pg_class` oid of a table, derived from its catalog id. Exposed because
+/// the oid a `regclass` value carries is this, not the bare catalog id.
+pub use catalog_rel::table_relation_oid;
 pub use commit::{Committer, LocalCommitter};
 use crabka_pgkv::{FjallKv, Kv, MemKv};
 use crabka_pgwire::engine::Engine;
 use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
 pub use error::{
     DependentForeignKey, DroppedObject, ExecError, ForeignKeyDependents, ForeignKeyTypeMismatch,
-    ForeignKeyViolation, ForeignKeyViolationSide, GucRangeViolation,
+    ForeignKeyViolation, ForeignKeyViolationSide, GucRangeViolation, VirtualGeneratedSubcommand,
 };
 pub use gtm::GlobalXidLease;
 pub use hlc::{Hlc, HybridLogicalClock};
@@ -145,15 +188,42 @@ struct EngineCoordination {
     table_id_lock: Arc<tokio::sync::Mutex<()>>,
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<WriterFence>,
+    lockmgr: Arc<RowLockManager>,
+    unique_index_gates: Arc<RowLockManager>,
+    next_unique_index_owner: AtomicU64,
+    /// Every statement this server currently has in flight. Shared here for the
+    /// same reason the locks above are: it is one server-wide thing that each
+    /// session touches, and a report is only useful if it can name every
+    /// backend at once.
+    pub(crate) statements: Arc<watchdog::StatementRegistry>,
 }
 
 impl EngineCoordination {
-    fn new() -> Self {
+    /// Build the shared coordination state and start this server's
+    /// stuck-statement watchdog.
+    ///
+    /// The watchdog is spawned here because this is where the registry it
+    /// watches is born, and it holds only a [`Weak`] handle to it, so the loop
+    /// retires the moment the last engine over this store goes away. Outside a
+    /// runtime — an embedded caller building an engine synchronously — there is
+    /// nothing to spawn onto and the registry simply goes unwatched; it still
+    /// records, so [`watchdog::StatementRegistry::in_flight`] answers either
+    /// way.
+    fn new(policy: watchdog::StuckStatementPolicy) -> Self {
+        let lockmgr = Arc::new(RowLockManager::new());
+        let statements = Arc::new(watchdog::StatementRegistry::default());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(watchdog::watch(Arc::downgrade(&statements), policy));
+        }
         Self {
             catalog_lock: Arc::new(tokio::sync::Mutex::new(())),
             table_id_lock: Arc::new(tokio::sync::Mutex::new(())),
             table_write_gate: Arc::new(tokio::sync::RwLock::new(())),
             writer_fence: Arc::new(WriterFence::new()),
+            lockmgr: Arc::clone(&lockmgr),
+            unique_index_gates: lockmgr,
+            next_unique_index_owner: AtomicU64::new(0),
+            statements,
         }
     }
 }
@@ -262,7 +332,10 @@ fn new_local_sequence() -> Arc<local_sequence::LocalSequence> {
     )
 }
 
-fn coordination_for(kv: &Arc<dyn Kv>) -> Arc<EngineCoordination> {
+fn coordination_for(
+    kv: &Arc<dyn Kv>,
+    policy: watchdog::StuckStatementPolicy,
+) -> Arc<EngineCoordination> {
     static COORDINATORS: OnceLock<Mutex<HashMap<usize, Weak<EngineCoordination>>>> =
         OnceLock::new();
 
@@ -275,7 +348,7 @@ fn coordination_for(kv: &Arc<dyn Kv>) -> Arc<EngineCoordination> {
     if let Some(coordinator) = coordinators.get(&identity).and_then(Weak::upgrade) {
         return coordinator;
     }
-    let coordinator = Arc::new(EngineCoordination::new());
+    let coordinator = Arc::new(EngineCoordination::new(policy));
     coordinators.insert(identity, Arc::downgrade(&coordinator));
     coordinator
 }
@@ -341,6 +414,9 @@ pub struct RuntimePolicy {
     pub rowid_reservation: u64,
     pub ts_prune_versions_per_row: usize,
     pub ts_gc_floor_lag: crabka_units::Time,
+    /// When the stuck-statement watchdog reports an in-flight statement, and how
+    /// often it looks. Diagnostic only — see [`watchdog`].
+    pub stuck_statement: watchdog::StuckStatementPolicy,
 }
 
 impl Default for RuntimePolicy {
@@ -356,6 +432,7 @@ impl Default for RuntimePolicy {
             rowid_reservation: seq::DURABLE_BLOCK,
             ts_prune_versions_per_row: ts_gc::TS_PRUNE_ROW_VERSION_CAP,
             ts_gc_floor_lag: ts_gc::TS_PRUNE_FLOOR_LAG,
+            stuck_statement: watchdog::StuckStatementPolicy::default(),
         }
     }
 }
@@ -388,6 +465,12 @@ impl RuntimePolicy {
         {
             return Err(ExecError::Unsupported(
                 "PgExec byte limits and counts must be positive whole values and GC lag must be finite, nonnegative, and whole milliseconds"
+                    .into(),
+            ));
+        }
+        if !self.stuck_statement.is_valid() {
+            return Err(ExecError::Unsupported(
+                "PgExec stuck-statement threshold, poll interval, and repeat interval must be finite and positive"
                     .into(),
             ));
         }
@@ -443,12 +526,11 @@ pub struct SqlEngine {
     /// additionally retain `writer_fence` through their terminal outcome.
     pub(crate) table_write_gate: Arc<tokio::sync::RwLock<()>>,
     pub(crate) writer_fence: Arc<WriterFence>,
-    /// DML on local tables holds this SHARED (per statement, or until
-    /// COMMIT/ROLLBACK in an explicit transaction); unique-index DDL (CREATE
-    /// UNIQUE INDEX backfill, CREATE TABLE with a unique constraint) holds it
-    /// EXCLUSIVELY so its backfill scan cannot race in-flight writers.
+    /// DML on a local table holds that relation's gate SHARED (per statement,
+    /// or until COMMIT/ROLLBACK in an explicit transaction); unique-index DDL
+    /// holds the same relation's gate EXCLUSIVELY while it backfills.
     /// Same-key DML conflicts serialize through per-key locks in `lockmgr`.
-    pub(crate) unique_index_lock: Arc<tokio::sync::RwLock<()>>,
+    pub(crate) unique_index_gates: Arc<RowLockManager>,
     pub(crate) committer: Arc<dyn crate::commit::Committer>,
     pub(crate) linearizer: Arc<dyn crate::read_gate::Linearizer>,
     pub(crate) persist_mode: PersistMode,
@@ -835,7 +917,7 @@ impl SqlEngine {
     /// Returns an error when the store cannot be initialized or the policy is invalid.
     pub fn with_kv_and_policy(kv: Arc<dyn Kv>, policy: RuntimePolicy) -> Result<Self, ExecError> {
         let policy = policy.validate()?;
-        let coordination = coordination_for(&kv);
+        let coordination = coordination_for(&kv, policy.stuck_statement);
         let procarray = Arc::new(ProcArray::open(Arc::clone(&kv), PersistMode::Durable)?);
         let sweep_committer = timestamp_txn::HorizonObservingCommitter::wrap(
             Arc::new(crate::commit::LocalCommitter {
@@ -859,7 +941,7 @@ impl SqlEngine {
             kv: Arc::clone(&kv),
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Durable)),
-            lockmgr: Arc::new(RowLockManager::new()),
+            lockmgr: Arc::clone(&coordination.lockmgr),
             session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
@@ -867,7 +949,7 @@ impl SqlEngine {
             table_id_lock: Arc::clone(&coordination.table_id_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
-            unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
+            unique_index_gates: Arc::clone(&coordination.unique_index_gates),
             committer,
             linearizer: Arc::new(crate::read_gate::LocalLinearizer),
             persist_mode: PersistMode::Durable,
@@ -876,7 +958,10 @@ impl SqlEngine {
             clock: Arc::new(crate::clock::SystemClock),
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
-            join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&kv))),
+            join_stats: Arc::new(plan_dist::StoredRowStats::new(
+                Arc::clone(&kv),
+                policy.join_broadcast_threshold.bytes_u64(),
+            )),
             join_strategy_config: plan_dist::PlannerConfig {
                 broadcast_threshold_bytes: policy.join_broadcast_threshold.bytes_u64(),
             },
@@ -1280,10 +1365,17 @@ impl SqlEngine {
             // collide with a writer's puts, but the index-entry survivor
             // computation must not race a concurrent writer re-adding the
             // same indexed values, and a freeze/clear rewrite must not race a
-            // writer stamping xmax on the same key. Holding at most this
-            // one lock, the sweep cannot close a wait-for cycle of its
-            // own; a transient deadlock verdict (a just-woken waiter's
-            // stale edge) simply skips the row until the next sweep.
+            // writer stamping xmax on the same key.
+            //
+            // Never wait for it. The lock manager's own wait-for graph cannot
+            // deadlock on a sweep holding one lock, but the graph is not the
+            // whole picture: the caller holds the maintenance gate exclusively
+            // for the length of this step, and that gate is what every
+            // statement takes to be admitted -- `COMMIT` and `ROLLBACK`
+            // included. Waiting here for a row an open transaction holds would
+            // wait for a lock only that transaction can release, through a
+            // statement this step is itself blocking. A contended row is
+            // skipped and swept on a later pass instead.
             if self
                 .lockmgr
                 .acquire(
@@ -1291,7 +1383,7 @@ impl SqlEngine {
                     rowid,
                     crate::lockmgr::LockMode::Exclusive,
                     owner_xid,
-                    None,
+                    Some(std::time::Duration::ZERO),
                 )
                 .await
                 .is_err()
@@ -1453,7 +1545,7 @@ impl SqlEngine {
         policy: RuntimePolicy,
     ) -> Result<Self, ExecError> {
         let policy = policy.validate()?;
-        let coordination = coordination_for(&sm_kv);
+        let coordination = coordination_for(&sm_kv, policy.stuck_statement);
         let procarray = Arc::new(ProcArray::open(
             Arc::clone(&sm_kv),
             PersistMode::Replicated,
@@ -1472,7 +1564,7 @@ impl SqlEngine {
             kv: Arc::clone(&sm_kv),
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Replicated)),
-            lockmgr: Arc::new(RowLockManager::new()),
+            lockmgr: Arc::clone(&coordination.lockmgr),
             session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
@@ -1480,7 +1572,7 @@ impl SqlEngine {
             table_id_lock: Arc::clone(&coordination.table_id_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
-            unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
+            unique_index_gates: Arc::clone(&coordination.unique_index_gates),
             // Replicated engines never vacuum locally, so no demand-observing
             // wrapper and the sweep committer is the ordinary one.
             sweep_committer: Arc::clone(&committer),
@@ -1492,7 +1584,10 @@ impl SqlEngine {
             clock: Arc::new(crate::clock::SystemClock),
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
-            join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&sm_kv))),
+            join_stats: Arc::new(plan_dist::StoredRowStats::new(
+                Arc::clone(&sm_kv),
+                policy.join_broadcast_threshold.bytes_u64(),
+            )),
             join_strategy_config: plan_dist::PlannerConfig {
                 broadcast_threshold_bytes: policy.join_broadcast_threshold.bytes_u64(),
             },
@@ -1555,7 +1650,7 @@ impl SqlEngine {
             table_id_lock: Arc::clone(&self.table_id_lock),
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
-            unique_index_lock: Arc::clone(&self.unique_index_lock),
+            unique_index_gates: Arc::clone(&self.unique_index_gates),
             committer: Arc::clone(&self.committer),
             linearizer: Arc::clone(&self.linearizer),
             persist_mode: self.persist_mode,
@@ -1577,6 +1672,16 @@ impl SqlEngine {
             vacuum_demand: Arc::clone(&self.vacuum_demand),
             vacuum_progress: Arc::clone(&self.vacuum_progress),
         }
+    }
+
+    /// Every statement this engine's sessions currently have in flight.
+    ///
+    /// The watchdog reads this on its own schedule; callers that want the same
+    /// picture without waiting for a poll — a test, or an operator asking what
+    /// a wedged server is doing — read it here.
+    #[must_use]
+    pub fn statement_registry(&self) -> &Arc<watchdog::StatementRegistry> {
+        &self.coordination.statements
     }
 
     /// This engine's `LISTEN`/`NOTIFY` bus. Sessions register on it to receive
@@ -1953,6 +2058,8 @@ impl SqlEngine {
             date_order: crabka_pgtypes::datetime::DateOrder::default(),
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
+            extra_float_digits: 1,
+            bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             // No connection was ever opened for this write, so there is no
@@ -1960,8 +2067,10 @@ impl SqlEngine {
             backend_pid: 0,
             trigger_depth: 0,
             clock: Arc::clone(&self.clock),
+            random: None,
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
+                data: Arc::clone(&self.kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 pending: Arc::clone(pending),
@@ -1979,6 +2088,10 @@ impl SqlEngine {
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            // A scattered write carries no transaction of its own to export,
+            // so `pg_current_xact_id()` in one refuses for the same reason
+            // `pg_notify` above does.
+            txn: None,
         };
         crate::exec::execute_timestamp_write(
             self.catalog_kv.as_ref(),
@@ -3138,6 +3251,144 @@ mod cursor_terminal_tests {
     }
 }
 
+#[cfg(test)]
+mod point_type_tests {
+    use crabka_pgwire::engine::{Engine, QueryResult, Session};
+
+    use super::SqlEngine;
+
+    #[tokio::test]
+    async fn point_columns_store_copy_and_render_postgres_values() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE point_values (p point, route path); \
+                 INSERT INTO point_values VALUES \
+                    ('(0,0)', '[(-1,2),(3,4)]'), \
+                    (' ( NaN , Infinity ) ', '((0,0),(1,1))'); \
+                 SELECT p, route FROM point_values",
+            )
+            .await
+            .expect("point values round trip through a table");
+    }
+
+    #[tokio::test]
+    async fn inherited_tables_merge_columns_and_only_excludes_children() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query(
+                "CREATE TABLE parent_values (id int4, location point); \
+                 CREATE TABLE child_values (note text) INHERITS (parent_values); \
+                 CREATE TABLE sibling_values (extra text) INHERITS (parent_values); \
+                 CREATE TABLE grandchild_values () INHERITS (child_values, sibling_values); \
+                 INSERT INTO parent_values VALUES (1, '(0,0)'); \
+                 INSERT INTO child_values VALUES (2, '(1,1)', 'child')",
+            )
+            .await
+            .expect("create and populate inherited tables");
+        assert_eq!(
+            notices.try_recv().expect("id merge notice").message,
+            "merging multiple inherited definitions of column \"id\""
+        );
+        assert_eq!(
+            notices.try_recv().expect("location merge notice").message,
+            "merging multiple inherited definitions of column \"location\""
+        );
+
+        let all = session
+            .simple_query("SELECT id FROM parent_values ORDER BY id")
+            .await
+            .expect("scan inheritance tree");
+        let only = session
+            .simple_query("SELECT id FROM ONLY parent_values ORDER BY id")
+            .await
+            .expect("scan only parent");
+        let row_count = |results: &[QueryResult]| match results.last() {
+            Some(QueryResult::Rows { rows, .. }) => rows.len(),
+            other => panic!("expected rows, got {other:?}"),
+        };
+        assert_eq!(row_count(&all), 2);
+        assert_eq!(row_count(&only), 1);
+    }
+
+    fn scanned_rows(results: &[QueryResult]) -> usize {
+        match results.last() {
+            Some(QueryResult::Rows { rows, .. }) => rows.len(),
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    /// Multiple inheritance makes the tree a DAG, so a grandchild is reachable
+    /// from the root by more than one path. Reading the root must still see each
+    /// of its rows once.
+    #[tokio::test]
+    async fn a_diamond_descendant_is_scanned_once() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE dia_root (id int4); \
+                 CREATE TABLE dia_left () INHERITS (dia_root); \
+                 CREATE TABLE dia_right () INHERITS (dia_root); \
+                 CREATE TABLE dia_bottom () INHERITS (dia_left, dia_right); \
+                 INSERT INTO dia_root VALUES (1); \
+                 INSERT INTO dia_bottom VALUES (2)",
+            )
+            .await
+            .expect("build the diamond");
+
+        let all = session
+            .simple_query("SELECT id FROM dia_root")
+            .await
+            .expect("scan the diamond root");
+        // `dia_bottom` is reachable via both `dia_left` and `dia_right`; without
+        // a visited set its single row is returned once per path.
+        assert2::assert!(scanned_rows(&all) == 2);
+    }
+
+    /// Dropping either end of an inheritance link must leave no dangling half:
+    /// a stale child entry makes the surviving parent unreadable, and a stale
+    /// parent entry breaks `pg_inherits` for every relation, not just this one.
+    #[tokio::test]
+    async fn dropping_either_end_of_an_inheritance_link_leaves_no_dangling_half() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE drop_keep (id int4); \
+                 CREATE TABLE drop_child () INHERITS (drop_keep); \
+                 INSERT INTO drop_keep VALUES (1); \
+                 CREATE TABLE drop_gone (id int4); \
+                 CREATE TABLE drop_orphan () INHERITS (drop_gone); \
+                 DROP TABLE drop_child; \
+                 DROP TABLE drop_gone",
+            )
+            .await
+            .expect("drop each end of an inheritance link");
+
+        let parent = session
+            .simple_query("SELECT id FROM drop_keep")
+            .await
+            .expect("a parent stays readable after its child is dropped");
+        assert2::assert!(scanned_rows(&parent) == 1);
+
+        let inherits = session
+            .simple_query("SELECT inhrelid FROM pg_inherits")
+            .await
+            .expect("pg_inherits stays readable after a parent is dropped");
+        assert2::assert!(scanned_rows(&inherits) == 0);
+
+        let orphan = session
+            .simple_query("SELECT id FROM drop_orphan")
+            .await
+            .expect("the orphaned child stays readable");
+        assert2::assert!(scanned_rows(&orphan) == 0);
+    }
+}
+
 pub(crate) fn checkpoint_garbage_horizon(
     procarray: &ProcArray,
     kv: &dyn Kv,
@@ -3300,7 +3551,7 @@ impl Engine for SqlEngine {
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
             coordination: Arc::clone(&self.coordination),
-            unique_index_lock: Arc::clone(&self.unique_index_lock),
+            unique_index_gates: Arc::clone(&self.unique_index_gates),
             committer: Arc::clone(&self.committer),
             linearizer: Arc::clone(&self.linearizer),
             persist_mode: self.persist_mode,

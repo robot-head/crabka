@@ -116,12 +116,29 @@ impl SearchPath {
         out
     }
 
-    /// True when the path names the temporary namespace itself.
+    /// The same path with `schema` searched first.
     ///
-    /// The namespace then sits where it was written, and not implicitly first.
-    /// This was verified against `postgres:18.4`, where
-    /// `SET search_path = public, pg_temp` makes `current_schemas(true)` report
-    /// `{pg_catalog,public,pg_temp_1}`.
+    /// This is how a stored body's unqualified relation names are resolved. A
+    /// view's body is kept as text and re-parsed on every use, so unlike
+    /// `PostgreSQL` — which resolves the body to oids once, at `CREATE VIEW`,
+    /// and never consults a `search_path` again — this engine has to resolve it
+    /// afresh each time. Searching the view's own schema first is what makes
+    /// that resolution a property of the view rather than of whoever is reading
+    /// it: `CREATE VIEW s.v AS SELECT … FROM t` was almost always written with
+    /// `s` on the path, and the body has to keep meaning `s.t` when read from a
+    /// session whose path does not name `s` at all.
+    #[must_use]
+    pub fn searching_first(&self, schema: &str) -> Self {
+        let mut entries = Vec::with_capacity(self.entries.len() + 1);
+        entries.push(schema.to_string());
+        entries.extend(self.entries.iter().cloned());
+        Self { entries }
+    }
+
+    /// True when the path names the temporary namespace itself, in which case
+    /// it sits where it was written rather than implicitly first. Verified
+    /// against `postgres:18.4`, where `SET search_path = public, pg_temp` makes
+    /// `current_schemas(true)` report `{pg_catalog,public,pg_temp_1}`.
     #[must_use]
     pub fn names_temp_schema(&self, temp: &str) -> bool {
         self.entries

@@ -144,6 +144,15 @@ EOF
         >"${ARTIFACT_DIR}/oracle-setup.log" 2>&1
     psql "$ORACLE_ADMIN_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE gres_sharded_oracle' \
         >>"${ARTIFACT_DIR}/oracle-setup.log" 2>&1
+    # Gres implements exactly one monetary locale, C -- see the note on
+    # `pgtypes::money`. The oracle inherits the server's default instead, so
+    # `to_char(485, 'L999')` reads `$ 485` there and `  485` here, and the
+    # comparison measures the harness rather than the engine. pg_regress avoids
+    # this by forcing LC_ALL=C on its own postmaster; do the same to the oracle
+    # database so both sides answer for the locale Gres actually has.
+    psql "$ORACLE_ADMIN_URL" -v ON_ERROR_STOP=1 \
+        -c "ALTER DATABASE gres_sharded_oracle SET lc_monetary = 'C'" \
+        >>"${ARTIFACT_DIR}/oracle-setup.log" 2>&1
     local oracle_url="${ORACLE_ADMIN_URL/dbname=postgres/dbname=gres_sharded_oracle}"
     if ! ./target/debug/crabka-gres-conformance \
         --oracle-url "$oracle_url" \

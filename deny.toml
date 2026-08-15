@@ -11,11 +11,14 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = [
     # quick-xml DoS advisories (quadratic duplicate-attribute check and
-    # unbounded namespace-declaration allocation). Patched only in
-    # quick-xml >= 0.41, which our dependents (polars-io and the S3 XML
-    # paths) do not accept yet; Crabka never feeds attacker-controlled XML
-    # into these parsers (S3/object-store responses are from configured
-    # endpoints). Drop these once upstreams take quick-xml 0.41.
+    # unbounded namespace-declaration allocation). Patched in quick-xml
+    # >= 0.41, which is the version `crabka-pgtypes` pins for the `xml`
+    # type — the one place attacker-controlled XML enters, since any client
+    # that can run `SELECT '…'::xml` chooses the document. These ignores
+    # cover only the transitive 0.39 copy under polars-io and the S3 XML
+    # paths, whose input is a response from a configured endpoint. Drop them
+    # once those upstreams take 0.41 too; do NOT extend the reasoning to a
+    # SQL-reachable parser.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
     # RSA "Marvin" timing side-channel. Pulled in transitively by `picky`
@@ -55,6 +58,9 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 exceptions = [
+    # pglz is a direct, safe Rust port of PostgreSQL's PGLZ codec. Keep the
+    # permissive PostgreSQL License allowance scoped to that crate.
+    { allow = ["PostgreSQL"], crate = "pglz" },
     # portpicker is public-domain-equivalent (The Unlicense, OSI-approved and
     # FSF Free/Libre). Pulled in transitively via the vendored `sspi` crate's
     # `network_client` feature, which we need for KDC communication.

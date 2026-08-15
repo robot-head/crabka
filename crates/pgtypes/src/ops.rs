@@ -124,7 +124,9 @@ fn numeric_as_f64(d: &Datum) -> Option<f64> {
 fn float_arith(x: f64, y: f64, op: fn(f64, f64) -> f64) -> Result<Datum, TypeError> {
     let r = op(x, y);
     if r.is_infinite() && x.is_finite() && y.is_finite() {
-        return Err(TypeError::Overflow);
+        // `float8_pl` and its siblings all raise `value out of range: overflow`
+        // through `float_overflow_error`, never the `int4` wording.
+        return Err(TypeError::float_overflow());
     }
     Ok(Datum::Float8(r))
 }
@@ -190,9 +192,13 @@ fn arith(a: &Datum, b: &Datum, op: NumericOp) -> Result<Datum, TypeError> {
             .map(Datum::Int2)
             .ok_or_else(|| TypeError::out_of_range_for("smallint")),
         _ => match (as_i32(a), as_i32(b)) {
-            (Some(x), Some(y)) => (op.i4)(x, y).map(Datum::Int4).ok_or(TypeError::Overflow),
+            (Some(x), Some(y)) => (op.i4)(x, y)
+                .map(Datum::Int4)
+                .ok_or_else(|| TypeError::out_of_range_for("integer")),
             _ => match (as_i64(a), as_i64(b)) {
-                (Some(x), Some(y)) => (op.i8)(x, y).map(Datum::Int8).ok_or(TypeError::Overflow),
+                (Some(x), Some(y)) => (op.i8)(x, y)
+                    .map(Datum::Int8)
+                    .ok_or_else(|| TypeError::out_of_range_for("bigint")),
                 _ => Err(TypeError::TypeMismatch {
                     message: "operator requires integer operands".into(),
                 }),
@@ -236,8 +242,8 @@ fn reject_infinite_interval_on_time(
 /// needs the session tz, which is only available in the executor).
 fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     use crate::datetime::{
-        add_interval, combine_date_time, date_plus_days, date_plus_interval, time_plus_interval,
-        timestamp_plus_interval,
+        add_interval, combine_date_time, date_plus_days, date_plus_interval, date_plus_timetz,
+        time_plus_interval, timestamp_plus_interval,
     };
     match (a, b) {
         // date + int4 / int8 → date (add days)
@@ -252,8 +258,23 @@ fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
         // date + time / time + date → timestamp (combine the calendar date and
         // the wall-clock time; the time's days/months are irrelevant — a Time has
         // no date component).
-        (Datum::Date(d), Datum::Time(t)) => Ok(Datum::Timestamp(combine_date_time(*d, *t))),
-        (Datum::Time(t), Datum::Date(d)) => Ok(Datum::Timestamp(combine_date_time(*d, *t))),
+        (Datum::Date(d), Datum::Time(t)) | (Datum::Time(t), Datum::Date(d)) => {
+            // `24:00:00` lands on the next day, which the last representable
+            // date has none of.
+            combine_date_time(*d, *t)
+                .map(Datum::Timestamp)
+                .ok_or_else(|| TypeError::DatetimeOutOfRange {
+                    message: "timestamp out of range".to_string(),
+                })
+        }
+        // date + timetz / timetz + date → timestamptz (`datetimetz_timestamptz`).
+        // The offset the `timetz` carries names the zone the reading was taken
+        // in, so the instant follows from the two operands alone. This is the
+        // only operator that produces a `timestamptz` without a session zone,
+        // which is why it belongs here rather than in the executor.
+        (Datum::Date(d), Datum::Timetz(t)) | (Datum::Timetz(t), Datum::Date(d)) => {
+            date_plus_timetz(*d, *t).map(Datum::Timestamptz)
+        }
         // time + interval / interval + time → time (uses ONLY the interval micros,
         // wrapping mod 24 h; the interval's days/months are ignored — a Time has no
         // date).
@@ -291,7 +312,7 @@ fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
 /// `sub` for temporal operand pairs.
 fn temporal_sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     use crate::datetime::{
-        date_diff_days, date_plus_days, neg_interval, sub_interval, timestamp_diff,
+        date_diff_days, date_plus_days, neg_interval, sub_interval, time_diff, timestamp_diff,
         timestamp_plus_interval,
     };
     match (a, b) {
@@ -310,6 +331,10 @@ fn temporal_sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
             let neg = neg_interval(*iv)?;
             crate::datetime::date_plus_interval(*d, neg).map(Datum::Timestamp)
         }
+        // time - time → interval (`time_mi_time`): a signed microsecond count.
+        // It does not wrap the way `time - interval` does, because the answer is
+        // an elapsed span rather than another clock reading.
+        (Datum::Time(a), Datum::Time(b)) => Ok(Datum::Interval(time_diff(*a, *b))),
         // time - interval → time (negate the interval, then add — only the micros
         // matter; the result wraps mod 24 h).
         (Datum::Time(t), Datum::Interval(iv)) => {
@@ -465,19 +490,21 @@ pub fn div(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     // `float4 / float4` stays single-precision; a zero divisor is 22012 here
     // exactly as it is one rung down.
     if let (Datum::Float4(x), Datum::Float4(y)) = (a, b) {
-        if *y == 0.0 {
+        if *y == 0.0 && !x.is_nan() {
             return Err(TypeError::DivisionByZero);
         }
         return float4_arith(*x, *y, |x, y| x / y);
     }
     // SP30: float division — a zero divisor (incl. `-0.0`) is 22012, like PG.
+    // A `NaN` dividend is the one exception `float4_div`/`float8_div` carve out:
+    // `NaN / 0` is `NaN`, not a division-by-zero.
     if is_float(a) || is_float(b) {
         let (Some(x), Some(y)) = (as_f64(a), as_f64(b)) else {
             return Err(TypeError::TypeMismatch {
                 message: "operator requires numeric operands".into(),
             });
         };
-        if y == 0.0 {
+        if y == 0.0 && !x.is_nan() {
             return Err(TypeError::DivisionByZero);
         }
         return float_arith(x, y, |x, y| x / y);
@@ -616,15 +643,124 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // Placed before the numeric fall-throughs, which would otherwise try to
         // promote these to f64 and fail.
         (Datum::Jsonb(x), Datum::Jsonb(y)) => x.cmp(y),
+        // `json` has no btree opclass and no equality operator in PostgreSQL, so
+        // there is nothing to compare it *with*. GROUP BY, DISTINCT and the set
+        // operations all reach this arm and must report what PostgreSQL reports
+        // rather than inventing a text order — text order would make
+        // `'{"a":1}'` and `'{"a": 1}'` two groups on one side and one on the
+        // other, silently.
+        (Datum::Json(_), Datum::Json(_)) => {
+            return Err(TypeError::Coded {
+                sqlstate: "42883",
+                message: "could not identify an equality operator for type json".to_string(),
+            });
+        }
+        // `xml` is the other type with no equality operator and no btree
+        // opclass. Two documents can differ byte for byte and mean the same
+        // thing, so PostgreSQL declines to pick a comparison rather than
+        // pretending text order is one.
+        (Datum::Xml(_), Datum::Xml(_)) => {
+            return Err(TypeError::Coded {
+                sqlstate: "42883",
+                message: "could not identify an equality operator for type xml".to_string(),
+            });
+        }
         (Datum::TsVector(x), Datum::TsVector(y)) => x.cmp(y),
         (Datum::TsQuery(x), Datum::TsQuery(y)) => x.cmp(y),
+        // `network_cmp`: one comparison for `inet` and `cidr` alike, so a
+        // `cidr` and an `inet` naming the same address compare equal.
+        (Datum::Money(x), Datum::Money(y)) => x.cmp(y),
+        // `charlt` and friends cast to `uint8` first, so `'\377'::"char"` is
+        // the largest value of the type and not the smallest. The integer
+        // conversions go the other way and read the byte signed; `char.c` says
+        // "You wanted consistency?" about exactly this.
+        (Datum::InternalChar(x), Datum::InternalChar(y)) => x.cmp(y),
+        // `bitcmp` and `varbitcmp` are the same routine, so a `bit` and a
+        // `bit varying` holding the same bits compare equal.
+        (Datum::BitString(x), Datum::BitString(y)) => x.cmp(y),
+        (Datum::Inet(x), Datum::Inet(y)) => x.cmp(y),
+        (Datum::MacAddr(x), Datum::MacAddr(y)) => x.cmp(y),
+        (Datum::MacAddr8(x), Datum::MacAddr8(y)) => x.cmp(y),
+        // The system identifier family compares **unsigned**, which is the
+        // whole difference from `int4` for `oid`: 4294967295 is the largest
+        // value, not -1. `xid` and `cid` reach this arm only for `=`/`<>` —
+        // the executor refuses `<`/`<=`/`>`/`>=` before it gets here, because
+        // PostgreSQL declares no such operator (transaction ids compare with
+        // modular arithmetic, which has no total order).
+        (Datum::Oid(x), Datum::Oid(y))
+        | (Datum::Xid(x), Datum::Xid(y))
+        | (Datum::Cid(x), Datum::Cid(y)) => x.cmp(y),
+        (Datum::Xid8(x), Datum::Xid8(y)) | (Datum::PgLsn(x), Datum::PgLsn(y)) => x.cmp(y),
+        // `ItemPointerCompare`: block number first, then offset.
+        (Datum::Tid(x), Datum::Tid(y)) => x.cmp(y),
+        // `pg_cast` makes `int2`/`int4`/`int8 → oid` implicit, so PostgreSQL
+        // resolves `oidcol = intcol` to `oideq(oid, oid)` — the integer is
+        // reinterpreted, not widened, which is why `4294967295::oid = -1` is
+        // true. `int8` is range-checked instead, because its cast is a
+        // function that raises `OID out of range`.
+        (Datum::Oid(x), Datum::Int2(_) | Datum::Int4(_) | Datum::Int8(_)) => {
+            x.cmp(&oid_operand(b)?)
+        }
+        (Datum::Int2(_) | Datum::Int4(_) | Datum::Int8(_), Datum::Oid(y)) => oid_operand(a)?.cmp(y),
+        // `xideqint4` / `xidneqint4` are the only cross-type operators in the
+        // family, and they compare the int4's bits against the xid's. They have
+        // no commutator, so the plan layer refuses the reflected spelling; this
+        // arm still takes both orders because `IN` and `CASE` route their
+        // operands through here in whichever order they were written.
+        (Datum::Xid(x), Datum::Int2(_) | Datum::Int4(_)) => x.cmp(&oid_operand(b)?),
+        (Datum::Int2(_) | Datum::Int4(_), Datum::Xid(y)) => oid_operand(a)?.cmp(y),
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
+        (Datum::OidVector(x), Datum::OidVector(y)) => compare_vectors(x, y)?,
+        // Every circle comparison operator orders by area through PostgreSQL's
+        // epsilon FP macros. A NaN area makes all of them false there; here it
+        // yields NULL, which excludes the row from a WHERE just the same. No
+        // corpus statement distinguishes the two.
+        (Datum::Circle(x), Datum::Circle(y)) => match x.compare(*y) {
+            Some(ordering) => ordering,
+            None => return Ok(None),
+        },
+        // `box` orders by AREA through the same epsilon macros, so two boxes of
+        // equal area are `=` however differently they are placed — `~=`
+        // (`box_same`) is the structural relation. PostgreSQL declares no
+        // `box <> box`; refusing that spelling is operator resolution's job, not
+        // this function's, which only answers what the ordering is.
+        (Datum::Box(x), Datum::Box(y)) => match x.compare(*y) {
+            Some(ordering) => ordering,
+            None => return Ok(None),
+        },
+        // `lseg` orders by LENGTH, so the endpoints are ignored entirely and `=`
+        // (`lseg_eq`) is a separate, structural relation the executor answers
+        // itself. NaN coordinates make every upstream comparison false, which is
+        // the `None` here.
+        (Datum::Lseg(x), Datum::Lseg(y)) => match x.compare(*y) {
+            Some(ordering) => ordering,
+            None => return Ok(None),
+        },
+        // `path` orders by the NUMBER OF POINTS and nothing else (`path_n_lt`
+        // and friends). Plain integer comparison, so unlike box and circle it is
+        // total and can never be NULL. `path` has no `<>` either.
+        (Datum::Path(x), Datum::Path(y)) => x.compare(y),
+        // `line` supports only equality; the ordering operators are rejected
+        // before they reach here, so `Equal`/`Greater` is enough to answer `=`.
+        // `line_eq` is PROPORTIONAL, not field-by-field — `{1,-1,0}` equals
+        // `{2,-2,0}` — so this must go through `eq_line` rather than the
+        // derive-shaped `PartialEq`, which is the structural relation backing
+        // `Hash`.
+        (Datum::Line(x), Datum::Line(y)) => {
+            if x.eq_line(*y) {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }
+        }
         // `record_cmp`: field by field, left to right.
         (Datum::Record(x), Datum::Record(y)) => compare_records(x, y)?,
         // An enum orders by its labels' declared positions, which is what
         // `pg_enum.enumsortorder` records.
         (Datum::Enum(x), Datum::Enum(y)) => compare_enums(x, y)?,
+        (Datum::Range(x), Datum::Range(y)) => compare_ranges(x, y)?,
+        (Datum::Multirange(x), Datum::Multirange(y)) => compare_multiranges(x, y)?,
         // SP30: any numeric pair with a float promotes to float comparison (NaN is
         // the largest value and equals itself; `-0.0 == +0.0` — PG's float ordering).
         _ if is_float(a) || is_float(b) => match (as_f64(a), as_f64(b)) {
@@ -644,11 +780,155 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
     Ok(Some(ord))
 }
 
+/// An integer operand read as the `oid` PostgreSQL's implicit cast makes it.
+///
+/// `int2` and `int4` are binary coercions — the bits are reinterpreted — while
+/// `int8` runs `i8tooid`, which range-checks and raises 22003.
+fn oid_operand(value: &Datum) -> Result<u32, TypeError> {
+    match value {
+        Datum::Int2(n) => Ok(i32::from(*n).cast_unsigned()),
+        Datum::Int4(n) => Ok(n.cast_unsigned()),
+        Datum::Int8(n) => u32::try_from(*n).map_err(|_| TypeError::OutOfRange {
+            message: "OID out of range".to_string(),
+        }),
+        other => Err(cannot_compare(other, other)),
+    }
+}
+
+fn compare_ranges(a: &crate::RangeValue, b: &crate::RangeValue) -> Result<Ordering, TypeError> {
+    if a.ty != b.ty {
+        return Err(TypeError::TypeMismatch {
+            message: "cannot compare ranges of different types".into(),
+        });
+    }
+    match (a.empty, b.empty) {
+        (true, true) => return Ok(Ordering::Equal),
+        (true, false) => return Ok(Ordering::Less),
+        (false, true) => return Ok(Ordering::Greater),
+        (false, false) => {}
+    }
+    let lower = compare_range_bounds(
+        a.lower.as_deref(),
+        a.lower_inclusive,
+        b.lower.as_deref(),
+        b.lower_inclusive,
+        false,
+    )?;
+    if lower != Ordering::Equal {
+        return Ok(lower);
+    }
+    compare_range_bounds(
+        a.upper.as_deref(),
+        a.upper_inclusive,
+        b.upper.as_deref(),
+        b.upper_inclusive,
+        true,
+    )
+}
+
+fn compare_multiranges(
+    a: &crate::MultirangeValue,
+    b: &crate::MultirangeValue,
+) -> Result<Ordering, TypeError> {
+    if a.ty != b.ty {
+        return Err(TypeError::TypeMismatch {
+            message: "cannot compare multiranges of different types".into(),
+        });
+    }
+    for (left, right) in a.ranges.iter().zip(&b.ranges) {
+        let order = compare_ranges(left, right)?;
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
+    }
+    Ok(a.ranges.len().cmp(&b.ranges.len()))
+}
+
+fn compare_range_bounds(
+    a: Option<&Datum>,
+    a_inclusive: bool,
+    b: Option<&Datum>,
+    b_inclusive: bool,
+    upper: bool,
+) -> Result<Ordering, TypeError> {
+    match (a, b) {
+        (None, None) => Ok(Ordering::Equal),
+        (None, Some(_)) => Ok(if upper {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        }),
+        (Some(_), None) => Ok(if upper {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }),
+        (Some(a), Some(b)) => match compare(a, b)?.expect("finite range bounds are non-null") {
+            Ordering::Equal => Ok(match (a_inclusive, b_inclusive) {
+                (true, false) => {
+                    if upper {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (false, true) => {
+                    if upper {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                _ => Ordering::Equal,
+            }),
+            ordering => Ok(ordering),
+        },
+    }
+}
+
 /// PostgreSQL's array btree order (`array_cmp`): element-wise over the common
 /// prefix, then the shorter array first, then fewer dimensions first, then the
 /// dimension lengths, then the lower bounds. A NULL element sorts greater than
 /// any non-NULL one (PostgreSQL's `btarraycmp` treats NULLs as largest), and two
 /// NULLs are equal. The *comparison* is never NULL, unlike a scalar `=`.
+/// `oidvectorlt` and friends, which are not `array_cmp`.
+///
+/// An `oidvector`'s elements are oids, and an oid is unsigned. crabka has no
+/// `oid` element type, so the `u32` rides in an `Int4` with its bit pattern
+/// preserved -- which means the generic element comparison reads it back
+/// *signed* and sorts `4294967295` before `1`. `PostgreSQL` compares through
+/// `oidcmp`, unsigned, and puts `1` first.
+///
+/// `int2vector` shares this datum variant and is genuinely signed, so the
+/// element type is the discriminator: `Int4` elements are oids, `Int2` elements
+/// are int2s and keep the ordinary comparison.
+///
+/// Only ordering is affected. Equality reads the same under either
+/// interpretation, so index probes and unique enforcement were never wrong.
+fn compare_vectors(
+    a: &crate::datum::ArrayValue,
+    b: &crate::datum::ArrayValue,
+) -> Result<Ordering, TypeError> {
+    if a.elem != crate::ElemType::Int4 || b.elem != crate::ElemType::Int4 {
+        return compare_arrays(a, b);
+    }
+    for (x, y) in a.elems.iter().zip(b.elems.iter()) {
+        let ord = match (x, y) {
+            (Datum::Int4(x), Datum::Int4(y)) => x.cast_unsigned().cmp(&y.cast_unsigned()),
+            _ => match (x.is_null(), y.is_null()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => compare(x, y)?.expect("non-NULL operands compare"),
+            },
+        };
+        if ord != Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(a.elems.len().cmp(&b.elems.len()))
+}
+
 fn compare_arrays(
     a: &crate::datum::ArrayValue,
     b: &crate::datum::ArrayValue,
@@ -870,6 +1150,92 @@ mod tests {
         );
     }
 
+    /// The three exact `pg_operator` rows over `time` and `timetz`:
+    /// `time_mi_time`, and `datetimetz_timestamptz` in both operand orders.
+    ///
+    /// `time - time` is the one `time` operator whose answer is not a clock
+    /// reading, so it is signed and it does not wrap. `date + timetz` is the
+    /// one `timestamptz`-producing operator that takes no session zone, so it
+    /// lives here rather than in the executor: the offset the `timetz` carries
+    /// is the whole of the zone information.
+    #[test]
+    fn time_and_timetz_answer_their_own_pg_operator_rows() {
+        use assert2::assert;
+
+        let time = |s: &str| Datum::Time(crate::datetime::parse_time(s).expect("time"));
+        let timetz = |s: &str| {
+            Datum::Timetz(
+                crate::datetime::parse_timetz(s, &jiff::tz::TimeZone::UTC).expect("timetz"),
+            )
+        };
+        let date = |s: &str| Datum::Date(crate::datetime::parse_date(s).expect("date"));
+        let interval = |months, days, micros| {
+            Datum::Interval(crate::datetime::Interval {
+                months,
+                days,
+                micros,
+            })
+        };
+        let instant = |s: &str| {
+            Datum::Timestamptz(
+                crate::datetime::parse_timestamptz(s, &jiff::tz::TimeZone::UTC)
+                    .expect("timestamptz"),
+            )
+        };
+
+        // time - time is a signed microsecond count with no months and no days.
+        assert!(
+            sub(&time("01:00"), &time("00:30")).expect("difference")
+                == interval(0, 0, 1_800_000_000)
+        );
+        assert!(
+            sub(&time("00:30"), &time("01:00")).expect("difference")
+                == interval(0, 0, -1_800_000_000)
+        );
+        // `24:00:00` is a legal reading, and the span it ends is a whole day of
+        // microseconds rather than one interval day.
+        assert!(
+            sub(&time("24:00:00"), &time("00:00:00")).expect("difference")
+                == interval(0, 0, 86_400_000_000)
+        );
+
+        // date + timetz reads the offset as the zone the reading was taken in,
+        // so 11:00 at -05 is 16:00 UTC on the given date. The operand order
+        // makes no difference.
+        assert!(
+            add(&date("2000-01-01"), &timetz("11:00-05")).expect("instant")
+                == instant("2000-01-01 16:00:00+00")
+        );
+        assert!(
+            add(&timetz("11:00-05"), &date("2000-01-01")).expect("instant")
+                == instant("2000-01-01 16:00:00+00")
+        );
+        // The same reading at the opposite offset names an instant ten hours
+        // earlier, which is the whole of the difference between them.
+        assert!(
+            add(&date("2000-01-01"), &timetz("11:00+05")).expect("instant")
+                == instant("2000-01-01 06:00:00+00")
+        );
+
+        // An infinite date is carried through rather than computed with.
+        assert!(
+            add(
+                &Datum::Date(crate::datetime::DATE_INFINITY),
+                &timetz("11:00-05")
+            )
+            .expect("infinity")
+                == Datum::Timestamptz(crate::datetime::timestamptz_infinity_of_sign(1))
+        );
+        assert!(
+            add(
+                &Datum::Date(crate::datetime::DATE_NEG_INFINITY),
+                &timetz("11:00-05")
+            )
+            .expect("negative infinity")
+                == Datum::Timestamptz(crate::datetime::timestamptz_infinity_of_sign(-1))
+        );
+    }
+
     /// `ORDER BY`, `min`/`max` and `DISTINCT` over a bytea column all route
     /// through `compare`; without a bytea arm they raise 42804. PostgreSQL's
     /// `byteacmp` is bytewise over the common prefix, then length.
@@ -1070,10 +1436,24 @@ mod tests {
             add(&Datum::Int4(1), &Datum::Int8(2)).expect("ok"),
             Datum::Int8(3)
         );
-        assert!(matches!(
-            add(&Datum::Int4(i32::MAX), &Datum::Int4(1)),
-            Err(TypeError::Overflow)
-        ));
+        // Each width names itself, exactly as PostgreSQL's `int*_pl` do.
+        for (a, b, message) in [
+            (
+                Datum::Int2(i16::MAX),
+                Datum::Int2(1),
+                "smallint out of range",
+            ),
+            (
+                Datum::Int4(i32::MAX),
+                Datum::Int4(1),
+                "integer out of range",
+            ),
+            (Datum::Int8(i64::MAX), Datum::Int8(1), "bigint out of range"),
+        ] {
+            let err = add(&a, &b).expect_err("overflow");
+            assert_eq!(err.to_string(), message);
+            assert_eq!(err.sqlstate(), "22003");
+        }
         assert!(matches!(
             div(&Datum::Int4(1), &Datum::Int4(0)),
             Err(TypeError::DivisionByZero)
@@ -1213,10 +1593,20 @@ mod tests {
             Datum::Null
         );
         // finite × finite overflowing to infinity is 22003; an infinite operand
-        // propagates Infinity without error.
+        // propagates Infinity without error. The message is `float8_mul`'s, not
+        // `int4`'s.
+        let overflow = mul(&Datum::Float8(1e308), &Datum::Float8(1e308)).expect_err("overflow");
+        assert!(overflow.sqlstate() == "22003");
+        assert!(overflow.to_string() == "value out of range: overflow");
+        // `NaN / 0` is `NaN`, the one dividend `float8_div` lets past its
+        // zero-divisor guard.
         assert!(matches!(
-            mul(&Datum::Float8(1e308), &Datum::Float8(1e308)),
-            Err(TypeError::Overflow)
+            div(&Datum::Float8(f64::NAN), &Datum::Float8(0.0)),
+            Ok(Datum::Float8(result)) if result.is_nan()
+        ));
+        assert!(matches!(
+            div(&Datum::Float4(f32::NAN), &Datum::Float4(0.0)),
+            Ok(Datum::Float4(result)) if result.is_nan()
         ));
         assert_eq!(
             mul(&Datum::Float8(f64::INFINITY), &Datum::Float8(2.0)).expect("ok"),
@@ -1875,5 +2265,169 @@ mod tests {
                 "{right:?} vs {left:?}"
             );
         }
+    }
+
+    // ---- the geometric btree orderings ----
+
+    /// The four geometric types with an ordering each compare a different
+    /// *magnitude*, not their structure: `box` and `circle` by area, `lseg` by
+    /// length, `path` by point count. Every row is the truth of the
+    /// corresponding `<`/`=`/`>` on PostgreSQL 18.4.
+    #[test]
+    fn geometric_ordering_compares_the_magnitude_postgres_compares() {
+        use assert2::assert;
+
+        use crate::ColumnType;
+        let tz = jiff::tz::TimeZone::UTC;
+        let value = |ty: ColumnType, text: &str| {
+            crate::cast::cast(&Datum::Text(text.into()), ty, &tz)
+                .unwrap_or_else(|_| panic!("{text}"))
+        };
+        let cases: &[(ColumnType, &str, &str, Ordering)] = &[
+            // `box` orders by AREA, so two boxes of equal area are Equal however
+            // differently they are placed — the structural relation is `~=`.
+            (
+                ColumnType::Box,
+                "(0,0),(2,2)",
+                "(0,0),(3,3)",
+                Ordering::Less,
+            ),
+            (
+                ColumnType::Box,
+                "(0,0),(2,2)",
+                "(5,5),(7,7)",
+                Ordering::Equal,
+            ),
+            (
+                ColumnType::Box,
+                "(0,0),(2,2)",
+                "(0,0),(1,1)",
+                Ordering::Greater,
+            ),
+            // `lseg` orders by LENGTH, so two segments of equal length are Equal
+            // even with different endpoints — `lseg_eq` is the structural one.
+            (
+                ColumnType::Lseg,
+                "[(0,0),(3,0)]",
+                "[(0,0),(0,2)]",
+                Ordering::Greater,
+            ),
+            (
+                ColumnType::Lseg,
+                "[(0,0),(3,0)]",
+                "[(1,1),(1,4)]",
+                Ordering::Equal,
+            ),
+            (
+                ColumnType::Lseg,
+                "[(0,0),(3,0)]",
+                "[(0,0),(4,0)]",
+                Ordering::Less,
+            ),
+            // `path` orders by POINT COUNT and nothing else — the vertices, the
+            // shape and the open/closed flag are all ignored.
+            (
+                ColumnType::Path,
+                "((0,0),(1,0),(1,1))",
+                "((0,0),(1,1))",
+                Ordering::Greater,
+            ),
+            (
+                ColumnType::Path,
+                "[(0,0),(1,1)]",
+                "((5,5),(9,9))",
+                Ordering::Equal,
+            ),
+            (
+                ColumnType::Path,
+                "((0,0),(1,1))",
+                "((0,0),(1,0),(1,1))",
+                Ordering::Less,
+            ),
+            // `circle` orders by area too.
+            (
+                ColumnType::Circle,
+                "<(0,0),1>",
+                "<(9,9),1>",
+                Ordering::Equal,
+            ),
+            (ColumnType::Circle, "<(0,0),1>", "<(0,0),2>", Ordering::Less),
+        ];
+        for (ty, left, right, expected) in cases {
+            let (a, b) = (value(*ty, left), value(*ty, right));
+            assert!(
+                compare(&a, &b).expect("geometric cmp") == Some(*expected),
+                "{ty:?} {left} vs {right}"
+            );
+            assert!(
+                compare(&b, &a).expect("geometric cmp") == Some(expected.reverse()),
+                "{ty:?} {right} vs {left}"
+            );
+        }
+    }
+
+    /// `polygon` and `point` have no btree opclass at all: `polygon < polygon`
+    /// and `point = point` are both "operator does not exist" upstream, so
+    /// `compare` must refuse rather than invent an order. The message names the
+    /// types, which is what the executor turns into its own error.
+    #[test]
+    fn polygon_and_point_have_no_comparison() {
+        use assert2::assert;
+
+        use crate::ColumnType;
+        let tz = jiff::tz::TimeZone::UTC;
+        let value = |ty: ColumnType, text: &str| {
+            crate::cast::cast(&Datum::Text(text.into()), ty, &tz)
+                .unwrap_or_else(|_| panic!("{text}"))
+        };
+        for (ty, left, right) in [
+            (ColumnType::Polygon, "((0,0),(1,0),(1,1))", "((0,0),(1,1))"),
+            // Even two identical polygons: PostgreSQL has no `polygon =`.
+            (
+                ColumnType::Polygon,
+                "((0,0),(1,0),(1,1))",
+                "((0,0),(1,0),(1,1))",
+            ),
+            (ColumnType::Point, "(1,2)", "(1,2)"),
+        ] {
+            let error = compare(&value(ty, left), &value(ty, right)).expect_err("no ordering");
+            assert!(error.sqlstate() == "42804", "{ty:?} {left} vs {right}");
+            assert!(error.to_string().contains(ty.name()), "{ty:?} names itself");
+        }
+        // A NULL still short-circuits to NULL before the type is consulted.
+        assert!(compare(&Datum::Null, &value(ColumnType::Polygon, "((0,0),(1,1))")) == Ok(None));
+    }
+
+    /// `oidvectorlt` is unsigned; `array_cmp` is not.
+    ///
+    /// An oid above 2^31 rides in an `Int4` with its bit pattern intact, so the
+    /// generic element comparison reads it back negative and sorts it first.
+    /// `PostgreSQL` compares oids through `oidcmp`, unsigned. `int2vector`
+    /// shares the datum variant and is genuinely signed, so it must keep the
+    /// ordinary ordering -- that pair is what stops this being fixed by
+    /// reinterpreting every vector element.
+    #[test]
+    fn a_vector_of_oids_orders_unsigned_and_one_of_int2s_does_not() {
+        use assert2::assert;
+
+        use crate::ColumnType;
+        let tz = jiff::tz::TimeZone::UTC;
+        let vector = |ty: ColumnType, text: &str| {
+            crate::cast::cast(&Datum::Text(text.into()), ty, &tz)
+                .unwrap_or_else(|_| panic!("{text}"))
+        };
+        let oidvec = |text: &str| vector(ColumnType::OidVector, text);
+        let int2vec = |text: &str| vector(ColumnType::Int2Vector, text);
+
+        // 4294967295 is -1 as an i32. Unsigned, it is the largest oid there is.
+        assert!(compare(&oidvec("1 2"), &oidvec("4294967295 0")) == Ok(Some(Ordering::Less)));
+        assert!(compare(&oidvec("4294967295 0"), &oidvec("1 2")) == Ok(Some(Ordering::Greater)));
+        assert!(compare(&oidvec("0 1"), &oidvec("0 2")) == Ok(Some(Ordering::Less)));
+        assert!(compare(&oidvec("1 2"), &oidvec("1 2")) == Ok(Some(Ordering::Equal)));
+        // A common prefix orders the shorter first, as array_cmp does.
+        assert!(compare(&oidvec("1"), &oidvec("1 0")) == Ok(Some(Ordering::Less)));
+
+        // int2 elements stay signed: -1 really is below 1 here.
+        assert!(compare(&int2vec("-1 0"), &int2vec("1 0")) == Ok(Some(Ordering::Less)));
     }
 }

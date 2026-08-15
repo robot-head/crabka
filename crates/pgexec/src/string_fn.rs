@@ -33,8 +33,12 @@ enum StrFunc {
     Sha256,
     Sha384,
     Sha512,
+    Crc32,
+    Crc32c,
     Encode,
     Decode,
+    Convert,
+    ConvertFrom,
     ToHex,
     QuoteIdent,
     QuoteLiteral,
@@ -60,8 +64,12 @@ fn str_func(name: &str) -> Option<StrFunc> {
         "sha256" => StrFunc::Sha256,
         "sha384" => StrFunc::Sha384,
         "sha512" => StrFunc::Sha512,
+        "crc32" => StrFunc::Crc32,
+        "crc32c" => StrFunc::Crc32c,
         "encode" => StrFunc::Encode,
         "decode" => StrFunc::Decode,
+        "convert" => StrFunc::Convert,
+        "convert_from" => StrFunc::ConvertFrom,
         "to_hex" => StrFunc::ToHex,
         "quote_ident" => StrFunc::QuoteIdent,
         "quote_literal" => StrFunc::QuoteLiteral,
@@ -122,13 +130,41 @@ pub(crate) fn string_func_result_type(
             require_string_arg(fc, args, scope)?;
             Ok(ColumnType::Bytea)
         }
+        // The checksums are declared over `bytea` alone and return `bigint`,
+        // which is what keeps a residue above 2^31 positive.
+        StrFunc::Crc32 | StrFunc::Crc32c => {
+            require_arity(fc, n == 1)?;
+            require_bytea_arg(fc, args, scope)?;
+            Ok(ColumnType::Int8)
+        }
+        // `encode(bytea, text)` is PostgreSQL's only candidate, so an `unknown`
+        // first argument is coerced through `byteain` rather than read as text.
         StrFunc::Encode => {
             require_arity(fc, n == 2)?;
+            require_bytea_arg(fc, args, scope)?;
             Ok(ColumnType::Text)
         }
         StrFunc::Decode => {
             require_arity(fc, n == 2)?;
             Ok(ColumnType::Bytea)
+        }
+        StrFunc::Convert => {
+            require_arity(fc, n == 3)?;
+            if !is_unknown_arg(&args[0])
+                && crate::eval::infer_type(&args[0], scope)? != ColumnType::Bytea
+            {
+                return Err(undefined_function_spelled(&fc.name, args, scope));
+            }
+            for arg in &args[1..] {
+                if !is_unknown_arg(arg) && !crate::eval::infer_type(arg, scope)?.is_string() {
+                    return Err(undefined_function_spelled(&fc.name, args, scope));
+                }
+            }
+            Ok(ColumnType::Bytea)
+        }
+        StrFunc::ConvertFrom => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Text)
         }
         // `to_hex` has an int4 and an int8 overload and no preferred one, so a
         // lone `unknown` argument leaves PostgreSQL unable to choose.
@@ -180,6 +216,18 @@ fn require_string_arg(fc: &FuncCall, args: &[Expr], scope: &Scope) -> Result<(),
     }
     match crate::eval::infer_type(&args[0], scope)? {
         ColumnType::Text | ColumnType::Bytea => Ok(()),
+        _ => Err(undefined_function_spelled(&fc.name, args, scope)),
+    }
+}
+
+/// Require an argument a `bytea`-only parameter accepts: `bytea`, or an
+/// `unknown` literal the coercion will run `byteain` over.
+fn require_bytea_arg(fc: &FuncCall, args: &[Expr], scope: &Scope) -> Result<(), ExecError> {
+    if is_unknown_arg(&args[0]) {
+        return Ok(());
+    }
+    match crate::eval::infer_type(&args[0], scope)? {
+        ColumnType::Bytea => Ok(()),
         _ => Err(undefined_function_spelled(&fc.name, args, scope)),
     }
 }
@@ -256,13 +304,35 @@ fn eval_strict(
             require_arity(fc, vals.len() == 1)?;
             Ok(Datum::Bytea(sha(f, bytes_arg(&vals[0])?)))
         }
+        StrFunc::Crc32 => {
+            require_arity(fc, vals.len() == 1)?;
+            Ok(Datum::Int8(crate::bytea_fn::crc32(&bytea_input_arg(
+                &vals[0], ctx,
+            )?)))
+        }
+        StrFunc::Crc32c => {
+            require_arity(fc, vals.len() == 1)?;
+            Ok(Datum::Int8(crate::bytea_fn::crc32c(&bytea_input_arg(
+                &vals[0], ctx,
+            )?)))
+        }
         StrFunc::Encode => {
             require_arity(fc, vals.len() == 2)?;
-            encode(bytes_of(&vals[0])?, text_arg(&vals[1])?).map(Datum::Text)
+            encode(&bytea_input_arg(&vals[0], ctx)?, text_arg(&vals[1])?).map(Datum::Text)
         }
         StrFunc::Decode => {
             require_arity(fc, vals.len() == 2)?;
             decode(text_arg(&vals[0])?, text_arg(&vals[1])?).map(Datum::Bytea)
+        }
+        StrFunc::Convert => {
+            require_arity(fc, vals.len() == 3)?;
+            let bytes = conversion_bytes(&vals[0], ctx)?;
+            convert_encoding(&bytes, text_arg(&vals[1])?, text_arg(&vals[2])?).map(Datum::Bytea)
+        }
+        StrFunc::ConvertFrom => {
+            require_arity(fc, vals.len() == 2)?;
+            let bytes = conversion_bytes(&vals[0], ctx)?;
+            decode_encoding(&bytes, text_arg(&vals[1])?).map(Datum::Text)
         }
         StrFunc::ToHex => {
             require_arity(fc, vals.len() == 1)?;
@@ -334,12 +404,21 @@ fn eval_strict(
             let form = normalization_form(vals.get(1))?;
             Ok(Datum::Bool(is_normalized(text_arg(&vals[0])?, form)))
         }
+        // `bitoctetlength` counts the bytes the bits occupy, and `bit_length`
+        // over a bit string is `bitlength` — the bit count itself, which is not
+        // the byte count times eight when the last byte is part-full.
         StrFunc::OctetLength => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                return Ok(Datum::Int4(bits.octet_len()));
+            }
             Ok(Datum::Int4(byte_len(bytes_of(&vals[0])?.len())))
         }
         StrFunc::BitLength => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                return Ok(Datum::Int4(crate::bit_fn::length(bits)));
+            }
             Ok(Datum::Int4(byte_len(bytes_of(&vals[0])?.len() * 8)))
         }
         StrFunc::Format | StrFunc::ConcatWs => Err(undefined_function(&fc.name)),
@@ -348,6 +427,105 @@ fn eval_strict(
 
 fn byte_len(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+fn conversion_bytes(value: &Datum, ctx: &EvalCtx) -> Result<Vec<u8>, ExecError> {
+    match value {
+        Datum::Bytea(bytes) => Ok(bytes.clone()),
+        Datum::Text(_) => {
+            match crabka_pgtypes::cast::cast(value, ColumnType::Bytea, &ctx.time_zone)? {
+                Datum::Bytea(bytes) => Ok(bytes),
+                _ => unreachable!("text to bytea cast returns bytea"),
+            }
+        }
+        other => Err(type_error("convert", other)),
+    }
+}
+
+fn convert_encoding(bytes: &[u8], source: &str, target: &str) -> Result<Vec<u8>, ExecError> {
+    let Some(source_id) = crate::catalog_fn::encoding_id(source) else {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22023",
+            message: format!("invalid source encoding name \"{source}\""),
+        });
+    };
+    let Some(target_id) = crate::catalog_fn::encoding_id(target) else {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22023",
+            message: format!("invalid destination encoding name \"{target}\""),
+        });
+    };
+    let supported = source_id == target_id
+        || source_id == 0
+        || target_id == 0
+        || crate::builtin_conversions::BUILTIN_CONVERSIONS.iter().any(
+            |&(_, _, _, _, candidate_source, candidate_target, _, default)| {
+                default && candidate_source == source_id && candidate_target == target_id
+            },
+        );
+    if !supported {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42883",
+            message: format!("default conversion from {source} to {target} does not exist"),
+        });
+    }
+    // ponytail: ASCII is invariant across PostgreSQL's built-in encodings;
+    // add a converter backend when non-ASCII conversion becomes an owning test.
+    if bytes.is_ascii() || source_id == target_id || target_id == 0 {
+        return Ok(bytes.to_vec());
+    }
+    Err(ExecError::FunctionError {
+        sqlstate: "0A000",
+        message: format!("encoding conversion from {source} to {target} is not supported"),
+    })
+}
+
+fn decode_encoding(bytes: &[u8], source: &str) -> Result<String, ExecError> {
+    let Some(source_id) = crate::catalog_fn::encoding_id(source) else {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22023",
+            message: format!("invalid source encoding name \"{source}\""),
+        });
+    };
+    if source_id == crate::catalog_fn::UTF8_ENCODING {
+        return String::from_utf8(bytes.to_vec()).map_err(|_| ExecError::FunctionError {
+            sqlstate: "22021",
+            message: "invalid byte sequence for encoding \"UTF8\"".into(),
+        });
+    }
+    if source_id != crate::catalog_fn::EUC_KR_ENCODING {
+        return Err(ExecError::FunctionError {
+            sqlstate: "0A000",
+            message: format!("encoding conversion from {source} to UTF8 is not supported"),
+        });
+    }
+    // PostgreSQL EUC_KR accepts ASCII plus strict KS X 1001 two-byte pairs.
+    // encoding_rs implements the wider Windows-949 repertoire, so validate the
+    // byte grammar before using its decoder.
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii() {
+            index += 1;
+            continue;
+        }
+        if index + 1 >= bytes.len()
+            || !(0xa1..=0xfe).contains(&bytes[index])
+            || !(0xa1..=0xfe).contains(&bytes[index + 1])
+        {
+            return Err(ExecError::FunctionError {
+                sqlstate: "22021",
+                message: format!("invalid byte sequence for encoding \"{source}\""),
+            });
+        }
+        index += 2;
+    }
+    encoding_rs::EUC_KR
+        .decode_without_bom_handling_and_without_replacement(bytes)
+        .map(|text| text.into_owned())
+        .ok_or_else(|| ExecError::FunctionError {
+            sqlstate: "22021",
+            message: format!("invalid byte sequence for encoding \"{source}\""),
+        })
 }
 
 fn text_arg(d: &Datum) -> Result<&str, ExecError> {
@@ -368,8 +546,32 @@ fn bytes_arg(d: &Datum) -> Result<&[u8], ExecError> {
     }
 }
 
+/// The bytes `octet_length`/`bit_length` measure. Both have a `text` overload,
+/// so an untyped literal is text and its UTF-8 length is the answer.
 fn bytes_of(d: &Datum) -> Result<&[u8], ExecError> {
     bytes_arg(d)
+}
+
+/// The bytes a parameter declared `bytea` — and only `bytea` — sees.
+///
+/// This differs from [`bytes_arg`] in what it does with an untyped literal, and
+/// the difference is visible: `md5` has both a `text` and a `bytea` overload, so
+/// PostgreSQL reads `md5('\x12')` as four characters of text, while `encode` has
+/// only the `bytea` one, so `encode('\x12', 'hex')` is coerced through `byteain`
+/// and is a single byte. Reading the literal's UTF-8 here would return the hex
+/// of the backslash and the digits instead of the byte they spell.
+fn bytea_input_arg<'a>(
+    d: &'a Datum,
+    ctx: &EvalCtx,
+) -> Result<std::borrow::Cow<'a, [u8]>, ExecError> {
+    match d {
+        Datum::Bytea(bytes) => Ok(std::borrow::Cow::Borrowed(bytes)),
+        Datum::Text(_) => match crabka_pgtypes::cast::cast(d, ColumnType::Bytea, &ctx.time_zone)? {
+            Datum::Bytea(bytes) => Ok(std::borrow::Cow::Owned(bytes)),
+            _ => unreachable!("a cast to bytea yields bytea"),
+        },
+        other => Err(type_error("function", other)),
+    }
 }
 
 // ---- message digests ----
@@ -414,18 +616,24 @@ fn encode(input: &[u8], encoding: &str) -> Result<String, ExecError> {
     }
 }
 
-/// `bytea_out`'s traditional escape format: printable ASCII except backslash
-/// stays literal, a backslash doubles, and everything else is `\nnn` octal.
+/// `encode(bytea, 'escape')` — `esc_encode`, which escapes **less** than
+/// `byteaout`'s escape spelling does.
+///
+/// Only NUL and the high half become `\nnn` octal, and only a backslash
+/// doubles. A control byte such as `0x01` passes through raw, where `byteaout`
+/// would write `\001`. The two rules agree on every byte outside `0x01..=0x1f`
+/// and `0x7f`, which is why one implementation stood in for both until an
+/// `overlay` result carried a `0x01`.
 fn escape_encode(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len());
     for &b in input {
         match b {
-            b'\\' => out.push_str("\\\\"),
-            0x20..=0x7e => out.push(char::from(b)),
-            _ => {
+            0x00 | 0x80..=0xff => {
                 use std::fmt::Write;
                 write!(out, "\\{b:03o}").expect("writing to a String cannot fail");
             }
+            b'\\' => out.push_str("\\\\"),
+            _ => out.push(char::from(b)),
         }
     }
     out

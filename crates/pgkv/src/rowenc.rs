@@ -45,6 +45,106 @@ mod tag {
     /// Full-text values, stored as their canonical text representations.
     pub const TSVECTOR: u8 = 20;
     pub const TSQUERY: u8 = 21;
+    /// Geometric point (`[22][f64 x][f64 y]`). Append-only.
+    pub const POINT: u8 = 22;
+    /// Geometric path. Append-only.
+    pub const PATH: u8 = 23;
+    /// A range (`[24][u32 type oid][u8 flags][tagged finite bounds...]`).
+    pub const RANGE: u8 = 24;
+    /// A multirange (`[25][u32 type oid][u32 count][tagged ranges...]`).
+    pub const MULTIRANGE: u8 = 25;
+    /// `jsonpath`, stored as canonical UTF-8 text. Append-only.
+    pub const JSONPATH: u8 = 26;
+    /// `PostgreSQL` `lseg`. Append-only — no version bump.
+    pub const LSEG: u8 = 27;
+    /// `PostgreSQL` `line`. Append-only — no version bump.
+    pub const LINE: u8 = 28;
+    /// `PostgreSQL` `circle`. Append-only — no version bump.
+    pub const CIRCLE: u8 = 29;
+    /// `PostgreSQL` `box`. Append-only — no version bump.
+    pub const BOX: u8 = 30;
+    /// `PostgreSQL` `inet`/`cidr` (`[31][is_cidr][family][bits][16 address
+    /// bytes]`). One tag for both SQL types, as one datum holds both.
+    /// Append-only — no version bump.
+    pub const INET: u8 = 31;
+    /// `PostgreSQL` `macaddr` (`[32][6 bytes]`). Append-only.
+    pub const MACADDR: u8 = 32;
+    /// `PostgreSQL` `macaddr8` (`[33][8 bytes]`). Append-only.
+    pub const MACADDR8: u8 = 33;
+    /// `PostgreSQL` `bit` / `bit varying` (`[34][varying][u32 bit count][packed
+    /// bytes]`). One tag for both SQL types, as one datum holds both.
+    /// Append-only — no version bump.
+    pub const BITSTRING: u8 = 34;
+    /// `PostgreSQL` `money` (`[35][8 big-endian bytes]`). Append-only — no
+    /// version bump.
+    pub const MONEY: u8 = 35;
+    /// `PostgreSQL` `xml` (`[43][u32 length][UTF-8 document]`). Like [`JSON`]
+    /// the stored bytes are the input text, and for the same reason: re-parsing
+    /// them on the way out would normalise a value the type exists to preserve.
+    /// Append-only — no version bump.
+    pub const XML: u8 = 43;
+    /// `PostgreSQL` `json` (`[36][u32 length][UTF-8 document]`). Its own tag
+    /// rather than [`JSONB`]'s, because the stored bytes are the *input* text:
+    /// decoding through the `jsonb` tag would normalise them and lose exactly
+    /// what the type exists to keep. Append-only — no version bump.
+    pub const JSON: u8 = 36;
+    /// `PostgreSQL` `oid` (`[37][u32 big-endian]`). Append-only — no version
+    /// bump.
+    pub const OID: u8 = 37;
+    /// `PostgreSQL` `xid` (`[38][u32 big-endian]`). Append-only.
+    pub const XID: u8 = 38;
+    /// `PostgreSQL` `xid8` (`[39][u64 big-endian]`). Append-only.
+    pub const XID8: u8 = 39;
+    /// `PostgreSQL` `cid` (`[40][u32 big-endian]`). Append-only.
+    pub const CID: u8 = 40;
+    /// `PostgreSQL` `tid` (`[41][u32 block][u16 offset]`). Append-only.
+    pub const TID: u8 = 41;
+    /// `PostgreSQL` `pg_lsn` (`[42][u64 big-endian]`). Append-only.
+    pub const PG_LSN: u8 = 42;
+    /// `PostgreSQL` `polygon` (`[44][u32 vertex count][f64 x][f64 y]…`). Like
+    /// [`PATH`] but with no closed flag: a polygon is always closed. The
+    /// bounding box is not stored — it is a function of the vertices, and
+    /// recomputing it on read is what keeps the two from disagreeing.
+    /// Append-only — no version bump.
+    pub const POLYGON: u8 = 44;
+    /// `PostgreSQL` `oidvector` and `int2vector` (`[45]` then [`ARRAY`]'s
+    /// payload). Its own tag rather than [`ARRAY`]'s, because the two are
+    /// different SQL types and only the tag says which was stored: read back
+    /// through [`ARRAY`] a stored `oidvector` becomes an `integer[]`, which
+    /// prints `[0:1]={1,2}` instead of `1 2` and which `=` refuses to compare
+    /// against an `oidvector` literal.
+    ///
+    /// One tag covers both SQL types, as one datum holds both. The element type
+    /// in the payload tells them apart — `oidvector` carries its unsigned oids
+    /// in `Int4` elements, `int2vector` its `Int2` elements — so it needs no
+    /// discriminator of its own.
+    ///
+    /// Append-only — no version bump. Every array already on disk keeps its
+    /// bytes and its meaning, and a decoder that predates this tag rejects it
+    /// as an unknown field tag rather than reading it as something else.
+    pub const OIDVECTOR: u8 = 45;
+    /// `PostgreSQL` `"char"` (`[46][byte]`). Its own tag rather than [`TEXT`]'s
+    /// because the two are different SQL types and only the tag says which was
+    /// stored: read back through [`TEXT`] a stored `"char"` would become the
+    /// escaped `\ooo` spelling rather than the byte, and the high half of the
+    /// type's range is not valid UTF-8 to store as text in the first place.
+    /// Append-only — no version bump.
+    pub const INTERNAL_CHAR: u8 = 46;
+    /// `PostgreSQL` `pg_snapshot` and `txid_snapshot` (`[47]` then a
+    /// length-prefixed UTF-8 string), stored in the canonical `xmin:xmax:xip`
+    /// text form the way [`TSVECTOR`] and [`TSQUERY`] store theirs.
+    ///
+    /// The text form is lossless here, unlike for most types, because it *is*
+    /// the canonical form: the value's running list is already sorted, already
+    /// de-duplicated and already clipped to the window, so printing and
+    /// re-reading it recovers the same triple.
+    ///
+    /// One tag covers both SQL types, as one datum holds both. Which of the
+    /// two a stored value belongs to is the column's declared type, not the
+    /// value's, so the tag has no discriminator to carry.
+    ///
+    /// Append-only — no version bump.
+    pub const PG_SNAPSHOT: u8 = 47;
 }
 
 /// Encodes one row in the current storage format.
@@ -59,8 +159,17 @@ pub fn encode_row(cols: &[Datum]) -> Vec<u8> {
     out
 }
 
-/// Appends `cols` as tagged fields. This is the row body without the version
-/// byte, and it is also the payload format for array elements.
+/// Append `cols` as tagged fields (the row body, without the version byte —
+/// also the payload format for array elements).
+/// Append `[tag][u32 length][bytes]` — the shape every variable-length scalar
+/// uses. `what` names the column only so the 4 GiB panic can say which one.
+fn push_tagged_bytes(out: &mut Vec<u8>, tag: u8, bytes: &[u8], what: &str) {
+    out.push(tag);
+    let len = u32::try_from(bytes.len()).unwrap_or_else(|_| panic!("{what} exceeds 4 GiB"));
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
 fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
     for d in cols {
         match d {
@@ -81,11 +190,9 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::INT8);
                 out.extend_from_slice(&n.to_be_bytes());
             }
-            Datum::Text(s) => {
-                out.push(tag::TEXT);
-                let len = u32::try_from(s.len()).expect("text column exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(s.as_bytes());
+            Datum::Text(s) => push_tagged_bytes(out, tag::TEXT, s.as_bytes(), "text column"),
+            Datum::JsonPath(s) => {
+                push_tagged_bytes(out, tag::JSONPATH, s.as_bytes(), "jsonpath column");
             }
             Datum::Float4(f) => {
                 out.push(tag::FLOAT4);
@@ -95,12 +202,58 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::FLOAT8);
                 out.extend_from_slice(&f.to_be_bytes());
             }
+            Datum::Point(point) => {
+                out.push(tag::POINT);
+                out.extend_from_slice(&point.x.to_be_bytes());
+                out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            Datum::Box(value) => {
+                out.push(tag::BOX);
+                for coordinate in [value.high.x, value.high.y, value.low.x, value.low.y] {
+                    out.extend_from_slice(&coordinate.to_be_bytes());
+                }
+            }
+            Datum::Circle(circle) => {
+                out.push(tag::CIRCLE);
+                for value in [circle.center.x, circle.center.y, circle.radius] {
+                    out.extend_from_slice(&value.to_be_bytes());
+                }
+            }
+            Datum::Line(line) => {
+                out.push(tag::LINE);
+                for coefficient in [line.a, line.b, line.c] {
+                    out.extend_from_slice(&coefficient.to_be_bytes());
+                }
+            }
+            Datum::Lseg(lseg) => {
+                out.push(tag::LSEG);
+                for coordinate in [lseg.start.x, lseg.start.y, lseg.end.x, lseg.end.y] {
+                    out.extend_from_slice(&coordinate.to_be_bytes());
+                }
+            }
+            Datum::Path(path) => {
+                out.push(tag::PATH);
+                out.push(u8::from(path.closed));
+                let count = u32::try_from(path.points.len()).expect("path exceeds 2^32 points");
+                out.extend_from_slice(&count.to_be_bytes());
+                for point in &path.points {
+                    out.extend_from_slice(&point.x.to_be_bytes());
+                    out.extend_from_slice(&point.y.to_be_bytes());
+                }
+            }
+            Datum::Polygon(polygon) => {
+                out.push(tag::POLYGON);
+                let count =
+                    u32::try_from(polygon.points.len()).expect("polygon exceeds 2^32 points");
+                out.extend_from_slice(&count.to_be_bytes());
+                for point in &polygon.points {
+                    out.extend_from_slice(&point.x.to_be_bytes());
+                    out.extend_from_slice(&point.y.to_be_bytes());
+                }
+            }
             Datum::Numeric(d) => {
-                out.push(tag::NUMERIC);
                 let s = crabka_pgtypes::numeric::to_text(d);
-                let len = u32::try_from(s.len()).expect("numeric text exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(s.as_bytes());
+                push_tagged_bytes(out, tag::NUMERIC, s.as_bytes(), "numeric text");
             }
             Datum::Date(d) => {
                 out.push(tag::DATE);
@@ -126,34 +279,22 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::INTERVAL);
                 out.extend_from_slice(&crabka_pgtypes::datetime::interval_to_binary(*iv));
             }
-            Datum::Bytea(b) => {
-                out.push(tag::BYTEA);
-                let len = u32::try_from(b.len()).expect("bytea column exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(b);
-            }
+            Datum::Bytea(b) => push_tagged_bytes(out, tag::BYTEA, b, "bytea column"),
             Datum::Jsonb(j) => {
-                out.push(tag::JSONB);
-                let text = j.to_text();
-                let len = u32::try_from(text.len()).expect("jsonb column exceeds 4 GiB");
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(text.as_bytes());
+                push_tagged_bytes(out, tag::JSONB, j.to_text().as_bytes(), "jsonb column");
             }
-            Datum::Array(a) => {
-                out.push(tag::ARRAY);
-                a.elem.write_code(out);
-                let ndim = u8::try_from(a.dims.len()).expect("array dimensions exceed a byte");
-                out.push(ndim);
-                for dim in &a.dims {
-                    out.extend_from_slice(&dim.lower.to_be_bytes());
-                    out.extend_from_slice(&dim.len.to_be_bytes());
-                }
-                let count = u32::try_from(a.elems.len()).expect("array exceeds 4G elements");
-                out.extend_from_slice(&count.to_be_bytes());
-                // Elements reuse the same tagged-field encoding, so a `jsonb`
-                // inside an array (or a NULL element) needs no special case.
-                encode_fields(&a.elems, out);
+            // The stored bytes are the input text, so there is nothing to
+            // render: `json` is the one JSON column that round-trips unchanged.
+            Datum::Json(text) => {
+                push_tagged_bytes(out, tag::JSON, text.as_bytes(), "json column");
             }
+            // `xml` likewise stores what it was given.
+            Datum::Xml(text) => push_tagged_bytes(out, tag::XML, text.as_bytes(), "xml column"),
+            Datum::Array(a) => encode_array(tag::ARRAY, a, out),
+            // The vector types share the array payload but not its tag: the tag
+            // is the only thing that survives to tell the decoder which SQL type
+            // it is rebuilding.
+            Datum::OidVector(a) => encode_array(tag::OIDVECTOR, a, out),
             Datum::Record(r) => {
                 out.push(tag::RECORD);
                 out.extend_from_slice(&r.ty.map_or(0, |ty| ty.oid).to_be_bytes());
@@ -182,7 +323,154 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             }
             Datum::TsVector(vector) => encode_search(tag::TSVECTOR, &vector.to_string(), out),
             Datum::TsQuery(query) => encode_search(tag::TSQUERY, &query.to_string(), out),
+            Datum::PgSnapshot(snapshot) => {
+                push_tagged_bytes(
+                    out,
+                    tag::PG_SNAPSHOT,
+                    snapshot.to_string().as_bytes(),
+                    "pg_snapshot column",
+                );
+            }
+            Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_) => {
+                encode_network(d, out);
+            }
+            Datum::Money(value) => encode_money(*value, out),
+            Datum::InternalChar(value) => {
+                out.push(tag::INTERNAL_CHAR);
+                out.push(*value);
+            }
+            Datum::Oid(_)
+            | Datum::Xid(_)
+            | Datum::Cid(_)
+            | Datum::Xid8(_)
+            | Datum::PgLsn(_)
+            | Datum::Tid(_) => encode_system_identifier(d, out),
+            Datum::BitString(bits) => encode_bit_string(bits, out),
+            Datum::Range(range) => {
+                out.push(tag::RANGE);
+                out.extend_from_slice(&range.ty.oid.to_be_bytes());
+                let mut flags = u8::from(range.empty);
+                flags |= u8::from(range.lower_inclusive) << 1;
+                flags |= u8::from(range.upper_inclusive) << 2;
+                flags |= u8::from(range.lower.is_none()) << 3;
+                flags |= u8::from(range.upper.is_none()) << 4;
+                out.push(flags);
+                if let Some(lower) = &range.lower {
+                    encode_fields(std::slice::from_ref(lower.as_ref()), out);
+                }
+                if let Some(upper) = &range.upper {
+                    encode_fields(std::slice::from_ref(upper.as_ref()), out);
+                }
+            }
+            Datum::Multirange(multirange) => {
+                out.push(tag::MULTIRANGE);
+                out.extend_from_slice(&multirange.ty.oid.to_be_bytes());
+                out.extend_from_slice(
+                    &u32::try_from(multirange.ranges.len())
+                        .expect("multirange exceeds 4G components")
+                        .to_be_bytes(),
+                );
+                for range in &multirange.ranges {
+                    encode_fields(std::slice::from_ref(&Datum::Range(range.clone())), out);
+                }
+            }
         }
+    }
+}
+
+/// Append one array-shaped value under `tag`: the element type code, the
+/// dimension header, the element count, then the elements.
+///
+/// [`tag::ARRAY`] and [`tag::OIDVECTOR`] share this payload, so the two differ
+/// on disk by their tag alone — which is what makes the decode unambiguous.
+fn encode_array(tag: u8, value: &crabka_pgtypes::ArrayValue, out: &mut Vec<u8>) {
+    out.push(tag);
+    value.elem.write_code(out);
+    let ndim = u8::try_from(value.dims.len()).expect("array dimensions exceed a byte");
+    out.push(ndim);
+    for dim in &value.dims {
+        out.extend_from_slice(&dim.lower.to_be_bytes());
+        out.extend_from_slice(&dim.len.to_be_bytes());
+    }
+    let count = u32::try_from(value.elems.len()).expect("array exceeds 4G elements");
+    out.extend_from_slice(&count.to_be_bytes());
+    // Elements reuse the same tagged-field encoding, so a `jsonb` inside an
+    // array (or a NULL element) needs no special case.
+    encode_fields(&value.elems, out);
+}
+
+/// Append one system identifier value: its own fixed-width **unsigned** value
+/// under its own tag.
+///
+/// `oid` cannot ride on [`tag::INT4`] and `xid8`/`pg_lsn` cannot ride on
+/// [`tag::INT8`]: the round trip would come back signed, and 4294967295 would
+/// read as -1.
+fn encode_system_identifier(value: &Datum, out: &mut Vec<u8>) {
+    match value {
+        Datum::Oid(v) => {
+            out.push(tag::OID);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Xid(v) => {
+            out.push(tag::XID);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Cid(v) => {
+            out.push(tag::CID);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Xid8(v) => {
+            out.push(tag::XID8);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::PgLsn(v) => {
+            out.push(tag::PG_LSN);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        Datum::Tid(v) => {
+            out.push(tag::TID);
+            out.extend_from_slice(&v.block.to_be_bytes());
+            out.extend_from_slice(&v.offset.to_be_bytes());
+        }
+        _ => unreachable!("encode_system_identifier is reached only for a system identifier"),
+    }
+}
+
+/// Append one `money` value: its `i64` count of minor currency units.
+fn encode_money(value: i64, out: &mut Vec<u8>) {
+    out.push(tag::MONEY);
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+/// Append one bit string: which of the two SQL types produced it, the bit
+/// count, then the packed bytes.
+fn encode_bit_string(bits: &crabka_pgtypes::BitString, out: &mut Vec<u8>) {
+    out.push(tag::BITSTRING);
+    out.push(u8::from(bits.varying));
+    out.extend_from_slice(&bits.len().to_be_bytes());
+    out.extend_from_slice(bits.bytes());
+}
+
+/// Append one network address: `inet`/`cidr` as its `is_cidr` flag, family,
+/// netmask and 16 address bytes; the two MAC widths as their raw bytes.
+fn encode_network(value: &Datum, out: &mut Vec<u8>) {
+    match value {
+        Datum::Inet(value) => {
+            out.push(tag::INET);
+            out.push(u8::from(value.is_cidr));
+            out.push(value.family.wire_code());
+            out.push(value.bits);
+            out.extend_from_slice(&value.addr);
+        }
+        Datum::MacAddr(value) => {
+            out.push(tag::MACADDR);
+            out.extend_from_slice(&value.0);
+        }
+        Datum::MacAddr8(value) => {
+            out.push(tag::MACADDR8);
+            out.extend_from_slice(&value.0);
+        }
+        _ => unreachable!("encode_network is reached only for a network address"),
     }
 }
 
@@ -219,7 +507,11 @@ pub fn decode_row(bytes: &[u8]) -> Result<Vec<Datum>, KvError> {
     Ok(cols)
 }
 
-/// Decodes one tagged field and advances `cur` past it.
+/// Decode one tagged field, advancing `cur` past it.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one match keeps every row-wire tag and decoder in one auditable map"
+)]
 fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
     let t = take_u8(cur)?;
     Ok(match t {
@@ -243,6 +535,14 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             Datum::Text(
                 String::from_utf8(raw.to_vec())
                     .map_err(|_| KvError::CorruptRow("text is not valid UTF-8".into()))?,
+            )
+        }
+        tag::JSONPATH => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            Datum::JsonPath(
+                String::from_utf8(raw.to_vec())
+                    .map_err(|_| KvError::CorruptRow("jsonpath is not valid UTF-8".into()))?,
             )
         }
         tag::FLOAT4 => {
@@ -305,6 +605,106 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                     .map_err(|e| KvError::CorruptRow(format!("corrupt interval: {e}")))?,
             )
         }
+        tag::POINT => {
+            let x = f64::from_be_bytes(
+                take_n(cur, 8)?
+                    .try_into()
+                    .expect("8 bytes fit a point coordinate"),
+            );
+            let y = f64::from_be_bytes(
+                take_n(cur, 8)?
+                    .try_into()
+                    .expect("8 bytes fit a point coordinate"),
+            );
+            Datum::Point(crabka_pgtypes::Point { x, y })
+        }
+        tag::PATH => {
+            let closed = match take_u8(cur)? {
+                0 => false,
+                1 => true,
+                flag => {
+                    return Err(KvError::CorruptRow(format!(
+                        "invalid path closed flag {flag}"
+                    )));
+                }
+            };
+            let count = usize::try_from(u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4")))
+                .expect("u32 fits usize");
+            let mut points = Vec::with_capacity(count);
+            for _ in 0..count {
+                let x = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+                let y = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+                points.push(crabka_pgtypes::Point { x, y });
+            }
+            Datum::Path(crabka_pgtypes::Path { closed, points })
+        }
+        tag::POLYGON => {
+            let count = usize::try_from(u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4")))
+                .expect("u32 fits usize");
+            let mut points = Vec::with_capacity(count);
+            for _ in 0..count {
+                let x = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+                let y = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+                points.push(crabka_pgtypes::Point { x, y });
+            }
+            Datum::Polygon(crabka_pgtypes::Polygon { points })
+        }
+        tag::BOX => {
+            let mut values = [0.0_f64; 4];
+            for value in &mut values {
+                *value = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+            }
+            Datum::Box(crabka_pgtypes::geometry::Box2 {
+                high: crabka_pgtypes::Point {
+                    x: values[0],
+                    y: values[1],
+                },
+                low: crabka_pgtypes::Point {
+                    x: values[2],
+                    y: values[3],
+                },
+            })
+        }
+        tag::CIRCLE => {
+            let mut values = [0.0_f64; 3];
+            for value in &mut values {
+                *value = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+            }
+            Datum::Circle(crabka_pgtypes::geometry::Circle {
+                center: crabka_pgtypes::Point {
+                    x: values[0],
+                    y: values[1],
+                },
+                radius: values[2],
+            })
+        }
+        tag::LINE => {
+            let mut coefficients = [0.0_f64; 3];
+            for coefficient in &mut coefficients {
+                *coefficient = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+            }
+            Datum::Line(crabka_pgtypes::geometry::Line {
+                a: coefficients[0],
+                b: coefficients[1],
+                c: coefficients[2],
+            })
+        }
+        tag::LSEG => {
+            let mut coordinates = [0.0_f64; 4];
+            for coordinate in &mut coordinates {
+                *coordinate = f64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"));
+            }
+            Datum::Lseg(crabka_pgtypes::geometry::Lseg {
+                start: crabka_pgtypes::Point {
+                    x: coordinates[0],
+                    y: coordinates[1],
+                },
+                end: crabka_pgtypes::Point {
+                    x: coordinates[2],
+                    y: coordinates[3],
+                },
+            })
+        }
         tag::BYTEA => {
             let len = take_u32_len(cur)?;
             let raw = take_n(cur, len)?;
@@ -320,23 +720,24 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                     .map_err(|e| KvError::CorruptRow(format!("corrupt jsonb: {e}")))?,
             )
         }
-        tag::ARRAY => {
-            let elem = crabka_pgtypes::ElemType::read_code(cur)
-                .ok_or_else(|| KvError::CorruptRow("unknown array element code".to_string()))?;
-            let ndim = take_u8(cur)?;
-            let mut dims = Vec::new();
-            for _ in 0..ndim {
-                let lower = take_i32(cur)?;
-                let len = take_i32(cur)?;
-                dims.push(crabka_pgtypes::ArrayDim::new(lower, len));
-            }
-            let count = take_u32_len(cur)?;
-            let mut elems = Vec::new();
-            for _ in 0..count {
-                elems.push(decode_field(cur)?);
-            }
-            Datum::Array(crabka_pgtypes::ArrayValue::with_dims(elem, elems, dims))
+        tag::JSON => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            let text = std::str::from_utf8(raw)
+                .map_err(|_| KvError::CorruptRow("json text is not valid UTF-8".into()))?;
+            // Stored verbatim and returned verbatim: no re-parse, because a
+            // re-parse is precisely what would normalise it.
+            Datum::Json(text.to_string())
         }
+        tag::XML => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            let text = std::str::from_utf8(raw)
+                .map_err(|_| KvError::CorruptRow("xml text is not valid UTF-8".into()))?;
+            Datum::Xml(text.to_string())
+        }
+        tag::ARRAY => Datum::Array(decode_array(cur)?),
+        tag::OIDVECTOR => Datum::OidVector(decode_array(cur)?),
         tag::RECORD => {
             let type_oid = take_u32_len(cur)?;
             let count = take_u32_len(cur)?;
@@ -373,8 +774,142 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             .parse()
             .map(Datum::TsQuery)
             .map_err(|error| KvError::CorruptRow(format!("corrupt tsquery: {error}")))?,
+        tag::PG_SNAPSHOT => take_text(cur, "pg_snapshot")?
+            .parse()
+            .map(|snapshot| Datum::PgSnapshot(Box::new(snapshot)))
+            .map_err(|error| KvError::CorruptRow(format!("corrupt pg_snapshot: {error}")))?,
+        tag::INET => {
+            let is_cidr = take_u8(cur)? != 0;
+            let family = crabka_pgtypes::InetFamily::from_wire_code(take_u8(cur)?)
+                .ok_or_else(|| KvError::CorruptRow("unknown inet address family".into()))?;
+            let bits = take_u8(cur)?;
+            if bits > family.max_bits() {
+                return Err(KvError::CorruptRow("inet netmask out of range".into()));
+            }
+            let addr: [u8; 16] = take_n(cur, 16)?.try_into().expect("16");
+            Datum::Inet(crabka_pgtypes::Inet::new(is_cidr, family, bits, addr))
+        }
+        tag::MONEY => Datum::Money(i64::from_be_bytes(
+            take_n(cur, 8)?.try_into().expect("eight bytes make an i64"),
+        )),
+        tag::INTERNAL_CHAR => Datum::InternalChar(take_u8(cur)?),
+        tag::BITSTRING => {
+            let varying = take_u8(cur)? != 0;
+            let len =
+                u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("four bytes make a u32"));
+            let bytes = take_n(cur, usize::try_from(len.div_ceil(8)).unwrap_or(usize::MAX))?;
+            Datum::BitString(
+                crabka_pgtypes::BitString::from_parts(varying, len, bytes.to_vec())
+                    .ok_or_else(|| KvError::CorruptRow("corrupt bit string".into()))?,
+            )
+        }
+        tag::MACADDR => Datum::MacAddr(crabka_pgtypes::MacAddr(
+            take_n(cur, 6)?.try_into().expect("6"),
+        )),
+        tag::MACADDR8 => Datum::MacAddr8(crabka_pgtypes::MacAddr8(
+            take_n(cur, 8)?.try_into().expect("8"),
+        )),
+        tag::OID => Datum::Oid(u32::from_be_bytes(
+            take_n(cur, 4)?.try_into().expect("four bytes make a u32"),
+        )),
+        tag::XID => Datum::Xid(u32::from_be_bytes(
+            take_n(cur, 4)?.try_into().expect("four bytes make a u32"),
+        )),
+        tag::CID => Datum::Cid(u32::from_be_bytes(
+            take_n(cur, 4)?.try_into().expect("four bytes make a u32"),
+        )),
+        tag::XID8 => Datum::Xid8(u64::from_be_bytes(
+            take_n(cur, 8)?.try_into().expect("eight bytes make a u64"),
+        )),
+        tag::PG_LSN => Datum::PgLsn(u64::from_be_bytes(
+            take_n(cur, 8)?.try_into().expect("eight bytes make a u64"),
+        )),
+        tag::TID => Datum::Tid(crabka_pgtypes::Tid {
+            block: u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("four bytes make a u32")),
+            offset: u16::from_be_bytes(take_n(cur, 2)?.try_into().expect("two bytes make a u16")),
+        }),
+        tag::RANGE => {
+            let oid = u32::try_from(take_u32_len(cur)?)
+                .map_err(|_| KvError::CorruptRow("range type oid out of range".into()))?;
+            let Some(crabka_pgtypes::ColumnType::Range(ty)) =
+                crabka_pgtypes::ColumnType::builtin_range(oid)
+                    .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(oid))
+            else {
+                return Err(KvError::CorruptRow(format!(
+                    "range type {oid} is not registered"
+                )));
+            };
+            let flags = take_u8(cur)?;
+            if flags & !0x1f != 0 {
+                return Err(KvError::CorruptRow("invalid range flags".into()));
+            }
+            let empty = flags & 0x01 != 0;
+            let lower = (!empty && flags & 0x08 == 0)
+                .then(|| decode_field(cur).map(Box::new))
+                .transpose()?;
+            let upper = (!empty && flags & 0x10 == 0)
+                .then(|| decode_field(cur).map(Box::new))
+                .transpose()?;
+            Datum::Range(crabka_pgtypes::RangeValue {
+                ty,
+                lower,
+                upper,
+                lower_inclusive: !empty && flags & 0x02 != 0,
+                upper_inclusive: !empty && flags & 0x04 != 0,
+                empty,
+            })
+        }
+        tag::MULTIRANGE => {
+            let oid = u32::try_from(take_u32_len(cur)?)
+                .map_err(|_| KvError::CorruptRow("multirange type oid out of range".into()))?;
+            let Some(crabka_pgtypes::ColumnType::Multirange(ty)) =
+                crabka_pgtypes::ColumnType::builtin_multirange(oid)
+                    .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(oid))
+            else {
+                return Err(KvError::CorruptRow(format!(
+                    "multirange type {oid} is not registered"
+                )));
+            };
+            let count = take_u32_len(cur)?;
+            let mut ranges = Vec::with_capacity(count);
+            for _ in 0..count {
+                let Datum::Range(range) = decode_field(cur)? else {
+                    return Err(KvError::CorruptRow(
+                        "multirange component is not a range".into(),
+                    ));
+                };
+                if range.ty != ty.range {
+                    return Err(KvError::CorruptRow(
+                        "multirange component type does not match".into(),
+                    ));
+                }
+                ranges.push(range);
+            }
+            Datum::Multirange(crabka_pgtypes::MultirangeValue { ty, ranges })
+        }
         other => return Err(KvError::CorruptRow(format!("unknown field tag {other}"))),
     })
+}
+
+/// Read the payload [`tag::ARRAY`] and [`tag::OIDVECTOR`] share: the element
+/// type code, the dimension header, the element count, then the elements. The
+/// caller's tag decides which datum wraps the result.
+fn decode_array(cur: &mut &[u8]) -> Result<crabka_pgtypes::ArrayValue, KvError> {
+    let elem = crabka_pgtypes::ElemType::read_code(cur)
+        .ok_or_else(|| KvError::CorruptRow("unknown array element code".to_string()))?;
+    let ndim = take_u8(cur)?;
+    let mut dims = Vec::new();
+    for _ in 0..ndim {
+        let lower = take_i32(cur)?;
+        let len = take_i32(cur)?;
+        dims.push(crabka_pgtypes::ArrayDim::new(lower, len));
+    }
+    let count = take_u32_len(cur)?;
+    let mut elems = Vec::new();
+    for _ in 0..count {
+        elems.push(decode_field(cur)?);
+    }
+    Ok(crabka_pgtypes::ArrayValue::with_dims(elem, elems, dims))
 }
 
 /// A length-prefixed UTF-8 string, the shape every name and label field uses.
@@ -430,6 +965,12 @@ mod tests {
 
     #[test]
     fn roundtrip_all_datum_kinds_including_null() {
+        let crabka_pgtypes::ColumnType::Range(int4range) =
+            crabka_pgtypes::ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE)
+                .expect("built-in range")
+        else {
+            unreachable!()
+        };
         let row = vec![
             Datum::Null,
             Datum::Bool(true),
@@ -438,6 +979,7 @@ mod tests {
             Datum::Int4(i32::MIN),
             Datum::Int8(i64::MIN),
             Datum::Text("héllo".into()),
+            Datum::JsonPath("$.\"héllo\"".into()),
             Datum::Float4(-1.5),
             Datum::Float4(f32::NAN),
             Datum::Float4(-0.0),
@@ -446,6 +988,10 @@ mod tests {
             Datum::Float8(-0.0),
             Datum::Numeric(crabka_pgtypes::numeric::parse("1.50").expect("n")),
             Datum::Numeric(crabka_pgtypes::numeric::parse("-9999999999999999999.0001").expect("n")),
+            Datum::Range(
+                crabka_pgtypes::range::parse("[1,4)", int4range, &jiff::tz::TimeZone::UTC)
+                    .expect("range"),
+            ),
         ];
         let bytes = encode_row(&row);
         assert_eq!(decode_row(&bytes).expect("decode"), row);
@@ -475,6 +1021,10 @@ mod tests {
                 vec![json(r#"{"z":1}"#), Datum::Null],
             )),
             Datum::Array(ArrayValue::new(
+                ElemType::JsonPath,
+                vec![Datum::JsonPath("$.\"a\"".into()), Datum::Null],
+            )),
+            Datum::Array(ArrayValue::new(
                 ElemType::Numeric,
                 vec![Datum::Numeric(
                     crabka_pgtypes::numeric::parse("1.50").expect("n"),
@@ -484,6 +1034,117 @@ mod tests {
             Datum::Int4(9),
         ];
         assert!(decode_row(&encode_row(&row)).expect("decode") == row);
+    }
+
+    /// `oidvector`, `int2vector` and `integer[]` share one payload, and until
+    /// this tag existed they shared one field tag too — so a stored vector came
+    /// back an array: `[0:1]={1,2}` where `1 2` was written, and `=` against an
+    /// `oidvector` literal failed with "cannot compare integer[] and
+    /// oidvector". The decoded *variant* is the whole assertion. `Datum`
+    /// equality is false across variants, so the round trip pins it.
+    #[test]
+    fn a_vector_decodes_back_as_a_vector_and_never_as_an_array() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayDim, ArrayValue, ElemType};
+
+        let vector = |elem, elems: Vec<Datum>| {
+            let len = i32::try_from(elems.len()).expect("a test vector is short");
+            ArrayValue::with_dims(elem, elems, vec![ArrayDim::new(0, len)])
+        };
+        let cases = vec![
+            // `oidvector` is zero-based and carries its unsigned oids in `Int4`
+            // elements. 4294967295 is the one that reads back as -1 if any step
+            // on the path treats it as signed.
+            (
+                "oidvector",
+                Datum::OidVector(vector(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(2), Datum::Int4(-1)],
+                )),
+            ),
+            // `int2vector` has no datum variant of its own: it is the same
+            // vector with `Int2` elements, so it rides the same tag and the
+            // element code is what separates the two SQL types.
+            (
+                "int2vector",
+                Datum::OidVector(vector(
+                    ElemType::Int2,
+                    vec![Datum::Int2(1), Datum::Int2(-2)],
+                )),
+            ),
+            (
+                "empty oidvector",
+                Datum::OidVector(vector(ElemType::Int4, vec![])),
+            ),
+            // The adversarial twin: an ordinary array with the vector's element
+            // type, elements and zero-based dimension header. The tag is all
+            // that separates it from the first case.
+            (
+                "integer[] in a vector's shape",
+                Datum::Array(vector(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(2), Datum::Int4(-1)],
+                )),
+            ),
+            // And an ordinary one-based array, which must be untouched.
+            (
+                "integer[]",
+                Datum::Array(ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Null, Datum::Int4(3)],
+                )),
+            ),
+        ];
+
+        for (what, value) in &cases {
+            let decoded = decode_row(&encode_row(std::slice::from_ref(value))).expect("decode");
+            assert!(decoded == vec![value.clone()], "{what}");
+        }
+
+        // All of them in one row, which pins the field boundaries too: a vector
+        // must consume exactly its own bytes and leave the next field's tag
+        // where the decoder expects it.
+        let row: Vec<Datum> = cases.into_iter().map(|(_, value)| value).collect();
+        assert!(decode_row(&encode_row(&row)).expect("decode") == row);
+    }
+
+    /// The tag byte is the discriminator and the only difference: a vector and
+    /// the array over the same value agree on every payload byte. Byte-level
+    /// here because that is what the claim is about — one payload format, two
+    /// tags — and because index keys are these bytes.
+    #[test]
+    fn the_field_tag_is_the_only_byte_that_separates_a_vector_from_its_array() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayDim, ArrayValue, ElemType};
+
+        let value = ArrayValue::with_dims(
+            ElemType::Int4,
+            vec![Datum::Int4(1), Datum::Int4(2)],
+            vec![ArrayDim::new(0, 2)],
+        );
+        let array = encode_row(&[Datum::Array(value.clone())]);
+        let vector = encode_row(&[Datum::OidVector(value)]);
+
+        assert!(array[1] == tag::ARRAY);
+        assert!(vector[1] == tag::OIDVECTOR);
+        assert!(array[2..] == vector[2..]);
+        assert!(array != vector);
+    }
+
+    /// The reader is intolerant by design: an unknown field tag is corruption.
+    /// A reader that fell back to a default instead would read a value written
+    /// under a newer tag as whatever that default was — the same silent
+    /// mis-decode the `oidvector` tag exists to end.
+    #[test]
+    fn an_unknown_field_tag_is_corruption_rather_than_a_tolerated_decode() {
+        use assert2::assert;
+
+        for unknown in [tag::OIDVECTOR + 1, 100, 255] {
+            assert!(
+                decode_row(&[ROW_VERSION, unknown]).is_err(),
+                "tag {unknown} decoded"
+            );
+        }
     }
 
     #[test]
@@ -514,6 +1175,14 @@ mod tests {
         let mut bytes = vec![ROW_VERSION, tag::JSONB];
         bytes.extend_from_slice(&2u32.to_be_bytes());
         bytes.extend_from_slice(b"{{");
+        assert!(decode_row(&bytes).is_err());
+        // The vector tag reads the same payload, so it refuses the same
+        // corruption rather than returning a short vector.
+        let mut bytes = vec![ROW_VERSION, tag::OIDVECTOR, 200];
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        assert!(decode_row(&bytes).is_err());
+        let mut bytes = vec![ROW_VERSION, tag::OIDVECTOR, 1];
+        bytes.extend_from_slice(&3u32.to_be_bytes());
         assert!(decode_row(&bytes).is_err());
     }
 
@@ -617,5 +1286,89 @@ mod tests {
             }),
         ];
         assert_eq!(decode_row(&encode_row(&row)).expect("decode"), row);
+    }
+
+    fn geometric(ty: crabka_pgtypes::ColumnType, text: &str) -> Datum {
+        crabka_pgtypes::cast::cast(&Datum::Text(text.into()), ty, &jiff::tz::TimeZone::UTC)
+            .unwrap_or_else(|_| panic!("{text} is a {ty:?}"))
+    }
+
+    /// All seven geometric types in one row, with the non-geometric kinds
+    /// interleaved: appending the `polygon` tag must not disturb any tag already
+    /// in the registry, and a geometry-only corpus would not notice if it did.
+    #[test]
+    fn geometric_row_round_trip_keeps_every_other_tag_working() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayValue, ColumnType, ElemType};
+
+        let row = vec![
+            // The controls: unchanged tags on either side of the new one.
+            Datum::Int4(-7),
+            Datum::Text("héllo".into()),
+            Datum::Jsonb(crabka_pgtypes::jsonb::parse(r#"{"b":1,"a":2}"#).expect("jsonb")),
+            Datum::Array(ArrayValue::new(
+                ElemType::Int4,
+                vec![Datum::Int4(1), Datum::Null, Datum::Int4(3)],
+            )),
+            Datum::Null,
+            geometric(ColumnType::Point, "(1,2)"),
+            geometric(ColumnType::Lseg, "[(1,2),(3,4)]"),
+            geometric(ColumnType::Line, "{1,-1,0}"),
+            geometric(ColumnType::Box, "(1,2),(3,4)"),
+            geometric(ColumnType::Circle, "<(1,2),3>"),
+            // Open and closed paths differ only in the flag the tag carries.
+            geometric(ColumnType::Path, "[(0,0),(1,1)]"),
+            geometric(ColumnType::Path, "((0,0),(1,0),(1,1))"),
+            // A polygon with the same vertices as the closed path above: the two
+            // must decode back as different variants, which is the whole reason
+            // `polygon` needs its own tag rather than reusing `PATH`.
+            geometric(ColumnType::Polygon, "((0,0),(1,0),(1,1))"),
+            geometric(ColumnType::Polygon, "((1,2))"),
+            // Wild coordinates: `-0` and the IEEE specials survive the bit-level
+            // round trip. (`Point`'s `PartialEq` treats NaN as equal to NaN, so
+            // this compares as written.)
+            geometric(ColumnType::Polygon, "(NaN,Infinity),(-Infinity,-0)"),
+            Datum::Bytea(vec![0xDE, 0xAD]),
+            Datum::Float8(-0.0),
+        ];
+        let bytes = encode_row(&row);
+        assert!(decode_row(&bytes).expect("decode") == row);
+        // The closed path and the polygon over the same vertices encode to
+        // different bytes, so neither can decode as the other.
+        let path = geometric(ColumnType::Path, "((0,0),(1,0),(1,1))");
+        let polygon = geometric(ColumnType::Polygon, "((0,0),(1,0),(1,1))");
+        assert!(
+            encode_row(std::slice::from_ref(&path)) != encode_row(std::slice::from_ref(&polygon))
+        );
+        assert!(
+            decode_row(&encode_row(std::slice::from_ref(&polygon))).expect("decode")
+                == vec![polygon]
+        );
+    }
+
+    /// The `polygon` field is `[44][u32 count]` then the vertices — no closed
+    /// flag and no bounding box, so a two-vertex polygon is exactly 37 bytes
+    /// after the row's version byte.
+    #[test]
+    fn polygon_field_layout_is_the_tag_then_the_count_then_the_points() {
+        use assert2::assert;
+        use crabka_pgtypes::ColumnType;
+
+        let encoded = encode_row(std::slice::from_ref(&geometric(
+            ColumnType::Polygon,
+            "((1,2),(3,4))",
+        )));
+        let expected: Vec<u8> = [
+            &[ROW_VERSION, tag::POLYGON][..],
+            &2u32.to_be_bytes()[..],
+            &1.0f64.to_be_bytes()[..],
+            &2.0f64.to_be_bytes()[..],
+            &3.0f64.to_be_bytes()[..],
+            &4.0f64.to_be_bytes()[..],
+        ]
+        .concat();
+        assert!(encoded == expected);
+        // A truncated vertex list is corruption, not a silent short polygon.
+        assert!(decode_row(&encoded[..encoded.len() - 1]).is_err());
     }
 }

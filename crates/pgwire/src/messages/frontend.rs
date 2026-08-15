@@ -150,6 +150,9 @@ pub enum FrontendMessage {
     CopyData(Bytes),
     CopyDone,
     CopyFail(String),
+    /// Legacy fastpath function call. The wire layer rejects these after
+    /// consuming the complete frame so the connection stays synchronized.
+    FunctionCall,
     Terminate,
 }
 
@@ -219,6 +222,10 @@ pub fn decode_message_with_max_len(
         }
         b'c' => FrontendMessage::CopyDone,
         b'f' => FrontendMessage::CopyFail(get_cstr(&mut body)?),
+        b'F' => {
+            body.advance(body.len());
+            FrontendMessage::FunctionCall
+        }
         b'p' => {
             let payload = body.clone();
             body.advance(body.len());

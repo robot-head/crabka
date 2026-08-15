@@ -237,6 +237,7 @@ pub(crate) fn describe_cte_relation(
             .iter()
             .map(|f| {
                 Ok(crate::scope::ColumnBinding {
+                    exposure: crate::scope::Exposure::Output,
                     qualifier: None,
                     name: f.name.clone(),
                     ty: crate::exec::column_type_from_oid(f.type_oid)?,
@@ -258,6 +259,7 @@ pub(crate) fn describe_cte_relation(
             .iter()
             .map(|f| {
                 Ok(crate::scope::ColumnBinding {
+                    exposure: crate::scope::Exposure::Output,
                     qualifier: None,
                     name: f.name.clone(),
                     ty: crate::exec::column_type_from_oid(f.type_oid)?,
@@ -349,6 +351,11 @@ fn evaluate_recursive_cte(
     let width = base.scope.width();
     let output_scope = base.scope.clone();
     check_recursive_term_types(ctx, cte, recursive, &output_scope)?;
+    if !all {
+        for index in 0..width {
+            crate::eval::require_equality_operator(output_scope.ty_at(index))?;
+        }
+    }
 
     let mut result: Vec<Vec<Datum>> = Vec::new();
     let mut seen: HashSet<Vec<Datum>> = HashSet::new();
@@ -498,8 +505,7 @@ fn coerce_row(
             if cell.is_null() || from.ty_at(index) == to.ty_at(index) {
                 return Ok(cell);
             }
-            crabka_pgtypes::cast::cast(&cell, to.ty_at(index), &ctx.eval_ctx.time_zone)
-                .map_err(ExecError::from)
+            crate::eval::cast_value(&cell, to.ty_at(index), &ctx.eval_ctx.time_zone)
         })
         .collect()
 }
@@ -653,6 +659,11 @@ fn scan_table_expr(
                 for arg in &call.args {
                     scan_expr(arg, name, refs);
                 }
+            }
+        }
+        TableExpr::JsonTable(table) => {
+            for expr in table.exprs() {
+                scan_expr(expr, name, refs);
             }
         }
         TableExpr::Join {

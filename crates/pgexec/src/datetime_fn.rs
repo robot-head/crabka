@@ -165,10 +165,11 @@ pub(crate) fn datetime_func_result_type(
             require_arity(fc, n == 1 || n == 2)?;
             ColumnType::Interval
         }
-        // timezone(zone, value): timestamp → timestamptz, timestamptz → timestamp.
+        // timezone(zone, value) and the one-argument `AT LOCAL` overload alike:
+        // timestamp → timestamptz, timestamptz → timestamp, timetz → timetz.
         DtFunc::Timezone => {
-            require_arity(fc, n == 2)?;
-            match crate::eval::infer_type(&args[1], scope)? {
+            require_arity(fc, n == 1 || n == 2)?;
+            match crate::eval::infer_type(&args[n - 1], scope)? {
                 ColumnType::Timestamp => ColumnType::Timestamptz,
                 ColumnType::Timestamptz => ColumnType::Timestamp,
                 other => other,
@@ -213,11 +214,15 @@ pub(crate) fn eval_datetime(
         }
         DtFunc::CurrentDate => {
             require_arity(fc, args.is_empty())?;
-            Ok(Datum::Date(ctx.time_zone.to_datetime(ctx.now).date()))
+            Ok(Datum::Date(
+                ctx.time_zone.to_datetime(ctx.now).date().into(),
+            ))
         }
         DtFunc::CurrentTime => {
             require_arity(fc, args.is_empty())?;
-            Ok(Datum::Time(ctx.time_zone.to_datetime(ctx.now).time()))
+            Ok(Datum::Time(
+                ctx.time_zone.to_datetime(ctx.now).time().into(),
+            ))
         }
         DtFunc::LocalTimestamp => {
             require_arity(fc, args.is_empty())?;
@@ -286,7 +291,9 @@ pub(crate) fn eval_datetime(
                 Datum::Text(s) => s.to_ascii_lowercase(),
                 other => return Err(type_error("date_trunc", other)),
             };
-            let unit = canonical_unit(&unit).ok_or_else(|| unknown_field(&unit))?;
+            let type_name =
+                date_trunc_type_name(&source).ok_or_else(|| type_error("date_trunc", &source))?;
+            let unit = canonical_unit(&unit).ok_or_else(|| unknown_field(&unit, type_name))?;
             date_trunc(unit, &source, zone.as_ref(), &ctx.time_zone)
         }
         // ---- age ----
@@ -297,22 +304,42 @@ pub(crate) fn eval_datetime(
                 return Ok(Datum::Null);
             }
             // Two-arg: `age(end, start)` = end − start. One-arg: `age(ts)` =
-            // current_date(at midnight, session zone) − ts (PG semantics).
-            let (end, start) = match args.get(1) {
+            // current_date(at midnight, session zone) − ts (PG semantics), and
+            // the transaction date is always finite, so only `a` can be
+            // infinite there.
+            let b = match args.get(1) {
                 Some(e) => {
                     let b = eval_child(e)?;
                     if b.is_null() {
                         return Ok(Datum::Null);
                     }
-                    (
-                        as_datetime(&a, &ctx.time_zone)?,
-                        as_datetime(&b, &ctx.time_zone)?,
-                    )
+                    Some(b)
                 }
+                None => None,
+            };
+            // Settle the non-finite cases on the Datums, BEFORE `as_datetime`.
+            // A `timestamptz` infinity is the extreme *instant*, and rendering
+            // it as a wall-clock in a session zone off UTC moves it off the
+            // reserved value — the sentinel would be gone by the time the field
+            // arithmetic saw it.
+            let (end_sign, start_sign) = match &b {
+                Some(b) => (temporal_infinite_sign(&a), temporal_infinite_sign(b)),
+                None => (0, temporal_infinite_sign(&a)),
+            };
+            if let Some(result) =
+                crabka_pgtypes::datetime::infinite_interval_difference(end_sign, start_sign)
+            {
+                return Ok(Datum::Interval(result?));
+            }
+            let (end, start) = match &b {
+                Some(b) => (
+                    as_datetime(&a, &ctx.time_zone)?,
+                    as_datetime(b, &ctx.time_zone)?,
+                ),
                 None => {
                     let today = ctx.time_zone.to_datetime(ctx.now).date();
                     (
-                        crabka_pgtypes::datetime::date_to_midnight(today),
+                        crabka_pgtypes::datetime::date_to_midnight(today.into()),
                         as_datetime(&a, &ctx.time_zone)?,
                     )
                 }
@@ -321,13 +348,30 @@ pub(crate) fn eval_datetime(
         }
         // ---- timezone (AT TIME ZONE) ----
         DtFunc::Timezone => {
-            require_arity(fc, args.len() == 2)?;
-            let zone_d = eval_child(&args[0])?; // zone FIRST (parser lowering)
-            let value = eval_child(&args[1])?;
-            if zone_d.is_null() || value.is_null() {
+            require_arity(fc, (1..=2).contains(&args.len()))?;
+            // `x AT LOCAL` is the one-argument overload — `timetz_at_local` and
+            // its two `timestamp` siblings — which converts against the
+            // *session's* zone. It is a distinct `pg_proc` entry rather than
+            // sugar for `AT TIME ZONE current_setting('TimeZone')`, which is
+            // why the session zone is read here instead of being planted as an
+            // argument at parse time.
+            let [zone, value] = match args {
+                [value] => [None, Some(eval_child(value)?)],
+                // Zone FIRST: that is the argument order `AT TIME ZONE` lowers
+                // to, and `pg_proc` declares.
+                [zone, value] => [Some(eval_child(zone)?), Some(eval_child(value)?)],
+                _ => unreachable!("arity checked above"),
+            };
+            let Some(value) = value else {
+                unreachable!("arity checked above")
+            };
+            if zone.as_ref().is_some_and(Datum::is_null) || value.is_null() {
                 return Ok(Datum::Null);
             }
-            let tz = zone_arg(&zone_d)?;
+            let tz = match &zone {
+                Some(zone) => zone_arg(zone)?,
+                None => ctx.time_zone.clone(),
+            };
             timezone_convert(&tz, &value)
         }
         DtFunc::IsFinite => {
@@ -457,20 +501,75 @@ fn literal_field(e: &Expr) -> Result<String, ExecError> {
     }
 }
 
-/// Resolve a zone-name text value to a jiff `TimeZone`. Jiff's tzdb handles
-/// `UTC` and fixed-offset spellings. An unknown zone is 22023.
+/// Resolve a zone-specification text value to a jiff `TimeZone`, the way
+/// `AT TIME ZONE` and `date_trunc`'s third argument do: the default
+/// abbreviation set, then the bundled zone database, then a `POSIX` `TZ`
+/// specification whose offset counts *west* of Greenwich. An unresolvable
+/// specification is 22023.
 fn zone_arg(d: &Datum) -> Result<TimeZone, ExecError> {
     let name = match d {
         Datum::Text(s) => s.as_str(),
+        // `AT TIME ZONE INTERVAL '-08:00'` names a fixed offset rather than a
+        // zone — `timestamp_izone` and its `timestamptz`/`timetz` siblings.
+        // Months and days have no fixed length in seconds, so an interval that
+        // carries either names no offset at all and PostgreSQL refuses it
+        // rather than picking one.
+        Datum::Interval(interval) => return interval_zone(*interval),
         other => return Err(type_error("timezone", other)),
     };
     if name.eq_ignore_ascii_case("utc") {
         return Ok(TimeZone::UTC);
     }
-    // The full PostgreSQL zone vocabulary: database names, the default
-    // abbreviation set, POSIX specs, and bare signed offsets.
     crabka_pgtypes::datetime::resolve_time_zone(name)
-        .ok_or_else(|| invalid_param(format!("time zone \"{name}\" not recognized")))
+        .ok_or_else(|| ExecError::UnknownTimeZone(name.to_string()))
+}
+
+/// The fixed zone an `interval` names as a `timezone()` argument.
+///
+/// `PostgreSQL` reads the interval's microseconds as a signed offset *east*
+/// (`timestamp_izone` shifts by `zone->time`, and `timetz_izone` stores its
+/// negation because a `TimeTzADT` counts west), so one conversion serves all
+/// three value types. Months and days are refused rather than approximated:
+/// neither is a fixed number of seconds, so an interval carrying one names no
+/// offset at all.
+fn interval_zone(interval: crabka_pgtypes::datetime::Interval) -> Result<TimeZone, ExecError> {
+    let spelled = || crate::func::text_render(&Datum::Interval(interval), &TimeZone::UTC);
+    // 22023 with PostgreSQL's own sentence, not the `SET`-shaped one
+    // [`invalid_param`] wraps a parameter name in.
+    let refuse = |reason: &str| {
+        ExecError::InvalidParameterValueMessage(format!(
+            "interval time zone \"{}\" {reason}",
+            spelled()
+        ))
+    };
+    if interval.is_infinite() {
+        return Err(refuse("must be finite"));
+    }
+    if interval.months != 0 || interval.days != 0 {
+        return Err(refuse("must not include months or days"));
+    }
+    let seconds = i32::try_from(interval.micros / 1_000_000)
+        .ok()
+        .and_then(|seconds| jiff::tz::Offset::from_seconds(seconds).ok())
+        .ok_or_else(|| invalid_param("time zone displacement out of range"))?;
+    Ok(TimeZone::fixed(seconds))
+}
+
+/// `1` for a `+infinity` temporal Datum, `-1` for `-infinity`, `0` for a finite
+/// one. A Datum of a type that has no infinities — or none at all — is `0`, and
+/// the caller's own coercion then reports the type error.
+///
+/// This has to be read off the Datum in its own type. [`as_datetime`] renders a
+/// `timestamptz` as a wall-clock, which for the reserved extreme instant lands
+/// on an ordinary civil datetime in any session zone off UTC, so a check made
+/// after the coercion would miss half the infinities.
+fn temporal_infinite_sign(d: &Datum) -> i32 {
+    match d {
+        Datum::Date(v) => crabka_pgtypes::datetime::date_infinite_sign(*v),
+        Datum::Timestamp(v) => crabka_pgtypes::datetime::timestamp_infinite_sign(*v),
+        Datum::Timestamptz(v) => crabka_pgtypes::datetime::timestamptz_infinite_sign(*v),
+        _ => 0,
+    }
 }
 
 /// Coerce a temporal Datum to a civil `DateTime` for `age` arithmetic. A
@@ -540,7 +639,8 @@ fn unsupported_field(field: &str, type_name: &str) -> ExecError {
 /// parses it. `tz` is the session zone, and only the timezone-* fields of a
 /// timestamptz use it.
 fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<String>, ExecError> {
-    let unit = canonical_unit(field).ok_or_else(|| unknown_field(field))?;
+    let type_name = extract_type_name(source).ok_or_else(|| type_error("extract", source))?;
+    let unit = canonical_unit(field).ok_or_else(|| unknown_field(field, type_name))?;
     match source {
         Datum::Date(d) => {
             // A `date` has no clock or zone, so PostgreSQL refuses those units,
@@ -559,7 +659,13 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
             ) {
                 return Err(unsupported_field(field, "date"));
             }
-            match non_finite_field(unit, crabka_pgtypes::datetime::date_infinite_sign(*d)) {
+            match non_finite_field(
+                unit,
+                field,
+                crabka_pgtypes::datetime::date_infinite_sign(*d),
+                NonFiniteKind::Datetime,
+                "date",
+            )? {
                 NonFinite::Value(text) => return Ok(Some(text)),
                 NonFinite::Null => return Ok(None),
                 NonFinite::Finite => {}
@@ -578,7 +684,13 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
             extract_from_datetime(unit, dt, None, "date").map(Some)
         }
         Datum::Timestamp(dt) => {
-            match non_finite_field(unit, crabka_pgtypes::datetime::timestamp_infinite_sign(*dt)) {
+            match non_finite_field(
+                unit,
+                field,
+                crabka_pgtypes::datetime::timestamp_infinite_sign(*dt),
+                NonFiniteKind::Datetime,
+                "timestamp without time zone",
+            )? {
                 NonFinite::Value(text) => return Ok(Some(text)),
                 NonFinite::Null => return Ok(None),
                 NonFinite::Finite => {}
@@ -588,8 +700,11 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
         Datum::Timestamptz(ts) => {
             match non_finite_field(
                 unit,
+                field,
                 crabka_pgtypes::datetime::timestamptz_infinite_sign(*ts),
-            ) {
+                NonFiniteKind::Datetime,
+                "timestamp with time zone",
+            )? {
                 NonFinite::Value(text) => return Ok(Some(text)),
                 NonFinite::Null => return Ok(None),
                 NonFinite::Finite => {}
@@ -604,7 +719,13 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
             extract_from_datetime(unit, dt, Some(off_secs), "timestamp with time zone").map(Some)
         }
         Datum::Interval(iv) => {
-            match non_finite_field(unit, iv.infinite_sign()) {
+            match non_finite_field(
+                unit,
+                field,
+                iv.infinite_sign(),
+                NonFiniteKind::Interval,
+                "interval",
+            )? {
                 NonFinite::Value(text) => return Ok(Some(text)),
                 NonFinite::Null => return Ok(None),
                 NonFinite::Finite => {}
@@ -619,21 +740,74 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
     }
 }
 
-/// The value of `unit` for a non-finite source, or `None` when the source is
-/// finite. PostgreSQL splits the units in two. The *monotonic* ones, which only
-/// grow with the value, become `Infinity`/`-Infinity`. The *oscillating* ones
-/// (month, day, hour, …) have no limit and become NULL. A unit with no meaning
-/// at all for the type is still an error.
-fn non_finite_field(unit: &str, sign: i32) -> NonFinite {
+/// Which of PostgreSQL's two non-finite unit tables `unit` is looked up in.
+///
+/// The two disagree about `hour` and `day`. An infinite *interval* is a length,
+/// so its hours and days grow with it and are `Infinity`; an infinite
+/// *timestamp* is a moment, and the hour and day of a moment beyond the
+/// calendar are the clock and calendar fields it does not have, so they are
+/// NULL.
+///
+/// Neither table is derivable from that reading alone. `week` of an interval is
+/// `days / 7`, yet upstream calls `day` monotonic and `week` oscillating, so an
+/// infinite interval answers `Infinity` for its days and NULL for its weeks.
+/// Both lists are therefore transcribed from upstream rather than reasoned out,
+/// and `expected/interval.out` pins every cell of both.
+#[derive(Clone, Copy)]
+enum NonFiniteKind {
+    /// `date`, `timestamp` and `timestamptz`. PostgreSQL's
+    /// `NonFiniteTimestampTzPart` and the matching switch in `extract_date`.
+    Datetime,
+    /// `interval`. PostgreSQL's `NonFiniteIntervalPart`.
+    Interval,
+}
+
+/// The value of `unit` for a non-finite source, or [`NonFinite::Finite`] when
+/// the source is finite. PostgreSQL splits the units in two. The *monotonic*
+/// ones, which only grow with the value, become `Infinity`/`-Infinity`. The
+/// *oscillating* ones have no limit and become NULL. A unit the type has no
+/// value for is 0A000, the same error the finite path raises for it, because
+/// otherwise an infinite input would answer where a finite one refuses.
+fn non_finite_field(
+    unit: &str,
+    field: &str,
+    sign: i32,
+    kind: NonFiniteKind,
+    type_name: &str,
+) -> Result<NonFinite, ExecError> {
     if sign == 0 {
-        return NonFinite::Finite;
+        return Ok(NonFinite::Finite);
     }
-    let infinity = if sign > 0 { "Infinity" } else { "-Infinity" };
-    match unit {
-        "year" | "isoyear" | "decade" | "century" | "millennium" | "julian" | "epoch" => {
-            NonFinite::Value(infinity.to_string())
-        }
-        _ => NonFinite::Null,
+    let monotonic = match kind {
+        NonFiniteKind::Datetime => matches!(
+            unit,
+            "year" | "isoyear" | "decade" | "century" | "millennium" | "julian" | "epoch"
+        ),
+        // No `isoyear` or `julian`: an interval has no ISO week year and sits
+        // on no Julian day, so those are 0A000 for it, finite or not.
+        NonFiniteKind::Interval => matches!(
+            unit,
+            "hour" | "day" | "year" | "decade" | "century" | "millennium" | "epoch"
+        ),
+    };
+    if monotonic {
+        let infinity = if sign > 0 { "Infinity" } else { "-Infinity" };
+        return Ok(NonFinite::Value(infinity.to_string()));
+    }
+    let oscillating = match kind {
+        // Every remaining unit `canonical_unit` accepts is a clock, calendar or
+        // zone field of the moment, and PostgreSQL lists all of them as
+        // oscillating, so nothing reaches its `default:` arm from here.
+        NonFiniteKind::Datetime => true,
+        NonFiniteKind::Interval => matches!(
+            unit,
+            "microseconds" | "milliseconds" | "second" | "minute" | "week" | "month" | "quarter"
+        ),
+    };
+    if oscillating {
+        Ok(NonFinite::Null)
+    } else {
+        Err(unsupported_field(field, type_name))
     }
 }
 
@@ -663,7 +837,9 @@ fn julian_day(date: Date) -> i64 {
 /// gives.
 fn julian_datetime_str(dt: DateTime) -> String {
     let day = julian_day(dt.date());
-    let micros = i128::from(crabka_pgtypes::datetime::time_to_micros_of_day(dt.time()));
+    let micros = i128::from(crabka_pgtypes::datetime::time_to_micros_of_day(
+        dt.time().into(),
+    ));
     let scale = 10_i128.pow(20);
     let per_day = 86_400_000_000_i128;
     let frac = (micros * scale + per_day / 2) / per_day;
@@ -690,8 +866,8 @@ fn extract_from_datetime(
         }
         "decade" => int_str(year.div_euclid(10)),
         "millennium" => int_str(millennium_of(year)),
-        "year" => int_str(year),
-        "isoyear" => int_str(i64::from(date.iso_week_date().year())),
+        "year" => int_str(year_without_zero(year)),
+        "isoyear" => int_str(year_without_zero(i64::from(date.iso_week_date().year()))),
         "quarter" => int_str(((i64::from(date.month()) - 1) / 3) + 1),
         "month" => int_str(i64::from(date.month())),
         "day" => int_str(i64::from(date.day())),
@@ -735,7 +911,7 @@ fn extract_from_datetime(
 fn extract_from_time(
     unit: &str,
     field: &str,
-    t: Time,
+    t: crabka_pgtypes::datetime::PgTime,
     tz_offset_secs: Option<i64>,
 ) -> Result<String, ExecError> {
     let type_name = if tz_offset_secs.is_some() {
@@ -782,29 +958,106 @@ fn extract_from_interval(unit: &str, field: &str, iv: Interval) -> Result<String
         "century" => int_str(months / 1200),
         "decade" => int_str(months / 120),
         "year" => int_str(months / 12),
-        "quarter" => int_str((months % 12) / 3 + 1),
+        // Every field of a negative interval is the negation of the same field
+        // of the sign-reversed interval, and `(months % 12) / 3 + 1` breaks
+        // that rule: the `+ 1` is a quarter ordinal, so it has to move to the
+        // far side of the negation rather than ride along inside it. `@ 3 mons
+        // ago` is quarter -2, not 0, and `@ 34 years ago` is -1, not 1.
+        // `interval_part` reads the sign off the months field for the same
+        // reason: the remainder alone cannot supply it once it is zero.
+        "quarter" => int_str(if months >= 0 {
+            (months % 12) / 3 + 1
+        } else {
+            -((-months % 12) / 3 + 1)
+        }),
         "month" => int_str(months % 12),
         "day" => int_str(i64::from(iv.days)),
+        // `interval_part`'s DTK_WEEK is `tm_mday / 7` -- the days field alone,
+        // truncating toward zero. Months contribute nothing, which is the same
+        // reason `date_trunc` refuses `week` for an interval: a month is not a
+        // whole number of weeks, so only the days field has a week in it.
+        "week" => int_str(i64::from(iv.days) / 7),
         "hour" => int_str(secs_whole / 3600),
         "minute" => int_str((secs_whole % 3600) / 60),
         "second" => seconds_str(secs_whole % 60, subsec * 1_000),
         "milliseconds" => millis_str(secs_whole % 60, subsec * 1_000),
         "microseconds" => micros_str(secs_whole % 60, subsec * 1_000),
         "epoch" => {
-            // PG: total seconds, treating a month as 30 days and a day as 86400 s.
-            // PostgreSQL's `extract(epoch …)` returns `numeric`, so a wide
-            // interval has an answer rather than an overflow; compute in i128
-            // so this one does too.
-            let total_micros = (i128::from(months) * 30 + i128::from(iv.days)) * 86_400_000_000
-                + i128::from(iv.micros);
+            // A whole year is 365.25 days, and only the leftover months are 30.
+            // Treating every month as 30 days makes `@ 34 years` 1057536000
+            // where PostgreSQL says 1072958400 -- 1.4% short, and wrong for
+            // every interval carrying a year.
+            //
+            // `interval_part` keeps this in integers by scaling: DAYS_PER_YEAR
+            // is a multiple of 0.25 and SECS_PER_DAY a multiple of 4, so it
+            // multiplies the day counts by 4 (1461 = 4 x 365.25, 120 = 4 x 30)
+            // and divides the seconds by 4 (21600 = 86400 / 4). Rust and C
+            // both truncate integer division toward zero, so a negative
+            // interval splits into years and months the same way.
+            //
+            // `extract(epoch ...)` returns `numeric`, so a wide interval has an
+            // answer rather than an overflow; compute in i128 so this one does.
+            let secs_from_day_month = (1461 * i128::from(months / 12)
+                + 120 * i128::from(months % 12)
+                + 4 * i128::from(iv.days))
+                * 21_600;
+            let total_micros = secs_from_day_month * 1_000_000 + i128::from(iv.micros);
             epoch_string_micros_wide(total_micros)
         }
         _ => return Err(unsupported_field(field, "interval")),
     })
 }
 
-fn unknown_field(field: &str) -> ExecError {
-    invalid_param(format!("unit \"{field}\" not recognized"))
+/// 22023: a unit no datetime function has ever heard of (`fortnight`).
+///
+/// `PostgreSQL` names the source type as `format_type_be` spells it, so the
+/// same unrecognised unit reads differently over a `time` and over a `timetz`.
+/// The wording is the whole message, not a value inside the `SET`/`RESET`
+/// sentence [`ExecError::InvalidParameterValue`] builds.
+fn unknown_field(field: &str, type_name: &str) -> ExecError {
+    ExecError::InvalidParameterValueMessage(format!(
+        "unit \"{field}\" not recognized for type {type_name}"
+    ))
+}
+
+/// The type an `extract` diagnostic names, for the six source types the
+/// function accepts. `None` for anything else, which `PostgreSQL` turns away
+/// during function resolution and never reports as a unit failure.
+fn extract_type_name(source: &Datum) -> Option<&'static str> {
+    match source {
+        Datum::Date(_)
+        | Datum::Time(_)
+        | Datum::Timetz(_)
+        | Datum::Timestamp(_)
+        | Datum::Timestamptz(_)
+        | Datum::Interval(_) => source.column_type().map(ColumnType::name),
+        _ => None,
+    }
+}
+
+/// The type a `date_trunc` diagnostic names.
+///
+/// `PostgreSQL` has no `date_trunc(text, date)`: a `date` argument is coerced
+/// to `timestamptz` before the call, so a `date` reports the type it was
+/// coerced to and never its own.
+fn date_trunc_type_name(source: &Datum) -> Option<&'static str> {
+    match source {
+        Datum::Date(_) => Some(ColumnType::Timestamptz.name()),
+        Datum::Timestamp(_) | Datum::Timestamptz(_) | Datum::Interval(_) => {
+            source.column_type().map(ColumnType::name)
+        }
+        _ => None,
+    }
+}
+
+/// Astronomical year `y` as `PostgreSQL` numbers it.
+///
+/// The calendar has no year 0: astronomical 0 is 1 BC and astronomical -1 is
+/// 2 BC. `PostgreSQL` stores the astronomical year but reports the calendar
+/// one, so every year at or below 0 loses one more to the gap. That is why
+/// `EXTRACT(YEAR FROM DATE '2020-08-11 BC')` is -2020 and not -2019.
+fn year_without_zero(y: i64) -> i64 {
+    if y > 0 { y } else { y - 1 }
 }
 
 /// century containing AD year `y` (PG: 2000 is in century 20, 2001 starts century 21).
@@ -823,6 +1076,44 @@ fn millennium_of(y: i64) -> i64 {
         (y + 999) / 1000
     } else {
         -((999 - (y - 1)) / 1000)
+    }
+}
+
+/// First astronomical year of the decade that holds astronomical year `y`.
+///
+/// A decade is ten consecutive astronomical years, so this is a floor and not
+/// the truncation `/` gives. Truncation rounds -1 up to 0 and puts
+/// `date_trunc('decade', '0002-12-31 BC')` on 1 BC, where `PostgreSQL` puts it
+/// on 11 BC.
+fn decade_start_year(y: i16) -> i64 {
+    i64::from(y).div_euclid(10) * 10
+}
+
+/// First astronomical year of the century that holds astronomical year `y`.
+///
+/// Century 21 runs 2001..2100, so an AD century `c` starts at
+/// `(c - 1) * 100 + 1`. There is no century 0, and the missing one takes up the
+/// slack for BC: century -1 runs 100 BC..1 BC, so a BC century starts at
+/// `c * 100 + 1`. Skip that shift and every BC truncation lands one century
+/// early.
+fn century_start_year(y: i16) -> i64 {
+    let c = century_of(i64::from(y));
+    if y > 0 {
+        (c - 1) * 100 + 1
+    } else {
+        c * 100 + 1
+    }
+}
+
+/// First astronomical year of the millennium that holds astronomical year `y`.
+/// Numbered like [`century_start_year`], with the same skip over the missing
+/// millennium 0.
+fn millennium_start_year(y: i16) -> i64 {
+    let m = millennium_of(i64::from(y));
+    if y > 0 {
+        (m - 1) * 1000 + 1
+    } else {
+        m * 1000 + 1
     }
 }
 
@@ -903,10 +1194,14 @@ fn date_trunc(
             // A non-finite timestamp truncates to itself, but the unit is still
             // validated first.
             if crabka_pgtypes::datetime::timestamp_is_infinite(*dt) {
-                trunc_datetime(unit, DateTime::default())?;
+                trunc_datetime(unit, ColumnType::Timestamp.name(), DateTime::default())?;
                 return Ok(Datum::Timestamp(*dt));
             }
-            Ok(Datum::Timestamp(trunc_datetime(unit, *dt)?))
+            Ok(Datum::Timestamp(trunc_datetime(
+                unit,
+                ColumnType::Timestamp.name(),
+                *dt,
+            )?))
         }
         // PostgreSQL has no `date_trunc(text, date)`: the date is coerced to
         // `timestamptz`, so the result carries the session zone.
@@ -917,22 +1212,40 @@ fn date_trunc(
                 crabka_pgtypes::ColumnType::Timestamptz,
                 session_tz,
             )
-            .map_err(|_| invalid_param(format!("date out of range for date_trunc: {d}")))?,
+            .map_err(|_| {
+                invalid_param(format!(
+                    "date out of range for date_trunc: {}",
+                    crabka_pgtypes::datetime::date_to_text(*d)
+                ))
+            })?,
             zone,
             session_tz,
         ),
         Datum::Timestamptz(ts) => {
             if crabka_pgtypes::datetime::timestamptz_is_infinite(*ts) {
-                trunc_datetime(unit, DateTime::default())?;
+                trunc_datetime(unit, ColumnType::Timestamptz.name(), DateTime::default())?;
                 return Ok(Datum::Timestamptz(*ts));
             }
             let tz = zone.unwrap_or(session_tz);
-            // Render in the zone, truncate the wall-clock, re-interpret in the zone.
+            // Render in the zone, truncate the wall-clock, then put it back on
+            // the timeline.
+            let offset = tz.to_offset(*ts);
             let dt = tz.to_datetime(*ts);
-            let truncated = trunc_datetime(unit, dt)?;
-            truncated
-                .to_zoned(tz.clone())
-                .map(|z| Datum::Timestamptz(z.timestamp()))
+            let truncated = trunc_datetime(unit, ColumnType::Timestamptz.name(), dt)?;
+            let instant = if unit_redoes_zone(unit) {
+                // Truncating to a day or coarser moves the reading far enough
+                // that its offset has to be worked out afresh, and the midnight
+                // it lands on may itself be a DST gap or fold.
+                crabka_pgtypes::datetime::zoned_instant(truncated, tz)
+            } else {
+                // Truncating within the day keeps the offset the source instant
+                // already had. That is what makes `date_trunc('hour', …)` inside
+                // a fall-back fold stay on the pre-transition side, where
+                // re-deriving the offset would move it an hour.
+                offset.to_timestamp(truncated)
+            };
+            instant
+                .map(Datum::Timestamptz)
                 .map_err(|_| invalid_param("timestamp out of range for date_trunc"))
         }
         Datum::Interval(iv) => Ok(Datum::Interval(trunc_interval(unit, *iv)?)),
@@ -940,8 +1253,30 @@ fn date_trunc(
     }
 }
 
-/// Zero out every field below `unit` in a civil datetime.
-fn trunc_datetime(unit: &str, dt: DateTime) -> Result<DateTime, ExecError> {
+/// Whether truncating to `unit` makes `date_trunc` re-derive the zone offset.
+///
+/// `PostgreSQL`'s `redotz`: set for `day` and every coarser unit, left clear for
+/// `hour` and finer. A sub-day truncation therefore carries the source instant's
+/// own offset forward, which only shows up on a DST boundary — and is exactly
+/// where it shows up that the two rules disagree.
+fn unit_redoes_zone(unit: &str) -> bool {
+    matches!(
+        unit,
+        "day" | "week" | "month" | "quarter" | "year" | "decade" | "century" | "millennium"
+    )
+}
+
+/// Narrow a computed decade/century/millennium start year to the width a civil
+/// date holds. Every year the calendar can hold fits, so this only guards the
+/// arithmetic.
+fn fit_year(y: i64) -> Result<i16, ExecError> {
+    i16::try_from(y).map_err(|_| invalid_param("date_trunc out of range"))
+}
+
+/// Zero out every field below `unit` in a civil datetime. `type_name` is the
+/// source type the caller reports, since the same civil datetime stands in for
+/// a `timestamp` and for a `timestamptz` rendered in its zone.
+fn trunc_datetime(unit: &str, type_name: &str, dt: DateTime) -> Result<DateTime, ExecError> {
     let d = dt.date();
     let (y, m, day) = (d.year(), d.month(), d.day());
     let t = dt.time();
@@ -963,7 +1298,7 @@ fn trunc_datetime(unit: &str, dt: DateTime) -> Result<DateTime, ExecError> {
         "week" => {
             // PG truncates to the most recent Monday (ISO week start), midnight.
             let back = i64::from(d.weekday().to_monday_one_offset()) - 1;
-            let monday = crabka_pgtypes::datetime::date_plus_days(d, -back)
+            let monday = crabka_pgtypes::datetime::date_plus_days(d.into(), -back)
                 .map_err(|_| invalid_param("date_trunc week out of range"))?;
             crabka_pgtypes::datetime::date_to_midnight(monday)
         }
@@ -973,17 +1308,10 @@ fn trunc_datetime(unit: &str, dt: DateTime) -> Result<DateTime, ExecError> {
             mk(y, qm, 1, 0, 0, 0)?
         }
         "year" => mk(y, 1, 1, 0, 0, 0)?,
-        "decade" => mk((y / 10) * 10, 1, 1, 0, 0, 0)?,
-        "century" => {
-            // First year of the century containing y (1901, 2001, …).
-            let cy = ((century_of(i64::from(y)) - 1) * 100 + 1) as i16;
-            mk(cy, 1, 1, 0, 0, 0)?
-        }
-        "millennium" => {
-            let my = ((millennium_of(i64::from(y)) - 1) * 1000 + 1) as i16;
-            mk(my, 1, 1, 0, 0, 0)?
-        }
-        _ => return Err(unsupported_field(unit, "timestamp without time zone")),
+        "decade" => mk(fit_year(decade_start_year(y))?, 1, 1, 0, 0, 0)?,
+        "century" => mk(fit_year(century_start_year(y))?, 1, 1, 0, 0, 0)?,
+        "millennium" => mk(fit_year(millennium_start_year(y))?, 1, 1, 0, 0, 0)?,
+        _ => return Err(unsupported_field(unit, type_name)),
     })
 }
 
@@ -1050,7 +1378,16 @@ fn trunc_interval(unit: &str, iv: Interval) -> Result<Interval, ExecError> {
             days: 0,
             micros: 0,
         },
-        _ => return Err(unknown_field(unit)),
+        // `week` is the one unit PostgreSQL refuses for `interval` with an
+        // explanation: months are stored apart from days, and a month is not a
+        // whole number of weeks, so there is no week boundary to truncate to.
+        "week" => {
+            return Err(ExecError::UnsupportedWithDetail {
+                message: format!("unit \"{unit}\" not supported for type interval"),
+                detail: "Months usually have fractional weeks.".into(),
+            });
+        }
+        _ => return Err(unsupported_field(unit, "interval")),
     })
 }
 
@@ -1126,9 +1463,28 @@ fn days_in_month(year: i16, month: i8) -> Option<i8> {
 ///   * `timestamptz` → `timestamp`: render the instant in `zone` (wall-clock).
 fn timezone_convert(tz: &TimeZone, value: &Datum) -> Result<Datum, ExecError> {
     match value {
-        Datum::Timestamp(dt) => dt
-            .to_zoned(tz.clone())
-            .map(|z| Datum::Timestamptz(z.timestamp()))
+        // A non-finite reading is the same non-finite reading in every zone: it
+        // is not a wall-clock a zone can move. Rendering it would land on an
+        // ordinary value in any zone off UTC, and re-deriving an instant from
+        // one can leave the calendar altogether, so only the type changes.
+        Datum::Timestamp(dt) if crabka_pgtypes::datetime::timestamp_is_infinite(*dt) => {
+            let sign = crabka_pgtypes::datetime::timestamp_infinite_sign(*dt);
+            Ok(Datum::Timestamptz(
+                crabka_pgtypes::datetime::timestamptz_infinity_of_sign(sign),
+            ))
+        }
+        Datum::Timestamptz(ts) if crabka_pgtypes::datetime::timestamptz_is_infinite(*ts) => {
+            let sign = crabka_pgtypes::datetime::timestamptz_infinite_sign(*ts);
+            Ok(Datum::Timestamp(
+                crabka_pgtypes::datetime::timestamp_infinity_of_sign(sign),
+            ))
+        }
+        // A wall-clock on a DST boundary has two readings or none; PostgreSQL's
+        // `DetermineTimeZoneOffset` picks the later instant either way, which is
+        // what `zoned_instant` applies. jiff's own `Compatible` strategy takes
+        // the *earlier* instant in a fold, so it cannot stand in here.
+        Datum::Timestamp(dt) => crabka_pgtypes::datetime::zoned_instant(*dt, tz)
+            .map(Datum::Timestamptz)
             .map_err(|_| invalid_param("timestamp out of range for time zone conversion")),
         Datum::Timestamptz(ts) => Ok(Datum::Timestamp(tz.to_datetime(*ts))),
         // `timetz AT TIME ZONE zone` re-expresses the same instant-of-day at the
@@ -1159,25 +1515,32 @@ mod tests {
     };
 
     fn ctx_at(rfc3339: &str) -> EvalCtx {
+        ctx_at_zone(rfc3339, jiff::tz::TimeZone::UTC)
+    }
+    fn ctx_at_zone(rfc3339: &str, time_zone: jiff::tz::TimeZone) -> EvalCtx {
         let now: jiff::Timestamp = rfc3339.parse().expect("ts");
         EvalCtx {
             now,
             stmt_now: now,
-            time_zone: jiff::tz::TimeZone::UTC,
+            time_zone,
             date_order: crabka_pgtypes::datetime::DateOrder::default(),
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
+            extra_float_digits: 1,
+            bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
             trigger_depth: 0,
             clock: Arc::new(FixedClock(now)),
+            random: None,
             sequence: None,
             catalog: None,
             resolution: None,
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            txn: None,
         }
     }
     fn ev(sql: &str, ctx: &EvalCtx) -> Datum {
@@ -1191,6 +1554,81 @@ mod tests {
     }
     fn num(s: &str) -> Datum {
         Datum::Numeric(crabka_pgtypes::numeric::parse(s).expect("n"))
+    }
+
+    /// `AT TIME ZONE` and `date_trunc`'s zone argument read their text as a
+    /// POSIX specification, whose offset counts *west* of Greenwich — so
+    /// `'-08:00'` names UTC+8, the opposite of what the same text means inside
+    /// a literal. Every expectation is `PostgreSQL` 18.4's.
+    #[test]
+    fn at_time_zone_reads_a_specification_west_of_greenwich() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (expr, expected) in [
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE '-08:00'",
+                "1970-01-01T08:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE '+08:00'",
+                "1969-12-31T16:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE '08:00'",
+                "1969-12-31T16:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE '-08'",
+                "1970-01-01T08:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE 'UTC-2'",
+                "1970-01-01T02:00:00",
+            ),
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE 'UTC+10'",
+                "1969-12-31T14:00:00",
+            ),
+            // A specification with a rule, either side of its spring transition.
+            (
+                "timestamptz '2014-03-09 09:59:00+00' AT TIME ZONE 'PST8PDT,M3.2.0,M11.1.0'",
+                "2014-03-09T01:59:00",
+            ),
+            (
+                "timestamptz '2014-03-09 10:01:00+00' AT TIME ZONE 'PST8PDT,M3.2.0,M11.1.0'",
+                "2014-03-09T03:01:00",
+            ),
+            // An abbreviation the `TimeZone` setting would refuse.
+            (
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE 'PST'",
+                "1969-12-31T16:00:00",
+            ),
+        ] {
+            let want = Datum::Timestamp(expected.parse().expect("expected civil datetime"));
+            assert!(ev(expr, &ctx) == want, "{expr}");
+        }
+    }
+
+    /// An unresolvable zone is `PostgreSQL`'s own one-line 22023, not a message
+    /// nested inside another message.
+    #[test]
+    fn at_time_zone_reports_an_unknown_zone_the_way_postgresql_words_it() {
+        use assert2::assert;
+
+        let error = crate::eval::eval(
+            &crabka_pgparser::parser::parse_expr_for_test(
+                "timestamptz '1970-01-01 00:00:00+00' AT TIME ZONE 'America/Does_not_exist'",
+            )
+            .expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx_at("2024-01-15T12:00:00Z"),
+        )
+        .expect_err("unknown zone")
+        .into_pg();
+        assert!(error.code == "22023");
+        assert!(error.message == "time zone \"America/Does_not_exist\" not recognized");
     }
 
     #[test]
@@ -1207,7 +1645,7 @@ mod tests {
         );
         assert_eq!(
             ev("current_date", &ctx),
-            Datum::Date("2024-01-15".parse().expect("d"))
+            Datum::Date(crabka_pgtypes::datetime::parse_date("2024-01-15").expect("d"))
         );
     }
 
@@ -1223,6 +1661,184 @@ mod tests {
             ev("date_part('hour', TIMESTAMP '2024-01-15 13:45:06')", &ctx),
             Datum::Float8(13.0)
         );
+    }
+
+    /// `EXTRACT(WEEK FROM interval)` is the days field divided by seven, and
+    /// `date_trunc` still refuses the same unit.
+    ///
+    /// `interval_part`'s `DTK_WEEK` is `tm_mday / 7`, so months contribute
+    /// nothing: `@ 34 years` has no weeks in it. `date_trunc` is the opposite
+    /// case and PostgreSQL rejects it, because there is no week boundary to
+    /// truncate a months-and-days value to. Both spellings are pinned here so
+    /// a later change cannot quietly make them agree.
+    #[test]
+    fn extract_week_from_interval_counts_days_but_date_trunc_refuses_it() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        // The three rows expected/interval.out pins for this column.
+        assert!(ev("extract(week from INTERVAL '10 days')", &ctx) == num("1"));
+        assert!(ev("extract(week from INTERVAL '34 years')", &ctx) == num("0"));
+        assert!(ev("extract(week from INTERVAL '3 mons')", &ctx) == num("0"));
+        // Truncating toward zero, and a negative interval keeps the sign.
+        assert!(ev("extract(week from INTERVAL '13 days')", &ctx) == num("1"));
+        assert!(ev("extract(week from INTERVAL '14 days')", &ctx) == num("2"));
+        assert!(ev("extract(week from INTERVAL '-10 days')", &ctx) == num("-1"));
+        // `epoch` counts a whole year as 365.25 days and only the leftover
+        // months as 30. Every value here is the one expected/interval.out
+        // prints for the same interval.
+        assert!(ev("extract(epoch from INTERVAL '34 years')", &ctx) == num("1072958400.000000"));
+        assert!(ev("extract(epoch from INTERVAL '6 years')", &ctx) == num("189345600.000000"));
+        assert!(ev("extract(epoch from INTERVAL '3 mons')", &ctx) == num("7776000.000000"));
+        assert!(ev("extract(epoch from INTERVAL '10 days')", &ctx) == num("864000.000000"));
+        assert!(
+            ev("extract(epoch from INTERVAL '5 mons 12 hours')", &ctx) == num("13003200.000000")
+        );
+        // A month is not a whole number of weeks, so this stays refused.
+        let refused = crate::eval::eval(
+            &crabka_pgparser::parser::parse_expr_for_test("date_trunc('week', INTERVAL '10 days')")
+                .expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx,
+        )
+        .expect_err("date_trunc must still refuse week for an interval");
+        assert!(format!("{refused:?}").contains("not supported for type interval"));
+    }
+
+    /// The whole non-finite unit table for `interval`, both signs.
+    ///
+    /// This is not derivable from a rule: `day` is `Infinity` while `week` is
+    /// NULL, and `hour` is `Infinity` while `minute` is NULL. Every entry is
+    /// the cell `expected/interval.out` prints on its `infinity` and
+    /// `-infinity` rows, so the two twelve-row EXTRACT matrices hold only if
+    /// this table does.
+    #[test]
+    fn extract_from_an_infinite_interval_splits_growing_units_from_cycling_ones() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (unit, monotonic) in [
+            ("hour", true),
+            ("day", true),
+            ("year", true),
+            ("decade", true),
+            ("century", true),
+            ("millennium", true),
+            ("epoch", true),
+            ("microseconds", false),
+            ("milliseconds", false),
+            ("second", false),
+            ("minute", false),
+            ("week", false),
+            ("month", false),
+            ("quarter", false),
+        ] {
+            for (literal, sign) in [("infinity", "Infinity"), ("-infinity", "-Infinity")] {
+                let got = ev(&format!("extract({unit} from INTERVAL '{literal}')"), &ctx);
+                let want = if monotonic { num(sign) } else { Datum::Null };
+                assert!(got == want, "extract({unit} from INTERVAL '{literal}')");
+            }
+        }
+        // `date_part` reaches the same table and renders it as float8.
+        assert!(ev("date_part('day', INTERVAL 'infinity')", &ctx) == Datum::Float8(f64::INFINITY));
+        assert!(ev("date_part('week', INTERVAL '-infinity')", &ctx) == Datum::Null);
+    }
+
+    /// A unit an interval has no value for is 0A000 whether or not the interval
+    /// is finite. PostgreSQL says so explicitly at `NonFiniteIntervalPart`: an
+    /// infinite input must not answer where a finite one refuses. `isoyear` and
+    /// `julian` are the trap, because they *are* monotonic for a timestamp.
+    #[test]
+    fn an_infinite_interval_refuses_the_units_a_finite_one_refuses() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for unit in ["isoyear", "julian", "dow", "isodow", "doy", "timezone"] {
+            for literal in ["infinity", "-infinity", "10 days"] {
+                let err = crate::eval::eval(
+                    &crabka_pgparser::parser::parse_expr_for_test(&format!(
+                        "extract({unit} from INTERVAL '{literal}')"
+                    ))
+                    .expect("parse"),
+                    &Scope::empty(),
+                    &[],
+                    &ctx,
+                )
+                .expect_err("interval has no value for this unit")
+                .into_pg();
+                assert!(err.code == "0A000", "extract({unit} from '{literal}')");
+                assert!(err.message == format!("unit \"{unit}\" not supported for type interval"));
+            }
+        }
+    }
+
+    /// An infinite *timestamp* keeps the other table: `hour` and `day` are NULL
+    /// there, because they are the clock and calendar fields of a moment that
+    /// has none. Splitting the interval table must not drag this one with it.
+    #[test]
+    fn extract_from_an_infinite_timestamp_keeps_hour_and_day_null() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for source in ["TIMESTAMP", "TIMESTAMPTZ"] {
+            for unit in ["hour", "day", "week", "month", "quarter", "minute", "doy"] {
+                let got = ev(&format!("extract({unit} from {source} 'infinity')"), &ctx);
+                assert!(got == Datum::Null, "extract({unit} from {source})");
+            }
+            for unit in [
+                "year",
+                "isoyear",
+                "decade",
+                "century",
+                "millennium",
+                "epoch",
+            ] {
+                let got = ev(&format!("extract({unit} from {source} '-infinity')"), &ctx);
+                assert!(got == num("-Infinity"), "extract({unit} from {source})");
+            }
+        }
+        assert!(ev("extract(day from DATE 'infinity')", &ctx) == Datum::Null);
+        assert!(ev("extract(julian from DATE 'infinity')", &ctx) == num("Infinity"));
+        // A `date` has no clock at all, so `hour` stays 0A000 rather than
+        // becoming NULL: that refusal runs before the non-finite table.
+        let refused = crate::eval::eval(
+            &crabka_pgparser::parser::parse_expr_for_test("extract(hour from DATE 'infinity')")
+                .expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx,
+        )
+        .expect_err("a date has no hour")
+        .into_pg();
+        assert!(refused.code == "0A000");
+    }
+
+    /// `EXTRACT(QUARTER FROM interval)` negates as a whole for a negative
+    /// interval, so `@ 3 mons ago` is -2 rather than the 0 that
+    /// `(months % 12) / 3 + 1` gives. Every value is the cell the second
+    /// twelve-row matrix in `expected/interval.out` prints.
+    #[test]
+    fn extract_quarter_from_a_negative_interval_negates_the_whole_ordinal() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (literal, quarter) in [
+            ("1 min", "1"),
+            ("3 mons", "2"),
+            ("5 mons", "2"),
+            ("6 years", "1"),
+            ("34 years", "1"),
+            ("1 min ago", "1"),
+            ("3 mons ago", "-2"),
+            ("5 mons ago", "-2"),
+            ("5 mons 12 hours ago", "-2"),
+            ("6 years ago", "-1"),
+            ("34 years ago", "-1"),
+        ] {
+            let got = ev(&format!("extract(quarter from INTERVAL '{literal}')"), &ctx);
+            assert!(got == num(quarter), "extract(quarter from '{literal}')");
+        }
     }
 
     #[test]
@@ -1285,21 +1901,25 @@ mod tests {
             date_order: crabka_pgtypes::datetime::DateOrder::default(),
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
+            extra_float_digits: 1,
+            bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
             trigger_depth: 0,
             clock: Arc::new(FixedClock(ny)),
+            random: None,
             sequence: None,
             catalog: None,
             resolution: None,
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            txn: None,
         };
         assert_eq!(
             ev("current_date", &ctx),
-            Datum::Date("2024-01-14".parse().expect("d"))
+            Datum::Date(crabka_pgtypes::datetime::parse_date("2024-01-14").expect("d"))
         );
         // now() is still the absolute instant (timestamptz), zone-independent.
         assert_eq!(ev("now()", &ctx), Datum::Timestamptz(ny));
@@ -1332,6 +1952,99 @@ mod tests {
         // milliseconds = 6*1000 + 500 = 6500; microseconds = 6_500_000.
         assert_eq!(ex("milliseconds"), num("6500"));
         assert_eq!(ex("microseconds"), num("6500000"));
+    }
+
+    /// The calendar has no year 0. `PostgreSQL` stores the astronomical year,
+    /// where 0 is 1 BC, but every year unit reports the calendar number, so a
+    /// non-positive year drops one more. Each expectation is `PostgreSQL`
+    /// 18.4's, read off the server.
+    #[test]
+    fn extract_year_units_skip_the_missing_year_zero() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (unit, literal, expected) in [
+            // Either side of the AD/BC boundary, where the gap opens.
+            ("year", "0001-01-01", "1"),
+            ("year", "0001-01-01 BC", "-1"),
+            ("year", "0002-01-01 BC", "-2"),
+            ("year", "0101-01-01 BC", "-101"),
+            ("year", "2020-08-11 BC", "-2020"),
+            // ISO year follows the same skip, and near a boundary it names a
+            // different year from the calendar one.
+            ("isoyear", "0001-01-01", "1"),
+            ("isoyear", "0001-12-31", "2"),
+            ("isoyear", "0001-01-01 BC", "-2"),
+            ("isoyear", "0001-12-31 BC", "-1"),
+            ("isoyear", "0002-01-01 BC", "-3"),
+            ("isoyear", "0010-06-15 BC", "-10"),
+            ("isoyear", "0012-01-01 BC", "-13"),
+            ("isoyear", "2020-08-11 BC", "-2020"),
+            // Decade 0 runs 1 BC through 9 AD, so it is a floor and not a
+            // truncation toward zero.
+            ("decade", "0004-06-15", "0"),
+            ("decade", "0001-01-01 BC", "0"),
+            ("decade", "0002-01-01 BC", "-1"),
+            ("decade", "0011-01-01 BC", "-1"),
+            ("decade", "0012-01-01 BC", "-2"),
+            ("decade", "0100-01-01 BC", "-10"),
+            ("decade", "0101-01-01 BC", "-10"),
+            // Century -1 runs 100 BC through 1 BC. There is no century 0.
+            ("century", "0004-06-15", "1"),
+            ("century", "0001-01-01 BC", "-1"),
+            ("century", "0100-01-01 BC", "-1"),
+            ("century", "0101-01-01 BC", "-2"),
+            ("century", "1501-01-01 BC", "-16"),
+            ("millennium", "0004-06-15", "1"),
+            ("millennium", "0001-01-01 BC", "-1"),
+            ("millennium", "0100-01-01 BC", "-1"),
+            ("millennium", "1501-01-01 BC", "-2"),
+        ] {
+            let sql = format!("extract({unit} from TIMESTAMP '{literal}')");
+            assert!(ev(&sql, &ctx) == num(expected), "{sql}");
+        }
+    }
+
+    /// `date_trunc` carries the same skip: the first year of a BC century or
+    /// millennium is one whole unit later than the AD formula would put it, and
+    /// the decade floor keeps 2 BC in the decade that starts at 11 BC. Years
+    /// below are astronomical, so 0 is 1 BC. Each expectation is `PostgreSQL`
+    /// 18.4's, read off the server.
+    #[test]
+    fn date_trunc_year_units_skip_the_missing_year_zero() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (unit, literal, expected_year) in [
+            ("year", "0001-12-31 BC", 0),
+            ("year", "2020-08-11 BC", -2019),
+            ("decade", "0015-06-15", 10),
+            ("decade", "0004-12-25", 0),
+            ("decade", "0001-01-01 BC", 0),
+            ("decade", "0002-12-31 BC", -10),
+            ("decade", "0010-06-15 BC", -10),
+            ("decade", "0012-01-01 BC", -20),
+            ("decade", "0100-01-01 BC", -100),
+            ("century", "0004-06-15", 1),
+            ("century", "0055-08-10 BC", -99),
+            ("century", "0001-01-01 BC", -99),
+            ("century", "0100-01-01 BC", -99),
+            ("century", "0101-01-01 BC", -199),
+            ("century", "1501-01-01 BC", -1599),
+            ("millennium", "0004-06-15", 1),
+            ("millennium", "0001-01-01 BC", -999),
+            ("millennium", "0100-01-01 BC", -999),
+            ("millennium", "1501-01-01 BC", -1999),
+        ] {
+            let sql = format!("date_trunc('{unit}', TIMESTAMP '{literal}')");
+            let want = Datum::Timestamp(jiff::civil::date(expected_year, 1, 1).at(0, 0, 0, 0));
+            assert!(ev(&sql, &ctx) == want, "{sql}");
+        }
+        // `week` reaches back to the Monday of the ISO week, which for the
+        // first day of 1 BC is in the year before it.
+        let sql = "date_trunc('week', TIMESTAMP '0001-01-01 BC')";
+        let want = Datum::Timestamp(jiff::civil::date(-1, 12, 27).at(0, 0, 0, 0));
+        assert!(ev(sql, &ctx) == want, "{sql}");
     }
 
     #[test]
@@ -1371,17 +2084,21 @@ mod tests {
             date_order: crabka_pgtypes::datetime::DateOrder::default(),
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
+            extra_float_digits: 1,
+            bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
             trigger_depth: 0,
             clock: Arc::new(FixedClock(ts)),
+            random: None,
             sequence: None,
             catalog: None,
             resolution: None,
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            txn: None,
         };
         assert_eq!(
             ev(
@@ -1498,6 +2215,65 @@ mod tests {
         );
     }
 
+    /// The rules `PostgreSQL` applies when a wall-clock reading falls on a DST
+    /// boundary, all read off a PostgreSQL 18.4 oracle.
+    ///
+    /// `AT TIME ZONE` resolves a gap or a fold with `DetermineTimeZoneOffset`,
+    /// which takes the smaller of the two candidate offsets — the later instant
+    /// — where jiff's own `Compatible` strategy takes the earlier one in a fold.
+    /// `date_trunc` uses that same rule only for `day` and coarser units; a
+    /// sub-day truncation keeps whatever offset the source instant already had,
+    /// which is `PostgreSQL`'s `redotz` flag.
+    #[test]
+    fn dst_boundaries_resolve_the_way_postgres_resolves_them() {
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        let epoch = |d: &Datum| match d {
+            Datum::Timestamptz(ts) => ts.as_second(),
+            other => panic!("expected timestamptz, got {other:?}"),
+        };
+        let at = |secs: i64| secs;
+        // 2011-11-06 01:30 in Los Angeles is a fold: 08:30 UTC at PDT (-7) or
+        // 09:30 UTC at PST (-8). PostgreSQL names the later instant.
+        assert2::assert!(
+            epoch(&ev(
+                "TIMESTAMP '2011-11-06 01:30:00' AT TIME ZONE 'America/Los_Angeles'",
+                &ctx
+            )) == at(1_320_571_800)
+        );
+        // 2011-03-13 02:30 does not exist there; the same rule gives 10:30 UTC.
+        assert2::assert!(
+            epoch(&ev(
+                "TIMESTAMP '2011-03-13 02:30:00' AT TIME ZONE 'America/Los_Angeles'",
+                &ctx
+            )) == at(1_300_012_200)
+        );
+        // Truncating to the hour inside that fold keeps the source offset, so
+        // 08:30 UTC (PDT) becomes 08:00 UTC and stays on the pre-transition
+        // side; re-deriving the offset would move it an hour to 09:00 UTC.
+        assert2::assert!(
+            epoch(&ev(
+                "date_trunc('hour', TIMESTAMPTZ '2011-11-06 08:30:00+00', 'America/Los_Angeles')",
+                &ctx
+            )) == at(1_320_566_400)
+        );
+        // A day truncation does re-derive it. Havana began DST at midnight on
+        // 2011-03-13, so the midnight it lands on is a gap.
+        assert2::assert!(
+            epoch(&ev(
+                "date_trunc('day', TIMESTAMPTZ '2011-03-13 10:00:00+00', 'America/Havana')",
+                &ctx
+            )) == at(1_299_992_400)
+        );
+        // And the same day truncation inside the fold lands on a midnight that
+        // is unambiguous, one PDT day earlier.
+        assert2::assert!(
+            epoch(&ev(
+                "date_trunc('day', TIMESTAMPTZ '2011-11-06 08:30:00+00', 'America/Los_Angeles')",
+                &ctx
+            )) == at(1_320_562_800)
+        );
+    }
+
     #[test]
     fn date_trunc_result_type_matches_source() {
         let infer = |sql: &str| {
@@ -1572,6 +2348,149 @@ mod tests {
                 micros: 0
             })
         );
+    }
+
+    /// `PostgreSQL` 18.4, measured. `age` CARRIES a non-finite endpoint; it does
+    /// not compute with it. Before this, the reserved sentinels went into the
+    /// field arithmetic as ordinary years 9999 and −9999, so `age(timestamp
+    /// 'infinity')` answered a finite interval measured from the transaction
+    /// date — a wrong answer that also changed every day.
+    ///
+    /// The finite rows share the table on purpose: they run the same path and
+    /// must not move.
+    #[test]
+    fn age_carries_a_non_finite_endpoint_rather_than_computing_with_it() {
+        use assert2::assert;
+
+        // A session zone OFF UTC is the interesting one for `timestamptz`: the
+        // reserved instant renders as an ordinary wall-clock there, so a check
+        // made after the coercion to civil time would see a finite value.
+        for zone in [
+            jiff::tz::TimeZone::UTC,
+            jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(-8)),
+            jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(11)),
+        ] {
+            let ctx = ctx_at_zone("2024-03-15T10:00:00Z", zone.clone());
+            for (expr, expected) in [
+                // One argument: `current_date − x`, so the sign flips.
+                ("age(timestamp 'infinity')", "-infinity"),
+                ("age(timestamp '-infinity')", "infinity"),
+                ("age(timestamptz 'infinity')", "-infinity"),
+                ("age(timestamptz '-infinity')", "infinity"),
+                ("age(date 'infinity')", "-infinity"),
+                ("age(date '-infinity')", "infinity"),
+                // Two arguments: `end − start`, so `end`'s sign wins, and a
+                // negated `-infinity` start is a `+infinity` contribution.
+                (
+                    "age(timestamp 'infinity', timestamp '-infinity')",
+                    "infinity",
+                ),
+                (
+                    "age(timestamp '-infinity', timestamp 'infinity')",
+                    "-infinity",
+                ),
+                (
+                    "age(timestamp 'infinity', timestamp '2000-01-01')",
+                    "infinity",
+                ),
+                (
+                    "age(timestamp '2000-01-01', timestamp 'infinity')",
+                    "-infinity",
+                ),
+                (
+                    "age(timestamp '2000-01-01', timestamp '-infinity')",
+                    "infinity",
+                ),
+                (
+                    "age(timestamptz 'infinity', timestamptz '2000-01-01')",
+                    "infinity",
+                ),
+                ("age(date 'infinity', timestamp '2000-01-01')", "infinity"),
+                // A NULL argument still wins over a non-finite one.
+                ("age(timestamp 'infinity', NULL::timestamp)", "NULL"),
+                ("age(NULL::timestamp, timestamp 'infinity')", "NULL"),
+                // Finite endpoints, through the same path, unmoved.
+                (
+                    "age(TIMESTAMP '2024-03-01 00:00:00', TIMESTAMP '2024-01-01 00:00:00')",
+                    "2 mons",
+                ),
+                (
+                    "age(TIMESTAMP '2024-03-01 00:00:00', TIMESTAMP '2024-01-15 00:00:00')",
+                    "1 mon 15 days",
+                ),
+                ("age(TIMESTAMP '2024-01-15 00:00:00')", "2 mons"),
+            ] {
+                let got = match ev(expr, &ctx) {
+                    Datum::Null => "NULL".to_string(),
+                    Datum::Interval(iv) => crabka_pgtypes::datetime::interval_to_text(iv),
+                    other => panic!("{expr} gave {other:?}"),
+                };
+                assert!(got == expected, "{expr} in {zone:?}");
+            }
+        }
+    }
+
+    /// Two infinities of the SAME sign would have to cancel, which `PostgreSQL`
+    /// refuses with 22008 rather than answering zero. Gres answered `@ 0`.
+    #[test]
+    fn age_of_two_like_signed_infinities_is_22008() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-03-15T10:00:00Z");
+        for expr in [
+            "age(timestamp 'infinity', timestamp 'infinity')",
+            "age(timestamp '-infinity', timestamp '-infinity')",
+            "age(timestamptz 'infinity', timestamptz 'infinity')",
+            "age(timestamptz '-infinity', timestamptz '-infinity')",
+            "age(date 'infinity', date 'infinity')",
+        ] {
+            let error = crate::eval::eval(
+                &crabka_pgparser::parser::parse_expr_for_test(expr).expect("parse"),
+                &Scope::empty(),
+                &[],
+                &ctx,
+            )
+            .expect_err(expr)
+            .into_pg();
+            assert!(error.code == "22008", "{expr}");
+            assert!(error.message == "interval out of range", "{expr}");
+        }
+    }
+
+    /// A non-finite reading is the same reading in every zone, so `AT TIME ZONE`
+    /// only switches its type. Rendering the reserved instant as a wall-clock
+    /// used to lose the sentinel in any zone off UTC.
+    #[test]
+    fn a_non_finite_reading_survives_at_time_zone() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-03-15T10:00:00Z");
+        let civil_high = Datum::Timestamp(crabka_pgtypes::datetime::TIMESTAMP_INFINITY);
+        let civil_low = Datum::Timestamp(crabka_pgtypes::datetime::TIMESTAMP_NEG_INFINITY);
+        let zoned_high = Datum::Timestamptz(crabka_pgtypes::datetime::timestamptz_infinity());
+        let zoned_low = Datum::Timestamptz(crabka_pgtypes::datetime::timestamptz_neg_infinity());
+        for zone in ["UTC", "-08:00", "+11:00"] {
+            for (expr, expected) in [
+                (
+                    format!("timestamp 'infinity' AT TIME ZONE '{zone}'"),
+                    zoned_high.clone(),
+                ),
+                (
+                    format!("timestamp '-infinity' AT TIME ZONE '{zone}'"),
+                    zoned_low.clone(),
+                ),
+                (
+                    format!("timestamptz 'infinity' AT TIME ZONE '{zone}'"),
+                    civil_high.clone(),
+                ),
+                (
+                    format!("timestamptz '-infinity' AT TIME ZONE '{zone}'"),
+                    civil_low.clone(),
+                ),
+            ] {
+                assert!(ev(&expr, &ctx) == expected, "{expr}");
+            }
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use crate::{
     numeric::{NumericValue, Typmod},
-    usertype::{DomainRef, UserTypeRef},
+    usertype::{BaseRef, DomainRef, MultirangeRef, RangeRef, UserTypeRef},
 };
 
 /// PostgreSQL type OIDs (from pg_type.dat) for the slice's types.
@@ -24,21 +24,104 @@ pub mod oids {
     pub const INT2: u32 = 21;
     pub const INT4: u32 = 23;
     pub const TEXT: u32 = 25;
-    /// PostgreSQL `oid`: object identifier, an unsigned 4-byte integer.
-    ///
-    /// Drivers send this OID for typeinfo-query parameters (e.g. tokio-postgres
-    /// declares `WHERE t.oid = $1` with OID). Values live in the existing `Int4`
-    /// datum, the same representation the catalog's oid-valued columns use.
+    /// PostgreSQL `oid` — object identifier, an **unsigned** 4-byte integer.
     pub const OID: u32 = 26;
-    /// PostgreSQL `regclass`: a relation's `pg_class` oid with name-based
+    /// `oid[]`.
+    pub const OIDARRAY: u32 = 1028;
+    /// PostgreSQL `xid` — a 32-bit transaction id. Equality only: transaction
+    /// ids compare with modular arithmetic, which has no total order.
+    pub const XID: u32 = 28;
+    /// `xid[]`.
+    pub const XIDARRAY: u32 = 1011;
+    /// PostgreSQL `xid8` — a 64-bit (epoch-extended) transaction id, fully
+    /// ordered unlike its 32-bit sibling.
+    pub const XID8: u32 = 5069;
+    /// `xid8[]`.
+    pub const XID8ARRAY: u32 = 271;
+    /// PostgreSQL `cid` — a 32-bit command id. Equality only.
+    pub const CID: u32 = 29;
+    /// `cid[]`.
+    pub const CIDARRAY: u32 = 1012;
+    /// PostgreSQL `tid` — a `(block, offset)` tuple identifier.
+    pub const TID: u32 = 27;
+    /// `tid[]`.
+    pub const TIDARRAY: u32 = 1010;
+    /// PostgreSQL `pg_lsn` — a write-ahead log sequence number, printed `X/Y`
+    /// in hexadecimal.
+    pub const PG_LSN: u32 = 3220;
+    /// `pg_lsn[]`.
+    pub const PG_LSNARRAY: u32 = 3221;
+    /// PostgreSQL `pg_snapshot` — an exported `(xmin, xmax, xip)` triple.
+    pub const PG_SNAPSHOT: u32 = 5038;
+    /// PostgreSQL `txid_snapshot` — `pg_snapshot`'s deprecated predecessor. It
+    /// is a separate type with a separate oid, and it shares every input and
+    /// output function with `pg_snapshot`, so the two hold the same values and
+    /// report the same errors.
+    pub const TXID_SNAPSHOT: u32 = 2970;
+    pub const OIDVECTOR: u32 = 30;
+    /// PostgreSQL `int2vector` — a zero-based `int2` array with the same
+    /// space-separated text form `oidvector` uses.
+    pub const INT2VECTOR: u32 = 22;
+    /// PostgreSQL `regclass` — a relation's `pg_class` oid with name-based
     /// text input; values live in the `Int4` datum like `oid`.
     pub const REGCLASS: u32 = 2205;
+    pub const REGTYPE: u32 = 2206;
+    pub const REGPROCEDURE: u32 = 2202;
+    /// PostgreSQL `regnamespace` — a schema's `pg_namespace` oid rendered as
+    /// its name. `psql`'s `\d` casts `stxnamespace` through it.
+    pub const REGNAMESPACE: u32 = 4089;
+    pub const REGNAMESPACEARRAY: u32 = 4090;
+    pub const REGTYPEARRAY: u32 = 2211;
+    /// PostgreSQL `regproc` — a `pg_proc` oid rendered as the bare function
+    /// name, without its argument types. Unlike every other member of the
+    /// family its oid is in the bootstrap band, because `pg_proc.protransform`
+    /// and friends are declared with it.
+    pub const REGPROC: u32 = 24;
+    /// PostgreSQL `regoper` — a `pg_operator` oid rendered as the bare operator
+    /// name.
+    pub const REGOPER: u32 = 2203;
+    /// PostgreSQL `regoperator` — a `pg_operator` oid rendered with its operand
+    /// types, `NONE` standing in for the missing side of a unary operator.
+    pub const REGOPERATOR: u32 = 2204;
+    /// PostgreSQL `regconfig` — a `pg_ts_config` oid.
+    pub const REGCONFIG: u32 = 3734;
+    /// PostgreSQL `regdictionary` — a `pg_ts_dict` oid.
+    pub const REGDICTIONARY: u32 = 3769;
+    /// PostgreSQL `regrole` — a `pg_authid` oid. Roles are cluster-wide, so it
+    /// is one of the two members that never schema-qualifies.
+    pub const REGROLE: u32 = 4096;
+    /// PostgreSQL `regcollation` — a `pg_collation` oid.
+    pub const REGCOLLATION: u32 = 4191;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
+    /// PostgreSQL `"char"` — the ad-hoc one-byte type, written in double
+    /// quotes. It is NOT [`BPCHAR`]: `char`/`character` without quotes is
+    /// `character(1)`, a varlena holding one *character*, while this holds one
+    /// *byte* and is what the catalogs use for their single-letter codes.
+    pub const CHAR: u32 = 18;
+    /// `"char"[]`.
+    pub const CHARARRAY: u32 = 1002;
     /// PostgreSQL `real`: single-precision IEEE-754 (`f32`).
     pub const FLOAT4: u32 = 700;
     /// SP30: `double precision` (IEEE-754 f64).
     pub const FLOAT8: u32 = 701;
+    /// PostgreSQL geometric point.
+    pub const POINT: u32 = 600;
+    /// PostgreSQL geometric path.
+    pub const PATH: u32 = 602;
+    /// PostgreSQL `polygon` — a closed vertex list. Its array type (`_polygon`,
+    /// 1027) is deliberately not named here: like the other six geometric
+    /// types, `polygon` has no [`ElemType`] and so no array form crabka can
+    /// encode.
+    pub const POLYGON: u32 = 604;
+    /// PostgreSQL `lseg` — a line segment between two points.
+    pub const LSEG: u32 = 601;
+    /// PostgreSQL `line` — an infinite line as `Ax + By + C = 0`.
+    pub const LINE: u32 = 628;
+    /// PostgreSQL `circle` — a centre point and a radius.
+    pub const CIRCLE: u32 = 718;
+    /// PostgreSQL `box` — an axis-aligned rectangle.
+    pub const BOX: u32 = 603;
     /// SP32: arbitrary-precision `numeric`/`decimal`.
     pub const NUMERIC: u32 = 1700;
     /// SP37: `date`: days since 2000-01-01, stored as i32.
@@ -60,6 +143,38 @@ pub mod oids {
     pub const JSON: u32 = 114;
     /// PostgreSQL `jsonb`: the decomposed binary JSON type.
     pub const JSONB: u32 = 3802;
+    /// PostgreSQL `jsonpath` — a parsed SQL/JSON path expression.
+    pub const JSONPATH: u32 = 4072;
+    /// PostgreSQL `jsonpath[]`.
+    pub const JSONPATHARRAY: u32 = 4073;
+    /// PostgreSQL `xml` — a document or fragment kept as the text it was given.
+    pub const XML: u32 = 142;
+    /// `xml[]`.
+    pub const XMLARRAY: u32 = 143;
+    pub const INT4RANGE: u32 = 3904;
+    pub const INT4RANGEARRAY: u32 = 3905;
+    pub const NUMRANGE: u32 = 3906;
+    pub const NUMRANGEARRAY: u32 = 3907;
+    pub const TSRANGE: u32 = 3908;
+    pub const TSRANGEARRAY: u32 = 3909;
+    pub const TSTZRANGE: u32 = 3910;
+    pub const TSTZRANGEARRAY: u32 = 3911;
+    pub const DATERANGE: u32 = 3912;
+    pub const DATERANGEARRAY: u32 = 3913;
+    pub const INT8RANGE: u32 = 3926;
+    pub const INT8RANGEARRAY: u32 = 3927;
+    pub const INT4MULTIRANGE: u32 = 4451;
+    pub const NUMMULTIRANGE: u32 = 4532;
+    pub const TSMULTIRANGE: u32 = 4533;
+    pub const TSTZMULTIRANGE: u32 = 4534;
+    pub const DATEMULTIRANGE: u32 = 4535;
+    pub const INT8MULTIRANGE: u32 = 4536;
+    pub const INT4MULTIRANGEARRAY: u32 = 6150;
+    pub const NUMMULTIRANGEARRAY: u32 = 6151;
+    pub const TSMULTIRANGEARRAY: u32 = 6152;
+    pub const TSTZMULTIRANGEARRAY: u32 = 6153;
+    pub const DATEMULTIRANGEARRAY: u32 = 6155;
+    pub const INT8MULTIRANGEARRAY: u32 = 6157;
     /// `json[]`.
     pub const JSONARRAY: u32 = 199;
     /// `jsonb[]`.
@@ -104,6 +219,34 @@ pub mod oids {
     /// PostgreSQL `tsquery` and its array type.
     pub const TSQUERY: u32 = 3615;
     pub const TSQUERYARRAY: u32 = 3645;
+    /// PostgreSQL `inet` — a host address with an optional netmask.
+    pub const INET: u32 = 869;
+    /// `inet[]`.
+    pub const INETARRAY: u32 = 1041;
+    /// PostgreSQL `cidr` — a network address, sharing `inet`'s representation.
+    pub const CIDR: u32 = 650;
+    /// `cidr[]`.
+    pub const CIDRARRAY: u32 = 651;
+    /// PostgreSQL `macaddr` — a six-byte EUI-48 hardware address.
+    pub const MACADDR: u32 = 829;
+    /// `macaddr[]`.
+    pub const MACADDRARRAY: u32 = 1040;
+    /// PostgreSQL `macaddr8` — an eight-byte EUI-64 hardware address.
+    pub const MACADDR8: u32 = 774;
+    /// `macaddr8[]`.
+    pub const MACADDR8ARRAY: u32 = 775;
+    /// PostgreSQL `money` — a 64-bit count of minor currency units.
+    pub const MONEY: u32 = 790;
+    /// `money[]`.
+    pub const MONEYARRAY: u32 = 791;
+    /// PostgreSQL `bit` — a fixed-length string of bits.
+    pub const BIT: u32 = 1560;
+    /// `bit[]`.
+    pub const BITARRAY: u32 = 1561;
+    /// PostgreSQL `bit varying` (`varbit`).
+    pub const VARBIT: u32 = 1562;
+    /// `varbit[]`.
+    pub const VARBITARRAY: u32 = 1563;
 }
 
 /// The element type of a SQL array.
@@ -129,22 +272,27 @@ pub enum ElemType {
     Interval,
     Bytea,
     Uuid,
+    Json,
     Jsonb,
+    JsonPath,
+    Xml,
     Int2,
     Float4,
-    /// `character varying(n)[]`: the length modifier applies to each element on
-    /// assignment, exactly as `PostgreSQL` applies it to a scalar `varchar(n)`.
+    Regtype,
+    /// `character varying(n)[]` — the length modifier is applied to each element
+    /// on assignment, exactly as `PostgreSQL` applies it to a scalar `varchar(n)`.
     Varchar(Option<u16>),
     /// `character(n)[]`: each element is blank-padded to `n` on assignment.
     Char(Option<u16>),
+    Range(RangeRef),
+    Multirange(MultirangeRef),
 }
 
 impl ElemType {
     /// Every supported array element type, in `code()` order. The two
-    /// length-modified entries stand for their whole family. `from_code`
-    /// reconstructs the modifier, and neither the OID nor the name depends on
-    /// it.
-    pub const ALL: [ElemType; 18] = [
+    /// length-modified entries stand for their whole family — `from_code`
+    /// reconstructs the modifier, and neither the OID nor the name depends on it.
+    pub const ALL: [ElemType; 22] = [
         ElemType::Bool,
         ElemType::Int4,
         ElemType::Int8,
@@ -163,6 +311,10 @@ impl ElemType {
         ElemType::Float4,
         ElemType::Varchar(None),
         ElemType::Char(None),
+        ElemType::Regtype,
+        ElemType::JsonPath,
+        ElemType::Json,
+        ElemType::Xml,
     ];
 
     /// The element type as a column type (`numeric` is unconstrained, because an
@@ -182,11 +334,17 @@ impl ElemType {
             ElemType::Interval => ColumnType::Interval,
             ElemType::Bytea => ColumnType::Bytea,
             ElemType::Uuid => ColumnType::Uuid,
+            ElemType::Json => ColumnType::Json,
+            ElemType::Xml => ColumnType::Xml,
             ElemType::Jsonb => ColumnType::Jsonb,
+            ElemType::JsonPath => ColumnType::JsonPath,
             ElemType::Int2 => ColumnType::Int2,
             ElemType::Float4 => ColumnType::Float4,
+            ElemType::Regtype => ColumnType::Regtype,
             ElemType::Varchar(n) => ColumnType::Varchar(n),
             ElemType::Char(n) => ColumnType::Char(n),
+            ElemType::Range(range) => ColumnType::Range(range),
+            ElemType::Multirange(multirange) => ColumnType::Multirange(multirange),
         }
     }
 
@@ -204,14 +362,19 @@ impl ElemType {
             ColumnType::Numeric(_) => ElemType::Numeric,
             ColumnType::Date => ElemType::Date,
             ColumnType::Time => ElemType::Time,
-            // `timetz` has no array type in crabka yet.
-            ColumnType::Timetz => return None,
+            // `timetz` and `"char"` have no array type in crabka yet. Their
+            // `pg_type.typarray` still resolves, so a driver walking the
+            // scalar → array link finds the row upstream has.
+            ColumnType::Timetz | ColumnType::InternalChar => return None,
             ColumnType::Timestamp => ElemType::Timestamp,
             ColumnType::Timestamptz => ElemType::Timestamptz,
             ColumnType::Interval => ElemType::Interval,
             ColumnType::Bytea => ElemType::Bytea,
             ColumnType::Uuid => ElemType::Uuid,
+            ColumnType::Json => ElemType::Json,
+            ColumnType::Xml => ElemType::Xml,
             ColumnType::Jsonb => ElemType::Jsonb,
+            ColumnType::JsonPath => ElemType::JsonPath,
             ColumnType::Int2 => ElemType::Int2,
             ColumnType::Float4 => ElemType::Float4,
             ColumnType::Varchar(n) => ElemType::Varchar(n),
@@ -219,13 +382,66 @@ impl ElemType {
             // Composite, enum and domain element types are not supported: an
             // array of them would need an element oid the array encoder cannot
             // name, so callers report 0A000 rather than mis-encoding.
-            ColumnType::Regclass
+            ColumnType::Point
+            | ColumnType::Path
+            | ColumnType::Polygon
+            | ColumnType::Lseg
+            | ColumnType::Line
+            | ColumnType::Circle
+            | ColumnType::Box
+            | ColumnType::Regclass
+            | ColumnType::Regprocedure
+            | ColumnType::Regnamespace
+            | ColumnType::Regproc
+            | ColumnType::Regoper
+            | ColumnType::Regoperator
+            | ColumnType::Regconfig
+            | ColumnType::Regdictionary
+            | ColumnType::Regrole
+            | ColumnType::Regcollation
+            | ColumnType::OidVector
+            | ColumnType::Int2Vector
             | ColumnType::TsVector
             | ColumnType::TsQuery
+            // The network types have no array element form here for the same
+            // reason the geometric ones do not: their array oids would need an
+            // `ElemType` the array encoder cannot name.
+            | ColumnType::Inet
+            | ColumnType::Cidr
+            | ColumnType::MacAddr
+            | ColumnType::MacAddr8
+            // The system identifier types have no `ElemType` for the same
+            // reason: their array oids would need an element the array encoder
+            // cannot name.
+            | ColumnType::Oid
+            | ColumnType::Xid
+            | ColumnType::Xid8
+            | ColumnType::Cid
+            | ColumnType::Tid
+            | ColumnType::PgLsn
+            // The two snapshot types have array oids upstream, and no element
+            // the array encoder can name here either.
+            | ColumnType::PgSnapshot
+            | ColumnType::TxidSnapshot
+            | ColumnType::Money
+            | ColumnType::Bit(_)
+            | ColumnType::VarBit(_)
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
-            | ColumnType::Domain(_) => return None,
+            | ColumnType::Domain(_)
+            // A user-defined base type gets no array companion, for the same
+            // reason a composite, an enum and a domain get none.
+            | ColumnType::Base(_) => return None,
+            ColumnType::Range(range) => {
+                let elem = ElemType::Range(range);
+                if elem.array_oid() == 0 {
+                    return None;
+                }
+                elem
+            }
+            ColumnType::Multirange(multirange) => ElemType::Multirange(multirange),
+            ColumnType::Regtype => ElemType::Regtype,
         })
     }
 
@@ -250,11 +466,33 @@ impl ElemType {
             ElemType::Interval => oids::INTERVALARRAY,
             ElemType::Bytea => oids::BYTEAARRAY,
             ElemType::Uuid => oids::UUIDARRAY,
+            ElemType::Json => oids::JSONARRAY,
+            ElemType::Xml => oids::XMLARRAY,
             ElemType::Jsonb => oids::JSONBARRAY,
+            ElemType::JsonPath => oids::JSONPATHARRAY,
             ElemType::Int2 => oids::INT2ARRAY,
             ElemType::Float4 => oids::FLOAT4ARRAY,
+            ElemType::Regtype => oids::REGTYPEARRAY,
             ElemType::Varchar(_) => oids::VARCHARARRAY,
             ElemType::Char(_) => oids::BPCHARARRAY,
+            ElemType::Range(range) => match range.oid {
+                oids::INT4RANGE => oids::INT4RANGEARRAY,
+                oids::NUMRANGE => oids::NUMRANGEARRAY,
+                oids::TSRANGE => oids::TSRANGEARRAY,
+                oids::TSTZRANGE => oids::TSTZRANGEARRAY,
+                oids::DATERANGE => oids::DATERANGEARRAY,
+                oids::INT8RANGE => oids::INT8RANGEARRAY,
+                _ => 0,
+            },
+            ElemType::Multirange(multirange) => match multirange.oid {
+                oids::INT4MULTIRANGE => oids::INT4MULTIRANGEARRAY,
+                oids::NUMMULTIRANGE => oids::NUMMULTIRANGEARRAY,
+                oids::TSMULTIRANGE => oids::TSMULTIRANGEARRAY,
+                oids::TSTZMULTIRANGE => oids::TSTZMULTIRANGEARRAY,
+                oids::DATEMULTIRANGE => oids::DATEMULTIRANGEARRAY,
+                oids::INT8MULTIRANGE => oids::INT8MULTIRANGEARRAY,
+                oid => crate::usertype::user_multirange_array_oid(oid),
+            },
         }
     }
 
@@ -279,11 +517,33 @@ impl ElemType {
             ElemType::Interval => "interval[]",
             ElemType::Bytea => "bytea[]",
             ElemType::Uuid => "uuid[]",
+            ElemType::Json => "json[]",
+            ElemType::Xml => "xml[]",
             ElemType::Jsonb => "jsonb[]",
+            ElemType::JsonPath => "jsonpath[]",
             ElemType::Int2 => "smallint[]",
             ElemType::Float4 => "real[]",
+            ElemType::Regtype => "regtype[]",
             ElemType::Varchar(_) => "character varying[]",
             ElemType::Char(_) => "character[]",
+            ElemType::Range(range) => match range.oid {
+                oids::INT4RANGE => "int4range[]",
+                oids::NUMRANGE => "numrange[]",
+                oids::TSRANGE => "tsrange[]",
+                oids::TSTZRANGE => "tstzrange[]",
+                oids::DATERANGE => "daterange[]",
+                oids::INT8RANGE => "int8range[]",
+                _ => "range[]",
+            },
+            ElemType::Multirange(multirange) => match multirange.oid {
+                oids::INT4MULTIRANGE => "int4multirange[]",
+                oids::NUMMULTIRANGE => "nummultirange[]",
+                oids::TSMULTIRANGE => "tsmultirange[]",
+                oids::TSTZMULTIRANGE => "tstzmultirange[]",
+                oids::DATEMULTIRANGE => "datemultirange[]",
+                oids::INT8MULTIRANGE => "int8multirange[]",
+                _ => "multirange[]",
+            },
         }
     }
 
@@ -320,6 +580,12 @@ impl ElemType {
             ElemType::Float4 => 15,
             ElemType::Varchar(_) => 16,
             ElemType::Char(_) => 17,
+            ElemType::Range(_) => 18,
+            ElemType::Multirange(_) => 19,
+            ElemType::Regtype => 20,
+            ElemType::JsonPath => 21,
+            ElemType::Json => 22,
+            ElemType::Xml => 23,
         }
     }
 
@@ -333,7 +599,11 @@ impl ElemType {
     /// present-flag and a big-endian `u16` for the length-modified families.
     pub fn write_code(self, out: &mut Vec<u8>) {
         out.push(self.code());
-        if matches!(self, ElemType::Varchar(_) | ElemType::Char(_)) {
+        if let ElemType::Range(range) = self {
+            out.extend_from_slice(&range.oid.to_be_bytes());
+        } else if let ElemType::Multirange(multirange) = self {
+            out.extend_from_slice(&multirange.oid.to_be_bytes());
+        } else if matches!(self, ElemType::Varchar(_) | ElemType::Char(_)) {
             match self.typmod() {
                 None => out.push(0),
                 Some(n) => {
@@ -349,6 +619,28 @@ impl ElemType {
     pub fn read_code(cursor: &mut &[u8]) -> Option<Self> {
         let (code, rest) = cursor.split_first()?;
         *cursor = rest;
+        if *code == 18 {
+            let (bytes, rest) = cursor.split_at_checked(4)?;
+            *cursor = rest;
+            let oid = u32::from_be_bytes(bytes.try_into().ok()?);
+            return match ColumnType::builtin_range(oid)
+                .or_else(|| crate::usertype::lookup_oid(oid).and_then(|ty| ty.column_type()))?
+            {
+                ColumnType::Range(range) => Some(ElemType::Range(range)),
+                _ => None,
+            };
+        }
+        if *code == 19 {
+            let (bytes, rest) = cursor.split_at_checked(4)?;
+            *cursor = rest;
+            let oid = u32::from_be_bytes(bytes.try_into().ok()?);
+            return match ColumnType::builtin_multirange(oid)
+                .or_else(|| crate::usertype::column_type_for_oid(oid))?
+            {
+                ColumnType::Multirange(multirange) => Some(ElemType::Multirange(multirange)),
+                _ => None,
+            };
+        }
         let base = ElemType::from_code(*code)?;
         if !matches!(base, ElemType::Varchar(_) | ElemType::Char(_)) {
             return Some(base);
@@ -371,10 +663,49 @@ impl ElemType {
     }
 
     /// The element type of an array OID (`pg_type.typelem`), for parameter
-    /// binding. `json[]` maps onto `jsonb[]` like `json` maps onto `jsonb`.
+    /// binding.
     pub fn from_array_oid(oid: u32) -> Option<Self> {
-        if oid == oids::JSONARRAY {
-            return Some(ElemType::Jsonb);
+        for range_oid in [
+            oids::INT4RANGE,
+            oids::NUMRANGE,
+            oids::TSRANGE,
+            oids::TSTZRANGE,
+            oids::DATERANGE,
+            oids::INT8RANGE,
+        ] {
+            let range = match ColumnType::builtin_range(range_oid)? {
+                ColumnType::Range(range) => range,
+                _ => unreachable!(),
+            };
+            let elem = ElemType::Range(range);
+            if elem.array_oid() == oid {
+                return Some(elem);
+            }
+        }
+        for multirange_oid in [
+            oids::INT4MULTIRANGE,
+            oids::NUMMULTIRANGE,
+            oids::TSMULTIRANGE,
+            oids::TSTZMULTIRANGE,
+            oids::DATEMULTIRANGE,
+            oids::INT8MULTIRANGE,
+        ] {
+            let multirange = match ColumnType::builtin_multirange(multirange_oid)? {
+                ColumnType::Multirange(multirange) => multirange,
+                _ => unreachable!(),
+            };
+            let elem = ElemType::Multirange(multirange);
+            if elem.array_oid() == oid {
+                return Some(elem);
+            }
+        }
+        if let Some(multirange) = crate::usertype::all().into_iter().find_map(|ty| {
+            let ColumnType::Multirange(multirange) = ty.multirange_type()? else {
+                return None;
+            };
+            (ElemType::Multirange(multirange).array_oid() == oid).then_some(multirange)
+        }) {
+            return Some(ElemType::Multirange(multirange));
         }
         ElemType::ALL.into_iter().find(|e| e.array_oid() == oid)
     }
@@ -394,10 +725,32 @@ pub enum ColumnType {
     Text,
     Varchar(Option<u16>),
     Char(Option<u16>),
+    /// PostgreSQL `"char"` (OID 18) — the ad-hoc single-**byte** type, spelled
+    /// with the double quotes and unrelated to [`Char`](Self::Char), the
+    /// blank-padded `character(n)`. `typlen` is 1 and the value is one byte, so
+    /// the type stores no string at all: `charin` reads the first byte of its
+    /// input, and a `\ooo` octal escape names one byte directly. It is the type
+    /// PostgreSQL's own catalogs give their single-letter codes
+    /// (`pg_class.relkind`, `pg_type.typtype`).
+    InternalChar,
     /// PostgreSQL `real` (OID 700): an IEEE-754 `f32`.
     Float4,
     /// SP30: PostgreSQL `double precision` (an IEEE-754 `f64`).
     Float8,
+    /// PostgreSQL `point` (OID 600): two double-precision coordinates.
+    Point,
+    /// PostgreSQL `path` (OID 602): an open or closed point sequence.
+    Path,
+    /// PostgreSQL `polygon` (OID 604): a closed, non-directional vertex list.
+    Polygon,
+    /// PostgreSQL `lseg` (OID 601): a line segment between two endpoints.
+    Lseg,
+    /// PostgreSQL `line` (OID 628): the infinite line `Ax + By + C = 0`.
+    Line,
+    /// PostgreSQL `circle` (OID 718): a centre point and a radius.
+    Circle,
+    /// PostgreSQL `box` (OID 603): an axis-aligned rectangle.
+    Box,
     /// SP32: PostgreSQL `numeric`/`decimal`. The `Typmod` (precision, scale) is
     /// significant only when storing/casting; OID/name/typlen ignore it.
     Numeric(Option<Typmod>),
@@ -424,12 +777,112 @@ pub enum ColumnType {
     /// resolution, which the session/executor layers do, because the pure
     /// datum-parse path only accepts numeric strings).
     Regclass,
+    /// PostgreSQL `regtype` (OID 2206), represented by the shared named-oid
+    /// datum because its comparison and wire identity are the oid.
+    Regtype,
+    /// PostgreSQL `regprocedure` (OID 2202), a `pg_proc` oid rendered with its
+    /// identity argument types.
+    Regprocedure,
+    /// PostgreSQL `regnamespace` (OID 4089), a `pg_namespace` oid rendered as
+    /// the schema's name. Values share `Datum::Regclass` with the other reg
+    /// types because comparison and wire identity are the oid.
+    Regnamespace,
+    /// PostgreSQL `regproc` (OID 24), a `pg_proc` oid rendered as the bare
+    /// function name. It differs from [`Regprocedure`](Self::Regprocedure) in
+    /// that a name matching more than one overload is 42725 rather than a
+    /// resolution.
+    Regproc,
+    /// PostgreSQL `regoper` (OID 2203), a `pg_operator` oid rendered as the
+    /// bare operator name.
+    Regoper,
+    /// PostgreSQL `regoperator` (OID 2204), a `pg_operator` oid rendered with
+    /// its operand types.
+    Regoperator,
+    /// PostgreSQL `regconfig` (OID 3734), a `pg_ts_config` oid.
+    Regconfig,
+    /// PostgreSQL `regdictionary` (OID 3769), a `pg_ts_dict` oid.
+    Regdictionary,
+    /// PostgreSQL `regrole` (OID 4096), a `pg_authid` oid.
+    Regrole,
+    /// PostgreSQL `regcollation` (OID 4191), a `pg_collation` oid.
+    Regcollation,
+    /// PostgreSQL `oidvector` (OID 30), an oid array with lower bound zero and
+    /// a space-separated text representation.
+    OidVector,
+    /// PostgreSQL `int2vector` (OID 22), a zero-based `int2` array sharing
+    /// `oidvector`'s space-separated text form.
+    Int2Vector,
     /// PostgreSQL's normalized full-text document and query types.
     TsVector,
     TsQuery,
-    /// PostgreSQL `jsonb` (OID 3802): decomposed JSON. `json` (114) is accepted
-    /// on input as an alias but never reported.
+    /// PostgreSQL `inet` (OID 869) — a host address plus an optional netmask.
+    Inet,
+    /// PostgreSQL `cidr` (OID 650) — a network address. Shares `inet`'s
+    /// representation and values; what differs is the input check (no bits set
+    /// to the right of the netmask) and the output function.
+    Cidr,
+    /// PostgreSQL `macaddr` (OID 829) — a six-byte EUI-48 address.
+    MacAddr,
+    /// PostgreSQL `macaddr8` (OID 774) — an eight-byte EUI-64 address.
+    MacAddr8,
+    /// PostgreSQL `oid` (OID 26) — an **unsigned** 32-bit object identifier.
+    /// Not `int4` under another name: real catalog oids exceed 2^31, and
+    /// `oidin` reads `-1` as 4294967295 rather than rejecting it.
+    Oid,
+    /// PostgreSQL `xid` (OID 28) — a 32-bit transaction id. It shares `oid`'s
+    /// input function and width but has **only** `=` and `<>`, because
+    /// transaction ids compare with modular arithmetic.
+    Xid,
+    /// PostgreSQL `xid8` (OID 5069) — a 64-bit transaction id, which unlike
+    /// `xid` is fully ordered and has both a B-tree and a hash opclass.
+    Xid8,
+    /// PostgreSQL `cid` (OID 29) — a 32-bit command id, with `=` and nothing
+    /// else (not even `<>`).
+    Cid,
+    /// PostgreSQL `tid` (OID 27) — a `(block, offset)` tuple identifier.
+    Tid,
+    /// PostgreSQL `pg_lsn` (OID 3220) — a 64-bit log sequence number written
+    /// `X/Y` in hexadecimal.
+    PgLsn,
+    /// PostgreSQL `pg_snapshot` (OID 5038) — an exported transaction snapshot,
+    /// written `xmin:xmax:xip_list`. It has no operators at all, not even
+    /// equality: every question about one is asked through a function.
+    PgSnapshot,
+    /// PostgreSQL `txid_snapshot` (OID 2970) — the deprecated predecessor of
+    /// `pg_snapshot`. It is a distinct type with its own oid, so a column
+    /// declared with it reports 2970 and a cast to it is labelled
+    /// `txid_snapshot`. It holds the same values, because every one of its
+    /// input, output and accessor functions is `pg_snapshot`'s under another
+    /// name — which is also why its errors name `pg_snapshot`.
+    TxidSnapshot,
+    /// PostgreSQL `money` (OID 790) — a signed 64-bit count of minor currency
+    /// units, rendered through `lc_monetary`.
+    Money,
+    /// PostgreSQL `bit` (OID 1560) — a fixed-length bit string. The modifier is
+    /// the declared length; `None` is the unconstrained type, which `bit_in`
+    /// treats as "however many bits the input has" and which every other path
+    /// treats as `bit(1)`, exactly as PostgreSQL does.
+    Bit(Option<i32>),
+    /// PostgreSQL `bit varying` (OID 1562) — a bit string with an optional
+    /// maximum length. Shares `bit`'s values: the two are binary-coercible in
+    /// both directions.
+    VarBit(Option<i32>),
+    /// PostgreSQL `json` (OID 114) — the input text, validated and otherwise
+    /// untouched, so whitespace, object key order and duplicate keys all survive
+    /// a round trip. `jsonb` is the decomposed sibling; the two are different
+    /// types, not two spellings of one.
+    Json,
+    /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON: whitespace dropped,
+    /// numbers held as `numeric`, object keys sorted and de-duplicated.
     Jsonb,
+    /// PostgreSQL `xml` (OID 142) — a document or fragment, validated on input
+    /// and then kept byte for byte, the way [`ColumnType::Json`] keeps its text.
+    /// `pg_cast` declares `xml` binary-coercible to `text`, which is only
+    /// possible because the two really are the same bytes.
+    Xml,
+    /// PostgreSQL `jsonpath` (OID 4072). Values use the existing canonical text
+    /// datum; the executor validates and normalizes them at input boundaries.
+    JsonPath,
     /// A one-dimensional PostgreSQL array (OID = the element type's `typarray`).
     Array(ElemType),
     /// A composite type: the anonymous `record` (OID 2249) that a bare `ROW(…)`
@@ -437,26 +890,111 @@ pub enum ColumnType {
     Record(Option<UserTypeRef>),
     /// `CREATE TYPE … AS ENUM (…)`.
     Enum(UserTypeRef),
-    /// `CREATE DOMAIN … AS base`: a base type plus constraints. Values are the
+    /// A built-in or user-defined range type.
+    Range(RangeRef),
+    /// A canonical ordered set of non-overlapping ranges.
+    Multirange(MultirangeRef),
+    /// `CREATE DOMAIN … AS base` — a base type plus constraints. Values are the
     /// base type's values; what the domain adds is the constraint check on
     /// assignment and cast, and the type it reports.
     Domain(DomainRef),
+    /// `CREATE TYPE name (INPUT = …, OUTPUT = …, LIKE = …)` — a user-defined
+    /// base type. Values are held in the representation type's `Datum`, which
+    /// is what `LIKE` selects; the base type adds a distinct identity, its own
+    /// I/O pair, and no automatic conversion to or from anything.
+    Base(BaseRef),
 }
 
 impl ColumnType {
+    /// Resolve a built-in PostgreSQL range oid.
+    #[must_use]
+    pub fn builtin_range(oid: u32) -> Option<Self> {
+        let (name, subtype) = match oid {
+            oids::INT4RANGE => ("int4range", &ColumnType::Int4),
+            oids::NUMRANGE => ("numrange", &ColumnType::Numeric(None)),
+            oids::TSRANGE => ("tsrange", &ColumnType::Timestamp),
+            oids::TSTZRANGE => ("tstzrange", &ColumnType::Timestamptz),
+            oids::DATERANGE => ("daterange", &ColumnType::Date),
+            oids::INT8RANGE => ("int8range", &ColumnType::Int8),
+            _ => return None,
+        };
+        Some(ColumnType::Range(RangeRef { oid, name, subtype }))
+    }
+
+    #[must_use]
+    pub fn builtin_multirange(oid: u32) -> Option<Self> {
+        let (name, range_oid) = match oid {
+            oids::INT4MULTIRANGE => ("int4multirange", oids::INT4RANGE),
+            oids::NUMMULTIRANGE => ("nummultirange", oids::NUMRANGE),
+            oids::TSMULTIRANGE => ("tsmultirange", oids::TSRANGE),
+            oids::TSTZMULTIRANGE => ("tstzmultirange", oids::TSTZRANGE),
+            oids::DATEMULTIRANGE => ("datemultirange", oids::DATERANGE),
+            oids::INT8MULTIRANGE => ("int8multirange", oids::INT8RANGE),
+            _ => return None,
+        };
+        let ColumnType::Range(range) = Self::builtin_range(range_oid)? else {
+            unreachable!()
+        };
+        Some(ColumnType::Multirange(MultirangeRef { oid, name, range }))
+    }
+
+    /// Resolve the automatic multirange companion for a built-in or registered range.
+    #[must_use]
+    pub fn multirange_for_range(range: RangeRef) -> Option<Self> {
+        let oid = match range.oid {
+            oids::INT4RANGE => oids::INT4MULTIRANGE,
+            oids::NUMRANGE => oids::NUMMULTIRANGE,
+            oids::TSRANGE => oids::TSMULTIRANGE,
+            oids::TSTZRANGE => oids::TSTZMULTIRANGE,
+            oids::DATERANGE => oids::DATEMULTIRANGE,
+            oids::INT8RANGE => oids::INT8MULTIRANGE,
+            oid => return crate::usertype::column_type_for_oid(oid.checked_add(3)?),
+        };
+        Self::builtin_multirange(oid)
+    }
+
     /// Resolve a bare SQL type name (no modifier). `numeric`/`decimal` resolve to
     /// the unconstrained form; the parser layers the `(p, s)` modifier on top.
     pub fn from_sql_name(name: &str) -> Option<Self> {
-        match name.to_ascii_lowercase().as_str() {
+        Self::from_builtin_sql_name(&name.to_ascii_lowercase())
+            .or_else(|| crate::usertype::column_type_for_name(name))
+    }
+
+    /// The built-in whose **quoted** spelling names a different type from its
+    /// unquoted one, or `None` for every other name.
+    ///
+    /// `PostgreSQL`'s grammar reaches `character(1)` only through the unquoted
+    /// keywords `char` and `character`; a name in double quotes is an ordinary
+    /// identifier looked up in `pg_type` by `typname`, and `typname = 'char'`
+    /// is OID 18, the one-byte type. So `'a'::char` is a `bpchar` and
+    /// `'a'::"char"` is not, and `SELECT '\101'::"char"` is `A` because
+    /// `charin` decodes the octal escape that `bpcharin` keeps as a backslash.
+    ///
+    /// Only `char` is listed. The rest of the quoted-versus-unquoted split —
+    /// that `"integer"` and `"bigint"` are not type names at all, since neither
+    /// is a `typname` — is a separate divergence and not this function's.
+    #[must_use]
+    pub fn from_quoted_builtin_sql_name(name: &str) -> Option<Self> {
+        (name == "char").then_some(ColumnType::InternalChar)
+    }
+
+    /// Resolve only a built-in SQL type name. Session-aware parsers use this
+    /// while walking `pg_catalog` in search-path order, then consult exact user
+    /// type identities for every other visible schema.
+    #[must_use]
+    pub fn from_builtin_sql_name(name: &str) -> Option<Self> {
+        match name {
             "int2" | "smallint" => Some(ColumnType::Int2),
             "int4" | "integer" | "int" => Some(ColumnType::Int4),
             "int8" | "bigint" => Some(ColumnType::Int8),
-            // `oid` (object identifier, OID 26) is a pragmatic alias for `int4`:
-            // the catalog's oid-valued columns (pg_type.oid, pg_namespace.oid,
-            // pg_type.typnamespace, …) are Int4, so `NULL::oid` and
-            // `CAST(x AS oid)` resolve consistently with them. RowDescription
-            // consequently reports int4 (23), not oid (26), for such expressions.
-            "oid" => Some(ColumnType::Int4),
+            "oid" => Some(ColumnType::Oid),
+            "xid" => Some(ColumnType::Xid),
+            "xid8" => Some(ColumnType::Xid8),
+            "cid" => Some(ColumnType::Cid),
+            "tid" => Some(ColumnType::Tid),
+            "pg_lsn" => Some(ColumnType::PgLsn),
+            "pg_snapshot" => Some(ColumnType::PgSnapshot),
+            "txid_snapshot" => Some(ColumnType::TxidSnapshot),
             // `name` (OID 19) is a pragmatic alias for `text`, the same shape of
             // divergence as `oid` → `int4` above: the catalog's name-valued
             // columns are already Text, so `'x'::name` and a `name[]` column
@@ -474,6 +1012,13 @@ impl ColumnType {
             // two-word `double precision` is normalized to this single string by the
             // parser before it reaches here.
             "float8" | "float" | "double precision" => Some(ColumnType::Float8),
+            "point" => Some(ColumnType::Point),
+            "path" => Some(ColumnType::Path),
+            "polygon" => Some(ColumnType::Polygon),
+            "lseg" => Some(ColumnType::Lseg),
+            "line" => Some(ColumnType::Line),
+            "circle" => Some(ColumnType::Circle),
+            "box" => Some(ColumnType::Box),
             "float4" | "real" => Some(ColumnType::Float4),
             // SP32: `numeric`/`decimal` (unconstrained here; typmod added by parser).
             "numeric" | "decimal" => Some(ColumnType::Numeric(None)),
@@ -488,17 +1033,58 @@ impl ColumnType {
             "bytea" => Some(ColumnType::Bytea),
             "uuid" => Some(ColumnType::Uuid),
             "regclass" => Some(ColumnType::Regclass),
+            "regtype" => Some(ColumnType::Regtype),
+            "regprocedure" => Some(ColumnType::Regprocedure),
+            "regnamespace" => Some(ColumnType::Regnamespace),
+            "regproc" => Some(ColumnType::Regproc),
+            "regoper" => Some(ColumnType::Regoper),
+            "regoperator" => Some(ColumnType::Regoperator),
+            "regconfig" => Some(ColumnType::Regconfig),
+            "regdictionary" => Some(ColumnType::Regdictionary),
+            "regrole" => Some(ColumnType::Regrole),
+            "regcollation" => Some(ColumnType::Regcollation),
+            "oidvector" => Some(ColumnType::OidVector),
+            "int2vector" => Some(ColumnType::Int2Vector),
             "tsvector" => Some(ColumnType::TsVector),
             "tsquery" => Some(ColumnType::TsQuery),
-            // `json` is an input alias for `jsonb`: values are stored decomposed
-            // and always report OID 3802 (a documented divergence).
-            "jsonb" | "json" => Some(ColumnType::Jsonb),
+            "money" => Some(ColumnType::Money),
+            "bit" => Some(ColumnType::Bit(None)),
+            "varbit" | "bit varying" => Some(ColumnType::VarBit(None)),
+            "inet" => Some(ColumnType::Inet),
+            "cidr" => Some(ColumnType::Cidr),
+            "macaddr" => Some(ColumnType::MacAddr),
+            "macaddr8" => Some(ColumnType::MacAddr8),
+            "json" => Some(ColumnType::Json),
+            "xml" => Some(ColumnType::Xml),
+            "jsonb" => Some(ColumnType::Jsonb),
+            "jsonpath" => Some(ColumnType::JsonPath),
             // The anonymous composite type. `SELECT ROW(1,2)` has it, and it is
             // the declared parameter type of `json_populate_record(record, …)`.
             "record" => Some(ColumnType::Record(None)),
-            // A name that is not built in may be a user-defined type; the
-            // registry the DDL writes into is what makes `x::my_type` resolve.
-            other => crate::usertype::column_type_for_name(other),
+            "int4range" => ColumnType::builtin_range(oids::INT4RANGE),
+            "numrange" => ColumnType::builtin_range(oids::NUMRANGE),
+            "tsrange" => ColumnType::builtin_range(oids::TSRANGE),
+            "tstzrange" => ColumnType::builtin_range(oids::TSTZRANGE),
+            "daterange" => ColumnType::builtin_range(oids::DATERANGE),
+            "int8range" => ColumnType::builtin_range(oids::INT8RANGE),
+            "int4multirange" => ColumnType::builtin_multirange(oids::INT4MULTIRANGE),
+            "nummultirange" => ColumnType::builtin_multirange(oids::NUMMULTIRANGE),
+            "tsmultirange" => ColumnType::builtin_multirange(oids::TSMULTIRANGE),
+            "tstzmultirange" => ColumnType::builtin_multirange(oids::TSTZMULTIRANGE),
+            "datemultirange" => ColumnType::builtin_multirange(oids::DATEMULTIRANGE),
+            "int8multirange" => ColumnType::builtin_multirange(oids::INT8MULTIRANGE),
+            // `_int4` is what `pg_type.typname` calls `int4[]`, and PostgreSQL
+            // accepts that spelling wherever a type name is written -- which is
+            // how `CREATE TYPE … AS (ia _int4)` and `'_int4'::regtype` are
+            // written in the regress corpus. The element must itself be a
+            // built-in: a user type's array is reached through the catalog, and
+            // an array of arrays does not exist, so `__int4` resolves to
+            // nothing rather than nesting.
+            other => other
+                .strip_prefix('_')
+                .and_then(Self::from_builtin_sql_name)
+                .and_then(ElemType::from_column_type)
+                .map(ColumnType::Array),
         }
     }
 
@@ -537,6 +1123,8 @@ impl ColumnType {
     pub fn array_element(self) -> Option<ElemType> {
         match self {
             ColumnType::Array(elem) => Some(elem),
+            ColumnType::OidVector => Some(ElemType::Int4),
+            ColumnType::Int2Vector => Some(ElemType::Int2),
             _ => None,
         }
     }
@@ -550,8 +1138,16 @@ impl ColumnType {
             ColumnType::Text => oids::TEXT,
             ColumnType::Varchar(_) => oids::VARCHAR,
             ColumnType::Char(_) => oids::BPCHAR,
+            ColumnType::InternalChar => oids::CHAR,
             ColumnType::Float4 => oids::FLOAT4,
             ColumnType::Float8 => oids::FLOAT8,
+            ColumnType::Point => oids::POINT,
+            ColumnType::Path => oids::PATH,
+            ColumnType::Polygon => oids::POLYGON,
+            ColumnType::Lseg => oids::LSEG,
+            ColumnType::Line => oids::LINE,
+            ColumnType::Circle => oids::CIRCLE,
+            ColumnType::Box => oids::BOX,
             ColumnType::Numeric(_) => oids::NUMERIC,
             ColumnType::Date => oids::DATE,
             ColumnType::Time => oids::TIME,
@@ -562,13 +1158,46 @@ impl ColumnType {
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
             ColumnType::Regclass => oids::REGCLASS,
+            ColumnType::Regtype => oids::REGTYPE,
+            ColumnType::Regprocedure => oids::REGPROCEDURE,
+            ColumnType::Regnamespace => oids::REGNAMESPACE,
+            ColumnType::Regproc => oids::REGPROC,
+            ColumnType::Regoper => oids::REGOPER,
+            ColumnType::Regoperator => oids::REGOPERATOR,
+            ColumnType::Regconfig => oids::REGCONFIG,
+            ColumnType::Regdictionary => oids::REGDICTIONARY,
+            ColumnType::Regrole => oids::REGROLE,
+            ColumnType::Regcollation => oids::REGCOLLATION,
+            ColumnType::OidVector => oids::OIDVECTOR,
+            ColumnType::Int2Vector => oids::INT2VECTOR,
             ColumnType::TsVector => oids::TSVECTOR,
             ColumnType::TsQuery => oids::TSQUERY,
+            ColumnType::Inet => oids::INET,
+            ColumnType::Cidr => oids::CIDR,
+            ColumnType::MacAddr => oids::MACADDR,
+            ColumnType::MacAddr8 => oids::MACADDR8,
+            ColumnType::Oid => oids::OID,
+            ColumnType::Xid => oids::XID,
+            ColumnType::Xid8 => oids::XID8,
+            ColumnType::Cid => oids::CID,
+            ColumnType::Tid => oids::TID,
+            ColumnType::PgLsn => oids::PG_LSN,
+            ColumnType::PgSnapshot => oids::PG_SNAPSHOT,
+            ColumnType::TxidSnapshot => oids::TXID_SNAPSHOT,
+            ColumnType::Money => oids::MONEY,
+            ColumnType::Bit(_) => oids::BIT,
+            ColumnType::VarBit(_) => oids::VARBIT,
+            ColumnType::Json => oids::JSON,
+            ColumnType::Xml => oids::XML,
             ColumnType::Jsonb => oids::JSONB,
+            ColumnType::JsonPath => oids::JSONPATH,
             ColumnType::Array(elem) => elem.array_oid(),
             ColumnType::Record(None) => oids::RECORD,
             ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.oid,
+            ColumnType::Range(range) => range.oid,
+            ColumnType::Multirange(multirange) => multirange.oid,
             ColumnType::Domain(domain) => domain.oid,
+            ColumnType::Base(base) => base.oid,
         }
     }
 
@@ -582,8 +1211,19 @@ impl ColumnType {
             ColumnType::Text => "text",
             ColumnType::Varchar(_) => "character varying",
             ColumnType::Char(_) => "character",
+            // `format_type` special-cases OID 18 and prints the quotes, because
+            // `char` unquoted is a different type. Every diagnostic that names
+            // this type therefore carries them: `"char" out of range`.
+            ColumnType::InternalChar => "\"char\"",
             ColumnType::Float4 => "real",
             ColumnType::Float8 => "double precision",
+            ColumnType::Point => "point",
+            ColumnType::Path => "path",
+            ColumnType::Polygon => "polygon",
+            ColumnType::Lseg => "lseg",
+            ColumnType::Line => "line",
+            ColumnType::Circle => "circle",
+            ColumnType::Box => "box",
             ColumnType::Numeric(_) => "numeric",
             ColumnType::Date => "date",
             ColumnType::Time => "time without time zone",
@@ -594,13 +1234,46 @@ impl ColumnType {
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
             ColumnType::Regclass => "regclass",
+            ColumnType::Regtype => "regtype",
+            ColumnType::Regprocedure => "regprocedure",
+            ColumnType::Regnamespace => "regnamespace",
+            ColumnType::Regproc => "regproc",
+            ColumnType::Regoper => "regoper",
+            ColumnType::Regoperator => "regoperator",
+            ColumnType::Regconfig => "regconfig",
+            ColumnType::Regdictionary => "regdictionary",
+            ColumnType::Regrole => "regrole",
+            ColumnType::Regcollation => "regcollation",
+            ColumnType::OidVector => "oidvector",
+            ColumnType::Int2Vector => "int2vector",
             ColumnType::TsVector => "tsvector",
             ColumnType::TsQuery => "tsquery",
+            ColumnType::Inet => "inet",
+            ColumnType::Cidr => "cidr",
+            ColumnType::MacAddr => "macaddr",
+            ColumnType::MacAddr8 => "macaddr8",
+            ColumnType::Oid => "oid",
+            ColumnType::Xid => "xid",
+            ColumnType::Xid8 => "xid8",
+            ColumnType::Cid => "cid",
+            ColumnType::Tid => "tid",
+            ColumnType::PgLsn => "pg_lsn",
+            ColumnType::PgSnapshot => "pg_snapshot",
+            ColumnType::TxidSnapshot => "txid_snapshot",
+            ColumnType::Money => "money",
+            ColumnType::Bit(_) => "bit",
+            ColumnType::VarBit(_) => "bit varying",
+            ColumnType::Json => "json",
+            ColumnType::Xml => "xml",
             ColumnType::Jsonb => "jsonb",
+            ColumnType::JsonPath => "jsonpath",
             ColumnType::Array(elem) => elem.array_name(),
             ColumnType::Record(None) => "record",
             ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.name,
+            ColumnType::Range(range) => range.name,
+            ColumnType::Multirange(multirange) => multirange.name,
             ColumnType::Domain(domain) => domain.name,
+            ColumnType::Base(base) => base.name,
         }
     }
 
@@ -612,8 +1285,19 @@ impl ColumnType {
             ColumnType::Int8 => 8,
             ColumnType::Int4 => 4,
             ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_) => -1,
+            // The whole point of `"char"`: one byte, pass-by-value, no varlena
+            // header. `character(1)` above is -1.
+            ColumnType::InternalChar => 1,
             ColumnType::Float4 => 4,
             ColumnType::Float8 => 8,
+            ColumnType::Point => 16,
+            // `path` and `polygon` are the two varlena geometric types: both
+            // carry an unbounded vertex list, so `pg_type.typlen` is -1.
+            ColumnType::Path | ColumnType::Polygon => -1,
+            ColumnType::Lseg => 32,
+            ColumnType::Line => 24,
+            ColumnType::Circle => 24,
+            ColumnType::Box => 32,
             ColumnType::Numeric(_) => -1,
             ColumnType::Date => 4,
             ColumnType::Time => 8,
@@ -624,13 +1308,48 @@ impl ColumnType {
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
             ColumnType::Regclass => 4,
+            ColumnType::Regtype => 4,
+            ColumnType::Regprocedure | ColumnType::Regnamespace => 4,
+            // The seven remaining `reg*` types are oids too: `pg_type.typlen`
+            // is 4 for every member of the family.
+            ColumnType::Regproc
+            | ColumnType::Regoper
+            | ColumnType::Regoperator
+            | ColumnType::Regconfig
+            | ColumnType::Regdictionary
+            | ColumnType::Regrole
+            | ColumnType::Regcollation => 4,
+            ColumnType::OidVector | ColumnType::Int2Vector => -1,
             ColumnType::TsVector | ColumnType::TsQuery => -1,
-            // jsonb, arrays and composites are variable-length.
-            ColumnType::Jsonb | ColumnType::Array(_) | ColumnType::Record(_) => -1,
+            // `inet`/`cidr` are varlena; the two MAC types are fixed-width.
+            ColumnType::Inet | ColumnType::Cidr => -1,
+            ColumnType::MacAddr => 6,
+            ColumnType::MacAddr8 => 8,
+            // `pg_type.typlen`: the three 32-bit identifiers are 4, `tid` is a
+            // 4-byte block plus a 2-byte offset, and `xid8`/`pg_lsn` are 8.
+            ColumnType::Oid | ColumnType::Xid | ColumnType::Cid => 4,
+            ColumnType::Tid => 6,
+            ColumnType::Xid8 | ColumnType::PgLsn => 8,
+            // Both snapshot types are varlena: the running list has no bound.
+            ColumnType::PgSnapshot | ColumnType::TxidSnapshot => -1,
+            // `money` is a pass-by-value int64; the two bit types are varlena.
+            ColumnType::Money => 8,
+            ColumnType::Bit(_) | ColumnType::VarBit(_) => -1,
+            // xml, json, jsonb, jsonpath, arrays and composites are
+            // variable-length.
+            ColumnType::Xml
+            | ColumnType::Json
+            | ColumnType::Jsonb
+            | ColumnType::JsonPath
+            | ColumnType::Array(_)
+            | ColumnType::Record(_) => -1,
             // `pg_type.typlen` of an enum is 4 (the oid of its pg_enum row).
             ColumnType::Enum(_) => 4,
+            ColumnType::Range(_) | ColumnType::Multirange(_) => -1,
             // A domain has its base type's storage.
             ColumnType::Domain(domain) => domain.base.type_size(),
+            // `LIKE = float4` copies `float4`'s `typlen`, which is what this is.
+            ColumnType::Base(base) => base.representation.type_size(),
         }
     }
 
@@ -647,9 +1366,34 @@ impl ColumnType {
         )
     }
 
+    /// True for the eleven object-identifier types. Every one of them is an
+    /// `oid` underneath — same storage, same comparison, same binary wire form
+    /// — and differs only in the catalog its input and output functions read.
+    /// The cast table keys off this rather than listing all eleven at each of
+    /// its half-dozen sites.
+    pub const fn is_reg(self) -> bool {
+        matches!(
+            self,
+            ColumnType::Regclass
+                | ColumnType::Regtype
+                | ColumnType::Regprocedure
+                | ColumnType::Regnamespace
+                | ColumnType::Regproc
+                | ColumnType::Regoper
+                | ColumnType::Regoperator
+                | ColumnType::Regconfig
+                | ColumnType::Regdictionary
+                | ColumnType::Regrole
+                | ColumnType::Regcollation
+        )
+    }
+
     pub fn typmod(self) -> i32 {
         match self {
             ColumnType::Varchar(Some(n)) | ColumnType::Char(Some(n)) => i32::from(n) + 4,
+            // `bittypmodin` stores the bit count with no varlena adjustment,
+            // so `bit(4)`'s typmod is 4, not 8.
+            ColumnType::Bit(Some(n)) | ColumnType::VarBit(Some(n)) => n,
             // A domain inherits its base type's length modifier.
             ColumnType::Domain(domain) => domain.base.typmod(),
             _ => -1,
@@ -685,18 +1429,41 @@ pub enum Datum {
     Int4(i32),
     Int8(i64),
     Text(String),
-    /// PostgreSQL `real`: single-precision float. Grouping equality and hashing
+    /// PostgreSQL `"char"` — one byte, held raw. The escaped `\ooo` spelling is
+    /// only the *text* form ([`crate::internal_char`]); a value that has been
+    /// read in is the byte itself, which is why `'\377'::"char"` compares above
+    /// `'a'::"char"` instead of below it, where the backslash would put it.
+    InternalChar(u8),
+    /// PostgreSQL `jsonpath`, stored as its canonical text representation.
+    JsonPath(String),
+    /// PostgreSQL `real` — single-precision float. Grouping equality and hashing
     /// follow the same rules as [`Datum::Float8`] (one NaN, `-0.0 == +0.0`).
     Float4(f32),
     /// SP30: PostgreSQL `double precision`.
     Float8(f64),
-    /// SP32: PostgreSQL `numeric`: an arbitrary-precision exact decimal, or one
+    /// PostgreSQL geometric point.
+    Point(crate::geometry::Point),
+    /// PostgreSQL geometric path.
+    Path(crate::geometry::Path),
+    /// PostgreSQL's `polygon`, a closed vertex list.
+    Polygon(crate::geometry::Polygon),
+    /// PostgreSQL's `lseg`, a line segment between two endpoints.
+    Lseg(crate::geometry::Lseg),
+    /// PostgreSQL's `line`, an infinite line's three coefficients.
+    Line(crate::geometry::Line),
+    /// PostgreSQL's `circle`, a centre point and a radius.
+    Circle(crate::geometry::Circle),
+    /// PostgreSQL's `box`, an axis-aligned rectangle's two corners.
+    Box(crate::geometry::Box2),
+    /// SP32: PostgreSQL `numeric` — an arbitrary-precision exact decimal, or one
     /// of the `NaN` / `±Infinity` specials.
     Numeric(NumericValue),
-    /// SP37: PostgreSQL `date`: a calendar date (no time-of-day, no timezone).
-    Date(jiff::civil::Date),
-    /// SP37: PostgreSQL `time without time zone`: time-of-day only.
-    Time(jiff::civil::Time),
+    /// SP37: PostgreSQL `date`: a calendar date (no time-of-day, no timezone),
+    /// or one of the two non-finite values.
+    Date(crate::datetime::PgDate),
+    /// SP37: PostgreSQL `time without time zone`: time-of-day only, as
+    /// microseconds since midnight so the `24:00:00` boundary is representable.
+    Time(crate::datetime::PgTime),
     /// PostgreSQL `time with time zone`: a clock reading and its UTC offset.
     Timetz(crate::datetime::TimeTz),
     /// SP37: PostgreSQL `timestamp without time zone`: date + time-of-day, no timezone.
@@ -707,21 +1474,101 @@ pub enum Datum {
     Interval(crate::datetime::Interval),
     /// SP40: PostgreSQL `bytea`: variable-length binary string (raw bytes).
     Bytea(Vec<u8>),
-    /// PostgreSQL `jsonb`: a decomposed JSON value in canonical form.
+    /// PostgreSQL `json` — the original input text, validated by `json_in` and
+    /// then left exactly as written. Holding the text rather than a parse tree
+    /// is what makes `'{"b":1,   "a":2}'::json` print back unchanged.
+    Json(String),
+    /// PostgreSQL `xml` — the document or fragment exactly as `xml_in`
+    /// received it. Holding the text rather than a tree is what lets
+    /// `'<a  b = "1" />'::xml` print back with its spacing intact, and is why
+    /// `xml → text` can be binary-coercible.
+    Xml(String),
+    /// PostgreSQL `jsonb` — a decomposed JSON value in canonical form.
     Jsonb(crate::jsonb::JsonbValue),
     /// A one-dimensional PostgreSQL array.
     Array(ArrayValue),
-    /// A composite value: the anonymous `record` a `ROW(…)` produces, or a row
+    /// PostgreSQL's zero-based oid array used by catalog signatures.
+    OidVector(ArrayValue),
+    /// A composite value — the anonymous `record` a `ROW(…)` produces, or a row
     /// of a type created by `CREATE TYPE … AS (…)`.
     Record(RecordValue),
     /// A value of a `CREATE TYPE … AS ENUM` type.
     Enum(EnumValue),
-    /// PostgreSQL `regclass`: a relation's `pg_class` oid plus the name
+    /// A built-in or user-defined range with typed bounds.
+    Range(RangeValue),
+    /// A built-in multirange in canonical component order.
+    Multirange(MultirangeValue),
+    /// PostgreSQL `regclass` — a relation's `pg_class` oid plus the name
     /// `regclassout` prints for it.
     Regclass(RegclassValue),
     /// PostgreSQL full-text document/query values.
     TsVector(crate::text_search::TsVector),
     TsQuery(crate::text_search::TsQuery),
+    /// PostgreSQL `money`, stored the way PostgreSQL stores it: a count of
+    /// minor currency units, so `$1.00` is 100.
+    Money(i64),
+    /// PostgreSQL `bit` or `bit varying`. One variant for both, because the two
+    /// are binary-coercible in either direction and share every operation; the
+    /// value's own `varying` flag is what reports which type it is.
+    BitString(crate::bitstring::BitString),
+    /// PostgreSQL `inet` or `cidr`. One variant for both, because PostgreSQL
+    /// stores both in one struct and compares them with one function; the
+    /// value's `is_cidr` flag decides only how it renders and which SQL type
+    /// it reports.
+    Inet(crate::network::Inet),
+    /// PostgreSQL `macaddr` — six bytes.
+    MacAddr(crate::network::MacAddr),
+    /// PostgreSQL `macaddr8` — eight bytes.
+    MacAddr8(crate::network::MacAddr8),
+    /// PostgreSQL `oid`, held **unsigned** — the whole point of the type.
+    Oid(u32),
+    /// PostgreSQL `xid`, a 32-bit transaction id.
+    Xid(u32),
+    /// PostgreSQL `xid8`, a 64-bit transaction id.
+    Xid8(u64),
+    /// PostgreSQL `cid`, a 32-bit command id.
+    Cid(u32),
+    /// PostgreSQL `tid`, a block number and an offset within it.
+    Tid(crate::sysid::Tid),
+    /// PostgreSQL `pg_lsn`, a 64-bit log position.
+    PgLsn(u64),
+    /// PostgreSQL `pg_snapshot` — and `txid_snapshot`, which is the same value
+    /// under an older name. One variant serves both because the two types
+    /// share every input, output and accessor function; which SQL type a
+    /// particular value is declared as is carried by the column, not by the
+    /// datum, and [`Datum::column_type`] therefore reports the modern name.
+    PgSnapshot(Box<crate::snapshot::PgSnapshot>),
+}
+
+/// A PostgreSQL range value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RangeValue {
+    pub ty: RangeRef,
+    pub lower: Option<Box<Datum>>,
+    pub upper: Option<Box<Datum>>,
+    pub lower_inclusive: bool,
+    pub upper_inclusive: bool,
+    pub empty: bool,
+}
+
+impl RangeValue {
+    #[must_use]
+    pub fn column_type(&self) -> ColumnType {
+        ColumnType::Range(self.ty)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MultirangeValue {
+    pub ty: MultirangeRef,
+    pub ranges: Vec<RangeValue>,
+}
+
+impl MultirangeValue {
+    #[must_use]
+    pub fn column_type(&self) -> ColumnType {
+        ColumnType::Multirange(self.ty)
+    }
 }
 
 /// A `regclass` value: the relation oid, and the relation name that oid
@@ -749,12 +1596,16 @@ impl RegclassValue {
     /// `PostgreSQL`'s `regclassout` does not error here: it prints `-` for
     /// `InvalidOid` and the bare oid otherwise, so `SELECT 999999::oid::regclass`
     /// yields `999999`.
+    ///
+    /// The fallback is `oidout`, which is **unsigned**: an oid past 2^31 is
+    /// stored as a negative `i32` here and still prints as
+    /// `4294967295::regclass` does in PostgreSQL, not as `-1`.
     #[must_use]
     pub fn unresolved(oid: i32) -> Self {
         let name = if oid == 0 {
             "-".into()
         } else {
-            oid.to_string().into()
+            (oid as u32).to_string().into()
         };
         RegclassValue { oid, name }
     }
@@ -1039,10 +1890,20 @@ impl PartialEq for Datum {
             (Datum::Int4(a), Datum::Int4(b)) => a == b,
             (Datum::Int8(a), Datum::Int8(b)) => a == b,
             (Datum::Text(a), Datum::Text(b)) => a == b,
+            (Datum::JsonPath(a), Datum::JsonPath(b)) => a == b,
             // Grouping equality: `NaN == NaN` (Rust's `==` says false, hence the
             // explicit NaN arm) and `-0.0 == +0.0` (Rust's `==` already says true).
             (Datum::Float4(a), Datum::Float4(b)) => a == b || (a.is_nan() && b.is_nan()),
             (Datum::Float8(a), Datum::Float8(b)) => a == b || (a.is_nan() && b.is_nan()),
+            (Datum::Point(a), Datum::Point(b)) => a == b,
+            (Datum::Path(a), Datum::Path(b)) => a == b,
+            // Vertex-order-sensitive, unlike SQL's `~=` (`poly_same`), which
+            // also ignores rotation and direction and so cannot back a hash.
+            (Datum::Polygon(a), Datum::Polygon(b)) => a == b,
+            (Datum::Lseg(a), Datum::Lseg(b)) => a == b,
+            (Datum::Line(a), Datum::Line(b)) => a == b,
+            (Datum::Circle(a), Datum::Circle(b)) => a == b,
+            (Datum::Box(a), Datum::Box(b)) => a == b,
             // SP32: numeric grouping equality is by VALUE, ignoring scale, so
             // `1.0` and `1.00` group together (`bigdecimal`'s `==` already does
             // this), and — as in PostgreSQL's `numeric_eq` — `NaN` equals `NaN`.
@@ -1060,9 +1921,21 @@ impl PartialEq for Datum {
             (Datum::Bytea(a), Datum::Bytea(b)) => a == b,
             // jsonb equality is structural over the canonical form (key order is
             // already normalized; number scale is ignored, as in `numeric`).
+            // `PostgreSQL` declares no equality operator for `json`, so nothing
+            // in SQL can reach this arm through `=`. It exists because `Datum`
+            // is `PartialEq` for the executor's own bookkeeping (unchanged-row
+            // detection, default comparison), where two `json` values are the
+            // same only when their text is.
+            (Datum::Json(a), Datum::Json(b)) => a == b,
+            // `xml` has no equality operator either, for the same reason: two
+            // documents can differ in bytes and mean the same thing, and
+            // PostgreSQL declines to choose. This arm serves the executor's own
+            // bookkeeping only.
+            (Datum::Xml(a), Datum::Xml(b)) => a == b,
             (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
             // Arrays are equal when their element type and every element are.
             (Datum::Array(a), Datum::Array(b)) => a == b,
+            (Datum::OidVector(a), Datum::OidVector(b)) => a == b,
             // Composites compare field by field; enums by type and label.
             (Datum::Record(a), Datum::Record(b)) => a == b,
             (Datum::Enum(a), Datum::Enum(b)) => a == b,
@@ -1070,6 +1943,25 @@ impl PartialEq for Datum {
             (Datum::Regclass(a), Datum::Regclass(b)) => a.oid == b.oid,
             (Datum::TsVector(a), Datum::TsVector(b)) => a == b,
             (Datum::TsQuery(a), Datum::TsQuery(b)) => a == b,
+            // `Inet`'s own `PartialEq` ignores `is_cidr`, so a `cidr` and an
+            // `inet` naming the same address are one value — which is what
+            // PostgreSQL's shared `network_cmp` gives `'x'::cidr = 'x'::inet`.
+            (Datum::Money(a), Datum::Money(b)) => a == b,
+            (Datum::InternalChar(a), Datum::InternalChar(b)) => a == b,
+            // `BitString`'s own `PartialEq` ignores `varying`, so a `bit` and a
+            // `bit varying` holding the same bits are one value.
+            (Datum::BitString(a), Datum::BitString(b)) => a == b,
+            (Datum::Inet(a), Datum::Inet(b)) => a == b,
+            (Datum::MacAddr(a), Datum::MacAddr(b)) => a == b,
+            (Datum::MacAddr8(a), Datum::MacAddr8(b)) => a == b,
+            (Datum::Oid(a), Datum::Oid(b))
+            | (Datum::Xid(a), Datum::Xid(b))
+            | (Datum::Cid(a), Datum::Cid(b)) => a == b,
+            (Datum::Xid8(a), Datum::Xid8(b)) | (Datum::PgLsn(a), Datum::PgLsn(b)) => a == b,
+            (Datum::Tid(a), Datum::Tid(b)) => a == b,
+            (Datum::PgSnapshot(a), Datum::PgSnapshot(b)) => a == b,
+            (Datum::Range(a), Datum::Range(b)) => a == b,
+            (Datum::Multirange(a), Datum::Multirange(b)) => a == b,
             _ => false,
         }
     }
@@ -1090,6 +1982,7 @@ impl std::hash::Hash for Datum {
             Datum::Int4(n) => n.hash(state),
             Datum::Int8(n) => n.hash(state),
             Datum::Text(s) => s.hash(state),
+            Datum::JsonPath(s) => s.hash(state),
             // Canonicalized exactly like `Float8` below, one width down.
             Datum::Float4(f) => {
                 let bits = if f.is_nan() {
@@ -1113,6 +2006,13 @@ impl std::hash::Hash for Datum {
                 };
                 bits.hash(state);
             }
+            Datum::Point(point) => point.hash(state),
+            Datum::Path(path) => path.hash(state),
+            Datum::Polygon(polygon) => polygon.hash(state),
+            Datum::Lseg(lseg) => lseg.hash(state),
+            Datum::Line(line) => line.hash(state),
+            Datum::Circle(circle) => circle.hash(state),
+            Datum::Box(value) => value.hash(state),
             // SP32: `NumericValue` hashes the scale-normalized form so values
             // that compare equal (`1.0` and `1.00`) hash equally.
             Datum::Numeric(d) => d.hash(state),
@@ -1128,14 +2028,28 @@ impl std::hash::Hash for Datum {
             // SP40: bytea hashes its bytes.
             Datum::Bytea(b) => b.hash(state),
             // Both hash scale-normalized numbers internally, matching `Eq`.
+            Datum::Json(text) | Datum::Xml(text) => text.hash(state),
             Datum::Jsonb(j) => j.hash(state),
             Datum::Array(a) => a.hash(state),
+            Datum::OidVector(a) => a.hash(state),
             Datum::Record(r) => r.hash(state),
             Datum::Enum(e) => e.hash(state),
             // Hashes the oid alone, matching the `PartialEq` arm above.
             Datum::Regclass(r) => r.oid.hash(state),
             Datum::TsVector(v) => v.hash(state),
             Datum::TsQuery(q) => q.hash(state),
+            Datum::Money(value) => value.hash(state),
+            Datum::InternalChar(value) => value.hash(state),
+            Datum::BitString(value) => value.hash(state),
+            Datum::Inet(value) => value.hash(state),
+            Datum::MacAddr(value) => value.hash(state),
+            Datum::MacAddr8(value) => value.hash(state),
+            Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => value.hash(state),
+            Datum::Xid8(value) | Datum::PgLsn(value) => value.hash(state),
+            Datum::Tid(value) => value.hash(state),
+            Datum::PgSnapshot(value) => value.hash(state),
+            Datum::Range(range) => range.hash(state),
+            Datum::Multirange(multirange) => multirange.hash(state),
         }
     }
 }
@@ -1150,8 +2064,16 @@ impl Datum {
             Datum::Int4(_) => Some(ColumnType::Int4),
             Datum::Int8(_) => Some(ColumnType::Int8),
             Datum::Text(_) => Some(ColumnType::Text),
+            Datum::JsonPath(_) => Some(ColumnType::JsonPath),
             Datum::Float4(_) => Some(ColumnType::Float4),
             Datum::Float8(_) => Some(ColumnType::Float8),
+            Datum::Point(_) => Some(ColumnType::Point),
+            Datum::Path(_) => Some(ColumnType::Path),
+            Datum::Polygon(_) => Some(ColumnType::Polygon),
+            Datum::Lseg(_) => Some(ColumnType::Lseg),
+            Datum::Line(_) => Some(ColumnType::Line),
+            Datum::Circle(_) => Some(ColumnType::Circle),
+            Datum::Box(_) => Some(ColumnType::Box),
             // The runtime value carries no typmod — it is unconstrained `numeric`.
             Datum::Numeric(_) => Some(ColumnType::Numeric(None)),
             Datum::Date(_) => Some(ColumnType::Date),
@@ -1161,13 +2083,53 @@ impl Datum {
             Datum::Timetz(_) => Some(ColumnType::Timetz),
             Datum::Interval(_) => Some(ColumnType::Interval),
             Datum::Bytea(_) => Some(ColumnType::Bytea),
+            Datum::Json(_) => Some(ColumnType::Json),
+            Datum::Xml(_) => Some(ColumnType::Xml),
             Datum::Jsonb(_) => Some(ColumnType::Jsonb),
             Datum::Array(a) => Some(a.column_type()),
+            // `int2vector` has no datum variant of its own -- both vector
+            // types land in `OidVector` -- so the element type is what says
+            // which one this is, the same discriminator `oidvectorout` versus
+            // `int2vectorout` uses in `encoding.rs`. Reporting every vector as
+            // `oidvector` made an `int2vector` column impossible to write to:
+            // the assignment check saw oidvector against int2vector and
+            // refused, so `CREATE TABLE` succeeded and every `INSERT` was a
+            // 42804.
+            Datum::OidVector(v) => Some(if v.elem == ElemType::Int2 {
+                ColumnType::Int2Vector
+            } else {
+                ColumnType::OidVector
+            }),
             Datum::Record(r) => Some(r.column_type()),
             Datum::Enum(e) => Some(e.column_type()),
             Datum::Regclass(_) => Some(ColumnType::Regclass),
             Datum::TsVector(_) => Some(ColumnType::TsVector),
             Datum::TsQuery(_) => Some(ColumnType::TsQuery),
+            Datum::Money(_) => Some(ColumnType::Money),
+            Datum::InternalChar(_) => Some(ColumnType::InternalChar),
+            // A runtime bit string carries no typmod; what it does carry is
+            // which of the two SQL types produced it.
+            Datum::BitString(value) => Some(if value.varying {
+                ColumnType::VarBit(None)
+            } else {
+                ColumnType::Bit(None)
+            }),
+            Datum::Inet(value) => Some(if value.is_cidr {
+                ColumnType::Cidr
+            } else {
+                ColumnType::Inet
+            }),
+            Datum::MacAddr(_) => Some(ColumnType::MacAddr),
+            Datum::MacAddr8(_) => Some(ColumnType::MacAddr8),
+            Datum::Oid(_) => Some(ColumnType::Oid),
+            Datum::Xid(_) => Some(ColumnType::Xid),
+            Datum::Xid8(_) => Some(ColumnType::Xid8),
+            Datum::Cid(_) => Some(ColumnType::Cid),
+            Datum::Tid(_) => Some(ColumnType::Tid),
+            Datum::PgLsn(_) => Some(ColumnType::PgLsn),
+            Datum::PgSnapshot(_) => Some(ColumnType::PgSnapshot),
+            Datum::Range(range) => Some(range.column_type()),
+            Datum::Multirange(multirange) => Some(multirange.column_type()),
         }
     }
 
@@ -1306,6 +2268,34 @@ pub fn canonicalize_row_for_key(values: &[Datum]) -> std::borrow::Cow<'_, [Datum
 mod tests {
     use super::*;
 
+    /// `pg_type.typname` spells an array with a leading underscore, and
+    /// PostgreSQL accepts that wherever a type name is written -- which is how
+    /// `CREATE TYPE … AS (ia _int4)` is written in the regress corpus, and what
+    /// blocked it here. Only a built-in element resolves: a user type's array
+    /// is reached through the catalog, and there is no array of arrays.
+    #[test]
+    fn an_underscore_prefix_names_the_array_of_a_builtin() {
+        for (written, expected) in [
+            ("_int4", Some(ColumnType::Array(ElemType::Int4))),
+            ("_text", Some(ColumnType::Array(ElemType::Text))),
+            ("_bool", Some(ColumnType::Array(ElemType::Bool))),
+            ("_INT4", Some(ColumnType::Array(ElemType::Int4))),
+            // Not an array of arrays, and not a type that does not exist.
+            ("__int4", None),
+            ("_nosuchtype", None),
+            ("_", None),
+            // The ordinary spellings are untouched.
+            ("int4", Some(ColumnType::Int4)),
+            ("text", Some(ColumnType::Text)),
+        ] {
+            assert!(
+                ColumnType::from_sql_name(written) == expected,
+                "{written}: {:?}",
+                ColumnType::from_sql_name(written)
+            );
+        }
+    }
+
     #[test]
     fn column_type_from_sql_names_and_aliases() {
         assert_eq!(ColumnType::from_sql_name("int4"), Some(ColumnType::Int4));
@@ -1314,6 +2304,19 @@ mod tests {
         assert_eq!(ColumnType::from_sql_name("int8"), Some(ColumnType::Int8));
         assert_eq!(ColumnType::from_sql_name("bigint"), Some(ColumnType::Int8));
         assert_eq!(ColumnType::from_sql_name("text"), Some(ColumnType::Text));
+        assert_eq!(
+            ColumnType::from_sql_name("varbit"),
+            Some(ColumnType::VarBit(None))
+        );
+        assert_eq!(
+            ColumnType::from_sql_name("bit varying"),
+            Some(ColumnType::VarBit(None))
+        );
+        assert_eq!(
+            ColumnType::from_sql_name("bit"),
+            Some(ColumnType::Bit(None))
+        );
+        assert_eq!(ColumnType::from_sql_name("money"), Some(ColumnType::Money));
         assert_eq!(
             ColumnType::from_sql_name("varchar"),
             Some(ColumnType::Varchar(None))
@@ -1348,16 +2351,76 @@ mod tests {
         assert_eq!(ColumnType::from_sql_name("uuid"), Some(ColumnType::Uuid));
     }
 
-    /// `oid` resolves as a type name (drivers' typeinfo queries cast
-    /// `NULL::OID`) and aliases the executor's oid representation, `Int4`. That
-    /// is consistent with the catalog's oid-valued columns (`pg_type.oid`,
-    /// `pg_namespace.oid`, `pg_type.typnamespace`, …).
     #[test]
-    fn oid_type_name_aliases_int4() {
+    fn built_in_ranges_keep_postgres_identity_and_subtype() {
+        for (name, oid, subtype) in [
+            ("int4range", oids::INT4RANGE, ColumnType::Int4),
+            ("numrange", oids::NUMRANGE, ColumnType::Numeric(None)),
+            ("tsrange", oids::TSRANGE, ColumnType::Timestamp),
+            ("tstzrange", oids::TSTZRANGE, ColumnType::Timestamptz),
+            ("daterange", oids::DATERANGE, ColumnType::Date),
+            ("int8range", oids::INT8RANGE, ColumnType::Int8),
+        ] {
+            let Some(ColumnType::Range(range)) = ColumnType::from_sql_name(name) else {
+                panic!("{name} must resolve as a range");
+            };
+            assert_eq!(
+                (range.oid, range.name, *range.subtype),
+                (oid, name, subtype)
+            );
+        }
+    }
+
+    /// `oid` is its own type, not a spelling of `int4`. The distinction is not
+    /// cosmetic: an `int4` alias cannot hold 4294967295, and this test would
+    /// have passed while `'4294967295'::oid` raised `out of range for type
+    /// integer`, which is how the alias survived.
+    #[test]
+    fn oid_is_its_own_type_not_an_int4_alias() {
         use assert2::assert;
-        assert!(ColumnType::from_sql_name("oid") == Some(ColumnType::Int4));
-        assert!(ColumnType::from_sql_name("OID") == Some(ColumnType::Int4));
+        assert!(ColumnType::from_sql_name("oid") == Some(ColumnType::Oid));
+        assert!(ColumnType::from_sql_name("OID") == Some(ColumnType::Oid));
+        assert!(ColumnType::Oid.oid() == 26);
+        assert!(ColumnType::Oid.name() == "oid");
+        assert!(ColumnType::Oid.type_size() == 4);
         assert!(oids::OID == 26);
+        // The value `int4` cannot hold, and the negative input `int4` would
+        // have rejected.
+        let utc = jiff::tz::TimeZone::UTC;
+        let parse = |text: &str| {
+            crate::cast::cast_in(
+                &Datum::Text(text.to_string()),
+                ColumnType::Oid,
+                crate::encoding::OutputStyle::with_zone(&utc),
+            )
+        };
+        assert!(parse("4294967295") == Ok(Datum::Oid(u32::MAX)));
+        assert!(parse("-1") == Ok(Datum::Oid(u32::MAX)));
+        assert!(Datum::Oid(u32::MAX).column_type() == Some(ColumnType::Oid));
+        // Unsigned ordering: an `int4` would put 4294967295 below 1.
+        assert!(
+            crate::ops::compare(&Datum::Oid(u32::MAX), &Datum::Oid(1))
+                == Ok(Some(std::cmp::Ordering::Greater))
+        );
+    }
+
+    /// The other five system identifier types resolve too, at PostgreSQL's own
+    /// oids and `typlen`s.
+    #[test]
+    fn the_system_identifier_types_resolve_by_name() {
+        use assert2::assert;
+        for (name, ty, oid, size) in [
+            ("xid", ColumnType::Xid, 28_u32, 4_i16),
+            ("xid8", ColumnType::Xid8, 5069, 8),
+            ("cid", ColumnType::Cid, 29, 4),
+            ("tid", ColumnType::Tid, 27, 6),
+            ("pg_lsn", ColumnType::PgLsn, 3220, 8),
+        ] {
+            assert!(ColumnType::from_sql_name(name) == Some(ty), "{name}");
+            assert!(ty.oid() == oid, "{name}");
+            assert!(ty.name() == name, "{name}");
+            assert!(ty.type_size() == size, "{name}");
+        }
     }
 
     #[test]
@@ -1555,16 +2618,10 @@ mod tests {
             d.hash(&mut s);
             s.finish()
         }
-        let d1 = Datum::Date(
-            "2024-01-15"
-                .parse::<jiff::civil::Date>()
-                .expect("valid date literal"),
-        );
-        let d2 = Datum::Date(
-            "2024-01-15"
-                .parse::<jiff::civil::Date>()
-                .expect("valid date literal"),
-        );
+        let d1 =
+            Datum::Date(crate::datetime::parse_date("2024-01-15").expect("valid date literal"));
+        let d2 =
+            Datum::Date(crate::datetime::parse_date("2024-01-15").expect("valid date literal"));
         assert_eq!(d1, d2);
         assert_eq!(h(&d1), h(&d2));
         let m = Datum::Interval(Interval {
@@ -1719,8 +2776,19 @@ mod tests {
         assert!(ColumnType::Jsonb.typmod() == -1);
         assert!(ColumnType::from_sql_name("jsonb") == Some(ColumnType::Jsonb));
         // `json` is an input alias that reports as jsonb.
-        assert!(ColumnType::from_sql_name("JSON") == Some(ColumnType::Jsonb));
+        assert!(ColumnType::from_sql_name("JSON") == Some(ColumnType::Json));
         assert!(jsonb("1").column_type() == Some(ColumnType::Jsonb));
+    }
+
+    #[test]
+    fn jsonpath_column_type_reports_postgres_oid_name_and_size() {
+        use assert2::assert;
+        assert!(ColumnType::JsonPath.oid() == oids::JSONPATH);
+        assert!(ColumnType::JsonPath.name() == "jsonpath");
+        assert!(ColumnType::JsonPath.type_size() == -1);
+        assert!(ColumnType::JsonPath.typmod() == -1);
+        assert!(ColumnType::from_sql_name("JSONPATH") == Some(ColumnType::JsonPath));
+        assert!(Datum::JsonPath("$".into()).column_type() == Some(ColumnType::JsonPath));
     }
 
     #[test]
@@ -1750,11 +2818,15 @@ mod tests {
             ),
             (ElemType::Interval, 1186, 1187, "interval[]"),
             (ElemType::Uuid, 2950, 2951, "uuid[]"),
+            (ElemType::Json, 114, 199, "json[]"),
+            (ElemType::Xml, 142, 143, "xml[]"),
             (ElemType::Jsonb, 3802, 3807, "jsonb[]"),
+            (ElemType::JsonPath, 4072, 4073, "jsonpath[]"),
             (ElemType::Int2, 21, 1005, "smallint[]"),
             (ElemType::Float4, 700, 1021, "real[]"),
             (ElemType::Varchar(None), 1043, 1015, "character varying[]"),
             (ElemType::Char(None), 1042, 1014, "character[]"),
+            (ElemType::Regtype, 2206, 2211, "regtype[]"),
         ];
         assert!(expected.len() == ElemType::ALL.len());
         for (elem, elem_oid, array_oid, name) in expected {
@@ -1768,8 +2840,7 @@ mod tests {
             assert!(ty.array_element() == Some(*elem));
             assert!(ElemType::from_array_oid(*array_oid) == Some(*elem));
         }
-        // `json[]` binds onto `jsonb[]`, like `json` onto `jsonb`.
-        assert!(ElemType::from_array_oid(oids::JSONARRAY) == Some(ElemType::Jsonb));
+        assert!(ElemType::from_array_oid(oids::JSONARRAY) == Some(ElemType::Json));
         assert!(ElemType::from_array_oid(9999) == None);
     }
 
@@ -1778,11 +2849,10 @@ mod tests {
     #[test]
     fn element_type_codes_are_stable_and_round_trip() {
         use assert2::assert;
-        for (code, elem) in ElemType::ALL.iter().enumerate() {
-            let code = u8::try_from(code).expect("small");
-            assert!(elem.code() == code, "{elem:?}");
-            assert!(ElemType::from_code(code) == Some(*elem));
+        for elem in ElemType::ALL {
+            assert!(ElemType::from_code(elem.code()) == Some(elem), "{elem:?}");
         }
+        assert!(ElemType::JsonPath.code() == 21);
         assert!(ElemType::from_code(200) == None);
     }
 
@@ -2109,5 +3179,80 @@ mod tests {
             BigDecimal::from_str("2.0").expect("2.0"),
         ));
         assert_ne!(a, c);
+    }
+
+    fn polygon(text: &str) -> Datum {
+        Datum::Polygon(crate::geometry::Polygon::parse(text).expect(text))
+    }
+
+    /// Every column is `SELECT typname, oid, typlen FROM pg_type` on PostgreSQL
+    /// 18.4, for all seven geometric types at once: `polygon`'s row is the point
+    /// of the test, and its six neighbours are here so a change that shifts one
+    /// of the shared arms cannot hide behind a polygon-only corpus.
+    #[test]
+    fn geometric_column_types_report_the_postgres_oid_name_and_typlen() {
+        use assert2::assert;
+        let expected: &[(ColumnType, u32, &str, i16)] = &[
+            (ColumnType::Point, 600, "point", 16),
+            (ColumnType::Lseg, 601, "lseg", 32),
+            (ColumnType::Path, 602, "path", -1),
+            (ColumnType::Box, 603, "box", 32),
+            (ColumnType::Polygon, 604, "polygon", -1),
+            (ColumnType::Line, 628, "line", 24),
+            (ColumnType::Circle, 718, "circle", 24),
+        ];
+        for (ty, oid, name, typlen) in expected {
+            assert!(ty.oid() == *oid, "{name} oid");
+            assert!(ty.name() == *name, "{name} name");
+            assert!(ty.type_size() == *typlen, "{name} typlen");
+            // No geometric type carries a length modifier.
+            assert!(ty.typmod() == -1, "{name} typmod");
+            assert!(
+                ColumnType::from_sql_name(name) == Some(*ty),
+                "{name} by name"
+            );
+            // `pg_type.typcategory` is `G` for all seven, none of which is a
+            // string or a number as far as the cast matrix is concerned.
+            assert!(!ty.is_string(), "{name} is not a string type");
+            assert!(!ty.is_numeric(), "{name} is not numeric");
+            assert!(!ty.is_reg(), "{name} is not a reg type");
+            // None of the seven has an `ElemType`, so crabka names no array type
+            // over them — `polygon[]` (1027) included.
+            assert!(
+                ColumnType::array_of(*ty) == None,
+                "{name} has no array type"
+            );
+            assert!(ty.array_element() == None, "{name} is not an array");
+            assert!(ty.storage_type() == *ty, "{name} stores as itself");
+            assert!(ty.composite() == None, "{name} is not a composite");
+        }
+    }
+
+    #[test]
+    fn polygon_datum_reports_its_column_type_and_compares_by_vertex_order() {
+        use assert2::assert;
+        assert!(polygon("((0,0),(2,0),(2,2))").column_type() == Some(ColumnType::Polygon));
+        // `Datum` equality is the exact, vertex-order-sensitive relation — NOT
+        // SQL's `~=` (`poly_same`), which also ignores rotation and direction.
+        assert!(polygon("((0,0),(2,0),(2,2))") == polygon("((0,0),(2,0),(2,2))"));
+        assert!(polygon("((0,0),(2,0),(2,2))") != polygon("((2,0),(2,2),(0,0))"));
+        assert!(polygon("((0,0),(2,0),(2,2))") != polygon("((0,0),(2,0))"));
+        // A polygon is never equal to a value of another variant, including the
+        // closed path over the same vertices.
+        assert!(polygon("((0,0),(2,0),(2,2))") != Datum::Text("((0,0),(2,0),(2,2))".into()));
+        assert!(
+            polygon("((0,0),(2,0),(2,2))")
+                != Datum::Path(crate::Path::parse("((0,0),(2,0),(2,2))").expect("path"))
+        );
+        assert!(
+            hash_of(&polygon("((0,0),(2,0),(2,2))")) == hash_of(&polygon("((0,0),(2,0),(2,2))"))
+        );
+        assert!(
+            hash_of(&polygon("((0,0),(2,0),(2,2))")) != hash_of(&polygon("((2,0),(2,2),(0,0))"))
+        );
+        // `-0` and `NaN` are canonicalized by `Point`'s own `Hash`, so the
+        // Hash/Eq contract holds without a `canonicalize_for_key` arm.
+        assert!(polygon("((-0,0),(1,1))") == polygon("((0,0),(1,1))"));
+        assert!(hash_of(&polygon("((-0,0),(1,1))")) == hash_of(&polygon("((0,0),(1,1))")));
     }
 }

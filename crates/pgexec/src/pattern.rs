@@ -30,6 +30,24 @@ pub(crate) fn escape_char(escape: &Datum) -> Result<Option<char>, ExecError> {
     }
 }
 
+/// The escape byte a `bytea` `ESCAPE` clause supplies.
+///
+/// PostgreSQL declares `ESCAPE` over `bytea` for the `bytea` form of `LIKE`, so
+/// the clause is measured in bytes here too: a two-byte escape is 22025 even
+/// when those bytes spell one character.
+pub(crate) fn escape_byte(escape: &Datum) -> Result<Option<u8>, ExecError> {
+    let Datum::Bytea(bytes) = escape else {
+        return Err(ExecError::TypeMismatch(
+            "ESCAPE string must be type bytea".into(),
+        ));
+    };
+    match bytes.as_slice() {
+        [] => Ok(None),
+        [byte] => Ok(Some(*byte)),
+        _ => Err(ExecError::Type(TypeError::InvalidEscapeString)),
+    }
+}
+
 /// `s SIMILAR TO pattern`: true if and only if the whole of `s` matches.
 pub(crate) fn similar_match(
     s: &str,

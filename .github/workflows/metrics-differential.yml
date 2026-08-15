@@ -47,7 +47,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: metrics-differential
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          # Pinned, not `@latest`: see the note in `ci.yml`. A moving test
+          # runner is a silent change to how the suite is selected and retried.
+          tool: cargo-nextest@0.9.143
       # The in-process Crabka server binds the host; the Grafana container dials
       # it back via the advertised `host.docker.internal` datasource URL. On
       # Linux runners the host has no such resolution, so add it (same trick the

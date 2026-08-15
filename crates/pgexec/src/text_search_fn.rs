@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
 use crabka_pgtypes::{
-    ColumnType, Datum, JsonbValue, Lexeme, Position, QueryTerm, TsQuery, TsVector, Weight,
-    text_search::MAX_POSITION,
+    ArrayValue, ColumnType, Datum, ElemType, JsonbValue, Lexeme, Position, QueryTerm, TsQuery,
+    TsVector, Weight, text_search::MAX_POSITION,
 };
 use rust_stemmers::{Algorithm, Stemmer};
 
@@ -34,7 +34,14 @@ enum TextSearchFunc {
     TsRank,
     TsRankCd,
     TsHeadline,
+    TsLexize,
     JsonbToTsVector,
+    /// `json_to_tsvector(json, jsonb)` — the `json` sibling. Genuinely a
+    /// different function, not a spelling: it walks the document in *input*
+    /// order, so `json_to_tsvector('{"b":"cat sat","a":"mat"}', '["all"]')` is
+    /// `'b':1 'cat':3 'mat':7 'sat':4` where the `jsonb` form, walking canonical
+    /// key order, is `'b':4 'cat':6 'mat':2 'sat':7`.
+    JsonToTsVector,
 }
 
 type Catalog<'a> = Option<&'a dyn crabka_pgkv::Kv>;
@@ -57,7 +64,9 @@ fn text_search_func(name: &str) -> Option<TextSearchFunc> {
         "ts_rank" => TextSearchFunc::TsRank,
         "ts_rank_cd" => TextSearchFunc::TsRankCd,
         "ts_headline" => TextSearchFunc::TsHeadline,
+        "ts_lexize" => TextSearchFunc::TsLexize,
         "jsonb_to_tsvector" => TextSearchFunc::JsonbToTsVector,
+        "json_to_tsvector" => TextSearchFunc::JsonToTsVector,
         _ => return None,
     })
 }
@@ -125,7 +134,11 @@ pub(crate) fn text_search_result_type(
             require_arity(fc, (2..=4).contains(&count))?;
             ColumnType::Text
         }
-        TextSearchFunc::JsonbToTsVector => {
+        TextSearchFunc::TsLexize => {
+            require_arity(fc, count == 2)?;
+            ColumnType::Array(ElemType::Text)
+        }
+        TextSearchFunc::JsonbToTsVector | TextSearchFunc::JsonToTsVector => {
             require_arity(fc, count == 2 || count == 3)?;
             ColumnType::TsVector
         }
@@ -196,7 +209,9 @@ pub(crate) fn eval_text_search(
         TextSearchFunc::TsFilter => filter_weights(fc, &values),
         TextSearchFunc::TsRank | TextSearchFunc::TsRankCd => rank(fc, &values),
         TextSearchFunc::TsHeadline => headline(fc, &values, catalog),
+        TextSearchFunc::TsLexize => lexize(fc, &values, catalog),
         TextSearchFunc::JsonbToTsVector => jsonb_to_vector(fc, &values, catalog),
+        TextSearchFunc::JsonToTsVector => json_to_vector(fc, &values, catalog),
     }
 }
 
@@ -304,6 +319,70 @@ fn collect_json_text(value: &JsonbValue, filter: JsonTextFilter, out: &mut Vec<S
     }
 }
 
+/// `json_to_tsvector`: the same filter and the same lexeme accumulation, over the
+/// document's own text rather than a decomposed value, so the positions follow
+/// input order.
+fn json_to_vector(
+    fc: &FuncCall,
+    values: &[Datum],
+    catalog: Catalog<'_>,
+) -> Result<Datum, ExecError> {
+    let (config, document, filter) = match values {
+        [Datum::Json(document), Datum::Jsonb(filter)] => (default_config()?, document, filter),
+        [
+            Datum::Text(config),
+            Datum::Json(document),
+            Datum::Jsonb(filter),
+        ] => (config.clone(), document, filter),
+        [got, ..] => return Err(type_error("json", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    let filter = JsonTextFilter::parse(filter)?;
+    // `iterate_json_values` builds its lexer with `need_escapes`, so a document
+    // whose escapes do not decode is refused before any lexeme is produced.
+    // Without this the decode still happens -- `collect_json_document_text`
+    // reaches `json::as_text` -- and a `\u0000` or an unpaired surrogate lands
+    // in a stored `tsvector`, which is the corruption the other eleven `json`
+    // entry points were closed against.
+    crabka_pgtypes::json::validate_escapes(document)?;
+    let mut pieces = Vec::new();
+    collect_json_document_text(document, filter, &mut pieces);
+    Ok(Datum::TsVector(vector_from_pieces(
+        &config, &pieces, catalog,
+    )?))
+}
+
+/// [`collect_json_text`]'s twin over `json` text: object fields in input order
+/// with duplicates kept, and numbers as the token the document actually holds.
+fn collect_json_document_text(value: &str, filter: JsonTextFilter, out: &mut Vec<String>) {
+    use crabka_pgtypes::json::{self, Kind};
+    match json::kind(value) {
+        Kind::Object => {
+            for (key, item) in json::object_fields(value).unwrap_or_default() {
+                if filter.contains(JsonTextFilter::KEY) {
+                    out.push(key);
+                }
+                collect_json_document_text(item, filter, out);
+            }
+        }
+        Kind::Array => {
+            for item in json::array_elements(value).unwrap_or_default() {
+                collect_json_document_text(item, filter, out);
+            }
+        }
+        Kind::String if filter.contains(JsonTextFilter::STRING) => {
+            out.push(json::as_text(value.trim()));
+        }
+        Kind::Number if filter.contains(JsonTextFilter::NUMERIC) => {
+            out.push(value.trim().to_string());
+        }
+        Kind::Bool if filter.contains(JsonTextFilter::BOOLEAN) => {
+            out.push(value.trim().to_string());
+        }
+        Kind::Null | Kind::String | Kind::Number | Kind::Bool => {}
+    }
+}
+
 fn vector_from_pieces(
     config: &str,
     pieces: &[String],
@@ -392,42 +471,65 @@ fn normalize_query(
 ) -> Result<TsQuery, ExecError> {
     let simple = validate_config(config, catalog)?;
     let stemmer = Stemmer::create(Algorithm::English);
-    Ok(normalize_query_inner(query, simple, &stemmer))
+    Ok(normalize_query_inner(query, simple, &stemmer)
+        .0
+        .unwrap_or(TsQuery::Empty))
 }
 
-fn normalize_query_inner(query: TsQuery, simple: bool, stemmer: &Stemmer) -> TsQuery {
+/// The distance a vanished operand still contributes to its parent phrase, on
+/// each side of what is left.
+///
+/// PostgreSQL's `clean_stopword_intree` carries these up the tree so that a
+/// stop word removed from inside a phrase widens the gap it leaves rather than
+/// closing it: `foo <-> a <-> the <-> bar` is `'foo' <3> 'bar'`, not
+/// `'foo' <-> 'bar'`.
+#[derive(Debug, Clone, Copy, Default)]
+struct PhraseGap {
+    left: u16,
+    right: u16,
+}
+
+/// Strip the stop words out of a parsed query, and repair the phrase distances
+/// their removal would otherwise swallow.
+///
+/// This is `clean_stopword_intree` with the lexizing folded in. `None` is
+/// PostgreSQL's null node: the whole subtree was stop words, and the caller
+/// decides what its width does to the operator above it.
+fn normalize_query_inner(
+    query: TsQuery,
+    simple: bool,
+    stemmer: &Stemmer,
+) -> (Option<TsQuery>, PhraseGap) {
+    let gap = PhraseGap::default();
     match query {
-        TsQuery::Empty => TsQuery::Empty,
+        TsQuery::Empty => (None, gap),
         TsQuery::Term(mut term) => {
-            term.text = normalize_word(&term.text, simple, stemmer);
-            if !simple && is_stopword(&term.text) {
-                TsQuery::Empty
-            } else {
-                TsQuery::Term(term)
+            // The stop-word list is consulted on the folded word, before
+            // stemming, exactly as `dsnowball_lexize` does: `above` is a stop
+            // word, its stem `abov` is not on any list.
+            let folded = term.text.to_lowercase();
+            if !simple && is_stopword(&folded) {
+                return (None, gap);
             }
+            term.text = normalize_word(&folded, simple, stemmer);
+            (Some(TsQuery::Term(term)), gap)
         }
-        TsQuery::Not(inner) => match normalize_query_inner(*inner, simple, stemmer) {
-            TsQuery::Empty => TsQuery::Empty,
-            query => TsQuery::Not(Box::new(query)),
-        },
-        TsQuery::And(left, right) => combine_nonempty(
-            normalize_query_inner(*left, simple, stemmer),
-            normalize_query_inner(*right, simple, stemmer),
-            |left, right| TsQuery::And(Box::new(left), Box::new(right)),
-        ),
-        TsQuery::Or(left, right) => combine_nonempty(
-            normalize_query_inner(*left, simple, stemmer),
-            normalize_query_inner(*right, simple, stemmer),
-            |left, right| TsQuery::Or(Box::new(left), Box::new(right)),
-        ),
-        TsQuery::Phrase(left, right, distance) => combine_nonempty(
-            normalize_query_inner(*left, simple, stemmer),
-            normalize_query_inner(*right, simple, stemmer),
-            |left, right| TsQuery::Phrase(Box::new(left), Box::new(right), distance),
-        ),
+        // `NOT` does not change the width of what it matches, so it reports
+        // its child's distances unaltered.
+        TsQuery::Not(inner) => {
+            let (inner, gap) = normalize_query_inner(*inner, simple, stemmer);
+            (inner.map(|query| TsQuery::Not(Box::new(query))), gap)
+        }
+        TsQuery::And(left, right) => binary_node(*left, *right, BinaryKind::And, simple, stemmer),
+        TsQuery::Or(left, right) => binary_node(*left, *right, BinaryKind::Or, simple, stemmer),
+        TsQuery::Phrase(left, right, distance) => {
+            binary_node(*left, *right, BinaryKind::Phrase(distance), simple, stemmer)
+        }
     }
 }
 
+/// Join two accumulated queries, where [`TsQuery::Empty`] stands for "nothing
+/// accumulated yet" rather than for a query that matches nothing.
 fn combine_nonempty(
     left: TsQuery,
     right: TsQuery,
@@ -436,6 +538,92 @@ fn combine_nonempty(
     match (left, right) {
         (TsQuery::Empty, query) | (query, TsQuery::Empty) => query,
         (left, right) => combine(left, right),
+    }
+}
+
+/// Which binary operator [`binary_node`] is repairing. Only a phrase carries a
+/// distance of its own, and only a phrase's distance survives the operand it
+/// loses.
+#[derive(Debug, Clone, Copy)]
+enum BinaryKind {
+    And,
+    Or,
+    Phrase(u16),
+}
+
+/// One binary operator's half of [`normalize_query_inner`].
+fn binary_node(
+    left: TsQuery,
+    right: TsQuery,
+    kind: BinaryKind,
+    simple: bool,
+    stemmer: &Stemmer,
+) -> (Option<TsQuery>, PhraseGap) {
+    let (left, lgap) = normalize_query_inner(left, simple, stemmer);
+    let (right, rgap) = normalize_query_inner(right, simple, stemmer);
+    let own = match kind {
+        BinaryKind::Phrase(distance) => Some(distance),
+        BinaryKind::And | BinaryKind::Or => None,
+    };
+    match (left, right) {
+        // Both operands were stop words. A phrase sums the two children's gaps
+        // with its own; a boolean operator keeps the wider of the two, which is
+        // the width matching would have seen had the operands survived.
+        (None, None) => {
+            let width = own.map_or_else(
+                || lgap.left.max(rgap.left),
+                |own| lgap.left.saturating_add(own).saturating_add(rgap.left),
+            );
+            (
+                None,
+                PhraseGap {
+                    left: width,
+                    right: width,
+                },
+            )
+        }
+        // One operand goes, and the operator with it. A phrase pushes its own
+        // distance out on the side it lost; a boolean operator forgets that
+        // side entirely.
+        (None, Some(right)) => {
+            let gap = own.map_or(rgap, |own| PhraseGap {
+                left: lgap.left.saturating_add(own).saturating_add(rgap.left),
+                right: rgap.right,
+            });
+            (Some(right), gap)
+        }
+        (Some(left), None) => {
+            let gap = own.map_or(lgap, |own| PhraseGap {
+                left: lgap.left,
+                right: lgap.right.saturating_add(own).saturating_add(rgap.right),
+            });
+            (Some(left), gap)
+        }
+        // Both operands survive. A phrase absorbs the gaps facing each other
+        // into its own distance and passes the outward-facing ones up.
+        (Some(left), Some(right)) => match kind {
+            BinaryKind::Phrase(distance) => (
+                Some(TsQuery::Phrase(
+                    Box::new(left),
+                    Box::new(right),
+                    distance
+                        .saturating_add(lgap.right)
+                        .saturating_add(rgap.left),
+                )),
+                PhraseGap {
+                    left: lgap.left,
+                    right: rgap.right,
+                },
+            ),
+            BinaryKind::And => (
+                Some(TsQuery::And(Box::new(left), Box::new(right))),
+                PhraseGap::default(),
+            ),
+            BinaryKind::Or => (
+                Some(TsQuery::Or(Box::new(left), Box::new(right))),
+                PhraseGap::default(),
+            ),
+        },
     }
 }
 
@@ -459,7 +647,7 @@ fn query_tree(query: &TsQuery) -> Option<TsQuery> {
     }
 }
 
-fn plain_query(
+pub(crate) fn plain_query(
     config: &str,
     source: &str,
     phrase: bool,
@@ -704,6 +892,40 @@ fn headline(fc: &FuncCall, values: &[Datum], catalog: Catalog<'_>) -> Result<Dat
     Ok(Datum::Text(out))
 }
 
+/// `ts_lexize(dict, token)` — the lexemes one dictionary makes of one token.
+///
+/// The two templates crabka implements never decline a token, so the result is
+/// an array and never SQL NULL: `{}` for a token the dictionary swallows (an
+/// empty string, or a stop word), otherwise the one lexeme it produces.
+/// PostgreSQL's `simple` dictionary carries no stop-word list — only
+/// `english_stem` and the other snowball dictionaries do — so `simple` folds
+/// case and stops there.
+fn lexize(fc: &FuncCall, values: &[Datum], catalog: Catalog<'_>) -> Result<Datum, ExecError> {
+    let (dictionary, token) = match values {
+        [Datum::Text(dictionary), Datum::Text(token)] => (dictionary, token),
+        [got] | [got, _] => return Err(type_error("regdictionary", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    let template = crate::text_search_catalog::dictionary_template(catalog, dictionary)?;
+    let folded = token.to_lowercase();
+    let swallowed = folded.is_empty()
+        || (template == crate::text_search_catalog::DictionaryTemplate::Snowball
+            && is_stopword(&folded));
+    let lexemes = if swallowed {
+        Vec::new()
+    } else {
+        vec![Datum::Text(match template {
+            crate::text_search_catalog::DictionaryTemplate::Simple => folded,
+            crate::text_search_catalog::DictionaryTemplate::Snowball => {
+                Stemmer::create(Algorithm::English)
+                    .stem(&folded)
+                    .into_owned()
+            }
+        })]
+    };
+    Ok(Datum::Array(ArrayValue::new(ElemType::Text, lexemes)))
+}
+
 fn default_config() -> Result<String, ExecError> {
     crate::session::current_setting_runtime("default_text_search_config", false)?
         .ok_or_else(|| ExecError::UnrecognizedParameter("default_text_search_config".into()))
@@ -850,6 +1072,7 @@ fn is_stopword(word: &str) -> bool {
     matches!(
         word,
         "a" | "about"
+            | "above"
             | "after"
             | "again"
             | "against"
@@ -876,6 +1099,7 @@ fn is_stopword(word: &str) -> bool {
             | "do"
             | "does"
             | "doing"
+            | "don"
             | "down"
             | "during"
             | "each"
@@ -927,12 +1151,14 @@ fn is_stopword(word: &str) -> bool {
             | "out"
             | "over"
             | "own"
+            | "s"
             | "same"
             | "she"
             | "should"
             | "so"
             | "some"
             | "such"
+            | "t"
             | "than"
             | "that"
             | "the"
@@ -1013,6 +1239,113 @@ mod tests {
         let query = web_query("simple", "fat OR rat dog", None).unwrap();
         assert_eq!(query.to_string(), "'fat' | 'rat' & 'dog'");
         assert!(to_tsvector("simple", "fat", None).unwrap().matches(&query));
+    }
+
+    fn lexize_call() -> FuncCall {
+        FuncCall {
+            sql_syntax: false,
+            name: "ts_lexize".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(Vec::new()),
+            order_by: Vec::new(),
+            filter: None,
+        }
+    }
+
+    fn lexemes(dictionary: &str, token: &str) -> Result<Datum, ExecError> {
+        lexize(
+            &lexize_call(),
+            &[Datum::Text(dictionary.into()), Datum::Text(token.into())],
+            None,
+        )
+    }
+
+    fn text_lexemes(dictionary: &str, token: &str) -> Vec<String> {
+        let Ok(Datum::Array(array)) = lexemes(dictionary, token) else {
+            panic!("ts_lexize returns a text[]")
+        };
+        text_array(&array).expect("text elements")
+    }
+
+    #[test]
+    fn snowball_lexize_stems_and_swallows_a_stop_word() {
+        assert2::assert!(text_lexemes("english_stem", "skies") == vec!["sky".to_string()]);
+        assert2::assert!(text_lexemes("english_stem", "Identity") == vec!["ident".to_string()]);
+        assert2::assert!(text_lexemes("english_stem", "the").is_empty());
+        assert2::assert!(text_lexemes("english_stem", "").is_empty());
+    }
+
+    #[test]
+    fn simple_lexize_folds_case_and_keeps_stop_words() {
+        assert2::assert!(text_lexemes("simple", "SkIeS") == vec!["skies".to_string()]);
+        assert2::assert!(text_lexemes("simple", "the") == vec!["the".to_string()]);
+        assert2::assert!(text_lexemes("simple", "").is_empty());
+    }
+
+    /// A dictionary built on a template crabka does not have never reaches the
+    /// catalog, so naming it is a missing dictionary and not a missing
+    /// function. Answering it with the wrong lexemes would silently change
+    /// what a search matches; the 42704 says so out loud.
+    #[test]
+    fn an_absent_dictionary_is_refused_by_name() {
+        let error = lexemes("ispell", "skies").expect_err("no ispell dictionary");
+        assert2::assert!(
+            error
+                == ExecError::UndefinedObject(
+                    "text search dictionary \"ispell\" does not exist".into()
+                )
+        );
+    }
+
+    /// Removing a stop word from inside a phrase widens the gap it leaves.
+    /// PostgreSQL's `clean_stopword_intree` carries the vanished operand's
+    /// distance up to the surviving operator, so `foo <-> a <-> the <-> bar`
+    /// keeps the three-token span it described. The table is every phrase case
+    /// upstream's `tsearch` corpus checks, with `a` and `s` the stop words.
+    #[test]
+    fn a_stop_word_inside_a_phrase_widens_the_distance_it_leaves() {
+        for (source, expected) in [
+            ("(1 <-> 2) <-> a", "'1' <-> '2'"),
+            ("(1 <-> a) <-> 2", "'1' <2> '2'"),
+            ("(a <-> 1) <-> 2", "'1' <-> '2'"),
+            ("a <-> (1 <-> 2)", "'1' <-> '2'"),
+            ("1 <-> (a <-> 2)", "'1' <2> '2'"),
+            ("1 <-> (2 <-> a)", "'1' <-> '2'"),
+            ("(1 <-> 2) <3> a", "'1' <-> '2'"),
+            ("(1 <-> a) <3> 2", "'1' <4> '2'"),
+            ("(a <-> 1) <3> 2", "'1' <3> '2'"),
+            ("a <3> (1 <-> 2)", "'1' <-> '2'"),
+            ("1 <3> (a <-> 2)", "'1' <4> '2'"),
+            ("1 <3> (2 <-> a)", "'1' <3> '2'"),
+            ("(1 <3> 2) <-> a", "'1' <3> '2'"),
+            ("(1 <3> a) <-> 2", "'1' <4> '2'"),
+            ("(a <3> 1) <-> 2", "'1' <-> '2'"),
+            ("a <-> (1 <3> 2)", "'1' <3> '2'"),
+            ("1 <-> (a <3> 2)", "'1' <4> '2'"),
+            ("1 <-> (2 <3> a)", "'1' <-> '2'"),
+            ("((a <-> 1) <-> 2) <-> s", "'1' <-> '2'"),
+            ("(2 <-> (a <-> 1)) <-> s", "'2' <2> '1'"),
+            ("((1 <-> a) <-> 2) <-> s", "'1' <2> '2'"),
+            ("(2 <-> (1 <-> a)) <-> s", "'2' <-> '1'"),
+            ("s <-> ((a <-> 1) <-> 2)", "'1' <-> '2'"),
+            ("s <-> (2 <-> (a <-> 1))", "'2' <2> '1'"),
+            ("s <-> ((1 <-> a) <-> 2)", "'1' <2> '2'"),
+            ("s <-> (2 <-> (1 <-> a))", "'2' <-> '1'"),
+            ("((a <-> 1) <-> s) <-> 2", "'1' <2> '2'"),
+            ("(s <-> (a <-> 1)) <-> 2", "'1' <-> '2'"),
+            ("((1 <-> a) <-> s) <-> 2", "'1' <3> '2'"),
+            ("(s <-> (1 <-> a)) <-> 2", "'1' <2> '2'"),
+            ("2 <-> ((a <-> 1) <-> s)", "'2' <2> '1'"),
+            ("2 <-> (s <-> (a <-> 1))", "'2' <3> '1'"),
+            ("2 <-> ((1 <-> a) <-> s)", "'2' <-> '1'"),
+            ("2 <-> (s <-> (1 <-> a))", "'2' <2> '1'"),
+            ("foo <-> (a <-> (the <-> bar))", "'foo' <3> 'bar'"),
+            ("((foo <-> a) <-> the) <-> bar", "'foo' <3> 'bar'"),
+            ("foo <-> a <-> the <-> bar", "'foo' <3> 'bar'"),
+        ] {
+            let query = to_tsquery("english", source, None).expect(source);
+            assert2::assert!(query.to_string() == expected, "{source}");
+        }
     }
 
     #[test]

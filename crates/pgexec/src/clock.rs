@@ -60,6 +60,12 @@ pub struct EvalCtx {
     pub date_style: crabka_pgtypes::datetime::DateStyle,
     /// The `IntervalStyle` GUC, which decides how an `interval` is spelled.
     pub interval_style: crabka_pgtypes::datetime::IntervalStyle,
+    /// `extra_float_digits`, which decides how many significant digits a float
+    /// renders with. PostgreSQL's default since v12 is 1 (shortest round trip).
+    pub extra_float_digits: i32,
+    /// `bytea_output`, which decides whether a `bytea` renders as `\x`-prefixed
+    /// hex or in the older backslash-octal escape spelling.
+    pub bytea_output: crabka_pgtypes::encoding::ByteaOutput,
     pub current_user: String,
     pub session_user: String,
     /// The session's backend process id.
@@ -74,6 +80,9 @@ pub struct EvalCtx {
     /// now.
     pub(crate) trigger_depth: u32,
     pub clock: Arc<dyn Clock>,
+    /// The session's pseudo-random stream. Cloned statement contexts share the
+    /// same locked generator so `setseed()` survives executor thread changes.
+    pub(crate) random: Option<Arc<Mutex<crate::math_fn::Prng>>>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
     /// The catalog KV on its own, for a context that can read the catalog but
     /// has no sequence machinery.
@@ -102,6 +111,47 @@ pub struct EvalCtx {
     pub(crate) notify: Option<Arc<Mutex<crate::session::NotifyPending>>>,
     pub(crate) transition_relations: Option<Arc<Mutex<HashMap<String, TransitionRelation>>>>,
     pub(crate) event_trigger: Option<Arc<EventTriggerContext>>,
+    /// The session's transaction identity, for the functions that export it.
+    ///
+    /// `None` outside a SQL session — in a planning context or a unit test —
+    /// where `pg_current_xact_id()` and its family report 0A000 rather than
+    /// inventing a transaction that is not running.
+    pub(crate) txn: Option<Arc<TxnRuntime>>,
+}
+
+/// The transaction state `pg_current_xact_id()`, `pg_current_snapshot()` and
+/// `pg_xact_status()` read.
+///
+/// It is bundled behind one `Option<Arc<…>>` for the same reason
+/// [`SequenceRuntime`] is: the four pieces are acquired together or not at all,
+/// and every context that has none of them must refuse rather than guess.
+pub(crate) struct TxnRuntime {
+    /// The statement's read snapshot, exactly as the session took it — the
+    /// analogue of `GetActiveSnapshot()`. Under REPEATABLE READ this is the
+    /// snapshot fixed at `BEGIN`, which is what makes `pg_current_snapshot()`
+    /// stable across the block.
+    ///
+    /// `None` where the session holds no transaction and so took no snapshot.
+    /// A fresh one is then read from `procarray` on demand rather than eagerly,
+    /// so building a context costs no lock on the registry every session
+    /// shares.
+    pub(crate) snapshot: Option<crabka_pgmvcc::visibility::Snapshot>,
+    /// The transaction's own xid, if the transaction has already written and
+    /// so already has one. `None` is exactly what
+    /// `pg_current_xact_id_if_assigned()` reports as NULL.
+    pub(crate) own_xid: Option<u64>,
+    /// The running-transaction registry, so `pg_current_xact_id()` can assign
+    /// an xid to a transaction that has not written, and `pg_xact_status()`
+    /// can tell a running transaction from a lost one.
+    pub(crate) procarray: Arc<crate::procarray::ProcArray>,
+    /// An xid this statement's evaluation assigned, for the session to adopt.
+    ///
+    /// Expression evaluation holds the context by shared reference and cannot
+    /// write the transaction's own xid slot, so it stages the assignment here
+    /// and [`crate::session::SqlSession`] moves it across. This is the seam
+    /// [`SequenceRuntime::pending`] gives `nextval`, and it exists for the
+    /// same reason.
+    pub(crate) assigned: Arc<Mutex<Option<u64>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +169,17 @@ pub(crate) struct EventTriggerObject {
     pub schema_name: Option<String>,
     pub object_name: Option<String>,
     pub identity: String,
+    /// Whether the object lived in a temporary namespace, which
+    /// `pg_event_trigger_dropped_objects` reports as `is_temporary`.
+    ///
+    /// This is carried rather than derived. `schema_name` holds the *display*
+    /// spelling, and [`crabka_pgcatalog::displayed_schema`] renders every
+    /// temporary namespace as the bare alias `pg_temp`, which
+    /// [`crabka_pgcatalog::is_temp_schema`] deliberately answers `false` for.
+    /// The stored `pg_temp_<backend id>` is the only spelling the predicate
+    /// recognises, and it is gone by the time a reader sees this struct — so
+    /// the producer records the fact while it still holds the stored name.
+    pub is_temporary: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +198,9 @@ pub(crate) struct SequenceRuntime {
     /// catalog-introspection functions read relations, views and comments
     /// through. A session has exactly one.
     pub(crate) kv: Arc<dyn crabka_pgkv::Kv>,
+    /// The session's row/index KV. This can differ from `kv` when catalog and
+    /// data storage are split.
+    pub(crate) data: Arc<dyn crabka_pgkv::Kv>,
     pub(crate) manager: Arc<crate::seq::SequenceManager>,
     pub(crate) currvals: Arc<Mutex<HashMap<String, i64>>>,
     /// The session's sequence advances that are not durable yet.
@@ -158,6 +222,8 @@ impl EvalCtx {
             date_style: self.date_style,
             date_order: self.date_order,
             interval_style: self.interval_style,
+            extra_float_digits: self.extra_float_digits,
+            bytea_output: self.bytea_output,
         }
     }
 }
@@ -174,11 +240,41 @@ impl EvalCtx {
             .or_else(|| self.sequence.as_ref().map(|runtime| runtime.kv.as_ref()))
     }
 
+    /// The data KV backing physical row and index entries.
+    pub(crate) fn data(&self) -> Option<&dyn crabka_pgkv::Kv> {
+        self.sequence.as_ref().map(|runtime| runtime.data.as_ref())
+    }
+
+    /// The session's transaction identity, or the 0A000 every member of the
+    /// transaction-id family reports where there is no session behind the
+    /// evaluation.
+    ///
+    /// # Errors
+    ///
+    /// 0A000 naming the function the caller was asked for.
+    pub(crate) fn txn(&self, what: &str) -> Result<&TxnRuntime, crate::error::ExecError> {
+        self.txn.as_deref().ok_or_else(|| {
+            crate::error::ExecError::Unsupported(format!("{what} requires a SQL session"))
+        })
+    }
+
     /// The scope an unqualified relation name resolves against.
     pub(crate) fn resolution(&self) -> &crate::relname::ResolutionScope {
         self.resolution
             .as_deref()
             .unwrap_or_else(|| crate::relname::ResolutionScope::default_scope())
+    }
+
+    /// The database this session connected to.
+    ///
+    /// `current_database()`, the single `pg_database` row, `pg_stat_activity`
+    /// and every `information_schema` `*_catalog` column answer with this, so a
+    /// client that connected as `dbname=sales` is never told it is somewhere
+    /// else. It rides on the resolution scope because the same name decides
+    /// whether a three-part `sales.public.t` is a local reference or a
+    /// cross-database one.
+    pub(crate) fn database(&self) -> &str {
+        &self.resolution().database
     }
 }
 
@@ -215,17 +311,21 @@ impl EvalCtx {
             date_order: crabka_pgtypes::datetime::DateOrder::default(),
             date_style: crabka_pgtypes::datetime::DateStyle::default(),
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
+            extra_float_digits: 1,
+            bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
             trigger_depth: 0,
             clock: Arc::new(SystemClock),
+            random: None,
             sequence: None,
             catalog: None,
             resolution: None,
             notify: None,
             transition_relations: None,
             event_trigger: None,
+            txn: None,
         }
     }
 }

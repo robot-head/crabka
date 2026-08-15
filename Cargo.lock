@@ -3556,14 +3556,17 @@ dependencies = [
  "crabka-pgwire",
  "crabka-trace-context",
  "crabka-units",
+ "encoding_rs",
  "hex",
  "jiff",
  "md-5 0.11.0",
  "opentelemetry",
  "opentelemetry_sdk",
+ "pglz",
  "regex",
  "rust-stemmers",
  "sha2 0.11.0",
+ "shlex 1.3.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3571,8 +3574,10 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicode-general-category",
  "unicode-normalization",
  "zerocopy",
+ "zstd",
 ]
 
 [[package]]
@@ -3624,6 +3629,7 @@ dependencies = [
  "dashu-float",
  "jiff",
  "proptest",
+ "quick-xml 0.41.0",
  "thiserror 2.0.20",
 ]
 
@@ -9316,7 +9322,7 @@ dependencies = [
  "md-5 0.10.6",
  "parking_lot",
  "percent-encoding",
- "quick-xml",
+ "quick-xml 0.39.4",
  "rand 0.10.2",
  "reqwest 0.12.28",
  "ring",
@@ -9913,6 +9919,12 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "pglz"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67cbae2e9ce0605b5de065e53f781f82a1b3677ec1c8bbd12a6c3ccfeeeb5d70"
 
 [[package]]
 name = "phf"
@@ -11558,6 +11570,15 @@ checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
 dependencies = [
  "memchr",
  "serde",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

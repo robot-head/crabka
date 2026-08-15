@@ -1051,3 +1051,69 @@ async fn range_offsets_follow_postgres_in_range() {
             == vec!["1"]
     );
 }
+
+/// **A frame offset may be a subquery.**
+///
+/// `ROWS <offset> PRECEDING` takes an arbitrary expression, evaluated once for
+/// the whole window rather than per row. The subquery pre-pass walked a window
+/// specification's `PARTITION BY` and `ORDER BY` but not its frame, so a
+/// subquery there survived as a raw node into the scalar evaluator, which runs
+/// none — the statement was refused rather than answered. Both ends of a
+/// `BETWEEN` and the named-`WINDOW` form reach the specification by different
+/// routes, so each is checked.
+#[tokio::test]
+async fn a_frame_offset_may_be_a_subquery() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE f (k int4); \
+             INSERT INTO f VALUES (1), (2), (3), (4), (5); \
+             CREATE TABLE width (n int4); \
+             INSERT INTO width VALUES (2)",
+        )
+        .await
+        .expect("fixture");
+
+    // Two rows back plus the current one.
+    assert!(
+        rows(
+            &client,
+            "SELECT sum(k) OVER (ORDER BY k ROWS (SELECT n FROM width) PRECEDING) FROM f ORDER BY k",
+        )
+        .await
+            == vec!["1", "3", "6", "9", "12"]
+    );
+
+    // Both ends of a BETWEEN, and an offset that is a subquery inside a larger
+    // expression rather than the whole of it.
+    assert!(
+        rows(
+            &client,
+            "SELECT sum(k) OVER (ORDER BY k
+                 ROWS BETWEEN (SELECT n FROM width) PRECEDING
+                          AND (SELECT n - 1 FROM width) FOLLOWING) FROM f ORDER BY k",
+        )
+        .await
+            == vec!["3", "6", "10", "14", "12"]
+    );
+    assert!(
+        rows(
+            &client,
+            "SELECT sum(k) OVER (ORDER BY k
+                 ROWS (SELECT n FROM width ORDER BY n LIMIT 1) - 1 PRECEDING) FROM f ORDER BY k",
+        )
+        .await
+            == vec!["1", "3", "5", "7", "9"]
+    );
+
+    // The named-WINDOW form reaches the same specification by another route.
+    assert!(
+        rows(
+            &client,
+            "SELECT sum(k) OVER win FROM f
+               WINDOW win AS (ORDER BY k ROWS (SELECT n FROM width) PRECEDING) ORDER BY k",
+        )
+        .await
+            == vec!["1", "3", "6", "9", "12"]
+    );
+}

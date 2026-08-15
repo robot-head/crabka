@@ -6,7 +6,8 @@
 //! The literal grammar tracks `PostgreSQL`'s `scan.l`: decimal, hexadecimal
 //! (`0x…`), octal (`0o…`) and binary (`0b…`) integers, `_` digit separators,
 //! `float8`/`numeric` literals with fraction and exponent, standard `'…'`
-//! strings, `E'…'` escape strings, and `$tag$…$tag$` dollar quoting.
+//! strings, `E'…'` escape strings, `U&'…'` / `U&"…"` Unicode-escape literals,
+//! and `$tag$…$tag$` dollar quoting.
 
 use crate::{
     error::ParseError,
@@ -19,6 +20,18 @@ use crate::{
 /// spell a sequence that is not valid UTF-8. `PostgreSQL` rejects those with
 /// this code, not with 42601.
 const UNTRANSLATABLE: &str = "22021";
+
+/// SQLSTATE 42601 (`syntax_error`). [`ParseError::new`] already defaults to it,
+/// but it also prefixes its argument with "syntax error at position N:", so a
+/// lexer rule whose text `PostgreSQL` renders verbatim has to name the code.
+const SYNTAX_ERROR: &str = "42601";
+
+/// The escape character a `U&'…'` / `U&"…"` literal uses when it carries no
+/// `UESCAPE` clause of its own.
+const DEFAULT_UESCAPE: u8 = b'\\';
+
+/// `PostgreSQL`'s hint under a `U&'…'` escape that no escape form completes.
+const UESCAPE_HINT: &str = "Unicode escapes must be \\XXXX or \\+XXXXXX.";
 
 /// Tokenize SQL text and preserve each token's byte offset.
 ///
@@ -62,30 +75,39 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
                 i = end;
                 out.push((Token::StringLit(text), start));
             }
+            // `B'…'` / `X'…'` — a bit-string literal, binary or hexadecimal.
+            // The marker is kept on the token so the parser can run PostgreSQL's
+            // `bit_in`, which is the routine that decides `x` means hex. Checked
+            // ahead of the identifier arm, and only when the quote follows the
+            // letter immediately, so `box'x'` is still the identifier `box`.
+            b'b' | b'B' | b'x' | b'X' if bytes.get(i + 1) == Some(&b'\'') => {
+                let start = i;
+                let marker = bytes[i].to_ascii_lowercase();
+                let (text, end) = string_literal(bytes, i + 1, false)?;
+                i = end;
+                out.push((
+                    Token::BitStringLit(format!("{}{text}", char::from(marker))),
+                    start,
+                ));
+            }
             b'"' => {
                 let start = i;
-                i += 1;
-                let mut s = Vec::new();
-                loop {
-                    match bytes.get(i) {
-                        None => {
-                            return Err(ParseError::new("unterminated quoted identifier", start));
-                        }
-                        Some(&b'"') if bytes.get(i + 1) == Some(&b'"') => {
-                            s.push(b'"');
-                            i += 2;
-                        }
-                        Some(&b'"') => {
-                            i += 1;
-                            break;
-                        }
-                        Some(&b) => {
-                            s.push(b);
-                            i += 1;
-                        }
-                    }
-                }
-                out.push((Token::Ident(decode_utf8(s, start)?), start));
+                let (name, end) = quoted_ident(sql, bytes, start, start)?;
+                i = end;
+                out.push((Token::Ident(name), start));
+            }
+            // `U&'…'` / `U&"…"` — a Unicode-escape string or quoted identifier.
+            // `PostgreSQL`'s `[uU]&{quote}` admits nothing between the three
+            // characters, so `u & 'x'` is still a bitwise AND of a column named
+            // `u`, and `u&'x'` is still the literal (the same reading there).
+            b'u' | b'U'
+                if bytes.get(i + 1) == Some(&b'&')
+                    && matches!(bytes.get(i + 2), Some(b'\'' | b'"')) =>
+            {
+                let start = i;
+                let (token, end) = unicode_literal(sql, bytes, start)?;
+                i = end;
+                out.push((token, start));
             }
             b'$' if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) => {
                 let start = i;
@@ -97,9 +119,11 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
                 if bytes.get(i).is_some_and(|&b| is_ident_cont(b) || b == b'$') {
                     return Err(ParseError::new("trailing junk after parameter", start));
                 }
-                let n: u32 = sql[ds..i]
+                let n: i32 = sql[ds..i]
                     .parse()
-                    .map_err(|_| ParseError::new("parameter number out of range", start))?;
+                    .map_err(|_| ParseError::new("parameter number too large", start))?;
+                let n = u32::try_from(n)
+                    .map_err(|_| ParseError::new("parameter number too large", start))?;
                 out.push((Token::Param(n), start));
             }
             // `$$…$$` / `$tag$…$tag$` — dollar quoting. The body is taken verbatim
@@ -429,6 +453,293 @@ fn literal_continuation(bytes: &[u8], from: usize) -> Option<usize> {
     (newline && bytes.get(i) == Some(&b'\'')).then_some(i)
 }
 
+/// Scan the double-quoted identifier whose opening quote is at `quote` and
+/// return its text with the offset just past the closing quote. A doubled `""`
+/// inside the delimiters is one embedded quote.
+///
+/// `PostgreSQL`'s `scan.l` rejects a delimiter pair enclosing nothing at the
+/// moment it closes the identifier (`literallen == 0`), so `""` never becomes a
+/// name — the error fires wherever a quoted identifier may appear, not only in
+/// the clause that would have consumed it. A doubled quote INSIDE the
+/// delimiters is an escape rather than a delimiter, so this never fires for
+/// `""""` (the one-character identifier `"`) or for `"a""b"`. Only the
+/// accumulated name's length decides, and it is the RAW length: `U&""` is
+/// rejected before any Unicode escape could have filled it.
+///
+/// `lexeme` is where the whole token starts, which is the quote itself except
+/// under a `U&"…"` prefix. The message quotes the source from there, the way
+/// `PostgreSQL`'s scanner quotes the lexeme it was reading.
+fn quoted_ident(
+    sql: &str,
+    bytes: &[u8],
+    lexeme: usize,
+    quote: usize,
+) -> Result<(String, usize), ParseError> {
+    let mut s = Vec::new();
+    let mut i = quote + 1;
+    loop {
+        match bytes.get(i) {
+            None => return Err(ParseError::new("unterminated quoted identifier", lexeme)),
+            Some(&b'"') if bytes.get(i + 1) == Some(&b'"') => {
+                s.push(b'"');
+                i += 2;
+            }
+            Some(&b'"') => {
+                i += 1;
+                break;
+            }
+            Some(&b) => {
+                s.push(b);
+                i += 1;
+            }
+        }
+    }
+    if s.is_empty() {
+        return Err(ParseError::new_sqlstate(
+            SYNTAX_ERROR,
+            format!(
+                "zero-length delimited identifier at or near \"{}\"",
+                &sql[lexeme..i]
+            ),
+            lexeme,
+        ));
+    }
+    Ok((decode_utf8(s, lexeme)?, i))
+}
+
+/// Scan the `U&'…'` string literal or `U&"…"` quoted identifier at `start`,
+/// together with the `UESCAPE 'c'` clause that may follow either one.
+///
+/// UESCAPE is consumed HERE, in the lexer, and not in the grammar.
+/// `PostgreSQL` resolves it in the same place — `base_yylex`, the one-token
+/// lookahead filter it puts between the scanner and the parser — because the
+/// clause belongs to the literal and to nothing else. `U&'…'` stands wherever a
+/// string stands and `U&"…"` wherever a name stands, so a token that still
+/// carried an unresolved escape character would have to be handled again in
+/// every one of those productions. Resolving it here means the parser only ever
+/// sees the ordinary [`Token::StringLit`] and [`Token::Ident`] it already
+/// understands, and `U&' \' UESCAPE '!'` yields the two characters ` \` without
+/// any production knowing that a Unicode literal exists.
+fn unicode_literal(sql: &str, bytes: &[u8], start: usize) -> Result<(Token, usize), ParseError> {
+    let quote = start + 2;
+    let is_ident = bytes[quote] == b'"';
+    let (raw, after_literal) = if is_ident {
+        quoted_ident(sql, bytes, start, quote)?
+    } else {
+        string_literal(bytes, quote, false)?
+    };
+    let (escape, end) = uescape_clause(sql, bytes, after_literal)?;
+    let text = unicode_deescape(&raw, escape, quote + 1)?;
+    Ok((
+        if is_ident {
+            Token::Ident(text)
+        } else {
+            Token::StringLit(text)
+        },
+        end,
+    ))
+}
+
+/// Read the optional `UESCAPE 'c'` that follows a `U&` literal ending at
+/// `from`, and return the escape character it selects with the offset just past
+/// the clause. Without a clause the escape is the default `\` and `from` is
+/// unchanged.
+///
+/// `c` must be exactly one character, and `PostgreSQL` refuses the ones that
+/// would make an escape unreadable: a hex digit, `+`, either quote, and
+/// whitespace.
+fn uescape_clause(sql: &str, bytes: &[u8], from: usize) -> Result<(u8, usize), ParseError> {
+    let word = skip_whitespace_and_comments(bytes, from);
+    let word_end = ident_end(bytes, word);
+    if !sql[word..word_end].eq_ignore_ascii_case("uescape") {
+        return Ok((DEFAULT_UESCAPE, from));
+    }
+    let at = skip_whitespace_and_comments(bytes, word_end);
+    if bytes.get(at) != Some(&b'\'') {
+        return Err(ParseError::new_sqlstate(
+            SYNTAX_ERROR,
+            format!(
+                "UESCAPE must be followed by a simple string literal {}",
+                at_or_near(sql, bytes, at)
+            ),
+            at,
+        )
+        .reporting_position());
+    }
+    let (text, end) = string_literal(bytes, at, false)?;
+    let [escape] = text.as_bytes() else {
+        return Err(invalid_uescape_char(sql, at, end));
+    };
+    if escape.is_ascii_hexdigit()
+        || matches!(escape, b'+' | b'\'' | b'"')
+        || escape.is_ascii_whitespace()
+    {
+        return Err(invalid_uescape_char(sql, at, end));
+    }
+    Ok((*escape, end))
+}
+
+/// The rejection of a `UESCAPE` character, quoting the string literal that
+/// named it exactly as it was written.
+fn invalid_uescape_char(sql: &str, at: usize, end: usize) -> ParseError {
+    ParseError::new_sqlstate(
+        SYNTAX_ERROR,
+        format!(
+            "invalid Unicode escape character at or near \"{}\"",
+            &sql[at..end]
+        ),
+        at,
+    )
+    .reporting_position()
+}
+
+/// Expand the Unicode escapes in the body of a `U&'…'` / `U&"…"` literal.
+///
+/// `escape` introduces `XXXX` (exactly 4 hex digits) or `+XXXXXX` (exactly 6),
+/// each naming one code point, and doubling it writes the character itself.
+/// A high surrogate must be followed IMMEDIATELY by the escape of its low half,
+/// and the pair becomes the one code point it encodes; a lone half of a pair is
+/// an error. `base` is the source offset the body starts at, so the errors land
+/// where `PostgreSQL` puts its cursor.
+///
+/// `E'…'`'s `\uXXXX` / `\UXXXXXXXX` spellings are deliberately absent. They
+/// belong to the other form, and `U&'\u0061'` is an error in `PostgreSQL`
+/// because `u006` is not four hex digits.
+fn unicode_deescape(body: &str, escape: u8, base: usize) -> Result<String, ParseError> {
+    let bytes = body.as_bytes();
+    let mut out = String::new();
+    // The high half of a surrogate pair, once one has been read: the next
+    // escape has to complete it.
+    let mut pair_first: Option<u32> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != escape {
+            if pair_first.is_some() {
+                return Err(invalid_surrogate_pair(base + i));
+            }
+            let ch = body[i..]
+                .chars()
+                .next()
+                .expect("i indexes a character boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&escape) {
+            if pair_first.is_some() {
+                return Err(invalid_surrogate_pair(base + i));
+            }
+            out.push(char::from(escape));
+            i += 2;
+            continue;
+        }
+        let (value, next) = if let Some(value) = hex_run(bytes, i + 1, 4) {
+            (value, i + 5)
+        } else if bytes.get(i + 1) == Some(&b'+')
+            && let Some(value) = hex_run(bytes, i + 2, 6)
+        {
+            (value, i + 8)
+        } else {
+            return Err(
+                ParseError::new_sqlstate(SYNTAX_ERROR, "invalid Unicode escape", base + i)
+                    .with_hint(UESCAPE_HINT)
+                    .reporting_position(),
+            );
+        };
+        if value == 0 || value > 0x10_FFFF {
+            return Err(invalid_escape_value(base + i));
+        }
+        // A surrogate is only ever half a character, so it is held back until
+        // its partner arrives rather than encoded on its own.
+        let value = match (pair_first, value) {
+            (Some(high), 0xdc00..0xe000) => 0x1_0000 + ((high - 0xd800) << 10) + (value - 0xdc00),
+            (Some(_), _) | (None, 0xdc00..0xe000) => {
+                return Err(invalid_surrogate_pair(base + i));
+            }
+            (None, _) => value,
+        };
+        pair_first = None;
+        if (0xd800..0xdc00).contains(&value) {
+            pair_first = Some(value);
+        } else {
+            out.push(char::from_u32(value).ok_or_else(|| invalid_escape_value(base + i))?);
+        }
+        i = next;
+    }
+    if pair_first.is_some() {
+        return Err(invalid_surrogate_pair(base + bytes.len()));
+    }
+    Ok(out)
+}
+
+/// The value of exactly `width` hexadecimal digits at `at`, or `None` when
+/// fewer than that many are there.
+fn hex_run(bytes: &[u8], at: usize, width: usize) -> Option<u32> {
+    let mut value: u32 = 0;
+    for k in 0..width {
+        value = value * 16 + char::from(*bytes.get(at + k)?).to_digit(16)?;
+    }
+    Some(value)
+}
+
+fn invalid_surrogate_pair(position: usize) -> ParseError {
+    ParseError::new_sqlstate(SYNTAX_ERROR, "invalid Unicode surrogate pair", position)
+        .reporting_position()
+}
+
+fn invalid_escape_value(position: usize) -> ParseError {
+    ParseError::new_sqlstate(SYNTAX_ERROR, "invalid Unicode escape value", position)
+        .reporting_position()
+}
+
+/// `PostgreSQL`'s `at or near "…"` clause for the token at `at`, or its `at end
+/// of input` when nothing is left.
+///
+/// The scanner quotes source text, so the lexeme is echoed as it was written.
+fn at_or_near(sql: &str, bytes: &[u8], at: usize) -> String {
+    let Some(&b) = bytes.get(at) else {
+        return "at end of input".to_string();
+    };
+    let end = if is_ident_start(b) {
+        ident_end(bytes, at)
+    } else if b.is_ascii_digit() {
+        // A number's own scan can fail on trailing junk, and an error message is
+        // no place to raise a second error; the digit run is enough to name it.
+        digit_run(bytes, at, 10)
+    } else {
+        // Anything else is one operator lexeme, or — where even that does not
+        // match — the single character sitting there.
+        punctuation(bytes, at).map_or_else(
+            || at + sql[at..].chars().next().map_or(1, char::len_utf8),
+            |(_, len)| at + len,
+        )
+    };
+    format!("at or near \"{}\"", &sql[at..end])
+}
+
+/// Skip the run of whitespace and comments at `from`, the way the scanner's own
+/// loop does between two tokens. An unterminated block comment stops the skip
+/// where it started, so [`lex`] reports it against the comment and not against
+/// whatever the lookahead was after.
+fn skip_whitespace_and_comments(bytes: &[u8], from: usize) -> usize {
+    let mut i = from;
+    loop {
+        match bytes.get(i) {
+            Some(&(b' ' | b'\t' | b'\r' | b'\n' | b'\x0c')) => i += 1,
+            Some(&b'-') if bytes.get(i + 1) == Some(&b'-') => {
+                while bytes.get(i).is_some_and(|&b| b != b'\n') {
+                    i += 1;
+                }
+            }
+            Some(&b'/') if bytes.get(i + 1) == Some(&b'*') => match skip_block_comment(bytes, i) {
+                (end, true) => i = end,
+                (_, false) => return i,
+            },
+            _ => return i,
+        }
+    }
+}
+
 /// Expand one `E'…'` backslash escape that starts at the `\` at `i`.
 ///
 /// The function appends the escape's bytes to `buf` and returns the offset
@@ -589,15 +900,15 @@ fn skip_block_comment(bytes: &[u8], i: usize) -> (usize, bool) {
 
 /// Match the longest operator/punctuation lexeme that starts at `bytes[i]`.
 ///
-/// Returns the lexeme with its byte length.
-///
-/// MAXIMAL MUNCH is the whole contract of this function. Every spelling whose
-/// first byte also begins a shorter spelling is listed longest-first: `->>`
-/// before `->` before `-`, `#>>` before `#>` before `#`, `?|`/`?&` before `?`,
-/// `!~*` before `!~`, `||/` before `||` before `|/` before `|`, `<@`/`<=`/`<>`/
-/// `<<` before `<`, `::` before `:`. A slip re-reads `a->>'k'` as `a -> >'k'`,
-/// whose tail still lexes. So the lexer tests pin each neighbouring shorter
-/// spelling explicitly.
+/// MAXIMAL MUNCH is the whole contract of this function: every spelling whose
+/// first byte also begins a shorter spelling is listed longest-first — `->>`
+/// before `->` before `-`, `#>>` before `#>` before `##` before `#`, `?-|`
+/// before `?-` and `?||` before `?|`, then `?#`/`?&` before `?`, `@-@` before
+/// `@>`/`@?`/`@@`/`@`, `!~*` before `!~`, `||/` before `||` before `|/` before
+/// `|`, `<<=` before `<<`, `>>=` before `>>`, `<@`/`<=`/`<>`/`<^`/`<<` before
+/// `<`, `>^` before `>`, `::` before `:`. A slip re-reads `a->>'k'` as
+/// `a -> >'k'`, whose tail still lexes, so the lexer tests pin each
+/// neighbouring shorter spelling explicitly.
 ///
 /// The comment arms in [`lex`] claim `--` and `/*` before this function runs,
 /// so a `-` or `/` that reaches here is always the operator. The one place that
@@ -608,30 +919,58 @@ fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
     let next_two_are = |first: u8, second: u8| next_is(first) && bytes.get(i + 2) == Some(&second);
     let comment_at = |at: usize| bytes.get(at) == Some(&b'*');
     Some(match bytes[i] {
+        b'-' if next_two_are(b'|', b'-') => (Token::Adjacent, 3),
         b'-' if next_two_are(b'>', b'>') => (Token::JsonGetText, 3),
         b'-' if next_is(b'>') => (Token::JsonGet, 2),
         b'#' if next_two_are(b'>', b'>') => (Token::JsonGetPathText, 3),
         b'#' if next_is(b'>') => (Token::JsonGetPath, 2),
+        b'#' if next_is(b'#') => (Token::ClosestPoint, 2),
+        // `@-@` leads the `@` family. Its second byte is unique among them, so
+        // ordering is not load-bearing here — but the geometric spellings are
+        // the ones a reader is least likely to expect, so they go first.
+        b'@' if next_two_are(b'-', b'@') => (Token::Length, 3),
         b'@' if next_is(b'>') => (Token::Contains, 2),
         b'@' if next_is(b'?') => (Token::JsonPathExists, 2),
         b'@' if next_is(b'@') => (Token::JsonPathMatch, 2),
         b'<' if next_is(b'@') => (Token::ContainedBy, 2),
+        b'?' if next_two_are(b'-', b'|') => (Token::Perpendicular, 3),
+        b'?' if next_two_are(b'|', b'|') => (Token::Parallel, 3),
         b'?' if next_is(b'|') => (Token::KeyExistsAny, 2),
+        b'?' if next_is(b'-') => (Token::Horizontal, 2),
+        b'?' if next_is(b'#') => (Token::Intersects, 2),
         b'?' if next_is(b'&') => (Token::KeyExistsAll, 2),
         b'?' => (Token::KeyExists, 1),
         b'&' if next_is(b'&') => (Token::Overlaps, 2),
+        b'&' if next_two_are(b'<', b'|') => (Token::DoesNotExtendAbove, 3),
+        b'&' if next_is(b'<') => (Token::DoesNotExtendRight, 2),
+        b'&' if next_is(b'>') => (Token::DoesNotExtendLeft, 2),
         b'<' if next_two_are(b'-', b'>') => (Token::Phrase, 3),
         b'!' if next_is(b'!') => (Token::TsNot, 2),
         b'!' if next_two_are(b'~', b'*') => (Token::NotTildeCi, 3),
         b'!' if next_is(b'~') => (Token::NotTilde, 2),
         // PostgreSQL accepts `!=` as a spelling of `<>`.
         b'!' if next_is(b'=') => (Token::Ne, 2),
+        b'~' if next_is(b'=') => (Token::Same, 2),
         b'~' if next_is(b'*') => (Token::TildeCi, 2),
         b'~' => (Token::Tilde, 1),
+        // `=>` before `=`. PostgreSQL's scanner returns EQUALS_GREATER for it
+        // and refuses to let any user operator take the spelling, so the
+        // two-byte reading is the only one.
+        b'=' if next_is(b'>') => (Token::NamedArg, 2),
         b'<' if next_is(b'=') => (Token::Le, 2),
         b'>' if next_is(b'=') => (Token::Ge, 2),
         b'<' if next_is(b'>') => (Token::Ne, 2),
+        // The geometric `<^`/`>^`. Nothing extends them, and their `^` second
+        // byte is unique in both families, so they cannot disturb `<@ <= <>
+        // <<| <<= << <-> <` or `>= >>= >> >`.
+        b'<' if next_is(b'^') => (Token::BelowEq, 2),
+        b'>' if next_is(b'^') => (Token::AboveEq, 2),
+        b'<' if next_two_are(b'<', b'|') => (Token::StrictlyBelow, 3),
+        b'<' if next_two_are(b'<', b'=') => (Token::ContainedByOrEq, 3),
         b'<' if next_is(b'<') => (Token::Shl, 2),
+        b'|' if next_two_are(b'&', b'>') => (Token::DoesNotExtendBelow, 3),
+        b'|' if next_two_are(b'>', b'>') => (Token::StrictlyAbove, 3),
+        b'>' if next_two_are(b'>', b'=') => (Token::ContainsOrEq, 3),
         b'>' if next_is(b'>') => (Token::Shr, 2),
         b'|' if next_two_are(b'|', b'/') && !comment_at(i + 3) => (Token::CubeRoot, 3),
         b'|' if next_is(b'|') => (Token::Concat, 2),
@@ -856,7 +1195,16 @@ mod tests {
 
     #[test]
     fn lexes_parameter_placeholder() {
+        assert_eq!(toks("$0")[0], Token::Param(0));
         assert_eq!(toks("$1")[0], Token::Param(1));
+        assert_eq!(toks("$2147483647")[0], Token::Param(2_147_483_647));
+
+        let error = lex("select $2147483648").expect_err("parameter exceeds signed int32");
+        assert_eq!(error.position, 7);
+        assert_eq!(
+            error.message,
+            "syntax error at position 7: parameter number too large"
+        );
     }
 
     #[test]
@@ -1112,6 +1460,8 @@ mod tests {
             ("a!=b", &[Token::Ne, Token::Ident("b".into())]),
             ("a<<b", &[Token::Shl, Token::Ident("b".into())]),
             ("a>>b", &[Token::Shr, Token::Ident("b".into())]),
+            ("a<<=b", &[Token::ContainedByOrEq, Token::Ident("b".into())]),
+            ("a>>=b", &[Token::ContainsOrEq, Token::Ident("b".into())]),
             ("a<=b", &[Token::Le, Token::Ident("b".into())]),
             ("a>=b", &[Token::Ge, Token::Ident("b".into())]),
             ("a<@b", &[Token::ContainedBy, Token::Ident("b".into())]),
@@ -1129,6 +1479,9 @@ mod tests {
             ("a||/b", &[Token::CubeRoot, Token::Ident("b".into())]),
             ("a^b", &[Token::Caret, Token::Ident("b".into())]),
             ("a%b", &[Token::Percent, Token::Ident("b".into())]),
+            ("a=b", &[Token::Eq, Token::Ident("b".into())]),
+            ("a=>b", &[Token::NamedArg, Token::Ident("b".into())]),
+            ("a>b", &[Token::Gt, Token::Ident("b".into())]),
         ];
         for (sql, tail) in cases {
             let mut expected = vec![Token::Ident("a".into())];
@@ -1405,12 +1758,453 @@ mod tests {
         );
     }
 
+    #[test]
+    fn geometric_operator_spellings_lex_with_maximal_munch() {
+        use assert2::assert;
+
+        // Written WITHOUT surrounding spaces, and each new spelling paired with
+        // every SHORTER spelling it shares a first byte with. A munch-order slip
+        // re-reads `a?-|b` as `a ?- |b` — whose tail still lexes — so only the
+        // exact token vector catches it.
+        let cases: &[(&str, &[Token])] = &[
+            // `#`: `#>>` before `#>` before `##` before `#`.
+            (
+                "a#>>'{k}'",
+                &[Token::JsonGetPathText, Token::StringLit("{k}".into())],
+            ),
+            (
+                "a#>'{k}'",
+                &[Token::JsonGetPath, Token::StringLit("{k}".into())],
+            ),
+            ("a##b", &[Token::ClosestPoint, Token::Ident("b".into())]),
+            ("a#b", &[Token::Hash, Token::Ident("b".into())]),
+            // `?`: `?-|` before `?-`, `?||` before `?|`, then `?#`, `?&`, `?`.
+            ("a?-|b", &[Token::Perpendicular, Token::Ident("b".into())]),
+            ("a?-b", &[Token::Horizontal, Token::Ident("b".into())]),
+            ("a?||b", &[Token::Parallel, Token::Ident("b".into())]),
+            ("a?|b", &[Token::KeyExistsAny, Token::Ident("b".into())]),
+            ("a?#b", &[Token::Intersects, Token::Ident("b".into())]),
+            ("a?&b", &[Token::KeyExistsAll, Token::Ident("b".into())]),
+            ("a?'k'", &[Token::KeyExists, Token::StringLit("k".into())]),
+            // `@`: `@-@` before `@>`, `@?`, `@@`, `@`.
+            ("a@>b", &[Token::Contains, Token::Ident("b".into())]),
+            ("a@?b", &[Token::JsonPathExists, Token::Ident("b".into())]),
+            ("a@@b", &[Token::JsonPathMatch, Token::Ident("b".into())]),
+            ("a@b", &[Token::At, Token::Ident("b".into())]),
+            // `<`: `<^` must leave the rest of the family alone.
+            ("a<^b", &[Token::BelowEq, Token::Ident("b".into())]),
+            ("a<@b", &[Token::ContainedBy, Token::Ident("b".into())]),
+            ("a<=b", &[Token::Le, Token::Ident("b".into())]),
+            ("a<>b", &[Token::Ne, Token::Ident("b".into())]),
+            ("a<<|b", &[Token::StrictlyBelow, Token::Ident("b".into())]),
+            ("a<<=b", &[Token::ContainedByOrEq, Token::Ident("b".into())]),
+            ("a<<b", &[Token::Shl, Token::Ident("b".into())]),
+            ("a<->b", &[Token::Phrase, Token::Ident("b".into())]),
+            ("a<b", &[Token::Lt, Token::Ident("b".into())]),
+            // `>`: same for `>^`.
+            ("a>^b", &[Token::AboveEq, Token::Ident("b".into())]),
+            ("a>=b", &[Token::Ge, Token::Ident("b".into())]),
+            ("a>>=b", &[Token::ContainsOrEq, Token::Ident("b".into())]),
+            ("a>>b", &[Token::Shr, Token::Ident("b".into())]),
+            ("a>b", &[Token::Gt, Token::Ident("b".into())]),
+        ];
+        for (sql, tail) in cases {
+            let mut expected = vec![Token::Ident("a".into())];
+            expected.extend_from_slice(tail);
+            expected.push(Token::Eof);
+            assert!(toks(sql) == expected, "lexing {sql:?}");
+        }
+    }
+
+    #[test]
+    fn the_prefix_only_length_spelling_is_one_token() {
+        use assert2::assert;
+
+        // `@-@` is the one geometric spelling with no infix reading, and the
+        // only one whose bytes used to lex as three separate operators — as
+        // `@ - @`, which parsed as a nested absolute value.
+        assert!(toks("@-@p") == vec![Token::Length, Token::Ident("p".into()), Token::Eof,]);
+        // The shorter `@` spellings it could have stolen from are untouched, and
+        // an `@` followed by an ordinary minus still lexes as two operators.
+        assert!(
+            toks("@-p")
+                == vec![
+                    Token::At,
+                    Token::Minus,
+                    Token::Ident("p".into()),
+                    Token::Eof,
+                ]
+        );
+    }
+
+    #[test]
+    fn a_zero_length_delimited_identifier_is_rejected_wherever_one_can_appear() {
+        use assert2::assert;
+
+        // `PostgreSQL` raises this from `scan.l`, so it fires at the quote pair
+        // itself rather than in whatever clause would have consumed the name.
+        // Each case pairs a statement with the BYTE offset of its `""`; the
+        // one-based column PostgreSQL's caret prints is that offset plus one.
+        let cases: &[(&str, usize)] = &[
+            // The `create_am` regression case: an access method name.
+            ("CREATE TABLE i_am_a_failure() USING \"\";", 36),
+            // A relation name, bare and schema-qualified on either side.
+            ("SELECT * FROM \"\";", 14),
+            ("SELECT * FROM \"\".t;", 14),
+            ("SELECT * FROM pg_catalog.\"\";", 25),
+            ("CREATE TABLE \"\" (a int);", 13),
+            // A column name, in a target list, a definition and an insert list.
+            ("SELECT \"\" FROM t;", 7),
+            ("CREATE TABLE t (\"\" int);", 16),
+            ("INSERT INTO t (\"\") VALUES (1);", 15),
+            // An alias, a sort key, a grouping key, a function and a type.
+            ("SELECT * FROM t AS \"\";", 19),
+            ("SELECT 1 AS \"\";", 12),
+            ("SELECT x FROM t ORDER BY \"\";", 25),
+            ("SELECT x FROM t GROUP BY \"\";", 25),
+            ("SELECT \"\"('a');", 7),
+            ("SELECT 1::\"\";", 10),
+            ("SELECT CAST(1 AS \"\");", 17),
+            // Other object namespaces, and a name abutting a bare word on
+            // either side — `x""` is the identifier `x` and then the error.
+            ("CREATE SCHEMA \"\";", 14),
+            ("CREATE INDEX \"\" ON t (a);", 13),
+            ("SET \"\" = 1;", 4),
+            ("SELECT \"\"x;", 7),
+            ("SELECT x\"\";", 8),
+        ];
+        for (sql, position) in cases {
+            let e = lex(sql).expect_err("a zero-length delimited identifier");
+            assert!(
+                e.message == "zero-length delimited identifier at or near \"\"\"\"",
+                "lexing {sql:?}: {}",
+                e.message
+            );
+            assert!(e.sqlstate() == "42601", "lexing {sql:?}");
+            assert!(e.position == *position, "lexing {sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_doubled_quote_inside_the_delimiters_is_an_escape_not_an_empty_name() {
+        use assert2::assert;
+
+        // Only the ACCUMULATED name's length decides, so a pair that is escaped
+        // rather than delimiting still yields a name. `""""` is the one-character
+        // identifier `"`, and the rule reaches neither the empty string literal
+        // (which is legal) nor any other quoted form the lexer scans.
+        let cases: &[(&str, Token)] = &[
+            ("\"\"\"\"", Token::Ident("\"".into())),
+            ("\"\"\"\"\"\"", Token::Ident("\"\"".into())),
+            ("\"a\"\"b\"", Token::Ident("a\"b".into())),
+            ("\"\"\"ab\"", Token::Ident("\"ab".into())),
+            ("\"ab\"\"\"", Token::Ident("ab\"".into())),
+            ("\"a\"\"\"\"b\"", Token::Ident("a\"\"b".into())),
+            ("\"\"\"a\"\"\"", Token::Ident("\"a\"".into())),
+            ("\" \"", Token::Ident(" ".into())),
+            ("\"select\"", Token::Ident("select".into())),
+            ("\"MixedCase\"", Token::Ident("MixedCase".into())),
+            ("\"héllo\"", Token::Ident("héllo".into())),
+            // A zero-length STRING is legal in PostgreSQL, in every spelling.
+            ("''", Token::StringLit(String::new())),
+            ("E''", Token::StringLit(String::new())),
+            ("$$$$", Token::StringLit(String::new())),
+            ("B''", Token::BitStringLit("b".into())),
+            ("X''", Token::BitStringLit("x".into())),
+            // And a quote pair that is DATA rather than a delimiter is untouched.
+            ("'\"\"'", Token::StringLit("\"\"".into())),
+            ("$$\"\"$$", Token::StringLit("\"\"".into())),
+        ];
+        for (sql, token) in cases {
+            assert!(
+                toks(sql) == vec![token.clone(), Token::Eof],
+                "lexing {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_plpgsql_label_and_directive_bytes_still_lex_as_before() {
+        use assert2::assert;
+
+        // PL/pgSQL spells `<<label>>` with the shift tokens and its compiler
+        // directives with a bare `#`; `<^`/`>^`/`##` must not have disturbed
+        // either. (The parse-level guarantee is pinned in the parser tests.)
+        assert!(
+            toks("<<lbl>>")
+                == vec![
+                    Token::Shl,
+                    Token::Ident("lbl".into()),
+                    Token::Shr,
+                    Token::Eof,
+                ]
+        );
+        assert!(
+            toks("#variable_conflict use_column")
+                == vec![
+                    Token::Hash,
+                    Token::Ident("variable_conflict".into()),
+                    Token::Ident("use_column".into()),
+                    Token::Eof,
+                ]
+        );
+    }
+
+    #[test]
+    fn unicode_escape_string_literals_decode_to_their_code_points() {
+        use assert2::assert;
+
+        // `\XXXX` is exactly four hex digits and `\+XXXXXX` exactly six; the
+        // escape character doubles to itself, a surrogate pair combines into one
+        // character, and `''` still doubles. `UESCAPE` replaces the escape
+        // character for its own literal only, which demotes `\` to ordinary text.
+        let cases: &[(&str, &str)] = &[
+            (r"U&'d\0061t\+000061'", "data"),
+            (r"u&'d\0061t\+000061'", "data"),
+            (r"U&'a\\b'", r"a\b"),
+            (r"U&'\0061\0308bc'", "a\u{308}bc"),
+            (r"U&'\00E4bc'", "äbc"),
+            (r"U&'abc\+10FFFF'", "abc\u{10ffff}"),
+            (r"U&'abc'", "abc"),
+            (r"U&''", ""),
+            (r"U&'it''s'", "it's"),
+            // A high surrogate followed by its low half is one character.
+            (r"U&'\D83D\DE00'", "\u{1f600}"),
+            (r"U&'\+00D83D\+00DE00'", "\u{1f600}"),
+            (r"U&' \' UESCAPE '!'", r" \"),
+            (r"U&'d!0061t\+000061' UESCAPE '!'", r"dat\+000061"),
+            (r"U&'!!' UESCAPE '!'", "!"),
+            (r"U&'\0061' uescape '!'", r"\0061"),
+        ];
+        for (sql, text) in cases {
+            assert!(
+                toks(sql) == vec![Token::StringLit((*text).into()), Token::Eof],
+                "lexing {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_escape_quoted_identifiers_decode_the_same_way() {
+        use assert2::assert;
+
+        // The same prefix and the same escapes spell a NAME, whose case is kept
+        // because the delimiters are quotes.
+        let cases: &[(&str, &str)] = &[
+            (r#"U&"d\0061t\+000061""#, "data"),
+            (r#"u&"d\0061t\+000061""#, "data"),
+            (r#"U&"a\\b""#, r"a\b"),
+            (r#"U&"MixedCase""#, "MixedCase"),
+            (r#"U&"a""b""#, "a\"b"),
+            (r#"U&"\" UESCAPE '!'"#, r"\"),
+            (r#"U&"d*0061t\+000061" UESCAPE '*'"#, r"dat\+000061"),
+        ];
+        for (sql, name) in cases {
+            assert!(
+                toks(sql) == vec![Token::Ident((*name).into()), Token::Eof],
+                "lexing {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_unicode_literal_is_one_token_in_the_statement_around_it() {
+        use assert2::assert;
+
+        // The `U` must not be read as a column and the `&` must not be read as
+        // the bitwise operator, in either position; and the alias form takes its
+        // own UESCAPE.
+        assert!(
+            toks(r#"SELECT U&'d\0061t\+000061' AS U&"d\0061t\+000061""#)
+                == vec![
+                    Token::Keyword(Keyword::Select),
+                    Token::StringLit("data".into()),
+                    Token::Keyword(Keyword::As),
+                    Token::Ident("data".into()),
+                    Token::Eof,
+                ]
+        );
+        assert!(
+            toks(r#"SELECT 'tricky' AS U&"\" UESCAPE '!'"#)
+                == vec![
+                    Token::Keyword(Keyword::Select),
+                    Token::StringLit("tricky".into()),
+                    Token::Keyword(Keyword::As),
+                    Token::Ident(r"\".into()),
+                    Token::Eof,
+                ]
+        );
+        // `u` is only the prefix when the `&` and the quote follow it directly.
+        assert!(
+            toks("u & 'x'")
+                == vec![
+                    Token::Ident("u".into()),
+                    Token::Amp,
+                    Token::StringLit("x".into()),
+                    Token::Eof,
+                ]
+        );
+        assert!(
+            toks("uu&'x'")
+                == vec![
+                    Token::Ident("uu".into()),
+                    Token::Amp,
+                    Token::StringLit("x".into()),
+                    Token::Eof,
+                ]
+        );
+    }
+
+    #[test]
+    fn unicode_escapes_reject_what_postgresql_rejects() {
+        use assert2::assert;
+
+        // Message and cursor both, because psql draws the caret from the cursor
+        // and the regression corpus compares that line. The offsets are the ones
+        // PostgreSQL reports: the escape itself for a malformed or out-of-range
+        // one, and whatever failed to complete a surrogate pair for that.
+        let cases: &[(&str, &str, usize)] = &[
+            (r"SELECT U&'wrong: \061'", "invalid Unicode escape", 17),
+            (r"SELECT U&'wrong: \+0061'", "invalid Unicode escape", 17),
+            (
+                r"SELECT U&'wrong: \db99'",
+                "invalid Unicode surrogate pair",
+                22,
+            ),
+            (
+                r"SELECT U&'wrong: \db99xy'",
+                "invalid Unicode surrogate pair",
+                22,
+            ),
+            (
+                r"SELECT U&'wrong: \db99\\'",
+                "invalid Unicode surrogate pair",
+                22,
+            ),
+            (
+                r"SELECT U&'wrong: \db99\0061'",
+                "invalid Unicode surrogate pair",
+                22,
+            ),
+            (
+                r"SELECT U&'wrong: \+00db99\+000061'",
+                "invalid Unicode surrogate pair",
+                25,
+            ),
+            (
+                r"SELECT U&'wrong: \+2FFFFF'",
+                "invalid Unicode escape value",
+                17,
+            ),
+            (
+                r"SELECT U&'wrong: \0000'",
+                "invalid Unicode escape value",
+                17,
+            ),
+            // A low surrogate with no high half before it is just as wrong.
+            (
+                r"SELECT U&'wrong: \de00'",
+                "invalid Unicode surrogate pair",
+                17,
+            ),
+            (
+                r"SELECT U&'wrong: +0061' UESCAPE +",
+                "UESCAPE must be followed by a simple string literal at or near \"+\"",
+                32,
+            ),
+            (
+                r"SELECT U&'wrong: +0061' UESCAPE '+'",
+                "invalid Unicode escape character at or near \"'+'\"",
+                32,
+            ),
+            (
+                r"SELECT U&'x' UESCAPE 'ab'",
+                "invalid Unicode escape character at or near \"'ab'\"",
+                21,
+            ),
+            (
+                // A hex digit cannot be the escape: `a0061` would be unreadable.
+                r"SELECT U&'x' UESCAPE 'a'",
+                "invalid Unicode escape character at or near \"'a'\"",
+                21,
+            ),
+            (
+                r"SELECT U&'x' UESCAPE ' '",
+                "invalid Unicode escape character at or near \"' '\"",
+                21,
+            ),
+            (
+                r"SELECT U&'x' UESCAPE",
+                "UESCAPE must be followed by a simple string literal at end of input",
+                20,
+            ),
+            // The identifier spelling reports the identical rejections.
+            (r#"SELECT U&"wrong: \061""#, "invalid Unicode escape", 17),
+            (
+                r#"SELECT U&"wrong: \db99""#,
+                "invalid Unicode surrogate pair",
+                22,
+            ),
+        ];
+        for (sql, message, position) in cases {
+            let error = lex(sql).expect_err("rejected");
+            assert!(error.message == *message, "lexing {sql:?}");
+            assert!(error.position == *position, "lexing {sql:?}");
+            // PostgreSQL puts a cursor on every one of these, so psql echoes the
+            // line with a caret under it.
+            assert!(
+                error.reported_position(sql) == Some(position + 1),
+                "lexing {sql:?}"
+            );
+        }
+        // The malformed-escape rejection carries PostgreSQL's remedy, and names
+        // only the two forms this literal has.
+        let error = lex(r"SELECT U&'wrong: \061'").expect_err("rejected");
+        assert!(error.hint() == Some(r"Unicode escapes must be \XXXX or \+XXXXXX."));
+    }
+
+    #[test]
+    fn a_unicode_literal_does_not_admit_the_escape_string_spellings() {
+        use assert2::assert;
+
+        // `\uXXXX` / `\UXXXXXXXX` belong to `E'…'`. In a `U&'…'` literal the
+        // `u` is simply not a hex digit, so these are malformed escapes — and
+        // the `E'…'` spellings must keep working where they do belong.
+        for sql in [r"SELECT U&'\u0061'", r"SELECT U&'\U00000061'"] {
+            let error = lex(sql).expect_err("rejected");
+            assert!(error.message == "invalid Unicode escape", "lexing {sql:?}");
+        }
+        assert!(toks(r"E'dat\U00000061'") == vec![Token::StringLit("data".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn a_unicode_quoted_identifier_may_not_be_empty() {
+        use assert2::assert;
+
+        // PostgreSQL applies its zero-length rule to the RAW delimiters, before
+        // any escape could have filled the name, and quotes the lexeme it read.
+        let error = lex(r#"SELECT U&"""#).expect_err("rejected");
+        assert!(error.message == "zero-length delimited identifier at or near \"U&\"\"\"");
+        let error = lex(r#"SELECT """#).expect_err("rejected");
+        assert!(error.message == "zero-length delimited identifier at or near \"\"\"\"");
+    }
+
     proptest! {
         #[test]
         fn lex_never_panics(s: String) {
             // The lexer must never panic on arbitrary (valid-UTF-8) input —
             // it returns Ok(tokens) or Err(ParseError), never unwinds.
             let _ = lex(&s);
+        }
+
+        #[test]
+        fn a_unicode_literal_never_panics(body: String, escape: String) {
+            // Arbitrary input rarely spells the `U&` prefix, and the escape
+            // expansion indexes BYTES into text that may hold any character, so
+            // the two spellings are shaped here explicitly.
+            let _ = lex(&format!("U&'{body}'"));
+            let _ = lex(&format!("U&\"{body}\""));
+            let _ = lex(&format!("U&'{body}' UESCAPE '{escape}'"));
         }
     }
 }

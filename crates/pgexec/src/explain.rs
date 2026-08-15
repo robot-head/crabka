@@ -122,7 +122,10 @@ fn plan_query(query: &QueryExpr) -> PlanNode {
     let mut node = plan_set_expr(&query.body);
     if !query.order_by.is_empty() {
         node = PlanNode::new("Sort")
-            .detail("Sort Key", sort_key(&query.order_by))
+            .detail(
+                "Sort Key",
+                plan_sort_key(&query.order_by, body_projection(&query.body)),
+            )
             .with_child(node);
     }
     if query.limit.is_some() || query.offset.is_some() {
@@ -171,7 +174,16 @@ fn plan_select(select: &SelectStmt) -> PlanNode {
         }
         node = aggregate.with_child(node);
     } else if aggregated {
-        node = PlanNode::new("Aggregate").with_child(node);
+        // An ungrouped `HAVING` is still a predicate the aggregate node applies
+        // — the engine folds every row, then tests the one result row and emits
+        // nothing when it fails — so it prints as this node's `Filter`, exactly
+        // as the grouped branch above does. Leaving it off claimed a plan that
+        // returns the aggregate unconditionally.
+        let mut aggregate = PlanNode::new("Aggregate");
+        if let Some(having) = &select.having {
+            aggregate = aggregate.detail("Filter", deparse(having));
+        }
+        node = aggregate.with_child(node);
     }
     match &select.distinct {
         DistinctClause::All => {}
@@ -198,7 +210,10 @@ fn plan_select(select: &SelectStmt) -> PlanNode {
     }
     if !select.order_by.is_empty() {
         node = PlanNode::new("Sort")
-            .detail("Sort Key", sort_key(&select.order_by))
+            .detail(
+                "Sort Key",
+                plan_sort_key(&select.order_by, &select.projection),
+            )
             .with_child(node);
     }
     if select.limit.is_some() || select.offset.is_some() {
@@ -290,37 +305,18 @@ fn scan_node(table: &str, alias: Option<&str>, filter: Option<&Expr>) -> PlanNod
     node
 }
 
+/// Does `expr` aggregate, and therefore need an `Aggregate` plan node above the
+/// scan?
+///
+/// This asks the executor's own resolver rather than keeping a list here. A
+/// private list drifts: the one this replaced named fourteen aggregates and had
+/// not learned `json_agg`, the bitwise trio, the range pair, `var_pop`/`var_samp`,
+/// `stddev_pop`/`stddev_samp`, or any of the two-variable statistical family, so
+/// `EXPLAIN SELECT corr(a, b) FROM t` printed a bare `Seq Scan` where
+/// `PostgreSQL` prints an `Aggregate`. Deferring also means a user-defined
+/// aggregate is explained like a built-in one, for free.
 fn contains_aggregate(expr: &Expr) -> bool {
-    match expr {
-        Expr::Func(call) => {
-            const AGGREGATES: &[&str] = &[
-                "count",
-                "sum",
-                "avg",
-                "min",
-                "max",
-                "bool_and",
-                "bool_or",
-                "string_agg",
-                "array_agg",
-                "jsonb_agg",
-                "jsonb_object_agg",
-                "stddev",
-                "variance",
-                "every",
-            ];
-            AGGREGATES
-                .iter()
-                .any(|name| call.name.eq_ignore_ascii_case(name))
-                || match &call.args {
-                    FuncArgs::Star => false,
-                    FuncArgs::Exprs(args) => args.iter().any(contains_aggregate),
-                }
-        }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => contains_aggregate(expr),
-        Expr::Binary { left, right, .. } => contains_aggregate(left) || contains_aggregate(right),
-        _ => false,
-    }
+    crate::agg::contains_aggregate(expr)
 }
 
 fn expr_list(exprs: &[Expr]) -> String {
@@ -331,27 +327,157 @@ fn expr_list(exprs: &[Expr]) -> String {
         .join(", ")
 }
 
-fn sort_key(items: &[OrderItem]) -> String {
+/// The `Sort Key` of a `Sort` plan node.
+///
+/// A `Sort` evaluates nothing. `set_dummy_tlist_references` rewrites its target
+/// list into bare references to the node underneath, and `ruleutils` prints
+/// such a reference by deparsing whatever it points at — wrapped in
+/// parentheses, "because our caller probably assumed a Var is a simple
+/// expression" (`get_special_variable`). A reference that lands on a plain
+/// column *is* a simple expression and gets none. That is the whole rule, and
+/// it is why `Sort Key: id DESC` carries no parentheses while
+/// `Sort Key: (count(*))` carries a pair the expression never asked for.
+///
+/// The node that computes an expression — an `Aggregate`'s `Group Key` — prints
+/// it without the extra pair, which is why the two lines of one plan can differ
+/// by exactly one parenthesis.
+fn plan_sort_key(items: &[OrderItem], projection: &[SelectItem]) -> String {
     items
         .iter()
         .map(|item| {
-            let mut key = deparse_bare(&item.expr);
-            if !item.asc {
-                key.push_str(" DESC");
-            }
-            // PostgreSQL prints the NULLS clause only when it is not the default
-            // for the direction (NULLS LAST for ASC, NULLS FIRST for DESC).
-            if item.nulls_first == item.asc {
-                key.push_str(if item.nulls_first {
-                    " NULLS FIRST"
-                } else {
-                    " NULLS LAST"
-                });
-            }
+            let target = sort_target(&item.expr, projection);
+            let mut key = match target {
+                Expr::Column { .. } => deparse_bare(target),
+                other => format!("({})", deparse_bare(other)),
+            };
+            key.push_str(&sort_order_suffix(item));
             key
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// What an `ORDER BY` item actually sorts on — `findTargetlistEntrySQL92`.
+///
+/// A bare name is an *output* column name before it is anything else: the
+/// SELECT list's aliases beat the FROM clause's columns, which is the one place
+/// `ORDER BY` reads differently from `GROUP BY`. A bare integer is a position in
+/// that same list. Everything else is an expression over the input and stands
+/// as written.
+///
+/// The name never survives into the plan either way — the sort clause points at
+/// a target-list entry, and the entry holds the expression — so `EXPLAIN` prints
+/// the expression and never the alias the query wrote.
+fn sort_target<'a>(item: &'a Expr, projection: &'a [SelectItem]) -> &'a Expr {
+    match item {
+        Expr::Column { table: None, name } => match output_column(projection, name) {
+            // A target that is the column of that same name says nothing the
+            // written reference does not, except a table qualifier — and this
+            // deparser prints a qualifier only where the query wrote one, while
+            // `EXPLAIN` prints one whenever the plan reads more than one
+            // relation. Substituting `SELECT t.a … ORDER BY a`'s target would
+            // add a qualifier to a single-relation plan, which is the case this
+            // module gets right today. Keep what was written.
+            Some(Expr::Column { name: column, .. }) if column == name => item,
+            Some(target) => target,
+            None => item,
+        },
+        Expr::IntLiteral(digits) => digits
+            .parse::<usize>()
+            .ok()
+            .and_then(|position| nth_output_column(projection, position))
+            .unwrap_or(item),
+        _ => item,
+    }
+}
+
+/// The target-list entry `name` names, if the SELECT list exposes one.
+///
+/// An entry's output name is its `AS` alias, or the column's own name when it
+/// is a bare column reference. A wildcard exposes names this module cannot see
+/// without the catalog, so a list holding one may fail to find a match that
+/// `PostgreSQL` would — which leaves the item deparsed as written, the reading
+/// this had before it could resolve anything.
+fn output_column<'a>(projection: &'a [SelectItem], name: &str) -> Option<&'a Expr> {
+    projection.iter().find_map(|item| match item {
+        SelectItem::Expr {
+            expr,
+            alias: Some(alias),
+        } if alias == name => Some(expr),
+        SelectItem::Expr { expr, alias: None } => match expr {
+            Expr::Column { name: column, .. } if column == name => Some(expr),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// The `position`'th output column, counting from one.
+///
+/// `None` when the list holds a wildcard, because then the positions this
+/// module can count are not the positions `PostgreSQL` counts.
+fn nth_output_column(projection: &[SelectItem], position: usize) -> Option<&Expr> {
+    if projection
+        .iter()
+        .any(|item| !matches!(item, SelectItem::Expr { .. }))
+    {
+        return None;
+    }
+    match projection.get(position.checked_sub(1)?)? {
+        SelectItem::Expr { expr, .. } => Some(expr),
+        _ => None,
+    }
+}
+
+/// The SELECT list an `ORDER BY` at this level resolves against. Empty for a
+/// set operation, whose output names are the leftmost branch's but whose
+/// expressions are not any one branch's.
+fn body_projection(body: &SetExpr) -> &[SelectItem] {
+    match body {
+        SetExpr::Query(QueryBody::Select(select)) => &select.projection,
+        SetExpr::Query(QueryBody::Nested(query)) => body_projection(&query.body),
+        SetExpr::Query(QueryBody::Values(_)) | SetExpr::SetOp { .. } => &[],
+    }
+}
+
+/// A sort-key list under an explicit qualification choice.
+///
+/// This is `get_rule_orderby`, which is what an *aggregate's* own `ORDER BY`
+/// deparses through. It is not the plan-node path: no target list stands
+/// between the aggregate and its sort expressions, so none of
+/// [`plan_sort_key`]'s parentheses apply here.
+fn sort_key_with(items: &[OrderItem], qualify: bool) -> String {
+    items
+        .iter()
+        .map(|item| {
+            let mut key = deparse_bare_with(&item.expr, qualify);
+            key.push_str(&sort_order_suffix(item));
+            key
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The direction and NULL-placement spelling that follows a sort key.
+///
+/// One place for both paths, so an aggregate's `ORDER BY` and a `Sort` node's
+/// key can never disagree about them — in `PostgreSQL` they are both
+/// `show_sortorder_options`'s wording.
+fn sort_order_suffix(item: &OrderItem) -> String {
+    let mut suffix = String::new();
+    if !item.asc {
+        suffix.push_str(" DESC");
+    }
+    // PostgreSQL prints the NULLS clause only when it is not the default for
+    // the direction (NULLS LAST for ASC, NULLS FIRST for DESC).
+    if item.nulls_first == item.asc {
+        suffix.push_str(if item.nulls_first {
+            " NULLS FIRST"
+        } else {
+            " NULLS LAST"
+        });
+    }
+    suffix
 }
 
 /// Deparse `expr` the way `PostgreSQL` prints a `Filter:` line: operator nodes
@@ -378,10 +504,6 @@ fn deparse_with(expr: &Expr, qualify: bool) -> String {
             deparse_with(expr, qualify),
             if *negated { "NOT " } else { "" }
         ),
-        Expr::Unary {
-            op: UnaryOp::Not,
-            expr,
-        } => format!("(NOT {})", deparse_with(expr, qualify)),
         other => deparse_bare_with(other, qualify),
     }
 }
@@ -390,6 +512,94 @@ fn deparse_with(expr: &Expr, qualify: bool) -> String {
 /// `PostgreSQL` uses in `Group Key`/`Sort Key` lists.
 fn deparse_bare(expr: &Expr) -> String {
     deparse_bare_with(expr, true)
+}
+
+/// The operand of a `::` cast, parenthesised the way `get_coercion_expr` does.
+///
+/// `PostgreSQL` wraps a coercion's argument in parentheses unconditionally —
+/// `(a)::text`, `((a + b))::pg_lsn` — with one exception: a constant that is
+/// already the target type is printed by `get_const_expr` instead, which
+/// decorates it with `::type` itself and needs no wrapping. A literal is that
+/// constant, which is why the corpus has `'42'::bigint` and `NULL::integer`
+/// beside `(stringu1)::text`.
+fn cast_operand(expr: &Expr, qualify: bool) -> String {
+    let rendered = deparse_bare_with(expr, qualify);
+    if matches!(
+        expr,
+        Expr::IntLiteral(_)
+            | Expr::NumericLiteral(_)
+            | Expr::StringLiteral(_)
+            | Expr::BitStringLiteral(_)
+            | Expr::BoolLiteral(_)
+            | Expr::NullLiteral
+    ) {
+        return rendered;
+    }
+    format!("({rendered})")
+}
+
+/// What a subscript is taken of, parenthesized the way `get_rule_expr` does.
+///
+/// The rule is [`crate::viewdef::subscript_base_is_bare`], which the view
+/// deparser answers against the same oracle: a bare column or a field
+/// selection stands alone, everything else gains a pair. So a plan line reads
+/// `(string_to_array(t, ','::text))[1]`, not `string_to_array(t, ','::text)[1]`.
+fn subscript_base(base: &Expr, qualify: bool) -> String {
+    let text = deparse_bare_with(base, qualify);
+    if crate::viewdef::subscript_base_is_bare(base) {
+        text
+    } else {
+        format!("({text})")
+    }
+}
+
+/// What a field selection is taken of, parenthesized the way `get_rule_expr`
+/// does — [`crate::viewdef::field_base_is_bare`], the mirror image of the
+/// subscript rule. A column base keeps its pair, so a plan line still reads
+/// `(c).f`, but `(c).h.g` and `carr[1].f` shed the one this used to add
+/// unconditionally.
+fn field_base(base: &Expr, qualify: bool) -> String {
+    let text = deparse_bare_with(base, qualify);
+    if crate::viewdef::field_base_is_bare(base) {
+        text
+    } else {
+        format!("({text})")
+    }
+}
+
+/// A call rendered the ordinary way, as `name(args)` with the modifiers that
+/// change which rows an aggregate folds.
+///
+/// `viewdef::func_text` renders the same envelope for `pg_get_viewdef`, against
+/// the same oracle. The two are deliberately separate today — that module's
+/// version also rewrites the XML constructors and the SQL value functions,
+/// neither of which belongs in a plan line — but they must not drift: this
+/// function dropping all three modifiers while its sibling printed them is
+/// exactly the bug this comment exists to stop recurring.
+fn deparse_plain_call(call: &crabka_pgparser::ast::FuncCall, qualify: bool) -> String {
+    let args = match &call.args {
+        FuncArgs::Star => "*".to_string(),
+        FuncArgs::Exprs(args) => args
+            .iter()
+            .map(|arg| deparse_bare_with(arg, qualify))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let order_by = if call.order_by.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", sort_key_with(&call.order_by, qualify))
+    };
+    // `get_agg_expr` adds no parentheses of its own around the predicate; the
+    // operator node it holds brings whatever it needs.
+    let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
+        format!(" FILTER (WHERE {})", deparse_with(predicate, qualify))
+    });
+    format!(
+        "{}({}{args}{order_by}){filter}",
+        call.name,
+        if call.distinct { "DISTINCT " } else { "" }
+    )
 }
 
 fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
@@ -410,11 +620,14 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
             _ => name.clone(),
         },
         Expr::FieldSelect { base, field } => {
-            format!("({}).{field}", deparse_bare_with(base, qualify))
+            format!("{}.{field}", field_base(base, qualify))
         }
         Expr::FieldSelectAll(base) => format!("({}).*", deparse_bare_with(base, qualify)),
         Expr::IntLiteral(digits) | Expr::NumericLiteral(digits) => digits.clone(),
         Expr::StringLiteral(text) => format!("'{}'::text", text.replace('\'', "''")),
+        // `pg_get_expr` renders a bit constant with its type name quoted,
+        // because `bit` is a reserved word.
+        Expr::BitStringLiteral(bits) => format!("'{bits}'::\"bit\""),
         Expr::BoolLiteral(value) => if *value { "true" } else { "false" }.to_string(),
         Expr::NullLiteral => "NULL".to_string(),
         Expr::Param(index) => format!("${index}"),
@@ -422,24 +635,69 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
             "{} COLLATE \"{collation}\"",
             deparse_bare_with(expr, qualify)
         ),
-        Expr::Func(call) => match &call.args {
-            FuncArgs::Star => format!("{}(*)", call.name),
-            FuncArgs::Exprs(args) => format!(
-                "{}({})",
-                call.name,
-                args.iter()
-                    .map(|arg| deparse_bare_with(arg, qualify))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        },
-        Expr::Cast { expr, ty } => format!("{}::{}", deparse_bare_with(expr, qualify), ty.name()),
-        Expr::Unary { op, expr } => match op {
-            UnaryOp::Neg => format!("-{}", deparse_bare_with(expr, qualify)),
-            UnaryOp::Plus => format!("+{}", deparse_bare_with(expr, qualify)),
-            UnaryOp::Not => format!("(NOT {})", deparse_with(expr, qualify)),
-            other => format!("{other:?} {}", deparse_bare_with(expr, qualify)),
-        },
+        // An aggregate's `DISTINCT`, its own `ORDER BY` and its `FILTER` all
+        // change which rows it folds and in what order, so all three print:
+        // `count(*)` and `count(*) FILTER (WHERE …)` are different aggregates,
+        // and a plan line that spelled them alike would describe neither.
+        //
+        // `viewdef::func_text` renders the same envelope for `pg_get_viewdef`,
+        // against the same oracle. The two are deliberately separate today —
+        // that module's version also rewrites the XML constructors and the SQL
+        // value functions, neither of which belongs in a plan line — but they
+        // must not drift: this arm dropping all three modifiers while its
+        // sibling printed them is exactly the bug this comment exists to stop
+        // recurring.
+        // `AT TIME ZONE` and `AT LOCAL` reach the planner as `timezone` calls
+        // that remember their spelling, and `ruleutils.c` prints the spelling
+        // back in a plan line exactly as it does in a view definition. An
+        // operator operand keeps its own parentheses under the construct.
+        Expr::Func(call) if call.sql_syntax && call.name == "timezone" => {
+            let operand = |expr: &Expr| match expr {
+                Expr::Binary { .. } | Expr::Unary { .. } => {
+                    format!("({})", deparse_bare_with(expr, qualify))
+                }
+                other => deparse_bare_with(other, qualify),
+            };
+            match &call.args {
+                FuncArgs::Exprs(args) => match args.as_slice() {
+                    // Note the reversed argument order: `timezone` takes the
+                    // zone first.
+                    [zone, value] => {
+                        format!("({} AT TIME ZONE {})", operand(value), operand(zone))
+                    }
+                    [value] => format!("({} AT LOCAL)", operand(value)),
+                    _ => deparse_plain_call(call, qualify),
+                },
+                FuncArgs::Star => deparse_plain_call(call, qualify),
+            }
+        }
+        Expr::Func(call) => deparse_plain_call(call, qualify),
+        Expr::Cast { expr, ty } => format!("{}::{}", cast_operand(expr, qualify), ty.name()),
+        // A sign on a numeric literal is not an operator by the time
+        // PostgreSQL deparses anything: `doNegate` folds it into the literal's
+        // own spelling, so what reaches `ruleutils` is one `Const` and
+        // `get_const_expr` writes `'-3'::integer`. Gres has no typed constant
+        // here — the plan is built from the AST, and the AST does not know
+        // whether `-3` is an `int4`, a `bigint` or a `numeric` — so it cannot
+        // pick the type label, and guessing one has been measured to cost more
+        // corpus lines through psql's ruler than the wrong spelling does.
+        // Folding the sign is the part that is right either way, and it keeps
+        // the operator arm below from claiming `-3` is an operator node.
+        Expr::Unary {
+            op: op @ (UnaryOp::Neg | UnaryOp::Plus),
+            expr,
+        } if matches!(expr.as_ref(), Expr::IntLiteral(_) | Expr::NumericLiteral(_)) => {
+            let sign = if matches!(op, UnaryOp::Neg) { "-" } else { "+" };
+            format!("{sign}{}", deparse_bare_with(expr, qualify))
+        }
+        // Every other unary form is spelled by the one table `pg_get_viewdef`
+        // uses, with `PRETTY_PAREN` cleared because `EXPLAIN` deparses at
+        // `prettyFlags = 0`. That is why a plan line reads `(- q1)` and
+        // `(b IS TRUE)` rather than the `-q1` and `IsTrue b` this arm printed
+        // while it kept a second, incomplete table of its own.
+        Expr::Unary { op, expr } => {
+            crate::viewdef::unary_expr_text(*op, &deparse_bare_with(expr, qualify), false)
+        }
         // Forms that carry their own parentheses: `deparse_with` matches these
         // explicitly, so this delegation terminates.
         Expr::Binary { .. } | Expr::IsNull { .. } => deparse_with(expr, qualify),
@@ -518,11 +776,11 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
         Expr::Row(fields) => format!("ROW({})", expr_list_with(fields, qualify)),
         Expr::Subscript { base, index } => format!(
             "{}[{}]",
-            deparse_bare_with(base, qualify),
+            subscript_base(base, qualify),
             deparse_bare_with(index, qualify)
         ),
         Expr::ArrayRef { base, subscripts } => {
-            let mut text = deparse_bare_with(base, qualify);
+            let mut text = subscript_base(base, qualify);
             for subscript in subscripts {
                 match subscript {
                     ArraySubscript::Index(index) => {
@@ -575,24 +833,16 @@ fn expr_list_with(exprs: &[Expr], qualify: bool) -> String {
         .join(", ")
 }
 
-const fn binary_op_text(op: BinaryOp) -> &'static str {
-    match op {
-        BinaryOp::Eq => "=",
-        BinaryOp::Ne => "<>",
-        BinaryOp::Lt => "<",
-        BinaryOp::Le => "<=",
-        BinaryOp::Gt => ">",
-        BinaryOp::Ge => ">=",
-        BinaryOp::And => "AND",
-        BinaryOp::Or => "OR",
-        BinaryOp::Add => "+",
-        BinaryOp::Sub => "-",
-        BinaryOp::Mul => "*",
-        BinaryOp::Div => "/",
-        BinaryOp::Mod => "%",
-        BinaryOp::Concat => "||",
-        _ => "?",
-    }
+/// How EXPLAIN spells a binary operator.
+///
+/// Delegates to [`crate::eval::op_spelling`] rather than keeping a second table.
+/// This was a partial copy ending in `_ => "?"`, so every operator it had not
+/// been taught — the whole jsonb family, and every geometric operator — printed
+/// as a literal `?` in a `Filter:` line. A catch-all in a deparser cannot fail
+/// loudly, so the only durable fix is to have ONE exhaustive table that the
+/// compiler forces someone to extend when a `BinaryOp` variant is added.
+fn binary_op_text(op: BinaryOp) -> &'static str {
+    crate::eval::op_spelling(op)
 }
 
 /// Render the plan for the wire, one output line per element.
@@ -925,6 +1175,77 @@ mod tests {
                 "SELECT * FROM d1 ORDER BY id DESC, s",
                 &["Sort", "  Sort Key: id DESC, s", "  ->  Seq Scan on d1"],
             ),
+            // A `Sort` evaluates nothing, so its key is a reference to the node
+            // below and prints inside a pair of parentheses of its own — unless
+            // the reference lands on a plain column, as the two above do.
+            (
+                "SELECT * FROM d1 ORDER BY id + 1",
+                &["Sort", "  Sort Key: ((id + 1))", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT s FROM d1 ORDER BY lower(s)",
+                &["Sort", "  Sort Key: (lower(s))", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT * FROM d1 ORDER BY (id + 1) DESC NULLS LAST",
+                &[
+                    "Sort",
+                    "  Sort Key: ((id + 1)) DESC NULLS LAST",
+                    "  ->  Seq Scan on d1",
+                ],
+            ),
+            // `ORDER BY` names an output column before it names anything else,
+            // and the plan carries the expression the name stood for.
+            (
+                "SELECT id + 1 AS x FROM d1 ORDER BY x",
+                &["Sort", "  Sort Key: ((id + 1))", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT id AS x FROM d1 ORDER BY x",
+                &["Sort", "  Sort Key: id", "  ->  Seq Scan on d1"],
+            ),
+            // The written reference stands where the target adds only a
+            // qualifier: PostgreSQL prints one here only when the plan reads
+            // more than one relation, and this one reads d1 alone.
+            (
+                "SELECT d1.id FROM d1 ORDER BY id",
+                &["Sort", "  Sort Key: id", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT id, s FROM d1 ORDER BY 2",
+                &["Sort", "  Sort Key: s", "  ->  Seq Scan on d1"],
+            ),
+            (
+                "SELECT count(*) FROM d1 ORDER BY count(*)",
+                &[
+                    "Sort",
+                    "  Sort Key: (count(*))",
+                    "  ->  Aggregate",
+                    "        ->  Seq Scan on d1",
+                ],
+            ),
+            // The `HashAggregate` computes the key, so it prints without the
+            // extra pair the `Sort` above it adds to the very same expression.
+            (
+                "SELECT DISTINCT id + 1 FROM d1 ORDER BY 1",
+                &[
+                    "Sort",
+                    "  Sort Key: ((id + 1))",
+                    "  ->  HashAggregate",
+                    "        Group Key: (id + 1)",
+                    "        ->  Seq Scan on d1",
+                ],
+            ),
+            // A cast parenthesises what it converts; a literal constant carries
+            // its own type decoration instead and is left alone.
+            (
+                "SELECT * FROM d1 WHERE id::text = 'a'",
+                &["Seq Scan on d1", "  Filter: ((id)::text = 'a'::text)"],
+            ),
+            (
+                "SELECT * FROM d1 ORDER BY (id)::text",
+                &["Sort", "  Sort Key: ((id)::text)", "  ->  Seq Scan on d1"],
+            ),
             (
                 "SELECT * FROM d1 LIMIT 2 OFFSET 1",
                 &["Limit", "  ->  Seq Scan on d1"],
@@ -957,6 +1278,114 @@ mod tests {
         ];
         for (sql, expected) in cases {
             assert!(plan_text(sql, &costs_off()) == *expected, "{sql}");
+        }
+    }
+
+    /// Every unary form, in `PostgreSQL` 18.4's own `EXPLAIN (COSTS OFF)` text
+    /// over a `d1` that carries a column of each type the operator needs.
+    ///
+    /// `get_oper_expr` writes a prefix operator, one space, then the operand,
+    /// and `EXPLAIN` deparses with the pretty flag off, so the whole node
+    /// carries a pair of parentheses. A `BooleanTest` reads the same way from
+    /// the other side. `IS DOCUMENT` is the one exception in the set, and
+    /// `IS NOT DOCUMENT` is not a node at all — the grammar builds
+    /// `NOT (… IS DOCUMENT)` and the deparser prints that back.
+    #[test]
+    fn unary_operators_match_the_postgres_oracle() {
+        let cases: &[(&str, &str)] = &[
+            ("- id > 0", "  Filter: ((- id) > 0)"),
+            ("+ id > 0", "  Filter: ((+ id) > 0)"),
+            ("@ id > 0", "  Filter: ((@ id) > 0)"),
+            ("~ id > 0", "  Filter: ((~ id) > 0)"),
+            ("b IS TRUE", "  Filter: (b IS TRUE)"),
+            ("b IS NOT TRUE", "  Filter: (b IS NOT TRUE)"),
+            ("b IS FALSE", "  Filter: (b IS FALSE)"),
+            ("b IS NOT FALSE", "  Filter: (b IS NOT FALSE)"),
+            ("b IS UNKNOWN", "  Filter: (b IS UNKNOWN)"),
+            ("b IS NOT UNKNOWN", "  Filter: (b IS NOT UNKNOWN)"),
+            ("NOT b", "  Filter: (NOT b)"),
+            ("x IS DOCUMENT", "  Filter: x IS DOCUMENT"),
+            ("x IS NOT DOCUMENT", "  Filter: (NOT x IS DOCUMENT)"),
+            ("?- l", "  Filter: (?- l)"),
+            ("?| l", "  Filter: (?| l)"),
+            ("(@@ bx) IS NOT NULL", "  Filter: ((@@ bx) IS NOT NULL)"),
+            ("(!! q) IS NOT NULL", "  Filter: ((!! q) IS NOT NULL)"),
+        ];
+        for (predicate, expected) in cases {
+            let lines = plan_text(&format!("SELECT * FROM d1 WHERE {predicate}"), &costs_off());
+            assert!(lines == ["Seq Scan on d1", *expected], "{predicate}");
+        }
+
+        // A `Sort` references the node below it, and `get_special_variable`
+        // parenthesizes a reference that does not land on a plain column — so
+        // each of these carries the operator's own pair inside the sort key's.
+        let keys: &[(&str, &str)] = &[
+            ("- id", "  Sort Key: ((- id))"),
+            ("|/ f", "  Sort Key: ((|/ f))"),
+            ("||/ f", "  Sort Key: ((||/ f))"),
+            ("@-@ l", "  Sort Key: ((@-@ l))"),
+            ("# p", "  Sort Key: ((# p))"),
+        ];
+        for (key, expected) in keys {
+            let lines = plan_text(&format!("SELECT * FROM d1 ORDER BY {key}"), &costs_off());
+            assert!(
+                lines == ["Sort", *expected, "  ->  Seq Scan on d1"],
+                "{key}"
+            );
+        }
+
+        // A sign on a literal is not an operator. PostgreSQL folds it into the
+        // constant and answers `Filter: ((id = '-3'::integer) AND
+        // (n = '-1.5'::numeric))`; this module cannot pick the type label
+        // without knowing the constant's type, so it writes the folded
+        // spelling and no label. What it must not do is print `(- 3)`, which
+        // is neither engine's answer and is wider than both starts of one.
+        let folded = plan_text("SELECT * FROM d1 WHERE id = -3 AND n = -1.5", &costs_off());
+        assert!(folded == ["Seq Scan on d1", "  Filter: ((id = -3) AND (n = -1.5))"]);
+
+        // The node that computes the expression prints it without that extra
+        // pair, exactly as it does for any other grouping key.
+        let grouped = plan_text("SELECT DISTINCT b IS TRUE FROM d1", &costs_off());
+        assert!(
+            grouped
+                == [
+                    "HashAggregate",
+                    "  Group Key: (b IS TRUE)",
+                    "  ->  Seq Scan on d1",
+                ]
+        );
+    }
+
+    /// `get_rule_expr` parenthesizes a subscript's base unless it is a plain
+    /// column or a field selection. Each expectation is `PostgreSQL` 18.4's.
+    #[test]
+    fn a_subscript_base_is_parenthesised_unless_it_is_a_column_or_a_field() {
+        let cases: &[(&str, &str)] = &[
+            ("arr[1] = 1", "  Filter: (arr[1] = 1)"),
+            ("(c).f[1] = 1", "  Filter: ((c).f[1] = 1)"),
+        ];
+        for (predicate, expected) in cases {
+            let lines = plan_text(&format!("SELECT * FROM d1 WHERE {predicate}"), &costs_off());
+            assert!(lines == ["Seq Scan on d1", *expected], "{predicate}");
+        }
+
+        let keys: &[(&str, &str)] = &[
+            ("arr[1:2]", "  Sort Key: (arr[1:2])"),
+            (
+                "(string_to_array(s, ','))[1]",
+                "  Sort Key: ((string_to_array(s, ','::text))[1])",
+            ),
+            (
+                "(string_to_array(s, ','))[1:2]",
+                "  Sort Key: ((string_to_array(s, ','::text))[1:2])",
+            ),
+        ];
+        for (key, expected) in keys {
+            let lines = plan_text(&format!("SELECT * FROM d1 ORDER BY {key}"), &costs_off());
+            assert!(
+                lines == ["Sort", *expected, "  ->  Seq Scan on d1"],
+                "{key}"
+            );
         }
     }
 

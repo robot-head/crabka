@@ -46,6 +46,7 @@ url = "2"
 promql-parser = { version = "0.10", features = ["ser"] }
 columnar = "0.13"
 bytes = "1"
+shlex = "1.3"
 num-traits = "0.2.19"
 uom = { version = "0.38", default-features = false, features = ["autoconvert", "f64", "si", "std", "use_serde"] }
 thiserror = "2"
@@ -55,6 +56,16 @@ thiserror = "2"
 derive_more = { version = "2", features = ["display", "from", "into", "deref", "as_ref", "constructor", "from_str", "add", "add_assign", "mul", "sum"] }
 refined_type = "0.6"
 jsonpath-rust = "1.0"
+# XML tokenizer behind the `xml` type (crabka-pgtypes). Chosen because it is
+# pure safe Rust (`#![forbid(unsafe_code)]`, so it can live under this
+# workspace's `unsafe_code = "forbid"`) and because it performs no I/O and
+# resolves no entities: a reference is surfaced as an event for the caller to
+# resolve, so there is no code path from a SQL string to a file handle and XXE
+# is structurally impossible rather than switched off. Pinned to >= 0.41, the
+# first release carrying the fixes for RUSTSEC-2026-0194/0195 — unlike the
+# transitive 0.39 copy under `object_store`, this one parses attacker-supplied
+# documents straight off the wire.
+quick-xml = { version = "0.41", default-features = false }
 jfrs = "0.2.5"
 proptest = "1"
 # Expressive test assertions: `assert!(a == b)` / `check!(..)` with
@@ -109,6 +120,7 @@ once_cell = "1"
 # datafusion rev; the renovate rule below holds it to enforce that.
 object_store = { version = "0.13", features = ["aws", "gcp"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+pglz = "=0.1.1"
 multer = "3"
 snap = "1"
 lz4_flex = { version = "0.14", default-features = false, features = ["frame"] }
@@ -260,3 +272,8 @@ sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "r
 # PostgreSQL's `normalize(text, form)` / `is_normalized(text, form)` need the
 # Unicode NFC/NFD/NFKC/NFKD algorithms; this is the ecosystem's UAX #15 crate.
 unicode-normalization = "0.1"
+# `unicode_assigned(text)` asks whether every code point has been assigned,
+# which is General_Category != Cn. The table is generated from `UnicodeData.txt`
+# and is the whole of it, so no hand-kept list of ranges lives in this tree.
+unicode-general-category = "1"
+encoding_rs = "0.8"

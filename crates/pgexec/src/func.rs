@@ -22,7 +22,10 @@
 use std::cmp::Ordering;
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
-use crabka_pgtypes::{ColumnType, Datum, ops};
+use crabka_pgtypes::{
+    ColumnType, Datum, ElemType, ops,
+    usertype::{MultirangeRef, RangeRef},
+};
 
 use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
 
@@ -41,6 +44,9 @@ enum ScalarFunc {
     Concat,
     Abs,
     Mod,
+    BoolCompare {
+        equal: bool,
+    },
     Coalesce,
     NullIf,
     Greatest,
@@ -58,6 +64,7 @@ enum ScalarFunc {
     Ln,
     Log,
     Pi,
+    Float4Send,
     // SP33: string family.
     Lpad,
     Rpad,
@@ -89,6 +96,13 @@ enum ScalarFunc {
     /// S3: `pg_advisory_unlock_all`.
     AdvisoryUnlockAll,
     CurrentDatabase,
+    GetDatabaseEncoding,
+    /// `unicode_version()`: the Unicode release the engine's character tables
+    /// come from.
+    UnicodeVersion,
+    /// `unicode_assigned(text)`: has every code point in the string been
+    /// assigned?
+    UnicodeAssigned,
     CurrentSchema,
     CurrentUser,
     SessionUser,
@@ -99,6 +113,24 @@ enum ScalarFunc {
     /// `pg_input_is_valid(text, text)`: would the type's input function accept
     /// this string?
     PgInputIsValid,
+    /// Regression helper exposing PostgreSQL's `IsBinaryCoercible`.
+    BinaryCoercible,
+    PgNumaAvailable,
+    RangeConstructor(RangeRef),
+    MultirangeConstructor(MultirangeRef),
+    GenericMultirangeConstructor,
+    IsEmpty,
+    LowerInc,
+    LowerInf,
+    UpperInc,
+    UpperInf,
+    RangeContains,
+    RangeContainedBy,
+    RangeOverlaps,
+    RangeAdjacent,
+    RangeMinus,
+    RangeMerge,
+    MultirangePredicate,
     PgTableIsVisible,
     NextVal,
     CurrVal,
@@ -123,6 +155,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "concat" => ScalarFunc::Concat,
         "abs" => ScalarFunc::Abs,
         "mod" => ScalarFunc::Mod,
+        "booleq" => ScalarFunc::BoolCompare { equal: true },
+        "boolne" => ScalarFunc::BoolCompare { equal: false },
         "coalesce" => ScalarFunc::Coalesce,
         "nullif" => ScalarFunc::NullIf,
         "greatest" => ScalarFunc::Greatest,
@@ -138,13 +172,14 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "ln" => ScalarFunc::Ln,
         "log" => ScalarFunc::Log,
         "pi" => ScalarFunc::Pi,
+        "float4send" => ScalarFunc::Float4Send,
         "lpad" => ScalarFunc::Lpad,
         "rpad" => ScalarFunc::Rpad,
         "left" => ScalarFunc::Left,
         "right" => ScalarFunc::Right,
         "repeat" => ScalarFunc::Repeat,
         "reverse" => ScalarFunc::Reverse,
-        "strpos" => ScalarFunc::Strpos,
+        "strpos" | "position" => ScalarFunc::Strpos,
         "initcap" => ScalarFunc::Initcap,
         "ascii" => ScalarFunc::Ascii,
         "chr" => ScalarFunc::Chr,
@@ -194,6 +229,9 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_advisory_unlock_shared" => ScalarFunc::AdvisoryUnlock { shared: true },
         "pg_advisory_unlock_all" => ScalarFunc::AdvisoryUnlockAll,
         "current_database" => ScalarFunc::CurrentDatabase,
+        "getdatabaseencoding" => ScalarFunc::GetDatabaseEncoding,
+        "unicode_version" => ScalarFunc::UnicodeVersion,
+        "unicode_assigned" => ScalarFunc::UnicodeAssigned,
         "current_schema" => ScalarFunc::CurrentSchema,
         "current_user" => ScalarFunc::CurrentUser,
         "session_user" => ScalarFunc::SessionUser,
@@ -201,12 +239,41 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "format_type" => ScalarFunc::FormatType,
         "pg_typeof" => ScalarFunc::PgTypeof,
         "pg_input_is_valid" => ScalarFunc::PgInputIsValid,
+        "binary_coercible" => ScalarFunc::BinaryCoercible,
+        "pg_numa_available" => ScalarFunc::PgNumaAvailable,
+        "isempty" => ScalarFunc::IsEmpty,
+        "lower_inc" => ScalarFunc::LowerInc,
+        "lower_inf" => ScalarFunc::LowerInf,
+        "upper_inc" => ScalarFunc::UpperInc,
+        "upper_inf" => ScalarFunc::UpperInf,
+        "range_contains" => ScalarFunc::RangeContains,
+        "range_contained_by" => ScalarFunc::RangeContainedBy,
+        "range_overlaps" => ScalarFunc::RangeOverlaps,
+        "range_adjacent" => ScalarFunc::RangeAdjacent,
+        "range_minus" => ScalarFunc::RangeMinus,
+        "range_merge" => ScalarFunc::RangeMerge,
+        "range_overlaps_multirange"
+        | "multirange_overlaps_range"
+        | "multirange_overlaps_multirange"
+        | "multirange_contains_elem"
+        | "multirange_contains_range"
+        | "multirange_contains_multirange"
+        | "elem_contained_by_multirange"
+        | "range_contained_by_multirange"
+        | "multirange_contained_by_multirange" => ScalarFunc::MultirangePredicate,
         "pg_table_is_visible" => ScalarFunc::PgTableIsVisible,
         "nextval" => ScalarFunc::NextVal,
         "currval" => ScalarFunc::CurrVal,
         "setval" => ScalarFunc::SetVal,
         "pg_notify" => ScalarFunc::PgNotify,
-        _ => return None,
+        "multirange" => ScalarFunc::GenericMultirangeConstructor,
+        _ => match ColumnType::from_sql_name(name) {
+            Some(ColumnType::Range(range)) => ScalarFunc::RangeConstructor(range),
+            Some(ColumnType::Multirange(multirange)) => {
+                ScalarFunc::MultirangeConstructor(multirange)
+            }
+            _ => return None,
+        },
     })
 }
 
@@ -222,6 +289,183 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::string_fn::is_string_func(name)
         || crate::regexp_fn::is_regexp_func(name)
         || crate::text_search_fn::is_text_search_func(name)
+        || crate::network_fn::is_network_func(name)
+        || crate::xml_fn::is_xml_func(name)
+        || crate::bit_fn::is_bit_func(name)
+        || crate::money_fn::is_money_func(name)
+        || crate::sysid_fn::is_sysid_func(name)
+        || crate::snapshot_fn::is_snapshot_func(name)
+        || crate::geometry_fn::is_geometry_func(name)
+        || constructor_cast_type(name).is_some()
+}
+
+/// Every one-argument function `PostgreSQL` names after a type, with the
+/// argument types it declares — `("float8", ["int4", "int8", …])` for the
+/// `float8(bigint)` that `SELECT q1, float8(q1) FROM int8_tbl` calls.
+///
+/// A cast function's `pg_proc.proname` is its *target type's* `pg_type.typname`,
+/// so the call means exactly `q1::float8`. `PostgreSQL` documents the spelling
+/// as obsolescent, but its own regression suite writes it, so the engine has to
+/// resolve it.
+///
+/// Enumerated from the pinned donor `REL_18_4`, not from what a test happened to
+/// name: every `src/include/catalog/pg_proc.dat` row whose `proname` is a
+/// `pg_type.dat` `typname` and whose `proargtypes` has exactly one non-array
+/// entry. A donor bump re-runs that filter over the new files.
+///
+/// Taking the arity from `pg_proc` and not from `pg_cast` is what keeps the
+/// length-coercion casts out. `pg_cast` has a `numeric` → `numeric` row, but its
+/// function is `numeric(numeric, int4)`; a one-argument `numeric(x::numeric)` is
+/// 42883 on `PostgreSQL` and has to stay 42883 here.
+///
+/// Sorted by name, so the lookup below can binary-search and a duplicate is
+/// visible on sight.
+const CONSTRUCTOR_CASTS: &[(&str, &[&str])] = &[
+    ("bool", &["int4", "jsonb"]),
+    ("box", &["circle", "point", "polygon"]),
+    ("bpchar", &["char", "name"]),
+    ("bytea", &["int2", "int4", "int8"]),
+    ("char", &["int4", "text"]),
+    ("cidr", &["inet"]),
+    ("circle", &["box", "polygon"]),
+    ("date", &["timestamp", "timestamptz"]),
+    ("datemultirange", &["daterange"]),
+    (
+        "float4",
+        &["float8", "int2", "int4", "int8", "jsonb", "numeric"],
+    ),
+    (
+        "float8",
+        &["float4", "int2", "int4", "int8", "jsonb", "numeric"],
+    ),
+    (
+        "int2",
+        &[
+            "bytea", "float4", "float8", "int4", "int8", "jsonb", "numeric",
+        ],
+    ),
+    (
+        "int4",
+        &[
+            "bit", "bool", "bytea", "char", "float4", "float8", "int2", "int8", "jsonb", "numeric",
+        ],
+    ),
+    ("int4multirange", &["int4range"]),
+    (
+        "int8",
+        &[
+            "bit", "bytea", "float4", "float8", "int2", "int4", "jsonb", "numeric", "oid",
+        ],
+    ),
+    ("int8multirange", &["int8range"]),
+    ("interval", &["time"]),
+    ("lseg", &["box"]),
+    ("macaddr", &["macaddr8"]),
+    ("macaddr8", &["macaddr"]),
+    ("money", &["int4", "int8", "numeric"]),
+    ("name", &["bpchar", "text", "varchar"]),
+    (
+        "numeric",
+        &["float4", "float8", "int2", "int4", "int8", "jsonb", "money"],
+    ),
+    ("nummultirange", &["numrange"]),
+    ("oid", &["int8"]),
+    ("path", &["polygon"]),
+    ("pg_lsn", &["numeric"]),
+    ("point", &["box", "circle", "lseg", "polygon"]),
+    ("polygon", &["box", "circle", "path"]),
+    ("regclass", &["text"]),
+    ("text", &["bool", "bpchar", "char", "inet", "name", "xml"]),
+    ("time", &["interval", "timestamp", "timestamptz", "timetz"]),
+    ("timestamp", &["date", "timestamptz"]),
+    ("timestamptz", &["date", "timestamp"]),
+    ("timetz", &["time", "timestamptz"]),
+    ("tsmultirange", &["tsrange"]),
+    ("tstzmultirange", &["tstzrange"]),
+    ("varchar", &["name"]),
+    ("xid", &["xid8"]),
+    ("xml", &["text"]),
+];
+
+/// The Unicode release `unicode_version()` reports, as (major, minor).
+///
+/// `PostgreSQL` generates every Unicode table it has in one run, so it has one
+/// version to report. Crabka's come from two crates on separate release
+/// schedules — `unicode-normalization` for UAX #15 and
+/// `unicode-general-category` for `unicode_assigned` — so the *lower* of the
+/// two is the release at which every Unicode answer this engine gives is
+/// current. Reporting the higher would claim coverage the other table has not
+/// caught up to.
+fn unicode_version() -> (u64, u64) {
+    let (norm_major, norm_minor, _) = unicode_normalization::UNICODE_VERSION;
+    let normalization = (u64::from(norm_major), u64::from(norm_minor));
+    let (cat_major, cat_minor, _) = unicode_general_category::UNICODE_VERSION;
+    normalization.min((cat_major, cat_minor))
+}
+
+/// Resolve one of the enumeration's `typname`s.
+///
+/// A `pg_proc` name is a `typname`, which is what a **quoted** type name
+/// resolves through: `PostgreSQL` spells the one-byte type's cast function
+/// `char`, the same identifier `"char"` names, and never `character(1)`. So the
+/// quoted table is consulted first, exactly as the parser does for `'a'::"char"`.
+fn type_of_typname(name: &str) -> Option<ColumnType> {
+    ColumnType::from_quoted_builtin_sql_name(name)
+        .or_else(|| ColumnType::from_builtin_sql_name(name))
+}
+
+/// The type a constructor-style cast call converts to, or `None` when `name` is
+/// no such function.
+fn constructor_cast_type(name: &str) -> Option<ColumnType> {
+    CONSTRUCTOR_CASTS
+        .binary_search_by_key(&name, |(target, _)| *target)
+        .ok()?;
+    type_of_typname(name)
+}
+
+/// The `Expr::Cast` a one-argument constructor-style call is, or `None` when the
+/// call is not one.
+///
+/// Rewriting to the cast node rather than converting here is what keeps the two
+/// spellings from drifting: `float8(x)` then goes through the same operand
+/// evaluation, the same `CREATE CAST` lookup and the same conversion table as
+/// `x::float8`, and gains whatever either of those gains.
+///
+/// The operand's type must be one the function declares. Without that check
+/// `xid('1'::xid)` would answer a value where `PostgreSQL` has only
+/// `xid(xid8)` and reports 42883, and `text(row('Jim','Beam'))` would render the
+/// composite the explicit cast renders. An operand still typed `unknown` is
+/// allowed through, because `PostgreSQL` resolves those against the candidate
+/// list rather than rejecting them.
+///
+/// Crabka holds `name` values in `text`, so the two collapse into one candidate
+/// here and `varchar(x::text)` resolves where `PostgreSQL` wants a `name`. That
+/// is the existing type mapping showing through, not a rule of this table.
+fn constructor_cast(fc: &FuncCall, scope: Option<&Scope>) -> Option<Expr> {
+    let index = CONSTRUCTOR_CASTS
+        .binary_search_by_key(&fc.name.as_str(), |(target, _)| *target)
+        .ok()?;
+    let ty = type_of_typname(fc.name.as_str())?;
+    let FuncArgs::Exprs(args) = &fc.args else {
+        return None;
+    };
+    let [arg] = args.as_slice() else {
+        return None;
+    };
+    let declared = CONSTRUCTOR_CASTS[index].1;
+    let given = scope.and_then(|scope| crate::eval::infer_type(arg, scope).ok());
+    if let Some(given) = given
+        && !declared
+            .iter()
+            .filter_map(|name| type_of_typname(name))
+            .any(|declared| declared.oid() == given.oid())
+    {
+        return None;
+    }
+    Some(Expr::Cast {
+        expr: Box::new(arg.clone()),
+        ty,
+    })
 }
 
 /// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
@@ -236,9 +480,11 @@ pub(crate) fn is_scalar(name: &str) -> bool {
 /// not.
 pub(crate) fn niladic_keyword_call(name: &str) -> Option<FuncCall> {
     matches!(name, "current_schema").then(|| FuncCall {
+        sql_syntax: false,
         name: name.to_string(),
         distinct: false,
         args: FuncArgs::Exprs(Vec::new()),
+        order_by: Vec::new(),
         filter: None,
     })
 }
@@ -263,6 +509,15 @@ fn distinct_not_aggregate(name: &str) -> ExecError {
     ))
 }
 
+/// A sort inside the parentheses orders the rows an aggregate accumulates. A
+/// scalar function sees one row at a time and has nothing to order, so
+/// `PostgreSQL` reports 42809 for it — the same class as a misplaced `DISTINCT`.
+fn order_by_not_aggregate(name: &str) -> ExecError {
+    ExecError::WrongObjectType(format!(
+        "ORDER BY specified, but {name} is not an aggregate function"
+    ))
+}
+
 /// The positional argument list of a scalar call. `f(*)` is never valid for a
 /// scalar function (only `count(*)` is), so it is an undefined-function error.
 fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
@@ -272,11 +527,15 @@ fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     }
 }
 
-/// Reject the `DISTINCT` modifier (42809) and return the call's argument list.
-/// Shared front-door check for both `scalar_result_type` and `eval_scalar`.
+/// Reject the aggregate-only modifiers (42809) and return the call's argument
+/// list. Shared front-door check for both `scalar_result_type` and
+/// `eval_scalar`.
 pub(crate) fn checked_args(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     if fc.distinct {
         return Err(distinct_not_aggregate(&fc.name));
+    }
+    if !fc.order_by.is_empty() {
+        return Err(order_by_not_aggregate(&fc.name));
     }
     exprs_of(fc)
 }
@@ -294,8 +553,39 @@ pub(crate) fn checked_args(fc: &FuncCall) -> Result<&[Expr], ExecError> {
 /// runtime as 42804, not here as 42883. This per-clause difference is
 /// documented.
 pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
+    match builtin_scalar_result_type(fc, scope) {
+        Err(ExecError::UndefinedFunction(message)) => constructor_cast(fc, Some(scope))
+            .map_or(Err(ExecError::UndefinedFunction(message)), |cast| {
+                crate::eval::infer_type(&cast, scope)
+            }),
+        resolved => resolved,
+    }
+}
+
+/// [`scalar_result_type`] without the constructor-cast last resort, so that
+/// `text(inet)` keeps `network_fn`'s meaning and only a 42883 there falls
+/// through to the cast.
+fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
     if crate::text_search_fn::is_text_search_func(&fc.name) {
         return crate::text_search_fn::text_search_result_type(fc, scope);
+    }
+    if crate::network_fn::is_network_func(&fc.name) {
+        return crate::network_fn::network_func_result_type(fc, scope);
+    }
+    if crate::xml_fn::is_xml_func(&fc.name) {
+        return crate::xml_fn::xml_func_result_type(fc, scope);
+    }
+    if crate::bit_fn::is_bit_func(&fc.name) {
+        return crate::bit_fn::bit_func_result_type(fc, scope);
+    }
+    if crate::money_fn::is_money_func(&fc.name) {
+        return crate::money_fn::money_func_result_type(fc, scope);
+    }
+    if crate::sysid_fn::is_sysid_func(&fc.name) {
+        return crate::sysid_fn::sysid_func_result_type(fc, scope);
+    }
+    if crate::snapshot_fn::is_snapshot_func(&fc.name) {
+        return crate::snapshot_fn::snapshot_func_result_type(fc, scope);
     }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::math_func_result_type(fc, scope);
@@ -306,24 +596,59 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
     if crate::regexp_fn::is_regexp_func(&fc.name) {
         return crate::regexp_fn::regexp_func_result_type(fc, scope);
     }
+    // Last of the family modules, so every name the older families already own
+    // keeps its meaning; the geometric surface adds only names of its own.
+    if crate::geometry_fn::is_geometry_func(&fc.name) {
+        return crate::geometry_fn::geometry_func_result_type(fc, scope);
+    }
     let f = scalar_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = checked_args(fc)?;
     let n = args.len();
     match f {
         ScalarFunc::Length => {
             require_arity(fc, n == 1)?;
-            if crate::eval::infer_type(&args[0], scope)? != ColumnType::TsVector {
-                require_text(&args[0], scope)?;
+            let ty = crate::eval::infer_type(&args[0], scope)?;
+            // `length(lseg)` and `length(path)` are the geometric overloads and
+            // return `float8`. Only the `length` spelling has them —
+            // `char_length`/`character_length` are `text`-only in PostgreSQL.
+            if fc.name == "length"
+                && let Some(result) = crate::geometry_fn::geometric_length_type(ty)
+            {
+                return Ok(result);
+            }
+            match ty {
+                ColumnType::TsVector => {}
+                ColumnType::Bytea if fc.name == "length" => {}
+                // `length(bit)` is `bitlength` — the bit count, not a
+                // character count.
+                ty if crate::bit_fn::is_bit_type(ty) => {}
+                _ => require_text(&args[0], scope)?,
             }
             Ok(ColumnType::Int4)
         }
         ScalarFunc::Upper | ScalarFunc::Lower => {
             require_arity(fc, n == 1)?;
-            require_text(&args[0], scope)?;
-            Ok(ColumnType::Text)
+            let ty = crate::eval::infer_type(&args[0], scope)?;
+            match ty {
+                ColumnType::Range(range) => Ok(*range.subtype),
+                ColumnType::Multirange(multirange) => Ok(*multirange.range.subtype),
+                _ => {
+                    require_text(&args[0], scope)?;
+                    Ok(ColumnType::Text)
+                }
+            }
         }
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
             require_arity(fc, n == 1 || n == 2)?;
+            // The `bytea` trims are two-argument only: PostgreSQL declares no
+            // default byte set, because "whitespace" is a property of text.
+            if is_bytea_subject(&args[0], scope)? {
+                if n != 2 {
+                    return Err(undefined_function_spelled(&fc.name, args, scope));
+                }
+                require_bytea(&args[1], scope)?;
+                return Ok(ColumnType::Bytea);
+            }
             for a in args {
                 require_text(a, scope)?;
             }
@@ -331,6 +656,23 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::Substr => {
             require_arity(fc, n == 2 || n == 3)?;
+            // `substring(bytea, int [, int])` is byte-indexed and has no
+            // pattern form, so its count arguments are always integers.
+            if is_bytea_subject(&args[0], scope)? {
+                for a in &args[1..] {
+                    require_int(a, scope)?;
+                }
+                return Ok(ColumnType::Bytea);
+            }
+            // `substring(bit, int [, int])` is a distinct function returning
+            // `bit`; it has no pattern form, so the count arguments are always
+            // integers.
+            if crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[0], scope)?) {
+                for a in &args[1..] {
+                    require_int(a, scope)?;
+                }
+                return Ok(ColumnType::Bit(None));
+            }
             require_text(&args[0], scope)?;
             // Two shapes share the name, and PostgreSQL tells them apart by the
             // second argument's type: `substring(text, int [, int])` takes a
@@ -351,6 +693,19 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         // characters as it inserts.
         ScalarFunc::Overlay => {
             require_arity(fc, n == 3 || n == 4)?;
+            if crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[0], scope)?) {
+                for a in &args[2..] {
+                    require_int(a, scope)?;
+                }
+                return Ok(ColumnType::Bit(None));
+            }
+            if is_bytea_subject(&args[0], scope)? {
+                require_bytea(&args[1], scope)?;
+                for a in &args[2..] {
+                    require_int(a, scope)?;
+                }
+                return Ok(ColumnType::Bytea);
+            }
             require_text(&args[0], scope)?;
             require_text(&args[1], scope)?;
             for a in &args[2..] {
@@ -376,6 +731,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::Abs => {
             require_arity(fc, n == 1)?;
+            // `abs` is declared over the numeric family only; naming the
+            // argument's type is what PostgreSQL reports for `abs(money)`.
+            if matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Money | ColumnType::Bit(_) | ColumnType::VarBit(_)
+            ) {
+                return Err(undefined_function_spelled(&fc.name, args, scope));
+            }
             // abs preserves the numeric type (int width, or SP30's float8).
             require_numeric(&args[0], scope)
         }
@@ -395,6 +758,15 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
                 Ok(promote(lt, rt))
             }
         }
+        ScalarFunc::BoolCompare { .. } => {
+            require_arity(fc, n == 2)?;
+            for arg in args {
+                if !is_unknown_literal(arg) {
+                    require_bool(arg, scope)?;
+                }
+            }
+            Ok(ColumnType::Bool)
+        }
         ScalarFunc::Coalesce | ScalarFunc::Greatest | ScalarFunc::Least | ScalarFunc::NullIf => {
             require_arity(
                 fc,
@@ -405,17 +777,49 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
                 },
             )?;
             let ty = unify_args(f, args, scope)?;
+            match f {
+                ScalarFunc::NullIf if crate::eval::is_scalar_jsonpath(ty) => {
+                    return Err(ExecError::UndefinedFunction(
+                        "operator does not exist: jsonpath = jsonpath".into(),
+                    ));
+                }
+                // `NULLIF` is `=` in disguise, and neither `json` nor `xml`
+                // has an `=`. The wording is the operator's, not the
+                // function's, which is why this cannot fall through to the
+                // generic arity check.
+                ScalarFunc::NullIf if crate::eval::is_uncomparable_scalar(ty) => {
+                    let name = ty.name();
+                    return Err(ExecError::UndefinedFunction(format!(
+                        "operator does not exist: {name} = {name}"
+                    )));
+                }
+                ScalarFunc::Greatest | ScalarFunc::Least => {
+                    if matches!(
+                        ty.storage_type(),
+                        ColumnType::JsonPath
+                            | ColumnType::Json
+                            | ColumnType::Xml
+                            | ColumnType::Array(ElemType::JsonPath)
+                            | ColumnType::Array(ElemType::Json)
+                            | ColumnType::Array(ElemType::Xml)
+                    ) {
+                        return Err(ExecError::UndefinedFunction(format!(
+                            "could not identify a comparison function for type {}",
+                            ty.name()
+                        )));
+                    }
+                }
+                ScalarFunc::NullIf => {}
+                ScalarFunc::Coalesce => {}
+                _ => unreachable!(),
+            }
             // PostgreSQL resolves the common type ignoring `unknown` literals,
             // then coerces each literal to it — at PLAN time, which is why
             // `coalesce(1, 'x')` is 22P02 even though the literal is never the
             // value returned.
             for a in args {
                 if let Expr::StringLiteral(s) = a {
-                    crabka_pgtypes::cast::cast(
-                        &Datum::Text(s.clone()),
-                        ty,
-                        &jiff::tz::TimeZone::UTC,
-                    )?;
+                    crate::eval::cast_value(&Datum::Text(s.clone()), ty, &jiff::tz::TimeZone::UTC)?;
                 }
             }
             Ok(ty)
@@ -435,6 +839,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
                 return Err(ambiguous_function(&fc.name, n));
             }
             if n == 1 {
+                // `trunc(macaddr)` / `trunc(macaddr8)` zero the device part of
+                // a hardware address, keeping the manufacturer prefix.
+                if f == ScalarFunc::Trunc
+                    && let ty @ (ColumnType::MacAddr | ColumnType::MacAddr8) =
+                        crate::eval::infer_type(&args[0], scope)?
+                {
+                    return Ok(ty);
+                }
                 let t = require_numeric(&args[0], scope)?;
                 Ok(float4_widens(t))
             } else {
@@ -453,7 +865,21 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             }
         }
         ScalarFunc::Sqrt | ScalarFunc::Exp | ScalarFunc::Ln | ScalarFunc::Log => {
-            require_arity(fc, n == 1)?;
+            require_arity(fc, n == 1 || (f == ScalarFunc::Log && n == 2))?;
+            if n == 2 {
+                // `log(base, num)` is declared over `numeric` alone — there is
+                // no two-argument `float8` candidate — so a `float8` operand
+                // has nothing to resolve to and both `unknown` literals land on
+                // `numeric` rather than the usual `float8`.
+                for arg in args {
+                    if !is_unknown_literal(arg)
+                        && float4_widens(require_numeric(arg, scope)?) == ColumnType::Float8
+                    {
+                        return Err(no_matching_function());
+                    }
+                }
+                return Ok(ColumnType::Numeric(None));
+            }
             let at = require_numeric(&args[0], scope)?;
             Ok(if at.is_numeric() {
                 ColumnType::Numeric(None)
@@ -465,11 +891,32 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 2)?;
             let a = require_numeric(&args[0], scope)?;
             let b = require_numeric(&args[1], scope)?;
-            Ok(power_result_type(a, b))
+            Ok(power_overload(args, a, b))
         }
         ScalarFunc::Pi => {
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Float8)
+        }
+        // `float4send(real)` is `real`'s binary output function, and the wire
+        // format is what it returns: four big-endian IEEE 754 bytes. The suite
+        // reads it to pin how a decimal literal rounds into `real`, which is a
+        // question the printed value cannot answer on its own.
+        ScalarFunc::Float4Send => {
+            require_arity(fc, n == 1)?;
+            if !is_unknown_literal(&args[0]) {
+                let t = crate::eval::infer_type(&args[0], scope)?;
+                // `real` is the only declared parameter; the integer widths
+                // reach it through PostgreSQL's implicit widening casts, while
+                // `float8` and `numeric` do not (their casts to `real` are
+                // assignment-only) and leave the call unresolved.
+                if !matches!(
+                    t,
+                    ColumnType::Float4 | ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8
+                ) {
+                    return Err(undefined_function_spelled(&fc.name, args, scope));
+                }
+            }
+            Ok(ColumnType::Bytea)
         }
         ScalarFunc::Lpad | ScalarFunc::Rpad => {
             require_arity(fc, n == 2 || n == 3)?;
@@ -487,12 +934,34 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             Ok(ColumnType::Text)
         }
         ScalarFunc::Reverse | ScalarFunc::Initcap => {
+            // The arity check has to come first: a match guard reading
+            // `args[0]` would index an empty slice for a bare `reverse()`.
             require_arity(fc, n == 1)?;
+            // `reverse` has a `bytea` overload and `initcap` does not — case is
+            // meaningless over bytes.
+            if f == ScalarFunc::Reverse && is_bytea_subject(&args[0], scope)? {
+                return Ok(ColumnType::Bytea);
+            }
             require_text(&args[0], scope)?;
             Ok(ColumnType::Text)
         }
         ScalarFunc::Strpos => {
             require_arity(fc, n == 2)?;
+            // `position(bit, bit)` is `bitposition`; it shares the name and the
+            // `int4` result with the text form.
+            if crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[0], scope)?)
+                || crate::bit_fn::is_bit_type(crate::eval::infer_type(&args[1], scope)?)
+            {
+                return Ok(ColumnType::Int4);
+            }
+            // `position(bytea, bytea)` counts bytes, and either argument being
+            // `bytea` selects it — the other side's `unknown` literal then
+            // coerces to `bytea` rather than to `text`.
+            if is_bytea_subject(&args[0], scope)? || is_bytea_subject(&args[1], scope)? {
+                require_bytea(&args[0], scope)?;
+                require_bytea(&args[1], scope)?;
+                return Ok(ColumnType::Int4);
+            }
             require_text(&args[0], scope)?;
             require_text(&args[1], scope)?;
             Ok(ColumnType::Int4)
@@ -550,7 +1019,14 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Text)
         }
+        ScalarFunc::UnicodeAssigned => {
+            require_arity(fc, n == 1)?;
+            require_text(&args[0], scope)?;
+            Ok(ColumnType::Bool)
+        }
         ScalarFunc::CurrentDatabase
+        | ScalarFunc::GetDatabaseEncoding
+        | ScalarFunc::UnicodeVersion
         | ScalarFunc::CurrentSchema
         | ScalarFunc::CurrentUser
         | ScalarFunc::SessionUser
@@ -560,7 +1036,7 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
         }
         ScalarFunc::FormatType => {
             require_arity(fc, n == 2)?;
-            require_int_or_null(&args[0], scope)?;
+            require_oid_or_null(&args[0], scope)?;
             require_int_or_null(&args[1], scope)?;
             Ok(ColumnType::Text)
         }
@@ -577,6 +1053,83 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             require_text(&args[0], scope)?;
             require_text(&args[1], scope)?;
             Ok(ColumnType::Bool)
+        }
+        ScalarFunc::BinaryCoercible => {
+            require_arity(fc, n == 2)?;
+            require_int(&args[0], scope)?;
+            require_int(&args[1], scope)?;
+            Ok(ColumnType::Bool)
+        }
+        ScalarFunc::PgNumaAvailable => {
+            require_arity(fc, n == 0)?;
+            Ok(ColumnType::Bool)
+        }
+        ScalarFunc::RangeConstructor(range) => {
+            require_arity(fc, (1..=3).contains(&n))?;
+            Ok(ColumnType::Range(range))
+        }
+        ScalarFunc::MultirangeConstructor(multirange) => {
+            for arg in args {
+                if crate::eval::infer_type(arg, scope)? != ColumnType::Range(multirange.range) {
+                    return Err(no_matching_function());
+                }
+            }
+            Ok(ColumnType::Multirange(multirange))
+        }
+        ScalarFunc::GenericMultirangeConstructor => {
+            require_arity(fc, n == 1)?;
+            let ColumnType::Range(range) = crate::eval::infer_type(&args[0], scope)? else {
+                return Err(no_matching_function());
+            };
+            ColumnType::multirange_for_range(range).ok_or_else(no_matching_function)
+        }
+        ScalarFunc::IsEmpty
+        | ScalarFunc::LowerInc
+        | ScalarFunc::LowerInf
+        | ScalarFunc::UpperInc
+        | ScalarFunc::UpperInf => {
+            require_arity(fc, n == 1)?;
+            if !matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Range(_) | ColumnType::Multirange(_)
+            ) {
+                return Err(no_matching_function());
+            }
+            Ok(ColumnType::Bool)
+        }
+        ScalarFunc::RangeContains
+        | ScalarFunc::RangeContainedBy
+        | ScalarFunc::RangeOverlaps
+        | ScalarFunc::RangeAdjacent => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Bool)
+        }
+        ScalarFunc::MultirangePredicate => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Bool)
+        }
+        ScalarFunc::RangeMinus | ScalarFunc::RangeMerge => {
+            if matches!(scalar_func(&fc.name), Some(ScalarFunc::RangeMerge))
+                && n == 1
+                && matches!(
+                    crate::eval::infer_type(&args[0], scope)?,
+                    ColumnType::Multirange(_)
+                )
+            {
+                let ColumnType::Multirange(multirange) = crate::eval::infer_type(&args[0], scope)?
+                else {
+                    unreachable!()
+                };
+                return Ok(ColumnType::Range(multirange.range));
+            }
+            require_arity(fc, n == 2)?;
+            let left = crate::eval::infer_type(&args[0], scope)?;
+            let right = crate::eval::infer_type(&args[1], scope)?;
+            if matches!((left, right), (ColumnType::Range(a), ColumnType::Range(b)) if a == b) {
+                Ok(left)
+            } else {
+                Err(no_matching_function())
+            }
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, n == 1)?;
@@ -617,11 +1170,52 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
 /// the lazy ones evaluate arguments only as far as they need to.
 pub(crate) fn eval_scalar(
     fc: &FuncCall,
+    scope: Option<&Scope>,
     ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
+    match builtin_eval_scalar(fc, scope, ctx, &mut eval_child) {
+        // A rewritten operand is evaluated a second time here. Every function
+        // that can reach this arm is pure — the side-effecting ones (`nextval`,
+        // the advisory locks) are named nothing like a type and resolve long
+        // before it.
+        Err(ExecError::UndefinedFunction(message)) => match constructor_cast(fc, scope) {
+            Some(cast) => eval_child(&cast),
+            None => Err(ExecError::UndefinedFunction(message)),
+        },
+        resolved => resolved,
+    }
+}
+
+/// [`eval_scalar`] without the constructor-cast last resort. See
+/// [`builtin_scalar_result_type`] for why the fallback is not inline.
+fn builtin_eval_scalar(
+    fc: &FuncCall,
+    scope: Option<&Scope>,
+    ctx: &EvalCtx,
+    eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Result<Datum, ExecError> {
+    let mut eval_child = bpchar_text_arguments(fc, scope, eval_child);
     if crate::text_search_fn::is_text_search_func(&fc.name) {
         return crate::text_search_fn::eval_text_search(fc, ctx, eval_child);
+    }
+    if crate::network_fn::is_network_func(&fc.name) {
+        return crate::network_fn::eval_network(fc, ctx, eval_child);
+    }
+    if crate::xml_fn::is_xml_func(&fc.name) {
+        return crate::xml_fn::eval_xml(fc, ctx, eval_child);
+    }
+    if crate::bit_fn::is_bit_func(&fc.name) {
+        return crate::bit_fn::eval_bit(fc, ctx, eval_child);
+    }
+    if crate::money_fn::is_money_func(&fc.name) {
+        return crate::money_fn::eval_money(fc, ctx, eval_child);
+    }
+    if crate::sysid_fn::is_sysid_func(&fc.name) {
+        return crate::sysid_fn::eval_sysid(fc, ctx, eval_child);
+    }
+    if crate::snapshot_fn::is_snapshot_func(&fc.name) {
+        return crate::snapshot_fn::eval_snapshot(fc, ctx, eval_child);
     }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::eval_math(fc, ctx, eval_child);
@@ -632,35 +1226,53 @@ pub(crate) fn eval_scalar(
     if crate::regexp_fn::is_regexp_func(&fc.name) {
         return crate::regexp_fn::eval_regexp(fc, ctx, eval_child);
     }
+    if crate::geometry_fn::is_geometry_func(&fc.name) {
+        return crate::geometry_fn::eval_geometry(fc, ctx, eval_child);
+    }
     let f = scalar_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = checked_args(fc)?;
+    if matches!(f, ScalarFunc::BoolCompare { .. }) {
+        require_arity(fc, args.len() == 2)?;
+        if let Some(scope) = scope {
+            for arg in args {
+                if !is_unknown_literal(arg) {
+                    require_bool(arg, scope)?;
+                }
+            }
+        }
+    }
     match f {
         // coalesce returns the first non-NULL argument, NOT evaluating the rest
         // (so `coalesce(x, 1/0)` with x non-null never divides by zero).
         ScalarFunc::Coalesce => {
             require_arity(fc, !args.is_empty())?;
+            let target = scope.map(|scope| unify_args(f, args, scope)).transpose()?;
             for a in args {
                 let v = eval_child(a)?;
                 if !v.is_null() {
-                    return Ok(v);
+                    return match target {
+                        Some(target) => crate::eval::cast_value(&v, target, &ctx.time_zone),
+                        None => Ok(v),
+                    };
                 }
             }
             Ok(Datum::Null)
         }
-        // `pg_typeof` reports its argument's resolved type. Crabka resolves that
-        // from the evaluated Datum (plus the cast, when the expression is one),
-        // because the scalar evaluator has no scope to re-infer from: a NULL
-        // value whose type comes from a *column* therefore reports `unknown`
-        // where PostgreSQL reports the column's type. Documented divergence.
+        // `pg_typeof` reports its argument's resolved type. Use the caller's
+        // scope when available because text-backed distinct types (and typed
+        // NULL columns) cannot be recovered from their Datum alone.
         ScalarFunc::PgTypeof => {
             require_arity(fc, args.len() == 1)?;
             let value = eval_child(&args[0])?;
-            Ok(Datum::Text(typeof_name(&args[0], &value)))
+            Ok(Datum::Text(typeof_name(&args[0], &value, scope)))
         }
         ScalarFunc::Greatest | ScalarFunc::Least => {
             require_arity(fc, !args.is_empty())?;
+            if let Some(scope) = scope {
+                crate::eval::require_comparison_function(unify_args(f, args, scope)?)?;
+            }
             let want_greater = matches!(f, ScalarFunc::Greatest);
-            let vals = resolved_args(args, ctx, &mut eval_child)?;
+            let vals = resolved_args(f, args, scope, ctx, &mut eval_child)?;
             let mut best: Option<Datum> = None;
             for v in vals {
                 if v.is_null() {
@@ -682,11 +1294,29 @@ pub(crate) fn eval_scalar(
         }
         ScalarFunc::NullIf => {
             require_arity(fc, args.len() == 2)?;
-            let vals = resolved_args(args, ctx, &mut eval_child)?;
+            if let Some(scope) = scope {
+                let ty = unify_args(f, args, scope)?;
+                if crate::eval::is_scalar_jsonpath(ty) {
+                    return Err(ExecError::UndefinedFunction(
+                        "operator does not exist: jsonpath = jsonpath".into(),
+                    ));
+                }
+                if crate::eval::is_uncomparable_scalar(ty) {
+                    let name = ty.name();
+                    return Err(ExecError::UndefinedFunction(format!(
+                        "operator does not exist: {name} = {name}"
+                    )));
+                }
+            }
+            let vals = resolved_args(f, args, scope, ctx, &mut eval_child)?;
             let [a, b] = vals.as_slice() else {
                 return Err(undefined_function(&fc.name));
             };
             let (a, b) = (a.clone(), b.clone());
+            if crate::eval::runtime_equality_short_circuit(&a, &b) == Some(false) {
+                return Ok(a);
+            }
+            crate::eval::require_runtime_equality(&a, &b)?;
             // NULLIF(a, b) = NULL when a = b, else a. `compare` is None if either
             // is NULL (so a NULL `a` falls through to `Ok(a)` = NULL).
             match ops::compare(&a, &b)? {
@@ -703,11 +1333,14 @@ pub(crate) fn eval_scalar(
             if oid.is_null() {
                 return Ok(Datum::Null);
             }
-            let typmod = match &typmod {
-                Datum::Null => -1,
-                other => int_arg(other)?,
-            };
-            Ok(Datum::Text(format_type(int_arg(&oid)?, typmod)))
+            // A NULL second argument is not `-1`: it withholds the modifier
+            // rather than stating there is none, which is a different name for
+            // `bit` and `bpchar`. `FORMAT_TYPE_TYPEMOD_GIVEN` is exactly this
+            // distinction.
+            Ok(Datum::Text(match &typmod {
+                Datum::Null => format_type(int_arg(&oid)?, -1),
+                other => format_type_given(int_arg(&oid)?, int_arg(other)?),
+            }))
         }
         // `pg_notify` is NOT strict: PostgreSQL substitutes the empty string for
         // a NULL channel or payload, so `pg_notify(NULL, 'x')` raises the same
@@ -724,18 +1357,76 @@ pub(crate) fn eval_scalar(
                 .iter()
                 .map(&mut eval_child)
                 .collect::<Result<Vec<_>, _>>()?;
-            coerce_unknown_numeric_args(f, args, &mut vals, ctx)?;
+            coerce_unknown_args(f, args, &mut vals, ctx)?;
             eval_eager(f, fc, &vals, ctx)
         }
     }
 }
 
-/// Coerce `unknown` literal arguments of the numeric-family scalar functions
-/// into the type the call resolved to, so `sqrt('4')` and `mod('9', 4)` compute
-/// and do not complain about a text argument. PostgreSQL does this coercion at
-/// plan time. The scalar evaluator has no scope, so it re-derives the target
-/// from the arguments that DID carry a type.
-fn coerce_unknown_numeric_args(
+/// Wrap an argument evaluator so a `character(n)` argument arrives with its
+/// blank padding removed.
+///
+/// This is one place, not one per function, because it is one cast:
+/// `PostgreSQL` declares almost every string function over `text` and reaches it
+/// from `character` through the implicit `text(bpchar)` coercion described on
+/// [`crabka_pgtypes::string::bpchar_to_text`]. `lower`, `replace`, `lpad`,
+/// `substr`, `quote_literal`, `to_tsvector` and `length` (whose `bpcharlen`
+/// overload measures with `bcTruelen`) therefore all agree with the trimmed
+/// value, and each one that did not was a divergence.
+///
+/// [`preserves_bpchar_padding`] carries the exceptions, and every scalar family
+/// this evaluator dispatches to is covered — the `json`, `array` and date/time
+/// families are separate arms of `crate::eval` and never reach here, which is
+/// what keeps `to_jsonb(c)` and `ARRAY[c]` padded as `PostgreSQL` leaves them.
+///
+/// Without a scope there is no static type to consult, so the wrapper is inert:
+/// a padded `text` value is never mistaken for a `character` one.
+fn bpchar_text_arguments<'a>(
+    fc: &FuncCall,
+    scope: Option<&'a Scope>,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> impl FnMut(&Expr) -> Result<Datum, ExecError> {
+    let scope = scope.filter(|_| !preserves_bpchar_padding(&fc.name));
+    move |expr: &Expr| {
+        let value = eval_child(expr)?;
+        let Some(scope) = scope else { return Ok(value) };
+        Ok(crate::eval::bpchar_to_text_value(expr, scope, &value)?.unwrap_or(value))
+    }
+}
+
+/// The scalar functions that read a `character` argument's padding rather than
+/// casting it to `text`, measured on 18.4.
+///
+/// Two reasons put a name here. `concat`, `concat_ws` and `format` are declared
+/// `VARIADIC "any"` and render each argument with its own output function, and
+/// `bpcharout` returns the padded datum — so `concat('x'::char(8), 'Z')` is
+/// `'x       Z'` while `'x'::char(8) || 'Z'` is `'xZ'`. `coalesce`, `nullif`,
+/// `greatest`, `least` and `pg_typeof` are polymorphic and hand the argument
+/// back (or describe it) as the `character` it still is.
+///
+/// `octet_length` and `bit_length` are the third case: `bpcharoctetlen` is a
+/// real `character` overload that measures the stored, padded datum, so
+/// `octet_length('x'::char(8))` is 8 where `length('x'::char(8))` is 1.
+fn preserves_bpchar_padding(name: &str) -> bool {
+    matches!(
+        name,
+        "bit_length"
+            | "coalesce"
+            | "concat"
+            | "concat_ws"
+            | "format"
+            | "greatest"
+            | "least"
+            | "nullif"
+            | "octet_length"
+            | "pg_typeof"
+    ) || crate::xml_fn::is_xml_func(name)
+}
+
+/// Coerce `unknown` literal arguments into the fixed type the scalar function
+/// resolves them to. PostgreSQL performs this at plan time; the scalar evaluator
+/// has no scope, so it re-derives the target from the function and typed inputs.
+fn coerce_unknown_args(
     f: ScalarFunc,
     args: &[Expr],
     vals: &mut [Datum],
@@ -745,9 +1436,12 @@ fn coerce_unknown_numeric_args(
         return Ok(());
     }
     let target = match f {
+        ScalarFunc::BoolCompare { .. } => ColumnType::Bool,
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
+        // `log(base, num)` likewise has no two-argument `float8` candidate.
+        ScalarFunc::Log if args.len() == 2 => ColumnType::Numeric(None),
         ScalarFunc::Abs
         | ScalarFunc::Floor
         | ScalarFunc::Ceil
@@ -755,10 +1449,25 @@ fn coerce_unknown_numeric_args(
         | ScalarFunc::Trunc
         | ScalarFunc::Sign
         | ScalarFunc::Sqrt
-        | ScalarFunc::Power
         | ScalarFunc::Exp
         | ScalarFunc::Ln
         | ScalarFunc::Log => ColumnType::Float8,
+        // `power` has both a `float8` and a `numeric` candidate, so a typed
+        // operand picks the overload the same way `mod`'s does.
+        ScalarFunc::Power if args.len() == 2 => {
+            let typed = |i: usize| {
+                if is_unknown_literal(&args[i]) {
+                    None
+                } else {
+                    vals[i].column_type()
+                }
+            };
+            match (typed(0), typed(1)) {
+                (Some(a), Some(b)) => power_result_type(a, b),
+                (Some(t), None) | (None, Some(t)) => power_result_type(t, t),
+                (None, None) => ColumnType::Float8,
+            }
+        }
         // `mod` has no float8 candidate, so a typed operand picks the overload.
         ScalarFunc::Mod => args
             .iter()
@@ -804,15 +1513,83 @@ fn eval_eager(
         }
         return Ok(Datum::Text(s));
     }
+    if let ScalarFunc::RangeConstructor(range) = f {
+        return eval_range_constructor(range, fc, vals, ctx);
+    }
+    if let ScalarFunc::MultirangeConstructor(multirange) = f {
+        let ranges = vals
+            .iter()
+            .map(|value| {
+                let Datum::Range(range) = value else {
+                    return Err(crabka_pgtypes::TypeError::TypeMismatch {
+                        message: "multirange constructor requires ranges".into(),
+                    });
+                };
+                if range.ty != multirange.range {
+                    return Err(crabka_pgtypes::TypeError::TypeMismatch {
+                        message: "multirange component type does not match".into(),
+                    });
+                }
+                Ok(range.clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return crabka_pgtypes::multirange::from_ranges(multirange, ranges)
+            .map(Datum::Multirange)
+            .map_err(ExecError::from);
+    }
+    if let ScalarFunc::GenericMultirangeConstructor = f {
+        let [Datum::Range(range)] = vals else {
+            return Err(undefined_function(&fc.name));
+        };
+        let ColumnType::Multirange(ty) = ColumnType::multirange_for_range(range.ty)
+            .ok_or_else(|| undefined_function(&fc.name))?
+        else {
+            unreachable!()
+        };
+        return crabka_pgtypes::multirange::from_ranges(ty, vec![range.clone()])
+            .map(Datum::Multirange)
+            .map_err(ExecError::from);
+    }
     // Strict: a NULL argument short-circuits to NULL.
     if vals.iter().any(Datum::is_null) {
         return Ok(Datum::Null);
     }
+    if let (ScalarFunc::RangeMerge, [Datum::Multirange(multirange)]) = (f, vals) {
+        return Ok(Datum::Range(
+            match (multirange.ranges.first(), multirange.ranges.last()) {
+                (Some(first), Some(last)) => crabka_pgtypes::range::merge(first, last)?,
+                _ => crabka_pgtypes::RangeValue {
+                    ty: multirange.ty.range,
+                    lower: None,
+                    upper: None,
+                    lower_inclusive: false,
+                    upper_inclusive: false,
+                    empty: true,
+                },
+            },
+        ));
+    }
     match f {
+        ScalarFunc::BoolCompare { equal } => {
+            require_arity(fc, vals.len() == 2)?;
+            let same = bool_arg(&vals[0])? == bool_arg(&vals[1])?;
+            Ok(Datum::Bool(same == equal))
+        }
         ScalarFunc::Length => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                return Ok(Datum::Int4(crate::bit_fn::length(bits)));
+            }
+            // The two geometric overloads are `float8`; the rest count units of
+            // the argument's own storage.
+            if fc.name == "length"
+                && let Some(length) = crate::geometry_fn::length_of(&vals[0])
+            {
+                return Ok(Datum::Float8(length));
+            }
             let n = match &vals[0] {
                 Datum::TsVector(vector) => vector.len(),
+                Datum::Bytea(bytes) if fc.name == "length" => bytes.len(),
                 value => text_arg(value)?.chars().count(),
             };
             i32::try_from(n)
@@ -821,14 +1598,121 @@ fn eval_eager(
         }
         ScalarFunc::Upper => {
             require_arity(fc, vals.len() == 1)?;
-            Ok(Datum::Text(text_arg(&vals[0])?.to_uppercase()))
+            match &vals[0] {
+                Datum::Range(range) => Ok(range
+                    .upper
+                    .as_deref()
+                    .filter(|_| !range.empty)
+                    .cloned()
+                    .unwrap_or(Datum::Null)),
+                Datum::Multirange(multirange) => Ok(multirange
+                    .ranges
+                    .last()
+                    .and_then(|range| range.upper.as_deref())
+                    .cloned()
+                    .unwrap_or(Datum::Null)),
+                value => Ok(Datum::Text(text_arg(value)?.to_uppercase())),
+            }
         }
         ScalarFunc::Lower => {
             require_arity(fc, vals.len() == 1)?;
-            Ok(Datum::Text(text_arg(&vals[0])?.to_lowercase()))
+            match &vals[0] {
+                Datum::Range(range) => Ok(range
+                    .lower
+                    .as_deref()
+                    .filter(|_| !range.empty)
+                    .cloned()
+                    .unwrap_or(Datum::Null)),
+                Datum::Multirange(multirange) => Ok(multirange
+                    .ranges
+                    .first()
+                    .and_then(|range| range.lower.as_deref())
+                    .cloned()
+                    .unwrap_or(Datum::Null)),
+                value => Ok(Datum::Text(text_arg(value)?.to_lowercase())),
+            }
         }
+        ScalarFunc::IsEmpty
+        | ScalarFunc::LowerInc
+        | ScalarFunc::LowerInf
+        | ScalarFunc::UpperInc
+        | ScalarFunc::UpperInf => {
+            require_arity(fc, vals.len() == 1)?;
+            let value = match &vals[0] {
+                Datum::Range(range) => match f {
+                    ScalarFunc::IsEmpty => range.empty,
+                    ScalarFunc::LowerInc => !range.empty && range.lower_inclusive,
+                    ScalarFunc::LowerInf => !range.empty && range.lower.is_none(),
+                    ScalarFunc::UpperInc => !range.empty && range.upper_inclusive,
+                    ScalarFunc::UpperInf => !range.empty && range.upper.is_none(),
+                    _ => unreachable!(),
+                },
+                Datum::Multirange(multirange) => match f {
+                    ScalarFunc::IsEmpty => multirange.ranges.is_empty(),
+                    ScalarFunc::LowerInc => multirange
+                        .ranges
+                        .first()
+                        .is_some_and(|range| range.lower_inclusive),
+                    ScalarFunc::LowerInf => multirange
+                        .ranges
+                        .first()
+                        .is_some_and(|range| range.lower.is_none()),
+                    ScalarFunc::UpperInc => multirange
+                        .ranges
+                        .last()
+                        .is_some_and(|range| range.upper_inclusive),
+                    ScalarFunc::UpperInf => multirange
+                        .ranges
+                        .last()
+                        .is_some_and(|range| range.upper.is_none()),
+                    _ => unreachable!(),
+                },
+                value => return Err(type_error(&fc.name, value)),
+            };
+            Ok(Datum::Bool(value))
+        }
+        ScalarFunc::RangeContains
+        | ScalarFunc::RangeContainedBy
+        | ScalarFunc::RangeOverlaps
+        | ScalarFunc::RangeAdjacent
+        | ScalarFunc::RangeMinus
+        | ScalarFunc::RangeMerge => {
+            require_arity(fc, vals.len() == 2)?;
+            let (Datum::Range(left), Datum::Range(right)) = (&vals[0], &vals[1]) else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            Ok(match f {
+                ScalarFunc::RangeContains => {
+                    Datum::Bool(crabka_pgtypes::range::contains_range(left, right)?)
+                }
+                ScalarFunc::RangeContainedBy => {
+                    Datum::Bool(crabka_pgtypes::range::contains_range(right, left)?)
+                }
+                ScalarFunc::RangeOverlaps => {
+                    Datum::Bool(crabka_pgtypes::range::overlaps(left, right)?)
+                }
+                ScalarFunc::RangeAdjacent => {
+                    Datum::Bool(crabka_pgtypes::range::adjacent(left, right)?)
+                }
+                ScalarFunc::RangeMinus => {
+                    Datum::Range(crabka_pgtypes::range::difference(left, right)?)
+                }
+                ScalarFunc::RangeMerge => Datum::Range(crabka_pgtypes::range::merge(left, right)?),
+                _ => unreachable!(),
+            })
+        }
+        ScalarFunc::MultirangePredicate => eval_multirange_predicate(&fc.name, vals),
         ScalarFunc::Btrim | ScalarFunc::Ltrim | ScalarFunc::Rtrim => {
             require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
+            if let Datum::Bytea(bytes) = &vals[0] {
+                let ends = match f {
+                    ScalarFunc::Ltrim => crate::bytea_fn::TrimEnds::Leading,
+                    ScalarFunc::Rtrim => crate::bytea_fn::TrimEnds::Trailing,
+                    _ => crate::bytea_fn::TrimEnds::Both,
+                };
+                let set = bytea_arg(&vals[1], ctx)?;
+                return Ok(crate::bytea_fn::trim(bytes, &set, ends));
+            }
             let s = text_arg(&vals[0])?;
             // The optional second argument is the set of characters to strip
             // (default: ASCII/Unicode whitespace).
@@ -843,6 +1727,23 @@ fn eval_eager(
         }
         ScalarFunc::Substr => {
             require_arity(fc, vals.len() == 2 || vals.len() == 3)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                let start = bit_index(&vals[1])?;
+                let count = match vals.get(2) {
+                    None => None,
+                    Some(c) => Some(bit_index(c)?),
+                };
+                return crate::bit_fn::substring(bits, start, count);
+            }
+            // Byte-indexed, and reached only when the plan gate saw a known
+            // `bytea` — so no multi-byte character can be split by accident.
+            if let Datum::Bytea(bytes) = &vals[0] {
+                let count = match vals.get(2) {
+                    None => None,
+                    Some(c) => Some(int_arg(c)?),
+                };
+                return crate::bytea_fn::substring(bytes, int_arg(&vals[1])?, count);
+            }
             let s = text_arg(&vals[0])?;
             // The pattern forms, distinguished at runtime the same way the plan
             // gate distinguishes them: a text second argument is a regexp.
@@ -867,6 +1768,24 @@ fn eval_eager(
         }
         ScalarFunc::Overlay => {
             require_arity(fc, vals.len() == 3 || vals.len() == 4)?;
+            if let Datum::BitString(bits) = &vals[0] {
+                let start = bit_index(&vals[2])?;
+                let count = match vals.get(3) {
+                    None => None,
+                    Some(c) => Some(bit_index(c)?),
+                };
+                return crate::bit_fn::overlay(bits, &vals[1], start, count);
+            }
+            if let Datum::Bytea(bytes) = &vals[0] {
+                let replacement = bytea_arg(&vals[1], ctx)?;
+                let start = int_arg(&vals[2])?;
+                let count = match vals.get(3) {
+                    Some(c) => int_arg(c)?,
+                    // The default replaces exactly as many bytes as it inserts.
+                    None => i64::try_from(replacement.len()).unwrap_or(i64::MAX),
+                };
+                return crate::bytea_fn::overlay(bytes, &replacement, start, count);
+            }
             let s = text_arg(&vals[0])?;
             let replacement = text_arg(&vals[1])?;
             let start = int_arg(&vals[2])?;
@@ -902,10 +1821,12 @@ fn eval_eager(
                     .checked_abs()
                     .map(Datum::Int4)
                     .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow)),
-                Datum::Int8(n) => n
-                    .checked_abs()
-                    .map(Datum::Int8)
-                    .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow)),
+                // `TypeError::Overflow` says "integer out of range", which is
+                // `int4`'s wording and not this overload's: `int8abs` reports
+                // the type it could not represent the result in.
+                Datum::Int8(n) => n.checked_abs().map(Datum::Int8).ok_or_else(|| {
+                    ExecError::Type(crabka_pgtypes::TypeError::out_of_range_for("bigint"))
+                }),
                 // SP30: abs over float8 (always representable, no overflow trap).
                 Datum::Float4(f) => Ok(Datum::Float4(f.abs())),
                 Datum::Float8(f) => Ok(Datum::Float8(f.abs())),
@@ -924,6 +1845,13 @@ fn eval_eager(
         }
         ScalarFunc::Round | ScalarFunc::Trunc => {
             require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
+            if f == ScalarFunc::Trunc && vals.len() == 1 {
+                match &vals[0] {
+                    Datum::MacAddr(value) => return Ok(Datum::MacAddr(value.trunc())),
+                    Datum::MacAddr8(value) => return Ok(Datum::MacAddr8(value.trunc())),
+                    _ => {}
+                }
+            }
             let scale = match vals.get(1) {
                 None => None,
                 Some(s) => Some(int_arg(s)?),
@@ -972,7 +1900,12 @@ fn eval_eager(
             Ok(Datum::Float8(x.ln()))
         }
         ScalarFunc::Log => {
-            require_arity(fc, vals.len() == 1)?;
+            require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
+            if let [base, num] = vals {
+                return crabka_pgtypes::numeric::num_log(&to_numeric(base)?, &to_numeric(num)?)
+                    .map(Datum::Numeric)
+                    .map_err(ExecError::Type);
+            }
             if let Datum::Numeric(d) = &vals[0] {
                 return crabka_pgtypes::numeric::num_log10(d)
                     .map(Datum::Numeric)
@@ -1006,6 +1939,17 @@ fn eval_eager(
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Float8(std::f64::consts::PI))
         }
+        ScalarFunc::Float4Send => {
+            require_arity(fc, vals.len() == 1)?;
+            let Datum::Float4(value) =
+                crabka_pgtypes::cast::cast(&vals[0], ColumnType::Float4, &ctx.time_zone)?
+            else {
+                return Err(type_error("float4send", &vals[0]));
+            };
+            Ok(Datum::Bytea(crabka_pgtypes::encoding::encode_binary(
+                &Datum::Float4(value),
+            )))
+        }
         ScalarFunc::Lpad | ScalarFunc::Rpad => {
             require_arity(fc, vals.len() == 2 || vals.len() == 3)?;
             let s = text_arg(&vals[0])?;
@@ -1030,6 +1974,9 @@ fn eval_eager(
         }
         ScalarFunc::Reverse => {
             require_arity(fc, vals.len() == 1)?;
+            if let Datum::Bytea(bytes) = &vals[0] {
+                return Ok(Datum::Bytea(bytes.iter().rev().copied().collect()));
+            }
             Ok(Datum::Text(text_arg(&vals[0])?.chars().rev().collect()))
         }
         ScalarFunc::Initcap => {
@@ -1038,6 +1985,15 @@ fn eval_eager(
         }
         ScalarFunc::Strpos => {
             require_arity(fc, vals.len() == 2)?;
+            if (matches!(&vals[0], Datum::BitString(_)) || matches!(&vals[1], Datum::BitString(_)))
+                && let Some(found) = crate::bit_fn::position(&vals[0], &vals[1])?
+            {
+                return Ok(Datum::Int4(found));
+            }
+            if matches!(&vals[0], Datum::Bytea(_)) || matches!(&vals[1], Datum::Bytea(_)) {
+                let (haystack, needle) = (bytea_arg(&vals[0], ctx)?, bytea_arg(&vals[1], ctx)?);
+                return Ok(Datum::Int4(crate::bytea_fn::position(&haystack, &needle)));
+            }
             Ok(Datum::Int4(strpos(
                 text_arg(&vals[0])?,
                 text_arg(&vals[1])?,
@@ -1164,9 +2120,33 @@ fn eval_eager(
                 .insert(name, value);
             Ok(Datum::Int8(value))
         }
+        // The database the session connected to, which is also the one
+        // `pg_database` row's `datname`. The two read the same field so they
+        // cannot disagree; they used to be two separate literals.
         ScalarFunc::CurrentDatabase => {
             require_arity(fc, vals.is_empty())?;
-            Ok(Datum::Text("postgres".into()))
+            Ok(Datum::Text(ctx.database().to_string()))
+        }
+        ScalarFunc::GetDatabaseEncoding => {
+            require_arity(fc, vals.is_empty())?;
+            Ok(Datum::Text("UTF8".into()))
+        }
+        ScalarFunc::UnicodeVersion => {
+            require_arity(fc, vals.is_empty())?;
+            let (major, minor) = unicode_version();
+            Ok(Datum::Text(format!("{major}.{minor}")))
+        }
+        // `pg_u_prop_assigned`: a code point is assigned when its
+        // General_Category is anything but `Cn`. Rust's `char` cannot hold a
+        // surrogate, so the halves PostgreSQL also rejects here can never reach
+        // this point — they are refused when the literal is lexed.
+        ScalarFunc::UnicodeAssigned => {
+            require_arity(fc, vals.len() == 1)?;
+            let assigned = text_arg(&vals[0])?.chars().all(|c| {
+                unicode_general_category::get_general_category(c)
+                    != unicode_general_category::GeneralCategory::Unassigned
+            });
+            Ok(Datum::Bool(assigned))
         }
         // The schema a `CREATE` with no qualifier lands in — the first
         // `search_path` entry that names an existing schema, and NULL when the
@@ -1199,22 +2179,147 @@ fn eval_eager(
             require_arity(fc, vals.len() == 2)?;
             let input = text_arg(&vals[0])?;
             let type_name = text_arg(&vals[1])?;
-            let ty =
-                ColumnType::from_sql_name(type_name).ok_or_else(|| ExecError::FunctionError {
-                    sqlstate: "42704",
-                    message: format!("type \"{type_name}\" does not exist"),
-                })?;
-            let parsed =
-                crabka_pgtypes::cast::cast(&Datum::Text(input.to_string()), ty, &ctx.time_zone);
-            Ok(Datum::Bool(parsed.is_ok()))
+            Ok(Datum::Bool(input_error(input, type_name, ctx)?.is_none()))
+        }
+        ScalarFunc::BinaryCoercible => {
+            require_arity(fc, vals.len() == 2)?;
+            let source = u32::try_from(int_arg(&vals[0])?).unwrap_or(0);
+            let target = u32::try_from(int_arg(&vals[1])?).unwrap_or(0);
+            Ok(Datum::Bool(crate::catalog_rel::is_binary_coercible(
+                source, target,
+            )))
+        }
+        ScalarFunc::PgNumaAvailable => {
+            require_arity(fc, vals.is_empty())?;
+            Ok(Datum::Bool(false))
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
-            let _oid = int_arg(&vals[0])?;
-            Ok(Datum::Bool(true))
+            crate::catalog_fn::relation_is_visible(&vals[0], ctx)
         }
         // concat / coalesce / nullif / greatest / least are handled before here.
         _ => unreachable!("non-eager scalar function reached eval_eager"),
+    }
+}
+
+fn eval_multirange_predicate(name: &str, vals: &[Datum]) -> Result<Datum, ExecError> {
+    if vals.len() != 2 {
+        return Err(undefined_function(name));
+    }
+    let result = match (name, &vals[0], &vals[1]) {
+        ("range_overlaps_multirange", Datum::Range(range), Datum::Multirange(multirange))
+        | ("multirange_overlaps_range", Datum::Multirange(multirange), Datum::Range(range)) => {
+            crabka_pgtypes::multirange::overlaps_range(multirange, range)?
+        }
+        ("multirange_overlaps_multirange", Datum::Multirange(left), Datum::Multirange(right)) => {
+            crabka_pgtypes::multirange::overlaps(left, right)?
+        }
+        ("multirange_contains_elem", Datum::Multirange(multirange), element)
+        | ("elem_contained_by_multirange", element, Datum::Multirange(multirange)) => {
+            crabka_pgtypes::multirange::contains_element(multirange, element)?
+        }
+        ("multirange_contains_range", Datum::Multirange(multirange), Datum::Range(range))
+        | ("range_contained_by_multirange", Datum::Range(range), Datum::Multirange(multirange)) => {
+            crabka_pgtypes::multirange::contains_range(multirange, range)?
+        }
+        ("multirange_contains_multirange", Datum::Multirange(left), Datum::Multirange(right)) => {
+            crabka_pgtypes::multirange::contains(left, right)?
+        }
+        (
+            "multirange_contained_by_multirange",
+            Datum::Multirange(left),
+            Datum::Multirange(right),
+        ) => crabka_pgtypes::multirange::contains(right, left)?,
+        _ => return Err(type_error(name, &vals[0])),
+    };
+    Ok(Datum::Bool(result))
+}
+
+pub(crate) fn input_error(
+    input: &str,
+    type_name: &str,
+    ctx: &EvalCtx,
+) -> Result<Option<crabka_pgwire::error::PgError>, ExecError> {
+    let time_zone = &ctx.time_zone;
+    let ty = input_type(type_name).ok_or_else(|| ExecError::FunctionError {
+        sqlstate: "42704",
+        message: format!("type \"{type_name}\" does not exist"),
+    })?;
+    // A `reg*` input function resolves against the catalog, so the pure cast
+    // this otherwise drives would report `invalid input syntax` for every name
+    // rather than the missing-object error PostgreSQL reports. Route it through
+    // the same resolver the cast operator uses.
+    // A hard error still propagates: PostgreSQL's own `regproc.sql` records
+    // `pg_input_error_info('way.too.many.names', 'regtype')` as an ERROR rather
+    // than a row, and `crate::reg_fn::soft` is the same test that decides
+    // whether `to_reg*` swallows it.
+    if let Some(kind) = crate::reg_fn::RegKind::of(ty) {
+        let value = Datum::Text(input.to_string());
+        return match crate::reg_fn::reg_cast(kind, &value, ctx) {
+            Ok(_) => Ok(None),
+            Err(error) if crate::reg_fn::soft(&error) => Ok(Some(error.into_pg())),
+            Err(error) => Err(error),
+        };
+    }
+    // `bit_in` / `varbit_in` take the length modifier themselves and reject a
+    // mismatch, where the *cast* to `bit(n)` would silently pad or truncate.
+    // `pg_input_error_info('01010001', 'bit(10)')` is the input function, so it
+    // must report `bit string length 8 does not match type bit(10)`.
+    if let ColumnType::Bit(len) | ColumnType::VarBit(len) = ty {
+        let varying = matches!(ty, ColumnType::VarBit(_));
+        return Ok(
+            crabka_pgtypes::BitString::parse_with_typmod(input, len, varying)
+                .err()
+                .map(|error| ExecError::from(error).into_pg()),
+        );
+    }
+    let value = Datum::Text(input.to_string());
+    let result = if matches!(ty, ColumnType::Varchar(Some(_)) | ColumnType::Char(Some(_))) {
+        crabka_pgtypes::cast::cast_assign(&value, ty, time_zone).map_err(ExecError::from)
+    } else {
+        crate::eval::cast_value(&value, ty, time_zone)
+    };
+    Ok(result.err().map(ExecError::into_pg))
+}
+
+/// Resolve the typmod spelling accepted by `regtype` arguments to PostgreSQL's
+/// soft-input functions. The ordinary expression parser already applies these
+/// modifiers; this text argument reaches the type layer directly.
+fn input_type(type_name: &str) -> Option<ColumnType> {
+    let normalized = type_name.trim().to_ascii_lowercase();
+    let Some(body) = normalized.strip_suffix(')') else {
+        // The grammar's `bit` production defaults to `bit(1)`, while a bare
+        // `bit varying` stays unconstrained — the same asymmetry the
+        // expression parser applies.
+        if normalized == "bit" {
+            return Some(ColumnType::Bit(Some(1)));
+        }
+        return ColumnType::from_sql_name(&normalized);
+    };
+    let (base, modifier) = body.split_once('(')?;
+    let parts = modifier.split(',').map(str::trim).collect::<Vec<_>>();
+    match (base.trim(), parts.as_slice()) {
+        ("varchar" | "character varying", [limit]) => {
+            Some(ColumnType::Varchar(Some(limit.parse().ok()?)))
+        }
+        ("char" | "character" | "bpchar", [limit]) => {
+            Some(ColumnType::Char(Some(limit.parse().ok()?)))
+        }
+        ("bit", [len]) => Some(ColumnType::Bit(Some(len.parse().ok()?))),
+        ("varbit" | "bit varying", [len]) => Some(ColumnType::VarBit(Some(len.parse().ok()?))),
+        ("numeric" | "decimal", [precision]) => {
+            Some(ColumnType::Numeric(Some(crabka_pgtypes::numeric::Typmod {
+                precision: precision.parse().ok()?,
+                scale: 0,
+            })))
+        }
+        ("numeric" | "decimal", [precision, scale]) => {
+            Some(ColumnType::Numeric(Some(crabka_pgtypes::numeric::Typmod {
+                precision: precision.parse().ok()?,
+                scale: scale.parse().ok()?,
+            })))
+        }
+        _ => None,
     }
 }
 
@@ -1243,6 +2348,25 @@ fn require_text(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     }
 }
 
+/// Does this argument select the `bytea` overload of a name `text` also owns?
+///
+/// Only a *known* `bytea` does. An `unknown` literal must not: `substr('abc',
+/// 2)` has to stay the text call, and PostgreSQL resolves it that way because
+/// `text` is the preferred type of the string category.
+fn is_bytea_subject(arg: &Expr, scope: &Scope) -> Result<bool, ExecError> {
+    Ok(crate::eval::infer_type(arg, scope)? == ColumnType::Bytea)
+}
+
+/// Require an argument the `bytea` overload accepts: `bytea` itself, or an
+/// `unknown` literal that the coercion will run `byteain` over.
+fn require_bytea(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
+    if is_unknown_literal(arg) || crate::eval::infer_type(arg, scope)? == ColumnType::Bytea {
+        Ok(())
+    } else {
+        Err(no_matching_function())
+    }
+}
+
 /// Require the argument to statically type as an integer. Returns that width.
 fn require_int(arg: &Expr, scope: &Scope) -> Result<ColumnType, ExecError> {
     match crate::eval::infer_type(arg, scope)? {
@@ -1252,9 +2376,10 @@ fn require_int(arg: &Expr, scope: &Scope) -> Result<ColumnType, ExecError> {
 }
 
 fn require_bool(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
-    match crate::eval::infer_type(arg, scope)? {
-        ColumnType::Bool => Ok(()),
-        _ => Err(no_matching_function()),
+    if crate::eval::infer_type(arg, scope)?.storage_type() == ColumnType::Bool {
+        Ok(())
+    } else {
+        Err(no_matching_function())
     }
 }
 
@@ -1340,7 +2465,9 @@ fn is_unknown_literal(e: &Expr) -> bool {
 /// one another, so they need one common type before `ops::compare` runs.
 /// Without it, `greatest(1, '2')` would try to order an integer against text.
 fn resolved_args(
+    f: ScalarFunc,
     args: &[Expr],
+    scope: Option<&Scope>,
     ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Vec<Datum>, ExecError> {
@@ -1348,21 +2475,24 @@ fn resolved_args(
         .iter()
         .map(&mut eval_child)
         .collect::<Result<Vec<_>, _>>()?;
-    let common = args
-        .iter()
-        .zip(&vals)
-        .filter(|(a, _)| !is_unknown_literal(a))
-        .filter_map(|(_, v)| v.column_type())
-        .try_fold(None, |acc: Option<ColumnType>, t| match acc {
-            None => Ok(Some(t)),
-            Some(a) => crate::eval::unify_types(a, t).map(Some),
-        })?;
+    let common = match scope {
+        Some(scope) => Some(unify_args(f, args, scope)?),
+        None => args
+            .iter()
+            .zip(&vals)
+            .filter(|(a, _)| !is_unknown_literal(a))
+            .filter_map(|(_, v)| v.column_type())
+            .try_fold(None, |acc: Option<ColumnType>, t| match acc {
+                None => Ok(Some(t)),
+                Some(a) => crate::eval::unify_types(a, t).map(Some),
+            })?,
+    };
     let Some(common) = common else {
         return Ok(vals);
     };
     for (a, v) in args.iter().zip(&mut vals) {
         if is_unknown_literal(a) && !v.is_null() {
-            *v = crabka_pgtypes::cast::cast(v, common, &ctx.time_zone)?;
+            *v = crate::eval::cast_value(v, common, &ctx.time_zone)?;
         }
     }
     Ok(vals)
@@ -1371,15 +2501,20 @@ fn resolved_args(
 /// The type name `pg_typeof` reports: the evaluated value's own type. It falls
 /// back to an explicit cast's target when the value is NULL, and to PostgreSQL's
 /// `unknown` for a literal that never acquired one.
-fn typeof_name(arg: &Expr, value: &Datum) -> String {
+fn typeof_name(arg: &Expr, value: &Datum, scope: Option<&Scope>) -> String {
     if is_unknown_literal(arg) {
         return "unknown".into();
+    }
+    if let Some(scope) = scope
+        && let Ok(ty) = crate::eval::infer_type(arg, scope)
+    {
+        return type_display_name(ty);
     }
     // A domain's *value* is a base-type value; only the expression records that
     // it went through the domain, so an explicit cast to one is read off the
     // node ahead of the value.
     if let Expr::Cast {
-        ty: ty @ ColumnType::Domain(_),
+        ty: ty @ (ColumnType::Domain(_) | ColumnType::JsonPath),
         ..
     } = arg
     {
@@ -1403,8 +2538,23 @@ fn type_display_name(t: ColumnType) -> String {
     }
 }
 
-/// Require an integer argument, or a bare `NULL`. PostgreSQL resolves such a
-/// `NULL` to the parameter's own type and does not reject it.
+/// `format_type`'s first argument is declared `oid`, and every `reg*` reaches
+/// `oid` by a binary coercion — so `format_type('int4'::regtype, -1)` and
+/// `format_type(to_regtype('varchar(32)'), 36)` both type-check, which is the
+/// spelling PostgreSQL's own `regproc.sql` uses.
+fn require_oid_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
+    if matches!(arg, Expr::NullLiteral) {
+        return Ok(());
+    }
+    let ty = crate::eval::infer_type(arg, scope)?;
+    if ty.is_reg() || ty == ColumnType::Oid {
+        return Ok(());
+    }
+    require_int(arg, scope).map(|_| ())
+}
+
+/// Require an integer argument, or a bare `NULL` (which PostgreSQL resolves to
+/// the parameter's own type rather than rejecting).
 fn require_int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     if matches!(arg, Expr::NullLiteral) {
         return Ok(());
@@ -1412,17 +2562,39 @@ fn require_int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     require_int(arg, scope).map(|_| ())
 }
 
-/// PostgreSQL `format_type(oid, typmod)`: the SQL-standard spelling of a type,
-/// with its modifier applied. An unrecognized OID is `-`, matching PostgreSQL's
-/// placeholder for a type that no longer exists.
-fn format_type(oid: i64, typmod: i64) -> String {
+/// PostgreSQL `format_type_be(oid)`: the SQL-standard spelling of a type, named
+/// with **no** modifier in hand. An unrecognized OID is `-`, matching
+/// PostgreSQL's placeholder for a type that no longer exists.
+///
+/// A negative `typmod` means "this type carries no modifier", not "a modifier
+/// of -1 was supplied". The two readings differ for exactly the two types whose
+/// bare grammar keyword implies a length; [`format_type_given`] is the other
+/// reading.
+pub(crate) fn format_type(oid: i64, typmod: i64) -> String {
+    format_type_extended(oid, typmod, typmod >= 0)
+}
+
+/// PostgreSQL `format_type_extended(oid, typmod, FORMAT_TYPE_TYPEMOD_GIVEN)`:
+/// the caller states a modifier, and `-1` states that the value has none.
+///
+/// `bit` and `bpchar` are the two types where that is not the same as saying
+/// nothing. Their bare grammar keywords mean `bit(1)` and `character(1)`, so a
+/// value that really carries no length has to be named in a spelling the parser
+/// will not re-decorate: `"bit"` in quotes, and `bpchar` under PostgreSQL's
+/// internal name. Naming the same type with no modifier in hand instead prints
+/// the SQL keyword, `bit` and `character`.
+pub(crate) fn format_type_given(oid: i64, typmod: i64) -> String {
+    format_type_extended(oid, typmod, true)
+}
+
+fn format_type_extended(oid: i64, typmod: i64, given: bool) -> String {
     let Ok(oid) = u32::try_from(oid) else {
         return "-".to_string();
     };
     let Some((base, kind)) = builtin_format_type(oid) else {
         return "-".to_string();
     };
-    let modifier = if typmod < 0 {
+    let modifier = if typmod < 0 || !given {
         String::new()
     } else {
         type_modifier(kind, typmod)
@@ -1432,6 +2604,13 @@ fn format_type(oid: i64, typmod: i64) -> String {
         None => (base, ""),
     };
     if modifier.is_empty() {
+        // With a modifier stated and none to state, the name has to survive
+        // being read back: `character` would come back as `character(1)`.
+        let element = match (element, given) {
+            ("bpchar", false) => "character",
+            ("bit", true) => "\"bit\"",
+            (element, _) => element,
+        };
         return format!("{element}{suffix}");
     }
     // `bpchar` is PostgreSQL's internal name for an unmodified blank-padded
@@ -1463,6 +2642,18 @@ enum TypmodKind {
     /// A fractional-seconds precision (`timestamp(3)`), printed before the
     /// `with/without time zone` tail.
     Seconds,
+    /// A `bit(n)` / `bit varying(n)` length, stored raw. Distinct from
+    /// [`TypmodKind::Seconds`] even though both print the stored word, because
+    /// `bit varying` has a space in its name and the modifier goes at the END:
+    /// `bit varying(5)`, never `bit(5) varying`.
+    Bits,
+    /// `printTypmod`'s fallback for a type with no `typmodout`: the stored word
+    /// is printed verbatim. The geometric types are the case — none of them
+    /// accepts a modifier (`point(4)` as a declaration is `42601 type modifier
+    /// is not allowed for type "point"`), so this is only ever reached by
+    /// calling `format_type` with a typmod the type could not have carried,
+    /// where `PostgreSQL` still prints `point(4)` rather than dropping it.
+    Verbatim,
 }
 
 fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
@@ -1473,7 +2664,7 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
             let packed = typmod - 4;
             format!("({},{})", (packed >> 16) & 0xffff, packed & 0xffff)
         }
-        TypmodKind::Seconds => format!("({typmod})"),
+        TypmodKind::Seconds | TypmodKind::Bits | TypmodKind::Verbatim => format!("({typmod})"),
     }
 }
 
@@ -1481,8 +2672,25 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
 /// The name carries a `[]` suffix for an array type, and the modifier goes in
 /// before that suffix (`character varying(6)[]`).
 fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
-    use TypmodKind::{Length, None as NoMod, PrecisionScale, Seconds};
+    use TypmodKind::{Bits, Length, None as NoMod, PrecisionScale, Seconds, Verbatim};
     Some(match oid {
+        // The seven geometric types. None accepts a modifier, so `Verbatim` is
+        // only reached through a direct `format_type(600, 4)` call; the reason
+        // they are here at all is that psql's `\d` renders every column through
+        // `format_type`, and without these arms it printed `-` for the type.
+        crabka_pgtypes::oids::POINT => ("point", Verbatim),
+        crabka_pgtypes::oids::LSEG => ("lseg", Verbatim),
+        crabka_pgtypes::oids::PATH => ("path", Verbatim),
+        crabka_pgtypes::oids::BOX => ("box", Verbatim),
+        crabka_pgtypes::oids::POLYGON => ("polygon", Verbatim),
+        crabka_pgtypes::oids::LINE => ("line", Verbatim),
+        crabka_pgtypes::oids::CIRCLE => ("circle", Verbatim),
+        790 => ("money", NoMod),
+        791 => ("money[]", NoMod),
+        1560 => ("bit", Bits),
+        1561 => ("bit[]", Bits),
+        1562 => ("bit varying", Bits),
+        1563 => ("bit varying[]", Bits),
         16 => ("boolean", NoMod),
         17 => ("bytea", NoMod),
         18 => ("\"char\"", NoMod),
@@ -1492,6 +2700,21 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         23 => ("integer", NoMod),
         25 => ("text", NoMod),
         26 => ("oid", NoMod),
+        27 => ("tid", NoMod),
+        28 => ("xid", NoMod),
+        29 => ("cid", NoMod),
+        271 => ("xid8[]", NoMod),
+        1010 => ("tid[]", NoMod),
+        1011 => ("xid[]", NoMod),
+        1012 => ("cid[]", NoMod),
+        1028 => ("oid[]", NoMod),
+        3220 => ("pg_lsn", NoMod),
+        3221 => ("pg_lsn[]", NoMod),
+        5069 => ("xid8", NoMod),
+        2949 => ("txid_snapshot[]", NoMod),
+        2970 => ("txid_snapshot", NoMod),
+        5038 => ("pg_snapshot", NoMod),
+        5039 => ("pg_snapshot[]", NoMod),
         114 => ("json", NoMod),
         142 => ("xml", NoMod),
         199 => ("json[]", NoMod),
@@ -1523,11 +2746,24 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         1231 => ("numeric[]", PrecisionScale),
         1266 => ("time with time zone", Seconds),
         1700 => ("numeric", PrecisionScale),
+        // The `reg*` family. `format_type` is what `psql`'s `\d` prints in the
+        // Type column and what `pg_attribute` reports, so a missing entry here
+        // is a blank column rather than a wrong one.
+        24 => ("regproc", NoMod),
+        2202 => ("regprocedure", NoMod),
+        2203 => ("regoper", NoMod),
+        2204 => ("regoperator", NoMod),
         2205 => ("regclass", NoMod),
         2206 => ("regtype", NoMod),
+        3734 => ("regconfig", NoMod),
+        3769 => ("regdictionary", NoMod),
+        4089 => ("regnamespace", NoMod),
+        4096 => ("regrole", NoMod),
+        4191 => ("regcollation", NoMod),
         2278 => ("void", NoMod),
         2950 => ("uuid", NoMod),
         2951 => ("uuid[]", NoMod),
+        143 => ("xml[]", NoMod),
         3802 => ("jsonb", NoMod),
         3807 => ("jsonb[]", NoMod),
         3614 => ("tsvector", NoMod),
@@ -1649,6 +2885,25 @@ fn text_arg(d: &Datum) -> Result<&str, ExecError> {
     }
 }
 
+/// A `bytea` argument's bytes.
+///
+/// The plan gate lets an `unknown` literal stand where a `bytea` is wanted,
+/// exactly as PostgreSQL's coercion does, and such a literal reaches evaluation
+/// still spelled as text. Running `byteain` over it here is what makes
+/// `btrim(b, '\x00')` agree with `btrim(b, '\x00'::bytea)` — reading the
+/// literal's own UTF-8 bytes instead would silently trim four ASCII characters
+/// rather than one NUL.
+fn bytea_arg<'a>(d: &'a Datum, ctx: &EvalCtx) -> Result<std::borrow::Cow<'a, [u8]>, ExecError> {
+    match d {
+        Datum::Bytea(bytes) => Ok(std::borrow::Cow::Borrowed(bytes)),
+        Datum::Text(_) => match crabka_pgtypes::cast::cast(d, ColumnType::Bytea, &ctx.time_zone)? {
+            Datum::Bytea(bytes) => Ok(std::borrow::Cow::Owned(bytes)),
+            _ => unreachable!("a cast to bytea yields bytea"),
+        },
+        other => Err(type_error("function", other)),
+    }
+}
+
 /// An integer argument at runtime, promoted to i64.
 /// The advisory-lock key: the single `int8` spelling, or `PostgreSQL`'s packing
 /// of the two-`int4` spelling into one `int8`.
@@ -1666,10 +2921,40 @@ fn advisory_key(vals: &[Datum]) -> Result<i64, ExecError> {
     }
 }
 
+/// A bit-string function's `int4` position argument. The bit routines take
+/// `int32` throughout — `SUBSTRING(b FROM 2 FOR 2147483646)` relies on the
+/// overflow of `start + count` in 32 bits meaning "to the end of the string" —
+/// so a wider value is out of range rather than silently clamped.
+fn bit_index(d: &Datum) -> Result<i32, ExecError> {
+    match d {
+        Datum::Int2(n) => Ok(i32::from(*n)),
+        Datum::Int4(n) => Ok(*n),
+        Datum::Int8(n) => {
+            i32::try_from(*n).map_err(|_| ExecError::Type(crabka_pgtypes::TypeError::Overflow))
+        }
+        other => Err(type_error("function", other)),
+    }
+}
+
 pub(crate) fn int_arg(d: &Datum) -> Result<i64, ExecError> {
     match d {
+        Datum::Int2(n) => Ok(i64::from(*n)),
         Datum::Int4(n) => Ok(i64::from(*n)),
         Datum::Int8(n) => Ok(*n),
+        // Every catalog function that takes an object identifier reads it
+        // through here, and psql writes those arguments as an explicit
+        // `'123'::pg_catalog.oid` rather than passing a catalog column. Without
+        // this arm `\d+` on a view fails: `pg_get_viewdef('123'::oid, true)`
+        // reports that the function does not accept an argument of type oid.
+        // PostgreSQL declares int2/int4/int8 -> oid implicit, so widening the
+        // other direction here is the same coercion read backwards.
+        Datum::Oid(n) => Ok(i64::from(*n)),
+        // A `reg*` is binary-coercible to `oid` in both directions, so the same
+        // arguments read as `'v'::regclass`. Without this arm
+        // `pg_get_viewdef('v'::regclass)` — the spelling PostgreSQL's own
+        // `pg_get_viewdef(regclass)` overload takes — reports that the function
+        // does not accept an argument of type regclass.
+        Datum::Regclass(value) => Ok(i64::from(value.oid)),
         other => Err(type_error("function", other)),
     }
 }
@@ -1693,6 +2978,18 @@ pub(crate) fn type_error(what: &str, got: &Datum) -> ExecError {
 /// operator.
 pub(crate) fn text_render(d: &Datum, tz: &jiff::tz::TimeZone) -> String {
     String::from_utf8(crabka_pgtypes::encoding::encode_text(d, tz))
+        .expect("a Datum's text encoding is always valid UTF-8")
+}
+
+/// [`text_render`] in the session's output styles rather than the canonical
+/// ones. This is what a *user-visible* rendering wants: the deparser prints a
+/// stored constant through its type's output function exactly as `ruleutils.c`
+/// does, so `DateStyle` and `IntervalStyle` reach it.
+pub(crate) fn text_render_in(
+    d: &Datum,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    String::from_utf8(crabka_pgtypes::encoding::encode_text_in(d, style))
         .expect("a Datum's text encoding is always valid UTF-8")
 }
 
@@ -1790,6 +3087,22 @@ fn finite_or_overflow(x: f64) -> Result<Datum, ExecError> {
 /// PostgreSQL power result type. It is float8 if any operand is float8. If not,
 /// it is numeric if any operand is numeric. Otherwise it is float8, the all-int
 /// case, which is PG's preferred type.
+/// Which `power` overload a call resolves to. PostgreSQL has both
+/// `power(double precision, double precision)` and `power(numeric, numeric)`,
+/// and an `unknown` literal constrains neither: `func_select_candidate` keeps
+/// the candidate that needs no coercion of the argument that IS typed. So
+/// `power('-2'::numeric, 'inf')` is `numeric` — and answers `Infinity` — where
+/// forcing the untyped `'inf'` to `float8` would drag the whole call onto the
+/// float path and raise instead.
+fn power_overload(args: &[Expr], a: ColumnType, b: ColumnType) -> ColumnType {
+    match (is_unknown_literal(&args[0]), is_unknown_literal(&args[1])) {
+        (false, false) => power_result_type(a, b),
+        (true, false) => power_result_type(b, b),
+        (false, true) => power_result_type(a, a),
+        (true, true) => ColumnType::Float8,
+    }
+}
+
 fn power_result_type(a: ColumnType, b: ColumnType) -> ColumnType {
     let (a, b) = (float4_widens(a), float4_widens(b));
     if a == ColumnType::Float8 || b == ColumnType::Float8 {
@@ -1841,6 +3154,66 @@ fn float_sign(x: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn eval_range_constructor(
+    ty: RangeRef,
+    fc: &FuncCall,
+    vals: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    require_arity(fc, (1..=3).contains(&vals.len()))?;
+    if vals.len() == 1 {
+        return crabka_pgtypes::cast::cast(&vals[0], ColumnType::Range(ty), &ctx.time_zone)
+            .map_err(ExecError::from);
+    }
+    if vals.get(2).is_some_and(Datum::is_null) {
+        return Ok(Datum::Null);
+    }
+    let bounds = vals.get(2).map_or(Ok("[)"), text_arg)?;
+    let [left, right] = bounds.as_bytes() else {
+        return Err(ExecError::Type(crabka_pgtypes::TypeError::Coded {
+            sqlstate: "22023",
+            message: "range constructor flags argument must be two characters".into(),
+        }));
+    };
+    if !matches!(left, b'[' | b'(') || !matches!(right, b']' | b')') {
+        return Err(ExecError::Type(crabka_pgtypes::TypeError::Coded {
+            sqlstate: "22023",
+            message: "range constructor flags argument must contain one of '(', '[' followed by one of ')', ']'".into(),
+        }));
+    }
+    let cast_bound = |value: &Datum| -> Result<Option<Box<Datum>>, ExecError> {
+        if value.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(Box::new(crabka_pgtypes::cast::cast(
+                value,
+                *ty.subtype,
+                &ctx.time_zone,
+            )?)))
+        }
+    };
+    let value = crabka_pgtypes::RangeValue {
+        ty,
+        lower: cast_bound(&vals[0])?,
+        upper: cast_bound(&vals[1])?,
+        lower_inclusive: *left == b'[',
+        upper_inclusive: *right == b']',
+        empty: false,
+    };
+    let literal = crabka_pgtypes::range::to_text(&value, |bound| {
+        String::from_utf8(crabka_pgtypes::encoding::encode_text_in(
+            bound,
+            ctx.output_style(),
+        ))
+        .expect("a Datum's text encoding is always valid UTF-8")
+    });
+    Ok(Datum::Range(crabka_pgtypes::range::parse(
+        &literal,
+        ty,
+        &ctx.time_zone,
+    )?))
 }
 
 // ---- string helpers ----
@@ -2054,14 +3427,18 @@ mod tests {
     fn table() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("s", ColumnType::Text),
                 Column::new("n", ColumnType::Int4),
             ],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -2069,11 +3446,15 @@ mod tests {
     fn table_n() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![Column::new("qn", ColumnType::Numeric(None))],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -2090,6 +3471,125 @@ mod tests {
     fn ev(sql: &str) -> Datum {
         let ctx = crate::clock::EvalCtx::test_default();
         crate::eval::eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx).expect("eval")
+    }
+
+    /// Render an expression the way the wire would, so a case's expectation is
+    /// exactly the text PostgreSQL prints — including a numeric's display
+    /// scale, which is the whole point of `log_var`'s scale selection.
+    fn rendered(sql: &str) -> String {
+        let ctx = crate::clock::EvalCtx::test_default();
+        text_render(&ev(sql), &ctx.time_zone)
+    }
+
+    /// `log(base, num)` is declared over `numeric` alone, and its result scale
+    /// comes from `log_var`, not from either input on its own.
+    #[test]
+    fn two_argument_log_divides_the_logarithms_at_postgres_display_scale() {
+        for (sql, expected) in [
+            ("log(2, 2)", "1.0000000000000000"),
+            ("log(2, 4.2)", "2.0703893278913979"),
+            ("log(4.2, 2)", "0.4830009440873890"),
+            ("log(numeric '2', 'Infinity')", "Infinity"),
+            ("log(numeric 'Infinity', 2)", "0"),
+            ("log(numeric 'Infinity', 'Infinity')", "NaN"),
+            ("log(numeric 'NaN', 2)", "NaN"),
+            ("log(0.99923, 4.58934e34)", "-103611.55579544132"),
+            ("log(1.000016, 8.452010e18)", "2723830.2877097365"),
+            // The one-argument form is still base 10.
+            ("log(100)", "2"),
+        ] {
+            assert!(rendered(sql) == expected, "{sql} gave {}", rendered(sql));
+        }
+        assert!(
+            crate::eval::infer_type(&pexpr("log(2, 8)").expect("parse"), &Scope::empty())
+                .expect("type")
+                == ColumnType::Numeric(None)
+        );
+    }
+
+    #[test]
+    fn two_argument_log_reports_the_domain_error_of_whichever_operand_fails() {
+        for (sql, code) in [
+            ("log(numeric '0', 10)", "2201E"),
+            ("log(numeric '10', 0)", "2201E"),
+            ("log(numeric '-Infinity', 10)", "2201E"),
+            ("log(numeric 'Infinity', 0)", "2201E"),
+            ("log(numeric 'Infinity', '-Infinity')", "2201E"),
+            // ln(1) is zero, so the division has no divisor.
+            ("log(1.0, 12.34)", "22012"),
+            // There is no two-argument float8 candidate.
+            ("log(2::float8, 8::float8)", "42883"),
+        ] {
+            assert!(err_code(sql, None) == code, "{sql}");
+        }
+    }
+
+    /// `float4send` is `real`'s binary output function: four big-endian IEEE
+    /// 754 bytes, which is how the suite pins the rounding of a decimal literal
+    /// that prints the same either way.
+    #[test]
+    fn float4send_reports_the_four_wire_bytes_of_a_real() {
+        for (sql, expected) in [
+            ("float4send('5e-20'::float4)", r"\x1f6c1e4a"),
+            ("float4send('67e14'::float4)", r"\x59be6cea"),
+            // Two literals that print alike and round to the same real.
+            ("float4send('1.17549435e-38'::float4)", r"\x00800000"),
+            ("float4send('1.1754944e-38'::float4)", r"\x00800000"),
+            ("float4send(0::float4)", r"\x00000000"),
+            ("float4send('-0'::float4)", r"\x80000000"),
+        ] {
+            assert!(rendered(sql) == expected, "{sql} gave {}", rendered(sql));
+        }
+        assert!(
+            crate::eval::infer_type(
+                &pexpr("float4send(1::float4)").expect("parse"),
+                &Scope::empty()
+            )
+            .expect("type")
+                == ColumnType::Bytea
+        );
+        assert!(ev("float4send(null)") == Datum::Null);
+        // `float8` reaches `real` only by an assignment cast, so it resolves to
+        // no candidate at all.
+        assert!(err_code("float4send(1::float8)", None) == "42883");
+        assert!(err_code("float4send('a'::text)", None) == "42883");
+    }
+
+    #[test]
+    fn binary_coercible_matches_builtin_identity_and_relabel_casts() {
+        assert!(ev("binary_coercible(23, 23)") == Datum::Bool(true));
+        assert!(ev("binary_coercible(23, 26)") == Datum::Bool(true));
+        assert!(ev("binary_coercible(25, 1043)") == Datum::Bool(true));
+        assert!(ev("binary_coercible(23, 25)") == Datum::Bool(false));
+    }
+
+    #[test]
+    fn boolean_comparison_builtins_are_strict_and_resolve_unknown_literals() {
+        for (sql, expected) in [
+            ("booleq(true, true)", true),
+            ("booleq(true, false)", false),
+            ("booleq(bool 'false', false)", true),
+            ("boolne(true, false)", true),
+            ("boolne(false, false)", false),
+            ("booleq('true', 'true')", true),
+            ("boolne('false', 'true')", true),
+        ] {
+            assert_eq!(ev(sql), Datum::Bool(expected), "{sql}");
+        }
+        assert_eq!(ev("booleq(null, true)"), Datum::Null);
+        assert_eq!(ev("boolne(false, null)"), Datum::Null);
+
+        for sql in ["booleq(true, false)", "boolne('true', 'false')"] {
+            assert_eq!(
+                crate::eval::infer_type(&pexpr(sql).expect("parse"), &Scope::empty())
+                    .expect("type"),
+                ColumnType::Bool,
+                "{sql}"
+            );
+        }
+        assert_eq!(err_code("booleq(1, true)", None), "42883");
+        assert_eq!(err_code("boolne(true)", None), "42883");
+        assert_eq!(ec_eval("booleq('not-a-bool', true)"), "22P02");
     }
 
     /// The SQL-standard call forms that spell their arguments with keywords.
@@ -2184,13 +3684,149 @@ mod tests {
     #[test]
     fn string_length_upper_lower() {
         assert_eq!(ev("length('hello')"), Datum::Int4(5));
+        assert_eq!(ev(r"length('\x00ff'::bytea)"), Datum::Int4(2));
         assert_eq!(ev("char_length('abc')"), Datum::Int4(3));
         assert_eq!(ev("character_length('')"), Datum::Int4(0));
+        assert_eq!(err_code(r"char_length('\x00ff'::bytea)", None), "42883");
         assert_eq!(ev("upper('aBc')"), Datum::Text("ABC".into()));
         assert_eq!(ev("lower('aBc')"), Datum::Text("abc".into()));
         // strict: NULL argument → NULL.
         assert_eq!(ev("length(null)"), Datum::Null);
         assert_eq!(ev("upper(null)"), Datum::Null);
+    }
+
+    #[test]
+    fn range_constructors_and_accessors_keep_typed_bounds() {
+        let text = |sql: &str| {
+            String::from_utf8(crabka_pgtypes::encoding::encode_text(
+                &ev(sql),
+                &jiff::tz::TimeZone::UTC,
+            ))
+            .expect("range output is UTF-8")
+        };
+        assert_eq!(text("int4range(1, 4, '(]')"), "[2,5)");
+        assert_eq!(text("int4range(int4range(1, 4))"), "[1,4)");
+        assert_eq!(text("int4multirange()"), "{}");
+        assert_eq!(text("multirange(int4range(1, 4))"), "{[1,4)}");
+        assert_eq!(
+            text("lower(int4multirange(int4range(1, 4), int4range(8, 10)))"),
+            "1"
+        );
+        assert_eq!(
+            text("upper(int4multirange(int4range(1, 4), int4range(8, 10)))"),
+            "10"
+        );
+        assert_eq!(text("int4range(1, 4)::int4multirange"), "{[1,4)}");
+        assert_eq!(
+            text("int4multirange(int4range(5, 8), int4range(1, 5))"),
+            "{[1,8)}"
+        );
+        assert_eq!(
+            ev("int4range(1, 10) @> int4multirange(int4range(2, 4), int4range(6, 8))"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("int4range(1, 3) && int4multirange(int4range(2, 4), int4range(6, 8))"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("int4multirange(int4range(2, 4), int4range(6, 8)) @> 3"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ec_eval("int4multirange(int4range(2, 4), int4range(6, 8)) @> '3'"),
+            "22P02"
+        );
+        assert_eq!(
+            ec_eval("'3' <@ int4multirange(int4range(2, 4), int4range(6, 8))"),
+            "22P02"
+        );
+        assert_eq!(
+            ev("int4multirange(int4range(2, 4), int4range(6, 8)) << int4range(9, 10)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev(
+                "int4multirange(int4range(2, 4), int4range(6, 8)) &< int4multirange(int4range(7, 10))"
+            ),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            text(
+                "int4multirange(int4range(1, 5), int4range(10, 15)) * int4multirange(int4range(3, 12))"
+            ),
+            "{[3,5),[10,12)}"
+        );
+        assert_eq!(
+            text(
+                "int4multirange(int4range(1, 5), int4range(10, 15)) - int4multirange(int4range(3, 12))"
+            ),
+            "{[1,3),[12,15)}"
+        );
+        assert_eq!(
+            ev("multirange_contains_range(int4multirange(int4range(1, 5)), int4range(2, 4))"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            text("range_merge(int4multirange(int4range(1, 5), int4range(10, 15)))"),
+            "[1,15)"
+        );
+        assert_eq!(ev("lower(int4range(1, 4))"), Datum::Int4(1));
+        assert_eq!(ev("upper(int4range(1, 4))"), Datum::Int4(4));
+        assert_eq!(ev("isempty('empty'::int4range)"), Datum::Bool(true));
+        assert_eq!(ev("lower_inf(int4range(null, 4))"), Datum::Bool(true));
+        assert_eq!(ev("upper_inc(int4range(1, 4, '[]'))"), Datum::Bool(false));
+        assert_eq!(ev("numrange(1.0, 3.0) @> 2.0"), Datum::Bool(true));
+        assert_eq!(
+            ev("numrange(1.0, 3.0) && numrange(2.0, 4.0)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("numrange(1.0, 2.0) -|- numrange(2.0, 3.0)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("numrange(1.0, 2.0) << numrange(3.0, 4.0)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(
+            ev("numrange(1.0, 2.0) &< numrange(1.5, 3.0)"),
+            Datum::Bool(true)
+        );
+        assert_eq!(text("numrange(1.0, 2.0) + numrange(2.0, 3.0)"), "[1.0,3.0)");
+        assert_eq!(text("numrange(1.0, 2.0) + '[2.0,3.0)'"), "[1.0,3.0)");
+        assert_eq!(text("numrange(1.0, 2.0) * numrange(1.5, 3.0)"), "[1.5,2.0)");
+        assert_eq!(text("numrange(1.0, 2.0) - numrange(1.5, 3.0)"), "[1.0,1.5)");
+        assert_eq!(
+            text("numrange(1.0, 3.0) - numrange(1.0, 3.0, '()')"),
+            "[1.0,1.0]"
+        );
+        assert_eq!(
+            ev("numrange(1.0, 2.0, '[]') &< numrange(1.0, 2.0)"),
+            Datum::Bool(false)
+        );
+        assert_eq!(
+            text("range_merge(numrange(1.0, 2.0), numrange(2.5, 3.0))"),
+            "[1.0,3.0)"
+        );
+        // A user-defined range type is usable as a constructor function. The
+        // oid is chosen here rather than allocated: the catalog that persists a
+        // type owns its oid, and this test never builds one.
+        crabka_pgtypes::usertype::replace(&crabka_pgtypes::usertype::UserType {
+            oid: 300_700,
+            schema: crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
+            name: "range_constructor_test".to_string(),
+            body: crabka_pgtypes::usertype::UserTypeBody::Range(
+                crabka_pgtypes::usertype::RangeBody {
+                    subtype: ColumnType::Text,
+                    collation: None,
+                    multirange_schema: None,
+                    multirange_name: None,
+                },
+            ),
+        });
+        assert!(text("range_constructor_test('a', 'z')") == "[a,z)");
+        crabka_pgtypes::usertype::unregister("range_constructor_test");
     }
 
     #[test]
@@ -2307,6 +3943,28 @@ mod tests {
         assert_eq!(ty("nullif(s, 'x')"), ColumnType::Text);
         // `||` is text; one operand text is enough.
         assert_eq!(ty("'id=' || n"), ColumnType::Text);
+    }
+
+    #[test]
+    fn database_encoding_is_utf8() {
+        let expr = pexpr("getdatabaseencoding()").expect("parse");
+        assert_eq!(
+            crate::eval::infer_type(&expr, &Scope::empty()).expect("type"),
+            ColumnType::Text
+        );
+        assert_eq!(ev("getdatabaseencoding()"), Datum::Text("UTF8".into()));
+        assert_eq!(err_code("getdatabaseencoding(1)", None), "42883");
+    }
+
+    #[test]
+    fn numa_availability_is_false() {
+        let expr = pexpr("pg_numa_available()").expect("parse");
+        assert_eq!(
+            crate::eval::infer_type(&expr, &Scope::empty()).expect("type"),
+            ColumnType::Bool
+        );
+        assert_eq!(ev("pg_numa_available()"), Datum::Bool(false));
+        assert_eq!(err_code("pg_numa_available(1)", None), "42883");
     }
 
     #[test]
@@ -2501,5 +4159,286 @@ mod tests {
         assert_eq!(ty("sqrt(4.0::float8)"), ColumnType::Float8);
         assert_eq!(ty("power(qn, 2)"), ColumnType::Numeric(None)); // numeric base
         assert_eq!(ty("power(2, 3)"), ColumnType::Float8); // all-int
+    }
+
+    /// A table whose columns are named after the geometric functions. Every one
+    /// of these is an ordinary identifier in `PostgreSQL` — none of the seven
+    /// type names is even a keyword there — so a column keeps the name whatever
+    /// `is_scalar` says about it.
+    fn geometric_name_table() -> Table {
+        Table {
+            id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
+            name: RelationName::public("t"),
+            columns: vec![
+                Column::new("area", ColumnType::Int4),
+                Column::new("center", ColumnType::Text),
+                Column::new("path", ColumnType::Text),
+                Column::new("slope", ColumnType::Int4),
+                Column::new("npoints", ColumnType::Int4),
+                Column::new("radius", ColumnType::Int4),
+                Column::new("width", ColumnType::Int4),
+                Column::new("height", ColumnType::Int4),
+                Column::new("length", ColumnType::Int4),
+            ],
+            sharded: false,
+            row_security: false,
+            force_row_security: false,
+            sharding: None,
+            foreign: None,
+            materialized: None,
+            checks: Vec::new(),
+        }
+    }
+
+    /// Adding the geometric family to `is_scalar` must not take any of its
+    /// names away from a column that happens to use one. A bare `area` is a
+    /// column reference, not a niladic call.
+    #[test]
+    fn a_column_named_after_a_geometric_function_is_still_a_column() {
+        let t = geometric_name_table();
+        let scope = scope_of(Some(&t));
+        let ty =
+            |sql: &str| crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type");
+        for (sql, expected) in [
+            ("area", ColumnType::Int4),
+            ("center", ColumnType::Text),
+            ("path", ColumnType::Text),
+            ("slope", ColumnType::Int4),
+            ("npoints", ColumnType::Int4),
+            ("radius", ColumnType::Int4),
+            ("width", ColumnType::Int4),
+            ("height", ColumnType::Int4),
+            ("length", ColumnType::Int4),
+            ("area + 1", ColumnType::Int4),
+            ("t.area", ColumnType::Int4),
+            ("upper(center)", ColumnType::Text),
+        ] {
+            assert!(ty(sql) == expected, "{sql}");
+        }
+        // And the values come through, not a function's result.
+        let ctx = crate::clock::EvalCtx::test_default();
+        let row = vec![
+            Datum::Int4(7),
+            Datum::Text("c".into()),
+            Datum::Text("p".into()),
+            Datum::Int4(1),
+            Datum::Int4(2),
+            Datum::Int4(3),
+            Datum::Int4(4),
+            Datum::Int4(5),
+            Datum::Int4(6),
+        ];
+        let value = crate::eval::eval(&pexpr("area + 1").expect("parse"), &scope, &row, &ctx)
+            .expect("eval");
+        assert!(value == Datum::Int4(8));
+    }
+
+    /// `length` keeps every non-geometric overload it already had; only `lseg`
+    /// and `path` arguments take the `float8` reading, and only under the
+    /// `length` spelling.
+    #[test]
+    fn length_keeps_its_non_geometric_overloads() {
+        let t = table();
+        let ty = |sql: &str| {
+            crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope_of(Some(&t))).expect("type")
+        };
+        for sql in [
+            "length('abc')",
+            "length(s)",
+            "char_length(s)",
+            "character_length('abc')",
+            "length(B'1011')",
+            "length('abc'::bytea)",
+            "length('a b'::tsvector)",
+        ] {
+            assert!(ty(sql) == ColumnType::Int4, "{sql}");
+        }
+        assert!(ev("length('abc')") == Datum::Int4(3));
+        assert!(ev("length(B'1011')") == Datum::Int4(4));
+        assert!(ev("length('abc'::bytea)") == Datum::Int4(3));
+        // The two geometric overloads, which return float8 rather than int4.
+        assert!(ty("length(lseg '[(0,0),(3,4)]')") == ColumnType::Float8);
+        assert!(ty("length(path '((0,0),(3,0),(3,4))')") == ColumnType::Float8);
+        assert!(ev("length(lseg '[(0,0),(3,4)]')") == Datum::Float8(5.0));
+        assert!(ev("length(path '((0,0),(3,0),(3,4))')") == Datum::Float8(12.0));
+        // `char_length`/`character_length` have no geometric overload.
+        assert!(err_code("char_length(lseg '[(0,0),(3,4)]')", Some(&t)) == "42883");
+    }
+
+    /// The geometric family answers through the ordinary scalar dispatch, so
+    /// its result types reach `RowDescription` and its errors are 42883.
+    #[test]
+    fn the_geometric_family_resolves_through_the_scalar_dispatch() {
+        let t = table();
+        let ty = |sql: &str| {
+            crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope_of(Some(&t))).expect("type")
+        };
+        for (sql, expected) in [
+            ("area(box '(0,0),(2,3)')", ColumnType::Float8),
+            ("area(circle '<(0,0),2>')", ColumnType::Float8),
+            ("area(path '((0,0),(2,0),(2,2),(0,2))')", ColumnType::Float8),
+            ("center(box '(0,0),(2,4)')", ColumnType::Point),
+            ("point(1, 2)", ColumnType::Point),
+            ("box(point '(1,2)', point '(3,4)')", ColumnType::Box),
+            ("lseg(box '(0,0),(2,3)')", ColumnType::Lseg),
+            ("line(point '(0,0)', point '(1,1)')", ColumnType::Line),
+            ("polygon(box '(0,0),(1,1)')", ColumnType::Polygon),
+            ("path(polygon '((0,0),(1,1))')", ColumnType::Path),
+            ("circle(box '(0,0),(2,2)')", ColumnType::Circle),
+            ("npoints(polygon '((0,0),(1,1))')", ColumnType::Int4),
+            ("isclosed(path '((0,0),(1,1))')", ColumnType::Bool),
+            ("poly_center(polygon '((0,0),(1,1))')", ColumnType::Point),
+        ] {
+            assert!(ty(sql) == expected, "{sql}");
+        }
+        assert!(ev("area(box '(0,0),(2,3)')") == Datum::Float8(6.0));
+        assert!(ev("width(box '(0,0),(2,3)')") == Datum::Float8(2.0));
+        // An argument type with no overload is 42883, both at plan time and at
+        // value time.
+        assert!(err_code("area(lseg '[(0,0),(1,1)]')", Some(&t)) == "42883");
+        assert!(ec_eval("area(lseg '[(0,0),(1,1)]')") == "42883");
+        assert!(err_code("area(n)", Some(&t)) == "42883");
+    }
+
+    /// The enumeration is only trustworthy if it stays sorted (the lookup binary
+    /// searches it), holds no name twice, and names types this engine has.
+    #[test]
+    fn the_constructor_cast_enumeration_is_sorted_and_resolvable() {
+        assert!(CONSTRUCTOR_CASTS.windows(2).all(|w| w[0].0 < w[1].0));
+        for (target, sources) in CONSTRUCTOR_CASTS {
+            assert!(sources.windows(2).all(|w| w[0] < w[1]), "{target}");
+            assert!(type_of_typname(target).is_some(), "{target}");
+            for source in *sources {
+                assert!(type_of_typname(source).is_some(), "{target}({source})");
+            }
+        }
+    }
+
+    /// `T(x)` is the cast function `pg_proc` names after its target type, so it
+    /// converts exactly as `x::T` does — in the value and in the reported type.
+    #[test]
+    fn a_constructor_call_casts_to_the_type_it_names() {
+        for (call, cast) in [
+            (
+                "float8(4567890123456789::int8)",
+                "4567890123456789::int8::float8",
+            ),
+            ("float4(2::int8)", "2::int8::float4"),
+            ("int4('123'::int8)", "'123'::int8::int4"),
+            ("int2('123'::int8)", "'123'::int8::int2"),
+            ("int8(2.5::float8)", "2.5::float8::int8"),
+            ("numeric(2.5::float8)", "2.5::float8::numeric"),
+            ("oid(4::int8)", "4::int8::oid"),
+            ("bool(1::int4)", "1::int4::bool"),
+            ("text(true::bool)", "true::bool::text"),
+            (
+                "date(timestamp '2026-08-13 12:00:00')",
+                "timestamp '2026-08-13 12:00:00'::date",
+            ),
+            (
+                "timestamptz(date '2026-08-13')",
+                "date '2026-08-13'::timestamptz",
+            ),
+            ("cidr(inet '10.0.0.0/8')", "inet '10.0.0.0/8'::cidr"),
+        ] {
+            assert!(ev(call) == ev(cast), "{call}");
+            let scope = Scope::empty();
+            let ty = |sql: &str| {
+                crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type")
+            };
+            assert!(ty(call) == ty(cast), "{call}");
+        }
+    }
+
+    /// The name a *quoted* type name resolves through is the one `pg_proc` gives
+    /// the cast function, so `"char"(x)` is the one-byte type and never
+    /// `character(1)`.
+    #[test]
+    fn the_char_constructor_names_the_one_byte_type() {
+        assert!(constructor_cast_type("char") == Some(ColumnType::InternalChar));
+        assert!(constructor_cast_type("bpchar") == Some(ColumnType::Char(None)));
+    }
+
+    /// A name outside the enumeration stays 42883, and so do the arities the
+    /// enumeration does not carry: it holds only the one-argument functions.
+    #[test]
+    fn a_constructor_call_is_still_undefined_off_the_enumeration() {
+        for sql in [
+            "jsonb('1')",
+            "uuid('00000000-0000-0000-0000-000000000000')",
+            "float8()",
+            "float8(1::int8, 2)",
+        ] {
+            assert!(err_code(sql, None) == "42883", "{sql}");
+        }
+    }
+
+    /// An operand type the function does not declare stays 42883 — the
+    /// enumeration is a candidate list, not a licence to cast anything.
+    /// `xid(xid8)` is the only `xid` overload, `numeric(numeric)` is the
+    /// length coercion and takes a modifier, and no candidate takes a
+    /// composite.
+    #[test]
+    fn an_undeclared_operand_type_has_no_constructor_cast() {
+        for sql in [
+            "xid('1'::xid)",
+            "numeric(1.5::numeric)",
+            "text(1::int4)",
+            "text(row('Jim', 'Beam'))",
+            "int4('123'::text)",
+        ] {
+            assert!(err_code(sql, None) == "42883", "{sql}");
+        }
+    }
+
+    /// `int8`'s overflow says which type could not hold the result. The wording
+    /// is `int4`'s in `TypeError::Overflow`, which is not this overload's.
+    #[test]
+    fn abs_reports_the_overflowing_type_by_name() {
+        for (sql, message) in [
+            ("abs('-9223372036854775808'::int8)", "bigint out of range"),
+            ("abs((-2147483648)::int4)", "integer out of range"),
+            ("abs((-32768)::int2)", "smallint out of range"),
+        ] {
+            let ctx = crate::clock::EvalCtx::test_default();
+            let pg = crate::eval::eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx)
+                .expect_err("expected overflow")
+                .into_pg();
+            assert!(pg.code == "22003", "{sql}");
+            assert!(pg.message == message, "{sql}");
+        }
+    }
+
+    /// `unicode_version()` answers the release the engine's own tables come
+    /// from, in PostgreSQL's two-component form, and never claims a release
+    /// past the older of the two tables.
+    #[test]
+    fn unicode_version_reports_the_older_of_the_two_tables() {
+        let (major, minor) = unicode_version();
+        assert!(ev("unicode_version()") == Datum::Text(format!("{major}.{minor}")));
+        let (norm_major, norm_minor, _) = unicode_normalization::UNICODE_VERSION;
+        let (cat_major, cat_minor, _) = unicode_general_category::UNICODE_VERSION;
+        assert!((major, minor) <= (u64::from(norm_major), u64::from(norm_minor)));
+        assert!((major, minor) <= (cat_major, cat_minor));
+    }
+
+    /// `unicode_assigned` is false as soon as one code point is unassigned, and
+    /// vacuously true for the empty string. `U+10FFFF` is the last code point
+    /// and a permanent noncharacter, so it is `Cn` in every Unicode release.
+    #[test]
+    fn unicode_assigned_rejects_a_single_unassigned_code_point() {
+        for (sql, expected) in [
+            ("unicode_assigned('')", Datum::Bool(true)),
+            ("unicode_assigned('abc')", Datum::Bool(true)),
+            ("unicode_assigned(U&'abc')", Datum::Bool(true)),
+            ("unicode_assigned(U&'abc\\+10FFFF')", Datum::Bool(false)),
+            ("unicode_assigned(U&'\\00E4\\24D1c')", Datum::Bool(true)),
+            ("unicode_assigned(NULL)", Datum::Null),
+        ] {
+            assert!(ev(sql) == expected, "{sql}");
+        }
+        assert!(err_code("unicode_assigned(1)", None) == "42883");
+        assert!(err_code("unicode_assigned('a', 'b')", None) == "42883");
     }
 }

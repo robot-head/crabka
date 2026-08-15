@@ -50,10 +50,10 @@
  public    | 
 
 ===== \l
-                                              List of databases
-   Name   |  Owner   | Encoding | Locale Provider | Collate | Ctype | Locale | ICU Rules | Access privileges 
-----------+----------+----------+-----------------+---------+-------+--------+-----------+-------------------
- postgres | postgres | UTF8     | libc            | C       | C     |        |           | 
+                                            List of databases
+ Name |  Owner   | Encoding | Locale Provider | Collate | Ctype | Locale | ICU Rules | Access privileges 
+------+----------+----------+-----------------+---------+-------+--------+-----------+-------------------
+ crab | postgres | UTF8     | libc            | C       | C     |        |           | 
 (1 row)
 
 ===== \df

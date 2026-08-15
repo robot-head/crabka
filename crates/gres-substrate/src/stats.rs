@@ -23,6 +23,17 @@ pub struct RangeStats {
     pub range_id: u32,
     /// Current authoritative row count, when available.
     pub row_count: Option<u64>,
+    /// A rowid the owner observed with about half of the range's rows below it,
+    /// when it measured one.
+    ///
+    /// Splitting a range needs an *observed* key. Its rowid interval says
+    /// nothing about where the rows sit inside it: `CLUSTER` rewrites every live
+    /// row at a fresh rowid and permanently vacates the block it came from,
+    /// deletes leave arbitrary holes, and a timestamp-sharded table's rowids are
+    /// packed clock readings spread across most of the domain. Only the owner
+    /// can see that distribution, so only the owner can name a boundary that
+    /// actually divides it.
+    pub median_rowid: Option<u64>,
     /// Current authoritative stored bytes, when available.
     pub store_bytes: Option<u64>,
     /// Authoritative write rate for the sample interval, when available.
@@ -127,6 +138,7 @@ mod tests {
                 tenant_name: "blue".to_string(),
                 range_id: 7,
                 row_count: None,
+                median_rowid: None,
                 store_bytes,
                 write_rate: None,
                 read_rate: None,

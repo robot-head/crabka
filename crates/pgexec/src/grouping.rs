@@ -52,7 +52,7 @@ use crabka_pgtypes::{ColumnType, Datum};
 use crate::{
     clock::EvalCtx,
     error::ExecError,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// Scope qualifier for this module's hidden columns. `$` cannot begin an
@@ -108,6 +108,80 @@ impl GroupingPlan<'_> {
 /// treating as an unknown function.
 pub(crate) fn is_grouping_query(s: &SelectStmt) -> bool {
     s.grouping.is_some() || crate::agg::is_aggregate_query(s) || mentions_grouping_call(s)
+}
+
+/// Is `s` a *degenerate* grouping query — one whose answer cannot depend on the
+/// rows its FROM clause produces?
+///
+/// `PostgreSQL`'s `is_degenerate_grouping` (`optimizer/plan/planner.c`) is a
+/// `HAVING` qual and/or grouping sets, with no aggregate and no `GROUP BY`.
+/// Such a query has exactly one group — or one per empty grouping set — and
+/// `create_degenerate_grouping_paths` answers it from a bare `Result` node,
+/// because "there cannot be any variables in either HAVING or the targetlist,
+/// so we actually do not need the FROM table at all". No variable can be there
+/// because with no `GROUP BY` and no aggregate to sit under, a column reference
+/// above the grouping is 42803.
+///
+/// That is what makes `SELECT 1 FROM t WHERE 1/a = 1 HAVING 1 < 2` answer one
+/// row instead of dividing by zero: the input is never read, so the `WHERE`
+/// over it is never evaluated.
+///
+/// This test is stricter than upstream's in one way. Rather than *rely* on the
+/// 42803 already having been raised, it requires every clause above the
+/// grouping to be visibly free of column references, of correlated subqueries
+/// and of window calls. A query that has earned the 42803 therefore keeps the
+/// scanning path — and keeps raising it — and so does anything this walk cannot
+/// see through.
+pub(crate) fn is_degenerate_grouping(s: &SelectStmt) -> bool {
+    if s.having.is_none() && s.grouping.is_none() {
+        return false;
+    }
+    if !s.group_by.is_empty() || !s.windows.is_empty() || !s.window_calls.is_empty() {
+        return false;
+    }
+    // `FOR UPDATE` locks the rows the scan returns, which is a side effect the
+    // elision would drop. `PostgreSQL` rejects the combination outright, so
+    // nothing is lost by declining it here.
+    if s.locking.is_some() {
+        return false;
+    }
+    let mut exprs: Vec<&Expr> = Vec::new();
+    for item in &s.projection {
+        match item {
+            SelectItem::Expr { expr, .. } => exprs.push(expr),
+            // `*` stands for the input columns themselves.
+            SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => return false,
+        }
+    }
+    exprs.extend(s.having.iter());
+    exprs.extend(s.order_by.iter().map(|item| &item.expr));
+    if let crabka_pgparser::ast::DistinctClause::On(keys) = &s.distinct {
+        exprs.extend(keys);
+    }
+    exprs.into_iter().all(reads_no_input)
+}
+
+/// Can `e` be evaluated without a row of the input relation?
+///
+/// The walk visits a subquery node without descending into it, which is exactly
+/// the granularity wanted: an uncorrelated subquery has already been folded to a
+/// constant by the time this runs, so one still standing may read the outer row.
+fn reads_no_input(e: &Expr) -> bool {
+    let mut reads = false;
+    visit_expr(e, &mut |node| {
+        reads |= match node {
+            // A window call stands in the tree as a placeholder column, so this
+            // arm covers one even before the `window_calls` test above.
+            Expr::Column { .. }
+            | Expr::ScalarSubquery(_)
+            | Expr::Exists(_)
+            | Expr::InSubquery { .. }
+            | Expr::Quantified { .. } => true,
+            Expr::Func(call) => crate::agg::is_aggregate_name(&call.name) || is_grouping_call(call),
+            _ => false,
+        };
+    });
+    !reads
 }
 
 /// Reject `GROUPING(…)` in a clause evaluated BELOW the grouping, where it has
@@ -194,6 +268,9 @@ pub(crate) fn aggregate_rows(
         .iter()
         .map(|g| crate::eval::infer_type(g, scope))
         .collect::<Result<Vec<_>, ExecError>>()?;
+    for ty in &key_types {
+        crate::eval::require_equality_operator(*ty)?;
+    }
     let plan = GroupingPlan {
         scope,
         group_by: group_by
@@ -258,7 +335,11 @@ pub(crate) fn canonicalize_columns(e: &Expr, scope: &Scope) -> Expr {
             let Ok(index) = scope.resolve(table.as_deref(), name) else {
                 return Ok(None);
             };
-            let binding = &scope.columns[index];
+            // `Scope::canonical` collapses a USING/NATURAL join input onto the
+            // merged column when PostgreSQL treats the two as one variable, so
+            // `SELECT x … GROUP BY ja.x` is grouped-valid over a LEFT join and
+            // still 42803 over a FULL one, where the merged value is a COALESCE.
+            let binding = &scope.columns[scope.canonical(index)];
             Ok(Some(Expr::Column {
                 table: binding.qualifier.clone(),
                 name: binding.name.clone(),
@@ -300,6 +381,37 @@ fn empty_input_rows(
     // row, so the tail has to run over the repeated output rather than per set.
     // Identical rows cannot be reordered, so only duplicate elimination and
     // OFFSET/LIMIT are still observable.
+    let (fields, out_exprs, out_types) = crate::exec::resolve_projection(&stmt.projection, scope)?;
+    let require_output = matches!(
+        stmt.distinct,
+        crabka_pgparser::ast::DistinctClause::Distinct
+    );
+    let order_keys = crate::exec::resolve_select_order_keys(
+        &stmt.order_by,
+        scope,
+        &fields,
+        &out_exprs,
+        require_output,
+    )?;
+    if require_output {
+        for ty in &out_types {
+            crate::eval::require_equality_operator(*ty)?;
+        }
+    }
+    if let Some(plan) =
+        crate::exec::distinct_on_plan(&stmt, scope, &fields, &out_exprs, &order_keys)?
+    {
+        for expr in &plan.group {
+            crate::eval::require_equality_operator(crate::eval::infer_type(expr, scope)?)?;
+        }
+    }
+    for key in &order_keys {
+        let ty = match key {
+            crate::exec::SelectOrderKey::Output(index) => out_types[*index],
+            crate::exec::SelectOrderKey::SourceExpr(expr) => crate::eval::infer_type(expr, scope)?,
+        };
+        crate::eval::require_ordering_operator(ty)?;
+    }
     let (distinct, order_by) = (stmt.distinct.clone(), std::mem::take(&mut stmt.order_by));
     stmt.distinct = crabka_pgparser::ast::DistinctClause::All;
     let one = crate::agg::aggregate_rows(&stmt, scope, Vec::new(), ctx)?;
@@ -338,12 +450,14 @@ fn augmented_scope(scope: &Scope, key_types: &[ColumnType]) -> Scope {
     let mut columns = scope.columns.clone();
     for (index, ty) in key_types.iter().enumerate() {
         columns.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(GROUPING_QUALIFIER.to_string()),
             name: key_column(index),
             ty: *ty,
         });
     }
     columns.push(ColumnBinding {
+        exposure: Exposure::Output,
         qualifier: Some(GROUPING_QUALIFIER.to_string()),
         name: SET_COLUMN.to_string(),
         ty: ColumnType::Int4,
@@ -360,13 +474,13 @@ fn augmented_rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut out = Vec::with_capacity(rows.len().saturating_mul(plan.sets.len()));
     let mut bytes = 0usize;
+    let group_by = crate::bind::bind_all(&plan.group_by, scope)?;
     for row in rows {
         // The grouping expressions are evaluated once per input row; a set only
         // decides which of those values survives into its key.
-        let keys = plan
-            .group_by
+        let keys = group_by
             .iter()
-            .map(|g| crate::eval::eval(g, scope, row, ctx))
+            .map(|g| crate::eval::eval(g.expr(), scope, row, ctx))
             .collect::<Result<Vec<_>, ExecError>>()?;
         for (ordinal, set) in plan.sets.iter().enumerate() {
             let mut augmented = row.clone();
@@ -784,6 +898,7 @@ pub(crate) fn rewrite(
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -814,17 +929,25 @@ pub(crate) fn rewrite(
         },
         Expr::Func(call) if !into_aggregates && is_aggregate_call(call) => Expr::Func(call.clone()),
         Expr::Func(FuncCall {
+            sql_syntax,
             name,
             distinct,
             args,
+            order_by,
             filter,
         }) => Expr::Func(FuncCall {
+            sql_syntax: *sql_syntax,
             name: name.clone(),
             distinct: *distinct,
             args: match args {
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(rewrite_all(args, fold, into_aggregates)?),
             },
+            // An aggregate's sort keys are ordinary expressions over the input
+            // rows, so they take the same rewrite the arguments take — column
+            // canonicalization above all, which is what lets a sort key be
+            // matched against the argument list under DISTINCT.
+            order_by: rewrite_order_by(order_by, fold, into_aggregates)?,
             // A FILTER predicate is an ordinary expression over the same rows, so
             // it is rewritten exactly like the arguments.
             filter: match filter {
@@ -999,6 +1122,25 @@ fn rewrite_all(
     exprs
         .iter()
         .map(|e| rewrite(e, fold, into_aggregates))
+        .collect()
+}
+
+/// [`rewrite_all`] over a sort list, keeping each item's direction and NULL
+/// placement.
+fn rewrite_order_by(
+    order_by: &[crabka_pgparser::ast::OrderItem],
+    fold: &mut impl FnMut(&Expr) -> Result<Option<Expr>, ExecError>,
+    into_aggregates: bool,
+) -> Result<Vec<crabka_pgparser::ast::OrderItem>, ExecError> {
+    order_by
+        .iter()
+        .map(|item| {
+            Ok(crabka_pgparser::ast::OrderItem {
+                expr: rewrite(&item.expr, fold, into_aggregates)?,
+                asc: item.asc,
+                nulls_first: item.nulls_first,
+            })
+        })
         .collect()
 }
 

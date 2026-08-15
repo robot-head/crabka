@@ -52,6 +52,10 @@ pub struct RangeMetrics {
     pub commit_rate: Option<u64>,
     /// Authoritative read rate over the stats sample interval.
     pub scan_bytes: Option<u64>,
+    /// A rowid the owner observed with about half of the range's rows below it.
+    /// `None` means unknown, and unknown is not a licence to guess one — see
+    /// [`crabka_gres_substrate::RangeStats::median_rowid`].
+    pub median_rowid: Option<u64>,
     pub is_sharded: bool,
     pub co_location_group: Option<String>,
     pub co_location_bucket: Option<u32>,
@@ -102,6 +106,7 @@ impl TenantMetrics {
             range.checkpoint_bytes = None;
             range.commit_rate = stats.and_then(|stats| stats.write_rate);
             range.scan_bytes = stats.and_then(|stats| stats.read_rate);
+            range.median_rowid = stats.and_then(|stats| stats.median_rowid);
         }
         tenant
     }

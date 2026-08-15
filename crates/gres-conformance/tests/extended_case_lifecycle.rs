@@ -1,10 +1,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use assert2::assert;
 use crabka_gres_conformance::{
     ExtendedCase, ExtendedParam, ExtendedParamType, ExtendedParamValue, run_extended_one, run_one,
     tls,
 };
-use tokio_postgres::Client;
+use tokio_postgres::{Client, error::SqlState};
 
 static NEXT_TABLE: AtomicU64 = AtomicU64::new(0);
 
@@ -168,17 +169,23 @@ async fn cleanup_error_is_visible_after_success_and_concurrent_cases_do_not_coll
         ],
         vec!["DROP TABLE definitely_missing_cleanup_table".into()],
     );
-    assert_eq!(
+    assert!(
         run_extended_one(&mut client, &cleanup_failure)
             .await
             .error_code
-            .as_deref(),
-        Some("42P01")
+            .as_deref()
+            == Some("42P01")
     );
-    client
+    // The setup ran inside the transaction `run_extended_one` rolls back, and
+    // DDL is transactional, so the table it created is gone with everything
+    // else -- there is nothing left behind to clean up. PostgreSQL 18.4
+    // answers the same drop with the same 42P01: an engine that leaves the
+    // table standing here is the one diverging.
+    let leftover = client
         .batch_execute(&format!("DROP TABLE {table}"))
         .await
-        .expect("remove table left by intentional cleanup failure");
+        .expect_err("a rolled-back CREATE TABLE must leave no table");
+    assert!(leftover.code() == Some(&SqlState::UNDEFINED_TABLE));
 
     let mut tasks = Vec::new();
     for _ in 0..2 {
@@ -198,6 +205,6 @@ async fn cleanup_error_is_visible_after_success_and_concurrent_cases_do_not_coll
         }));
     }
     for task in tasks {
-        assert_eq!(task.await.expect("join concurrent case").error_code, None);
+        assert!(task.await.expect("join concurrent case").error_code == None);
     }
 }

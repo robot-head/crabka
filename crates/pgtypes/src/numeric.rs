@@ -17,6 +17,7 @@
 
 use std::{
     cmp::Ordering,
+    fmt::LowerExp,
     hash::{Hash, Hasher},
 };
 
@@ -925,10 +926,18 @@ pub fn from_i64(n: i64) -> NumericValue {
     NumericValue::Finite(BigDecimal::from(n))
 }
 
-/// `float8 → numeric` through the float's shortest round-tripping text (PostgreSQL
-/// `float8_numeric`), so `0.1::float8::numeric` is `0.1`, not the exact binary
-/// expansion. A non-finite float maps to the matching numeric special
-/// (PostgreSQL 14+ `float8_numeric`).
+/// C's `DBL_DIG` / `FLT_DIG`: the significant-digit counts `float8_numeric` and
+/// `float4_numeric` hand to `snprintf` as the `%g` precision.
+const DBL_DIG: usize = 15;
+const FLT_DIG: usize = 6;
+
+/// `float8 → numeric` (PostgreSQL `float8_numeric`), which converts through
+/// `snprintf("%.*g", DBL_DIG, val)`, which is **fifteen** significant digits, not
+/// the shortest round-tripping text `float8out` emits. That is why
+/// `(1.0/3.0)::float8::numeric` is `0.333333333333333` (fifteen threes, not
+/// sixteen) and `1234567890123456::float8::numeric` is `1234567890123460`. A
+/// non-finite float maps to the matching numeric special. `numeric` gained its
+/// infinities in PostgreSQL 14.
 pub fn from_f64(f: f64) -> NumericValue {
     if f.is_nan() {
         return NumericValue::NaN;
@@ -937,7 +946,8 @@ pub fn from_f64(f: f64) -> NumericValue {
         return NumericValue::infinity_with_sign(if f < 0.0 { -1 } else { 1 });
     }
     NumericValue::Finite(
-        parse_finite(&format!("{f}")).expect("a finite f64 always lands inside the numeric format"),
+        parse_finite(&significant_digits(f, DBL_DIG))
+            .expect("a finite f64 always lands inside the numeric format"),
     )
 }
 
@@ -955,17 +965,27 @@ pub fn from_f32(f: f32) -> NumericValue {
         return NumericValue::infinity_with_sign(if f < 0.0 { -1 } else { 1 });
     }
     NumericValue::Finite(
-        parse_finite(&six_significant_digits(f))
+        parse_finite(&significant_digits(f, FLT_DIG))
             .expect("a finite f32 always lands inside the numeric format"),
     )
 }
 
-/// `%.6g` of `f`, in the scientific spelling `BigDecimal` parses identically to
-/// the fixed one. `{:.5e}` is six significant digits; `%g` then drops the
-/// trailing fractional zeros, which is what keeps the resulting numeric's
-/// display scale down (`0.1::float4::numeric` is `0.1`, not `0.100000`).
-fn six_significant_digits(f: f32) -> String {
-    let scientific = format!("{f:.5e}");
+/// `%.*g` of `f` at `digits` significant digits, in the scientific spelling
+/// `BigDecimal` parses identically to the fixed one. Rust's `{:.p$e}` writes
+/// `p + 1` significant digits; `%g` then drops the trailing fractional zeros,
+/// which is what keeps the resulting numeric's display scale down
+/// (`0.1::float8::numeric` is `0.1`, not `0.100000000000000`).
+///
+/// The two spellings only ever differ in shape. `%g` switches to the fixed style
+/// once the exponent is in `-4..digits`, and PostgreSQL immediately parses the
+/// buffer back with `set_var_from_str`, which reads an exponent as readily as a
+/// decimal point. Rust rounds the exact binary value half-to-even, which is what
+/// glibc's `printf` does too, so the digits themselves agree. They agree on an
+/// exact tie as well: `4429515941059445::float8` goes *down* to
+/// `4429515941059440` in both.
+fn significant_digits<T: LowerExp>(f: T, digits: usize) -> String {
+    let precision = digits - 1;
+    let scientific = format!("{f:.precision$e}");
     let (mantissa, exponent) = scientific
         .split_once('e')
         .expect("Rust's LowerExp always emits an `e`");
@@ -1019,730 +1039,1063 @@ pub fn apply_typmod(value: &NumericValue, tm: Typmod) -> Result<NumericValue, Ty
 }
 
 // ---------------------------------------------------------------------------
-// SP38: the numeric `to_char` engine (`format_numeric`).
+// The numeric `to_char` engine (`format_numeric`).
 //
 // This is an INDEPENDENT engine from the date/time `to_char` (in `datetime.rs`):
 // the numeric template language is a positional digit grid (`9 0 . , S MI …`),
-// not the date/time field-name tokenizer. It mirrors PostgreSQL's `formatting.c`
-// `NUM_processor` / `NUM_prepare_locale` for the C locale.
+// not the date/time field-name tokenizer.
 //
-// THE GENERAL SHAPE (PG `NUM_processor`):
-//   1. Parse the template ONCE into a `NumDesc` descriptor: the count of integer
-//      and fractional digit positions (`9`/`0`), where the decimal point sits,
-//      where group separators sit, the sign mode + its anchor, currency + its
-//      anchor, the `V` shift, and the `FM`/`TH`/`B`/`pre_lsign` flags.
-//   2. Apply the `V` shift (multiply by 10^n) if present.
-//   3. Round the value (half-away-from-zero) to the fractional-digit count.
-//   4. Lay the integer digits right-to-left into the integer positions, then the
-//      fractional digits left-to-right; place group separators; place the point.
-//   5. Render the sign / currency / brackets per the mode at their anchors.
-//   6. Integer-part overflow → `#`-fill the digit positions (the sign/currency
-//      decoration still renders normally).
-//   7. `FM` strips padding; `TH`/`th` appends an ordinal; `B` is a no-op in PG 18.
+// The engine is a port of PostgreSQL 18's `formatting.c`, which is a STREAM
+// processor, not a grid filler. That distinction is the whole design:
 //
-// Every exact spacing (the C-locale currency glyph, the `#`-overflow composition,
-// the default/`S`/`MI`/`PL`/`SG`/`PR` sign placement, and the `B` no-op) was
-// VALIDATED against a live PostgreSQL 18 oracle in SP38 Task 9; the relevant rule
-// comments cite the oracle-confirmed `to_char(...)` example.
+//   1. `parse_num_template` splits the template into an ORDERED list of
+//      [`NumNode`]s — one per pattern or literal character — and accumulates the
+//      structural totals into a [`NumDesc`] (PG `NUMDesc` / `NUMDesc_prepare`).
+//   2. A driver (`numeric_to_char`) turns the value into a plain digit STRING
+//      (`numstr`), a `sign`, and `out_pre_spaces`, the count of leading digit
+//      positions the value does not reach (PG `numeric_to_char`).
+//   3. `NumProc::run` walks the node list in TEMPLATE ORDER, consuming one digit
+//      of `numstr` per digit node and emitting each literal, separator, currency
+//      and sign node exactly where the template put it (PG `NUM_processor` /
+//      `NUM_numpart_to_char`).
+//
+// Walking the nodes in order is what makes `to_char(0, '999999SG9999999999')`
+// place its sign in the MIDDLE of the field, `to_char(-34338492.2, 'S 9 9 9')`
+// interleave the template's literal spaces with the digits, and
+// `to_char(100, 'f"ool"999')` emit a double-quoted run verbatim. A grid filler
+// cannot express any of those, because it has thrown the ordering away.
+//
+// `RN` (Roman numerals) and `EEEE` (scientific notation) short-circuit in the
+// driver: PG renders the value to its own string and, for `EEEE`, returns that
+// string as the whole result without running the node walk at all.
+//
+// The C locale supplies every locale symbol (PG `NUM_prepare_locale`): the
+// decimal point is `.`, the thousands separator is `,`, the signs are `+` / `-`,
+// and — the one non-obvious value — the currency symbol is a single SPACE, so
+// `L` widens the field by one blank rather than emitting a glyph.
 // ---------------------------------------------------------------------------
 
-/// Where a sign / currency marker is anchored relative to the number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Anchor {
-    /// Before the first digit position (left of the number).
-    Leading,
-    /// After the last digit position (right of the number).
-    Trailing,
+/// One parsed element of a numeric `to_char` template, in template order
+/// (PG `FormatNode`). Patterns PG parses but never emits during `to_char`
+/// (`FM`, `S`, `PR`, `V`, `B`, `C`, `SP`, `EEEE`) become [`NumNode::Silent`]:
+/// they have already had their effect on the [`NumDesc`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NumNode {
+    /// A `9` digit position: a leading zero renders blank.
+    Nine,
+    /// A `0` digit position: a leading zero renders `0`.
+    Zero,
+    /// A literal `.` decimal point.
+    Dec,
+    /// A `D` locale decimal point.
+    LocaleDec,
+    /// A literal `,` group separator.
+    Comma,
+    /// A `G` locale group separator.
+    Group,
+    /// An `L` locale currency symbol.
+    Currency,
+    /// `RN` / `rn`: Roman numerals. `true` = upper case.
+    Roman(bool),
+    /// `TH` / `th`: the English ordinal suffix. `true` = upper case.
+    Ordinal(bool),
+    /// `MI`: `-` when negative, else a blank (dropped under `FM`).
+    Minus,
+    /// `PL`: `+` when non-negative, else a blank (dropped under `FM`).
+    Plus,
+    /// `SG`: always the sign, at this exact column.
+    SignHere,
+    /// A pattern with no output of its own; its effect is in the [`NumDesc`].
+    Silent,
+    /// A literal character copied straight through.
+    Literal(char),
 }
 
-/// The sign-handling mode selected by the template.
+/// Where an `S` locale sign sits relative to the digits (PG `NUM_LSIGN_*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SignMode {
-    /// No explicit sign pattern: PostgreSQL reserves ONE leading column, a
-    /// blank for a non-negative value and `-` for a negative one. `FM` strips
-    /// that blank.
-    Default,
-    /// `S`: sign ANCHORED to the number (it floats right up against the first/last
-    /// printed digit, consuming a leading/trailing blank), always `-` or `+`. PG
-    /// doc: `to_char(-12,'S9999')` → `'  -12'` (the `-` is glued to `12`, not at the
-    /// far-left column).
-    S(Anchor),
-    /// `MI`: `-` if negative, blank otherwise, at a FIXED position (NOT anchored).
-    /// PG doc: `to_char(-12,'MI9999')` → `'-  12'` (the `-` is at the far-left
-    /// fixed column, the digits float).
-    Mi(Anchor),
-    /// `PL`: `+` if the number is `> 0` (PG: "plus sign … if number > 0"), at a
-    /// FIXED position; otherwise a blank in that column.
-    Pl(Anchor),
-    /// `SG`: plus OR minus sign at a FIXED position (NOT anchored).
-    Sg(Anchor),
-    /// `PR`: a negative value is wrapped `<…>`; a non-negative value gets a
-    /// leading + trailing blank instead of the brackets.
-    Pr,
+enum LSign {
+    /// No `S` in the template.
+    None,
+    /// `S` before the digits: the sign hugs the first significant digit.
+    Pre,
+    /// `S` after the digits: the sign follows the last digit position.
+    Post,
 }
 
-/// The parsed numeric template descriptor (PG `NUMDesc`).
+/// The structural totals a numeric template accumulates (PG `NUMDesc`).
+///
+/// The counts are what the driver needs in order to render the value to a digit
+/// string; the flags are what the node walk consults as it emits.
 #[derive(Debug, Clone)]
 struct NumDesc {
-    /// Number of digit positions before the decimal point.
+    /// Integer digit positions.
     pre: usize,
-    /// Number of digit positions after the decimal point.
+    /// Fractional digit positions.
     post: usize,
-    /// `true` at integer position `i` (counted from the LEFT, 0-based) if that
-    /// position is a `0` (zero-fill); `false` for a `9`. `int_zero[i]`.
-    int_zero: Vec<bool>,
-    /// Group-separator positions: the index (0-based, from the LEFT of the integer
-    /// digit run) AFTER which a separator is emitted. PG emits the separator
-    /// BETWEEN the digit at `idx-1` and `idx`; this field holds the count of
-    /// digits to the left of each separator.
-    group_before: Vec<usize>,
-    /// Does the template contain a decimal point at all?
-    has_point: bool,
-    /// Sign rendering mode + (for the anchored modes) whether the sign char was
-    /// seen before or after the digit run.
-    sign: SignMode,
-    /// Currency marker (`L` or `$`) anchor, if present.
-    currency: Option<Anchor>,
-    /// `V` shift amount = number of `9`/`0` digits following the `V` (multiply by
-    /// 10^shift). `None` if no `V`.
-    v_shift: Option<u32>,
-    /// `FM` fill-mode: suppress the reserved sign blank + leading/trailing blanks.
+    /// `V` shift: the count of digit positions that follow the `V`.
+    multi: usize,
+    /// 1-based index of the first `0` integer position, decremented to 0-based
+    /// by [`NumProc::new`] exactly as PG does.
+    zero_start: usize,
+    /// `pre + post` at the last `0`, the furthest position `FM` may not trim.
+    zero_end: usize,
+    /// Integer positions seen when an `S` was parsed, for the `Pre` → `Post`
+    /// demotion of a trailing `S`.
+    pre_lsign_num: usize,
+    /// Any `0` position was seen.
+    zero: bool,
+    /// `FM`: suppress padding blanks and trailing fractional zeros.
     fill_mode: bool,
-    /// `TH`/`th` ordinal suffix; `Some(true)` = upper (`TH`), `Some(false)` = lower.
-    ordinal: Option<bool>,
+    /// A decimal point (`.` or `D`) was seen.
+    decimal: bool,
+    /// Where an `S` sign sits.
+    lsign: LSign,
+    /// `PR`: render a negative in angle brackets.
+    bracket: bool,
+    /// `MI` or `SG` was seen.
+    minus: bool,
+    /// `PL` or `SG` was seen.
+    plus: bool,
+    /// `RN` / `rn`: render the value as a Roman numeral.
+    roman: bool,
+    /// `V` was seen.
+    has_multi: bool,
+    /// `EEEE`: render the value in scientific notation.
+    eeee: bool,
+    /// `B` blank-on-zero was seen before any digit position.
+    blank: bool,
+    /// The first template combination PostgreSQL refuses outright. `to_char` is
+    /// otherwise total, so only `to_number` consults this.
+    refusal: Option<RomanRefusal>,
 }
 
-/// Parse a numeric `to_char` template into a [`NumDesc`]. Patterns are matched
-/// left-to-right, longest-first for the multi-char ones (`MI`/`PL`/`SG`/`PR`/`TH`/
-/// `FM`/`EEEE`-not-supported). Unrecognized characters are kept as literals by the
-/// renderer, so this only records the STRUCTURAL pattern positions.
-fn parse_num_template(template: &str) -> NumDesc {
-    let chars: Vec<char> = template.chars().collect();
-    let mut int_zero: Vec<bool> = Vec::new();
-    let mut post = 0usize;
-    let mut group_before: Vec<usize> = Vec::new();
-    let mut has_point = false;
-    let mut sign = SignMode::Default;
-    let mut currency: Option<Anchor> = None;
-    let mut v_shift: Option<u32> = None;
-    let mut fill_mode = false;
-    let mut ordinal: Option<bool> = None;
-    let mut seen_digit = false; // have we passed any 9/0 yet? (anchors sign/currency)
-
-    let mut i = 0;
-    while i < chars.len() {
-        // Multi-character patterns first (case-insensitive where PG is).
-        if matches_ci(&chars, i, "FM") {
-            fill_mode = true;
-            i += 2;
-            continue;
-        }
-        if matches_at(&chars, i, "TH") {
-            ordinal = Some(true);
-            i += 2;
-            continue;
-        }
-        if matches_at(&chars, i, "th") {
-            ordinal = Some(false);
-            i += 2;
-            continue;
-        }
-        if matches_ci(&chars, i, "MI") {
-            sign = SignMode::Mi(anchor_of(seen_digit));
-            i += 2;
-            continue;
-        }
-        if matches_ci(&chars, i, "PL") {
-            sign = SignMode::Pl(anchor_of(seen_digit));
-            i += 2;
-            continue;
-        }
-        if matches_ci(&chars, i, "SG") {
-            sign = SignMode::Sg(anchor_of(seen_digit));
-            i += 2;
-            continue;
-        }
-        if matches_ci(&chars, i, "PR") {
-            sign = SignMode::Pr;
-            i += 2;
-            continue;
-        }
-        // `V` shift: the 9/0 digits that FOLLOW `V` are the shift amount. PG
-        // MULTIPLIES the value by 10^n AND counts those n positions as additional
-        // INTEGER positions (so `to_char(12.4, '99V999')` → `12.4*1000 = 12400`,
-        // laid into 2+3 = 5 integer slots → ' 12400'). They are NOT fractional.
-        if chars[i] == 'V' || chars[i] == 'v' {
-            let mut n = 0u32;
-            let mut j = i + 1;
-            while j < chars.len() && (chars[j] == '9' || chars[j] == '0') {
-                int_zero.push(chars[j] == '0');
-                n += 1;
-                j += 1;
-            }
-            v_shift = Some(n);
-            seen_digit = true;
-            i = j;
-            continue;
-        }
-        match chars[i] {
-            '9' | '0' => {
-                let is_zero = chars[i] == '0';
-                if has_point {
-                    post += 1;
-                } else {
-                    int_zero.push(is_zero);
-                }
-                seen_digit = true;
-                i += 1;
-            }
-            '.' | 'D' | 'd' => {
-                has_point = true;
-                i += 1;
-            }
-            ',' | 'G' | 'g' => {
-                // A separator's position = the count of integer digits seen so far.
-                if !has_point {
-                    group_before.push(int_zero.len());
-                }
-                i += 1;
-            }
-            'S' | 's' => {
-                sign = SignMode::S(anchor_of(seen_digit));
-                i += 1;
-            }
-            'L' | 'l' | '$' => {
-                currency = Some(anchor_of(seen_digit));
-                i += 1;
-            }
-            // `B` (blank-on-zero) is a documented PG pattern, but PostgreSQL 18's
-            // `NUM_processor` effectively never blanks the result for the in-scope
-            // templates (oracle-confirmed: `to_char(0,'B9999')` → `'    0'`). So `B`
-            // is consumed as a no-op (it is NOT emitted as a literal).
-            'B' | 'b' => {
-                i += 1;
-            }
-            // Any other character is a literal handled at render time.
-            _ => {
-                i += 1;
-            }
+impl NumDesc {
+    /// A template with no patterns at all.
+    fn new() -> Self {
+        Self {
+            pre: 0,
+            post: 0,
+            multi: 0,
+            zero_start: 0,
+            zero_end: 0,
+            pre_lsign_num: 0,
+            zero: false,
+            fill_mode: false,
+            decimal: false,
+            lsign: LSign::None,
+            bracket: false,
+            minus: false,
+            plus: false,
+            roman: false,
+            has_multi: false,
+            eeee: false,
+            blank: false,
+            refusal: None,
         }
     }
 
-    NumDesc {
-        pre: int_zero.len(),
-        post,
-        int_zero,
-        group_before,
-        has_point,
-        sign,
-        currency,
-        v_shift,
-        fill_mode,
-        ordinal,
+    /// PostgreSQL's post-keyword guard: `RN` tolerates only `FM` beside it.
+    fn check_roman(&mut self) {
+        if !self.roman || self.refusal.is_some() {
+            return;
+        }
+        if self.zero
+            || self.blank
+            || self.lsign != LSign::None
+            || self.bracket
+            || self.minus
+            || self.plus
+            || self.has_multi
+            || self.decimal
+            || self.eeee
+        {
+            self.refusal = Some(RomanRefusal::Incompatible);
+        }
     }
 }
 
-/// A sign/currency marker seen BEFORE any digit anchors leading, else trailing.
-fn anchor_of(seen_digit: bool) -> Anchor {
-    if seen_digit {
-        Anchor::Trailing
-    } else {
-        Anchor::Leading
-    }
+/// A numeric template PostgreSQL refuses to compile because of how `RN` is used.
+/// Both are 42601 syntax errors raised before the value is even looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RomanRefusal {
+    /// `"RN" is incompatible with other formats`.
+    Incompatible,
+    /// `cannot use "RN" twice`.
+    Twice,
 }
 
-/// Case-insensitive multi-char match at `chars[i..]`.
-fn matches_ci(chars: &[char], i: usize, pat: &str) -> bool {
-    let p: Vec<char> = pat.chars().collect();
-    if i + p.len() > chars.len() {
-        return false;
-    }
-    chars[i..i + p.len()]
-        .iter()
-        .zip(&p)
-        .all(|(a, b)| a.eq_ignore_ascii_case(b))
-}
+/// The numeric template keywords, in PostgreSQL's `NUM_keywords` order: matching
+/// is CASE-SENSITIVE and longest-first within a starting character, so `SG` wins
+/// over `S` but `Sg` matches neither and falls through to a literal `S`.
+const NUM_KEYWORDS: &[(&str, NumNode)] = &[
+    (",", NumNode::Comma),
+    (".", NumNode::Dec),
+    ("0", NumNode::Zero),
+    ("9", NumNode::Nine),
+    ("B", NumNode::Silent),
+    ("C", NumNode::Silent),
+    ("D", NumNode::LocaleDec),
+    ("EEEE", NumNode::Silent),
+    ("FM", NumNode::Silent),
+    ("G", NumNode::Group),
+    ("L", NumNode::Currency),
+    ("MI", NumNode::Minus),
+    ("PL", NumNode::Plus),
+    ("PR", NumNode::Silent),
+    ("RN", NumNode::Roman(true)),
+    ("SG", NumNode::SignHere),
+    ("SP", NumNode::Silent),
+    ("S", NumNode::Silent),
+    ("TH", NumNode::Ordinal(true)),
+    ("V", NumNode::Silent),
+    ("b", NumNode::Silent),
+    ("c", NumNode::Silent),
+    ("d", NumNode::LocaleDec),
+    ("eeee", NumNode::Silent),
+    ("fm", NumNode::Silent),
+    ("g", NumNode::Group),
+    ("l", NumNode::Currency),
+    ("mi", NumNode::Minus),
+    ("pl", NumNode::Plus),
+    ("pr", NumNode::Silent),
+    ("rn", NumNode::Roman(false)),
+    ("sg", NumNode::SignHere),
+    ("sp", NumNode::Silent),
+    ("s", NumNode::Silent),
+    ("th", NumNode::Ordinal(false)),
+    ("v", NumNode::Silent),
+];
 
-/// Exact (case-sensitive) multi-char match at `chars[i..]` (for `TH` vs `th`).
-fn matches_at(chars: &[char], i: usize, pat: &str) -> bool {
-    let p: Vec<char> = pat.chars().collect();
-    if i + p.len() > chars.len() {
-        return false;
-    }
-    chars[i..i + p.len()].iter().zip(&p).all(|(a, b)| a == b)
-}
-
-/// The numeric `to_char` engine (independent of the date/time one). Format `value`
-/// per the PostgreSQL numeric template. See the SP38 spec §1.2 for the in-scope
-/// pattern set. Returns text; on integer-part overflow the field is `#`-filled.
-///
-/// PostgreSQL's `to_char(numeric, text)` is extremely lenient. It never raises
-/// an error for a malformed template; it emits an unsupported character
-/// literally and `#`-fills an oversized integer part. This function therefore
-/// returns a `Result` only to match the engine signature contract; in practice
-/// it is always `Ok`.
-pub fn format_numeric(template: &str, value: &NumericValue) -> Result<String, TypeError> {
-    let desc = parse_num_template(template);
-    let value = match value.as_finite() {
-        Some(bd) => bd,
-        None => return format_special(&desc, value),
-    };
-
-    // (1) Apply the `V` shift: multiply by 10^shift. The shift digits were already
-    // folded into `desc.pre` (integer positions) by the template parser. Build the
-    // multiplier from text ("1" + n zeros) so a large `n` never overflows a `u64`.
-    let shifted = match desc.v_shift {
-        Some(0) | None => value.clone(),
-        Some(n) => {
-            let pow10 = parse_finite(&format!("1{}", "0".repeat(n as usize)))
-                .unwrap_or_else(|| BigDecimal::from(1));
-            canonical(value * pow10)
-        }
-    };
-
-    // (2) Round half-away-from-zero to the fractional-digit count.
-    let rounded = canonical(
-        shifted.with_scale_round((desc.post as i64).min(MAX_DSCALE), RoundingMode::HalfUp),
-    );
-    let negative =
-        rounded.sign() == bigdecimal::num_bigint::Sign::Minus && !finite_is_zero(&rounded);
-
-    // (3) Extract the integer + fractional decimal-digit strings of |value|.
-    let (int_digits, frac_digits) = split_decimal(&rounded, desc.post);
-
-    // (4) Integer-part overflow: more significant integer digits than positions.
-    // PG `#`-fills every DIGIT/separator/point position but still renders the sign
-    // and currency decoration normally (oracle-confirmed, PG 18: `to_char(123456,
-    // '999')` → `' ###'`, `to_char(-123456,'99.99')` → `'-##.##'`), so the overflow
-    // core is routed through the SAME `decorate` path as a normal value.
-    // A template with NO integer digit positions (e.g. `.99`) cannot represent any
-    // value's integer part — not even the implicit leading `0` — so PG `#`-overflows
-    // it for every value (oracle-confirmed, PG 18: `to_char(0,'.99')` → `' .##'`).
-    let int_significant = int_digits.trim_start_matches('0');
-    if int_significant.len() > desc.pre || desc.pre == 0 {
-        let core = overflow_core(&desc);
-        // The `TH` ordinal is suppressed on overflow (no integer value to ordinalize).
-        let mut d = desc.clone();
-        d.ordinal = None;
-        return Ok(decorate(&d, core, negative, &rounded));
-    }
-
-    // (5) Lay out the digit grid.
-    let core = lay_out_digits(&desc, &int_digits, &frac_digits);
-
-    // (6) Decorate with sign + currency, then FM / ordinal.
-    Ok(decorate(&desc, core, negative, &rounded))
-}
-
-/// `to_char` for `NaN` / `±Infinity`.
-///
-/// PostgreSQL's `numeric_to_char` runs `numeric_out` first and then lays the
-/// resulting STRING into the same digit grid, so a special is treated exactly
-/// like a run of integer digits: it fits (`to_char('NaN','999')` → `' NaN'`,
-/// `to_char('Infinity','99999999')` → `' Infinity'`), or it `#`-overflows
-/// (`to_char('Infinity','999')` → `' ###'`). The decimal point and the
-/// fractional positions drop when it fits, because `numeric_out` emitted no
-/// `.` for the consumer to place (`to_char('NaN','999.99')` → `' NaN'`). They
-/// are `#`-filled like any other position when it overflows
-/// (`to_char('Infinity','FM999.999')` → `'###.###'`). All oracle-confirmed
-/// against PostgreSQL 18.4.
-fn format_special(desc: &NumDesc, value: &NumericValue) -> Result<String, TypeError> {
-    let negative = matches!(value, NumericValue::NegInfinity);
-    let digits = if value.is_nan() { "NaN" } else { "Infinity" };
-    // `decorate` reads the value only to ordinalize it, which never happens here.
-    let unused = BigDecimal::from(0);
-
-    if digits.len() > desc.pre || desc.pre == 0 {
-        let mut overflowed = desc.clone();
-        overflowed.ordinal = None;
-        return Ok(decorate(
-            &overflowed,
-            overflow_core(desc),
-            negative,
-            &unused,
-        ));
-    }
-    // A `TH`/`th` ordinal over a special that FITS is PostgreSQL's `get_th`
-    // failure, 22P02 `"NaN" is not a number`.
-    if desc.ordinal.is_some() {
-        return Err(TypeError::Domain {
-            sqlstate: "22P02",
-            message: if value.is_nan() {
-                "\"NaN\" is not a number"
+/// Fold the keyword just matched into the running descriptor
+/// (PG `NUMDesc_prepare`). PostgreSQL raises a syntax error for several
+/// contradictory combinations; `to_char` is otherwise total, and gres keeps that
+/// contract by simply IGNORING a contradictory second pattern rather than
+/// failing the query. The regress corpus exercises none of the error cases.
+fn numdesc_prepare(num: &mut NumDesc, key: &str) {
+    match key {
+        "9" => {
+            if num.has_multi {
+                num.multi += 1;
+            } else if num.decimal {
+                num.post += 1;
             } else {
-                "\"Infinity\" is not a number"
-            },
-        });
-    }
-    // Lay the spelling into the integer grid alone: no point, no fraction.
-    let mut pointless = desc.clone();
-    pointless.has_point = false;
-    pointless.post = 0;
-    let core = lay_out_digits(&pointless, digits, "");
-    Ok(decorate(&pointless, core, negative, &unused))
-}
-
-/// The `#`-filled overflow CORE: the digit grid only. PG `#`-fills every digit
-/// position (a `9` and a `0` alike), renders each group separator as its literal
-/// char (there is always a `#` to its left), and places the decimal point; the
-/// sign / currency decoration is applied by `decorate`, NOT `#`-filled (oracle-
-/// confirmed, PG 18: `to_char(123456,'999')` → `' ###'`, `to_char(123456,'9,99')`
-/// → `' #,##'`, `to_char(123456,'L99')` → `'$ ##'`). FM trimming does not apply.
-fn overflow_core(desc: &NumDesc) -> String {
-    let mut int_out = String::new();
-    for idx in 0..desc.pre {
-        // A separator sits BEFORE digit slot `idx` when `group_before` records it.
-        for &g in &desc.group_before {
-            if g == idx && g != 0 {
-                int_out.push(',');
+                num.pre += 1;
             }
         }
-        int_out.push('#');
+        "0" => {
+            if !num.zero && !num.decimal {
+                num.zero = true;
+                num.zero_start = num.pre + 1;
+            }
+            if num.decimal {
+                num.post += 1;
+            } else {
+                num.pre += 1;
+            }
+            num.zero_end = num.pre + num.post;
+        }
+        "." | "D" | "d" => num.decimal = true,
+        "FM" | "fm" => num.fill_mode = true,
+        "S" | "s" => {
+            if num.decimal {
+                if num.lsign == LSign::None {
+                    num.lsign = LSign::Post;
+                }
+            } else {
+                num.lsign = LSign::Pre;
+                num.pre_lsign_num = num.pre;
+            }
+        }
+        "MI" | "mi" => num.minus = true,
+        "PL" | "pl" => num.plus = true,
+        "SG" | "sg" => {
+            num.minus = true;
+            num.plus = true;
+        }
+        "PR" | "pr" => num.bracket = true,
+        "B" | "b" => {
+            if num.pre == 0 && num.post == 0 && !num.zero {
+                num.blank = true;
+            }
+        }
+        "RN" | "rn" => {
+            if num.roman {
+                num.refusal = Some(RomanRefusal::Twice);
+            }
+            num.roman = true;
+        }
+        "V" | "v" => num.has_multi = true,
+        "EEEE" | "eeee" => num.eeee = true,
+        _ => {}
     }
-    let mut core = int_out;
-    if desc.has_point {
-        core.push('.');
-        core.push_str(&"#".repeat(desc.post));
-    }
-    core
+    num.check_roman();
 }
 
-/// Split a rounded value into (integer-digit-string, fractional-digit-string),
-/// where the fractional string is exactly `post` digits (zero-padded/right-trimmed
-/// to that width). Always uses the ABSOLUTE value (the sign is handled separately).
-fn split_decimal(rounded: &BigDecimal, post: usize) -> (String, String) {
-    let abs = rounded.abs();
-    // Force exactly `post` fractional digits so the grid lay-out is uniform.
-    let scaled = abs.with_scale_round(post as i64, RoundingMode::HalfUp);
-    let (mant, scale) = scaled.as_bigint_and_exponent();
-    let s = mant.to_string();
-    let digits = s.trim_start_matches('-');
-    let scale_u = scale.max(0) as usize;
-    if scale_u == 0 {
-        return (digits.to_string(), String::new());
+/// How `to_number` must read a template: as Roman numerals, as ordinary digits,
+/// or not at all because PostgreSQL refuses the template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberTemplate {
+    /// No `RN`: read the input as digits.
+    Digits,
+    /// `RN` (optionally with `FM`): read the input as a Roman numeral.
+    Roman,
+    /// PostgreSQL will not compile this template.
+    Refused(RomanRefusal),
+}
+
+/// Classify a `to_number` template.
+#[must_use]
+pub fn number_template(template: &str) -> NumberTemplate {
+    let (_, desc) = parse_num_template(template);
+    match desc.refusal {
+        Some(refusal) => NumberTemplate::Refused(refusal),
+        None if desc.roman => NumberTemplate::Roman,
+        None => NumberTemplate::Digits,
     }
-    if digits.len() > scale_u {
-        let point = digits.len() - scale_u;
-        (digits[..point].to_string(), digits[point..].to_string())
-    } else {
-        // |value| < 1: no integer digits, fractional left-padded with zeros.
-        (
-            "0".to_string(),
-            format!("{}{}", "0".repeat(scale_u - digits.len()), digits),
+}
+
+/// PostgreSQL `roman_to_int`: decode a leading Roman numeral, returning `None`
+/// for anything that is not a well-formed one.
+///
+/// Well-formed is narrower than "decodable": a subtractive pair may not be
+/// followed by a numeral as large as the one subtracted (`VIX`), `V` / `L` / `D`
+/// may neither repeat nor precede something larger (`VV`, `IL`), a symbol may not
+/// repeat more than three times (`MMMM`), and a subtraction may not follow a
+/// repeat of the same symbol (`MCCM`). At most 15 numerals are consumed, and
+/// leading whitespace is skipped; anything after the numerals is ignored, which
+/// is why `to_number('M CC', 'RN')` is 1000.
+#[must_use]
+pub fn roman_to_int(input: &str) -> Option<i32> {
+    fn value_of(c: char) -> i32 {
+        match c {
+            'I' => 1,
+            'V' => 5,
+            'X' => 10,
+            'L' => 50,
+            'C' => 100,
+            'D' => 500,
+            'M' => 1000,
+            _ => 0,
+        }
+    }
+    // Only `IV IX XL XC CD CM` subtract; nothing else may.
+    fn valid_sub(smaller: char, larger: char) -> bool {
+        matches!(
+            (smaller, larger),
+            ('I', 'V') | ('I', 'X') | ('X', 'L') | ('X', 'C') | ('C', 'D') | ('C', 'M')
         )
     }
-}
 
-/// Lay the integer digits right-to-left into the `pre` positions and the
-/// fractional digits left-to-right into the `post` positions, inserting group
-/// separators and the decimal point. Produces the bare numeric core (no sign,
-/// no currency, no FM trimming yet).
-fn lay_out_digits(desc: &NumDesc, int_digits: &str, frac_digits: &str) -> String {
-    // Right-align the integer significant digits in `pre` slots. A `9` slot with no
-    // significant digit (a leading zero) renders BLANK; a `0` slot renders `0`.
-    let int_chars: Vec<char> = int_digits.trim_start_matches('0').chars().collect();
-    let mut slots: Vec<char> = vec![' '; desc.pre];
-    // Fill from the right with the significant digits.
-    let n = int_chars.len();
-    for (k, ch) in int_chars.iter().rev().enumerate() {
-        if k < desc.pre {
-            slots[desc.pre - 1 - k] = *ch;
-        }
-    }
-    // For `0` positions to the LEFT of the first significant digit, force a `0`.
-    // `int_zero[i]` (from the left) marks a zero-fill slot. The first significant
-    // digit sits at slot `pre - n`; positions `>= pre - n` already hold digits.
-    let first_sig = desc.pre.saturating_sub(n);
-    for (i, slot) in slots.iter_mut().enumerate().take(first_sig) {
-        if desc.int_zero.get(i).copied().unwrap_or(false) {
-            *slot = '0';
-        }
-    }
-    // The ones place (the last integer position) for a value with NO significant
-    // integer digit (a whole zero or a sub-1 value): PostgreSQL renders a `0` ONLY
-    // when the ones-place pattern is a `0`, OR when the template has NO fractional
-    // positions; a `9` ones place over a fraction-bearing template BLANKS instead
-    // (oracle-confirmed, PG 18: `to_char(0,'9999')` → `'    0'` but
-    // `to_char(0.5,'9.9')` → `'  .5'`, `to_char(0.5,'0.9')` → `' 0.5'`).
-    if desc.pre > 0 && n == 0 {
-        let ones_is_zero_pattern = desc.int_zero.get(desc.pre - 1).copied().unwrap_or(false);
-        if ones_is_zero_pattern || desc.post == 0 {
-            slots[desc.pre - 1] = '0';
-        }
+    let chars: Vec<char> = input
+        .trim_start()
+        .chars()
+        .map(|c| c.to_ascii_uppercase())
+        .take_while(|c| value_of(*c) != 0)
+        .take(MAX_ROMAN_LEN)
+        .collect();
+    if chars.is_empty() {
+        return None;
     }
 
-    // Insert group separators. `group_before[k]` = number of integer digit slots
-    // to the LEFT of separator k. PG renders the separator as its literal char if
-    // there is a printable (non-blank) digit to its left, else blank (oracle-
-    // confirmed, PG 18: `to_char(123,'9,999')` → `'   123'` — the comma is blanked
-    // because every slot to its left is a suppressed leading zero).
-    let mut int_out = String::new();
-    for (idx, &slot) in slots.iter().enumerate() {
-        // Emit any separators whose position equals `idx` (i.e. they sit BEFORE
-        // this slot, counted from the left).
-        for &g in &desc.group_before {
-            if g == idx && g != 0 {
-                let left_blank = slots[..idx].iter().all(|c| *c == ' ');
-                int_out.push(if left_blank { ' ' } else { ',' });
+    let mut result: i32 = 0;
+    let mut repeat_count = 1u32;
+    let (mut v_count, mut l_count, mut d_count) = (0u32, 0u32, 0u32);
+    let mut subtracted: Option<i32> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let curr = chars[i];
+        let curr_value = value_of(curr);
+        // Nothing at or above the subtracted numeral may follow a subtraction.
+        if subtracted.is_some_and(|last| curr_value >= last) {
+            return None;
+        }
+        // `V` / `L` / `D` may neither repeat nor precede a larger numeral.
+        fn seen_half(c: char, value: i32, v: &mut u32, l: &mut u32, d: &mut u32) -> bool {
+            if (*v > 0 && value >= 5) || (*l > 0 && value >= 50) || (*d > 0 && value >= 500) {
+                return false;
             }
-        }
-        int_out.push(slot);
-    }
-
-    let mut core = int_out;
-    if desc.has_point {
-        core.push('.');
-        // Fractional digits, left-to-right, exactly `post` of them.
-        let fc: Vec<char> = frac_digits.chars().collect();
-        for i in 0..desc.post {
-            core.push(fc.get(i).copied().unwrap_or('0'));
-        }
-    }
-    core
-}
-
-/// Apply the sign / currency / brackets, then `FM` trimming and the `TH` ordinal,
-/// producing the final string.
-///
-/// Sign placement follows PG's two distinct behaviors:
-///  * The DEFAULT sign and `MI`/`PL`/`SG` occupy a FIXED column at the far left
-///    (or right) of the field, and the digits do NOT move toward the sign.
-///    e.g. `to_char(-12,'MI9999')` → `'-  12'`.
-///  * `S` is ANCHORED: the sign floats right up against the number, consuming the
-///    blank immediately adjacent to the first/last significant digit.
-///    e.g. `to_char(-12,'S9999')` → `'  -12'`.
-fn decorate(desc: &NumDesc, core: String, negative: bool, rounded: &BigDecimal) -> String {
-    // Under FM, PG suppresses TRAILING fractional zeros (and the decimal point if
-    // the whole fraction is dropped): `to_char(148.5,'FM999.999')` → `'148.5'`.
-    // Do this on the core BEFORE the sign/blank handling below.
-    // The ones place is a `0` pattern (forced) vs a `9` (a sub-1 leading zero that
-    // FM may strip).
-    let ones_is_zero_pattern =
-        desc.pre > 0 && desc.int_zero.get(desc.pre - 1).copied().unwrap_or(false);
-    let core = if desc.fill_mode && desc.has_point {
-        fm_trim_fraction(&core, ones_is_zero_pattern)
-    } else {
-        core
-    };
-    // FM strips the lay-out's leading blanks (suppressed leading zeros) and any
-    // trailing padding from the numeric core. (The reserved sign blank is handled
-    // per-mode below.)
-    let core_for_anchor = core.clone();
-    let mut lead = String::new();
-    let mut trail = String::new();
-    let mut body = core;
-    let mut anchored = false;
-
-    match desc.sign {
-        SignMode::Default => {
-            // PG's DEFAULT sign is ANCHORED: a negative `-` hugs the first significant
-            // digit, keeping the grid's leading blanks to its left (oracle-confirmed,
-            // PG 18: `to_char(-1,'999')` → `'  -1'`, `to_char(-12,'9999')` → `'  -12'`).
-            // A non-negative value reserves ONE leading blank column (FM strips it).
-            if negative {
-                body = anchor_sign(&core_for_anchor, '-', Anchor::Leading);
-                anchored = true;
-            } else if !desc.fill_mode {
-                lead.push(' ');
+            match c {
+                'V' => *v += 1,
+                'L' => *l += 1,
+                'D' => *d += 1,
+                _ => {}
             }
+            true
         }
-        SignMode::S(anchor) => {
-            // ANCHORED: inject the sign adjacent to the number's digits.
-            let sgn = if negative { '-' } else { '+' };
-            body = anchor_sign(&core_for_anchor, sgn, anchor);
-            anchored = true;
+        if !seen_half(curr, curr_value, &mut v_count, &mut l_count, &mut d_count) {
+            return None;
         }
-        SignMode::Mi(anchor) => {
-            // FIXED minus column REPLACING the default sign: `-` if negative, else a
-            // blank (FM drops the blank). Oracle-confirmed, PG 18: `to_char(-12,
-            // 'MI9999')` → `'-  12'`, `to_char(12,'MI9999')` → `'   12'`.
-            let ch = if negative {
-                Some('-')
-            } else if desc.fill_mode {
-                None
-            } else {
-                Some(' ')
-            };
-            push_fixed(&mut lead, &mut trail, ch, anchor);
-        }
-        SignMode::Pl(anchor) => {
-            // `PL` is ADDITIVE to PG's default sign behavior (oracle-confirmed, PG 18):
-            // `to_char(12,'PL99')` → `'+ 12'` (PL's `+`, then the default reserved
-            // blank), `to_char(-12,'PL999')` → `'  -12'` (PL's leading blank, then the
-            // default `-` ANCHORED to the digit). PL emits `+` for non-negative
-            // (including zero) / a blank for negative at its own fixed column.
-            let pl_ch = if !negative {
-                Some('+')
-            } else if desc.fill_mode {
-                None
-            } else {
-                Some(' ')
-            };
-            push_fixed(&mut lead, &mut trail, pl_ch, anchor);
-            // The default sign: an ANCHORED `-` for negative, else a reserved leading
-            // blank (FM strips the blank).
-            if negative {
-                body = anchor_sign(&core_for_anchor, '-', Anchor::Leading);
-                anchored = true;
-            } else if !desc.fill_mode {
-                lead.push(' ');
+
+        match chars.get(i + 1) {
+            Some(&next) if value_of(next) > curr_value => {
+                let next_value = value_of(next);
+                if !valid_sub(curr, next) || repeat_count > 1 {
+                    return None;
+                }
+                if !seen_half(next, next_value, &mut v_count, &mut l_count, &mut d_count) {
+                    return None;
+                }
+                repeat_count = 1;
+                subtracted = Some(curr_value);
+                result += next_value - curr_value;
+                i += 2;
             }
-        }
-        SignMode::Sg(anchor) => {
-            // FIXED sign column REPLACING the default sign: always `+` or `-`.
-            // Oracle-confirmed, PG 18: `to_char(12,'SG99')` → `'+12'`.
-            let sgn = if negative { '-' } else { '+' };
-            push_fixed(&mut lead, &mut trail, Some(sgn), anchor);
-        }
-        SignMode::Pr => {
-            // `PR` brackets HUG the number, preserving the grid's leading blanks
-            // (oracle-confirmed, PG 18): `to_char(-12,'9999PR')` → `'  <12>'` (the two
-            // leading blanks of `'  12'` stay, the `<` is glued before the first digit,
-            // the `>` is appended). A non-negative value gets a leading + trailing blank
-            // in the bracket positions instead.
-            if negative {
-                body = anchor_sign(&core_for_anchor, '<', Anchor::Leading);
-                trail.push('>');
-                anchored = true;
-            } else {
-                lead.push(' ');
-                trail.push(' ');
-            }
-        }
-    }
-
-    // Currency marker. Oracle-confirmed against PostgreSQL 18's default (C) locale:
-    // both `L` (the `lc_monetary` currency symbol) and `$` render a literal `$` at
-    // their anchor (`to_char(485,'L999')` → `'$ 485'`, `to_char(485,'999$')` →
-    // `' 485$'`). Currency sits OUTSIDE (left of / right of) the sign column.
-    if let Some(anchor) = desc.currency {
-        match anchor {
-            // Currency is the OUTERMOST leading element (before the sign column), so
-            // `L999`(485) → `$` + ` 485` = `$ 485`.
-            Anchor::Leading => lead.insert(0, '$'),
-            Anchor::Trailing => trail.push('$'),
-        }
-    }
-
-    // FM trims the lay-out blanks from the core (unless the sign was anchored into
-    // it, in which case `anchor_sign` already produced the tight form).
-    if desc.fill_mode && !anchored {
-        body = body.trim().to_string();
-    } else if desc.fill_mode && anchored {
-        body = body.trim_start().to_string();
-    }
-
-    let mut s = format!("{lead}{body}{trail}");
-
-    // `TH`/`th`: append the ordinal suffix of the integer value. PostgreSQL
-    // SUPPRESSES the suffix for a NEGATIVE value (oracle-confirmed, PG 18:
-    // `to_char(-12,'FM999TH')` → `'-12'`, `to_char(-1,'999TH')` → `'  -1'`).
-    if let Some(upper) = desc.ordinal
-        && !negative
-    {
-        let int_val = rounded.with_scale_round(0, RoundingMode::Down);
-        let n = int_val.to_i64().unwrap_or(0);
-        s.push_str(&num_ordinal_suffix(n, upper));
-    }
-
-    s
-}
-
-/// Under FM, drop trailing zeros from the fractional part of `core`, drop a
-/// now-bare decimal point, and (when a fraction survives) drop a sub-1 value's
-/// sole leading integer `0`. `core` is the laid-out body (it may carry leading
-/// blanks from suppressed leading zeros, which the caller trims separately).
-/// Oracle-confirmed, PG 18: `to_char(148.5,'FM999.999')` → `148.5`;
-/// `to_char(-0.1,'FM9.99')` → `-.1` (the sub-1 leading `0` is dropped BECAUSE a
-/// fraction remains); `to_char(0.5,'FM9.9')` → `.5` but `to_char(0.5,'FM0.9')` →
-/// `0.5` (a `0`-pattern ones place is forced, never dropped). When the template has
-/// fractional positions, FM strips the trailing fraction ZEROS but KEEPS the decimal
-/// point: `to_char(5,'FM9.99')` → `5.`, `to_char(100,'FM999.99')` → `100.`,
-/// `to_char(0,'FM9.99')` → `0.`. (A template with no point keeps no digit beyond the
-/// integer: `to_char(0,'FM9')` → `0`.)
-fn fm_trim_fraction(core: &str, ones_is_zero_pattern: bool) -> String {
-    match core.split_once('.') {
-        Some((int_part, frac)) => {
-            let trimmed = frac.trim_end_matches('0');
-            // The integer part is "effectively zero" if it has no significant digit
-            // (blank — a sub-1 / zero `9` ones place — or a forced `0`).
-            let int_is_zero = int_part.trim().is_empty() || int_part.trim() == "0";
-            let int_render = if int_is_zero && !ones_is_zero_pattern {
-                if trimmed.is_empty() {
-                    // A WHOLE zero (no fraction survives): PG shows the `0` (→ `0.`).
-                    "0".to_string()
+            Some(&next) => {
+                if next == curr {
+                    repeat_count += 1;
+                    if repeat_count > 3 {
+                        return None;
+                    }
                 } else {
-                    // A SUB-1 value whose `9` ones place is a leading zero AND a
-                    // fraction survives: PG drops the integer `0` (→ `.5`).
-                    String::new()
+                    repeat_count = 1;
                 }
-            } else if int_is_zero {
-                // A `0`-pattern ones place is forced — always shown as `0`.
-                "0".to_string()
-            } else {
-                int_part.to_string()
-            };
-            // PG keeps the decimal point even when every fraction digit is stripped.
-            format!("{int_render}.{trimmed}")
-        }
-        None => core.to_string(),
-    }
-}
-
-/// Push a fixed-column sign char (or nothing) to the leading or trailing side.
-fn push_fixed(lead: &mut String, trail: &mut String, ch: Option<char>, anchor: Anchor) {
-    if let Some(c) = ch {
-        match anchor {
-            Anchor::Leading => lead.push(c),
-            Anchor::Trailing => trail.push(c),
-        }
-    }
-}
-
-/// Inject an ANCHORED sign (`S`) adjacent to the number. PG keeps the full field
-/// width and adds the sign as its own column right before/after the digits:
-/// `to_char(-12,'S9999')` → `'  -12'` (the two leading blanks of `'  12'` are
-/// preserved and the `-` is inserted just before the `1`). For a trailing anchor
-/// the sign is appended after the last char.
-fn anchor_sign(core: &str, sgn: char, anchor: Anchor) -> String {
-    match anchor {
-        Anchor::Trailing => format!("{core}{sgn}"),
-        Anchor::Leading => {
-            let chars: Vec<char> = core.chars().collect();
-            // Insert the sign immediately BEFORE the first non-blank char, keeping
-            // all leading blanks to its left (the field widens by one column).
-            match chars.iter().position(|c| *c != ' ') {
-                Some(p) => {
-                    let mut out: String = chars[..p].iter().collect();
-                    out.push(sgn);
-                    out.extend(&chars[p..]);
-                    out
-                }
-                None => format!("{sgn}{core}"), // all blanks (zero value)
+                result += curr_value;
+                i += 1;
+            }
+            None => {
+                result += curr_value;
+                i += 1;
             }
         }
     }
+    Some(result)
 }
 
-/// The English ordinal suffix for `to_char(numeric, 'FM999TH')` etc. Same rule as
-/// the date/time engine: keyed off the last two decimal digits (11/12/13 → `th`).
-fn num_ordinal_suffix(n: i64, upper: bool) -> String {
-    let abs = n.unsigned_abs() % 100;
-    let s = if (11..=13).contains(&abs) {
-        "th"
-    } else {
-        match abs % 10 {
-            1 => "st",
-            2 => "nd",
-            3 => "rd",
-            _ => "th",
+/// Split a numeric `to_char` template into its ordered node list plus the
+/// structural descriptor (PG `parse_format` with the `NUM_FLAG`).
+///
+/// Outside a double-quoted run, a backslash is special only immediately before a
+/// `"`. Inside one, a backslash quotes whatever follows it, and the run ends at
+/// the next unescaped `"` or at the end of the template.
+fn parse_num_template(template: &str) -> (Vec<NumNode>, NumDesc) {
+    let chars: Vec<char> = template.chars().collect();
+    let mut nodes = Vec::new();
+    let mut desc = NumDesc::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some((key, node)) = match_keyword(&chars, i) {
+            numdesc_prepare(&mut desc, key);
+            nodes.push(node);
+            i += key.chars().count();
+            continue;
         }
-    };
-    if upper {
-        s.to_ascii_uppercase()
-    } else {
-        s.to_string()
+        if chars[i] == '"' {
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '"' {
+                    i += 1;
+                    break;
+                }
+                // A backslash quotes the next character, if any.
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                }
+                nodes.push(NumNode::Literal(chars[i]));
+                i += 1;
+            }
+            continue;
+        }
+        // Outside a quoted run, `\` is special only before a `"`.
+        if chars[i] == '\\' && chars.get(i + 1) == Some(&'"') {
+            i += 1;
+        }
+        nodes.push(NumNode::Literal(chars[i]));
+        i += 1;
     }
+    (nodes, desc)
+}
+
+/// Longest-first, case-sensitive keyword match at `chars[i..]`.
+fn match_keyword(chars: &[char], i: usize) -> Option<(&'static str, NumNode)> {
+    let first = *chars.get(i)?;
+    NUM_KEYWORDS
+        .iter()
+        .filter(|(name, _)| name.starts_with(first))
+        .find(|(name, _)| {
+            let n = name.chars().count();
+            i + n <= chars.len() && name.chars().zip(&chars[i..i + n]).all(|(a, b)| a == *b)
+        })
+        .map(|(name, node)| (*name, node.clone()))
+}
+
+/// The C-locale currency symbol PG's `NUM_prepare_locale` falls back to: a single
+/// SPACE, not a glyph. So `to_char(0, 'L99')` is `'   0'`, three columns wide.
+const LOCALE_CURRENCY: char = ' ';
+
+/// The state of one `to_char` node walk (PG `NUMProc`).
+struct NumProc<'a> {
+    desc: NumDesc,
+    /// The value rendered as a plain digit string, without a sign. May instead be
+    /// a run of `#` (integer overflow) or a special's spelling (`NaN`).
+    number: &'a [char],
+    /// How far the walk has consumed `number`.
+    number_p: usize,
+    /// `'+'` or `'-'` for the value's sign, or `'\0'` when the driver did not set
+    /// one (the `RN` path).
+    sign: char,
+    sign_wrote: bool,
+    /// Digit positions the value does not reach, at the left of the field.
+    out_pre_spaces: usize,
+    /// Total digit positions the walk will visit, for the trailing-sign trigger.
+    num_count: usize,
+    /// Digit positions visited so far.
+    num_curr: usize,
+    /// Did the position just emitted produce a digit? Group separators blank
+    /// themselves when it did not.
+    num_in: bool,
+    /// Index into `number` of the last digit `FM` may not trim, or of the `.`
+    /// when the whole fraction is zeros. `None` disables `FM` fraction trimming.
+    last_relevant: Option<usize>,
+    out: String,
+}
+
+impl<'a> NumProc<'a> {
+    /// Set up the walk from the driver's rendered value (PG `NUM_processor`'s
+    /// prologue).
+    fn new(mut desc: NumDesc, number: &'a [char], sign: char, out_pre_spaces: usize) -> Self {
+        // PG stores `zero_start` 1-based and decrements it here.
+        desc.zero_start = desc.zero_start.saturating_sub(1);
+
+        let mut sign_wrote;
+        if desc.plus || desc.minus {
+            // `MI` / `PL` / `SG` write the sign at their own node, so the digit
+            // walk must not write one — except for a bare `PL`, whose `+` is
+            // ADDITIVE to the default sign.
+            sign_wrote = !(desc.plus && !desc.minus);
+        } else {
+            if sign != '-' && desc.fill_mode {
+                desc.bracket = false;
+            }
+            sign_wrote = sign == '+' && desc.fill_mode && desc.lsign == LSign::None;
+            // A trailing `S` that follows every integer position is a POST sign.
+            if desc.lsign == LSign::Pre && desc.pre == desc.pre_lsign_num {
+                desc.lsign = LSign::Post;
+            }
+        }
+        if desc.roman {
+            sign_wrote = false;
+        }
+
+        let mut num_count = desc.post + desc.pre;
+        num_count = num_count.saturating_sub(1);
+
+        // `FM` may trim trailing fractional zeros, but never past the last `0`
+        // position the template pinned.
+        let mut last_relevant = None;
+        if desc.fill_mode && desc.decimal {
+            last_relevant = last_relevant_decnum(number);
+            if let Some(lr) = last_relevant
+                && desc.zero_end > out_pre_spaces
+            {
+                let last_zero = (number.len() - 1).min(desc.zero_end - out_pre_spaces);
+                if lr < last_zero {
+                    last_relevant = Some(last_zero);
+                }
+            }
+        }
+        if !sign_wrote && out_pre_spaces == 0 {
+            num_count += 1;
+        }
+
+        Self {
+            desc,
+            number,
+            number_p: 0,
+            sign,
+            sign_wrote,
+            out_pre_spaces,
+            num_count,
+            num_curr: 0,
+            num_in: false,
+            last_relevant,
+            out: String::new(),
+        }
+    }
+
+    /// The character `number_p` points at, or a NUL past the end. PostgreSQL
+    /// walks a NUL-terminated string and WRITES that NUL into the output when a
+    /// digit node outruns the value; the final `strlen` then truncates the result
+    /// there. `run` reproduces that by truncating at the first NUL.
+    fn cur(&self) -> char {
+        self.number.get(self.number_p).copied().unwrap_or('\0')
+    }
+
+    /// PG `IS_PREDEC_SPACE`: a sub-1 value's leading `0` in a `9` template over a
+    /// fraction renders blank, so `to_char(0.1, '9.9')` is `'  .1'`.
+    fn predec_space(&self) -> bool {
+        !self.desc.zero
+            && self.number_p == 0
+            && self.number.first() == Some(&'0')
+            && self.desc.post != 0
+    }
+
+    /// Emit one digit / decimal-point position (PG `NUM_numpart_to_char`).
+    fn numpart(&mut self, is_zero_node: bool) {
+        if self.desc.roman {
+            return;
+        }
+        self.num_in = false;
+
+        // The sign goes in front of the first position that renders something.
+        if !self.sign_wrote
+            && (self.num_curr >= self.out_pre_spaces
+                || (self.desc.zero && self.desc.zero_start == self.num_curr))
+            && (!self.predec_space() || self.last_relevant_is_point())
+        {
+            if self.desc.lsign != LSign::None {
+                // A POST `S` writes nothing here and leaves `sign_wrote` false:
+                // its sign lands after the last digit position instead.
+                if self.desc.lsign == LSign::Pre {
+                    self.out.push(self.sign);
+                    self.sign_wrote = true;
+                }
+            } else if self.desc.bracket {
+                self.out.push(if self.sign == '+' { ' ' } else { '<' });
+                self.sign_wrote = true;
+            } else if self.sign == '+' {
+                if !self.desc.fill_mode {
+                    self.out.push(' ');
+                }
+                self.sign_wrote = true;
+            } else if self.sign == '-' {
+                self.out.push('-');
+                self.sign_wrote = true;
+            }
+        }
+
+        if self.num_curr < self.out_pre_spaces
+            && (self.desc.zero_start > self.num_curr || !self.desc.zero)
+        {
+            // A leading position the value does not reach.
+            if !self.desc.fill_mode {
+                self.out.push(' ');
+            }
+        } else if self.desc.zero
+            && self.num_curr < self.out_pre_spaces
+            && self.desc.zero_start <= self.num_curr
+        {
+            // A leading position pinned by a `0` in the template.
+            self.out.push('0');
+            self.num_in = true;
+        } else {
+            if self.cur() == '.' {
+                // The decimal point survives `FM` even when the whole fraction is
+                // trimmed, so `to_char(5, 'FM9.99')` is `'5.'`.
+                if !self.last_relevant_is_point() || self.desc.fill_mode {
+                    self.out.push('.');
+                }
+            } else if self.last_relevant.is_some_and(|lr| self.number_p > lr) && !is_zero_node {
+                // Trimmed by `FM`: emit nothing.
+            } else if self.predec_space() {
+                if !self.desc.fill_mode {
+                    self.out.push(' ');
+                } else if self.last_relevant_is_point() {
+                    self.out.push('0');
+                }
+            } else {
+                self.out.push(self.cur());
+                self.num_in = true;
+            }
+            if self.cur() != '\0' {
+                self.number_p += 1;
+            }
+        }
+
+        // The trailing bracket / `S` sign fires on the LAST position visited.
+        let mut end =
+            self.num_count + usize::from(self.out_pre_spaces > 0) + usize::from(self.desc.decimal);
+        if self.last_relevant == Some(self.number_p) {
+            end = self.num_curr;
+        }
+        if self.num_curr + 1 == end {
+            if self.sign_wrote && self.desc.bracket {
+                self.out.push(if self.sign == '+' { ' ' } else { '>' });
+            } else if self.desc.lsign == LSign::Post {
+                self.out.push(self.sign);
+            }
+        }
+        self.num_curr += 1;
+    }
+
+    /// Does `last_relevant` point at the decimal point itself, that is, is the
+    /// whole fraction zeros?
+    fn last_relevant_is_point(&self) -> bool {
+        self.last_relevant
+            .is_some_and(|lr| self.number.get(lr) == Some(&'.'))
+    }
+
+    /// Walk the node list and return the formatted text (PG `NUM_processor`'s
+    /// main loop).
+    fn run(mut self, nodes: &[NumNode]) -> Result<String, TypeError> {
+        for node in nodes {
+            match node {
+                NumNode::Nine => self.numpart(false),
+                NumNode::Zero => self.numpart(true),
+                NumNode::Dec | NumNode::LocaleDec => self.numpart(false),
+                NumNode::Comma | NumNode::Group => {
+                    if self.num_in {
+                        self.out.push(',');
+                    } else if !self.desc.fill_mode {
+                        self.out.push(' ');
+                    }
+                }
+                NumNode::Currency => self.out.push(LOCALE_CURRENCY),
+                NumNode::Roman(upper) => {
+                    let roman: String = self.number[self.number_p..].iter().collect();
+                    let roman = if *upper {
+                        roman
+                    } else {
+                        roman.to_ascii_lowercase()
+                    };
+                    if self.desc.fill_mode {
+                        self.out.push_str(&roman);
+                    } else {
+                        // PG's `sprintf("%15s", …)`: right-aligned in 15 columns.
+                        let pad = MAX_ROMAN_LEN.saturating_sub(roman.chars().count());
+                        self.out.push_str(&" ".repeat(pad));
+                        self.out.push_str(&roman);
+                    }
+                }
+                NumNode::Ordinal(upper) => {
+                    if self.desc.roman
+                        || self.number.first() == Some(&'#')
+                        || self.sign == '-'
+                        || self.desc.decimal
+                    {
+                        continue;
+                    }
+                    match ordinal_suffix(self.number, *upper) {
+                        Some(suffix) => self.out.push_str(suffix),
+                        // PG's `get_th` raises 22P02 when the value's spelling
+                        // does not end in a digit, which is every special.
+                        None => {
+                            return Err(TypeError::Domain {
+                                sqlstate: "22P02",
+                                message: if self.number.first() == Some(&'N') {
+                                    "\"NaN\" is not a number"
+                                } else {
+                                    "\"Infinity\" is not a number"
+                                },
+                            });
+                        }
+                    }
+                }
+                NumNode::Minus => {
+                    if self.sign == '-' {
+                        self.out.push('-');
+                    } else if !self.desc.fill_mode {
+                        self.out.push(' ');
+                    }
+                }
+                NumNode::Plus => {
+                    if self.sign == '+' {
+                        self.out.push('+');
+                    } else if !self.desc.fill_mode {
+                        self.out.push(' ');
+                    }
+                }
+                NumNode::SignHere => self.out.push(self.sign),
+                NumNode::Silent => {}
+                NumNode::Literal(c) => self.out.push(*c),
+            }
+        }
+        // PG returns a NUL-terminated buffer and the caller takes its `strlen`.
+        Ok(match self.out.find('\0') {
+            Some(at) => self.out[..at].to_string(),
+            None => self.out,
+        })
+    }
+}
+
+/// PG `get_last_relevant_decnum`: the index of the last non-`0` character after
+/// the decimal point, or of the point itself when the fraction is all zeros.
+/// `None` when the string has no decimal point, which disables `FM` trimming.
+fn last_relevant_decnum(number: &[char]) -> Option<usize> {
+    let point = number.iter().position(|c| *c == '.')?;
+    let mut result = point;
+    for (i, c) in number.iter().enumerate().skip(point + 1) {
+        if *c != '0' {
+            result = i;
+        }
+    }
+    Some(result)
+}
+
+/// PG `get_th`: the English ordinal suffix for the digit string's last digit.
+/// `None` when that character is not a digit, which is PG's 22P02 case.
+fn ordinal_suffix(number: &[char], upper: bool) -> Option<&'static str> {
+    let last = *number.last()?;
+    if !last.is_ascii_digit() {
+        return None;
+    }
+    // Every "teen" takes `TH`; only a non-teen 1 / 2 / 3 takes `ST` / `ND` / `RD`.
+    let teen = number.len() > 1 && number[number.len() - 2] == '1';
+    Some(match (teen, last, upper) {
+        (false, '1', true) => "ST",
+        (false, '1', false) => "st",
+        (false, '2', true) => "ND",
+        (false, '2', false) => "nd",
+        (false, '3', true) => "RD",
+        (false, '3', false) => "rd",
+        (_, _, true) => "TH",
+        (_, _, false) => "th",
+    })
+}
+
+/// PG's `MAX_ROMAN_LEN`: the width `RN` right-aligns into, and the width of the
+/// `#` run it emits for a value outside 1..=3999.
+const MAX_ROMAN_LEN: usize = 15;
+
+/// PG `int_to_roman`. Outside 1..=3999 the answer is a run of `#`, because a
+/// valid Roman numeral never repeats a symbol more than three times.
+fn int_to_roman(number: i32) -> String {
+    const RM1: [&str; 9] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX"];
+    const RM10: [&str; 9] = ["X", "XX", "XXX", "XL", "L", "LX", "LXX", "LXXX", "XC"];
+    const RM100: [&str; 9] = ["C", "CC", "CCC", "CD", "D", "DC", "DCC", "DCCC", "CM"];
+
+    if !(1..=3999).contains(&number) {
+        return "#".repeat(MAX_ROMAN_LEN);
+    }
+    let numstr = number.to_string();
+    let mut result = String::new();
+    let mut len = numstr.len();
+    for ch in numstr.chars() {
+        let num = ch as usize;
+        // `'0'` contributes nothing; `'1'..='9'` index the column's table.
+        if num > '0' as usize {
+            let idx = num - '1' as usize;
+            match len {
+                4 => result.push_str(&"M".repeat(idx + 1)),
+                3 => result.push_str(RM100[idx]),
+                2 => result.push_str(RM10[idx]),
+                _ => result.push_str(RM1[idx]),
+            }
+        }
+        len -= 1;
+    }
+    result
+}
+
+/// How wide a value's own type lets `to_char` render its fraction. PostgreSQL's
+/// `float8_to_char` / `float4_to_char` clamp the template's fractional positions
+/// to the type's decimal digits, so `to_char(12345678901::float8, 'FM…D99999…')`
+/// keeps only `DBL_DIG - 11` of them. An exact type imposes no clamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumPrecision {
+    /// `numeric` and the integer types: every template position is honored.
+    Exact,
+    /// `real`: `FLT_DIG` significant decimal digits.
+    Float4,
+    /// `double precision`: `DBL_DIG` significant decimal digits.
+    Float8,
+}
+
+impl NumPrecision {
+    /// The type's significant decimal digits, or `None` for an exact type.
+    fn digits(self) -> Option<usize> {
+        match self {
+            Self::Exact => None,
+            Self::Float4 => Some(6),
+            Self::Float8 => Some(15),
+        }
+    }
+}
+
+/// The numeric `to_char` engine. Format `value` per the PostgreSQL numeric
+/// template, at the fractional width `precision` allows.
+///
+/// PostgreSQL's `to_char(numeric, text)` is extremely lenient: it never raises
+/// for a malformed template, emitting an unrecognized character literally and
+/// `#`-filling an integer part too wide for the template. The one exception is
+/// `TH` over a value whose spelling does not end in a digit, which is 22P02.
+pub fn format_numeric_prec(
+    template: &str,
+    value: &NumericValue,
+    precision: NumPrecision,
+) -> Result<String, TypeError> {
+    let (nodes, mut desc) = parse_num_template(template);
+
+    if desc.roman {
+        // PG rounds to int4 and lets `int_to_roman` reject anything out of range.
+        // A float rounds through `rint`, which is half to even, so
+        // `to_char(0.5::float8, 'RN')` reaches 0 and is refused.
+        let mode = if precision.digits().is_some() {
+            RoundingMode::HalfEven
+        } else {
+            RoundingMode::HalfUp
+        };
+        let rounded = match value.as_finite() {
+            Some(bd) => bd.with_scale_round(0, mode).to_string(),
+            None => String::new(),
+        };
+        let intvalue = rounded.parse::<i32>().unwrap_or(i32::MAX);
+        let numstr: Vec<char> = int_to_roman(intvalue).chars().collect();
+        return NumProc::new(desc, &numstr, '\0', 0).run(&nodes);
+    }
+
+    if desc.eeee {
+        // `EEEE` short-circuits the whole node walk: PG returns the scientific
+        // spelling as the entire result.
+        return Ok(format_scientific(&desc, value));
+    }
+
+    // The `V` shift widens the integer field whatever the value is, so it lands
+    // before the special short-circuit: PG multiplies `NaN` by 10^n too.
+    if desc.has_multi {
+        desc.pre += desc.multi;
+    }
+
+    let Some(value) = value.as_finite() else {
+        // A special renders through `numeric_out`, so `NaN` / `Infinity` lays
+        // into the digit positions exactly like a run of digits would.
+        let (spelling, sign) = match value {
+            NumericValue::NegInfinity => ("Infinity", '-'),
+            NumericValue::Infinity => ("Infinity", '+'),
+            _ => ("NaN", '+'),
+        };
+        return run_with_numstr(&nodes, &desc, spelling, sign);
+    };
+    let value = if desc.has_multi && desc.multi > 0 {
+        let pow10 = parse_finite(&format!("1{}", "0".repeat(desc.multi)))
+            .unwrap_or_else(|| BigDecimal::from(1));
+        canonical(value * pow10)
+    } else {
+        value.clone()
+    };
+
+    // A float's own precision caps the fractional positions PG will render.
+    if let Some(dig) = precision.digits() {
+        let int_len = value
+            .with_scale_round(0, RoundingMode::HalfEven)
+            .abs()
+            .to_string()
+            .len();
+        if int_len >= dig {
+            desc.post = 0;
+        } else if int_len + desc.post > dig {
+            desc.post = dig - int_len;
+        }
+    }
+
+    // A float renders through C's `%.*f`, which rounds half to EVEN and keeps the
+    // negative sign even when the magnitude rounds away. `numeric` renders through
+    // `numeric_round`, which rounds half AWAY from zero and has no negative zero.
+    // Oracle-confirmed, PG 18: `to_char(2.5::float8,'999')` → `'   2'` against
+    // `to_char(2.5,'999')` → `'   3'`, and `to_char(-0.0001::float8,'999')` →
+    // `'  -0'` against `to_char(-0.0001,'999')` → `'   0'`.
+    let is_float = precision.digits().is_some();
+    let mode = if is_float {
+        RoundingMode::HalfEven
+    } else {
+        RoundingMode::HalfUp
+    };
+    let rounded = value.with_scale_round((desc.post as i64).min(MAX_DSCALE), mode);
+    let negative =
+        if is_float { &value } else { &rounded }.sign() == bigdecimal::num_bigint::Sign::Minus;
+    let sign = if negative { '-' } else { '+' };
+    // PG's `numeric_out` of a rounded value keeps exactly `post` fractional
+    // digits, so the digit string's shape is fixed by the template, not by the
+    // value's own scale.
+    let mut numstr = format!("{:.*}", desc.post.min(MAX_DSCALE as usize), rounded.abs());
+    if desc.post == 0 {
+        numstr = numstr.trim_end_matches('.').to_string();
+    }
+
+    run_with_numstr(&nodes, &desc, &numstr, sign)
+}
+
+/// Finish a `to_char` from an already-rendered digit string: work out the
+/// left padding, `#`-fill an integer part too wide for the template, and walk
+/// the nodes (PG's `numeric_to_char` tail plus `NUM_TOCHAR_finish`).
+fn run_with_numstr(
+    nodes: &[NumNode],
+    desc: &NumDesc,
+    numstr: &str,
+    sign: char,
+) -> Result<String, TypeError> {
+    let pre_len = numstr.find('.').unwrap_or(numstr.len());
+    let (owned, out_pre_spaces) = if pre_len < desc.pre {
+        (numstr.to_string(), desc.pre - pre_len)
+    } else if pre_len > desc.pre {
+        // Integer overflow: PG replaces the whole value with `#`s and puts the
+        // decimal point back at the template's own position.
+        let mut fill: Vec<char> = vec!['#'; desc.pre + desc.post + 1];
+        if desc.pre < fill.len() {
+            fill[desc.pre] = '.';
+        }
+        (fill.into_iter().collect(), 0)
+    } else {
+        (numstr.to_string(), 0)
+    };
+    let chars: Vec<char> = owned.chars().collect();
+    NumProc::new(desc.clone(), &chars, sign, out_pre_spaces).run(nodes)
+}
+
+/// `EEEE`: PostgreSQL renders the value with `numeric_out_sci` at the template's
+/// fractional width and returns that string as the WHOLE result, prefixed with a
+/// blank when the value is non-negative so signs stay aligned. A special becomes
+/// a `#` run of the same shape.
+fn format_scientific(desc: &NumDesc, value: &NumericValue) -> String {
+    let Some(bd) = value.as_finite() else {
+        // PG allows 6 characters for the sign, point, `e`, exponent sign and two
+        // exponent digits, then overwrites the first with a blank and plants the
+        // point just past the integer positions.
+        let mut fill: Vec<char> = vec!['#'; desc.pre + desc.post + 6];
+        fill[0] = ' ';
+        if desc.pre + 1 < fill.len() {
+            fill[desc.pre + 1] = '.';
+        }
+        return fill.into_iter().collect();
+    };
+    let sci = scientific_notation(bd, desc.post);
+    if sci.starts_with('-') {
+        sci
+    } else {
+        format!(" {sci}")
+    }
+}
+
+/// PG `get_str_from_var_sci`: one integer digit, `scale` fractional digits, then
+/// `e` and a signed exponent of at least two digits.
+fn scientific_notation(value: &BigDecimal, scale: usize) -> String {
+    if finite_is_zero(value) {
+        let mantissa = format!("{:.*}", scale, BigDecimal::from(0));
+        return format!("{mantissa}e+00");
+    }
+    // The exponent is the power of ten of the leading significant digit.
+    let (mant, exp) = value.as_bigint_and_exponent();
+    let digits = mant.to_string();
+    let digit_count = digits.trim_start_matches('-').len() as i64;
+    let exponent = digit_count - exp - 1;
+    // PG fixes the exponent from the UNROUNDED value and never re-normalizes, so
+    // rounding the significand up to 10 stays there: `to_char(999.5, '9.99EEEE')`
+    // is `' 10.00e+02'`, not `' 1.00e+03'`.
+    let mantissa =
+        (value / power_of_ten(exponent)).with_scale_round(scale as i64, RoundingMode::HalfUp);
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!(
+        "{:.*}e{}{:02}",
+        scale,
+        mantissa,
+        sign,
+        exponent.unsigned_abs()
+    )
+}
+
+/// `10^exp` as an exact `BigDecimal`, for either sign of `exp`.
+fn power_of_ten(exp: i64) -> BigDecimal {
+    let magnitude = parse_finite(&format!("1{}", "0".repeat(exp.unsigned_abs() as usize)))
+        .unwrap_or_else(|| BigDecimal::from(1));
+    if exp < 0 {
+        BigDecimal::from(1) / magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// The numeric `to_char` engine for the exact types (`numeric` and the integers).
+pub fn format_numeric(template: &str, value: &NumericValue) -> Result<String, TypeError> {
+    format_numeric_prec(template, value, NumPrecision::Exact)
 }
 
 // ---------------------------------------------------------------------------
@@ -1928,10 +2281,18 @@ pub fn num_ln(arg: &NumericValue) -> Result<NumericValue, TypeError> {
         NumericValue::Infinity | NumericValue::NegInfinity => return Ok(NumericValue::Infinity),
         NumericValue::Finite(bd) => bd,
     };
-    let rscale = ln_rscale(bd);
+    Ok(NumericValue::Finite(finite_ln(bd, ln_rscale(bd))?))
+}
+
+/// `ln(bd)` rounded to `rscale` fractional digits (PostgreSQL `ln_var`).
+///
+/// `num_ln` lets `ln_rscale` pick the scale; `log_var` (see [`num_log`])
+/// instead asks for a scale of its own, because it divides two logarithms and
+/// needs guard digits in each of them.
+fn finite_ln(bd: &BigDecimal, rscale: i64) -> Result<BigDecimal, TypeError> {
     let prec = transc_prec(estimate_ln_dweight(bd) + 1, rscale);
     let v = bf_ln(&num_to_bf(&finite_to_text(bd), prec), prec).ok_or_else(err_log_negative)?;
-    Ok(NumericValue::Finite(finish_transc(&bf_to_text(&v), rscale)))
+    Ok(finish_transc(&bf_to_text(&v), rscale))
 }
 
 /// numeric log base 10; same domain and special rules as [`num_ln`].
@@ -1955,6 +2316,69 @@ pub fn num_log10(arg: &NumericValue) -> Result<NumericValue, TypeError> {
     Ok(NumericValue::Finite(canonical(
         quotient.with_scale_round(rscale, RoundingMode::HalfUp),
     )))
+}
+
+/// numeric log base `base` of `num` (PostgreSQL `numeric_log` / `log_var`).
+///
+/// The domain errors are `ln`'s, taken on the base before the argument, so
+/// `log(0, -1)` reports zero rather than a negative number. A base of exactly
+/// one makes `ln(base)` zero and the division 22012, which is how PostgreSQL
+/// reports `log(1.0, 12.34)`.
+pub fn num_log(base: &NumericValue, num: &NumericValue) -> Result<NumericValue, TypeError> {
+    let (b, n) = match (base, num) {
+        (NumericValue::Finite(b), NumericValue::Finite(n)) => (b, n),
+        _ => return special_log(base, num),
+    };
+    if let Some(err) = log_domain_error(base).or_else(|| log_domain_error(num)) {
+        return Err(err);
+    }
+    finite_log(b, n).map(NumericValue::Finite)
+}
+
+/// `log(base, num)` where at least one operand is `NaN` or an infinity.
+///
+/// PostgreSQL screens the signs and zeros of *both* operands before it looks at
+/// which one is infinite, so `log(Infinity, 0)` is the zero error rather than a
+/// shortcut answer.
+fn special_log(base: &NumericValue, num: &NumericValue) -> Result<NumericValue, TypeError> {
+    if base.is_nan() || num.is_nan() {
+        return Ok(NumericValue::NaN);
+    }
+    if base.signum() < 0 || num.signum() < 0 {
+        return Err(err_log_negative());
+    }
+    if base.is_zero() || num.is_zero() {
+        return Err(err_log_zero());
+    }
+    if base.is_infinite() {
+        // Infinity/Infinity is indeterminate; over an infinite base a finite
+        // logarithm underflows to plain zero rather than raising.
+        if num.is_infinite() {
+            return Ok(NumericValue::NaN);
+        }
+        return Ok(NumericValue::from(0i64));
+    }
+    Ok(NumericValue::Infinity)
+}
+
+/// PostgreSQL `log_var`: divide the two natural logarithms, each computed with
+/// eight guard digits past what the quotient's own scale needs.
+fn finite_log(base: &BigDecimal, num: &BigDecimal) -> Result<BigDecimal, TypeError> {
+    let ln_base_dweight = estimate_ln_dweight(base);
+    let ln_num_dweight = estimate_ln_dweight(num);
+    let result_dweight = ln_num_dweight - ln_base_dweight;
+    let rscale = (MIN_SIG_DIGITS - result_dweight)
+        .max(base.fractional_digit_count().max(0))
+        .max(num.fractional_digit_count().max(0))
+        .clamp(0, TRANSC_MAX_SCALE);
+    let ln_base = finite_ln(base, (rscale + result_dweight - ln_base_dweight + 8).max(0))?;
+    let ln_num = finite_ln(num, (rscale + result_dweight - ln_num_dweight + 8).max(0))?;
+    if finite_is_zero(&ln_base) {
+        return Err(TypeError::DivisionByZero);
+    }
+    Ok(canonical(
+        (ln_num / ln_base).with_scale_round(rscale, RoundingMode::HalfUp),
+    ))
 }
 
 /// numeric exp; `Err(22003)` when the result overflows the numeric format.
@@ -2416,11 +2840,86 @@ mod tests {
         ));
     }
 
+    /// `float8_numeric` converts through `snprintf("%.*g", DBL_DIG, val)`, so a
+    /// float8 reaches numeric with at most **fifteen** significant digits — not
+    /// the seventeen that `float8out` can need to round-trip. Every expectation
+    /// is the pinned PostgreSQL 18.4 answer to `<value>::float8::numeric`, and
+    /// every literal was checked against that server's `float8send` so the two
+    /// sides start from the same bits.
     #[test]
-    fn float_numeric_conversions_use_shortest_text() {
-        assert_eq!(to_text(&from_f64(0.1)), "0.1");
-        assert_eq!(to_text(&from_f64(2.5)), "2.5");
-        assert_eq!(to_f64(&n("1.5")), 1.5);
+    fn float8_to_numeric_rounds_to_fifteen_significant_digits() {
+        use assert2::assert;
+        for (value, expected) in [
+            (0.0, "0"),
+            // numeric has no negative zero.
+            (-0.0, "0"),
+            (0.1, "0.1"),
+            // Fifteen threes, not the sixteen `0.3333333333333333` would give.
+            (1.0 / 3.0, "0.333333333333333"),
+            // The sixteenth digit rounds the fifteenth up.
+            (2.0 / 3.0, "0.666666666666667"),
+            (std::f64::consts::PI, "3.14159265358979"),
+            // The smallest float8 above one loses its whole fractional part.
+            (1.0000000000000002, "1"),
+            (2.5, "2.5"),
+            (1e15, "1000000000000000"),
+            // Sixteen integer digits: the last is zeroed, not preserved.
+            (1_234_567_890_123_456.0, "1234567890123460"),
+            (-1_234_567_890_123_456.0, "-1234567890123460"),
+            (9_007_199_254_740_992.0, "9007199254740990"),
+            // An exact tie at the sixteenth digit. Both PostgreSQL and this go
+            // to even, so `…445` falls to `…440` rather than rising to `…450`.
+            (4_429_515_941_059_445.0, "4429515941059440"),
+            (1.234_567_890_123_456_8e20, "123456789012346000000"),
+            (1e-5, "0.00001"),
+            (0.000_123_456_789_012_345_67, "0.000123456789012346"),
+            (-0.7, "-0.7"),
+        ] {
+            assert!(to_text(&from_f64(value)) == expected);
+        }
+    }
+
+    /// The same rule at both ends of the float8 range, where PostgreSQL's texts
+    /// run to hundreds of characters. Each is spelled as the significant digits
+    /// `%g` keeps — fewer than fifteen once it drops trailing zeros — and the
+    /// run of zeros that places them.
+    #[test]
+    fn float8_to_numeric_holds_fifteen_digits_across_the_double_range() {
+        use assert2::assert;
+        for (value, expected) in [
+            (
+                f64::MIN_POSITIVE,
+                format!("0.{}22250738585072", "0".repeat(307)),
+            ),
+            (5e-324, format!("0.{}494065645841247", "0".repeat(323))),
+            (1e100, format!("1{}", "0".repeat(100))),
+            (f64::MAX, format!("179769313486232{}", "0".repeat(294))),
+        ] {
+            assert!(to_text(&from_f64(value)) == expected);
+        }
+    }
+
+    /// The float4 half of the same `%.*g` rule, at `FLT_DIG` = six digits.
+    /// Expectations are PostgreSQL 18.4's `<value>::float4::numeric`, with the
+    /// literals checked against its `float4send`.
+    #[test]
+    fn float4_to_numeric_rounds_to_six_significant_digits() {
+        use assert2::assert;
+        for (value, expected) in [
+            (0.1, "0.1"),
+            (-0.0, "0"),
+            (1e-5, "0.00001"),
+            // Seven integer digits, so the last is zeroed.
+            (16_777_216.0, "16777200"),
+            (123_456.7, "123457"),
+            (
+                f32::MIN_POSITIVE,
+                "0.0000000000000000000000000000000000000117549",
+            ),
+            (f32::MAX, "340282000000000000000000000000000000000"),
+        ] {
+            assert!(to_text(&from_f32(value)) == expected);
+        }
     }
 
     #[test]
@@ -2852,12 +3351,16 @@ mod tests {
         use super::{format_numeric, parse};
         let n = |s: &str| parse(s).expect(s);
         let fmt = |v: &str, t: &str| format_numeric(t, &n(v)).expect(t);
-        // Currency `L`/`$`: PostgreSQL 18's C/default locale emits a literal `$`
-        // (oracle-confirmed: `to_char(485,'L999')` → `'$ 485'`). `$` is also a
-        // currency anchor. Both render `$` at the anchor, outside the sign column.
-        assert_eq!(fmt("485", "L999"), "$ 485");
+        // `L` emits the C locale's currency symbol, which PostgreSQL's
+        // `NUM_prepare_locale` falls back to a single SPACE — not a glyph
+        // (oracle-confirmed, PG 18: `to_char(485,'L999')` → `'  485'`).
+        assert_eq!(fmt("485", "L999"), "  485");
+        assert_eq!(fmt("485", "999L"), " 485 ");
+        // `$` is NOT a numeric pattern at all; it is copied through as a literal,
+        // so the sign lands AFTER it (oracle-confirmed: `to_char(-485,'$999')` →
+        // `'$-485'`).
         assert_eq!(fmt("485", "$999"), "$ 485");
-        assert_eq!(fmt("485", "999L"), " 485$");
+        assert_eq!(fmt("-485", "$999"), "$-485");
     }
 
     #[test]
@@ -2939,10 +3442,11 @@ mod tests {
         // Rounding carries into a new integer digit that no longer fits → overflow
         // (`#`-filled digits, leading sign blank): 99.6 → 100, 3 digits > 2 positions.
         assert_eq!(fmt("99.6", "99"), " ##");
-        // A negative value with a currency marker (anchored `-` + leading currency).
-        assert_eq!(fmt("-485", "L999"), "$-485");
+        // A negative value with a currency marker (anchored `-` + the C locale's
+        // blank currency symbol).
+        assert_eq!(fmt("-485", "L999"), " -485");
         // Trailing currency on a negative.
-        assert_eq!(fmt("-485", "999L"), "-485$");
+        assert_eq!(fmt("-485", "999L"), "-485 ");
         // A V-shift with a fractional input that rounds.
         // to_char(12.45, '99V9') → 12.45*10 = 124.5 → round to 0 frac → 125.
         assert_eq!(fmt("12.45", "99V9"), " 125");
@@ -3166,6 +3670,54 @@ mod tests {
         assert!(num_log10(&n("-inf")).unwrap_err() == err_log_negative());
     }
 
+    /// `log_var` picks the result scale from the estimated weight of the
+    /// quotient and floors it at either input's own display scale, so the
+    /// printed digit count is part of the answer.
+    #[test]
+    fn two_argument_log_matches_postgres_value_and_display_scale() {
+        use assert2::assert;
+        let cases: &[(&str, &str, &str)] = &[
+            ("2", "2", "1.0000000000000000"),
+            ("2", "4.2", "2.0703893278913979"),
+            ("4.2", "2", "0.4830009440873890"),
+            ("10", "1000", "3.0000000000000000"),
+            ("0.99923", "4.58934e34", "-103611.55579544132"),
+            ("1.000016", "8.452010e18", "2723830.2877097365"),
+            // A base and argument at opposite ends of the format keep every
+            // digit their display scales ask for.
+            (
+                "1.23e-89",
+                "6.4689e45",
+                "-0.5152489207781856983977054971756484879653568168479201885425588841094788842469115325262329756",
+            ),
+        ];
+        for (base, num, expected) in cases {
+            let got = to_text(&num_log(&n(base), &n(num)).expect("log"));
+            assert!(got == *expected, "log({base}, {num}) gave {got}");
+        }
+    }
+
+    #[test]
+    fn two_argument_log_specials_and_domains_match_postgres() {
+        use assert2::assert;
+        assert!(to_text(&num_log(&n("2"), &n("inf")).expect("log")) == "Infinity");
+        assert!(to_text(&num_log(&n("inf"), &n("2")).expect("log")) == "0");
+        assert!(to_text(&num_log(&n("inf"), &n("inf")).expect("log")) == "NaN");
+        assert!(to_text(&num_log(&n("nan"), &n("2")).expect("log")) == "NaN");
+        assert!(to_text(&num_log(&n("2"), &n("nan")).expect("log")) == "NaN");
+        // A NaN operand wins over the sign and zero screens.
+        assert!(to_text(&num_log(&n("nan"), &n("0")).expect("log")) == "NaN");
+        assert!(num_log(&n("0"), &n("10")).unwrap_err() == err_log_zero());
+        assert!(num_log(&n("10"), &n("0")).unwrap_err() == err_log_zero());
+        assert!(num_log(&n("-inf"), &n("10")).unwrap_err() == err_log_negative());
+        assert!(num_log(&n("10"), &n("-inf")).unwrap_err() == err_log_negative());
+        // The sign screen runs before the zero screen, even across operands.
+        assert!(num_log(&n("inf"), &n("0")).unwrap_err() == err_log_zero());
+        assert!(num_log(&n("-inf"), &n("inf")).unwrap_err() == err_log_negative());
+        // ln(1) is zero, so there is no divisor.
+        assert!(num_log(&n("1.0"), &n("12.34")).unwrap_err() == TypeError::DivisionByZero);
+    }
+
     #[test]
     fn special_power_follows_posix_pow() {
         use assert2::assert;
@@ -3330,6 +3882,238 @@ mod tests {
     }
 
     #[test]
+    fn roman_numerals_decode_exactly_as_postgres_does() {
+        use assert2::assert;
+
+        use super::{NumberTemplate, RomanRefusal, number_template, roman_to_int};
+        // A well-formed numeral, its value, and what PostgreSQL 18.4 answers.
+        // `None` is `roman_to_int`'s rejection, which `to_number` reports as
+        // `invalid Roman numeral`. Every expectation oracle-confirmed.
+        let cases: &[(&str, Option<i32>)] = &[
+            ("CvIiI", Some(108)),
+            ("MMXX  ", Some(2020)),
+            ("  XIV", Some(14)),
+            ("  XIV  ", Some(14)),
+            // Decoding stops at the first non-numeral, so the tail is ignored.
+            ("M CC", Some(1000)),
+            ("MMMCMXCIX", Some(3999)),
+            ("MCMXCIV", Some(1994)),
+            ("IV", Some(4)),
+            // A subtraction may not be followed by anything as large as the
+            // numeral it subtracted, nor repeat the numeral it subtracts from.
+            ("viv", None),
+            ("VIX", None),
+            ("DCCCD", None),
+            ("MCCM", None),
+            ("XIXL", None),
+            // `V`, `L` and `D` may neither repeat nor precede something larger.
+            ("VV", None),
+            ("IL", None),
+            ("LXC", None),
+            ("DCM", None),
+            ("MMMDCM", None),
+            ("CLXC", None),
+            // No symbol may repeat more than three times.
+            ("MMMM", None),
+            ("IIII", None),
+            ("XXXX", None),
+            // Not a numeral at all.
+            ("qiv", None),
+            (" ", None),
+            ("", None),
+        ];
+        for (input, want) in cases {
+            assert!(roman_to_int(input) == *want, "roman_to_int({input:?})");
+        }
+        // `RN` tolerates only `FM`; anything else is a template PG will not
+        // compile, and a second `RN` is its own refusal.
+        assert!(number_template("RN") == NumberTemplate::Roman);
+        assert!(number_template("  RN") == NumberTemplate::Roman);
+        assert!(number_template("FMRN") == NumberTemplate::Roman);
+        assert!(number_template("999") == NumberTemplate::Digits);
+        assert!(number_template("MIRN") == NumberTemplate::Refused(RomanRefusal::Incompatible));
+        assert!(number_template("RNRN") == NumberTemplate::Refused(RomanRefusal::Twice));
+    }
+
+    #[test]
+    fn to_char_walks_the_template_in_order() {
+        use assert2::assert;
+
+        use super::{NumPrecision, format_numeric_prec};
+        // The node-stream features a digit-grid renderer cannot express: a `0`
+        // that zero-fills every position to its right, the C locale's BLANK
+        // currency symbol, an `SG` sign parked mid-field, literals interleaved
+        // with the digits, `G` inside the fraction, double-quoted and
+        // backslash-escaped runs, `EEEE` scientific notation, `RN` Roman
+        // numerals, and the `TH` ordinal PG drops over a fractional template.
+        // Every expectation oracle-confirmed against PostgreSQL 18.4.
+        let cases: &[(&str, NumPrecision, &str, &str)] = &[
+            (
+                "0",
+                NumPrecision::Exact,
+                "0999999999999999.999",
+                " 0000000000000000.000",
+            ),
+            (
+                "-34338492.215397047",
+                NumPrecision::Exact,
+                "0999999999999999.999",
+                "-0000000034338492.215",
+            ),
+            (
+                "4.31",
+                NumPrecision::Exact,
+                "FM0999999999999999.999909999",
+                "0000000000000004.31000",
+            ),
+            ("0", NumPrecision::Exact, "L9999.099", "      .000"),
+            (
+                "-83028485",
+                NumPrecision::Exact,
+                "L9999999999999999.099999999999999",
+                "         -83028485.000000000000000",
+            ),
+            (
+                "0",
+                NumPrecision::Exact,
+                "999999SG9999999999",
+                "      +         0",
+            ),
+            (
+                "-34338492.215397047",
+                NumPrecision::Exact,
+                "999999SG9999999999",
+                "      -  34338492",
+            ),
+            (
+                "0",
+                NumPrecision::Exact,
+                "SG9999999999999999.999999999999999th",
+                "+                .000000000000000",
+            ),
+            (
+                "4.31",
+                NumPrecision::Exact,
+                "FM9999999999999999.999999999999999THPR",
+                "4.31",
+            ),
+            (
+                "-34338492.215397047",
+                NumPrecision::Exact,
+                "FM9999999999999999.999999999999999THPR",
+                "<34338492.215397047>",
+            ),
+            (
+                "-34338492.215397047",
+                NumPrecision::Exact,
+                "S 9 9 9 9 9 9 9 9 . 9 9 9",
+                " -3 4 3 3 8 4 9 2 . 2 1 5",
+            ),
+            (
+                "0",
+                NumPrecision::Exact,
+                "S 9 9 9 9 9 9 9 9 . 9 9 9",
+                "                 +. 0 0 0",
+            ),
+            (
+                "-34338492.215397047",
+                NumPrecision::Exact,
+                "9G999G999G999D999G999",
+                "   -34,338,492.215,397",
+            ),
+            (
+                "0",
+                NumPrecision::Exact,
+                "9G999G999G999D999G999",
+                "              .000,000",
+            ),
+            ("100", NumPrecision::Exact, "f\"ool\"999", "fool 100"),
+            ("100", NumPrecision::Exact, "f\\oo999", "f\\oo 100"),
+            ("100", NumPrecision::Exact, "f\"ool\\\"999", "fool\"999"),
+            ("100", NumPrecision::Exact, "f\"\\\\ool\"999", "f\\ool 100"),
+            ("0", NumPrecision::Exact, "9.999EEEE", " 0.000e+00"),
+            (
+                "-34338492.215397047",
+                NumPrecision::Exact,
+                "9.999EEEE",
+                "-3.434e+07",
+            ),
+            ("999.5", NumPrecision::Exact, "9.99EEEE", " 10.00e+02"),
+            ("12345", NumPrecision::Exact, "99EEEE", " 1e+04"),
+            ("NaN", NumPrecision::Exact, "9.999EEEE", " #.#######"),
+            ("1.2345e-9", NumPrecision::Exact, "9.999EEEE", " 1.235e-09"),
+            ("1234", NumPrecision::Exact, "RN", "       MCCXXXIV"),
+            ("4", NumPrecision::Exact, "FMRN", "IV"),
+            ("3999", NumPrecision::Exact, "rn", "      mmmcmxcix"),
+            (
+                "100000000000000000000",
+                NumPrecision::Exact,
+                "FMRN",
+                "###############",
+            ),
+            ("123", NumPrecision::Exact, "999TH", " 123RD"),
+            ("12", NumPrecision::Exact, "FM999th", "12th"),
+            (
+                "-4567890123456789",
+                NumPrecision::Exact,
+                "9G999G999G999G999G999D999G999",
+                "-4,567,890,123,456,789.000,000",
+            ),
+            (
+                "4567890123456789",
+                NumPrecision::Exact,
+                "FM9999999999999999.000",
+                "4567890123456789.000",
+            ),
+            (
+                "4567890123456789",
+                NumPrecision::Exact,
+                "L9999999999999999.000",
+                "  4567890123456789.000",
+            ),
+            (
+                "4567890123456789",
+                NumPrecision::Exact,
+                "999999SG9999999999",
+                "456789+0123456789",
+            ),
+            (
+                "4567890123456789",
+                NumPrecision::Exact,
+                "FM9999999999999999THPR",
+                "4567890123456789TH",
+            ),
+            (
+                "-4567890123456789",
+                NumPrecision::Exact,
+                "FM9999999999999999THPR",
+                "<4567890123456789>",
+            ),
+            ("1234", NumPrecision::Exact, "9.99EEEE", " 1.23e+03"),
+            ("-1234", NumPrecision::Exact, "9.99eeee", "-1.23e+03"),
+            (
+                "12345678901",
+                NumPrecision::Float8,
+                "FM9999999999D9999900000000000000000",
+                "##########.####",
+            ),
+            ("2.5", NumPrecision::Float8, "999", "   2"),
+            ("-0.0001", NumPrecision::Float8, "999", "  -0"),
+            ("0.5", NumPrecision::Float8, "RN", "###############"),
+            ("4.31", NumPrecision::Float8, "9.999EEEE", " 4.310e+00"),
+            ("4.31", NumPrecision::Float4, "9.999EEEE", " 4.310e+00"),
+        ];
+        for (value, precision, template, want) in cases {
+            let got = format_numeric_prec(template, &n(value), *precision)
+                .unwrap_or_else(|e| panic!("to_char({value}, {template}): {e}"));
+            assert!(
+                got == *want,
+                "to_char({value}, {template}) = {got:?}, want {want:?}"
+            );
+        }
+    }
+
+    #[test]
     fn to_char_lays_a_special_into_the_digit_grid() {
         use assert2::assert;
         let fmt =
@@ -3355,8 +4139,8 @@ mod tests {
             ("-inf", "S999", "-###"),
             ("nan", "MI999", " NaN"),
             ("-inf", "MI999", "-###"),
-            ("nan", "L999", "$ NaN"),
-            ("-inf", "L999", "$-###"),
+            ("nan", "L999", "  NaN"),
+            ("-inf", "L999", " -###"),
             ("nan", "999PR", " NaN "),
             ("inf", "999PR", " ### "),
             ("-inf", "999PR", "<###>"),

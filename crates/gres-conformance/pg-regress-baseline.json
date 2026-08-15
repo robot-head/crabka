@@ -1,0 +1,1293 @@
+{
+  "failures": {
+    "advisory_lock": {
+      "changed_lines": 90,
+      "expected": "advisory_lock.out",
+      "hunks": 10,
+      "sha256": "c65b784c44e22655f691e75df7d440a313ba252cfffae156ea7c614601249c41"
+    },
+    "aggregates": {
+      "changed_lines": 1760,
+      "expected": "aggregates.out",
+      "hunks": 72,
+      "sha256": "827b4544b4b6c71a0e180066fd81094923f02a8480025b411e22bf1205ed0f6e"
+    },
+    "alter_generic": {
+      "changed_lines": 309,
+      "expected": "alter_generic.out",
+      "hunks": 8,
+      "sha256": "4d6ff990504ccc5f8a44f10f3983520748906c9da057fafe7a53f2c9c0c526fa"
+    },
+    "alter_operator": {
+      "changed_lines": 135,
+      "expected": "alter_operator.out",
+      "hunks": 5,
+      "sha256": "4c5d1160bf25ff61707330a64b605ad7cf23dc410a11c12245e84ea48a50a8bb"
+    },
+    "alter_table": {
+      "changed_lines": 1841,
+      "expected": "alter_table.out",
+      "hunks": 159,
+      "sha256": "58b4e4e920c3a7ea27583175af1a108486154aa61e41c2be3b0dba0f5db0129b"
+    },
+    "amutils": {
+      "changed_lines": 180,
+      "expected": "amutils.out",
+      "hunks": 7,
+      "sha256": "762b331fade072264a9e3789d28f6e27cf1341d20e5913c77ae5260f94c94d3b"
+    },
+    "arrays": {
+      "changed_lines": 689,
+      "expected": "arrays.out",
+      "hunks": 36,
+      "sha256": "55d33e813290c6609acc119b49d5469f6d1051b95e3b45d1a4e24ed999265d01"
+    },
+    "box": {
+      "changed_lines": 183,
+      "expected": "box.out",
+      "hunks": 9,
+      "sha256": "538242698f27b6b4868791ee7407c8f8a4cf2e7f04b0407d2b41e93e8a56f2f0"
+    },
+    "brin": {
+      "changed_lines": 148,
+      "expected": "brin.out",
+      "hunks": 8,
+      "sha256": "a8ddc1828e6a7a92d4010d080132df41a502056f1896a9a2fb2671318790cd77"
+    },
+    "brin_bloom": {
+      "changed_lines": 121,
+      "expected": "brin_bloom.out",
+      "hunks": 5,
+      "sha256": "78547651f0a5ad014139d78e38b189d5587ba831491883fe8d99a7c750f67c11"
+    },
+    "brin_multi": {
+      "changed_lines": 280,
+      "expected": "brin_multi.out",
+      "hunks": 16,
+      "sha256": "7cfa8f73a957d75e69b1053ad3f847fadbb6ca6e1358500e771235bf8beae059"
+    },
+    "btree_index": {
+      "changed_lines": 281,
+      "expected": "btree_index.out",
+      "hunks": 28,
+      "sha256": "ef936a2f8d5fc50d5af4fb0bc48a52c1d488f79bb50b75f676efd0415c5857d6"
+    },
+    "case": {
+      "changed_lines": 138,
+      "expected": "case.out",
+      "hunks": 9,
+      "sha256": "eee15fc0f920965f67e91aeb67aeff43e019662e5c564be1b24d91d29355f1d7"
+    },
+    "cluster": {
+      "changed_lines": 101,
+      "expected": "cluster.out",
+      "hunks": 11,
+      "sha256": "7f1a097b80522d036f3deedda32196db55e229dc4518e10b80ea77c39b42ac50"
+    },
+    "collate": {
+      "changed_lines": 305,
+      "expected": "collate.out",
+      "hunks": 16,
+      "sha256": "8f0abed60cee04d0d07a5b06ae0e0755999396e9b1c6b12c1834ab8ad582f039"
+    },
+    "collate.utf8": {
+      "changed_lines": 168,
+      "expected": "collate.utf8_1.out",
+      "hunks": 1,
+      "sha256": "3609084939dbc3bb5d994b6ebf2e5f45fbf884edd15565b7ae7e3001add16715"
+    },
+    "combocid": {
+      "changed_lines": 101,
+      "expected": "combocid.out",
+      "hunks": 2,
+      "sha256": "999892769ecdedf31d37c5851dac14c25bf7959d4d5cadf43d5fd282868bc05a"
+    },
+    "compression": {
+      "changed_lines": 245,
+      "expected": "compression_1.out",
+      "hunks": 3,
+      "sha256": "fb7ea469b5d9807423d7ab3ad222d5240e9c457cdf7f7f6d53099eb03c497e24"
+    },
+    "constraints": {
+      "changed_lines": 668,
+      "expected": "constraints.out",
+      "hunks": 55,
+      "sha256": "f4582884c917f6f9b636de3416c2ce316038985a4969efcf4a1561d65a231cd0"
+    },
+    "conversion": {
+      "changed_lines": 448,
+      "expected": "conversion.out",
+      "hunks": 14,
+      "sha256": "1139e1dc36e0bc28ba4779053dd212fac60477028c7b2fb91ab7f723238d685d"
+    },
+    "copy": {
+      "changed_lines": 45,
+      "expected": "copy.out",
+      "hunks": 5,
+      "sha256": "6c555f759c9eb9098f4a18615f72430fc569dee796624288404d8d2712b291ac"
+    },
+    "copy2": {
+      "changed_lines": 506,
+      "expected": "copy2.out",
+      "hunks": 15,
+      "sha256": "43299bfa5fd890fcb0631123e4de22a9dd75226ed3d6a290ee3b47b13e4f7eb1"
+    },
+    "copydml": {
+      "changed_lines": 58,
+      "expected": "copydml.out",
+      "hunks": 2,
+      "sha256": "962795c7ca299575b0ac90465f9761e1b287c8d58265a8bfa4bfa25048f5b163"
+    },
+    "copyencoding": {
+      "changed_lines": 4,
+      "expected": "copyencoding.out",
+      "hunks": 2,
+      "sha256": "035f07c1b7bf1291fd758e03d0d4926fe17424ae0768558c555f6aee237d2aef"
+    },
+    "create_aggregate": {
+      "changed_lines": 95,
+      "expected": "create_aggregate.out",
+      "hunks": 20,
+      "sha256": "26fdfab6343856d1ccdfab7373654946321d575948423a1339598d7b145bad4e"
+    },
+    "create_am": {
+      "changed_lines": 295,
+      "expected": "create_am.out",
+      "hunks": 21,
+      "sha256": "48ce696d5e2792d0744bebd58c08078e62b53712cc0ac6dba7b08f9b7fbad1cc"
+    },
+    "create_cast": {
+      "changed_lines": 34,
+      "expected": "create_cast.out",
+      "hunks": 3,
+      "sha256": "fabab1ea1924d4e2a1cd45606523c5029df057f44266e04c9eda97a3c58db7fb"
+    },
+    "create_function_sql": {
+      "changed_lines": 349,
+      "expected": "create_function_sql.out",
+      "hunks": 16,
+      "sha256": "413889acd7a48832a265e5d9f78605e570aede29d9a97b711fd10f02b9d8f2c7"
+    },
+    "create_index": {
+      "changed_lines": 1489,
+      "expected": "create_index.out",
+      "hunks": 112,
+      "sha256": "d4ee7919e0463a0ebe69fcd4ce1ddabbafef28db9f5fadf9c2c6b6f571c6fb70"
+    },
+    "create_index_spgist": {
+      "changed_lines": 799,
+      "expected": "create_index_spgist.out",
+      "hunks": 65,
+      "sha256": "862c6da22c8e16e2d578b70380709c85ecee91fae67db0d6bf1100b7f6a2813e"
+    },
+    "create_operator": {
+      "changed_lines": 78,
+      "expected": "create_operator.out",
+      "hunks": 13,
+      "sha256": "ce482a257af47b25f12158295778f8f79ad115ab68a5c821a692b396786b66fb"
+    },
+    "create_procedure": {
+      "changed_lines": 275,
+      "expected": "create_procedure.out",
+      "hunks": 13,
+      "sha256": "306bd5b8a7ce03613cad01073790826f81cb7e86f8518bf7680647fc27f09757"
+    },
+    "create_role": {
+      "changed_lines": 137,
+      "expected": "create_role.out",
+      "hunks": 10,
+      "sha256": "9b28b80d1ffb080d1da6a02f9fccae07b1fa5c51429aa5ada0f64dc15bf94ad5"
+    },
+    "create_table": {
+      "changed_lines": 495,
+      "expected": "create_table.out",
+      "hunks": 32,
+      "sha256": "87dcd2746d430706641ecccf3ef5b266cdcce4965c8c1038f0da4ca67b54d46e"
+    },
+    "create_table_like": {
+      "changed_lines": 377,
+      "expected": "create_table_like.out",
+      "hunks": 16,
+      "sha256": "eb0a5222905fe362a8c017526f439516d424dde93c7edc1825a6a75901c9a7c7"
+    },
+    "create_type": {
+      "changed_lines": 197,
+      "expected": "create_type.out",
+      "hunks": 11,
+      "sha256": "e3eedd91134ef4f98da21b797956eca1f4ce52691c0473dd07ff5f141fcc83f9"
+    },
+    "create_view": {
+      "changed_lines": 1633,
+      "expected": "create_view.out",
+      "hunks": 57,
+      "sha256": "6f3a9400e03fdcf2a39564e9b626b6cfc3db2b27869b1348b83d125277e75f63"
+    },
+    "database": {
+      "changed_lines": 10,
+      "expected": "database.out",
+      "hunks": 1,
+      "sha256": "861b426a79422833cada277d9676588cf0dbba5f54f3a46a188356402d750574"
+    },
+    "date": {
+      "changed_lines": 8,
+      "expected": "date.out",
+      "hunks": 1,
+      "sha256": "f97766af4b821e0b483ca1f5a2d9fd951482a36fe962680bb1770d072228ea67"
+    },
+    "dependency": {
+      "changed_lines": 96,
+      "expected": "dependency.out",
+      "hunks": 4,
+      "sha256": "a8fe71b9502b64e2d711ff7e36d0933e00706c229887e3c469974d88f8933511"
+    },
+    "domain": {
+      "changed_lines": 898,
+      "expected": "domain.out",
+      "hunks": 34,
+      "sha256": "e39cdc3d100a72ae6d71d0f3c52099cb6c10bba21543e0bebb942a83327fbd8a"
+    },
+    "drop_if_exists": {
+      "changed_lines": 170,
+      "expected": "drop_if_exists.out",
+      "hunks": 9,
+      "sha256": "4bc49939ee442b415e43001673ae420d067e526251e2a9ed0c558b544ea87c01"
+    },
+    "encoding": {
+      "changed_lines": 183,
+      "expected": "encoding.out",
+      "hunks": 7,
+      "sha256": "c81e940facc65ce9d2a22d21cae5912cb9fd6406792095b7d6606bda0f401f2c"
+    },
+    "enum": {
+      "changed_lines": 382,
+      "expected": "enum.out",
+      "hunks": 18,
+      "sha256": "055a06aef38a9ca7cd4cbb233f839b8665fd6ac724a6709f1a6419e14f6b0eff"
+    },
+    "equivclass": {
+      "changed_lines": 374,
+      "expected": "equivclass.out",
+      "hunks": 13,
+      "sha256": "6c5b3abcbe0865b8334ee3ba8ee30f83af84447e59db1eaa3c857f53295fcfe2"
+    },
+    "errors": {
+      "changed_lines": 207,
+      "expected": "errors.out",
+      "hunks": 13,
+      "sha256": "97735433a4be7412898472b8d1f2037d53e7127dc8525d38b3699cf5f6f28cfd"
+    },
+    "event_trigger": {
+      "changed_lines": 247,
+      "expected": "event_trigger.out",
+      "hunks": 19,
+      "sha256": "8064ed7732f4ae8f37d1aba0cd02008159425ca12327f6ecf66dc2c82914f837"
+    },
+    "explain": {
+      "changed_lines": 693,
+      "expected": "explain.out",
+      "hunks": 4,
+      "sha256": "339c9382677a6c7b8965a2a0a3a5215d47a557ae147070e922f16d9239dbe938"
+    },
+    "expressions": {
+      "changed_lines": 255,
+      "expected": "expressions.out",
+      "hunks": 15,
+      "sha256": "133e6e153ae76c43c132c353a77db92720332958da80dd726ddca3fc12d6ba83"
+    },
+    "fast_default": {
+      "changed_lines": 353,
+      "expected": "fast_default.out",
+      "hunks": 20,
+      "sha256": "99ba82339c72128663e7824c4b47c9e33af9c1440d9dee116afc656b7b1d9033"
+    },
+    "float8": {
+      "changed_lines": 465,
+      "expected": "float8.out",
+      "hunks": 16,
+      "sha256": "c59f342dbc45b160e0af8b59823e5b0de1258baad8715d124596986496878eb8"
+    },
+    "foreign_data": {
+      "changed_lines": 1650,
+      "expected": "foreign_data.out",
+      "hunks": 27,
+      "sha256": "a32f028bf315ce3f55e5fc967112627af46ca5719e714f99a835ff8f06eae4eb"
+    },
+    "foreign_key": {
+      "changed_lines": 1300,
+      "expected": "foreign_key.out",
+      "hunks": 86,
+      "sha256": "64f97274d457597c51b551bfed5b745eb4b6c72ef6715f2e319cafeb41e5f82d"
+    },
+    "functional_deps": {
+      "changed_lines": 70,
+      "expected": "functional_deps.out",
+      "hunks": 9,
+      "sha256": "6f4fba431ea4fa3a8a42c1829a9140f53405431764f19dbb81867e40151f4b49"
+    },
+    "generated_stored": {
+      "changed_lines": 511,
+      "expected": "generated_stored.out",
+      "hunks": 43,
+      "sha256": "24b9dab9b3eec3b0b1913883041c00d1e24a45386a2c3cc0b4abde8a28f0806d"
+    },
+    "generated_virtual": {
+      "changed_lines": 601,
+      "expected": "generated_virtual.out",
+      "hunks": 51,
+      "sha256": "587cb61c120288ac64426cac11ad3792118db00f2f6154f294e3315c693a0164"
+    },
+    "geometry": {
+      "changed_lines": 1346,
+      "expected": "geometry.out",
+      "hunks": 17,
+      "sha256": "f510bdef01737e27eeb631a06e685e0375fe5fa2f1a0142c78dbe7b7a7d7f3b3"
+    },
+    "gin": {
+      "changed_lines": 134,
+      "expected": "gin.out",
+      "hunks": 12,
+      "sha256": "623b74f9c3fb50fa53f70c5f8074283aeabd8a303c0df5e34bcd396602fcbd4c"
+    },
+    "gist": {
+      "changed_lines": 138,
+      "expected": "gist.out",
+      "hunks": 13,
+      "sha256": "4191244f4774b131956c1bf2d69ae0dae503755093b9144acff898e226c600a1"
+    },
+    "groupingsets": {
+      "changed_lines": 1919,
+      "expected": "groupingsets.out",
+      "hunks": 58,
+      "sha256": "d980899e804a1232939c2d6986b9b0304c37bef2a2c4edeeb580211267a35701"
+    },
+    "guc": {
+      "changed_lines": 164,
+      "expected": "guc.out",
+      "hunks": 16,
+      "sha256": "7c4e92df3595c1ef9ca1c73ba8b99398612d258cea081358295b5c346dc97440"
+    },
+    "hash_func": {
+      "changed_lines": 184,
+      "expected": "hash_func.out",
+      "hunks": 21,
+      "sha256": "d88db839aca3e0cf2eb7d0e53eaf763afb969e617fec20ccefea03b009d55d35"
+    },
+    "hash_index": {
+      "changed_lines": 13,
+      "expected": "hash_index.out",
+      "hunks": 2,
+      "sha256": "fdd7e4e6e72e0869dfdc17baa9dfe6d87811e694851e9803795c0ca28a763b29"
+    },
+    "hash_part": {
+      "changed_lines": 92,
+      "expected": "hash_part.out",
+      "hunks": 2,
+      "sha256": "91bdb37f62d44ccdfe7f119f9a415cddfce2129ff5e3e3b4c4d1090b5ac88a6d"
+    },
+    "horology": {
+      "changed_lines": 671,
+      "expected": "horology.out",
+      "hunks": 33,
+      "sha256": "0a2e78a3fa5f868dc546aefaec534c2653a28d9aefa3cd2fd1608b1fe4ac532c"
+    },
+    "identity": {
+      "changed_lines": 528,
+      "expected": "identity.out",
+      "hunks": 22,
+      "sha256": "ec6f79004aeb1170521dc03790708bb1bea298ed08c1e3235995f3068479dec0"
+    },
+    "incremental_sort": {
+      "changed_lines": 724,
+      "expected": "incremental_sort.out",
+      "hunks": 26,
+      "sha256": "797bc4298d1712fb1bc1c650e9b7e9c5ce06baee54fa18b87b60f30edc441907"
+    },
+    "index_including": {
+      "changed_lines": 270,
+      "expected": "index_including.out",
+      "hunks": 6,
+      "sha256": "b49c004880c5b53139d30c8e45e092365e3b92657b199423631d4a83066eb8ca"
+    },
+    "index_including_gist": {
+      "changed_lines": 83,
+      "expected": "index_including_gist.out",
+      "hunks": 9,
+      "sha256": "9a69f7016047991c5a199f8a013714b767597e8623daaae7d84eafd3954be312"
+    },
+    "indexing": {
+      "changed_lines": 703,
+      "expected": "indexing.out",
+      "hunks": 61,
+      "sha256": "217970130a2b19245232959c1b1d42d3b829258d846d9ac2781709ad389ede34"
+    },
+    "indirect_toast": {
+      "changed_lines": 75,
+      "expected": "indirect_toast.out",
+      "hunks": 3,
+      "sha256": "18497c92070a65b391dda83b4cfc7328b216e912327d38ca209fcb155c801f72"
+    },
+    "inet": {
+      "changed_lines": 80,
+      "expected": "inet.out",
+      "hunks": 5,
+      "sha256": "31856c77a2e6eb61c5af0dc76db9da346048241ae10e4e0f88ffdb49f7f2557e"
+    },
+    "inherit": {
+      "changed_lines": 2157,
+      "expected": "inherit.out",
+      "hunks": 96,
+      "sha256": "e5d7bc43a00c669782ee5b5c11e11a3bbc24e35802e5e399b057088cac6d0a2d"
+    },
+    "insert": {
+      "changed_lines": 630,
+      "expected": "insert.out",
+      "hunks": 18,
+      "sha256": "1a28f272d297b5a68b5a06f7578adb3c9dfecceae4c0fd20364a36eecfd704c7"
+    },
+    "insert_conflict": {
+      "changed_lines": 424,
+      "expected": "insert_conflict.out",
+      "hunks": 26,
+      "sha256": "2b8bc7bccd21f36a934fa0e286d8cf1c79f7dfaa581032151c3ae1a8603d2bc0"
+    },
+    "interval": {
+      "changed_lines": 173,
+      "expected": "interval.out",
+      "hunks": 13,
+      "sha256": "93fee6f1028e6d79559b9aefac498efbcdf448ef1852b6087911f43f48710ea7"
+    },
+    "join": {
+      "changed_lines": 7988,
+      "expected": "join.out",
+      "hunks": 253,
+      "sha256": "26a89fa91944b0de10f3a8db2698bf7f30ee0788586ed02e9579ab72c2cb82b5"
+    },
+    "join_hash": {
+      "changed_lines": 843,
+      "expected": "join_hash.out",
+      "hunks": 10,
+      "sha256": "c284dc09213de621d92b6d30d4edecc734011d11d92d49d7a202362bb01229ba"
+    },
+    "json": {
+      "changed_lines": 829,
+      "expected": "json.out",
+      "hunks": 27,
+      "sha256": "1534bba1c45b0ed6353f50d064a271e9cfda701bb83fe372826ef5ccb423fd9a"
+    },
+    "jsonb": {
+      "changed_lines": 1386,
+      "expected": "jsonb.out",
+      "hunks": 50,
+      "sha256": "f64848fece1241654690f501f12cb06ae69fbb3d51860187396f00b1b0829578"
+    },
+    "jsonb_jsonpath": {
+      "changed_lines": 2060,
+      "expected": "jsonb_jsonpath.out",
+      "hunks": 77,
+      "sha256": "3a1dc5797a38cd735090fd1e0b6c3930cbca304f057f994a7db0188a4afba993"
+    },
+    "jsonpath": {
+      "changed_lines": 909,
+      "expected": "jsonpath.out",
+      "hunks": 20,
+      "sha256": "e4afc0cae84844028e3e4f981d8bd2fc9868203c808558f71b8d56236f12be47"
+    },
+    "jsonpath_encoding": {
+      "changed_lines": 131,
+      "expected": "jsonpath_encoding_2.out",
+      "hunks": 1,
+      "sha256": "71debdcb65a0a6b850ddb6d60707162c8d36c0b3c4d3a4ee0038746431062ae5"
+    },
+    "largeobject": {
+      "changed_lines": 457,
+      "expected": "largeobject.out",
+      "hunks": 4,
+      "sha256": "679b140f87e381a75528fc83f12b1a882d2a226f3936975068ffea2a0389fe80"
+    },
+    "limit": {
+      "changed_lines": 199,
+      "expected": "limit.out",
+      "hunks": 9,
+      "sha256": "dc37148cbec3efe69eaabd76df3468e2c24c220cd0fcc0a8f9f6d3837789ef5c"
+    },
+    "lock": {
+      "changed_lines": 84,
+      "expected": "lock.out",
+      "hunks": 14,
+      "sha256": "49cd4a9980ed5d77fff1a73595cbb48c6dafd02fe812f085ac8a0c991c96f778"
+    },
+    "matview": {
+      "changed_lines": 173,
+      "expected": "matview.out",
+      "hunks": 20,
+      "sha256": "ad1413dcd252030cb7e764ecd696353d46cd81f2cd2ff2bd3f4f2fbd3dda7a2c"
+    },
+    "memoize": {
+      "changed_lines": 308,
+      "expected": "memoize.out",
+      "hunks": 11,
+      "sha256": "d745377773537d29a1306ba226256a55164c1c557b249a3f5c85514858651bd1"
+    },
+    "merge": {
+      "changed_lines": 984,
+      "expected": "merge.out",
+      "hunks": 85,
+      "sha256": "85401b4c904372558f8e09f3f3ed1eb91e096711e90d2090a66727772566ece9"
+    },
+    "misc": {
+      "changed_lines": 231,
+      "expected": "misc.out",
+      "hunks": 5,
+      "sha256": "d5df0fad1eb2fccc7f79d69606dee813222dfc2eaa4eff6b31ab7a4b4eda0106"
+    },
+    "misc_functions": {
+      "changed_lines": 767,
+      "expected": "misc_functions.out",
+      "hunks": 13,
+      "sha256": "a74bbbe82423e0fa180bcc35f94be9f4d151ce4d4baf7139df0f5a16ab80ef06"
+    },
+    "misc_sanity": {
+      "changed_lines": 217,
+      "expected": "misc_sanity.out",
+      "hunks": 4,
+      "sha256": "75f37700686dfe3dbede06d7c8d65132f8e0733b3ab5659fa4e95f54cc38ac54"
+    },
+    "multirangetypes": {
+      "changed_lines": 186,
+      "expected": "multirangetypes.out",
+      "hunks": 30,
+      "sha256": "b950d2c6c73baefb66d720990199e56e56fdbd0f1a1381b62c4fb21a122b15d8"
+    },
+    "name": {
+      "changed_lines": 102,
+      "expected": "name.out",
+      "hunks": 6,
+      "sha256": "6a8965046bd09a73085d418c14c81f5669efb47f931e5044cbcda3f884243231"
+    },
+    "namespace": {
+      "changed_lines": 29,
+      "expected": "namespace.out",
+      "hunks": 2,
+      "sha256": "2802031e002238570d7d987896fce59330691ca789a4a7245ca75dc160c222f0"
+    },
+    "numeric": {
+      "changed_lines": 269,
+      "expected": "numeric.out",
+      "hunks": 24,
+      "sha256": "26d0b73df8f4dedb4ad7c047b5ac6355ddbb997429f33895e8bb036e86497ab1"
+    },
+    "numerology": {
+      "changed_lines": 110,
+      "expected": "numerology.out",
+      "hunks": 2,
+      "sha256": "6dadfe15f31bb40cd52d6e6483613651a13c26ac0a7cd19d505d166d358b2957"
+    },
+    "object_address": {
+      "changed_lines": 691,
+      "expected": "object_address.out",
+      "hunks": 6,
+      "sha256": "b4a3eb56b7585ad8e85e3bb85aa6088b875ca675c65d18a807968c5f09d8f856"
+    },
+    "oidjoins": {
+      "changed_lines": 221,
+      "expected": "oidjoins.out",
+      "hunks": 1,
+      "sha256": "efef6dc7a1cf9fd2666ee8f9866cfc4c256c9b9893e6acfd095b56ffd9b798ca"
+    },
+    "opr_sanity": {
+      "changed_lines": 363,
+      "expected": "opr_sanity.out",
+      "hunks": 42,
+      "sha256": "61f6a6d73ccda89408e23363c40500ebfba36d0eac1bb93ea135bcf58acb992f"
+    },
+    "partition_aggregate": {
+      "changed_lines": 1201,
+      "expected": "partition_aggregate.out",
+      "hunks": 34,
+      "sha256": "f37c038ddbe80e8ce9e40899ea62d8b768aa860fada287ffa9db498b09e5dad5"
+    },
+    "partition_info": {
+      "changed_lines": 312,
+      "expected": "partition_info.out",
+      "hunks": 6,
+      "sha256": "c2fc0127695fc231b5cb9d27101932c3704d584c2346a1a670cd81c483197f6d"
+    },
+    "partition_join": {
+      "changed_lines": 4199,
+      "expected": "partition_join.out",
+      "hunks": 95,
+      "sha256": "33f5e9d5125dab39916e3df4f2c7cdc2d4bb49e21ad004d4db7070296ff65471"
+    },
+    "partition_prune": {
+      "changed_lines": 4035,
+      "expected": "partition_prune.out",
+      "hunks": 71,
+      "sha256": "bb3d64315ffa772caca418f5b291e2dc999c0e59ae9cdc24529b39ea05d9fa05"
+    },
+    "password": {
+      "changed_lines": 71,
+      "expected": "password_1.out",
+      "hunks": 5,
+      "sha256": "99da3c2ee2bf034382125b65f41bd9aa7505d9b0fe6b7559af37ff40d7dd8f74"
+    },
+    "pg_lsn": {
+      "changed_lines": 22,
+      "expected": "pg_lsn.out",
+      "hunks": 1,
+      "sha256": "f5819b678020ca9d1ba2950a416ce742d18d02dd40dc129e9e4e741f2976498d"
+    },
+    "plancache": {
+      "changed_lines": 76,
+      "expected": "plancache.out",
+      "hunks": 6,
+      "sha256": "85479c56bc3f3a1c88d79478ac17ef48230e49898a2f2f7181f2b36263740c84"
+    },
+    "plpgsql": {
+      "changed_lines": 1857,
+      "expected": "plpgsql.out",
+      "hunks": 163,
+      "sha256": "10fc0d3310a134abbc595d4f2a2d3c0c3bc0d17cf6320875bbc41369e11ab5f8"
+    },
+    "polygon": {
+      "changed_lines": 157,
+      "expected": "polygon.out",
+      "hunks": 13,
+      "sha256": "8bd71beaa237f596f86ac393904c8e6431ed38f614fb74714c61a0fcd5c9d9a7"
+    },
+    "polymorphism": {
+      "changed_lines": 832,
+      "expected": "polymorphism.out",
+      "hunks": 53,
+      "sha256": "392823251af758d33ddc09cd35b4fe8e6e2d1836d60ac9c1dd31a0abbec365ce"
+    },
+    "portals": {
+      "changed_lines": 1232,
+      "expected": "portals.out",
+      "hunks": 16,
+      "sha256": "a15382a04466401b865127feb5ccf57283adb7d0be88f3c239da24241adbe102"
+    },
+    "predicate": {
+      "changed_lines": 238,
+      "expected": "predicate.out",
+      "hunks": 14,
+      "sha256": "c62ca3fdcfce168d76d330852a38203488b08995d7d5d6a751ca26887989699b"
+    },
+    "prepare": {
+      "changed_lines": 81,
+      "expected": "prepare.out",
+      "hunks": 2,
+      "sha256": "7806f91697610442834c686850a1cc1b9e2c26b0d1dcf7b2f44c0e3a77eab53a"
+    },
+    "prepared_xacts": {
+      "changed_lines": 286,
+      "expected": "prepared_xacts_1.out",
+      "hunks": 1,
+      "sha256": "6860deb687b19b78a5f6c5c2b694543343f7007f11d175b5893eab300d5a8ac1"
+    },
+    "privileges": {
+      "changed_lines": 1765,
+      "expected": "privileges.out",
+      "hunks": 87,
+      "sha256": "ff97d8d7dd7fa73d39d537c46eefb1c430f37ef04b42823a3f0d19e71c9ca404"
+    },
+    "psql": {
+      "changed_lines": 1197,
+      "expected": "psql.out",
+      "hunks": 71,
+      "sha256": "2493d0086d29599ec1f0b359a723feb927a6d30bb79562af45c4e44518397cad"
+    },
+    "psql_pipeline": {
+      "changed_lines": 172,
+      "expected": "psql_pipeline.out",
+      "hunks": 19,
+      "sha256": "3fad41910fec457d1e4f7831d00e2e221a852e87a316a42c53ba9cd9da65352b"
+    },
+    "publication": {
+      "changed_lines": 1202,
+      "expected": "publication.out",
+      "hunks": 31,
+      "sha256": "a7f64b73c20d564fa6bc00230092977f7a15cca33aef793109d9020743a47a39"
+    },
+    "random": {
+      "changed_lines": 269,
+      "expected": "random.out",
+      "hunks": 12,
+      "sha256": "aaf43190634ad00f9504ccd565eccc55e61015fe6cd041b12bf9c2949ae6a422"
+    },
+    "rangefuncs": {
+      "changed_lines": 1896,
+      "expected": "rangefuncs.out",
+      "hunks": 50,
+      "sha256": "7a8810019156526e48706f0ff937c8055f3b081d06634c76eaed10da7626299c"
+    },
+    "rangetypes": {
+      "changed_lines": 124,
+      "expected": "rangetypes.out",
+      "hunks": 8,
+      "sha256": "8063e156a445e623125a44b04e18c53231180f9cb405fe0cf22578f4b59dffdb"
+    },
+    "regex": {
+      "changed_lines": 445,
+      "expected": "regex.out",
+      "hunks": 12,
+      "sha256": "eee2a234c6be806e13d40dcce2c14bb979702fce45924e7dcd6ff92ac9bdc9d0"
+    },
+    "reloptions": {
+      "changed_lines": 104,
+      "expected": "reloptions.out",
+      "hunks": 7,
+      "sha256": "2b2842c0705c0fbf45e989755397bd6216e3f00af51704060fc0952fbc05e76b"
+    },
+    "replica_identity": {
+      "changed_lines": 73,
+      "expected": "replica_identity.out",
+      "hunks": 15,
+      "sha256": "e6fa4bc1fc5fffad5d44bf2195c73c70102574a7bd24aa1b1a07ea9a00f34b89"
+    },
+    "returning": {
+      "changed_lines": 608,
+      "expected": "returning.out",
+      "hunks": 15,
+      "sha256": "cae8cd0614ace13b1c817c03d064501ff1f705a5c0131659ead6143fb2cdc921"
+    },
+    "rowsecurity": {
+      "changed_lines": 2215,
+      "expected": "rowsecurity.out",
+      "hunks": 124,
+      "sha256": "30d8cd584ec6b24103eaf118ea0d931605a8e75c205a8e9a352a7c1bcca74660"
+    },
+    "rowtypes": {
+      "changed_lines": 753,
+      "expected": "rowtypes.out",
+      "hunks": 30,
+      "sha256": "e9cd3cac39f6a996403991997cc6c9a5bf31f3790f03b8e160c23f3e62e5a546"
+    },
+    "rules": {
+      "changed_lines": 2452,
+      "expected": "rules.out",
+      "hunks": 77,
+      "sha256": "39607a02a920419f6e0b06d29ba2b5eb4690d325d16cc112be5207aba542d964"
+    },
+    "select": {
+      "changed_lines": 183,
+      "expected": "select.out",
+      "hunks": 17,
+      "sha256": "d09e7aa97abd4f3dfaf42671e4a3ec00fdc3b083017cb9493975c4e606ae49c3"
+    },
+    "select_distinct": {
+      "changed_lines": 188,
+      "expected": "select_distinct.out",
+      "hunks": 16,
+      "sha256": "f444e3093e7143e98d8fae7b8a5eba7b7c6c203b09f18a44c70653185454d4f4"
+    },
+    "select_distinct_on": {
+      "changed_lines": 93,
+      "expected": "select_distinct_on.out",
+      "hunks": 7,
+      "sha256": "6c51308158d561a1ed9aa802ac298eaa4f0ee215783c267c119f5977c9b5b38b"
+    },
+    "select_into": {
+      "changed_lines": 93,
+      "expected": "select_into.out",
+      "hunks": 6,
+      "sha256": "918013c869487c7a52acab0ffc343337f720799685b56901bbcb9064b153fad1"
+    },
+    "select_parallel": {
+      "changed_lines": 1148,
+      "expected": "select_parallel.out",
+      "hunks": 14,
+      "sha256": "d2a9578d112dd4fb61019504d6eebed01e2f1631911c354b7879d082060bed1d"
+    },
+    "select_views": {
+      "changed_lines": 1036,
+      "expected": "select_views.out",
+      "hunks": 14,
+      "sha256": "4e1ea76cfc80b1b569d3547e2f4e5379233d2a0cfb03bfdb6b222aa306e1bdd4"
+    },
+    "sequence": {
+      "changed_lines": 445,
+      "expected": "sequence.out",
+      "hunks": 24,
+      "sha256": "249936a433fe464a544bfa3f147ab6ad15fe9e863613fe088a8e99dd7415c5a5"
+    },
+    "spgist": {
+      "changed_lines": 12,
+      "expected": "spgist.out",
+      "hunks": 1,
+      "sha256": "28128c5f4829ba4f409e8516c46f0c5d18f1047e4e5b4f4b207fb50377ccfc1f"
+    },
+    "sqljson": {
+      "changed_lines": 716,
+      "expected": "sqljson.out",
+      "hunks": 28,
+      "sha256": "4f648c1c193a7ce244330ea65171bd24c602684655fba93b04ccab82ffb12517"
+    },
+    "sqljson_jsontable": {
+      "changed_lines": 313,
+      "expected": "sqljson_jsontable.out",
+      "hunks": 19,
+      "sha256": "0fd9438f673b3e33cb2ed39306de6b8f68d181f9edce038813c3acf77a4ae48b"
+    },
+    "sqljson_queryfuncs": {
+      "changed_lines": 477,
+      "expected": "sqljson_queryfuncs.out",
+      "hunks": 28,
+      "sha256": "9d96c3aafd60d3e4c4dfc40406fc413cb53879adddd9ff67ab777d7cf48b9789"
+    },
+    "stats": {
+      "changed_lines": 1397,
+      "expected": "stats.out",
+      "hunks": 37,
+      "sha256": "bc435c41f0f7e7c88a02539e5e2d502e86930698a35799bc3a40efbf3d219977"
+    },
+    "stats_ext": {
+      "changed_lines": 1392,
+      "expected": "stats_ext.out",
+      "hunks": 44,
+      "sha256": "f1041d39e98ef4ea8de917da4e76b04b3fb49529160587394c30421842f9e787"
+    },
+    "stats_import": {
+      "changed_lines": 726,
+      "expected": "stats_import.out",
+      "hunks": 59,
+      "sha256": "f897f79afc0f64f959f5164c1d56c5a9ef0c4f5801bb11b40c5c92611024f7b8"
+    },
+    "strings": {
+      "changed_lines": 432,
+      "expected": "strings.out",
+      "hunks": 24,
+      "sha256": "262ee69520647faa07fed473e2c9a47eed76e7df259bd81e8f55b2f1606a5303"
+    },
+    "subscription": {
+      "changed_lines": 388,
+      "expected": "subscription.out",
+      "hunks": 1,
+      "sha256": "00ad0bb13299cd17be7db45cbcc08e1cbdb4d670d9da4ca450ee59152b5a0b0e"
+    },
+    "subselect": {
+      "changed_lines": 1767,
+      "expected": "subselect.out",
+      "hunks": 60,
+      "sha256": "1f3dd890c370b5adf54d71c8a18488496692849d4f2568b3324b5ad0914487f9"
+    },
+    "sysviews": {
+      "changed_lines": 130,
+      "expected": "sysviews.out",
+      "hunks": 6,
+      "sha256": "60399a8d4bda62a78b7a3a035cb58e95366b128413031b379c3afb0aec797470"
+    },
+    "tablesample": {
+      "changed_lines": 178,
+      "expected": "tablesample.out",
+      "hunks": 8,
+      "sha256": "10cd791b41517bd224f9edb67a37fe5e725b12d50f33a900b5418e6bcff0d79b"
+    },
+    "tablespace": {
+      "changed_lines": 527,
+      "expected": "tablespace.out",
+      "hunks": 27,
+      "sha256": "8299e1517de2dbd2eec4664fe129190ab8fa9a11cf32fba2fe277585537fd96e"
+    },
+    "temp": {
+      "changed_lines": 125,
+      "expected": "temp.out",
+      "hunks": 15,
+      "sha256": "8ed5023ba3060ba344b0cffcbc15d8a7dafa0d09b563c5ddfdfd83b0796b52db"
+    },
+    "text": {
+      "changed_lines": 138,
+      "expected": "text.out",
+      "hunks": 9,
+      "sha256": "e24bb1ef757984278e620852e33f05fcdf770822fd3c3660ff49c57babcc3be5"
+    },
+    "tidrangescan": {
+      "changed_lines": 94,
+      "expected": "tidrangescan.out",
+      "hunks": 13,
+      "sha256": "7aa7cabef28cbf9e468ad35db2c793e74bee93d15b337d385a841b82daf2baf0"
+    },
+    "tidscan": {
+      "changed_lines": 186,
+      "expected": "tidscan.out",
+      "hunks": 9,
+      "sha256": "09a04ce86de9bd70767589d970ed1eafcc5e146575eeefa91c7a42d50136b491"
+    },
+    "timestamp": {
+      "changed_lines": 873,
+      "expected": "timestamp.out",
+      "hunks": 23,
+      "sha256": "682f524783d435ce8285af578ea33198ccf81404b060084a151b1516d1f5622e"
+    },
+    "timestamptz": {
+      "changed_lines": 1209,
+      "expected": "timestamptz.out",
+      "hunks": 38,
+      "sha256": "5c1bf873cd2b85477e18bb88a899dc942602f0590e036eda631fb52888a48742"
+    },
+    "transactions": {
+      "changed_lines": 262,
+      "expected": "transactions.out",
+      "hunks": 39,
+      "sha256": "008f743447ffe5dc0843a0c95772498f3df38b819a5eab57fc07456f1889c203"
+    },
+    "triggers": {
+      "changed_lines": 984,
+      "expected": "triggers.out",
+      "hunks": 86,
+      "sha256": "9d27d68d39e293b5bde1e7f2a4980f8dbd8e3e6670c5032d2c348a83d834986a"
+    },
+    "truncate": {
+      "changed_lines": 158,
+      "expected": "truncate.out",
+      "hunks": 10,
+      "sha256": "ac2ce2328cdd711b2f225ece26d5ac3d68e627014dce8de75169ca25a904d13d"
+    },
+    "tsdicts": {
+      "changed_lines": 599,
+      "expected": "tsdicts.out",
+      "hunks": 8,
+      "sha256": "01149700ea8d3885568f5c148479acc63262ea410cbab63cca7e994e5fcd57cb"
+    },
+    "tsearch": {
+      "changed_lines": 1388,
+      "expected": "tsearch.out",
+      "hunks": 68,
+      "sha256": "8260daa3f2a4fee0fb8e2ffd3ad451bc31468784824253fc13097b331aa9aeea"
+    },
+    "tsrf": {
+      "changed_lines": 499,
+      "expected": "tsrf.out",
+      "hunks": 12,
+      "sha256": "864e03857e29aebf4a5bb6a85a7213f26183bb6b0de0bd26b85576a1f8e1a594"
+    },
+    "tstypes": {
+      "changed_lines": 489,
+      "expected": "tstypes.out",
+      "hunks": 23,
+      "sha256": "870a93747457548c02166846927f65e1a5e8d39029f1a0eb7a5e0dfae674e45f"
+    },
+    "tuplesort": {
+      "changed_lines": 502,
+      "expected": "tuplesort.out",
+      "hunks": 12,
+      "sha256": "cbd808788792fa466b5b655432b2ed76f67d5e07eabdf6db926be1e56e1f5bd5"
+    },
+    "type_sanity": {
+      "changed_lines": 329,
+      "expected": "type_sanity.out",
+      "hunks": 25,
+      "sha256": "9953389cea1bae27c28cbd406c8a5afb45d4e146ba7dd76e1060416cd5cb062e"
+    },
+    "typed_table": {
+      "changed_lines": 108,
+      "expected": "typed_table.out",
+      "hunks": 1,
+      "sha256": "d5cc8e822eadcbdc24aca82ff5c0859167cb67a21330689640a6ea0b06857bcf"
+    },
+    "union": {
+      "changed_lines": 821,
+      "expected": "union.out",
+      "hunks": 45,
+      "sha256": "51218a64672b03cd62fbced1445262a2868ab3f8101716b28052436340affaa2"
+    },
+    "updatable_views": {
+      "changed_lines": 1452,
+      "expected": "updatable_views.out",
+      "hunks": 113,
+      "sha256": "d833d15800685123bc9da613d54ad348f6b47870ab9e2f03c659bc13c84ad274"
+    },
+    "update": {
+      "changed_lines": 538,
+      "expected": "update.out",
+      "hunks": 27,
+      "sha256": "87b1e07216cb561510248ffa8eae5ab33d9fcc1c95f116bb672bd8db107ed2dd"
+    },
+    "uuid": {
+      "changed_lines": 254,
+      "expected": "uuid.out",
+      "hunks": 4,
+      "sha256": "63869a27b63eb7ed7820c29d31cbd9e3d644d9d5e07029a3a705b9f7a0a3fdfe"
+    },
+    "vacuum": {
+      "changed_lines": 185,
+      "expected": "vacuum.out",
+      "hunks": 16,
+      "sha256": "7ee8c25c76f0b51aed0cee27fd41702f0d35824ea1c866a2122275d20c436ff2"
+    },
+    "window": {
+      "changed_lines": 2434,
+      "expected": "window.out",
+      "hunks": 169,
+      "sha256": "6419c69facb91405d0033932d320df37609eb11e5e1dcffc7ae799cdfe1c19a5"
+    },
+    "with": {
+      "changed_lines": 1758,
+      "expected": "with.out",
+      "hunks": 105,
+      "sha256": "15b34be9df363d091dd758fcd23f50e7d7ad8811ab088d9585586f77e322eecf"
+    },
+    "without_overlaps": {
+      "changed_lines": 450,
+      "expected": "without_overlaps.out",
+      "hunks": 75,
+      "sha256": "966c8e8c9259ce243a966405e68494272e15fdca8bb98ab16c4d650e1404900f"
+    },
+    "write_parallel": {
+      "changed_lines": 56,
+      "expected": "write_parallel.out",
+      "hunks": 2,
+      "sha256": "036da225ccf5f6fc61aeb085e1b2ec793c61c898c4372144bed0a02f9862be3f"
+    },
+    "xml": {
+      "changed_lines": 1088,
+      "expected": "xml.out",
+      "hunks": 24,
+      "sha256": "62657fd34a9691af6ffd188b1e498a7745bcec7574fd02c202ef9b6d38c5493a"
+    },
+    "xmlmap": {
+      "changed_lines": 131,
+      "expected": "xmlmap_1.out",
+      "hunks": 2,
+      "sha256": "fba8d9ee23aaaa7ceebd026299b8d3cfcd1e9c96bc65a2b2f62bcd3bc100337c"
+    }
+  },
+  "passed": 56,
+  "postgres_tag": "REL_18_4",
+  "schedule": [
+    "test_setup",
+    "boolean",
+    "char",
+    "name",
+    "varchar",
+    "text",
+    "int2",
+    "int4",
+    "int8",
+    "oid",
+    "float4",
+    "float8",
+    "bit",
+    "numeric",
+    "txid",
+    "uuid",
+    "enum",
+    "money",
+    "rangetypes",
+    "pg_lsn",
+    "regproc",
+    "strings",
+    "md5",
+    "numerology",
+    "point",
+    "lseg",
+    "line",
+    "box",
+    "path",
+    "polygon",
+    "circle",
+    "date",
+    "time",
+    "timetz",
+    "timestamp",
+    "timestamptz",
+    "interval",
+    "inet",
+    "macaddr",
+    "macaddr8",
+    "multirangetypes",
+    "geometry",
+    "horology",
+    "tstypes",
+    "regex",
+    "type_sanity",
+    "opr_sanity",
+    "misc_sanity",
+    "comments",
+    "expressions",
+    "unicode",
+    "xid",
+    "mvcc",
+    "database",
+    "stats_import",
+    "encoding",
+    "euc_kr",
+    "copy",
+    "copyselect",
+    "copydml",
+    "copyencoding",
+    "insert",
+    "insert_conflict",
+    "create_function_c",
+    "create_misc",
+    "create_operator",
+    "create_procedure",
+    "create_table",
+    "create_type",
+    "create_schema",
+    "create_index",
+    "create_index_spgist",
+    "create_view",
+    "index_including",
+    "index_including_gist",
+    "create_aggregate",
+    "create_function_sql",
+    "create_cast",
+    "constraints",
+    "triggers",
+    "select",
+    "inherit",
+    "typed_table",
+    "vacuum",
+    "drop_if_exists",
+    "updatable_views",
+    "roleattributes",
+    "create_am",
+    "hash_func",
+    "errors",
+    "infinite_recurse",
+    "sanity_check",
+    "select_into",
+    "select_distinct",
+    "select_distinct_on",
+    "select_implicit",
+    "select_having",
+    "subselect",
+    "union",
+    "case",
+    "join",
+    "aggregates",
+    "transactions",
+    "random",
+    "portals",
+    "arrays",
+    "btree_index",
+    "hash_index",
+    "update",
+    "delete",
+    "namespace",
+    "prepared_xacts",
+    "brin",
+    "gin",
+    "gist",
+    "spgist",
+    "privileges",
+    "init_privs",
+    "security_label",
+    "collate",
+    "matview",
+    "lock",
+    "replica_identity",
+    "rowsecurity",
+    "object_address",
+    "tablesample",
+    "groupingsets",
+    "drop_operator",
+    "password",
+    "identity",
+    "generated_stored",
+    "join_hash",
+    "brin_bloom",
+    "brin_multi",
+    "create_table_like",
+    "alter_generic",
+    "alter_operator",
+    "misc",
+    "async",
+    "dbsize",
+    "merge",
+    "misc_functions",
+    "sysviews",
+    "tsrf",
+    "tid",
+    "tidscan",
+    "tidrangescan",
+    "collate.utf8",
+    "collate.icu.utf8",
+    "incremental_sort",
+    "create_role",
+    "without_overlaps",
+    "generated_virtual",
+    "rules",
+    "psql",
+    "psql_crosstab",
+    "psql_pipeline",
+    "amutils",
+    "stats_ext",
+    "collate.linux.utf8",
+    "collate.windows.win1252",
+    "select_parallel",
+    "write_parallel",
+    "vacuum_parallel",
+    "maintain_every",
+    "publication",
+    "subscription",
+    "select_views",
+    "portals_p2",
+    "foreign_key",
+    "cluster",
+    "dependency",
+    "guc",
+    "bitmapops",
+    "combocid",
+    "tsearch",
+    "tsdicts",
+    "foreign_data",
+    "window",
+    "xmlmap",
+    "functional_deps",
+    "advisory_lock",
+    "indirect_toast",
+    "equivclass",
+    "json",
+    "jsonb",
+    "json_encoding",
+    "jsonpath",
+    "jsonpath_encoding",
+    "jsonb_jsonpath",
+    "sqljson",
+    "sqljson_queryfuncs",
+    "sqljson_jsontable",
+    "plancache",
+    "limit",
+    "plpgsql",
+    "copy2",
+    "temp",
+    "domain",
+    "rangefuncs",
+    "prepare",
+    "conversion",
+    "truncate",
+    "alter_table",
+    "sequence",
+    "polymorphism",
+    "rowtypes",
+    "returning",
+    "largeobject",
+    "with",
+    "xml",
+    "partition_join",
+    "partition_prune",
+    "reloptions",
+    "hash_part",
+    "indexing",
+    "partition_aggregate",
+    "partition_info",
+    "tuplesort",
+    "explain",
+    "memoize",
+    "stats",
+    "predicate",
+    "numa",
+    "compression",
+    "compression_pglz",
+    "oidjoins",
+    "event_trigger",
+    "event_trigger_login",
+    "fast_default",
+    "tablespace"
+  ],
+  "schedule_sha256": "63419f82d4a5faaf711658608a3b7b6b45ccc5c2a64e1b4e5c111ed9de648118",
+  "scheduled_tests": 231,
+  "schema_version": 1,
+  "total": 231
+}

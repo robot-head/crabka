@@ -36,7 +36,13 @@ where
         .build();
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("pgexec-exec-test")));
-    tracing::subscriber::set_global_default(subscriber).expect("no global subscriber yet");
+    tracing::subscriber::set_global_default(subscriber).expect(
+        "a global subscriber is already installed -- run these tests under \
+         `cargo nextest`, which gives each one its own process. Under \
+         `cargo test` the whole target shares a process, so only the first \
+         test can install one and the rest fail here. See the module docs for \
+         why this cannot be `with_default`.",
+    );
 
     let engine = Arc::new(SqlEngine::new());
     tokio::runtime::Builder::new_multi_thread()

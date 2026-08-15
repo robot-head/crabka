@@ -40,8 +40,13 @@
 
 use std::borrow::Cow;
 
-use crabka_pgparser::ast::{ArraySubscript, Expr, FuncArgs, SelectItem, SelectStmt, TableFuncCall};
-use crabka_pgtypes::{ColumnType, Datum, ElemType, TypeError, numeric::NumericValue};
+use crabka_pgparser::ast::{
+    ArraySubscript, Expr, FuncArgs, SelectItem, SelectStmt, TableFuncCall, TableFuncColumnDef,
+};
+use crabka_pgtypes::{
+    ArrayValue, ColumnType, Datum, ElemType, RecordValue, TypeError, numeric::NumericValue,
+    usertype::UserTypeRef,
+};
 use crabka_pgwire::engine::FieldDescription;
 
 use crate::{
@@ -49,7 +54,10 @@ use crate::{
     error::ExecError,
     eval::ArgType,
     join::Relation,
-    scope::{ColumnBinding, Scope},
+    json_fn::JsonbSrf,
+    json_record::RecordShape,
+    regexp_fn::{compile_pattern, group_datums},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// The set-returning functions crabka implements.
@@ -68,75 +76,410 @@ enum Srf {
     StringToTable,
     /// `regexp_split_to_table(text, pattern [, flags])`.
     RegexpSplitToTable,
-    /// `jsonb_each(jsonb)` → `(key text, value jsonb)`.
-    JsonbEach,
-    /// `jsonb_each_text(jsonb)` → `(key text, value text)`.
-    JsonbEachText,
-    /// `jsonb_object_keys(jsonb)` → `text`.
-    JsonbObjectKeys,
+    /// `regexp_matches(text, pattern [, flags])` → one `text[]` per match.
+    ///
+    /// The set-returning sibling of `regexp_match`: without the `g` flag it
+    /// produces the first match's capture groups and stops, and with `g` it
+    /// produces one row per non-overlapping match. A pattern that matches
+    /// nothing produces no rows at all rather than a NULL one.
+    RegexpMatches,
+    /// `json_each(json)` → `(key text, value json)`, `jsonb_each(jsonb)` →
+    /// `(key text, value jsonb)`.
+    Each(JsonFamily),
+    /// `json_each_text`/`jsonb_each_text` → `(key text, value text)`.
+    EachText(JsonFamily),
+    /// `json_object_keys`/`jsonb_object_keys` → `text`.
+    ObjectKeys(JsonFamily),
+    /// `json_array_elements(json)` → `value json`,
     /// `jsonb_array_elements(jsonb)` → `value jsonb`.
-    JsonbArrayElements,
-    /// `jsonb_array_elements_text(jsonb)` → `value text`.
-    JsonbArrayElementsText,
+    ArrayElements(JsonFamily),
+    /// `json_array_elements_text`/`jsonb_array_elements_text` → `value text`.
+    ArrayElementsText(JsonFamily),
     /// `jsonb_path_query(target, path [, vars [, silent]])` → one row per item
-    /// the jsonpath produces.
+    /// the jsonpath produces. There is no `json_path_query`: `PostgreSQL`
+    /// declares the jsonpath functions over `jsonb` alone.
     JsonbPathQuery,
+    /// `json_populate_record` and its seven relatives — see [`RecordCall`].
+    Record(RecordCall),
+    PgInputErrorInfo,
+    /// `pg_snapshot_xip(pg_snapshot)` → `xid8`, and `txid_snapshot_xip`, which
+    /// is the same expansion reported as `bigint`. One row per running
+    /// transaction the snapshot lists, ascending, and no row at all for a
+    /// snapshot with an empty window.
+    SnapshotXip(SnapshotFamily),
+    /// `pg_partition_ancestors(regclass)` → `relid regclass` — the relation
+    /// itself, then every parent up to the root of its partition tree.
+    PgPartitionAncestors,
     EventDdlCommands,
     EventDroppedObjects,
 }
 
-/// Classify a function name. Unquoted identifiers reach here lowercased, but a
-/// quoted `"UNNEST"` does not, and PostgreSQL matches those case-sensitively.
-/// The folding here is deliberate leniency, and it matches the pre-existing
-/// `unnest` handling this registry replaces.
-fn classify(name: &str) -> Option<Srf> {
-    let lowered = if name.bytes().any(|b| b.is_ascii_uppercase()) {
+/// Which of the two JSON document types one of the five expansion shapes reads.
+///
+/// `PostgreSQL` declares them as two families of five, over `json` and over
+/// `jsonb`, and the families are not interchangeable: there is no implicit cast
+/// between the types, so `json_each('{}'::jsonb)` is a 42883 rather than a
+/// coercion. The document type is also the *output* type of the two shapes that
+/// hand back a sub-document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonFamily {
+    /// `json` — the original input text, so whitespace, object key order and
+    /// duplicate keys all survive into the expansion.
+    Json,
+    /// `jsonb` — decomposed and canonically ordered, with duplicate keys already
+    /// resolved to the last one.
+    Jsonb,
+}
+
+/// Which of the two declared spellings a snapshot expansion belongs to.
+///
+/// `pg_snapshot_xip` reads a `pg_snapshot` and reports `xid8`;
+/// `txid_snapshot_xip` reads a `txid_snapshot` and reports `bigint`. The two
+/// run the same C function upstream, and they expand the same value here, so
+/// the family decides only which types the signature names. The scalar half of
+/// the same surface is [`crate::snapshot_fn`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotFamily {
+    Modern,
+    Legacy,
+}
+
+impl SnapshotFamily {
+    /// The type the family's argument carries.
+    fn snapshot_type(self) -> ColumnType {
+        match self {
+            SnapshotFamily::Modern => ColumnType::PgSnapshot,
+            SnapshotFamily::Legacy => ColumnType::TxidSnapshot,
+        }
+    }
+
+    /// The type the family reports one running transaction id as.
+    fn xid_type(self) -> ColumnType {
+        match self {
+            SnapshotFamily::Modern => ColumnType::Xid8,
+            SnapshotFamily::Legacy => ColumnType::Int8,
+        }
+    }
+
+    /// One running transaction id as a value of that type.
+    fn xid_datum(self, xid: u64) -> Datum {
+        match self {
+            SnapshotFamily::Modern => Datum::Xid8(xid),
+            // `bigint` reinterprets the bits, as the whole `txid_*` family does.
+            SnapshotFamily::Legacy => Datum::Int8(xid.cast_signed()),
+        }
+    }
+}
+
+impl JsonFamily {
+    /// The type the family's argument carries — and, for `each` and
+    /// `array_elements`, the type of the sub-document column they produce.
+    fn column_type(self) -> ColumnType {
+        match self {
+            JsonFamily::Json => ColumnType::Json,
+            JsonFamily::Jsonb => ColumnType::Jsonb,
+        }
+    }
+
+    /// The same distinction as seen by the shared population walk.
+    fn flavour(self) -> crate::json_record::Flavour {
+        match self {
+            JsonFamily::Json => crate::json_record::Flavour::Json,
+            JsonFamily::Jsonb => crate::json_record::Flavour::Jsonb,
+        }
+    }
+}
+
+/// One of the eight record-mapping functions, as three independent choices.
+///
+/// `PostgreSQL` declares them as two families of four, and the four differ only
+/// in where the target row type comes from and how many rows the document
+/// yields — so they are one implementation with three flags rather than eight
+/// entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordCall {
+    family: JsonFamily,
+    /// `*_populate_record`/`*_populate_recordset`, whose first argument is both
+    /// the row type and the source of every field the document omits. The
+    /// `*_to_record`/`*_to_recordset` half takes neither: its row type comes
+    /// from the FROM item's column-definition list and its omitted fields are
+    /// NULL.
+    populate: bool,
+    /// `*_recordset`/`*_to_recordset`: the document is an array of objects and
+    /// each element is a row.
+    set: bool,
+}
+
+impl RecordCall {
+    /// The SQL name, which several of this family's run-time errors quote.
+    fn name(self) -> &'static str {
+        match (self.family, self.populate, self.set) {
+            (JsonFamily::Json, true, false) => "json_populate_record",
+            (JsonFamily::Json, true, true) => "json_populate_recordset",
+            (JsonFamily::Json, false, false) => "json_to_record",
+            (JsonFamily::Json, false, true) => "json_to_recordset",
+            (JsonFamily::Jsonb, true, false) => "jsonb_populate_record",
+            (JsonFamily::Jsonb, true, true) => "jsonb_populate_recordset",
+            (JsonFamily::Jsonb, false, false) => "jsonb_to_record",
+            (JsonFamily::Jsonb, false, true) => "jsonb_to_recordset",
+        }
+    }
+
+    /// Which argument holds the document.
+    fn document_at(self) -> usize {
+        usize::from(self.populate)
+    }
+
+    /// The arities `PostgreSQL` declares, inclusive.
+    ///
+    /// The `json_populate_*` half carries a third parameter the `jsonb_` half
+    /// does not: `use_json_as_text boolean DEFAULT false`, kept since 9.4 for
+    /// callers written against the old signature. It has had no effect for a
+    /// decade — a sub-document reaches a `text` column as its own text either
+    /// way — but it is part of the signature, so a three-argument call resolves
+    /// and a boolean is coerced.
+    fn arity(self) -> (usize, usize) {
+        match (self.populate, self.family) {
+            (true, JsonFamily::Json) => (2, 3),
+            (true, JsonFamily::Jsonb) => (2, 2),
+            (false, _) => (1, 1),
+        }
+    }
+
+    /// The `*_recordset` sibling of this call.
+    const fn into_set(self) -> Self {
+        RecordCall { set: true, ..self }
+    }
+}
+
+const RECORD_JSON_POPULATE: RecordCall = RecordCall {
+    family: JsonFamily::Json,
+    populate: true,
+    set: false,
+};
+const RECORD_JSONB_POPULATE: RecordCall = RecordCall {
+    family: JsonFamily::Jsonb,
+    populate: true,
+    set: false,
+};
+const RECORD_JSON_TO: RecordCall = RecordCall {
+    family: JsonFamily::Json,
+    populate: false,
+    set: false,
+};
+const RECORD_JSONB_TO: RecordCall = RecordCall {
+    family: JsonFamily::Jsonb,
+    populate: false,
+    set: false,
+};
+
+/// What a call *is*, as opposed to how it was written: the name with its
+/// `pg_catalog` qualifier and its letter case folded away.
+///
+/// `PostgreSQL` resolves `pg_catalog.generate_series(1, 3)` to the same function
+/// the bare spelling names, and calls the output column — and the FROM item's
+/// qualifier — `generate_series` either way; the schema survives only in the
+/// `42883` a name that resolves to nothing raises. psql's `\d` writes every
+/// call this way, so the qualified spelling is the common one, not the exotic
+/// one.
+///
+/// Unquoted identifiers reach here lowercased, but a quoted `"UNNEST"` does not,
+/// and PostgreSQL matches those case-sensitively — the folding here is
+/// deliberate leniency, matching the pre-existing `unnest` handling this
+/// registry replaces.
+fn bare_name(name: &str) -> Cow<'_, str> {
+    let name = name.strip_prefix("pg_catalog.").unwrap_or(name);
+    if name.bytes().any(|b| b.is_ascii_uppercase()) {
         Cow::Owned(name.to_ascii_lowercase())
     } else {
         Cow::Borrowed(name)
-    };
-    Some(match lowered.as_ref() {
+    }
+}
+
+/// Classify a function name.
+fn classify(name: &str) -> Option<Srf> {
+    Some(match bare_name(name).as_ref() {
         "unnest" => Srf::Unnest,
         "generate_series" => Srf::GenerateSeries,
         "generate_subscripts" => Srf::GenerateSubscripts,
         "string_to_table" => Srf::StringToTable,
         "regexp_split_to_table" => Srf::RegexpSplitToTable,
-        // The `json_*` spellings share their implementation: crabka stores
-        // `json` as `jsonb` (see the compatibility matrix row).
-        "jsonb_each" | "json_each" => Srf::JsonbEach,
-        "jsonb_each_text" | "json_each_text" => Srf::JsonbEachText,
-        "jsonb_object_keys" | "json_object_keys" => Srf::JsonbObjectKeys,
-        "jsonb_array_elements" | "json_array_elements" => Srf::JsonbArrayElements,
-        "jsonb_array_elements_text" | "json_array_elements_text" => Srf::JsonbArrayElementsText,
+        "regexp_matches" => Srf::RegexpMatches,
+        // Ten functions, five shapes over two document types. The `json_*` half
+        // reads the original text, so it keeps input order and duplicate keys
+        // where the `jsonb_*` half has already discarded both.
+        "json_each" => Srf::Each(JsonFamily::Json),
+        "jsonb_each" => Srf::Each(JsonFamily::Jsonb),
+        "json_each_text" => Srf::EachText(JsonFamily::Json),
+        "jsonb_each_text" => Srf::EachText(JsonFamily::Jsonb),
+        "json_object_keys" => Srf::ObjectKeys(JsonFamily::Json),
+        "jsonb_object_keys" => Srf::ObjectKeys(JsonFamily::Jsonb),
+        "json_array_elements" => Srf::ArrayElements(JsonFamily::Json),
+        "jsonb_array_elements" => Srf::ArrayElements(JsonFamily::Jsonb),
+        "json_array_elements_text" => Srf::ArrayElementsText(JsonFamily::Json),
+        "jsonb_array_elements_text" => Srf::ArrayElementsText(JsonFamily::Jsonb),
         "jsonb_path_query" | "jsonb_path_query_tz" => Srf::JsonbPathQuery,
+        // Eight names, one implementation: see `RecordCall`.
+        "json_populate_record" => Srf::Record(RECORD_JSON_POPULATE),
+        "jsonb_populate_record" => Srf::Record(RECORD_JSONB_POPULATE),
+        "json_populate_recordset" => Srf::Record(RECORD_JSON_POPULATE.into_set()),
+        "jsonb_populate_recordset" => Srf::Record(RECORD_JSONB_POPULATE.into_set()),
+        "json_to_record" => Srf::Record(RECORD_JSON_TO),
+        "jsonb_to_record" => Srf::Record(RECORD_JSONB_TO),
+        "json_to_recordset" => Srf::Record(RECORD_JSON_TO.into_set()),
+        "jsonb_to_recordset" => Srf::Record(RECORD_JSONB_TO.into_set()),
+        "pg_input_error_info" => Srf::PgInputErrorInfo,
+        "pg_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Modern),
+        "txid_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Legacy),
+        "pg_partition_ancestors" => Srf::PgPartitionAncestors,
         "pg_event_trigger_ddl_commands" => Srf::EventDdlCommands,
         "pg_event_trigger_dropped_objects" => Srf::EventDroppedObjects,
         _ => return None,
     })
 }
 
-/// Is `name` a set-returning function? This is the dispatch point for the
-/// FROM-item and select-list guards.
+/// Is `name` one of the functions this registry expands in a FROM item?
+///
+/// Not every one of them is *set*-returning: `json_populate_record` returns one
+/// composite, and `json_to_record` one `record`. They live here because a FROM
+/// item expands a composite result into columns exactly as it expands a set into
+/// rows, and because the two halves of each pair share everything but their row
+/// count. [`is_set_returning`] is the narrower predicate the select-list rewrite
+/// needs.
 pub(crate) fn is_srf(name: &str) -> bool {
     classify(name).is_some()
+}
+
+/// Does `name` return a *set*? Only these multiply a select list's rows, so only
+/// these take the ProjectSet path — and only these are refused inside an
+/// aggregate.
+pub(crate) fn is_set_returning(name: &str) -> bool {
+    classify(name).is_some_and(Srf::returns_set)
+}
+
+impl Srf {
+    /// Does a call produce zero or more rows, rather than exactly one?
+    fn returns_set(self) -> bool {
+        match self {
+            Srf::Record(call) => call.set,
+            _ => true,
+        }
+    }
+
+    /// Does `PostgreSQL` declare this function's output columns as OUT
+    /// parameters? That changes which 42601 a column-definition list earns:
+    /// `json_each` is "redundant for a function with OUT parameters" where
+    /// `generate_series` is "only allowed for functions returning \"record\"".
+    fn has_out_parameters(self) -> bool {
+        matches!(
+            self,
+            Srf::Each(_)
+                | Srf::EachText(_)
+                | Srf::PgInputErrorInfo
+                | Srf::EventDdlCommands
+                | Srf::EventDroppedObjects
+        )
+    }
 }
 
 /// One resolved SRF call: which function, and the columns it produces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SrfPlan {
     kind: Srf,
+    /// The call's [`bare_name`] — which alias was written, folded to lowercase
+    /// and stripped of a `pg_catalog` qualifier. Output names and run-time
+    /// diagnostics come from this; a *plan-time* `42883` quotes the call as
+    /// written instead, because there is no function to have a real name.
     name: String,
     columns: Vec<ColumnBinding>,
+    /// For the record family, the composite the call populates and the type a
+    /// *select-list* occurrence of the call yields.
+    ///
+    /// `columns` always holds the FROM-position shape — a composite result
+    /// expands into one column per attribute there — but the same call in a
+    /// select list is a single value of the composite type, so the two shapes
+    /// are kept side by side rather than one being derived from the other.
+    record: Option<RecordResult>,
 }
 
-/// Resolve `name(args)` to the columns it produces. This function checks every
-/// arity and type rule a call can fail, at plan time, so `Describe` reports the
-/// same error `Execute` would.
-pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, ExecError> {
+/// The composite a record-family call produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordResult {
+    shape: RecordShapeSource,
+    /// The composite type itself, for the select-list column. `None` for the
+    /// anonymous `record` a column-definition list gave a shape but not a name.
+    named: Option<UserTypeRef>,
+    /// Was the shape supplied by a column-definition list? A run-time record
+    /// argument must then agree with it, which is `PostgreSQL`'s
+    /// "function return row and query-specified return row do not match".
+    from_column_defs: bool,
+}
+
+/// What tells a record-family call the shape of the rows it produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordShapeSource {
+    /// Known at plan time: the named composite the first argument is declared
+    /// as, or the FROM item's column-definition list.
+    Fixed(RecordShape),
+    /// Known only at run time, from the first argument's *value*.
+    ///
+    /// `SELECT json_populate_recordset(ROW(1, 2), '…')` has no FROM item to hang
+    /// a column-definition list on and no named composite to read, yet
+    /// PostgreSQL answers it — because a `ROW(…)` carries a row type the type
+    /// layer here cannot see but the value can. `NULL::record` reaches the same
+    /// plan and is the 0A000, so the two are only told apart by the value.
+    Argument,
+}
+
+/// Where a call was written. Which of the two it is decides what may supply a
+/// `record` result's row type, and so which refusal an unresolvable one earns.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CallSite<'a> {
+    /// A FROM item, which may carry a column-definition list.
+    FromItem(Option<&'a [TableFuncColumnDef]>),
+    /// A select-list call, where only a run-time record argument can supply one.
+    Projection,
+}
+
+impl<'a> CallSite<'a> {
+    fn column_defs(self) -> Option<&'a [TableFuncColumnDef]> {
+        match self {
+            CallSite::FromItem(defs) => defs,
+            CallSite::Projection => None,
+        }
+    }
+}
+
+/// Resolve `name(args)` to the columns it produces. Every arity/type rule a call
+/// can fail is checked here, at plan time, so `Describe` reports the same error
+/// `Execute` would.
+pub(crate) fn plan(
+    name: &str,
+    args: &[Expr],
+    site: CallSite<'_>,
+    scope: &Scope,
+) -> Result<SrfPlan, ExecError> {
     // Resolve the arguments' types first, so a name no entry claims still reports
     // the argument types PostgreSQL's 42883 names.
     let given = crate::eval::static_arg_types(args, scope)?;
     let kind = classify(name).ok_or_else(|| undefined_function(name, &given))?;
+    // Diagnostics quote the call as written, so `name` stays whole for
+    // `undefined_function` above; everything the *result* is named after uses
+    // the folded spelling.
+    let bare = bare_name(name);
+    if let Srf::Record(call) = kind {
+        return plan_record(call, &bare, &given, site);
+    }
+    if site.column_defs().is_some() {
+        return Err(ExecError::Syntax(
+            if kind.has_out_parameters() {
+                "a column definition list is redundant for a function with OUT parameters"
+            } else {
+                "a column definition list is only allowed for functions returning \"record\""
+            }
+            .into(),
+        ));
+    }
     let columns = match kind {
         Srf::Unnest => unnest_columns(name, &given)?,
         Srf::GenerateSeries => vec![column("generate_series", series_types(name, &given)?)],
@@ -153,37 +496,63 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
             require_arity(name, &given, (2, 3))?;
             vec![column("regexp_split_to_table", ColumnType::Text)]
         }
-        Srf::JsonbEach => {
-            require_arity(name, &given, (1, 1))?;
+        Srf::RegexpMatches => {
+            require_arity(name, &given, (2, 3))?;
+            vec![column("regexp_matches", ColumnType::Array(ElemType::Text))]
+        }
+        Srf::Each(family) => {
+            require_json_document(name, &given, family)?;
             vec![
                 column("key", ColumnType::Text),
-                column("value", ColumnType::Jsonb),
+                column("value", family.column_type()),
             ]
         }
-        Srf::JsonbEachText => {
-            require_arity(name, &given, (1, 1))?;
+        Srf::EachText(family) => {
+            require_json_document(name, &given, family)?;
             vec![
                 column("key", ColumnType::Text),
                 column("value", ColumnType::Text),
             ]
         }
-        Srf::JsonbObjectKeys => {
-            require_arity(name, &given, (1, 1))?;
-            // A single-column SRF names its column after the function, so the
-            // `json_object_keys` alias must not report `jsonb_object_keys`.
-            vec![column(&name.to_ascii_lowercase(), ColumnType::Text)]
+        Srf::ObjectKeys(family) => {
+            require_json_document(name, &given, family)?;
+            // A single-column SRF names its column after the function, so
+            // `json_object_keys` must not report `jsonb_object_keys`.
+            vec![column(&bare, ColumnType::Text)]
         }
-        Srf::JsonbArrayElements => {
-            require_arity(name, &given, (1, 1))?;
-            vec![column("value", ColumnType::Jsonb)]
+        Srf::ArrayElements(family) => {
+            require_json_document(name, &given, family)?;
+            vec![column("value", family.column_type())]
         }
-        Srf::JsonbArrayElementsText => {
-            require_arity(name, &given, (1, 1))?;
+        Srf::ArrayElementsText(family) => {
+            require_json_document(name, &given, family)?;
             vec![column("value", ColumnType::Text)]
         }
         Srf::JsonbPathQuery => {
             require_arity(name, &given, (2, 4))?;
-            vec![column(&name.to_ascii_lowercase(), ColumnType::Jsonb)]
+            vec![column(&bare, ColumnType::Jsonb)]
+        }
+        // Handled above: the record family resolves its own shape, and the
+        // column-definition-list rules differ for it.
+        Srf::Record(_) => unreachable!("plan_record answered the record family"),
+        Srf::SnapshotXip(family) => {
+            require_arity(name, &given, (1, 1))?;
+            // A single-column SRF names its column after the function, so
+            // `txid_snapshot_xip` must not report `pg_snapshot_xip`.
+            vec![column(&bare, family.xid_type())]
+        }
+        Srf::PgInputErrorInfo => {
+            require_arity(name, &given, (2, 2))?;
+            vec![
+                column("message", ColumnType::Text),
+                column("detail", ColumnType::Text),
+                column("hint", ColumnType::Text),
+                column("sql_error_code", ColumnType::Text),
+            ]
+        }
+        Srf::PgPartitionAncestors => {
+            require_arity(name, &given, (1, 1))?;
+            vec![column("relid", ColumnType::Regclass)]
         }
         Srf::EventDdlCommands => {
             require_arity(name, &given, (0, 0))?;
@@ -219,8 +588,125 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
     };
     Ok(SrfPlan {
         kind,
-        name: name.to_string(),
+        name: bare.into_owned(),
         columns,
+        record: None,
+    })
+}
+
+/// Resolve one record-family call: where its row type comes from, and what a
+/// column-definition list is allowed to say about it.
+///
+/// `PostgreSQL` splits this three ways and words each refusal differently, so
+/// the three cases are spelled out rather than folded into one check:
+///
+/// * `json_populate_record(null::jpop, …)` returns the *named* composite `jpop`,
+///   and a column-definition list on it is "redundant for a function returning a
+///   named composite type";
+/// * `json_to_record(…)`, and `json_populate_record(null::record, …)`, return
+///   `record`, whose shape only a column-definition list can supply — without
+///   one a FROM item is "a column definition list is required", and a select-list
+///   call is the 0A000 "could not determine row type";
+/// * an argument carrying no type at all (`json_populate_record('x', …)`) leaves
+///   the `anyelement` parameter unresolved, which is 42804.
+fn plan_record(
+    call: RecordCall,
+    bare: &str,
+    given: &[ArgType],
+    site: CallSite<'_>,
+) -> Result<SrfPlan, ExecError> {
+    let name = call.name();
+    require_arity(name, given, call.arity())?;
+    let document = given[call.document_at()];
+    if let Some(ty) = document.known()
+        && ty != call.family.column_type()
+    {
+        return Err(undefined_function(name, given));
+    }
+
+    let declared = if call.populate {
+        match given[0] {
+            ArgType::Known(ty @ ColumnType::Record(_)) => ty,
+            // `anyelement` resolved to a non-composite: no such function.
+            ArgType::Known(_) => return Err(undefined_function(name, given)),
+            // A bare literal or NULL resolves the polymorphic parameter to
+            // nothing at all, which PostgreSQL reports before it looks at the
+            // document.
+            ArgType::Unknown | ArgType::Opaque => {
+                return Err(ExecError::TypeMismatch(
+                    "could not determine polymorphic type because input has type unknown".into(),
+                ));
+            }
+        }
+    } else {
+        ColumnType::Record(None)
+    };
+
+    let record = match (RecordShape::of(declared), site.column_defs()) {
+        (Some(_), Some(_)) => {
+            return Err(ExecError::Syntax(
+                "a column definition list is redundant for a function returning a named \
+                 composite type"
+                    .into(),
+            ));
+        }
+        (Some(shape), None) => {
+            let ColumnType::Record(named) = declared else {
+                unreachable!("RecordShape::of accepted a non-record type");
+            };
+            RecordResult {
+                shape: RecordShapeSource::Fixed(shape),
+                named,
+                from_column_defs: false,
+            }
+        }
+        (None, Some(defs)) => {
+            // The list becomes a tuple descriptor, and PostgreSQL builds that
+            // through the same attribute-name check a `CREATE TABLE` goes
+            // through — so a repeated name is 42701, not two columns.
+            if let Some(name) = first_duplicate(defs) {
+                return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                    "42701",
+                    format!("column name \"{name}\" specified more than once"),
+                )));
+            }
+            RecordResult {
+                shape: RecordShapeSource::Fixed(RecordShape {
+                    fields: defs.iter().map(|d| (d.name.clone(), d.ty)).collect(),
+                }),
+                named: None,
+                from_column_defs: true,
+            }
+        }
+        (None, None) => match site {
+            CallSite::FromItem(_) => {
+                return Err(ExecError::Syntax(
+                    "a column definition list is required for functions returning \"record\""
+                        .into(),
+                ));
+            }
+            CallSite::Projection => RecordResult {
+                shape: RecordShapeSource::Argument,
+                named: None,
+                from_column_defs: false,
+            },
+        },
+    };
+
+    let columns = match &record.shape {
+        RecordShapeSource::Fixed(shape) => shape
+            .fields
+            .iter()
+            .map(|(name, ty)| column(name, *ty))
+            .collect(),
+        // Never a FROM item's shape — only the one column a select list sees.
+        RecordShapeSource::Argument => vec![column(bare, ColumnType::Record(None))],
+    };
+    Ok(SrfPlan {
+        kind: Srf::Record(call),
+        name: bare.to_string(),
+        columns,
+        record: Some(record),
     })
 }
 
@@ -241,6 +727,11 @@ pub(crate) fn rows(
     let strict_upto = match plan.kind {
         Srf::Unnest => 0,
         Srf::StringToTable => 1,
+        // Not strict in *either* argument, and deliberately so: the row type
+        // usually arrives as `NULL::jpop`, and a NULL document yields one
+        // all-NULL row from `populate_record` rather than no rows. `record_rows`
+        // decides what a NULL document means for each half.
+        Srf::Record(_) => 0,
         _ => vals.len(),
     };
     if vals[..strict_upto.min(vals.len())]
@@ -255,12 +746,17 @@ pub(crate) fn rows(
         Srf::GenerateSubscripts => subscript_rows(&plan.name, vals)?,
         Srf::StringToTable => string_to_table_rows(&plan.name, vals)?,
         Srf::RegexpSplitToTable => regexp_split_rows(&plan.name, vals)?,
-        Srf::JsonbEach
-        | Srf::JsonbEachText
-        | Srf::JsonbObjectKeys
-        | Srf::JsonbArrayElements
-        | Srf::JsonbArrayElementsText => crate::json_fn::jsonb_srf_rows(json_srf(plan.kind), vals)?,
+        Srf::RegexpMatches => regexp_matches_rows(&plan.name, vals)?,
+        Srf::Each(family) => expand_json(family, JsonbSrf::Each, vals)?,
+        Srf::EachText(family) => expand_json(family, JsonbSrf::EachText, vals)?,
+        Srf::ObjectKeys(family) => expand_json(family, JsonbSrf::ObjectKeys, vals)?,
+        Srf::ArrayElements(family) => expand_json(family, JsonbSrf::ArrayElements, vals)?,
+        Srf::ArrayElementsText(family) => expand_json(family, JsonbSrf::ArrayElementsText, vals)?,
         Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals)?,
+        Srf::Record(call) => record_rows(call, plan, vals, ctx)?,
+        Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
+        Srf::SnapshotXip(family) => snapshot_xip_rows(family, &plan.name, &vals[0], ctx)?,
+        Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
         Srf::EventDroppedObjects => event_dropped_object_rows(ctx)?,
     };
@@ -287,33 +783,310 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             vec![Some(value), Some(value), Some(step)]
         }
         Srf::GenerateSubscripts => vec![None, Some(ColumnType::Int4), Some(ColumnType::Bool)],
-        Srf::StringToTable | Srf::RegexpSplitToTable => vec![text, text, text],
-        Srf::JsonbEach
-        | Srf::JsonbEachText
-        | Srf::JsonbObjectKeys
-        | Srf::JsonbArrayElements
-        | Srf::JsonbArrayElementsText => vec![Some(ColumnType::Jsonb)],
-        // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`; crabka spells
-        // `jsonpath` `text`.
+        Srf::StringToTable | Srf::RegexpSplitToTable | Srf::RegexpMatches => {
+            vec![text, text, text]
+        }
+        Srf::Each(family)
+        | Srf::EachText(family)
+        | Srf::ObjectKeys(family)
+        | Srf::ArrayElements(family)
+        | Srf::ArrayElementsText(family) => vec![Some(family.column_type())],
+        // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`.
         Srf::JsonbPathQuery => vec![
             Some(ColumnType::Jsonb),
-            text,
+            Some(ColumnType::JsonPath),
             Some(ColumnType::Jsonb),
             Some(ColumnType::Bool),
         ],
+        // The row-type argument is `anyelement` — an `unknown` literal there is
+        // already a 42804 — so only the document and the vestigial
+        // `use_json_as_text` flag resolve a literal.
+        Srf::Record(call) => {
+            let mut params = vec![None; call.document_at()];
+            params.push(Some(call.family.column_type()));
+            params.push(Some(ColumnType::Bool));
+            params
+        }
+        Srf::PgInputErrorInfo => vec![text, text],
+        Srf::SnapshotXip(family) => vec![Some(family.snapshot_type())],
+        // `regclass`, but resolving a *name* to a relation needs the catalog and
+        // the search path, which the pure cast this drives has neither of. The
+        // literal is left `unknown` so the row builder can run the catalog-aware
+        // cast itself.
+        Srf::PgPartitionAncestors => vec![None],
         Srf::EventDdlCommands | Srf::EventDroppedObjects => Vec::new(),
     }
 }
 
-fn json_srf(kind: Srf) -> crate::json_fn::JsonbSrf {
-    use crate::json_fn::JsonbSrf;
-    match kind {
-        Srf::JsonbEach => JsonbSrf::Each,
-        Srf::JsonbEachText => JsonbSrf::EachText,
-        Srf::JsonbObjectKeys => JsonbSrf::ObjectKeys,
-        Srf::JsonbArrayElements => JsonbSrf::ArrayElements,
-        Srf::JsonbArrayElementsText => JsonbSrf::ArrayElementsText,
-        _ => unreachable!("only the jsonb SRFs reach the jsonb dispatch"),
+/// Run one record-family call over its evaluated arguments.
+fn record_rows(
+    call: RecordCall,
+    plan: &SrfPlan,
+    vals: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let result = plan
+        .record
+        .as_ref()
+        .expect("plan_record attached a shape to every record-family plan");
+    let base = match vals.first() {
+        Some(Datum::Record(record)) if call.populate => Some(record),
+        _ => None,
+    };
+    let shape = match &result.shape {
+        RecordShapeSource::Fixed(shape) => Cow::Borrowed(shape),
+        // The row type is the argument's, so there is no answer without one.
+        RecordShapeSource::Argument => match base {
+            Some(base) => Cow::Owned(RecordShape::of_value(base)),
+            None => return Err(crate::json_record::indeterminate_row_type(&plan.name)),
+        },
+    };
+    // A column-definition list does not *replace* a run-time record argument's
+    // row type, it has to agree with it — PostgreSQL compares the two tuple
+    // descriptors and refuses a mismatch rather than coercing.
+    if let Some(base) = base
+        && result.from_column_defs
+    {
+        check_row_type_matches(base, &shape)?;
+    }
+    let document = &vals[call.document_at()];
+    if document.is_null() {
+        // A NULL document leaves `populate_record` with the base row (all NULL
+        // when there is none) and `populate_recordset` with no rows at all.
+        return Ok(reshape(
+            result,
+            &shape,
+            if call.set {
+                Vec::new()
+            } else {
+                vec![crate::json_record::populate_missing(&shape, base, ctx)?]
+            },
+        ));
+    }
+    let node = crate::json_record::Node::of(document, call.family.flavour())?;
+    let produced = if call.set {
+        crate::json_record::populate_set(
+            &shape,
+            base,
+            node,
+            call.name(),
+            call.family.flavour(),
+            ctx,
+        )?
+    } else {
+        vec![crate::json_record::populate(&shape, base, node, ctx)?]
+    };
+    Ok(reshape(result, &shape, produced))
+}
+
+/// Fold each row into a single composite value when the plan's one column *is*
+/// the composite — the deferred select-list shape, whose columns nothing outside
+/// the value knows.
+fn reshape(
+    result: &RecordResult,
+    shape: &RecordShape,
+    produced: Vec<Vec<Datum>>,
+) -> Vec<Vec<Datum>> {
+    if matches!(result.shape, RecordShapeSource::Fixed(_)) {
+        return produced;
+    }
+    let names: std::sync::Arc<[String]> =
+        shape.fields.iter().map(|(name, _)| name.clone()).collect();
+    produced
+        .into_iter()
+        .map(|row| vec![Datum::Record(RecordValue::named(None, names.clone(), row))])
+        .collect()
+}
+
+/// PostgreSQL's `tupledesc_match`: a record argument's own row type and the
+/// column-definition list must agree on width and on every column's type.
+fn check_row_type_matches(base: &RecordValue, shape: &RecordShape) -> Result<(), ExecError> {
+    let mismatch = |detail: String| {
+        ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "42804",
+                "function return row and query-specified return row do not match",
+            )
+            .with_detail(detail),
+        )
+    };
+    if base.values.len() != shape.fields.len() {
+        return Err(mismatch(format!(
+            "Returned row contains {} attribute{}, but query expects {}.",
+            base.values.len(),
+            if base.values.len() == 1 { "" } else { "s" },
+            shape.fields.len()
+        )));
+    }
+    for (index, (value, (_, wanted))) in base.values.iter().zip(&shape.fields).enumerate() {
+        let Some(actual) = value.column_type() else {
+            continue;
+        };
+        if actual != *wanted {
+            return Err(mismatch(format!(
+                "Returned type {} at ordinal position {}, but query expects {}.",
+                actual.name(),
+                index + 1,
+                wanted.name()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let input = match &vals[0] {
+        Datum::Text(value) => value.as_str(),
+        other => return Err(type_error("pg_input_error_info", other)),
+    };
+    let type_name = match &vals[1] {
+        Datum::Text(value) => value.as_str(),
+        other => return Err(type_error("pg_input_error_info", other)),
+    };
+    let Some(error) = crate::func::input_error(input, type_name, ctx)? else {
+        return Ok(vec![vec![Datum::Null; 4]]);
+    };
+    let detail = error
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.detail.as_ref())
+        .map_or(Datum::Null, |detail| Datum::Text(detail.clone()));
+    Ok(vec![vec![
+        Datum::Text(error.message),
+        detail,
+        Datum::Null,
+        Datum::Text(error.code),
+    ]])
+}
+
+/// `pg_snapshot_xip` / `txid_snapshot_xip`: one row per running transaction the
+/// snapshot lists, in the ascending order the value already holds them in.
+fn snapshot_xip_rows(
+    family: SnapshotFamily,
+    name: &str,
+    value: &Datum,
+    ctx: &EvalCtx,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    // An `unknown` literal reaches here as text, because `param_types` names
+    // the parameter and the coercion runs `pg_snapshot_in` — which reports the
+    // same 22P02 a written cast would.
+    let snapshot = match value {
+        Datum::PgSnapshot(snapshot) => snapshot.as_ref().clone(),
+        other => {
+            match crabka_pgtypes::cast::cast_in(other, ColumnType::PgSnapshot, ctx.output_style())?
+            {
+                Datum::PgSnapshot(snapshot) => *snapshot,
+                _ => return Err(undefined_function(name, &[])),
+            }
+        }
+    };
+    Ok(snapshot
+        .xip()
+        .iter()
+        .map(|xid| vec![family.xid_datum(*xid)])
+        .collect())
+}
+
+/// `pg_partition_ancestors(regclass)`: the relation itself, then its parent, its
+/// grandparent, and so on to the root of the partition tree.
+///
+/// The gate at the top is `PostgreSQL`'s `check_rel_can_be_partition`: a
+/// relation that is neither a partition nor a partitioned parent belongs to no
+/// partition tree, so it produces **no** rows rather than naming itself. An
+/// unresolvable oid produces none either, while a *name* no relation has is the
+/// `42P01` the `regclass` cast itself raises — the same place `PostgreSQL`
+/// raises it.
+fn partition_ancestor_rows(value: &Datum, ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
+    // No catalog — a planning context or a unit test — means no partition tree
+    // to walk.
+    let Some(catalog) = ctx.catalog() else {
+        return Ok(Vec::new());
+    };
+    let Some(Datum::Regclass(start)) =
+        crate::catalog_fn::regclass_cast(catalog, ctx.resolution(), value)?
+    else {
+        return Ok(Vec::new());
+    };
+    // One catalog scan serves both directions: the oid the argument names has to
+    // become a relation name to walk from, and every parent the walk reaches has
+    // to become an oid to report.
+    let mut oids = std::collections::HashMap::new();
+    for table in crabka_pgcatalog::list_tables(catalog)? {
+        oids.insert(
+            table.name,
+            crate::catalog_rel::table_relation_oid(table.id)?,
+        );
+    }
+    let Some(mut current) = oids
+        .iter()
+        .find(|(_, oid)| **oid == start.oid)
+        .map(|(name, _)| name.clone())
+    else {
+        return Ok(Vec::new());
+    };
+    if crate::partition::parent_of(catalog, &current)?.is_none()
+        && !crate::partition::is_partitioned(catalog, &current)?
+    {
+        return Ok(Vec::new());
+    }
+    let mut produced = vec![vec![Datum::Regclass(start)]];
+    // A partition tree is acyclic and every relation in it is a table, so the
+    // table count bounds the walk; stopping there rather than looping keeps
+    // corrupt partition metadata from hanging the query.
+    while produced.len() <= oids.len()
+        && let Some((parent, _)) = crate::partition::parent_of(catalog, &current)?
+        && let Some(&oid) = oids.get(&parent)
+    {
+        produced.push(vec![Datum::Regclass(crate::exec::regclass_by_oid(
+            catalog,
+            ctx.resolution(),
+            oid,
+        )?)]);
+        current = parent;
+    }
+    Ok(produced)
+}
+
+fn type_error(name: &str, value: &Datum) -> ExecError {
+    ExecError::UndefinedFunction(format!(
+        "function {name}({}) does not exist",
+        value.column_type().unwrap_or(ColumnType::Text).name()
+    ))
+}
+
+/// The single document argument all ten expansion functions take.
+///
+/// `PostgreSQL` declares the `json` and `jsonb` families separately and has no
+/// implicit cast between the two types, so each family accepts only its own:
+/// `json_each('{}'::jsonb)` and `jsonb_each('{}'::json)` are both 42883, as is
+/// any other type. A bare literal is still `unknown` here and adopts the
+/// family's type in [`param_types`].
+fn require_json_document(
+    name: &str,
+    given: &[ArgType],
+    family: JsonFamily,
+) -> Result<(), ExecError> {
+    require_arity(name, given, (1, 1))?;
+    if given[0]
+        .known()
+        .is_some_and(|actual| actual != family.column_type())
+    {
+        return Err(undefined_function(name, given));
+    }
+    Ok(())
+}
+
+/// Expand one JSON document. The two families share all five shapes and differ
+/// only in what they expand — `jsonb`'s decomposed value, or `json`'s original
+/// text — so the family picks the row builder and the shape rides along.
+fn expand_json(
+    family: JsonFamily,
+    shape: JsonbSrf,
+    vals: &[Datum],
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    match family {
+        JsonFamily::Json => crate::json_fn::json_srf_rows(shape, vals),
+        JsonFamily::Jsonb => crate::json_fn::jsonb_srf_rows(shape, vals),
     }
 }
 
@@ -382,7 +1155,7 @@ fn event_dropped_object_rows(ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError
                 Datum::Int4(object.object_sub_id),
                 Datum::Bool(true),
                 Datum::Bool(false),
-                Datum::Bool(false),
+                Datum::Bool(object.is_temporary),
                 Datum::Text(object.object_type.clone()),
                 object
                     .schema_name
@@ -412,10 +1185,14 @@ fn event_dropped_object_rows(ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError
 pub(crate) fn from_item(
     functions: &[TableFuncCall],
     with_ordinality: bool,
+    rows_from: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
     ctx: &EvalCtx,
 ) -> Result<Relation, ExecError> {
+    if with_ordinality {
+        reject_ordinality_with_column_defs(functions, rows_from)?;
+    }
     let plans = plan_all(functions)?;
     let mut produced = Vec::new();
     for (call, plan) in functions.iter().zip(&plans) {
@@ -435,27 +1212,66 @@ pub(crate) fn from_item(
 pub(crate) fn from_item_schema(
     functions: &[TableFuncCall],
     with_ordinality: bool,
+    rows_from: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
 ) -> Result<Relation, ExecError> {
+    if with_ordinality {
+        reject_ordinality_with_column_defs(functions, rows_from)?;
+    }
     let plans = plan_all(functions)?;
     qualify(&plans, Vec::new(), with_ordinality, alias, column_aliases)
 }
 
-/// Plan every call in the item, and reject a column-definition list the way
-/// `PostgreSQL` does. crabka has no composite types, so no function it knows
-/// returns `record`, and the list is never allowed.
+/// The first column name a definition list repeats.
+fn first_duplicate(defs: &[TableFuncColumnDef]) -> Option<&str> {
+    let mut seen = std::collections::HashSet::new();
+    defs.iter()
+        .find(|def| !seen.insert(def.name.as_str()))
+        .map(|def| def.name.as_str())
+}
+
+/// `WITH ORDINALITY` and a column-definition list cannot be written on the same
+/// FROM item.
+///
+/// `PostgreSQL`'s grammar allows both, and then refuses the combination with a
+/// hint pointing at the one spelling that does accept both — `ROWS FROM(f(…) AS
+/// (…)) WITH ORDINALITY`, where the list belongs to the call rather than to the
+/// item.
+///
+/// `rows_from` is what tells the two apart, and it has to be passed in: both
+/// spellings parse to a single call carrying `column_defs`, so the calls alone
+/// cannot distinguish the legal form from the illegal one. Without it this
+/// refused the very shape its own hint recommends.
+fn reject_ordinality_with_column_defs(
+    functions: &[TableFuncCall],
+    rows_from: bool,
+) -> Result<(), ExecError> {
+    if !rows_from && matches!(functions, [call] if call.column_defs.is_some()) {
+        return Err(ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "42601",
+                "WITH ORDINALITY cannot be used with a column definition list",
+            )
+            .with_hint("Put the column definition list inside ROWS FROM()."),
+        ));
+    }
+    Ok(())
+}
+
+/// Plan every call in the item. Whether a column-definition list is allowed,
+/// required or refused is the individual function's business — [`plan`] decides
+/// it, because for the record family the answer depends on the arguments.
 fn plan_all(functions: &[TableFuncCall]) -> Result<Vec<SrfPlan>, ExecError> {
     functions
         .iter()
         .map(|call| {
-            if call.column_defs.is_some() {
-                return Err(ExecError::Syntax(
-                    "a column definition list is only allowed for functions returning \"record\""
-                        .into(),
-                ));
-            }
-            plan(&call.name, &call.args, &Scope::empty())
+            plan(
+                &call.name,
+                &call.args,
+                CallSite::FromItem(call.column_defs.as_deref()),
+                &Scope::empty(),
+            )
         })
         .collect()
 }
@@ -489,7 +1305,7 @@ fn qualifier_for(plans: &[SrfPlan], alias: Option<&str>) -> String {
         || {
             plans
                 .first()
-                .map_or_else(String::new, |plan| plan.name.to_ascii_lowercase())
+                .map_or_else(String::new, |plan| plan.name.clone())
         },
         str::to_string,
     )
@@ -511,6 +1327,11 @@ fn ordinality_column() -> ColumnBinding {
 /// keeps its own name either way. A column-alias list renames a prefix
 /// positionally. A list that names more columns than the item has is
 /// `PostgreSQL`'s 42P10.
+///
+/// That renaming is a property of a *scalar* result, not of column count. A
+/// one-attribute composite is one column too, but its column is the attribute
+/// and `AS q` names only the item — so `json_to_record(…) AS x(a int)` yields
+/// `a`, not `x`.
 fn qualify(
     plans: &[SrfPlan],
     rows: Vec<Vec<Datum>>,
@@ -529,6 +1350,7 @@ fn qualify(
         with_ordinality,
         alias,
         column_aliases,
+        plans.iter().all(|plan| plan.record.is_none()),
     )
 }
 
@@ -539,6 +1361,7 @@ pub(crate) fn user_function_relation(
     with_ordinality: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
+    column_defs: Option<&[TableFuncColumnDef]>,
 ) -> Result<Relation, ExecError> {
     let columns = columns
         .into_iter()
@@ -551,6 +1374,7 @@ pub(crate) fn user_function_relation(
         with_ordinality,
         alias,
         column_aliases,
+        column_defs.is_none(),
     )
 }
 
@@ -561,6 +1385,9 @@ fn qualify_columns(
     with_ordinality: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
+    // `alias_names_column`: may a bare alias rename the item's single column?
+    // Only when that column is the function's scalar result.
+    alias_names_column: bool,
 ) -> Result<Relation, ExecError> {
     let function_columns = columns.len();
     if with_ordinality {
@@ -582,6 +1409,7 @@ fn qualify_columns(
             column.name.clone_from(name);
         }
     } else if let Some(alias) = alias
+        && alias_names_column
         && function_columns == 1
     {
         columns[0].name = alias.to_string();
@@ -624,7 +1452,7 @@ pub(crate) fn order_by_contains_srf(order_by: &[crabka_pgparser::ast::OrderItem]
 
 fn expr_contains_srf(expr: &Expr) -> bool {
     if let Expr::Func(fc) = expr
-        && is_srf(&fc.name)
+        && is_set_returning(&fc.name)
     {
         return true;
     }
@@ -693,6 +1521,7 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -733,9 +1562,10 @@ fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
     let mut extended = scope.clone();
     for (index, call) in calls.iter().enumerate() {
         extended.columns.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(SRF_QUALIFIER.to_string()),
             name: index.to_string(),
-            ty: call.plan.columns[0].ty,
+            ty: projected_type(&call.plan),
         });
     }
     Ok(ProjectSet {
@@ -747,7 +1577,7 @@ fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
 
 fn rewrite_expr(expr: &mut Expr, scope: &Scope, calls: &mut Vec<SrfCall>) -> Result<(), ExecError> {
     if let Expr::Func(fc) = expr
-        && is_srf(&fc.name)
+        && is_set_returning(&fc.name)
     {
         let FuncArgs::Exprs(args) = &fc.args else {
             return Err(undefined_function(&fc.name, &[]));
@@ -759,8 +1589,10 @@ fn rewrite_expr(expr: &mut Expr, scope: &Scope, calls: &mut Vec<SrfCall>) -> Res
                     .into(),
             ));
         }
-        let plan = plan(&fc.name, args, scope)?;
-        if plan.columns.len() != 1 {
+        // A select-list call has no FROM item to hang a column-definition list
+        // on, so a record-returning one has no row type at all.
+        let plan = plan(&fc.name, args, CallSite::Projection, scope)?;
+        if plan.record.is_none() && plan.columns.len() != 1 {
             return Err(ExecError::Unsupported(format!(
                 "set-returning function {} with multiple output columns is only supported in FROM",
                 plan.name
@@ -829,6 +1661,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
+        | Expr::BitStringLiteral(_)
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Column { .. }
@@ -965,6 +1798,44 @@ pub(crate) fn project_rows_ordered(
     ))
 }
 
+/// The type a select-list occurrence of a planned call yields.
+///
+/// [`SrfPlan::columns`] is the FROM-position shape, which for the record family
+/// is one column per attribute; a select list gets the composite whole.
+fn projected_type(plan: &SrfPlan) -> ColumnType {
+    match &plan.record {
+        Some(record) => ColumnType::Record(record.named),
+        None => plan.columns[0].ty,
+    }
+}
+
+/// Reduce a call's FROM-position rows to the one column a select list sees.
+///
+/// A record-family call is *reassembled* here rather than truncated: its FROM
+/// shape is the composite's attributes spread across columns, and the select
+/// list wants them back inside one value.
+fn collapse_projection(plan: &SrfPlan, produced: Vec<Vec<Datum>>) -> Vec<Datum> {
+    let take_first = |produced: Vec<Vec<Datum>>| {
+        produced
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .collect()
+    };
+    let Some(record) = &plan.record else {
+        return take_first(produced);
+    };
+    let RecordShapeSource::Fixed(shape) = &record.shape else {
+        // `rows` already folded these; the one column is the composite.
+        return take_first(produced);
+    };
+    let names: std::sync::Arc<[String]> =
+        shape.fields.iter().map(|(name, _)| name.clone()).collect();
+    produced
+        .into_iter()
+        .map(|row| Datum::Record(RecordValue::named(record.named, names.clone(), row)))
+        .collect()
+}
+
 /// Expand one source row into the output rows its select-list SRFs produce.
 /// PostgreSQL 10+ runs the calls in lockstep. The row count is the longest
 /// call's, and the shorter ones read as NULL past their end.
@@ -982,12 +1853,7 @@ fn expand_row(
             .map(|arg| crate::eval::eval(arg, scope, row, ctx))
             .collect::<Result<Vec<_>, _>>()?;
         let produced = rows(&call.plan, &call.args, &mut vals, ctx)?;
-        values.push(
-            produced
-                .into_iter()
-                .filter_map(|r| r.into_iter().next())
-                .collect(),
-        );
+        values.push(collapse_projection(&call.plan, produced));
     }
     let count = values.iter().map(Vec::len).max().unwrap_or(0);
     let mut out = Vec::with_capacity(count);
@@ -1015,6 +1881,11 @@ fn unnest_columns(name: &str, given: &[ArgType]) -> Result<Vec<ColumnBinding>, E
         .iter()
         .map(|arg| {
             let ty = arg.known().ok_or_else(|| undefined_function(name, given))?;
+            if let ColumnType::Multirange(multirange) = ty
+                && given.len() == 1
+            {
+                return Ok(column("unnest", ColumnType::Range(multirange.range)));
+            }
             let elem = ty
                 .array_element()
                 .ok_or_else(|| undefined_function(name, given))?;
@@ -1028,6 +1899,14 @@ fn unnest_columns(name: &str, given: &[ArgType]) -> Result<Vec<ColumnBinding>, E
 /// as the longest array, shorter arrays padded with NULL. A NULL array behaves
 /// exactly as an empty one.
 fn unnest_rows(vals: &[Datum]) -> Vec<Vec<Datum>> {
+    if let [Datum::Multirange(multirange)] = vals {
+        return multirange
+            .ranges
+            .iter()
+            .cloned()
+            .map(|range| vec![Datum::Range(range)])
+            .collect();
+    }
     let columns: Vec<&[Datum]> = vals
         .iter()
         .map(|v| match v {
@@ -1290,7 +2169,7 @@ fn regexp_split_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, Exec
         None => "",
         Some(other) => text_arg(name, other)?,
     };
-    let re = compile_regex(pattern, flags)?;
+    let re = compile_pattern("regexp_split_to_table()", false, pattern, flags)?;
     let mut pieces = Vec::new();
     let mut piece_start = 0usize;
     let mut search = 0usize;
@@ -1334,62 +2213,51 @@ fn next_boundary(input: &str, at: usize) -> usize {
         .map_or(at + 1, |c| at + c.len_utf8())
 }
 
-/// Compile a PostgreSQL regular expression with its flag string.
+/// `regexp_matches(string, pattern [, flags])`: the capture groups of each
+/// match, one `text[]` row per match.
 ///
-/// PostgreSQL's default is "non-newline-sensitive": `.` matches a newline and
-/// `^`/`$` anchor only at the ends of the string. `n`/`m` make both
-/// newline-sensitive, `s` restores the default, `i`/`c` set case folding, `x`
-/// enables expanded syntax and `q` makes the pattern a literal. This function
-/// rejects `g` the way PostgreSQL rejects it for this function.
-fn compile_regex(pattern: &str, flags: &str) -> Result<regex::Regex, ExecError> {
-    let mut case_insensitive = false;
-    let mut newline_sensitive = false;
-    let mut expanded = false;
-    let mut literal = false;
-    for flag in flags.chars() {
-        match flag {
-            'i' => case_insensitive = true,
-            'c' => case_insensitive = false,
-            'n' | 'm' | 'p' | 'w' => newline_sensitive = true,
-            's' | 'e' | 'b' | 't' => newline_sensitive = false,
-            'x' => expanded = true,
-            'q' => literal = true,
-            'g' => {
-                return Err(ExecError::FunctionError {
-                    sqlstate: "22023",
-                    message: "regexp_split_to_table() does not support the \"global\" option"
-                        .to_string(),
-                });
-            }
-            other => {
-                return Err(ExecError::FunctionError {
-                    sqlstate: "22023",
-                    message: format!("invalid regular expression option: \"{other}\""),
-                });
-            }
-        }
-    }
-    let source = if literal {
-        regex::escape(pattern)
-    } else {
-        pattern.to_string()
+/// Without `g` only the first match produces a row. With `g` the scan walks
+/// forward from the end of each match — and one character past it when the
+/// match was empty, which is what makes `regexp_matches(…, '^', 'mg')` yield a
+/// row per line instead of looping. A pattern with no capture groups reports
+/// the whole match as the array's one element.
+fn regexp_matches_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let input = text_arg(name, &vals[0])?;
+    let pattern = text_arg(name, &vals[1])?;
+    let flags = match vals.get(2) {
+        None => "",
+        Some(other) => text_arg(name, other)?,
     };
-    regex::RegexBuilder::new(&source)
-        .case_insensitive(case_insensitive)
-        .multi_line(newline_sensitive)
-        .dot_matches_new_line(!newline_sensitive)
-        .ignore_whitespace(expanded)
-        .build()
-        .map_err(|error| ExecError::FunctionError {
-            sqlstate: "2201B",
-            message: format!("invalid regular expression: {error}"),
-        })
+    let global = flags.contains('g');
+    let re = compile_pattern("regexp_matches()", true, pattern, flags)?;
+    let mut rows = Vec::new();
+    let mut search = 0usize;
+    while search <= input.len() {
+        let Some(caps) = re.captures_at(input, search) else {
+            break;
+        };
+        let whole = caps.get(0).expect("group 0 always participates");
+        rows.push(vec![Datum::Array(ArrayValue::new(
+            ElemType::Text,
+            group_datums(&re, &caps),
+        ))]);
+        if !global {
+            break;
+        }
+        search = if whole.is_empty() {
+            next_boundary(input, whole.end())
+        } else {
+            whole.end()
+        };
+    }
+    Ok(rows)
 }
 
 // ---- shared helpers ----
 
 fn column(name: &str, ty: ColumnType) -> ColumnBinding {
     ColumnBinding {
+        exposure: Exposure::Output,
         qualifier: None,
         name: name.to_string(),
         ty,
@@ -1503,10 +2371,35 @@ mod tests {
             ColumnType::Jsonb,
         )
     }
+    /// One snapshot with three running ids, declared as whichever of the two
+    /// SQL types the caller is testing.
+    fn snapshot_arg(ty: ColumnType) -> Expr {
+        constant(
+            Datum::PgSnapshot(Box::new(
+                "12:20:13,15,18".parse().expect("valid pg_snapshot"),
+            )),
+            ty,
+        )
+    }
+
+    /// A `json` argument. Unlike [`jsonb_arg`] the document is *not* rebuilt —
+    /// `json_in` validates and keeps every byte — so the spacing, key order and
+    /// duplicate keys written here are what the expansion has to hand back.
+    fn json_arg(source: &str) -> Expr {
+        crabka_pgtypes::json::validate(source).expect("valid json");
+        constant(Datum::Json(source.to_string()), ColumnType::Json)
+    }
+
+    fn jsons(values: &[&str]) -> Vec<Datum> {
+        values
+            .iter()
+            .map(|s| Datum::Json((*s).to_string()))
+            .collect()
+    }
 
     /// Plan then expand a call, the way both callers do.
     fn call(name: &str, args: &[Expr]) -> Result<Vec<Vec<Datum>>, ExecError> {
-        let plan = plan(name, args, &Scope::empty())?;
+        let plan = plan(name, args, CallSite::FromItem(None), &Scope::empty())?;
         let mut vals = args
             .iter()
             .map(|a| crate::eval::eval(a, &Scope::empty(), &[], &ctx()))
@@ -1540,21 +2433,57 @@ mod tests {
             "generate_subscripts",
             "string_to_table",
             "regexp_split_to_table",
+            "regexp_matches",
             "jsonb_each",
             "jsonb_each_text",
             "jsonb_object_keys",
             "jsonb_array_elements",
             "jsonb_array_elements_text",
+            "json_each",
+            "json_each_text",
+            "json_object_keys",
+            "json_array_elements",
+            "json_array_elements_text",
+            "jsonb_path_query",
+            "pg_input_error_info",
+            "pg_snapshot_xip",
+            "txid_snapshot_xip",
         ] {
             assert!(is_srf(name), "{name} should be a set-returning function");
             assert!(is_srf(&name.to_ascii_uppercase()), "{name} uppercased");
         }
-        for name in ["jsonb_typeof", "generate_seriess", "abs", ""] {
+        // `PostgreSQL` declares the jsonpath functions over `jsonb` alone, so
+        // the `json_` spelling five of these have has no counterpart here.
+        for name in [
+            "jsonb_typeof",
+            "json_path_query",
+            "json_path_query_tz",
+            "generate_seriess",
+            "abs",
+            "",
+        ] {
             assert!(
                 !is_srf(name),
                 "{name} should not be a set-returning function"
             );
         }
+    }
+
+    #[test]
+    fn input_error_info_returns_postgres_error_fields() {
+        assert_eq!(
+            call("pg_input_error_info", &[text("(1,4"), text("int4range")]).expect("error info"),
+            vec![vec![
+                Datum::Text("malformed range literal: \"(1,4\"".into()),
+                Datum::Text("Unexpected end of input.".into()),
+                Datum::Null,
+                Datum::Text("22P02".into()),
+            ]]
+        );
+        assert_eq!(
+            call("pg_input_error_info", &[text("(1,4)"), text("int4range")]).expect("valid input"),
+            vec![vec![Datum::Null; 4]]
+        );
     }
 
     /// One planning case: the function, its arguments, and the `(name, type)`
@@ -1622,6 +2551,46 @@ mod tests {
                 vec![jsonb_arg("[1]")],
                 vec![("value", ColumnType::Text)],
             ),
+            // The `json` family is the same five shapes over the other document
+            // type, and the two that hand back a sub-document hand back `json`.
+            (
+                "json_each",
+                vec![json_arg(r#"{"a": 1}"#)],
+                vec![("key", ColumnType::Text), ("value", ColumnType::Json)],
+            ),
+            (
+                "json_each_text",
+                vec![json_arg(r#"{"a": 1}"#)],
+                vec![("key", ColumnType::Text), ("value", ColumnType::Text)],
+            ),
+            (
+                "json_object_keys",
+                vec![json_arg(r#"{"a": 1}"#)],
+                vec![("json_object_keys", ColumnType::Text)],
+            ),
+            (
+                "json_array_elements",
+                vec![json_arg("[1]")],
+                vec![("value", ColumnType::Json)],
+            ),
+            (
+                "json_array_elements_text",
+                vec![json_arg("[1]")],
+                vec![("value", ColumnType::Text)],
+            ),
+            // The snapshot pair is the same expansion over two declared types,
+            // and each names its column after itself rather than after the
+            // other.
+            (
+                "pg_snapshot_xip",
+                vec![snapshot_arg(ColumnType::PgSnapshot)],
+                vec![("pg_snapshot_xip", ColumnType::Xid8)],
+            ),
+            (
+                "txid_snapshot_xip",
+                vec![snapshot_arg(ColumnType::TxidSnapshot)],
+                vec![("txid_snapshot_xip", ColumnType::Int8)],
+            ),
         ];
 
         for (name, args, expected) in cases {
@@ -1629,7 +2598,8 @@ mod tests {
                 .into_iter()
                 .map(|(name, ty)| column(name, ty))
                 .collect();
-            let planned = plan(name, &args, &Scope::empty()).expect("plan");
+            let planned =
+                plan(name, &args, CallSite::FromItem(None), &Scope::empty()).expect("plan");
             assert!(planned.columns == expected, "planning {name}");
             // The `Describe` path must agree with the executing one, column for
             // column, or a prepared statement's RowDescription would lie.
@@ -1638,8 +2608,8 @@ mod tests {
                 args: args.clone(),
                 column_defs: None,
             }];
-            let schema = from_item_schema(&item, false, None, &None).expect("schema");
-            let executed = from_item(&item, false, None, &None, &ctx()).expect("rows");
+            let schema = from_item_schema(&item, false, false, None, &None).expect("schema");
+            let executed = from_item(&item, false, false, None, &None, &ctx()).expect("rows");
             assert!(schema.scope == executed.scope, "describing {name}");
         }
     }
@@ -1697,7 +2667,12 @@ mod tests {
         ];
 
         for (args, expected) in cases {
-            let planned = plan("generate_series", &args, &Scope::empty());
+            let planned = plan(
+                "generate_series",
+                &args,
+                CallSite::FromItem(None),
+                &Scope::empty(),
+            );
             match expected {
                 Ok(ty) => assert!(planned.expect("plan").columns[0].ty == ty),
                 Err(sqlstate) => {
@@ -1884,6 +2859,109 @@ mod tests {
         }
     }
 
+    /// One expected row of `regexp_matches`: a capture group per element, where
+    /// `None` is a group that did not participate.
+    type Groups<'a> = &'a [Option<&'a str>];
+
+    /// `regexp_matches` reports one `text[]` per match, and the `g` flag is
+    /// what decides whether it stops after the first one.
+    #[test]
+    fn regexp_matches_reports_the_capture_groups_of_each_match() {
+        let arrays = |rows: &[Groups<'_>]| -> Vec<Datum> {
+            rows.iter()
+                .map(|groups| {
+                    Datum::Array(ArrayValue::new(
+                        ElemType::Text,
+                        groups
+                            .iter()
+                            .map(|g| g.map_or(Datum::Null, |s| Datum::Text(s.to_string())))
+                            .collect(),
+                    ))
+                })
+                .collect()
+        };
+        let cases: Vec<(Vec<Expr>, Vec<Groups<'_>>)> = vec![
+            // Two groups, one match.
+            (
+                vec![text("foobarbequebaz"), text("(bar)(beque)")],
+                vec![&[Some("bar"), Some("beque")]],
+            ),
+            // No groups at all: the array holds the whole match.
+            (
+                vec![text("foobarbequebaz"), text("barbeque")],
+                vec![&[Some("barbeque")]],
+            ),
+            // A group that did not participate is a NULL element, not an empty
+            // string — which an *empty* match is.
+            (
+                vec![text("foobarbequebaz"), text("(bar)(.+)?(beque)")],
+                vec![&[Some("bar"), None, Some("beque")]],
+            ),
+            (
+                vec![text("foobarbequebaz"), text("(bar)(.*)(beque)")],
+                vec![&[Some("bar"), Some(""), Some("beque")]],
+            ),
+            // No match is no rows, not one NULL row.
+            (
+                vec![text("foobarbequebaz"), text("(bar)(.+)(beque)")],
+                vec![],
+            ),
+            // Without `g` the scan stops after the first match; with it every
+            // non-overlapping match reports.
+            (
+                vec![text("foobarbequebazilbarfbonk"), text("(b[^b]+)(b[^b]+)")],
+                vec![&[Some("bar"), Some("beque")]],
+            ),
+            (
+                vec![
+                    text("foobarbequebazilbarfbonk"),
+                    text("(b[^b]+)(b[^b]+)"),
+                    text("g"),
+                ],
+                vec![
+                    &[Some("bar"), Some("beque")],
+                    &[Some("bazil"), Some("barf")],
+                ],
+            ),
+            (
+                vec![text("foObARbEqUEbAz"), text("(bar)(beque)"), text("i")],
+                vec![&[Some("bAR"), Some("bEqUE")]],
+            ),
+            // An empty match advances one character, so a line anchor under `m`
+            // reports once per line instead of looping.
+            (
+                vec![text("foo\nbar\nbaz"), text("^"), text("mg")],
+                vec![&[Some("")], &[Some("")], &[Some("")]],
+            ),
+            (
+                vec![text("1\n2\n"), text("^.?"), text("mg")],
+                vec![&[Some("1")], &[Some("2")], &[Some("")]],
+            ),
+        ];
+        for (args, expected) in cases {
+            assert!(
+                single_column("regexp_matches", &args).expect("rows") == arrays(&expected),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// `regexp_matches` is the one function in the family that reads `g`, so it
+    /// must not inherit `regexp_split_to_table`'s rejection of it.
+    #[test]
+    fn regexp_matches_accepts_the_global_flag_that_the_split_srf_rejects() {
+        let args = [text("aa"), text("a"), text("g")];
+        assert!(single_column("regexp_matches", &args).expect("rows").len() == 2);
+        let error = single_column("regexp_split_to_table", &args)
+            .expect_err("rejected")
+            .into_pg();
+        assert!(error.code == "22023", "{error:?}");
+        assert!(
+            error.message == "regexp_split_to_table() does not support the \"global\" option",
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn a_rejected_regexp_flag_or_pattern_carries_postgres_sqlstate() {
         let cases: Vec<(&str, &str, &str)> = vec![
@@ -1989,6 +3067,225 @@ mod tests {
         assert!(
             call("jsonb_each", &[constant(Datum::Null, ColumnType::Jsonb)]).expect("rows")
                 == Vec::<Vec<Datum>>::new()
+        );
+    }
+
+    /// One row of a single-column expansion per value.
+    fn one_column(values: Vec<Datum>) -> Vec<Vec<Datum>> {
+        values.into_iter().map(|value| vec![value]).collect()
+    }
+
+    /// The `json` family expands the ORIGINAL document text, so the three things
+    /// `jsonb` has already thrown away by the time it is stored all survive:
+    /// input order, duplicate keys, and each sub-document's own spacing.
+    #[test]
+    fn the_json_set_returning_functions_preserve_input_order_duplicates_and_spacing() {
+        let object = json_arg(r#"{"b":1,   "a":"x",  "b":null, "o": { "b" : 1 }}"#);
+        let array = json_arg(r#"[1,  { "b" : 1 } , "x\"y", null]"#);
+
+        let cases: Vec<(&str, &Expr, Vec<Vec<Datum>>)> = vec![
+            (
+                "json_each",
+                &object,
+                vec![
+                    vec![Datum::Text("b".into()), Datum::Json("1".into())],
+                    vec![Datum::Text("a".into()), Datum::Json("\"x\"".into())],
+                    // The duplicate `b` is kept, where it was written — the one
+                    // row `jsonb_each` cannot produce.
+                    vec![Datum::Text("b".into()), Datum::Json("null".into())],
+                    vec![Datum::Text("o".into()), Datum::Json("{ \"b\" : 1 }".into())],
+                ],
+            ),
+            (
+                "json_each_text",
+                &object,
+                vec![
+                    vec![Datum::Text("b".into()), Datum::Text("1".into())],
+                    // `->>`'s rule: a JSON string is de-escaped, the JSON `null`
+                    // literal becomes SQL NULL, anything else is its own text.
+                    vec![Datum::Text("a".into()), Datum::Text("x".into())],
+                    vec![Datum::Text("b".into()), Datum::Null],
+                    vec![Datum::Text("o".into()), Datum::Text("{ \"b\" : 1 }".into())],
+                ],
+            ),
+            (
+                "json_object_keys",
+                &object,
+                one_column(texts(&["b", "a", "b", "o"])),
+            ),
+            (
+                "json_array_elements",
+                &array,
+                one_column(jsons(&["1", "{ \"b\" : 1 }", r#""x\"y""#, "null"])),
+            ),
+            (
+                "json_array_elements_text",
+                &array,
+                one_column(vec![
+                    Datum::Text("1".into()),
+                    Datum::Text("{ \"b\" : 1 }".into()),
+                    Datum::Text("x\"y".into()),
+                    Datum::Null,
+                ]),
+            ),
+        ];
+        for (name, argument, expected) in cases {
+            assert!(
+                call(name, std::slice::from_ref(argument)).expect("rows") == expected,
+                "{name}"
+            );
+        }
+
+        // An empty container expands to nothing, and — STRICT — so does NULL.
+        for (name, empty) in [
+            ("json_each", "{}"),
+            ("json_each_text", "{}"),
+            ("json_object_keys", "{}"),
+            ("json_array_elements", "[]"),
+            ("json_array_elements_text", "[]"),
+        ] {
+            assert!(
+                call(name, &[json_arg(empty)]).expect("rows") == Vec::<Vec<Datum>>::new(),
+                "{name}({empty})"
+            );
+            assert!(
+                call(name, &[constant(Datum::Null, ColumnType::Json)]).expect("rows")
+                    == Vec::<Vec<Datum>>::new(),
+                "{name}(NULL)"
+            );
+        }
+    }
+
+    /// The `json` family raises its own messages for a wrongly shaped document,
+    /// and they are NOT the `jsonb` ones: `json_each` on an array is "cannot
+    /// deconstruct an array as an object" where `jsonb_each` says "cannot call
+    /// jsonb_each on a non-object".
+    #[test]
+    fn a_wrongly_shaped_json_document_carries_the_json_familys_own_message() {
+        let cases: Vec<(&str, &str, &str)> = vec![
+            (
+                "json_each",
+                "[1]",
+                "cannot deconstruct an array as an object",
+            ),
+            ("json_each", "1", "cannot deconstruct a scalar"),
+            (
+                "json_each_text",
+                "[1]",
+                "cannot deconstruct an array as an object",
+            ),
+            ("json_each_text", "1", "cannot deconstruct a scalar"),
+            (
+                "json_object_keys",
+                "[1]",
+                "cannot call json_object_keys on an array",
+            ),
+            (
+                "json_object_keys",
+                "1",
+                "cannot call json_object_keys on a scalar",
+            ),
+            (
+                "json_array_elements",
+                r#"{"a": 1}"#,
+                "cannot call json_array_elements on a non-array",
+            ),
+            (
+                "json_array_elements",
+                "1",
+                "cannot call json_array_elements on a scalar",
+            ),
+            (
+                "json_array_elements_text",
+                r#"{"a": 1}"#,
+                "cannot call json_array_elements_text on a non-array",
+            ),
+            (
+                "json_array_elements_text",
+                "1",
+                "cannot call json_array_elements_text on a scalar",
+            ),
+        ];
+        for (name, source, message) in cases {
+            let error = call(name, &[json_arg(source)])
+                .expect_err("wrong container")
+                .into_pg();
+            assert!(
+                (error.code.as_str(), error.message.as_str()) == ("22023", message),
+                "{name}({source}) gave {error:?}"
+            );
+        }
+    }
+
+    /// `PostgreSQL` declares the two families over `json` and `jsonb` with no
+    /// implicit cast between them, so neither accepts the other's document — nor
+    /// any other type. Each is the plain 42883 an unresolvable call raises.
+    #[test]
+    fn neither_json_family_accepts_the_others_document_type() {
+        let cases: Vec<(&str, Expr, &str)> = vec![
+            ("json_each", jsonb_arg("{}"), "json_each(jsonb)"),
+            ("json_each_text", jsonb_arg("{}"), "json_each_text(jsonb)"),
+            (
+                "json_object_keys",
+                jsonb_arg("{}"),
+                "json_object_keys(jsonb)",
+            ),
+            (
+                "json_array_elements",
+                jsonb_arg("[]"),
+                "json_array_elements(jsonb)",
+            ),
+            (
+                "json_array_elements_text",
+                jsonb_arg("[]"),
+                "json_array_elements_text(jsonb)",
+            ),
+            ("jsonb_each", json_arg("{}"), "jsonb_each(json)"),
+            ("jsonb_each_text", json_arg("{}"), "jsonb_each_text(json)"),
+            (
+                "jsonb_object_keys",
+                json_arg("{}"),
+                "jsonb_object_keys(json)",
+            ),
+            (
+                "jsonb_array_elements",
+                json_arg("[]"),
+                "jsonb_array_elements(json)",
+            ),
+            (
+                "jsonb_array_elements_text",
+                json_arg("[]"),
+                "jsonb_array_elements_text(json)",
+            ),
+            ("json_each", int4(1), "json_each(integer)"),
+            ("json_each", text("x"), "json_each(text)"),
+            ("jsonb_each", int4(1), "jsonb_each(integer)"),
+            ("jsonb_each", text("x"), "jsonb_each(text)"),
+        ];
+        for (name, argument, signature) in cases {
+            let error = call(name, std::slice::from_ref(&argument))
+                .expect_err("wrong argument type")
+                .into_pg();
+            let expected = format!("function {signature} does not exist");
+            assert!(
+                (error.code.as_str(), error.message.as_str()) == ("42883", expected.as_str()),
+                "{name} gave {error:?}"
+            );
+        }
+
+        // A bare literal is `unknown` and adopts whichever type the family it was
+        // passed to declares, so the same spelling reaches both.
+        let literal = [Expr::StringLiteral(r#"{"a":1}"#.into())];
+        assert!(
+            call("json_each", &literal).expect("rows")
+                == vec![vec![Datum::Text("a".into()), Datum::Json("1".into())]]
+        );
+        assert!(
+            call("jsonb_each", &literal).expect("rows")
+                == vec![vec![
+                    Datum::Text("a".into()),
+                    Datum::Jsonb(JsonbValue::Number(bigdecimal::BigDecimal::from(1)))
+                ]]
         );
     }
 
@@ -2215,6 +3512,33 @@ mod tests {
                 vec!["key", "value"],
                 vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::TEXT],
             ),
+            // The `json` family's sub-document columns are `json` (114), not
+            // `jsonb` (3802) — `json` is a type of its own, not an alias.
+            (
+                "SELECT * FROM json_each('{\"a\": 1}'::json)",
+                vec!["key", "value"],
+                vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::JSON],
+            ),
+            (
+                "SELECT * FROM json_each_text('{\"a\": 1}'::json)",
+                vec!["key", "value"],
+                vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::TEXT],
+            ),
+            (
+                "SELECT * FROM json_array_elements('[1]'::json)",
+                vec!["value"],
+                vec![crabka_pgtypes::oids::JSON],
+            ),
+            (
+                "SELECT * FROM json_array_elements_text('[1]'::json)",
+                vec!["value"],
+                vec![crabka_pgtypes::oids::TEXT],
+            ),
+            (
+                "SELECT * FROM json_object_keys('{\"a\": 1}'::json)",
+                vec!["json_object_keys"],
+                vec![crabka_pgtypes::oids::TEXT],
+            ),
             (
                 "SELECT * FROM string_to_table('a,b', ',')",
                 vec!["string_to_table"],
@@ -2283,5 +3607,256 @@ mod tests {
         )
         .await;
         assert!(shape(&named).0 == vec!["x", "y"]);
+    }
+
+    /// The two families expand the SAME document differently, all the way out to
+    /// the wire: `json` keeps what was written, `jsonb` reports what it stored.
+    #[tokio::test]
+    async fn the_two_json_families_disagree_about_the_same_document_end_to_end() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        let document = r#"{"b":1,   "a":2,  "b":3}"#;
+
+        let r = query(
+            &mut s,
+            &format!("SELECT * FROM json_each('{document}'::json)"),
+        )
+        .await;
+        assert!(shape(&r).0 == vec!["key", "value"]);
+        assert!(shape(&r).1 == vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::JSON]);
+        assert!(
+            shape(&r).2
+                == vec![
+                    vec![Some("b".into()), Some("1".into())],
+                    vec![Some("a".into()), Some("2".into())],
+                    vec![Some("b".into()), Some("3".into())],
+                ]
+        );
+
+        // The same three fields through `jsonb`: sorted, and the duplicate `b`
+        // already resolved to the last one written.
+        let r = query(
+            &mut s,
+            &format!("SELECT * FROM jsonb_each('{document}'::jsonb)"),
+        )
+        .await;
+        assert!(shape(&r).1 == vec![crabka_pgtypes::oids::TEXT, crabka_pgtypes::oids::JSONB]);
+        assert!(
+            shape(&r).2
+                == vec![
+                    vec![Some("a".into()), Some("2".into())],
+                    vec![Some("b".into()), Some("3".into())],
+                ]
+        );
+
+        // A single-column call names its column after the function it was
+        // written as, and reports the duplicate key the same way.
+        let r = query(
+            &mut s,
+            &format!("SELECT * FROM json_object_keys('{document}'::json)"),
+        )
+        .await;
+        assert!(shape(&r).0 == vec!["json_object_keys"]);
+        assert!(column_of(&r) == vec![Some("b".into()), Some("a".into()), Some("b".into())]);
+
+        // Element text survives verbatim, spacing and escapes included.
+        let r = query(
+            &mut s,
+            "SELECT * FROM json_array_elements('[1,  { \"b\" : 1 } ]'::json)",
+        )
+        .await;
+        assert!(shape(&r).1 == vec![crabka_pgtypes::oids::JSON]);
+        assert!(column_of(&r) == vec![Some("1".into()), Some("{ \"b\" : 1 }".into())]);
+    }
+
+    /// `PostgreSQL` declares the jsonpath functions over `jsonb` alone, so the
+    /// `json_` spelling the other five have is a name that resolves to nothing.
+    #[tokio::test]
+    async fn json_path_query_is_not_a_function() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for sql in [
+            "SELECT * FROM json_path_query('{\"a\": 1}'::json, '$.a')",
+            "SELECT * FROM json_path_query_tz('{\"a\": 1}'::json, '$.a')",
+        ] {
+            let error = s.simple_query(sql).await.expect_err("refused");
+            assert!(error.code == "42883", "{sql} gave {error:?}");
+        }
+    }
+
+    /// Build `proot ⊃ pmid ⊃ pleaf`, an ordinary table beside it, and an index
+    /// on each — the tree every `pg_partition_ancestors` test below walks.
+    async fn partition_tree(s: &mut crate::SqlSession) {
+        query(
+            s,
+            "CREATE TABLE proot (a int, b int) PARTITION BY RANGE (a)",
+        )
+        .await;
+        query(
+            s,
+            "CREATE TABLE pmid PARTITION OF proot FOR VALUES FROM (0) TO (100) \
+             PARTITION BY RANGE (b)",
+        )
+        .await;
+        query(
+            s,
+            "CREATE TABLE pleaf PARTITION OF pmid FOR VALUES FROM (0) TO (50)",
+        )
+        .await;
+        query(s, "CREATE TABLE plain_t (a int)").await;
+        query(s, "CREATE INDEX plain_idx ON plain_t (a)").await;
+    }
+
+    #[tokio::test]
+    async fn pg_partition_ancestors_names_the_relation_then_every_parent_to_the_root() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        partition_tree(&mut s).await;
+
+        // The relation comes *first*, then each parent in turn — psql orders by
+        // the ordinality of this walk to find a trigger's topmost definer, so
+        // the direction is load-bearing, not incidental.
+        for (argument, expected) in [
+            ("'pleaf'", vec!["pleaf", "pmid", "proot"]),
+            ("'pmid'", vec!["pmid", "proot"]),
+            // A partitioned parent is in a partition tree, so it names itself.
+            ("'proot'", vec!["proot"]),
+            // A relation in no partition tree at all produces NO rows — not
+            // even itself. This is PostgreSQL's `check_rel_can_be_partition`.
+            ("'plain_t'", vec![]),
+            ("'plain_idx'", vec![]),
+            // STRICT: a NULL argument yields nothing.
+            ("NULL::regclass", vec![]),
+            // An oid no relation carries resolves to nothing, which is not an
+            // error — unlike a *name* no relation carries.
+            ("999999::regclass", vec![]),
+        ] {
+            let sql = format!("SELECT relid FROM pg_partition_ancestors({argument})");
+            let r = query(&mut s, &sql).await;
+            assert!(shape(&r).0 == vec!["relid"], "{sql}");
+            assert!(shape(&r).1 == vec![crabka_pgtypes::oids::REGCLASS], "{sql}");
+            let names: Vec<String> = column_of(&r).into_iter().flatten().collect();
+            assert!(names == expected, "{sql} gave {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pg_partition_ancestors_reaches_the_same_walk_from_every_call_position() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        partition_tree(&mut s).await;
+        let expected = vec![
+            Some("pleaf".to_string()),
+            Some("pmid".to_string()),
+            Some("proot".to_string()),
+        ];
+
+        // The select list names the single column after the function, the FROM
+        // item after the column, and `pg_catalog.` qualifies neither.
+        for (sql, column_name) in [
+            (
+                "SELECT pg_partition_ancestors('pleaf')",
+                "pg_partition_ancestors",
+            ),
+            (
+                "SELECT pg_catalog.pg_partition_ancestors('pleaf')",
+                "pg_partition_ancestors",
+            ),
+            ("SELECT relid FROM pg_partition_ancestors('pleaf')", "relid"),
+            (
+                "SELECT relid FROM pg_catalog.pg_partition_ancestors('pleaf')",
+                "relid",
+            ),
+            (
+                "SELECT * FROM pg_partition_ancestors('pleaf'::regclass)",
+                "relid",
+            ),
+        ] {
+            let r = query(&mut s, sql).await;
+            assert!(shape(&r).0 == vec![column_name], "{sql}");
+            assert!(column_of(&r) == expected, "{sql}");
+        }
+
+        // psql's `\d` walks a *correlated* call with ordinality and orders by
+        // the depth it produces, so the ancestors have to arrive in walk order
+        // through the lateral path too.
+        let r = query(
+            &mut s,
+            "SELECT a.relid, a.depth \
+               FROM pg_catalog.pg_class t, \
+                    pg_catalog.pg_partition_ancestors(t.oid) WITH ORDINALITY AS a(relid, depth) \
+              WHERE t.relname = 'pleaf' ORDER BY a.depth",
+        )
+        .await;
+        assert!(shape(&r).0 == vec!["relid", "depth"]);
+        assert!(
+            shape(&r).2
+                == vec![
+                    vec![Some("pleaf".into()), Some("1".into())],
+                    vec![Some("pmid".into()), Some("2".into())],
+                    vec![Some("proot".into()), Some("3".into())],
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_partition_ancestors_rejects_a_wrong_arity_and_an_unresolvable_name() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        partition_tree(&mut s).await;
+
+        for (sql, code) in [
+            ("SELECT * FROM pg_partition_ancestors()", "42883"),
+            (
+                "SELECT * FROM pg_partition_ancestors('pleaf', 'pmid')",
+                "42883",
+            ),
+            // A name is resolved by the `regclass` cast, which raises 42P01 —
+            // where PostgreSQL raises it too.
+            (
+                "SELECT * FROM pg_partition_ancestors('no_such_rel')",
+                "42P01",
+            ),
+        ] {
+            let error = s.simple_query(sql).await.expect_err("refused");
+            assert!(error.code == code, "{sql} gave {error:?}");
+        }
+    }
+
+    /// A `pg_catalog.` qualifier resolves to the same function everywhere and
+    /// never reaches the output names, but it *does* survive into the `42883`
+    /// for a name that resolves to nothing — PostgreSQL quotes the call as it
+    /// was written there, because there is no function to have a real name.
+    #[tokio::test]
+    async fn a_pg_catalog_qualifier_resolves_an_srf_without_naming_its_columns() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+
+        let r = query(&mut s, "SELECT * FROM pg_catalog.generate_series(1, 2)").await;
+        assert!(shape(&r).0 == vec!["generate_series"]);
+        assert!(column_of(&r) == vec![Some("1".into()), Some("2".into())]);
+
+        // The item is qualified by the bare name, so the qualified reference
+        // resolves.
+        let r = query(
+            &mut s,
+            "SELECT generate_series.* FROM pg_catalog.generate_series(1, 2)",
+        )
+        .await;
+        assert!(column_of(&r) == vec![Some("1".into()), Some("2".into())]);
+
+        let r = query(
+            &mut s,
+            "SELECT * FROM pg_catalog.json_object_keys('{\"a\": 1}'::json)",
+        )
+        .await;
+        assert!(shape(&r).0 == vec!["json_object_keys"]);
+
+        let error = s
+            .simple_query("SELECT * FROM pg_catalog.nosuch_srf(1)")
+            .await
+            .expect_err("refused");
+        assert!(error.code == "42883", "{error:?}");
+        assert!(error.message.contains("pg_catalog.nosuch_srf"), "{error:?}");
     }
 }

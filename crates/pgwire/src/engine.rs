@@ -66,6 +66,33 @@ pub enum ResultPage {
     Empty {
         result_index: usize,
     },
+    /// A whole `COPY … TO STDOUT` block: `CopyOutResponse`, every row, then
+    /// `CopyDone` and the command tag.
+    ///
+    /// A copy-out is one indivisible page rather than a stream of them for the
+    /// same reason [`CopyOutStream`] carries the whole copy: the engine only
+    /// has one once the copy has already succeeded, so there is no state in
+    /// which half a block has been written and the rest cannot be.
+    CopyOut {
+        result_index: usize,
+        stream: CopyOutStream,
+    },
+}
+
+/// Why [`Session::simple_query_batch_into`] returned.
+#[derive(Debug)]
+pub enum SimpleQueryStop {
+    /// Every statement in the query string ran.
+    Done,
+    /// A `COPY … FROM STDIN` was reached. The wire layer owes the client a
+    /// `CopyInResponse`, then the copy's data, then a resumption of the same
+    /// query string at `statement_index + 1`.
+    CopyIn {
+        /// The copy's position among the statements of the query string, which
+        /// is what [`Session::copy_in`] is given to find it again.
+        statement_index: usize,
+        response: CopyInResponse,
+    },
 }
 
 /// Backpressured consumer for bounded simple-query result pages.
@@ -114,6 +141,16 @@ impl CollectingResultSink {
                         return Err(malformed_result_pages(result_index, results.len()));
                     }
                     results.push(QueryResult::Empty);
+                }
+                // A copy-out is a wire state, and a sink that collects
+                // `QueryResult`s has nowhere to put one: `QueryResult` has no
+                // variant that carries copy data, and inventing a command tag
+                // for it would report a copy that never reached anybody.
+                ResultPage::CopyOut { .. } => {
+                    return Err(PgError::error(
+                        "0A000",
+                        "COPY TO STDOUT requires pgwire CopyOut messages",
+                    ));
                 }
                 ResultPage::Rows {
                     result_index,
@@ -208,8 +245,52 @@ pub enum CloseTarget<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyOutResponse {
+    /// 0 = text, 1 = binary.
     pub overall_format: i16,
+    /// One format code per source column.
     pub column_formats: Vec<i16>,
+}
+
+/// A complete COPY TO STDOUT result: everything the wire layer needs to put the
+/// connection into copy-out mode, stream the payload, and complete the command.
+///
+/// The whole copy is carried at once rather than streamed because that is what
+/// `PostgreSQL` puts on the wire. A backend buffers its entire copy-out block
+/// and flushes it when the statement finishes — a `COPY` whose query fails
+/// partway sends only `ErrorResponse`, never a `CopyOutResponse` followed by the
+/// rows produced before the failure. Handing the wire layer a value that only
+/// exists once the copy has succeeded makes that indivisibility structural: an
+/// engine that fails returns `Err` and no copy-out message is ever encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyOutStream {
+    pub response: CopyOutResponse,
+    /// One already-encoded `CopyData` payload per row, in the format named by
+    /// `response`. A binary copy carries its `PGCOPY` file header on the first
+    /// payload and its trailer as a payload of its own, matching how
+    /// `PostgreSQL` frames them.
+    pub rows: Vec<Bytes>,
+    /// The `CommandComplete` tag that closes the copy, such as `COPY 3`.
+    pub tag: String,
+}
+
+/// One `GUC_REPORT` parameter and the value the connection must be told it has.
+///
+/// `PostgreSQL` marks fifteen GUCs `GUC_REPORT` in `guc_tables.c` and reports
+/// each of them twice over: once in the startup burst, and again — as a fresh
+/// `ParameterStatus` — every later time the session value changes. The second
+/// half is the half clients actually build on. A transaction pooler learns the
+/// state of a backend it is about to hand to another client from exactly these
+/// messages, and libpq answers `PQparameterStatus` from them.
+///
+/// The wire layer owns the *reporting* rules, so an engine may push the same
+/// parameter repeatedly and need not remember what it last said: see
+/// [`Session::take_parameter_changes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedParameter {
+    /// The GUC's canonical spelling, which is the one `guc_tables.c` declares:
+    /// `DateStyle` and `TimeZone`, not `datestyle` and `timezone`.
+    pub name: String,
+    pub value: String,
 }
 
 /// One `NOTIFY` delivered asynchronously to a listening connection.
@@ -237,7 +318,7 @@ pub enum ExecuteOutcome {
         response: CopyInResponse,
     },
     CopyOut {
-        response: CopyOutResponse,
+        stream: CopyOutStream,
     },
     Notification {
         notification: Notification,
@@ -281,10 +362,80 @@ pub trait Engine: Send + Sync + 'static {
 /// `tokio::select!`, then await [`Session::cancel_current_query`] before it
 /// reports `ReadyForQuery`. Implementations must make that pair drop-safe.
 pub trait Session: Send {
+    /// Name the database the startup packet asked for, before any GUC is
+    /// applied and before [`Session::startup`].
+    ///
+    /// This is not a GUC — `database` is not settable and a backend never
+    /// reports it — so it does not travel through
+    /// [`Session::startup_parameter`]. It is nonetheless the session's own
+    /// identity: `current_database()`, `pg_database`, `pg_stat_activity` and
+    /// the `information_schema` `*_catalog` columns all have to answer with
+    /// it, and a client that asked for one database and is told it is in
+    /// another has been lied to about where its writes went.
+    ///
+    /// The wire layer calls this exactly once per connection, and only when
+    /// the startup packet carried a name. A session that is never called keeps
+    /// whatever default it was built with.
+    fn set_database(&mut self, _name: &str) {}
+
+    /// Apply a GUC supplied in the startup packet before login hooks run.
+    fn startup_parameter(
+        &mut self,
+        _name: &str,
+        _value: &str,
+    ) -> impl Future<Output = Result<(), PgError>> + Send {
+        async { Ok(()) }
+    }
+
     /// Complete engine-side connection startup before the wire layer reports
     /// `ReadyForQuery`. An error return rejects the connection.
     fn startup(&mut self) -> impl Future<Output = Result<(), PgError>> + Send {
         async { Ok(()) }
+    }
+
+    /// The `GUC_REPORT` values this session starts with, read once after
+    /// [`Session::startup`] and announced in the startup `ParameterStatus`
+    /// burst.
+    ///
+    /// These override the static
+    /// [`SessionConfig::server_params`](crate::session::SessionConfig::server_params)
+    /// by name, case-insensitively, and a name the static set does not carry
+    /// is announced as well. The engine is the only thing that can answer
+    /// truthfully, because it is the only thing that knows what it made of the
+    /// startup packet: `PostgreSQL` answers a startup `DateStyle=Postgres`
+    /// with `Postgres, MDY`, a `TimeZone=utc` with `UTC`, and an
+    /// `IntervalStyle=SQL_STANDARD` with `sql_standard`.
+    ///
+    /// The default is empty, which leaves a session announcing only the static
+    /// set.
+    fn reported_parameters(&self) -> Vec<ReportedParameter> {
+        Vec::new()
+    }
+
+    /// Hand the wire layer this session's `GUC_REPORT` change stream.
+    ///
+    /// The wire layer calls this exactly once, immediately after it creates the
+    /// session, and from then on drains the queue at every `ReadyForQuery` —
+    /// which is where `PostgreSQL` puts the resulting `ParameterStatus`
+    /// messages, batched after the last statement of the round rather than
+    /// interleaved with each one.
+    ///
+    /// An engine pushes a parameter's **new effective value** whenever that
+    /// value moves, and does not have to filter: the wire layer collapses
+    /// repeats within a round and drops any value equal to the one it last
+    /// announced, which is what `PostgreSQL`'s per-GUC `reported_value` check
+    /// does. Rolling a `SET LOCAL` back to the value the client already knows
+    /// therefore stays silent on both.
+    ///
+    /// Every path that moves a reported value owes a push, not just `SET`:
+    /// `RESET`, `RESET ALL`, `DISCARD ALL`, `set_config()`, and the transaction
+    /// end that reverts a `SET LOCAL` all emit `ParameterStatus` on
+    /// `PostgreSQL`.
+    ///
+    /// Engines that never push keep the default `None`, and their sessions
+    /// announce the startup burst and nothing after it.
+    fn take_parameter_changes(&mut self) -> Option<mpsc::Receiver<ReportedParameter>> {
+        None
     }
 
     /// Release whatever the session owns that outlives the connection but not
@@ -357,6 +508,42 @@ pub trait Session: Send {
         }
     }
 
+    /// Execute simple-query text from `from_statement` on, stopping at the
+    /// first `COPY … FROM STDIN`.
+    ///
+    /// This is the entry point the wire loop uses, because a simple query may
+    /// carry a copy-in anywhere among its statements: `PostgreSQL` answers
+    /// `select 0\; copy t from stdin\; select 1` with the first result, then a
+    /// `CopyInResponse`, then the rest once the client has sent its data. The
+    /// engine cannot drive that alone — the data arrives on the wire, not
+    /// through this call — so it stops and hands the index back, and the wire
+    /// layer resumes at the next statement once the copy is complete.
+    ///
+    /// `from_statement` counts statements in `sql`, not results; an index at or
+    /// past the end runs nothing and reports [`SimpleQueryStop::Done`].
+    ///
+    /// The default runs the whole string through [`Session::simple_query_into`]
+    /// and never stops, which is right for an engine with no copy-in support:
+    /// such an engine cannot produce the stop, so it can never be asked to
+    /// resume either.
+    fn simple_query_batch_into<S: ResultSink>(
+        &mut self,
+        sql: &str,
+        from_statement: usize,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> impl Future<Output = Result<SimpleQueryStop, PgError>> + Send {
+        async move {
+            if from_statement != 0 {
+                return Err(PgError::protocol(
+                    "this engine cannot resume a simple query part-way through",
+                ));
+            }
+            self.simple_query_into(sql, page_rows, sink).await?;
+            Ok(SimpleQueryStop::Done)
+        }
+    }
+
     fn parse(
         &mut self,
         name: &str,
@@ -402,18 +589,39 @@ pub trait Session: Send {
     }
 
     /// Finish a COPY FROM STDIN after the client sends `CopyDone`.
+    ///
+    /// `statement_index` names the copy's position among the statements of
+    /// `sql`, so that a query string carrying more than one of them completes
+    /// the right one. A string that is a single copy passes 0.
     fn copy_in(
         &mut self,
         sql: &str,
+        statement_index: usize,
         data: Vec<Bytes>,
     ) -> impl Future<Output = Result<QueryResult, PgError>> + Send {
-        let _ = (sql, data);
+        let _ = (sql, statement_index, data);
         async {
             Err(PgError::error(
                 crate::error::sqlstate::FEATURE_NOT_SUPPORTED,
                 "COPY FROM STDIN is not supported by this engine",
             ))
         }
+    }
+
+    /// Return `Some` when `sql` is a supported simple-query COPY TO STDOUT
+    /// command, having already run it to completion. The wire layer writes the
+    /// whole copy-out block — `CopyOutResponse`, the rows, `CopyDone`, and
+    /// `CommandComplete` — from the returned value. Non-COPY SQL returns `None`.
+    ///
+    /// Returning `Err` reports the failure as a plain `ErrorResponse` with no
+    /// copy-out messages at all, which is what `PostgreSQL` does when a COPY's
+    /// query fails partway through.
+    fn begin_copy_out(
+        &mut self,
+        sql: &str,
+    ) -> impl Future<Output = Result<Option<CopyOutStream>, PgError>> + Send {
+        let _ = sql;
+        async { Ok(None) }
     }
 
     /// Finish an extended-protocol COPY FROM STDIN after `CopyDone`. `portal`

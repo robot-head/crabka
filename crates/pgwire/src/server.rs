@@ -41,15 +41,30 @@ static NEXT_PID: AtomicI32 = AtomicI32::new(0);
 
 /// The high half every backend id this process announces carries.
 ///
-/// Each process draws this value once, and it is never zero, so the composed
-/// id is positive and two processes that serve one cluster do not hand out the
-/// same id. The range layer already uses the same device to tell one node's
-/// notification records from another's. `--range-listen` is a bind
-/// specification rather than a resolved address, so there is no stable node
-/// number to fold in, and a random per-process draw is what distinguishes
-/// processes.
-static PROCESS_TOKEN: LazyLock<i32> =
-    LazyLock::new(|| rand::rng().random_range(1..=(i32::MAX >> BACKEND_COUNTER_BITS)));
+/// Drawn once per process, never zero, so the composed id is positive and two
+/// processes serving one cluster do not hand out the same id. This is the same
+/// device the range layer already uses to tell one node's notification records
+/// from another's: `--range-listen` is a bind specification rather than a
+/// resolved address, so there is no stable node number to fold in and a random
+/// per-process draw is what distinguishes processes. A bounded
+/// `CRABKA_BACKEND_PROCESS_TOKEN` override exists for deterministic integration
+/// tests; production deployments must leave it unset unless their orchestrator
+/// assigns a unique token to every live process.
+static PROCESS_TOKEN: LazyLock<i32> = LazyLock::new(|| {
+    configured_process_token(
+        std::env::var("CRABKA_BACKEND_PROCESS_TOKEN")
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or_else(|| rand::rng().random_range(1..=(i32::MAX >> BACKEND_COUNTER_BITS)))
+});
+
+fn configured_process_token(value: Option<&str>) -> Option<i32> {
+    value?
+        .parse::<i32>()
+        .ok()
+        .filter(|token| (1..=(i32::MAX >> BACKEND_COUNTER_BITS)).contains(token))
+}
 
 /// Allocate the backend process id that identifies one session.
 ///
@@ -646,7 +661,17 @@ where
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use super::ActivityTracker;
+    use super::{ActivityTracker, configured_process_token};
+
+    #[test]
+    fn configured_backend_process_token_is_bounded() {
+        assert_eq!(configured_process_token(Some("1")), Some(1));
+        assert_eq!(configured_process_token(Some("65535")), Some(65535));
+        assert_eq!(configured_process_token(Some("0")), None);
+        assert_eq!(configured_process_token(Some("65536")), None);
+        assert_eq!(configured_process_token(Some("not-a-number")), None);
+        assert_eq!(configured_process_token(None), None);
+    }
 
     #[tokio::test]
     async fn maintenance_waits_for_active_statement() {

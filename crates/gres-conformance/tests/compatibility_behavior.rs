@@ -42,9 +42,39 @@ impl ForeignScanner for EmptyImporter {
 /// probe may also need its object present to reach the refusal at all.
 fn probe_setup(command: &str) -> &'static [&'static str] {
     match command {
-        "ALTER TABLE" | "COMMENT" | "CREATE INDEX" | "CREATE TABLE AS" | "DELETE"
-        | "DROP INDEX" | "DROP TABLE" | "INSERT" | "MERGE" | "SELECT INTO" | "TABLE"
-        | "TRUNCATE" | "UPDATE" => &["CREATE TABLE parser_commands_probe (id int4)"],
+        "ALTER ROLE" => &["CREATE ROLE parser_commands_role"],
+        "ALTER INDEX" => &[
+            "CREATE TABLE parser_commands_probe (id int4)",
+            "CREATE INDEX parser_commands_idx ON parser_commands_probe (id)",
+        ],
+        "ALTER OPERATOR CLASS" | "DROP OPERATOR CLASS" => {
+            &["CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid"]
+        }
+        "ALTER OPERATOR FAMILY" | "DROP OPERATOR FAMILY" => {
+            &["CREATE OPERATOR FAMILY parser_commands_family USING hash"]
+        }
+        // Each probe runs against a fresh engine, so the cast this drops has to
+        // be made first.
+        "DROP CAST" => &["CREATE CAST (int8 AS timestamp) WITHOUT FUNCTION"],
+        "ALTER TABLESPACE" | "DROP TABLESPACE" => {
+            &["CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'"]
+        }
+        "CREATE TABLE INHERITS" => &["CREATE TABLE parser_commands_parent (id int4)"],
+        "ALTER TABLE"
+        | "ALTER TABLE ENABLE ROW LEVEL SECURITY"
+        | "COMMENT"
+        | "CREATE INDEX"
+        | "CREATE POLICY"
+        | "CREATE TABLE AS"
+        | "DELETE"
+        | "DROP INDEX"
+        | "DROP TABLE"
+        | "INSERT"
+        | "MERGE"
+        | "SELECT INTO"
+        | "TABLE"
+        | "TRUNCATE"
+        | "UPDATE" => &["CREATE TABLE parser_commands_probe (id int4)"],
         "GRANT" | "REVOKE" => &[
             "CREATE TABLE parser_commands_probe (id int4)",
             "CREATE ROLE parser_commands_role",
@@ -67,7 +97,10 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
         "DROP ROLE" | "SET ROLE" | "SET SESSION AUTHORIZATION" => {
             &["CREATE ROLE parser_commands_role"]
         }
-        "ANALYZE" | "REINDEX" | "EXPLAIN" | "CREATE STATISTICS" => {
+        // ANALYZE and VACUUM resolve the relations they name, so their probes
+        // need one. They did not while the whole target list was parsed for
+        // shape and thrown away.
+        "ANALYZE" | "VACUUM" | "REINDEX" | "EXPLAIN" | "CREATE STATISTICS" => {
             &["CREATE TABLE parser_commands_probe (id int4)"]
         }
         "LOCK" | "DECLARE" => &["CREATE TABLE parser_commands_probe (id int4)", "BEGIN"],
@@ -87,7 +120,10 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             "CREATE SERVER parser_commands_server FOREIGN DATA WRAPPER parser_commands_wrapper",
             "CREATE USER MAPPING FOR PUBLIC SERVER parser_commands_server",
         ],
-        "DROP VIEW" => &["CREATE VIEW parser_commands_view AS SELECT 1"],
+        "ALTER VIEW" | "DROP VIEW" => &["CREATE VIEW parser_commands_view AS SELECT 1"],
+        "ALTER MATERIALIZED VIEW" | "DROP MATERIALIZED VIEW" | "REFRESH MATERIALIZED VIEW" => {
+            &["CREATE MATERIALIZED VIEW parser_commands_matview AS SELECT 1"]
+        }
         // P2: routine lifecycle probes need the routine they name.
         "ALTER FUNCTION" | "ALTER ROUTINE" | "DROP FUNCTION" | "DROP ROUTINE" => {
             &["CREATE FUNCTION parser_commands_fn(a int) RETURNS int AS 'SELECT $1' LANGUAGE sql"]
@@ -95,6 +131,15 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
         "ALTER PROCEDURE" | "DROP PROCEDURE" | "CALL" => {
             &["CREATE PROCEDURE parser_commands_proc(a int) LANGUAGE sql AS 'SELECT $1'"]
         }
+        // An aggregate is defined against a transition function that must
+        // already exist, and its own lifecycle probes need the aggregate.
+        "CREATE AGGREGATE" => &[
+            "CREATE FUNCTION parser_commands_add(int4, int4) RETURNS int4 LANGUAGE sql AS 'select $1 + $2'",
+        ],
+        "ALTER AGGREGATE" | "DROP AGGREGATE" => &[
+            "CREATE FUNCTION parser_commands_add(int4, int4) RETURNS int4 LANGUAGE sql AS 'select $1 + $2'",
+            "CREATE AGGREGATE parser_commands_agg (int4) (SFUNC = parser_commands_add, STYPE = int4, INITCOND = '0')",
+        ],
         // T5/D7: the probes are executed in command-name order, so every
         // lifecycle probe must create the object it names — `ALTER DOMAIN`
         // sorts ahead of `CREATE DOMAIN`.
@@ -103,6 +148,10 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             &["CREATE DOMAIN parser_commands_domain AS int4 CHECK (VALUE > 0)"]
         }
         "ALTER SCHEMA" | "DROP SCHEMA" => &["CREATE SCHEMA parser_commands_schema"],
+        "ALTER POLICY" | "DROP POLICY" => &[
+            "CREATE TABLE parser_commands_probe (id int4)",
+            "CREATE POLICY parser_commands_policy ON parser_commands_probe FOR SELECT TO PUBLIC USING (true)",
+        ],
         "CREATE TRIGGER" => &[
             "CREATE TABLE parser_commands_probe (id int4)",
             "CREATE FUNCTION parser_commands_trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
@@ -124,6 +173,26 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
     }
 }
 
+/// Rewrite a probe's tablespace location to one the host calls absolute.
+///
+/// `CREATE TABLESPACE` requires an absolute path, and `Path::is_absolute` is
+/// platform-aware: Windows wants a drive letter, so the `/tmp/...` the probe
+/// manifest documents is rejected there. The manifest keeps the POSIX spelling
+/// -- it is the pinned, published form -- and only execution is localised.
+fn localise(statement: &str) -> String {
+    let Some((head, rest)) = statement.split_once("LOCATION '/tmp/") else {
+        return statement.to_string();
+    };
+    let Some((name, tail)) = rest.split_once('\'') else {
+        return statement.to_string();
+    };
+    let path = std::env::temp_dir().join(name);
+    format!(
+        "{head}LOCATION '{}'{tail}",
+        path.to_string_lossy().replace('\'', "''")
+    )
+}
+
 async fn execute_probe(command: &str, sql: &str) {
     let mut engine = SqlEngine::new();
     engine.set_foreign_scanner(Arc::new(EmptyImporter));
@@ -131,7 +200,8 @@ async fn execute_probe(command: &str, sql: &str) {
 
     let setup: &[&str] = probe_setup(command);
     for statement in setup {
-        session.simple_query(statement).await.expect(statement);
+        let statement = localise(statement);
+        session.simple_query(&statement).await.expect(&statement);
     }
 
     if command == "COPY" {
@@ -145,18 +215,19 @@ async fn execute_probe(command: &str, sql: &str) {
             .expect("COPY must enter CopyIn mode")
             .expect("COPY response");
         session
-            .copy_in(sql, vec![Bytes::from_static(b"1\n")])
+            .copy_in(sql, 0, vec![Bytes::from_static(b"1\n")])
             .await
             .expect("COPY representative must execute");
     } else {
-        session.simple_query(sql).await.expect(sql);
+        let sql = localise(sql);
+        session.simple_query(&sql).await.expect(&sql);
     }
 }
 
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 155);
+    assert!(report.probes.len() == 172);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -192,13 +263,32 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 101);
-    assert!(refused == 54);
+    assert!(executed == 131);
+    assert!(refused == 41);
+}
+
+#[tokio::test]
+async fn alter_schema_rename_moves_the_schema_and_its_relations() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for statement in [
+        "CREATE SCHEMA parser_commands_schema",
+        "CREATE TABLE parser_commands_schema.t (a serial, b int UNIQUE)",
+        "ALTER SCHEMA parser_commands_schema RENAME TO renamed_schema",
+        "INSERT INTO renamed_schema.t DEFAULT VALUES",
+    ] {
+        session.simple_query(statement).await.expect(statement);
+    }
+    let error = session
+        .simple_query("ALTER SCHEMA parser_commands_schema RENAME TO other_schema")
+        .await
+        .expect_err("the old schema must be gone");
+    assert!(error.code == "3F000");
 }
 
 #[tokio::test]
 async fn every_major_feature_probe_matches_its_typed_behavior() {
-    assert!(FEATURE_PROBES.len() == 48);
+    assert!(FEATURE_PROBES.len() == 50);
     for probe in FEATURE_PROBES {
         if probe.behavior == FeatureBehavior::ParserRejectPending {
             assert!(

@@ -41,8 +41,13 @@ pub enum ParserCommandError {
     Rejected {
         command: &'static str,
         sql: &'static str,
+        /// Boxed because `ParseError` carries a message, a detail and a hint,
+        /// which puts this variant over the 128 bytes `result_large_err`
+        /// allows -- and every function here returns this type on a path that
+        /// almost always succeeds, so the whole `Result` would pay for the one
+        /// rejection that never happens.
         #[source]
-        source: ParseError,
+        source: Box<ParseError>,
     },
     /// A representative SQL command did not produce exactly one statement.
     #[error("parser command probe {command} produced {count} statements; expected exactly one")]
@@ -133,6 +138,56 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "CREATE MATERIALIZED VIEW",
+        sql: "CREATE MATERIALIZED VIEW parser_commands_matview AS SELECT 1",
+        expected_statement: "CreateMaterializedView",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER VIEW",
+        sql: "ALTER VIEW parser_commands_view SET (security_invoker = true)",
+        expected_statement: "AlterView",
+        refusal: None,
+    },
+    CommandProbe {
+        // Routed onto the `ALTER TABLE` action set, so the whole ordinary
+        // subcommand family applies to a materialized view for free.
+        command: "ALTER MATERIALIZED VIEW",
+        sql: "ALTER MATERIALIZED VIEW parser_commands_matview OWNER TO postgres",
+        expected_statement: "AlterTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "REFRESH MATERIALIZED VIEW",
+        sql: "REFRESH MATERIALIZED VIEW parser_commands_matview",
+        expected_statement: "RefreshMaterializedView",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER TABLE ENABLE ROW LEVEL SECURITY",
+        sql: "ALTER TABLE parser_commands_probe ENABLE ROW LEVEL SECURITY",
+        expected_statement: "AlterTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE POLICY",
+        sql: "CREATE POLICY parser_commands_policy ON parser_commands_probe FOR SELECT TO PUBLIC USING (true)",
+        expected_statement: "CreatePolicy",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER POLICY",
+        sql: "ALTER POLICY parser_commands_policy ON parser_commands_probe USING (false)",
+        expected_statement: "AlterPolicy",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP POLICY",
+        sql: "DROP POLICY parser_commands_policy ON parser_commands_probe",
+        expected_statement: "DropPolicy",
+        refusal: None,
+    },
+    CommandProbe {
         command: "CREATE TRIGGER",
         sql: "CREATE TRIGGER parser_commands_trigger BEFORE INSERT ON parser_commands_probe FOR EACH ROW EXECUTE FUNCTION parser_commands_trigger_fn()",
         expected_statement: "CreateTrigger",
@@ -193,6 +248,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "DROP MATERIALIZED VIEW",
+        sql: "DROP MATERIALIZED VIEW parser_commands_matview",
+        expected_statement: "DropMaterializedView",
+        refusal: None,
+    },
+    CommandProbe {
         command: "DROP INDEX",
         sql: "DROP INDEX IF EXISTS parser_commands_probe_index",
         expected_statement: "DropIndex",
@@ -208,6 +269,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "ALTER TABLE",
         sql: "ALTER TABLE parser_commands_probe RENAME TO parser_commands_renamed_probe",
         expected_statement: "AlterTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER INDEX",
+        sql: "ALTER INDEX parser_commands_idx SET TABLESPACE pg_default",
+        expected_statement: "AlterIndex",
         refusal: None,
     },
     CommandProbe {
@@ -577,6 +644,109 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "LOAD",
+        sql: "LOAD 'regress'",
+        expected_statement: "Load",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "SECURITY LABEL",
+        sql: "SECURITY LABEL ON TABLE parser_commands_probe IS 'classified'",
+        expected_statement: "SecurityLabel",
+        refusal: Some(("22023", "no security label providers have been loaded")),
+    },
+    CommandProbe {
+        command: "CREATE TABLESPACE",
+        sql: "CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'",
+        expected_statement: "CreateTablespace",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER TABLESPACE",
+        sql: "ALTER TABLESPACE parser_commands_space RENAME TO parser_commands_space2",
+        expected_statement: "AlterTablespace",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP TABLESPACE",
+        sql: "DROP TABLESPACE IF EXISTS parser_commands_space",
+        expected_statement: "DropTablespace",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE OPERATOR CLASS",
+        sql: "CREATE OPERATOR CLASS parser_commands_ops FOR TYPE uuid USING hash AS STORAGE uuid",
+        expected_statement: "CreateOperatorClass",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE TABLE INHERITS",
+        sql: "CREATE TABLE parser_commands_child (extra int4) INHERITS (parser_commands_parent)",
+        expected_statement: "CreateTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE OPERATOR FAMILY",
+        sql: "CREATE OPERATOR FAMILY parser_commands_family USING hash",
+        expected_statement: "CreateOperatorFamily",
+        refusal: None,
+    },
+    // A binary-coercible pair: both are 8 bytes and Gres can decode one as the
+    // other, which is what `CREATE CAST ... WITHOUT FUNCTION` asserts. The pair
+    // is probed at DDL time rather than at first use, so a pair that cannot be
+    // decoded is refused here rather than surfacing as a wrong value later.
+    CommandProbe {
+        command: "CREATE CAST",
+        sql: "CREATE CAST (int8 AS timestamp) WITHOUT FUNCTION",
+        expected_statement: "CreateCast",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP CAST",
+        sql: "DROP CAST (int8 AS timestamp)",
+        expected_statement: "DropCast",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER OPERATOR CLASS",
+        sql: "ALTER OPERATOR CLASS parser_commands_ops USING hash RENAME TO parser_commands_ops2",
+        expected_statement: "AlterOperatorObject",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER OPERATOR FAMILY",
+        sql: "ALTER OPERATOR FAMILY parser_commands_family USING hash RENAME TO parser_commands_family2",
+        expected_statement: "AlterOperatorObject",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE OPERATOR",
+        sql: "CREATE OPERATOR === (PROCEDURE = int8eq, LEFTARG = bigint, RIGHTARG = bigint)",
+        expected_statement: "CreateOperator",
+        refusal: None,
+    },
+    // `IF EXISTS` so the probe needs no setup of its own: the notice path is a
+    // documented success, and the lifecycle pairing with the `CREATE OPERATOR`
+    // probe above is covered by the session tests rather than here.
+    CommandProbe {
+        command: "DROP OPERATOR",
+        sql: "DROP OPERATOR IF EXISTS ===(bigint, bigint)",
+        expected_statement: "DropOperator",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP OPERATOR CLASS",
+        sql: "DROP OPERATOR CLASS IF EXISTS parser_commands_ops USING hash",
+        expected_statement: "DropOperatorObject",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP OPERATOR FAMILY",
+        sql: "DROP OPERATOR FAMILY IF EXISTS parser_commands_family USING hash",
+        expected_statement: "DropOperatorObject",
+        refusal: None,
+    },
+    CommandProbe {
         command: "ALTER SYSTEM",
         sql: "ALTER SYSTEM RESET work_mem",
         expected_statement: "AlterSystem",
@@ -658,9 +828,9 @@ const COMMAND_PROBES: &[CommandProbe] = &[
     },
     CommandProbe {
         command: "ALTER SCHEMA",
-        sql: "ALTER SCHEMA parser_commands_schema RENAME TO parser_commands_schema2",
+        sql: "ALTER SCHEMA parser_commands_schema OWNER TO postgres",
         expected_statement: "AlterSchema",
-        refusal: Some(("0A000", "is not supported")),
+        refusal: None,
     },
     CommandProbe {
         command: "DROP SCHEMA",
@@ -673,6 +843,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "CREATE TYPE",
         sql: "CREATE TYPE parser_commands_enum AS ENUM ('a', 'b')",
         expected_statement: "CreateType",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER ROLE",
+        sql: "ALTER ROLE parser_commands_role WITH NOSUPERUSER",
+        expected_statement: "AlterRole",
         refusal: None,
     },
     CommandProbe {
@@ -768,6 +944,27 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         expected_statement: "DoBlock",
         refusal: None,
     },
+    // User-defined aggregates, which are routines with `prokind = 'a'`: their
+    // transition function is an ordinary SQL function the setup defines first.
+    CommandProbe {
+        command: "CREATE AGGREGATE",
+        sql: "CREATE AGGREGATE parser_commands_agg (int4) (SFUNC = parser_commands_add, STYPE = \
+              int4, INITCOND = '0')",
+        expected_statement: "CreateAggregate",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER AGGREGATE",
+        sql: "ALTER AGGREGATE parser_commands_agg (int4) OWNER TO postgres",
+        expected_statement: "AlterAggregate",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP AGGREGATE",
+        sql: "DROP AGGREGATE parser_commands_agg (int4)",
+        expected_statement: "DropAggregate",
+        refusal: None,
+    },
 ];
 
 /// Build the compatibility matrix's parser-command inventory.
@@ -816,7 +1013,7 @@ fn behavior_probe(probe: &CommandProbe) -> Result<BehaviorProbe, ParserCommandEr
     let statements = parse(probe.sql).map_err(|source| ParserCommandError::Rejected {
         command: probe.command,
         sql: probe.sql,
-        source,
+        source: Box::new(source),
     })?;
     let [statement] = statements.as_slice() else {
         return Err(ParserCommandError::StatementCount {
@@ -848,7 +1045,7 @@ fn validate_probe(probe: &CommandProbe) -> Result<(), ParserCommandError> {
             ParserCommandError::Rejected {
                 command: probe.command,
                 sql: probe.sql,
-                source,
+                source: Box::new(source),
             }
         })?;
     let [(statement, identity)] = classified.as_slice() else {
@@ -883,10 +1080,18 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::CreateTrigger(_) => "CreateTrigger",
         Statement::AlterTrigger { .. } => "AlterTrigger",
         Statement::DropTrigger { .. } => "DropTrigger",
+        Statement::CreatePolicy(_) => "CreatePolicy",
+        Statement::AlterPolicy { .. } => "AlterPolicy",
+        Statement::DropPolicy { .. } => "DropPolicy",
+        Statement::GrantRoles { .. } => "GrantRoles",
+        Statement::RevokeRoles { .. } => "RevokeRoles",
         Statement::CreateEventTrigger(_) => "CreateEventTrigger",
         Statement::AlterEventTrigger { .. } => "AlterEventTrigger",
         Statement::DropEventTrigger { .. } => "DropEventTrigger",
         Statement::CreateRoutine(_) => "CreateRoutine",
+        Statement::CreateAggregate(_) => "CreateAggregate",
+        Statement::DropAggregate { .. } => "DropAggregate",
+        Statement::AlterAggregate { .. } => "AlterAggregate",
         Statement::DropRoutine { .. } => "DropRoutine",
         Statement::AlterRoutine { .. } => "AlterRoutine",
         Statement::Call { .. } => "Call",
@@ -896,6 +1101,8 @@ fn statement_shape(statement: &Statement) -> &'static str {
         }
         Statement::CreateIndex { .. } => "CreateIndex",
         Statement::DropIndex { .. } => "DropIndex",
+        Statement::AlterIndex { .. } => "AlterIndex",
+        Statement::AlterView { .. } => "AlterView",
         Statement::DropTable { names, .. }
             if names
                 .first()
@@ -905,10 +1112,15 @@ fn statement_shape(statement: &Statement) -> &'static str {
         }
         Statement::DropTable { .. } => "DropTable",
         Statement::DropView { .. } => "DropView",
+        Statement::CreateMaterializedView { .. } => "CreateMaterializedView",
+        Statement::RefreshMaterializedView { .. } => "RefreshMaterializedView",
+        Statement::DropMaterializedView { .. } => "DropMaterializedView",
         Statement::CreateSchema { .. } => "CreateSchema",
         Statement::AlterSchema { .. } => "AlterSchema",
         Statement::DropSchema { .. } => "DropSchema",
         Statement::CreateType { .. } => "CreateType",
+        Statement::CreateCast { .. } => "CreateCast",
+        Statement::DropCast { .. } => "DropCast",
         Statement::AlterType { .. } => "AlterType",
         Statement::DropType { .. } => "DropType",
         Statement::CreateDomain { .. } => "CreateDomain",
@@ -920,7 +1132,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Merge { .. } => "Merge",
         Statement::CreateTableAs { .. } => "CreateTableAs",
         Statement::Truncate { .. } => "Truncate",
-        Statement::Vacuum => "Vacuum",
+        Statement::Vacuum(_) => "Vacuum",
         Statement::Listen { .. } => "Listen",
         Statement::Notify { .. } => "Notify",
         Statement::Unlisten { .. } => "Unlisten",
@@ -930,9 +1142,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Rollback { .. } => "Rollback",
         Statement::Update { .. } => "Update",
         Statement::Delete { .. } => "Delete",
-        Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL => {
-            "CopyFromStdin"
-        }
+        Statement::Copy(copy) => copy_shape(copy),
         Statement::Discard { .. } => "Discard",
         Statement::Savepoint { .. } => "Savepoint",
         Statement::RollbackToSavepoint { .. } => "RollbackToSavepoint",
@@ -944,12 +1154,31 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::ExecuteStatement { .. } => "ExecuteStatement",
         Statement::Deallocate { .. } => "Deallocate",
         Statement::LockTable { .. } => "LockTable",
+        Statement::Cluster(_) => "Cluster",
         Statement::Explain { .. } => "Explain",
         Statement::Utility(utility) => match utility {
-            crabka_pgparser::ast::UtilityStatement::Analyze => "Analyze",
-            crabka_pgparser::ast::UtilityStatement::Cluster => "Cluster",
-            crabka_pgparser::ast::UtilityStatement::Reindex => "Reindex",
+            crabka_pgparser::ast::UtilityStatement::Analyze(_) => "Analyze",
+            crabka_pgparser::ast::UtilityStatement::Reindex(_) => "Reindex",
             crabka_pgparser::ast::UtilityStatement::Checkpoint => "Checkpoint",
+            crabka_pgparser::ast::UtilityStatement::Load { .. } => "Load",
+            crabka_pgparser::ast::UtilityStatement::SecurityLabel { .. } => "SecurityLabel",
+            crabka_pgparser::ast::UtilityStatement::CreateTablespace { .. } => "CreateTablespace",
+            crabka_pgparser::ast::UtilityStatement::DropTablespace { .. } => "DropTablespace",
+            crabka_pgparser::ast::UtilityStatement::AlterTablespace { .. } => "AlterTablespace",
+            crabka_pgparser::ast::UtilityStatement::CreateOperatorClass { .. } => {
+                "CreateOperatorClass"
+            }
+            crabka_pgparser::ast::UtilityStatement::CreateOperatorFamily { .. } => {
+                "CreateOperatorFamily"
+            }
+            crabka_pgparser::ast::UtilityStatement::AlterOperatorObject { .. } => {
+                "AlterOperatorObject"
+            }
+            crabka_pgparser::ast::UtilityStatement::DropOperatorObject { .. } => {
+                "DropOperatorObject"
+            }
+            crabka_pgparser::ast::UtilityStatement::CreateOperator(_) => "CreateOperator",
+            crabka_pgparser::ast::UtilityStatement::DropOperator { .. } => "DropOperator",
             crabka_pgparser::ast::UtilityStatement::AlterSystem { .. } => "AlterSystem",
             crabka_pgparser::ast::UtilityStatement::SetConstraints { .. } => "SetConstraints",
             crabka_pgparser::ast::UtilityStatement::SetSessionAuthorization { .. } => {
@@ -993,9 +1222,12 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Show { .. } => "Show",
         Statement::Reset { .. } => "Reset",
         Statement::CreateRole { .. } => "CreateRole",
+        Statement::AlterRole { .. } => "AlterRole",
         Statement::DropRole { .. } => "DropRole",
         Statement::GrantTablePrivileges { .. } => "GrantTablePrivileges",
+        Statement::GrantSchemaPrivileges { .. } => "GrantSchemaPrivileges",
         Statement::RevokeTablePrivileges { .. } => "RevokeTablePrivileges",
+        Statement::RevokeSchemaPrivileges { .. } => "RevokeSchemaPrivileges",
         Statement::SetRole { .. } => "SetRole",
         Statement::CreateFdw { .. } => "CreateFdw",
         Statement::DropFdw { .. } => "DropFdw",
@@ -1011,6 +1243,24 @@ fn statement_shape(statement: &Statement) -> &'static str {
     }
 }
 
+/// Classify a `COPY` by the two things that decide how a client must drive it:
+/// which way the rows move, and whether the far endpoint is the client (`STDIN`
+/// / `STDOUT`, needing the copy subprotocol) or a server-side file. The
+/// parenthesized-query source is called out separately because only `COPY … TO`
+/// can spell it.
+fn copy_shape(copy: &crabka_pgparser::ast::CopyStmt) -> &'static str {
+    use crabka_pgparser::ast::{CopyDestination, CopyDirection, CopySource, CopyTarget};
+
+    match (&copy.direction, &copy.target) {
+        (CopyDirection::From(CopySource::Stdin), _) => "CopyFromStdin",
+        (CopyDirection::From(CopySource::File(_)), _) => "CopyFromFile",
+        (CopyDirection::To(CopyDestination::Stdout), CopyTarget::Table { .. }) => "CopyToStdout",
+        (CopyDirection::To(CopyDestination::Stdout), CopyTarget::Query(_)) => "CopyQueryToStdout",
+        (CopyDirection::To(CopyDestination::File(_)), CopyTarget::Table { .. }) => "CopyToFile",
+        (CopyDirection::To(CopyDestination::File(_)), CopyTarget::Query(_)) => "CopyQueryToFile",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -1023,7 +1273,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 155,
+            report.commands.len() == 172,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1055,13 +1305,33 @@ mod tests {
     }
 
     #[test]
+    fn copy_shapes_name_their_direction_endpoint_and_source() {
+        for (sql, shape) in [
+            ("COPY t FROM STDIN", "CopyFromStdin"),
+            (
+                "COPY t (a, b) FROM STDIN WITH (FORMAT csv)",
+                "CopyFromStdin",
+            ),
+            ("COPY t FROM '/tmp/t.csv'", "CopyFromFile"),
+            ("COPY t TO STDOUT", "CopyToStdout"),
+            ("COPY t TO '/tmp/t.csv'", "CopyToFile"),
+            ("COPY (SELECT 1) TO STDOUT", "CopyQueryToStdout"),
+            ("COPY (SELECT 1) TO '/tmp/t.csv'", "CopyQueryToFile"),
+        ] {
+            let parsed = parse(sql).expect(sql);
+            assert!(parsed.len() == 1);
+            assert!(statement_shape(&parsed[0]) == shape, "{sql}");
+        }
+    }
+
+    #[test]
     fn report_serializes_as_a_json_object() {
         let report = parser_command_report().expect("all parser command probes must parse");
         let json = serde_json::to_value(report).expect("report must serialize");
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(155));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(172));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

@@ -199,12 +199,16 @@ pub(crate) fn relation_trigger_table(kv: &dyn Kv, name: &RelationName) -> Result
         .and_then(|oid| u32::try_from(oid).ok())
         .unwrap_or(0);
     Ok(Table {
+        owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
         id,
         name: view.name,
         columns: view.columns,
         sharded: false,
+        row_security: false,
+        force_row_security: false,
         sharding: None,
         foreign: None,
+        materialized: None,
         checks: Vec::new(),
     })
 }
@@ -387,6 +391,20 @@ pub(crate) fn create(
             return Err(trigger_error(
                 "42P17",
                 "transition tables can only be specified for AFTER non-constraint triggers",
+            ));
+        }
+        // TRUNCATE removes every row at once and has no per-row images to
+        // collect, so PostgreSQL rejects the clause outright rather than
+        // reaching the OLD/NEW event rules below — which would otherwise report
+        // "OLD TABLE can only be specified for …" for a TRUNCATE trigger.
+        // TRUNCATE removes every row at once and has no per-row images to
+        // collect, so PostgreSQL rejects the clause outright rather than
+        // reaching the OLD/NEW event rules below — which would otherwise report
+        // "OLD TABLE can only be specified for …" for a TRUNCATE trigger.
+        if events.truncate {
+            return Err(trigger_error(
+                "0A000",
+                "TRUNCATE triggers with transition tables are not supported",
             ));
         }
         if !events.update_columns.is_empty() {
@@ -635,40 +653,157 @@ fn map_event(value: parsed::EventTriggerEvent) -> EventTriggerEvent {
     }
 }
 
+/// The role a privilege check should be made against, for a session that may
+/// have authenticated as nobody.
+///
+/// Such a session carries `PUBLIC` and acts as the bootstrap superuser, the
+/// same rule `ForeignCtx::effective_role` applies. It is spelled out here
+/// because `create_event` is handed the role name rather than the context that
+/// method hangs off.
+fn acting_role(role: &str) -> &str {
+    if role == crabka_pgcatalog::PUBLIC_ROLE {
+        crabka_pgcatalog::BOOTSTRAP_ROLE
+    } else {
+        role
+    }
+}
+
+/// One row of `PostgreSQL`'s command-tag table.
+///
+/// The rows come from `cmdtaglist.h` unedited, so the flags are the ones the
+/// server itself consults rather than a reading of them: `event_trigger_ok` is
+/// `command_tag_event_trigger_ok`, and `table_rewrite_ok` is
+/// `command_tag_table_rewrite_ok`.
+struct CommandTag {
+    /// The tag as `PostgreSQL` spells it, which is upper case throughout.
+    name: &'static str,
+    /// Whether a `ddl_command_start`/`ddl_command_end`/`sql_drop` trigger may
+    /// name the tag, and whether such a trigger fires for the command at all.
+    event_trigger_ok: bool,
+    /// Whether a `table_rewrite` trigger may name the tag.
+    table_rewrite_ok: bool,
+}
+
+include!("event_command_tags.rs");
+
+/// `PostgreSQL`'s `GetCommandTagEnum`: the table row for a tag a user wrote, or
+/// `None` for `CMDTAG_UNKNOWN`.
+///
+/// The comparison ignores case because `GetCommandTagEnum` compares with
+/// `pg_strcasecmp`, which is why `when tag in ('create table')` is a valid
+/// filter. The scan is linear rather than the server's binary search: it runs
+/// once per tag named in a `CREATE EVENT TRIGGER`, and a linear scan needs no
+/// argument about whether case-insensitive comparison preserves the header's
+/// ordering.
+fn lookup_command_tag(name: &str) -> Option<&'static CommandTag> {
+    COMMAND_TAGS
+        .iter()
+        .find(|tag| tag.name.eq_ignore_ascii_case(name))
+}
+
+/// The 0A000 `PostgreSQL` raises for a tag that exists but is closed to event
+/// triggers.
+///
+/// The message quotes the user's spelling, not the canonical tag, which is what
+/// `validate_ddl_tags` does with its `%s`.
+fn unsupported_event_trigger_tag(written: &str) -> ExecError {
+    trigger_error(
+        "0A000",
+        format!("event triggers are not supported for {written}"),
+    )
+}
+
+/// Check a `CREATE EVENT TRIGGER`'s `WHEN` clause, in the order
+/// `CreateEventTrigger` checks it.
+///
+/// The order is load-bearing: every filter variable is named and counted before
+/// any tag value is looked at, so `when food in (…) and tag in ('bogus')`
+/// complains about `food` and `when tag in (…) and tag in (…)` complains about
+/// the repeat rather than about a tag.
+///
+/// # Errors
+///
+/// 42601 for a filter variable that is not `tag`, for the same variable twice,
+/// and for a value that is no command tag at all; 0A000 for tag filtering on a
+/// `login` trigger and for a real tag this event may not filter on.
+fn validate_event_trigger_filters(
+    event: parsed::EventTriggerEvent,
+    filters: &[parsed::EventTriggerFilter],
+) -> Result<(), ExecError> {
+    let mut seen_tag = false;
+    for filter in filters {
+        if !filter.variable.eq_ignore_ascii_case("tag") {
+            return Err(trigger_error(
+                "42601",
+                format!("unrecognized filter variable \"{}\"", filter.variable),
+            ));
+        }
+        if seen_tag {
+            return Err(trigger_error(
+                "42601",
+                format!(
+                    "filter variable \"{}\" specified more than once",
+                    filter.variable
+                ),
+            ));
+        }
+        seen_tag = true;
+    }
+    if !seen_tag {
+        return Ok(());
+    }
+    if event == parsed::EventTriggerEvent::Login {
+        return Err(trigger_error(
+            "0A000",
+            "tag filtering is not supported for login event triggers",
+        ));
+    }
+    for value in filters.iter().flat_map(|filter| &filter.values) {
+        let tag = lookup_command_tag(value);
+        // A `table_rewrite` trigger takes the other flag, and takes it without
+        // the "not recognized" arm: `validate_table_rewrite_tags` asks
+        // `command_tag_table_rewrite_ok(CMDTAG_UNKNOWN)`, which is false, so an
+        // invented tag comes back as "not supported" there rather than as the
+        // 42601 a DDL trigger would raise.
+        if event == parsed::EventTriggerEvent::TableRewrite {
+            if !tag.is_some_and(|tag| tag.table_rewrite_ok) {
+                return Err(unsupported_event_trigger_tag(value));
+            }
+            continue;
+        }
+        let Some(tag) = tag else {
+            return Err(trigger_error(
+                "42601",
+                format!("filter value \"{value}\" not recognized for filter variable \"tag\""),
+            ));
+        };
+        if !tag.event_trigger_ok {
+            return Err(unsupported_event_trigger_tag(value));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn create_event(
     kv: &dyn Kv,
     stmt: &parsed::CreateEventTrigger,
     owner: &str,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
+    if !crate::rls::role_is_superuser(kv, acting_role(owner))? {
+        return Err(ExecError::EventTriggerPrivilege {
+            message: format!(
+                "permission denied to create event trigger \"{}\"",
+                stmt.name
+            ),
+            hint: "Must be superuser to create an event trigger.",
+        });
+    }
+    validate_event_trigger_filters(stmt.event, &stmt.filters)?;
     if get_event_trigger(kv, &stmt.name)?.is_some() {
         return Err(ExecError::DuplicateObject(format!(
             "event trigger \"{}\" already exists",
             stmt.name
         )));
-    }
-    for filter in &stmt.filters {
-        if filter.variable != "tag" {
-            return Err(trigger_error(
-                "22023",
-                format!("filter variable \"{}\" not recognized", filter.variable),
-            ));
-        }
-        if stmt.event == parsed::EventTriggerEvent::Login {
-            return Err(trigger_error(
-                "22023",
-                "filter variable TAG is not supported for event LOGIN",
-            ));
-        }
-        if let Some(value) = filter
-            .values
-            .iter()
-            .find(|value| !EVENT_COMMAND_TAGS.contains(&value.as_str()))
-        {
-            return Err(trigger_error(
-                "22023",
-                format!("filter value \"{value}\" not recognized for filter variable \"tag\""),
-            ));
-        }
     }
     let (function_oid, function) = trigger_routine(kv, &stmt.function, true)?;
     let trigger = EventTrigger {
@@ -705,7 +840,21 @@ pub(crate) fn alter_event(
     let mut ops = Vec::new();
     match action {
         parsed::AlterEventTriggerAction::Enable(mode) => trigger.enabled = map_enabled(*mode),
-        parsed::AlterEventTriggerAction::OwnerTo(owner) => trigger.owner = owner.clone(),
+        parsed::AlterEventTriggerAction::OwnerTo(owner) => {
+            // The same rule `CREATE EVENT TRIGGER` enforces, applied to the
+            // incoming owner: an event trigger runs its function for every DDL
+            // command in the database, so handing one to a non-superuser is the
+            // privilege escalation the create-time check exists to prevent.
+            if !crate::rls::role_is_superuser(kv, owner)? {
+                return Err(ExecError::EventTriggerPrivilege {
+                    message: format!(
+                        "permission denied to change owner of event trigger \"{name}\""
+                    ),
+                    hint: "The owner of an event trigger must be a superuser.",
+                });
+            }
+            trigger.owner = owner.clone();
+        }
         parsed::AlterEventTriggerAction::RenameTo(new_name) => {
             if get_event_trigger(kv, new_name)?.is_some() {
                 return Err(ExecError::DuplicateObject(format!(
@@ -736,17 +885,24 @@ pub(crate) fn drop_event(
     Ok(command("DROP EVENT TRIGGER", drop_event_trigger_ops(name)))
 }
 
+/// Whether event triggers stay out of a statement's way.
+///
+/// The answer is the tag table's, not a list of its own: a command fires event
+/// triggers exactly when `command_tag_event_trigger_ok` says its tag may be
+/// filtered on. That covers the global objects `PostgreSQL` keeps event
+/// triggers away from — roles, databases, tablespaces, event triggers
+/// themselves — without naming them twice, and it makes an unmapped statement
+/// silent rather than firing under the tag `UNKNOWN`, which is a tag no
+/// `PostgreSQL` client would ever see.
 pub(crate) fn event_trigger_ddl_is_excluded(stmt: &parsed::Statement) -> bool {
-    matches!(
-        stmt,
-        parsed::Statement::CreateEventTrigger(_)
-            | parsed::Statement::AlterEventTrigger { .. }
-            | parsed::Statement::DropEventTrigger { .. }
-            | parsed::Statement::CreateRole { .. }
-            | parsed::Statement::DropRole { .. }
-    )
+    !lookup_command_tag(event_command_tag(stmt)).is_some_and(|tag| tag.event_trigger_ok)
 }
 
+/// The command tag a statement reports to an event trigger.
+///
+/// `UNKNOWN` is the fallthrough for a statement with no tag of its own. It is
+/// never a tag a trigger sees, because [`event_trigger_ddl_is_excluded`] finds
+/// no table row for it and keeps the triggers from firing at all.
 pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
     use parsed::Statement;
     match stmt {
@@ -764,9 +920,32 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
             "CREATE SEQUENCE"
         }
         Statement::CreateIndex { .. } => "CREATE INDEX",
+        Statement::AlterIndex { .. } => "ALTER INDEX",
         Statement::DropIndex { .. } => "DROP INDEX",
         Statement::CreateView { .. } => "CREATE VIEW",
+        Statement::AlterView { .. } => "ALTER VIEW",
         Statement::DropView { .. } => "DROP VIEW",
+        Statement::CreateMaterializedView { .. } => "CREATE MATERIALIZED VIEW",
+        Statement::RefreshMaterializedView { .. } => "REFRESH MATERIALIZED VIEW",
+        Statement::DropMaterializedView { .. } => "DROP MATERIALIZED VIEW",
+        Statement::CreatePolicy(_) => "CREATE POLICY",
+        Statement::AlterPolicy { .. } => "ALTER POLICY",
+        Statement::DropPolicy { .. } => "DROP POLICY",
+        Statement::CreateAggregate(_) => "CREATE AGGREGATE",
+        Statement::AlterAggregate { .. } => "ALTER AGGREGATE",
+        Statement::DropAggregate { .. } => "DROP AGGREGATE",
+        // The tags below are all `event_trigger_ok = false`, so naming them
+        // here is what keeps the triggers quiet for those commands rather than
+        // what makes them fire. They are global objects, or the event-trigger
+        // DDL an event trigger must not be able to interfere with.
+        Statement::CreateRole { .. } => "CREATE ROLE",
+        Statement::AlterRole { .. } => "ALTER ROLE",
+        Statement::DropRole { .. } => "DROP ROLE",
+        Statement::GrantRoles { .. } => "GRANT ROLE",
+        Statement::RevokeRoles { .. } => "REVOKE ROLE",
+        Statement::CreateEventTrigger(_) => "CREATE EVENT TRIGGER",
+        Statement::AlterEventTrigger { .. } => "ALTER EVENT TRIGGER",
+        Statement::DropEventTrigger { .. } => "DROP EVENT TRIGGER",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
         Statement::AlterSchema { .. } => "ALTER SCHEMA",
         Statement::DropSchema { .. } => "DROP SCHEMA",
@@ -806,8 +985,12 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         Statement::CreateForeignTable { .. } => "CREATE FOREIGN TABLE",
         Statement::DropForeignTable { .. } => "DROP FOREIGN TABLE",
         Statement::GrantTablePrivileges { .. } => "GRANT",
+        Statement::GrantSchemaPrivileges { .. } => "GRANT",
         Statement::RevokeTablePrivileges { .. } => "REVOKE",
+        Statement::RevokeSchemaPrivileges { .. } => "REVOKE",
         Statement::ImportForeignSchema { .. } => "IMPORT FOREIGN SCHEMA",
+        Statement::Utility(parsed::UtilityStatement::CreateOperator(_)) => "CREATE OPERATOR",
+        Statement::Utility(parsed::UtilityStatement::DropOperator { .. }) => "DROP OPERATOR",
         Statement::Utility(parsed::UtilityStatement::TextSearch(ddl)) => match ddl {
             parsed::TextSearchDdl::Create {
                 kind: parsed::TextSearchObjectKind::Configuration,
@@ -837,60 +1020,6 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         _ => "UNKNOWN",
     }
 }
-
-const EVENT_COMMAND_TAGS: &[&str] = &[
-    "ALTER DOMAIN",
-    "ALTER FOREIGN DATA WRAPPER",
-    "ALTER FUNCTION",
-    "ALTER PROCEDURE",
-    "ALTER ROUTINE",
-    "ALTER SCHEMA",
-    "ALTER SERVER",
-    "ALTER TABLE",
-    "ALTER TEXT SEARCH CONFIGURATION",
-    "ALTER TEXT SEARCH DICTIONARY",
-    "ALTER TRIGGER",
-    "ALTER TYPE",
-    "ALTER USER MAPPING",
-    "COMMENT",
-    "CREATE DOMAIN",
-    "CREATE FOREIGN DATA WRAPPER",
-    "CREATE FOREIGN TABLE",
-    "CREATE FUNCTION",
-    "CREATE INDEX",
-    "CREATE PROCEDURE",
-    "CREATE ROUTINE",
-    "CREATE SCHEMA",
-    "CREATE SEQUENCE",
-    "CREATE SERVER",
-    "CREATE TABLE",
-    "CREATE TEXT SEARCH CONFIGURATION",
-    "CREATE TEXT SEARCH DICTIONARY",
-    "CREATE TRIGGER",
-    "CREATE TYPE",
-    "CREATE USER MAPPING",
-    "CREATE VIEW",
-    "DROP DOMAIN",
-    "DROP FOREIGN DATA WRAPPER",
-    "DROP FOREIGN TABLE",
-    "DROP FUNCTION",
-    "DROP INDEX",
-    "DROP PROCEDURE",
-    "DROP ROUTINE",
-    "DROP SCHEMA",
-    "DROP SEQUENCE",
-    "DROP SERVER",
-    "DROP TABLE",
-    "DROP TEXT SEARCH CONFIGURATION",
-    "DROP TEXT SEARCH DICTIONARY",
-    "DROP TRIGGER",
-    "DROP TYPE",
-    "DROP USER MAPPING",
-    "DROP VIEW",
-    "GRANT",
-    "IMPORT FOREIGN SCHEMA",
-    "REVOKE",
-];
 
 pub(crate) fn is_drop_ddl(stmt: &parsed::Statement) -> bool {
     matches!(
@@ -972,7 +1101,7 @@ pub(crate) fn event_trigger_context(
             let Ok(table) = crabka_pgcatalog::get_table(kv, &name) else {
                 continue;
             };
-            i32::try_from(table.id).unwrap_or_default()
+            crate::catalog_rel::table_relation_oid(table.id).unwrap_or_default()
         };
         let (object_type, object_name) = if sequence.is_some() {
             ("sequence", name.name.as_str())
@@ -984,13 +1113,16 @@ pub(crate) fn event_trigger_context(
             object_id,
             object_sub_id: 0,
             object_type: object_type.to_string(),
-            schema_name: Some(name.schema.clone()),
+            schema_name: Some(crabka_pgcatalog::displayed_schema(&name.schema).to_string()),
             object_name: Some(object_name.to_string()),
             identity: format!(
                 "{}.{}",
-                crate::catalog_fn::quote_identifier(&name.schema),
+                crate::catalog_fn::quote_identifier(crabka_pgcatalog::displayed_schema(
+                    &name.schema
+                )),
                 crate::catalog_fn::quote_identifier(object_name)
             ),
+            is_temporary: crabka_pgcatalog::is_temp_schema(&name.schema),
         });
     }
     if let parsed::Statement::DropTable { names, cascade, .. } = stmt {
@@ -1063,13 +1195,14 @@ fn append_relation_object(
         object_id: i32::try_from(oid).unwrap_or(0),
         object_sub_id: 0,
         object_type: object_type.into(),
-        schema_name: Some(name.schema.clone()),
+        schema_name: Some(crabka_pgcatalog::displayed_schema(&name.schema).to_string()),
         object_name: Some(name.name.clone()),
         identity: format!(
             "{}.{}",
-            crate::catalog_fn::quote_identifier(&name.schema),
+            crate::catalog_fn::quote_identifier(crabka_pgcatalog::displayed_schema(&name.schema)),
             crate::catalog_fn::quote_identifier(&name.name)
         ),
+        is_temporary: crabka_pgcatalog::is_temp_schema(&name.schema),
     });
 }
 
@@ -1084,14 +1217,19 @@ fn append_trigger_objects(
             object_id: i32::try_from(trigger.oid).unwrap_or(0),
             object_sub_id: 0,
             object_type: "trigger".into(),
-            schema_name: Some(trigger.table.schema.clone()),
+            schema_name: Some(
+                crabka_pgcatalog::displayed_schema(&trigger.table.schema).to_string(),
+            ),
             object_name: Some(trigger.name.clone()),
             identity: format!(
                 "{} on {}.{}",
                 crate::catalog_fn::quote_identifier(&trigger.name),
-                crate::catalog_fn::quote_identifier(&trigger.table.schema),
+                crate::catalog_fn::quote_identifier(crabka_pgcatalog::displayed_schema(
+                    &trigger.table.schema
+                )),
                 crate::catalog_fn::quote_identifier(&trigger.table.name)
             ),
+            is_temporary: crabka_pgcatalog::is_temp_schema(&trigger.table.schema),
         });
     }
     Ok(())
@@ -1106,14 +1244,19 @@ fn append_foreign_key_object(
         object_id: crate::catalog_rel::foreign_key_oid(foreign_key.id)?,
         object_sub_id: 0,
         object_type: "table constraint".into(),
-        schema_name: Some(foreign_key.table.schema.clone()),
+        schema_name: Some(
+            crabka_pgcatalog::displayed_schema(&foreign_key.table.schema).to_string(),
+        ),
         object_name: Some(foreign_key.name.clone()),
         identity: format!(
             "{} on {}.{}",
             crate::catalog_fn::quote_identifier(&foreign_key.name),
-            crate::catalog_fn::quote_identifier(&foreign_key.table.schema),
+            crate::catalog_fn::quote_identifier(crabka_pgcatalog::displayed_schema(
+                &foreign_key.table.schema
+            )),
             crate::catalog_fn::quote_identifier(&foreign_key.table.name)
         ),
+        is_temporary: crabka_pgcatalog::is_temp_schema(&foreign_key.table.schema),
     });
     Ok(())
 }
@@ -1347,7 +1490,10 @@ fn invoke_catalog_trigger(
             operation: operation_name(event).into(),
             event: None,
             tag: None,
-            relation_oid: trigger.table_id,
+            relation_oid: u32::try_from(crate::catalog_rel::trigger_relation_oid(
+                trigger.table_id,
+            )?)
+            .unwrap_or_default(),
             table_schema: table.name.schema.clone(),
             table_name: table.name.name.clone(),
             arguments: trigger.arguments.clone(),
@@ -1480,7 +1626,8 @@ fn queue_catalog_trigger(
         operation: operation_name(event).into(),
         event: None,
         tag: None,
-        relation_oid: trigger.table_id,
+        relation_oid: u32::try_from(crate::catalog_rel::trigger_relation_oid(trigger.table_id)?)
+            .unwrap_or_default(),
         table_schema: table.name.schema.clone(),
         table_name: table.name.name.clone(),
         arguments: trigger.arguments.clone(),
@@ -1530,15 +1677,123 @@ fn queue_catalog_trigger(
     Ok(())
 }
 
+/// The relation a `BEFORE ROW` trigger fires for, together with the
+/// row-security check the row it leaves behind must satisfy.
+///
+/// One value rather than two arguments because the pairing is a decision each
+/// write path makes and can get wrong: a row routed into a partition leaf is
+/// judged by the policies of the *parent* the statement named, not the leaf
+/// whose triggers run. Naming the pair makes that choice visible at every call
+/// site instead of hiding it between two adjacent arguments.
+#[derive(Clone, Copy)]
+pub(crate) struct WriteTarget<'a> {
+    pub table: &'a Table,
+    pub check: &'a crate::rls::WriteChecks,
+}
+
+/// Blank every `VIRTUAL` generated column of one trigger image, in place.
+///
+/// `PostgreSQL` does not let a trigger read a generated column — "it is not
+/// allowed to access generated columns in `BEFORE` triggers", and its `AFTER`
+/// images carry the same NULL — because the value is conceptually settled once
+/// the triggers have run and before then there is nothing to report. Blanking
+/// here rather than relying on the write path never to have computed the value
+/// makes the rule hold for a statement that DOES name the column in its own
+/// `WHERE`, which materializes it into the very row `OLD` is taken from.
+fn blank_virtual_generated(table: &Table, image: &mut [crabka_pgtypes::Datum]) {
+    for (index, _) in table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.is_virtual_generated())
+    {
+        if let Some(slot) = image.get_mut(index) {
+            *slot = crabka_pgtypes::Datum::Null;
+        }
+    }
+}
+
+/// Blank every generated column of the `NEW` image, whichever kind it is.
+///
+/// The rule is the one `ddl.sgml` states: a generated column settles after the
+/// `BEFORE` triggers, so before them there is no value and `NEW.b` is NULL. An
+/// `UPDATE` is where the kinds part company from [`blank_virtual_generated`]:
+/// its proposed row is built from the stored row, which carries the `STORED`
+/// column's *old* value, and a trigger that read it would be reading a number
+/// about to be replaced.
+///
+/// Only on the way in. A value a trigger then assigns to a `STORED` column
+/// survives to the next trigger — `PostgreSQL` prints it — and is discarded by
+/// the settle rather than between triggers. A `VIRTUAL` column is the one
+/// upstream re-blanks after every trigger; see [`blank_virtual_generated`].
+fn blank_generated(table: &Table, image: &mut [crabka_pgtypes::Datum]) {
+    for (index, _) in table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.generated.is_some())
+    {
+        if let Some(slot) = image.get_mut(index) {
+            *slot = crabka_pgtypes::Datum::Null;
+        }
+    }
+}
+
+/// [`blank_virtual_generated`] over a borrowed image, which is copied only when
+/// the relation has a virtual generated column to blank.
+fn trigger_image<'a>(
+    table: &Table,
+    image: Option<&'a [crabka_pgtypes::Datum]>,
+) -> Option<std::borrow::Cow<'a, [crabka_pgtypes::Datum]>> {
+    let image = image?;
+    if !crate::exec::has_virtual_generated(table) {
+        return Some(std::borrow::Cow::Borrowed(image));
+    }
+    let mut owned = image.to_vec();
+    blank_virtual_generated(table, &mut owned);
+    Some(std::borrow::Cow::Owned(owned))
+}
+
+/// Fire the relation's `BEFORE ROW` triggers, settle the row they leave behind,
+/// and judge it against the target's check.
+///
+/// Both the settling ([`crate::exec::finish_written_row`]: the `STORED`
+/// generated columns, then the domain, `NOT NULL` and `CHECK` constraints) and
+/// the row-security check live *here* rather than in the row builders, because
+/// a `BEFORE ROW` trigger returns a *replacement* row and the replacement is
+/// what actually gets written. Anything judged before the trigger judges a row
+/// nobody stores, and lets the trigger launder its replacement past both.
+/// `PostgreSQL` orders it the same way, for the same reason: `ExecInsert` runs
+/// `ExecBRInsertTriggers`, then `ExecComputeStoredGenerated`, then
+/// `ExecWithCheckOptions` and `ExecConstraints`, and `ddl.sgml` states the rule
+/// outright — "Generated columns are, conceptually, updated after BEFORE
+/// triggers have run".
+///
+/// Every write path in the executor that fires row triggers passes through this
+/// one function, so putting both here covers all of them at once and makes a
+/// new write path that skips either fail to compile rather than fail to check.
+/// The three that fire no row trigger at all — a view's `INSTEAD OF` insert and
+/// update, and a sharded `COPY` — settle themselves, and are named in
+/// [`crate::exec::finish_written_row`].
+///
+/// A `DELETE` writes no row: it settles nothing, and carries
+/// [`crate::rls::CheckExemption::RemovesRows`] because its rows were already
+/// filtered by the `USING` qual at `write_candidate_rows`.
 pub(crate) fn fire_before_row(
     kv: &dyn Kv,
-    table: &Table,
+    target: WriteTarget<'_>,
     event: DmlEvent,
     updated: &[String],
     old: Option<&[crabka_pgtypes::Datum]>,
     mut new: Option<Vec<crabka_pgtypes::Datum>>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Option<Vec<crabka_pgtypes::Datum>>, ExecError> {
+    let WriteTarget { table, check } = target;
+    let old_image = trigger_image(table, old);
+    let old = old_image.as_deref();
+    if let Some(image) = new.as_mut() {
+        blank_generated(table, image);
+    }
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)? {
         if trigger.timing != TriggerTiming::Before
             || trigger.level != TriggerLevel::Row
@@ -1565,6 +1820,11 @@ pub(crate) fn fire_before_row(
                     .map(|(value, column)| crate::exec::coerce(value, column.ty, ctx))
                     .collect::<Result<Vec<_>, _>>()?;
                 if matches!(event, DmlEvent::Insert | DmlEvent::Update) {
+                    // `check_modified_virtual_generated`: a value the trigger
+                    // assigned to a virtual generated column is dropped before
+                    // the next trigger — or the write — can see it.
+                    let mut values = values;
+                    blank_virtual_generated(table, &mut values);
                     new = Some(values);
                 }
             }
@@ -1577,10 +1837,15 @@ pub(crate) fn fire_before_row(
         }
     }
     if event == DmlEvent::Delete {
-        Ok(old.map(|row| row.to_vec()))
-    } else {
-        Ok(new)
+        return Ok(old.map(|row| row.to_vec()));
     }
+    // The row every trigger has had its say about is the one that settles, and
+    // the settled row is the one the policy judges.
+    if let Some(row) = &mut new {
+        crate::exec::finish_written_row(table, row, ctx)?;
+        check.permit_row(kv, table, row, ctx)?;
+    }
+    Ok(new)
 }
 
 pub(crate) fn fire_instead_row(
@@ -1645,35 +1910,61 @@ pub(crate) fn fire_after_row(
     new: Option<&[crabka_pgtypes::Datum]>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
+    let old_image = trigger_image(table, old);
+    let new_image = trigger_image(table, new);
+    let old = old_image.as_deref();
+    let new = new_image.as_deref();
     let mut recorded = Vec::new();
-    let mut relation = table.clone();
-    let mut transition_old = old.map(|row| row.to_vec());
-    let mut transition_new = new.map(|row| row.to_vec());
-    loop {
+    // A relation may sit under a partitioned parent, under one or more
+    // inheritance parents, or under a mixture, so the ancestry is a DAG and not
+    // the single chain a partition alone forms: `d INHERITS (b, c)` reaches a
+    // shared grandparent by two routes. Recording an image once per *relation*
+    // rather than once per route is what stops the grandparent's transition
+    // table showing that row twice. Both routes reshape by column name, so
+    // whichever arrives first produces the same image.
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![(
+        table.clone(),
+        old.map(<[crabka_pgtypes::Datum]>::to_vec),
+        new.map(<[crabka_pgtypes::Datum]>::to_vec),
+    )];
+    while let Some((relation, transition_old, transition_new)) = pending.pop() {
+        if !seen.insert(relation.id) {
+            continue;
+        }
         recorded.push(TransitionChange {
             table_id: relation.id,
             operation: operation_name(event).into(),
             old: transition_old.clone(),
             new: transition_new.clone(),
         });
-        let Some((parent_name, _)) = crate::partition::parent_of(kv, &relation.name)? else {
-            break;
-        };
-        let parent = crabka_pgcatalog::get_table(kv, &parent_name)?;
-        let ordinals = crate::exec::column_mapping(&parent, &relation)?;
-        let reshape = |row: Vec<crabka_pgtypes::Datum>| {
-            ordinals
-                .iter()
-                .map(|ordinal| {
-                    row.get(*ordinal)
-                        .cloned()
-                        .unwrap_or(crabka_pgtypes::Datum::Null)
-                })
-                .collect()
-        };
-        transition_old = transition_old.map(&reshape);
-        transition_new = transition_new.map(reshape);
-        relation = parent;
+        let mut ancestors = Vec::new();
+        if let Some((parent_name, _)) = crate::partition::parent_of(kv, &relation.name)? {
+            ancestors.push(parent_name);
+        }
+        ancestors.extend(crate::inheritance::parents_of(kv, &relation.name)?);
+        for parent_name in ancestors {
+            let parent = crabka_pgcatalog::get_table(kv, &parent_name)?;
+            // The ancestor's columns, read out of this relation's row by name:
+            // a child may store them in a different order and may add its own,
+            // and the ancestor's transition table shows neither.
+            let ordinals = crate::exec::column_mapping(&parent, &relation)?;
+            let reshape = |row: &Vec<crabka_pgtypes::Datum>| {
+                ordinals
+                    .iter()
+                    .map(|ordinal| {
+                        row.get(*ordinal)
+                            .cloned()
+                            .unwrap_or(crabka_pgtypes::Datum::Null)
+                    })
+                    .collect()
+            };
+            pending.push((
+                parent,
+                transition_old.as_ref().map(&reshape),
+                transition_new.as_ref().map(&reshape),
+            ));
+        }
     }
     TRANSITION_CHANGES.with(|changes| {
         if let Some(changes) = changes.borrow_mut().as_mut() {

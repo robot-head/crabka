@@ -43,6 +43,13 @@
 //! it. That is what leaves the commit-time drain with no referential action of
 //! its own to run.
 //!
+//! [`DeferredConstraints`] is the transaction's whole deferral state, not the
+//! foreign keys' share of it. `SET CONSTRAINTS` moves every kind of constraint
+//! at once, so the modes and the queues live together: a `DEFERRABLE`
+//! `PRIMARY KEY` or `UNIQUE` key queues a [`PendingUniqueCheck`] here beside
+//! the referential ones, and the same three check points — the end of the
+//! statement, `SET CONSTRAINTS … IMMEDIATE`, and `COMMIT` — drain both.
+//!
 //! # Concurrency
 //!
 //! Both sides of a foreign key name the same lock identity: the referenced
@@ -387,18 +394,31 @@ fn load_referenced_relation(
     catalog_kv: &dyn Kv,
     name: &RelationName,
 ) -> Result<(Table, Vec<Index>), ExecError> {
+    // A synthesised catalog relation whose kind is `table` is a system catalog,
+    // and `PostgreSQL` refuses the reference as a privilege rather than as a
+    // kind: adding a foreign key writes the referenced relation's trigger set.
+    if let Some(error) = crate::exec::system_catalog_wrong_kind(name) {
+        return Err(error);
+    }
     match crabka_pgcatalog::get_table(catalog_kv, name) {
+        // A materialized view is stored under the table key, so the fetched
+        // record has to be asked what it is: referencing one built a foreign
+        // key `PostgreSQL` refuses outright.
+        Ok(table) if crate::exec::stored_relation_kind(&table) != "table" => {
+            Err(ExecError::ReferencedRelationNotATable(name.name.clone()))
+        }
         Ok(table) => {
-            if table.foreign.is_some() {
-                return Err(ExecError::ReferencedRelationNotATable(name.name.clone()));
-            }
             let indexes = crabka_pgcatalog::list_table_indexes(catalog_kv, name)?;
             Ok((table, indexes))
         }
         Err(error) => {
-            if crabka_pgcatalog::get_view(catalog_kv, name).is_ok()
-                || crabka_pgcatalog::get_sequence(catalog_kv, name).is_ok()
-            {
+            // An index never reaches the referenced-relation test: PostgreSQL's
+            // `relation_open` locks its relkind out first, so it reports the
+            // open rather than the reference.
+            if let Some(refusal) = crate::exec::open_wrong_kind(catalog_kv, name) {
+                return Err(refusal);
+            }
+            if crate::exec::relation_kind(catalog_kv, name).is_some() {
                 return Err(ExecError::ReferencedRelationNotATable(name.name.clone()));
             }
             Err(error.into())
@@ -409,12 +429,28 @@ fn load_referenced_relation(
 /// The parent's primary-key columns, in index order. This is what an omitted
 /// referenced-column list means.
 fn primary_key_columns(parent: &FkRelation<'_>) -> Result<Vec<String>, ExecError> {
-    parent
+    let key = parent
         .indexes
         .iter()
         .find(|index| index.constraint == Some(IndexConstraint::PrimaryKey))
-        .map(|index| index.columns.clone())
-        .ok_or_else(|| no_unique_constraint(parent))
+        .ok_or_else(|| no_unique_constraint(parent))?;
+    if key.deferral.is_deferrable() {
+        return Err(deferrable_referent(
+            parent,
+            "cannot use a deferrable primary key for referenced table",
+        ));
+    }
+    Ok(key.columns.clone())
+}
+
+/// 55000: the referenced key is `DEFERRABLE`, so it is not unique for the whole
+/// of the referencing statement and a probe against it proves nothing.
+/// `PostgreSQL` refuses this for the same reason, and says so per the SQL spec.
+fn deferrable_referent(parent: &FkRelation<'_>, message: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "55000",
+        format!("{message} \"{}\"", parent.name.name),
+    ))
 }
 
 /// 42830, naming the parent the way `PostgreSQL` does: with
@@ -435,30 +471,60 @@ fn select_referenced_index<'a>(
     referenced_columns: &[String],
 ) -> Result<&'a Index, ExecError> {
     let wanted: BTreeSet<&str> = referenced_columns.iter().map(String::as_str).collect();
-    let matches = || {
-        parent.indexes.iter().filter(|index| {
-            index.unique
-                && index.columns.len() == referenced_columns.len()
-                && index
-                    .columns
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<BTreeSet<_>>()
-                    == wanted
-        })
+    let covers_wanted = |index: &Index| {
+        index.columns.len() == referenced_columns.len()
+            && index
+                .columns
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                == wanted
     };
-    let rank = |index: &Index| match index.constraint {
+    // A `WITHOUT OVERLAPS` key holds its rows apart with `&&`, not `=`, so an
+    // equality probe against it proves nothing: several parent rows can share
+    // the scalar part of the key. PostgreSQL names that case rather than
+    // reporting a missing constraint, and the only remedy is a `PERIOD`
+    // foreign key.
+    if parent
+        .indexes
+        .iter()
+        .any(|index| index.without_overlaps && covers_wanted(index))
+    {
+        return Err(ExecError::ForeignKeyNeedsPeriod);
+    }
+    let matches = || {
+        parent
+            .indexes
+            .iter()
+            .filter(|index| index.unique && !index.without_overlaps && covers_wanted(index))
+    };
+    let rank = |index: &Index| match &index.constraint {
         Some(IndexConstraint::PrimaryKey) => 0,
         Some(IndexConstraint::Unique) => 1,
-        None => 2,
+        Some(IndexConstraint::Exclusion(_)) | None => 2,
     };
-    matches()
+    // A DEFERRABLE key is not unique for the whole of the referencing statement,
+    // so it cannot prove a parent exists. It is skipped rather than rejected on
+    // sight: a second, immediate index over the same columns is still a valid
+    // referent, and only when none is left does the deferrable one decide which
+    // refusal to report.
+    let chosen = matches()
+        .filter(|index| !index.deferral.is_deferrable())
         .min_by(|left, right| {
             rank(left)
                 .cmp(&rank(right))
                 .then_with(|| left.name.cmp(&right.name))
-        })
-        .ok_or_else(|| no_unique_constraint(parent))
+        });
+    match chosen {
+        Some(index) => Ok(index),
+        // Named as deferrable rather than reported missing, because "add a
+        // unique constraint" is not the remedy.
+        None if matches().next().is_some() => Err(deferrable_referent(
+            parent,
+            "cannot use a deferrable unique constraint for referenced table",
+        )),
+        None => Err(no_unique_constraint(parent)),
+    }
 }
 
 /// The comparison families a foreign key may pair.
@@ -806,7 +872,7 @@ pub enum PendingCheck {
 }
 
 impl PendingCheck {
-    fn fk(&self) -> &Arc<ForeignKey> {
+    pub(crate) fn fk(&self) -> &Arc<ForeignKey> {
         match self {
             PendingCheck::Child { fk, .. } | PendingCheck::Parent { fk, .. } => fk,
         }
@@ -997,8 +1063,14 @@ pub struct DeferralModes {
 }
 
 impl DeferralModes {
+    /// Is the constraint `(table, name)` deferred right now?
+    ///
+    /// This is the whole rule, and every constraint kind asks it the same way:
+    /// a constraint that is not `DEFERRABLE` is never deferred, whatever
+    /// `SET CONSTRAINTS` says, and a deferrable one takes its own name's
+    /// setting, then `ALL`'s, then the deferrability it was declared with.
     #[must_use]
-    pub fn is_trigger_deferred(
+    pub fn is_named_deferred(
         &self,
         table: TableId,
         name: &str,
@@ -1014,6 +1086,18 @@ impl DeferralModes {
                 .unwrap_or(initially_deferred)
     }
 
+    /// [`DeferralModes::is_named_deferred`] for the `PRIMARY KEY`/`UNIQUE`
+    /// constraint one index enforces.
+    #[must_use]
+    pub fn is_index_deferred(&self, index: &crabka_pgcatalog::Index) -> bool {
+        self.is_named_deferred(
+            index.table_id,
+            &index.name,
+            index.deferral.is_deferrable(),
+            index.deferral.initially_deferred(),
+        )
+    }
+
     /// Apply `SET CONSTRAINTS ALL`. `PostgreSQL` resets every per-constraint
     /// setting with it.
     pub fn set_all(&mut self, deferred: bool) {
@@ -1026,21 +1110,38 @@ impl DeferralModes {
         self.named.insert((table, name.to_string()), deferred);
     }
 
-    /// Is this constraint deferred right now?
-    ///
-    /// A constraint that is not `DEFERRABLE` is never deferred, whatever
-    /// `SET CONSTRAINTS` says.
+    /// [`DeferralModes::is_named_deferred`] for one foreign key.
     #[must_use]
     pub fn is_deferred(&self, fk: &ForeignKey) -> bool {
-        if !fk.deferrable {
-            return false;
-        }
-        self.named
-            .get(&(fk.table_id, fk.name.clone()))
-            .copied()
-            .or(self.all)
-            .unwrap_or(fk.initially_deferred)
+        self.is_named_deferred(fk.table_id, &fk.name, fk.deferrable, fk.initially_deferred)
     }
+}
+
+/// One uniqueness recheck a `DEFERRABLE` `PRIMARY KEY` or `UNIQUE` constraint
+/// still owes.
+///
+/// `PostgreSQL` enforces a deferrable unique index by inserting the entry with
+/// `UNIQUE_CHECK_PARTIAL` and queueing an `AFTER ROW` event that re-runs
+/// `check_exclusion_or_unique_constraint` later. This is that event: the row
+/// `rowid` claimed `values` on `index`, and the check point has to prove that
+/// no *other* live row claims them too.
+///
+/// The key values ride along rather than being re-derived from the row, because
+/// by the check point the row may have been updated to a different key — and
+/// then this event has nothing left to prove, which is exactly what makes
+/// `UPDATE t SET i = i + 1` succeed.
+#[derive(Debug, Clone)]
+pub struct PendingUniqueCheck {
+    /// The relation the row lives in, re-resolved at the check point so that a
+    /// dropped relation simply drops its checks.
+    pub table: crabka_pgcatalog::RelationName,
+    /// The index whose key was claimed. Carried whole: the check reports the
+    /// constraint by name and describes the key by the index's columns.
+    pub index: crabka_pgcatalog::Index,
+    /// The row that claimed the key.
+    pub rowid: u64,
+    /// The key values it claimed.
+    pub values: Vec<crabka_pgtypes::Datum>,
 }
 
 /// The transaction's deferred checks and deferral modes.
@@ -1055,13 +1156,19 @@ pub struct DeferredConstraints {
     /// [`DeferredConstraints::defer`] is the only way in, and it is the one
     /// place the rule lives, so a referential action can never be found here.
     pending: Vec<PendingCheck>,
+    /// The uniqueness rechecks waiting for `COMMIT`. The statement drain
+    /// promotes them here, having already applied
+    /// [`DeferralModes::is_index_deferred`], so everything in this queue is
+    /// deferred by definition and a later `SET CONSTRAINTS … IMMEDIATE` is what
+    /// takes it back out.
+    pending_unique: Vec<PendingUniqueCheck>,
 }
 
 impl DeferredConstraints {
     /// True when nothing is deferred.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+        self.pending.is_empty() && self.pending_unique.is_empty()
     }
 
     /// The deferral modes, for a savepoint frame to capture.
@@ -1108,9 +1215,33 @@ impl DeferredConstraints {
         Some(check)
     }
 
+    /// Hold a uniqueness recheck until its constraint stops being deferred.
+    ///
+    /// The caller has already asked [`DeferralModes::is_index_deferred`]: the
+    /// statement drain runs the checks that are not deferred and promotes only
+    /// the rest, so this queue never holds one that should have run already.
+    pub fn defer_unique(&mut self, check: PendingUniqueCheck) {
+        self.pending_unique.push(check);
+    }
+
     /// Take every deferred check. This is the `COMMIT` drain.
     pub fn take_all(&mut self) -> Vec<PendingCheck> {
         std::mem::take(&mut self.pending)
+    }
+
+    /// Take every deferred uniqueness recheck, for the `COMMIT` drain.
+    pub fn take_all_unique(&mut self) -> Vec<PendingUniqueCheck> {
+        std::mem::take(&mut self.pending_unique)
+    }
+
+    /// Take the uniqueness rechecks that are no longer deferred, which is what
+    /// `SET CONSTRAINTS … IMMEDIATE` drains mid-transaction.
+    pub fn take_immediate_unique(&mut self) -> Vec<PendingUniqueCheck> {
+        let (ready, still_deferred) = std::mem::take(&mut self.pending_unique)
+            .into_iter()
+            .partition(|check| !self.modes.is_index_deferred(&check.index));
+        self.pending_unique = still_deferred;
+        ready
     }
 
     /// Take the checks that are no longer deferred. This is what
@@ -1123,9 +1254,29 @@ impl DeferredConstraints {
         ready
     }
 
+    /// Whether any deferred check still names `table`, on either side of its
+    /// constraint.
+    ///
+    /// A check waiting here identifies its row by rowid, so a statement that
+    /// moves the relation's rows to different rowids would leave the check
+    /// pointing at a version it can no longer see — and `PostgreSQL` refuses
+    /// exactly that with `cannot CLUSTER "…" because it has pending trigger
+    /// events`.
+    #[must_use]
+    pub fn touches_table(&self, table: crabka_pgcatalog::TableId) -> bool {
+        self.pending.iter().any(|check| {
+            let fk = check.fk();
+            fk.table_id == table || fk.referenced_table_id == table
+        }) || self
+            .pending_unique
+            .iter()
+            .any(|check| check.index.table_id == table)
+    }
+
     /// Discard everything, for transaction teardown.
     pub fn clear(&mut self) {
         self.pending.clear();
+        self.pending_unique.clear();
         self.modes = DeferralModes::default();
     }
 }
@@ -2230,6 +2381,8 @@ mod tests {
             method: IndexMethod::Btree,
             placement: IndexPlacement::Local,
             constraint,
+            without_overlaps: false,
+            deferral: crabka_pgcatalog::ConstraintDeferral::Immediate,
         }
     }
 
@@ -2268,6 +2421,7 @@ mod tests {
         ForeignKeyRef {
             table: crabka_pgparser::ast::RelationRef::bare(table),
             columns: cols.iter().map(|c| (*c).to_string()).collect(),
+            period: false,
             match_type: AstMatchType::Simple,
             on_delete: AstAction::NoAction,
             on_update: AstAction::NoAction,
@@ -2517,6 +2671,9 @@ mod tests {
             method: IndexMethod::Btree,
             placement: IndexPlacement::Local,
             constraint: Some(IndexConstraint::PrimaryKey),
+            without_overlaps: false,
+            clustered: false,
+            deferral: crabka_pgcatalog::ConstraintDeferral::Immediate,
         }];
         let relation = FkRelation {
             id: 9,
@@ -2565,6 +2722,8 @@ mod tests {
             &RelationName::public("aview"),
             "SELECT 1".into(),
             columns(&[("one", ColumnType::Int4)]),
+            crabka_pgcatalog::ViewOptions::default(),
+            crabka_pgcatalog::BOOTSTRAP_ROLE,
         )
         .expect("create view");
         let child_columns = columns(&[
@@ -3052,11 +3211,15 @@ mod tests {
     fn one_constraint_writes_a_row_once_and_another_constraint_still_writes_it() {
         let table = Table {
             id: 4,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("c"),
             columns: columns(&[("a", ColumnType::Int4)]),
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let mut cascade = FakeCascade::default();

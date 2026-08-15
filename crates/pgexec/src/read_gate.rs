@@ -85,6 +85,10 @@ mod tests {
     /// reached the gate apart from a read that skipped it.
     #[tokio::test]
     async fn the_local_gate_opens_a_read_gate_span() {
+        // Every other test in this binary drives reads through this same gate,
+        // and with no subscriber of its own. Whichever thread reaches the
+        // callsite first decides its cached interest for the whole process.
+        crate::telemetry::install_interest_floor();
         let opened = Opened::default();
         let subscriber = tracing_subscriber::registry().with(
             opened

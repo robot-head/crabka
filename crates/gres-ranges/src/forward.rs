@@ -1512,6 +1512,16 @@ impl ResultSink for RangeFrameSink<'_> {
                     result: WireQueryResult::Empty,
                 },
             },
+            // A copy-out block is `CopyOutResponse`/`CopyData`/`CopyDone` on the
+            // client's connection, and this frame protocol carries results
+            // rather than protocol messages. Refused rather than flattened into
+            // rows, which is the same stance the gateway takes on copy-in.
+            ResultPage::CopyOut { .. } => {
+                return Err(PgError::error(
+                    crabka_pgwire::error::sqlstate::FEATURE_NOT_SUPPORTED,
+                    "COPY TO STDOUT is not supported through the multi-range gateway",
+                ));
+            }
         };
         match write_frame_with_limit(self.writer, &response, self.max_frame).await {
             Ok(()) => Ok(()),
@@ -4356,11 +4366,15 @@ mod tests {
     fn sharded_table() -> Table {
         Table {
             id: 11,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: crabka_pgcatalog::RelationName::public("t11"),
             columns: vec![Column::new("id", ColumnType::Int4)],
             sharded: true,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }

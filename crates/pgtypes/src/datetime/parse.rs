@@ -13,10 +13,12 @@
 //! date, a `date` keeps only the date).
 
 use jiff::{
-    Span,
+    Span, Timestamp, Zoned,
     civil::Date,
     tz::{Offset, TimeZone},
 };
+
+use super::tzdb::zone_by_name;
 
 /// The field-order component of `DateStyle`, which decides how an all-numeric
 /// date with no unambiguous field is read (`01/02/03`).
@@ -61,22 +63,41 @@ impl DateOrder {
     }
 }
 
-/// A reserved spelling that stands for something other than a fixed instant.
+/// Which of `PostgreSQL`'s two decoders is reading the literal.
+///
+/// `PostgreSQL` does not have one date/time decoder, it has two: `DecodeDateTime`
+/// behind `date`, `timestamp` and `timestamptz`, and `DecodeTimeOnly` behind
+/// `time` and `timetz`. They split the same fields differently, because a
+/// run-together number means opposite things to them — `040506` is a date to one
+/// and a clock reading to the other. `DecodeTimeOnly` gets that by passing
+/// `fmask | DTK_DATE_M` into every numeric decode, so the number decoders behave
+/// as though a date were already in hand and route the field to the clock. This
+/// enum carries the same decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodeMode {
+    /// `DecodeDateTime`: a bare run-together number is a date.
+    #[default]
+    DateTime,
+    /// `DecodeTimeOnly`: a bare run-together number is a clock reading.
+    TimeOnly,
+}
+
+/// A reserved spelling that stands for a whole value rather than for fields.
+///
+/// `PostgreSQL`'s `RESERV` keywords fall into two groups, and only this group
+/// replaces the entire value: its `DecodeDateTime` sets `*dtype` to the token
+/// itself and the caller never looks at the field struct. The other group —
+/// `now`, `today`, `tomorrow`, `yesterday` — *fills fields* and composes with the
+/// rest of the literal, so it is decoded into [`Parts`] instead of appearing
+/// here. That split is what makes `'today 10:30'` a valid timestamp while
+/// `'1995-08-06 epoch'` is a syntax error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Special {
     /// `infinity` / `+infinity`.
     Infinity,
     /// `-infinity`.
     NegInfinity,
-    /// `now`: the current transaction timestamp.
-    Now,
-    /// `today`: midnight of the current date.
-    Today,
-    /// `tomorrow`: midnight of the following date.
-    Tomorrow,
-    /// `yesterday`: midnight of the preceding date.
-    Yesterday,
-    /// `epoch`: 1970-01-01 00:00:00 UTC.
+    /// `epoch` — 1970-01-01 00:00:00 UTC.
     Epoch,
 }
 
@@ -88,6 +109,17 @@ pub enum Zone {
     /// A zone-database name or dynamic abbreviation, whose offset depends on the
     /// instant it is applied to.
     Named(TimeZone),
+}
+
+impl Zone {
+    /// The jiff zone this stands for.
+    #[must_use]
+    pub fn into_time_zone(self) -> TimeZone {
+        match self {
+            Zone::Offset(offset) => TimeZone::fixed(offset),
+            Zone::Named(tz) => tz,
+        }
+    }
 }
 
 /// Everything a literal supplied, before any per-type interpretation.
@@ -122,6 +154,23 @@ pub enum DecodeError {
     /// A field is outside its range, or the value leaves the type's range
     /// (22008).
     FieldOverflow,
+    /// The MONTH or the DAY field is outside its range (22008).
+    ///
+    /// Same class as [`DecodeError::FieldOverflow`] and same message, but
+    /// `PostgreSQL` adds a HINT to it: a month of 18 usually means the literal
+    /// was written in a field order the current `DateStyle` does not read, and
+    /// the month and the day are the two fields that ordering can swap. The
+    /// distinction stops at the coarse check — `1997-02-29` names a real month
+    /// and a day inside `1..=31`, so it is an ordinary field overflow, and
+    /// `PostgreSQL` deliberately leaves it without the HINT.
+    MdFieldOverflow,
+    /// Every field is in range, but the day they name is not (22008).
+    ///
+    /// `PostgreSQL` reports this one by the TYPE rather than by the field —
+    /// `date out of range`, `timestamp out of range` — because no single field
+    /// is at fault. The order matters: the field checks run first, which is why
+    /// `5874898-02-30` is a field overflow and `5874898-01-01` is this.
+    ValueOutOfRange,
     /// A UTC offset outside ±15:59:59 (22009).
     TzDisplacement,
     /// A zone name the zone database does not know (22023).
@@ -175,7 +224,9 @@ fn split_fields(text: &str) -> Result<Vec<Field>, DecodeError> {
         } else if c == '+' || c == '-' {
             out.push(split_signed_field(&chars, &mut i)?);
         } else {
-            return Err(DecodeError::Syntax);
+            // Any other punctuation separates fields and is dropped, so
+            // `19971)24` is a year and a month rather than a lexical error.
+            i += 1;
         }
     }
     if out.is_empty() {
@@ -303,14 +354,47 @@ fn split_signed_field(chars: &[char], i: &mut usize) -> Result<Field, DecodeErro
 }
 
 /// Whether a letter run is a keyword in its own right, so a digit right after it
-/// starts a new field and does not continue a zone name.
+/// starts a new field rather than continuing a zone name.
+///
+/// This is `PostgreSQL`'s `datebsearch(field, datetktbl)` test, and the set has to
+/// match that table rather than merely the spellings the decoder goes on to use.
+/// A word the table knows stops the field there and leaves the digits to be read
+/// separately, so `m2` is the unit `m` followed by `2` — two fields neither of
+/// which means anything in a literal — while `X8` is one field and a legal `POSIX`
+/// zone. That is the whole reason `'15:36:39 m2'` is malformed and `'15:36:39 X8'`
+/// is a zone eight hours west.
 fn is_non_zone_keyword(word: &str) -> bool {
+    // The single- and double-letter unit tokens, which are the ones a digit can
+    // realistically follow. The rest of the table is reached through the month,
+    // weekday and reserved-word lookups below.
     matches!(
         word,
-        "t" | "j" | "jd" | "on" | "at" | "of" | "am" | "pm" | "bc" | "ad"
+        "t" | "j"
+            | "jd"
+            | "julian"
+            | "on"
+            | "at"
+            | "of"
+            | "am"
+            | "pm"
+            | "bc"
+            | "ad"
+            | "d"
+            | "h"
+            | "m"
+            | "s"
+            | "y"
+            | "mm"
+            | "dow"
+            | "doy"
+            | "dst"
+            | "isodow"
+            | "isoyear"
+            | "allballs"
     ) || month_number(word).is_some()
         || is_weekday(word)
         || special_word(word).is_some()
+        || relative_word(word).is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -341,62 +425,204 @@ impl Tm {
     fn has_full_time(&self) -> bool {
         self.hour.is_some() && self.minute.is_some() && self.second.is_some()
     }
+
+    /// Whether any calendar slot has been filled — `PostgreSQL`'s `fmask &
+    /// DTK_DATE_M` read as a yes/no.
+    fn any_date(&self) -> bool {
+        self.year.is_some() || self.month.is_some() || self.day.is_some() || self.yday.is_some()
+    }
+
+    /// Whether any clock slot has been filled — `fmask & DTK_TIME_M`.
+    fn any_time(&self) -> bool {
+        self.hour.is_some() || self.minute.is_some() || self.second.is_some()
+    }
+}
+
+/// The slots a reserved spelling laid claim to.
+///
+/// `PostgreSQL` gives each `RESERV` keyword a `tmask` and refuses the literal
+/// when it overlaps the `fmask` built so far, in either direction: the keyword
+/// may not arrive after a field it would overwrite, and a field may not arrive
+/// after a keyword that already covered it. Both `'1995-08-06 epoch'` and `'epoch
+/// 01:01:01'` are rejected by that one rule.
+///
+/// Only the reserved spellings are tracked, because they are the only tokens
+/// whose claim is wider than the slot they fill: an ordinary field claims exactly
+/// the slot it lands in, and the slot-assignment rules already keep those from
+/// colliding.
+#[derive(Debug, Clone, Copy, Default)]
+struct Claimed {
+    date: bool,
+    time: bool,
+    zone: bool,
 }
 
 /// Decode a date/time literal into whichever parts it supplied.
 ///
-/// `order` decides only how an otherwise-ambiguous all-numeric date is read.
-pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
+/// `order` decides only how an otherwise-ambiguous all-numeric date is read;
+/// `mode` picks between `PostgreSQL`'s two decoders (see [`DecodeMode`]); `tz` is
+/// the session zone the relative spellings (`now`, `today`, `tomorrow`,
+/// `yesterday`) are resolved against. The wall clock is read at most once, and
+/// only when one of those spellings is present.
+///
+/// # Errors
+///
+/// [`DecodeError`], one variant per SQLSTATE class the literal can fail with.
+pub fn decode(
+    text: &str,
+    order: DateOrder,
+    mode: DecodeMode,
+    tz: &TimeZone,
+) -> Result<Decoded, DecodeError> {
     let fields = split_fields(text)?;
     let mut tm = Tm::default();
     let mut zone: Option<Zone> = None;
     let mut special: Option<Special> = None;
+    let mut claimed = Claimed::default();
+    // Read lazily: a literal with no relative spelling in it must not pay for a
+    // clock read, and one with several must see a single consistent instant.
+    let mut wall: Option<Zoned> = None;
     let mut is_bc = false;
     let mut meridiem: Option<bool> = None;
     let mut want_julian = false;
     let mut is_julian = false;
     let mut have_text_month = false;
+    // Whether a field outside the date itself has already been read. A
+    // punctuated date field insists nothing but a day-of-year or a zone has been
+    // seen yet, so a leading weekday makes `Fri 1-January-1999` malformed while
+    // the same literal with the weekday at the end is fine.
+    let mut have_non_date = false;
 
-    for field in &fields {
+    for (index, field) in fields.iter().enumerate() {
         match field {
-            Field::Time(text) => decode_time(text, &mut tm)?,
+            Field::Time(text) => {
+                if claimed.time {
+                    return Err(DecodeError::Syntax);
+                }
+                decode_time(text, &mut tm)?;
+                have_non_date = true;
+            }
             Field::Date(text) => {
+                // A Julian day with its zone run together — `J2452271-08` — is
+                // one punctuated field, so the day number and the offset have to
+                // be split apart here.
+                if std::mem::take(&mut want_julian) {
+                    let digits = text
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(text.len());
+                    let (jd, offset) = text.split_at(digits);
+                    set_julian_date(jd, &mut tm)?;
+                    is_julian = true;
+                    zone = Some(Zone::Offset(decode_tz_offset(offset)?));
+                }
                 // Once month and day are known a punctuated field can only be a
-                // zone name — this is what makes `America/New_York` legal after a
-                // date and a syntax error without one.
-                if tm.month.is_some() && tm.day.is_some() {
-                    zone = Some(lookup_zone_spec(text)?);
+                // zone: either a name with embedded punctuation, or a
+                // run-together clock reading with its offset glued on by the `-`
+                // that ordinarily delimits a date.
+                else if match mode {
+                    DecodeMode::DateTime => tm.month.is_some() && tm.day.is_some(),
+                    // A time-only literal takes a leading date only as a
+                    // preamble to a clock reading it must throw away, so the
+                    // field counts as a date exactly when something later in the
+                    // literal can still supply the time.
+                    DecodeMode::TimeOnly => {
+                        !(index == 0
+                            && fields.len() >= 2
+                            && (matches!(fields.last(), Some(Field::Date(_)))
+                                || matches!(fields.get(1), Some(Field::Time(_)))))
+                    }
+                } {
+                    if claimed.zone {
+                        return Err(DecodeError::Syntax);
+                    }
+                    if text.starts_with(|c: char| c.is_ascii_digit()) {
+                        let (reading, offset) = split_run_together_zone(text)?;
+                        zone = Some(Zone::Offset(offset));
+                        decode_number_field(reading, &mut tm, true)?;
+                    } else {
+                        zone = Some(lookup_zone_spec(text)?);
+                    }
                 } else {
+                    if have_non_date || claimed.date {
+                        return Err(DecodeError::Syntax);
+                    }
                     decode_date(text, order, &mut tm, &mut have_text_month)?;
                 }
             }
             Field::Number(text) => {
+                if claimed.date || (mode == DecodeMode::TimeOnly && claimed.time) {
+                    return Err(DecodeError::Syntax);
+                }
                 if std::mem::take(&mut want_julian) {
-                    let jd: i32 = text.parse().map_err(|_| DecodeError::FieldOverflow)?;
-                    let date = julian_to_date(jd)?;
-                    tm.year = Some(i32::from(date.year()));
-                    tm.month = Some(i32::from(date.month()));
-                    tm.day = Some(i32::from(date.day()));
-                    tm.two_digit_year = false;
+                    // A fractional Julian day carries the time of day with it.
+                    let (jd, fraction) = text.split_once('.').unwrap_or((text, ""));
+                    set_julian_date(jd, &mut tm)?;
                     is_julian = true;
+                    if !fraction.is_empty() {
+                        let micros = day_fraction_to_micros(fraction)?;
+                        tm.hour = Some((micros / 3_600_000_000) as i32);
+                        tm.minute = Some((micros / 60_000_000 % 60) as i32);
+                        tm.second = Some((micros / 1_000_000 % 60) as i32);
+                        tm.micro = micros % 1_000_000;
+                    }
                 } else {
-                    decode_number_token(text, order, &mut tm, have_text_month)?;
+                    decode_number_token(text, order, mode, &mut tm, have_text_month)?;
                 }
             }
-            Field::Tz(text) => zone = Some(Zone::Offset(decode_tz_offset(text)?)),
-            Field::SignedWord(text) => match text.as_str() {
-                "-infinity" => special = Some(Special::NegInfinity),
-                "+infinity" => special = Some(Special::Infinity),
-                _ => return Err(DecodeError::Syntax),
-            },
+            Field::Tz(text) => {
+                if claimed.zone {
+                    return Err(DecodeError::Syntax);
+                }
+                zone = Some(Zone::Offset(decode_tz_offset(text)?));
+            }
+            Field::SignedWord(text) => {
+                let found = match text.as_str() {
+                    "-infinity" => Special::NegInfinity,
+                    "+infinity" => Special::Infinity,
+                    _ => return Err(DecodeError::Syntax),
+                };
+                claim_whole_value(&tm, zone.as_ref(), &mut claimed)?;
+                special = Some(found);
+            }
             Field::Word(word) => match word.as_str() {
                 // The ISO `T` separator and the noise words PostgreSQL drops.
                 "t" | "on" | "at" | "of" => {}
-                "j" | "jd" | "julian" => want_julian = true,
-                "am" => meridiem = Some(false),
-                "pm" => meridiem = Some(true),
-                "bc" => is_bc = true,
-                "ad" => is_bc = false,
+                // A second `J` has nothing left to label, so `J J 1520447` is
+                // malformed rather than a Julian day with a noise word.
+                "j" | "jd" | "julian" => {
+                    if want_julian {
+                        return Err(DecodeError::Syntax);
+                    }
+                    want_julian = true;
+                }
+                "am" => {
+                    meridiem = Some(false);
+                    have_non_date = true;
+                }
+                "pm" => {
+                    meridiem = Some(true);
+                    have_non_date = true;
+                }
+                "bc" => {
+                    is_bc = true;
+                    have_non_date = true;
+                }
+                "ad" => {
+                    is_bc = false;
+                    have_non_date = true;
+                }
+                // `DST` as a word of its own moves the zone already named an
+                // hour east: `MET DST` is +02. It modifies a zone rather than
+                // being one, so it needs a fixed offset to modify.
+                "dst" => {
+                    let Some(Zone::Offset(offset)) = zone else {
+                        return Err(DecodeError::Syntax);
+                    };
+                    zone = Some(Zone::Offset(
+                        Offset::from_seconds(offset.seconds() + 3_600)
+                            .map_err(|_| DecodeError::TzDisplacement)?,
+                    ));
+                }
                 "allballs" => {
                     tm.hour = Some(0);
                     tm.minute = Some(0);
@@ -406,7 +632,19 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                 }
                 _ => {
                     if let Some(found) = special_word(word) {
+                        claim_whole_value(&tm, zone.as_ref(), &mut claimed)?;
                         special = Some(found);
+                    } else if let Some(relative) = relative_word(word) {
+                        apply_relative(
+                            relative,
+                            mode,
+                            tz,
+                            &mut wall,
+                            &mut tm,
+                            &mut zone,
+                            &mut claimed,
+                        )?;
+                        have_non_date = true;
                     } else if let Some(month) = month_number(word) {
                         // A number already read into the month slot was really
                         // the day: `08 Jan 1999`. PostgreSQL demotes it as soon
@@ -422,7 +660,18 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
                     } else if is_weekday(word) {
                         // Day-of-week names are decoration; PostgreSQL does not
                         // cross-check them against the date.
-                    } else if let Some(found) = lookup_abbrev(word) {
+                        have_non_date = true;
+                    } else if let Some(found) =
+                        lookup_abbrev(word).or_else(|| lookup_zone_name(word))
+                    {
+                        // An abbreviation wins over a same-spelled database
+                        // name, as in PostgreSQL: `EST` is the fixed -05 of the
+                        // default abbreviation set, not the `EST` zone. Whole
+                        // single-word zone names (`Japan`, `Navajo`, `Turkey`)
+                        // fall through to the database.
+                        if claimed.zone {
+                            return Err(DecodeError::Syntax);
+                        }
                         zone = Some(found);
                     } else {
                         return Err(DecodeError::Syntax);
@@ -453,6 +702,23 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
 
     let date = finish_date(&tm, is_bc, is_julian)?;
     let micros_of_day = finish_time(&tm)?;
+    if mode == DecodeMode::TimeOnly {
+        // `DecodeTimeOnly` insists on a whole clock reading, which is what makes
+        // `time '2003-03-07'` and `time 'zulu'` malformed rather than midnight.
+        if tm.hour.is_none() {
+            return Err(DecodeError::Syntax);
+        }
+        // A zone whose offset moves needs a date to be resolved against, and a
+        // time-only literal usually has none: `'15:36:39 America/New_York'` is
+        // malformed while `'15:36:39 UTC'` — a zone with one offset for all
+        // time — is not.
+        if let Some(Zone::Named(named)) = &zone
+            && date.is_none()
+            && named.to_fixed_offset().is_err()
+        {
+            return Err(DecodeError::Syntax);
+        }
+    }
     Ok(Decoded::Parts(Parts {
         date,
         micros_of_day,
@@ -461,27 +727,235 @@ pub fn decode(text: &str, order: DateOrder) -> Result<Decoded, DecodeError> {
     }))
 }
 
+/// A reserved spelling that fills fields from the wall clock instead of naming a
+/// whole value. These compose with the rest of the literal, so `'today 10:30'`
+/// is a date from the clock and a time from the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relative {
+    /// `now` — the current date, time and offset.
+    Now,
+    /// `today` — the current date, and nothing else.
+    Today,
+    /// `tomorrow` — the following date.
+    Tomorrow,
+    /// `yesterday` — the preceding date.
+    Yesterday,
+}
+
+/// Map a word to the clock-relative spelling it names.
+fn relative_word(word: &str) -> Option<Relative> {
+    Some(match word {
+        "now" => Relative::Now,
+        "today" => Relative::Today,
+        "tomorrow" => Relative::Tomorrow,
+        "yesterday" => Relative::Yesterday,
+        _ => return None,
+    })
+}
+
+/// Claim every slot on behalf of a whole-value spelling (`epoch`, `infinity`,
+/// `-infinity`), refusing the literal when any of them is already spoken for.
+///
+/// `PostgreSQL` gives these a `tmask` of `DTK_DATE_M | DTK_TIME_M | DTK_M(TZ)`,
+/// so they may neither follow nor precede anything that carries a date, a time or
+/// a zone.
+fn claim_whole_value(
+    tm: &Tm,
+    zone: Option<&Zone>,
+    claimed: &mut Claimed,
+) -> Result<(), DecodeError> {
+    if tm.any_date()
+        || tm.any_time()
+        || zone.is_some()
+        || claimed.date
+        || claimed.time
+        || claimed.zone
+    {
+        return Err(DecodeError::Syntax);
+    }
+    *claimed = Claimed {
+        date: true,
+        time: true,
+        zone: true,
+    };
+    Ok(())
+}
+
+/// Fill the fields a clock-relative spelling supplies, reading the wall clock at
+/// most once for the whole literal.
+///
+/// `DecodeTimeOnly` accepts only `now`, and takes just the time from it; the
+/// three date spellings have no clock reading to contribute and are malformed
+/// there, which is what makes `time 'today'` an error while `timestamp 'today'`
+/// is midnight.
+fn apply_relative(
+    relative: Relative,
+    mode: DecodeMode,
+    tz: &TimeZone,
+    wall: &mut Option<Zoned>,
+    tm: &mut Tm,
+    zone: &mut Option<Zone>,
+    claimed: &mut Claimed,
+) -> Result<(), DecodeError> {
+    if mode == DecodeMode::TimeOnly {
+        if relative != Relative::Now {
+            return Err(DecodeError::Syntax);
+        }
+        if tm.any_time() || claimed.time {
+            return Err(DecodeError::Syntax);
+        }
+        let time = wall_clock(tz, wall).time();
+        tm.hour = Some(i32::from(time.hour()));
+        tm.minute = Some(i32::from(time.minute()));
+        tm.second = Some(i32::from(time.second()));
+        tm.micro = i64::from(time.subsec_nanosecond()) / 1_000;
+        claimed.time = true;
+        return Ok(());
+    }
+    if tm.any_date() || claimed.date {
+        return Err(DecodeError::Syntax);
+    }
+    if relative == Relative::Now && (tm.any_time() || zone.is_some() || claimed.time) {
+        return Err(DecodeError::Syntax);
+    }
+    let zoned = wall_clock(tz, wall);
+    let date = match relative {
+        Relative::Now | Relative::Today => zoned.date(),
+        Relative::Tomorrow => zoned.date().tomorrow().map_err(|_| DecodeError::Syntax)?,
+        Relative::Yesterday => zoned.date().yesterday().map_err(|_| DecodeError::Syntax)?,
+    };
+    tm.year = Some(i32::from(date.year()));
+    tm.month = Some(i32::from(date.month()));
+    tm.day = Some(i32::from(date.day()));
+    tm.two_digit_year = false;
+    claimed.date = true;
+    if relative == Relative::Now {
+        let time = zoned.time();
+        tm.hour = Some(i32::from(time.hour()));
+        tm.minute = Some(i32::from(time.minute()));
+        tm.second = Some(i32::from(time.second()));
+        tm.micro = i64::from(time.subsec_nanosecond()) / 1_000;
+        *zone = Some(Zone::Offset(zoned.offset()));
+        claimed.time = true;
+        claimed.zone = true;
+    }
+    Ok(())
+}
+
+/// The wall clock in `tz`, read on first use and reused for the rest of the
+/// literal so `'yesterday'` and `'now'` in one text cannot straddle midnight.
+fn wall_clock<'a>(tz: &TimeZone, wall: &'a mut Option<Zoned>) -> &'a Zoned {
+    wall.get_or_insert_with(|| Timestamp::now().to_zoned(tz.clone()))
+}
+
+/// Split a run-together clock reading from the UTC offset glued to it — the
+/// `hhmmss-zz` shape that reaches the decoder as one punctuated field because `-`
+/// is also a date delimiter.
+///
+/// Only `-` glues: a `+` is not a date delimiter, so `040506+08` arrives already
+/// split and never comes here. That asymmetry is `PostgreSQL`'s, and it is why
+/// the two signs take different paths through the decoder.
+fn split_run_together_zone(text: &str) -> Result<(&str, Offset), DecodeError> {
+    let at = text.find('-').ok_or(DecodeError::Syntax)?;
+    let (reading, offset) = text.split_at(at);
+    Ok((reading, decode_tz_offset(offset)?))
+}
+
+/// Fill the calendar fields from a Julian day number.
+fn set_julian_date(digits: &str, tm: &mut Tm) -> Result<(), DecodeError> {
+    let jd: i32 = digits.parse().map_err(|_| DecodeError::FieldOverflow)?;
+    let date = julian_to_date(jd)?;
+    tm.year = Some(i32::from(date.year()));
+    tm.month = Some(i32::from(date.month()));
+    tm.day = Some(i32::from(date.day()));
+    tm.two_digit_year = false;
+    Ok(())
+}
+
+/// Turn the fractional part of a Julian day into microseconds since midnight.
+fn day_fraction_to_micros(digits: &str) -> Result<i64, DecodeError> {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(DecodeError::Syntax);
+    }
+    let fraction: f64 = format!("0.{digits}")
+        .parse()
+        .map_err(|_| DecodeError::Syntax)?;
+    Ok((fraction * MICROS_PER_DAY as f64).round() as i64)
+}
+
+/// The length of `month` in `year`, in the astronomical year numbering, where
+/// year 0 is 1 BC and is a leap year. `month` must already be `1..=12`.
+fn days_in_month(year: i32, month: i32) -> i32 {
+    const LENGTHS: [i32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    if month == 2 && is_leap {
+        return 29;
+    }
+    usize::try_from(month - 1)
+        .ok()
+        .and_then(|index| LENGTHS.get(index).copied())
+        .unwrap_or(31)
+}
+
 /// Apply the era and two-digit-year windows and build the calendar date.
+///
+/// `PostgreSQL`'s `ValidateDate` range-checks each field that arrived BEFORE
+/// anything insists the date is complete, and that order is observable:
+/// `19971)24` is a year and a month with no day, and it reports the month being
+/// out of range rather than the missing day.
 fn finish_date(tm: &Tm, is_bc: bool, is_julian: bool) -> Result<Option<Date>, DecodeError> {
-    let Some(year) = tm.year else {
+    // PostgreSQL stores BC years astronomically: 1 BC is year 0, so `n BC` is
+    // `-(n - 1)`. jiff numbers years the same way, so no further shift is needed.
+    let year = match tm.year {
+        Some(year) if is_julian => Some(year),
+        Some(year) if is_bc => {
+            if year <= 0 {
+                return Err(DecodeError::FieldOverflow);
+            }
+            Some(-(year - 1))
+        }
+        Some(year) if tm.two_digit_year && year < 100 => {
+            Some(if year < 70 { year + 2000 } else { year + 1900 })
+        }
+        Some(year) => {
+            // Year zero has no spelling outside the BC era.
+            if year <= 0 {
+                return Err(DecodeError::FieldOverflow);
+            }
+            Some(year)
+        }
+        None => None,
+    };
+    if let Some(month) = tm.month
+        && !(1..=12).contains(&month)
+    {
+        return Err(DecodeError::MdFieldOverflow);
+    }
+    if let Some(day) = tm.day
+        && !(1..=31).contains(&day)
+    {
+        return Err(DecodeError::MdFieldOverflow);
+    }
+    let Some(year) = year else {
         if tm.month.is_some() || tm.day.is_some() || tm.yday.is_some() {
             return Err(DecodeError::Syntax);
         }
         return Ok(None);
     };
-    // PostgreSQL stores BC years astronomically: 1 BC is year 0, so `n BC` is
-    // `-(n - 1)`. jiff numbers years the same way, so no further shift is needed.
-    let year = if is_bc {
-        if year <= 0 {
-            return Err(DecodeError::FieldOverflow);
-        }
-        -(year - 1)
-    } else if tm.two_digit_year && !is_julian && year < 100 {
-        if year < 70 { year + 2000 } else { year + 1900 }
-    } else {
-        year
-    };
-    let year = i16::try_from(year).map_err(|_| DecodeError::FieldOverflow)?;
+    // Now that the year is known, the day can be checked against the length of
+    // the month it names. `PostgreSQL` deliberately does NOT call this one a
+    // month/day fault: `Feb 29` is unlikely to be a field-order mistake, so it
+    // gets no `DateStyle` hint. The check runs on the year as written rather
+    // than on a calendar date, so it still applies to a year the calendar
+    // cannot hold — `5874898-02-30` is a bad day, not an unreachable one.
+    if let (Some(month), Some(day)) = (tm.month, tm.day)
+        && day > days_in_month(year, month)
+    {
+        return Err(DecodeError::FieldOverflow);
+    }
+    // The fields are all in range by now, so a year the calendar cannot hold is
+    // the VALUE leaving the type's range rather than a field leaving its own.
+    let year = i16::try_from(year).map_err(|_| DecodeError::ValueOutOfRange)?;
 
     if let Some(yday) = tm.yday {
         let jan1 = Date::new(year, 1, 1).map_err(|_| DecodeError::FieldOverflow)?;
@@ -577,6 +1051,13 @@ fn decode_date(
     tm: &mut Tm,
     have_text_month: &mut bool,
 ) -> Result<(), DecodeError> {
+    // `DecodeDate` reads a group, then skips separators hunting the next one;
+    // running out of text there is an error. So a trailing separator is
+    // malformed — which is the whole reason `1999-08-Jan` is rejected, since the
+    // field splitter hands the date half over as `1999-08-`.
+    if text.ends_with(|c: char| !c.is_ascii_alphanumeric()) {
+        return Err(DecodeError::Syntax);
+    }
     let raw: Vec<&str> = text
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -598,30 +1079,50 @@ fn decode_date(
         }
     }
     for part in numeric {
-        decode_number(part, order, tm, *have_text_month)?;
+        decode_number(part, order, tm, *have_text_month, false)?;
+    }
+    // A punctuated date field has to have carried a WHOLE date. PostgreSQL
+    // checks this at the end of `DecodeDate`, ahead of any range check, which is
+    // why `040506.07` — a year and a month and nothing else — is a syntax error
+    // rather than a complaint about the year.
+    if tm.year.is_none() || (tm.yday.is_none() && (tm.month.is_none() || tm.day.is_none())) {
+        return Err(DecodeError::Syntax);
     }
     Ok(())
 }
 
-/// Decode a standalone numeric field. This function chooses between the
-/// run-together forms (`19970210`, `173201`) and a single date or time
-/// component.
+/// Decode a standalone numeric field, choosing between the run-together forms
+/// (`19970210`, `173201`) and a single date or time component.
+///
+/// A time-only literal decodes every number as though the date were already in
+/// hand — `PostgreSQL` passes `fmask | DTK_DATE_M` here for exactly that reason —
+/// which is what sends `040506` to the clock rather than to the calendar.
 fn decode_number_token(
     text: &str,
     order: DateOrder,
+    mode: DecodeMode,
     tm: &mut Tm,
     have_text_month: bool,
 ) -> Result<(), DecodeError> {
+    let date_known = mode == DecodeMode::TimeOnly || tm.has_full_date();
     match text.find('.') {
         // `1997.041` — a year and a day-of-year, so read the whole field as a date.
-        Some(_) if !tm.has_full_date() => {
+        Some(_) if !date_known => {
             let mut text_month = have_text_month;
             decode_date(text, order, tm, &mut text_month)
         }
         // `040506.789` — a run-together time with fractional seconds.
-        Some(dot) if dot > 2 => decode_number_field(text, tm),
-        _ if text.len() > 4 => decode_number_field(text, tm),
-        _ => decode_number(text, order, tm, have_text_month),
+        Some(dot) if dot > 2 => decode_number_field(text, tm, date_known),
+        // A time-only literal that got here with a fraction and two digits or
+        // fewer ahead of it has nowhere left to put the field.
+        Some(_) if mode == DecodeMode::TimeOnly => Err(DecodeError::Syntax),
+        // A run-together `YYYYMMDD` or `HHMMSS` needs SIX digits. Five is a
+        // year, which is what leaves `19971)24` a month-out-of-range complaint
+        // rather than an unreadable field.
+        _ if text.len() >= 6 && !(date_known && tm.has_full_time()) => {
+            decode_number_field(text, tm, date_known)
+        }
+        _ => decode_number(text, order, tm, have_text_month, date_known),
     }
 }
 
@@ -632,6 +1133,7 @@ fn decode_number(
     order: DateOrder,
     tm: &mut Tm,
     have_text_month: bool,
+    date_known: bool,
 ) -> Result<(), DecodeError> {
     let (digits, fraction) = match text.split_once('.') {
         Some((whole, frac)) => (whole, Some(frac)),
@@ -642,7 +1144,7 @@ fn decode_number(
     if let Some(frac) = fraction {
         // More than two digits before the point is a run-together date or time.
         if len > 2 {
-            return decode_number_field(text, tm);
+            return decode_number_field(text, tm, date_known);
         }
         tm.micro = parse_fraction(frac)?;
         tm.second = Some(value);
@@ -661,7 +1163,11 @@ fn decode_number(
     }
 
     let mut assigned_year = false;
-    match (tm.year.is_some(), tm.month.is_some(), tm.day.is_some()) {
+    match (
+        date_known || tm.year.is_some(),
+        date_known || tm.month.is_some(),
+        date_known || tm.day.is_some(),
+    ) {
         (false, false, false) => {
             if len >= 3 || order == DateOrder::Ymd {
                 tm.year = Some(value);
@@ -698,7 +1204,7 @@ fn decode_number(
             assigned_year = true;
         }
         (true, false, true) => return Err(DecodeError::Syntax),
-        (true, true, true) => return decode_number_field(text, tm),
+        (true, true, true) => return decode_number_field(text, tm, date_known),
     }
     if assigned_year {
         tm.two_digit_year = len <= 2;
@@ -707,15 +1213,16 @@ fn decode_number(
 }
 
 /// Decode a run-together field: `YYYYMMDD`/`YYMMDD` when no date is known yet,
-/// otherwise `HHMMSS`/`HHMM`.
-fn decode_number_field(text: &str, tm: &mut Tm) -> Result<(), DecodeError> {
+/// otherwise `HHMMSS`/`HHMM`. `date_known` is `PostgreSQL`'s `fmask & DTK_DATE_M`
+/// test, which a time-only literal forces on so the field lands on the clock.
+fn decode_number_field(text: &str, tm: &mut Tm, date_known: bool) -> Result<(), DecodeError> {
     let (digits, fraction) = match text.split_once('.') {
         Some((whole, frac)) => (whole, Some(frac)),
         None => (text, None),
     };
     let len = digits.len();
     if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
-        if fraction.is_none() && !tm.has_full_date() && len >= 6 {
+        if fraction.is_none() && !date_known && !tm.has_full_date() && len >= 6 {
             let (year, rest) = digits.split_at(len - 4);
             let (month, day) = rest.split_at(2);
             tm.year = Some(parse_int(year)?);
@@ -762,126 +1269,301 @@ fn parse_fraction(digits: &str) -> Result<i64, DecodeError> {
 // Zones
 // ---------------------------------------------------------------------------
 
+/// Parse a signed numeric UTC offset (`-08`, `-0800`, `+05:30:15`) with the ISO
+/// sign, where a leading `-` is *behind* UTC.
+///
+/// This is `PostgreSQL`'s `DecodeTimezone`, the grammar it applies to the zone
+/// of a literal and to `make_timestamptz`'s zone argument. It is deliberately
+/// **not** the grammar behind a zone *specification* — `AT TIME ZONE '-08:00'`
+/// and `SET TimeZone = '-08:00'` both count the offset west of Greenwich
+/// instead. See [`posix_zone`] and [`resolve_guc_time_zone`].
+///
+/// # Errors
+///
+/// [`DecodeError::Syntax`] when the text is not of this shape at all, and
+/// [`DecodeError::TzDisplacement`] when it is but names an offset beyond
+/// ±15:59:59.
+pub fn decode_numeric_time_zone(text: &str) -> Result<Offset, DecodeError> {
+    decode_tz_offset(text)
+}
+
+/// Read the leading run of digits as an `i32` with the tail left over, C
+/// `strtoint` over one zone-offset field. No digits at all consumes nothing, so
+/// the caller's delimiter test is what rejects the text.
+fn take_offset_int(text: &str) -> Result<(i32, &str), DecodeError> {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let width = digits.bytes().take_while(u8::is_ascii_digit).count();
+    if width == 0 {
+        return Ok((0, text));
+    }
+    let end = text.len() - digits.len() + width;
+    let value = text[..end]
+        .parse()
+        .map_err(|_| DecodeError::TzDisplacement)?;
+    Ok((value, &text[end..]))
+}
+
 /// Parse a signed numeric UTC offset (`-08`, `-0800`, `+05:30:15`).
+///
+/// The shape of this grammar is what makes a *negative year* report a zone
+/// problem. `ParseDateTime` hands any `-` followed by digits to this function as
+/// a zone field, so `-44-02-01` arrives here as one offset: the hours read as
+/// 44, and the range check fires before the trailing `-02-01` is ever noticed as
+/// leftover text. `time zone displacement out of range` for what looks like a BC
+/// date is that ordering showing through, not a special case.
 fn decode_tz_offset(text: &str) -> Result<Offset, DecodeError> {
-    let (sign, rest) = match text.as_bytes().first() {
-        Some(b'+') => (1i32, &text[1..]),
-        Some(b'-') => (-1i32, &text[1..]),
+    let negative = match text.as_bytes().first() {
+        Some(b'+') => false,
+        Some(b'-') => true,
         _ => return Err(DecodeError::Syntax),
     };
-    let (hour, minute, second) = if rest.contains(':') {
-        let mut parts = rest.split(':');
-        let hour = parts.next().unwrap_or_default();
-        let minute = parts.next().unwrap_or("0");
-        let second = parts.next().unwrap_or("0");
-        if parts.next().is_some() {
-            return Err(DecodeError::Syntax);
+    let (mut hour, rest) = take_offset_int(&text[1..])?;
+    let mut minute = 0;
+    let mut second = 0;
+    let rest = if let Some(after_colon) = rest.strip_prefix(':') {
+        let (parsed, rest) = take_offset_int(after_colon)?;
+        minute = parsed;
+        match rest.strip_prefix(':') {
+            Some(after_colon) => {
+                let (parsed, rest) = take_offset_int(after_colon)?;
+                second = parsed;
+                rest
+            }
+            None => rest,
         }
-        (hour, minute, second)
+    } else if rest.is_empty() && text.len() > 3 {
+        // Run together, so the last two digits are minutes: `-0800`. There is no
+        // run-together `hhmmss` — `-080000` reads as 8000 hours and is rejected.
+        minute = hour % 100;
+        hour /= 100;
+        rest
     } else {
-        match rest.len() {
-            1 | 2 => (rest, "0", "0"),
-            4 => (&rest[..2], &rest[2..4], "0"),
-            6 => (&rest[..2], &rest[2..4], &rest[4..6]),
-            _ => return Err(DecodeError::Syntax),
-        }
+        rest
     };
-    let hour = parse_int(hour).map_err(|_| DecodeError::TzDisplacement)?;
-    let minute = parse_int(minute).map_err(|_| DecodeError::TzDisplacement)?;
-    let second = parse_int(second).map_err(|_| DecodeError::TzDisplacement)?;
-    if hour > MAX_TZDISP_HOUR || minute >= 60 || second >= 60 {
+    if !(0..=MAX_TZDISP_HOUR).contains(&hour)
+        || !(0..60).contains(&minute)
+        || !(0..60).contains(&second)
+    {
         return Err(DecodeError::TzDisplacement);
     }
-    Offset::from_seconds(sign * (hour * 3600 + minute * 60 + second))
+    // Trailing text is only a syntax error once the fields themselves are in
+    // range, which is the ordering that decides the message.
+    if !rest.is_empty() {
+        return Err(DecodeError::Syntax);
+    }
+    let seconds = hour * 3600 + minute * 60 + second;
+    Offset::from_seconds(if negative { -seconds } else { seconds })
         .map_err(|_| DecodeError::TzDisplacement)
 }
 
 /// Resolve a punctuated zone specification: a zone-database name, or a `POSIX`
-/// `STD±offset` spec whose sign counts *west* of UTC and so inverts.
+/// `TZ` specification whose sign counts *west* of UTC and so inverts.
 fn lookup_zone_spec(text: &str) -> Result<Zone, DecodeError> {
-    if let Some(zone) = lookup_zone_name(text) {
-        return Ok(zone);
-    }
-    if let Some(at) = text.find(['+', '-']) {
-        let (name, offset) = text.split_at(at);
-        if name.len() >= 3 && name.bytes().all(|b| b.is_ascii_alphabetic()) {
-            let sign = if offset.starts_with('-') { -1 } else { 1 };
-            let magnitude = decode_tz_offset(&format!("+{}", &offset[1..]))?;
-            return Offset::from_seconds(-sign * magnitude.seconds())
-                .map(Zone::Offset)
-                .map_err(|_| DecodeError::TzDisplacement);
-        }
-    }
-    Err(DecodeError::UnknownZone(text.to_string()))
+    lookup_zone_name(text)
+        .or_else(|| posix_zone(text))
+        .ok_or_else(|| DecodeError::UnknownZone(text.to_string()))
 }
 
-/// Look a name up in the zone database. Literals reach here lowercased, so this
-/// function reconstructs the database's own capitalization before it gives up.
+/// The transition rule `PostgreSQL` substitutes when a `POSIX` specification
+/// names a daylight abbreviation but gives no rule — tzcode's `TZDEFRULESTRING`,
+/// the United States rules in force since 2007. It is what makes `FOO8BAR` a
+/// zone that springs forward on the second Sunday in March.
+const POSIX_DEFAULT_RULE: &str = ",M3.2.0,M11.1.0";
+
+/// The largest hour `PostgreSQL`'s `POSIX` offset grammar accepts.
+const MAX_POSIX_HOUR: i64 = 167;
+
+/// Resolve a `POSIX` `TZ` specification — `STD offset [DST [offset] [,rule]]`.
+///
+/// The offset counts hours *west* of Greenwich, the opposite of the ISO sign, so
+/// `UTC-2` names UTC+2 and a naked `-08:00` names UTC+8. `PostgreSQL` is laxer
+/// than `POSIX` about the standard abbreviation — its `tzparse` allows one
+/// shorter than three characters, or none at all — which is precisely what makes
+/// a bare offset a legal specification. A specification with no daylight part
+/// therefore resolves to a fixed offset here rather than going through jiff,
+/// whose parser holds to the stricter `POSIX` grammar.
+///
+/// Two corners of `PostgreSQL`'s grammar stay out of reach and resolve to `None`
+/// instead. Its `tzparse` accepts an offset of up to 167 hours, where a jiff
+/// [`Offset`] stops at ±25:59:59, so `UTC-99` and `+30:00` are accepted there and
+/// rejected here. And a fractional spelling such as `-1.5` reads, to `tzparse`,
+/// as a one-hour standard offset followed by a daylight abbreviation spelled `.`
+/// — a zone that then observes United States daylight saving. Neither is
+/// reachable from the regression suite, whose fractional zone *settings* all
+/// arrive by the numeric route in [`resolve_guc_time_zone`] instead.
+fn posix_zone(spec: &str) -> Option<Zone> {
+    let after_abbrev = posix_abbrev(spec)?;
+    let (west_seconds, rest) = posix_offset(after_abbrev)?;
+    if rest.is_empty() {
+        let seconds = i32::try_from(-west_seconds).ok()?;
+        return Offset::from_seconds(seconds).ok().map(Zone::Offset);
+    }
+    // A daylight abbreviation follows, so the zone has two offsets and needs a
+    // transition rule to switch between them. jiff owns that part; all this adds
+    // is PostgreSQL's default rule for a specification that names a daylight
+    // abbreviation and then stops.
+    let completed;
+    let full = if rest.contains([',', ';']) {
+        spec
+    } else {
+        completed = format!("{spec}{POSIX_DEFAULT_RULE}");
+        &completed
+    };
+    TimeZone::posix(full).ok().map(Zone::Named)
+}
+
+/// Skip a `POSIX` zone abbreviation — `<quoted>` or a bare run of characters —
+/// and return what follows it. `PostgreSQL` accepts an abbreviation of any
+/// length, including an empty one, so this never fails on a short name.
+fn posix_abbrev(spec: &str) -> Option<&str> {
+    if let Some(quoted) = spec.strip_prefix('<') {
+        let end = quoted.find('>')?;
+        return Some(&quoted[end + '>'.len_utf8()..]);
+    }
+    let end = spec
+        .find(|c: char| c.is_ascii_digit() || c == ',' || c == '+' || c == '-')
+        .unwrap_or(spec.len());
+    Some(&spec[end..])
+}
+
+/// Decode a `POSIX` offset — `[±]hh[:mm[:ss]]` — into seconds *west* of
+/// Greenwich, and return it with the text it did not consume.
+fn posix_offset(spec: &str) -> Option<(i64, &str)> {
+    let (negative, rest) = match spec.as_bytes().first()? {
+        b'-' => (true, &spec[1..]),
+        b'+' => (false, &spec[1..]),
+        _ => (false, spec),
+    };
+    let (hour, mut rest) = posix_number(rest, MAX_POSIX_HOUR)?;
+    let mut seconds = hour * 3600;
+    if let Some(after_hour) = rest.strip_prefix(':') {
+        let (minute, tail) = posix_number(after_hour, 59)?;
+        seconds += minute * 60;
+        rest = tail;
+        if let Some(after_minute) = rest.strip_prefix(':') {
+            // tzcode's `getsecs` allows a leap second here.
+            let (second, tail) = posix_number(after_minute, 60)?;
+            seconds += second;
+            rest = tail;
+        }
+    }
+    Some((if negative { -seconds } else { seconds }, rest))
+}
+
+/// Read the leading run of digits as a number no greater than `max`, and return
+/// it with the text it did not consume. An empty run is not a number.
+fn posix_number(spec: &str, max: i64) -> Option<(i64, &str)> {
+    let end = spec
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(spec.len());
+    let value: i64 = spec[..end].parse().ok()?;
+    (value <= max).then_some((value, &spec[end..]))
+}
+
+/// Look a name up in the zone database. Literals reach here lowercased, which
+/// costs nothing: the bundled database matches without regard to ASCII case.
 fn lookup_zone_name(name: &str) -> Option<Zone> {
     if name.eq_ignore_ascii_case("utc") || name.eq_ignore_ascii_case("gmt") {
         return Some(Zone::Offset(Offset::UTC));
     }
-    for candidate in [
-        name.to_string(),
-        name.to_ascii_uppercase(),
-        title_case_zone(name),
-    ] {
-        if let Ok(tz) = TimeZone::get(&candidate) {
-            return Some(Zone::Named(tz));
-        }
-    }
-    None
+    zone_by_name(name).map(Zone::Named)
 }
 
-/// Rebuild `Area/City_Name` capitalization from a lowercased zone name.
-fn title_case_zone(name: &str) -> String {
-    name.split('/')
-        .map(|component| {
-            component
-                .split('_')
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-                        None => String::new(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("_")
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-/// Resolve a zone the way `AT TIME ZONE`, the `timezone()` function and the
-/// `TimeZone` setting do: a zone-database name, one of `PostgreSQL`'s
-/// abbreviations, a `POSIX` `STD±offset` spec, or a bare signed UTC offset.
+/// Resolve a zone the way `AT TIME ZONE`, the `timezone()` function and
+/// `date_trunc`'s third argument do — `PostgreSQL`'s `DecodeTimezoneName`: one
+/// of `PostgreSQL`'s abbreviations, a zone-database name, or a `POSIX` `TZ`
+/// specification.
 ///
-/// A bare offset follows the ISO sign convention here (`'-05:00'` is five hours
-/// *behind* UTC). That matches what `PostgreSQL` accepts for `AT TIME ZONE`.
+/// Database names come from the bundled database (see [`super::tzdb`]), so the
+/// vocabulary is the server build's, not the host's.
+///
+/// The abbreviation table is consulted *before* the database, because the
+/// database reuses a few spellings the default abbreviation set already binds:
+/// `AT TIME ZONE 'CET'` is a fixed +01 rather than the zone whose summers run
+/// at +02.
+///
+/// Everything that is neither an abbreviation nor a database name is a `POSIX`
+/// specification, whose offset counts *west* of Greenwich — so `AT TIME ZONE
+/// '-08:00'` yields UTC+8, and `'UTC-2'` yields UTC+2. Zone-bearing *literals*
+/// do not come through here: their numeric offsets go to
+/// [`decode_numeric_time_zone`], which is ISO, and only a punctuated zone
+/// *name* in a literal reaches the `POSIX` grammar.
 #[must_use]
 pub fn resolve_time_zone(name: &str) -> Option<TimeZone> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with(['+', '-']) {
-        return decode_tz_offset(trimmed).ok().map(TimeZone::fixed);
-    }
-    // An unsigned `HH:MM` setting is east of UTC, the same as `+HH:MM`.
-    if trimmed.contains(':') && trimmed.bytes().all(|b| b.is_ascii_digit() || b == b':') {
-        return decode_tz_offset(&format!("+{trimmed}"))
-            .ok()
-            .map(TimeZone::fixed);
-    }
     let lower = trimmed.to_ascii_lowercase();
-    let zone = lookup_zone_name(trimmed)
-        .or_else(|| lookup_abbrev(&lower))
-        .or_else(|| lookup_zone_spec(&lower).ok())?;
-    Some(match zone {
-        Zone::Offset(offset) => TimeZone::fixed(offset),
-        Zone::Named(tz) => tz,
-    })
+    let zone = lookup_abbrev(&lower)
+        .or_else(|| lookup_zone_name(trimmed))
+        .or_else(|| posix_zone(trimmed))?;
+    Some(zone.into_time_zone())
+}
+
+/// Resolve the value of the `TimeZone` setting, which `PostgreSQL`'s
+/// `check_timezone` reads by rules of its own.
+///
+/// A value that is wholly a number — `'-08'`, `'+2'`, `'0'`, `'-1.5'` — is a
+/// count of hours *east* of Greenwich, the ISO sign. Anything else is a
+/// zone-database name or a `POSIX` specification, where the sign is *west*.
+/// The two conventions therefore meet inside this one function: `SET TimeZone =
+/// '-08'` puts a session on UTC-8, while `SET TimeZone = '-08:00'` — the same
+/// offset written with a colon, which no longer parses as a number — puts it on
+/// UTC+8.
+///
+/// The abbreviation table is not consulted at all, so `SET TimeZone = 'PST'`
+/// fails here while `AT TIME ZONE 'PST'` succeeds.
+#[must_use]
+pub fn resolve_guc_time_zone(value: &str) -> Option<TimeZone> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(offset) = numeric_hours_offset(trimmed) {
+        return Some(TimeZone::fixed(offset));
+    }
+    let zone = lookup_zone_name(trimmed).or_else(|| posix_zone(trimmed))?;
+    Some(zone.into_time_zone())
+}
+
+/// Decode the `TimeZone` setting's plain-number form: a possibly fractional
+/// count of hours *east* of Greenwich. `None` when the text is not wholly a
+/// number, which is how `PostgreSQL` distinguishes this form (`strtod` must
+/// consume the entire string) from a zone name or `POSIX` specification.
+fn numeric_hours_offset(value: &str) -> Option<Offset> {
+    let (negative, magnitude) = match value.as_bytes().first()? {
+        b'-' => (true, &value[1..]),
+        b'+' => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let (whole, fraction) = magnitude.split_once('.').unwrap_or((magnitude, ""));
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !whole
+        .bytes()
+        .chain(fraction.bytes())
+        .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    // Digits past the fourth cannot move a whole second, so dropping them keeps
+    // the arithmetic in range without changing the answer.
+    let fraction = &fraction[..fraction.len().min(9)];
+    let mut seconds = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<i64>().ok()?.checked_mul(3600)?
+    };
+    if !fraction.is_empty() {
+        let scale = 10_i64.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+        // Truncating, like the C conversion PostgreSQL's `strtod` result goes
+        // through on the way to a `long`.
+        seconds = seconds.checked_add(fraction.parse::<i64>().ok()? * 3600 / scale)?;
+    }
+    let seconds = i32::try_from(if negative { -seconds } else { seconds }).ok()?;
+    Offset::from_seconds(seconds).ok()
 }
 
 /// Resolve a bare timezone abbreviation.
@@ -891,7 +1573,7 @@ fn lookup_abbrev(word: &str) -> Option<Zone> {
     if let Some(zone) = DYNAMIC_ABBREVS
         .iter()
         .find(|(abbrev, _)| *abbrev == word)
-        .and_then(|(_, name)| TimeZone::get(name).ok())
+        .and_then(|(_, name)| zone_by_name(name))
     {
         return Some(Zone::Named(zone));
     }
@@ -900,6 +1582,22 @@ fn lookup_abbrev(word: &str) -> Option<Zone> {
         .find(|(abbrev, _)| *abbrev == word)
         .and_then(|(_, seconds)| Offset::from_seconds(*seconds).ok())
         .map(Zone::Offset)
+}
+
+/// Resolve a lowercased timezone abbreviation to a UTC offset, for the template
+/// parser's `TZ` pattern.
+///
+/// The east-positive offset comes back directly for a fixed abbreviation; a
+/// dynamic one (`MSK`) yields its zone instead, because what it means depends on
+/// the reading it is attached to and the template parser has not finished
+/// assembling that yet. Going through the same table as literal decoding is the
+/// point: `to_timestamp(…, 'TZ')` and a zone-bearing literal accept exactly the
+/// same set of spellings, and adding an abbreviation moves both at once.
+pub(super) fn abbrev_offset(word: &str) -> Option<(i32, Option<TimeZone>)> {
+    match lookup_abbrev(word)? {
+        Zone::Offset(offset) => Some((offset.seconds(), None)),
+        Zone::Named(zone) => Some((0, Some(zone))),
+    }
 }
 
 /// Convert a Julian Day Number to a calendar date.
@@ -920,14 +1618,11 @@ fn julian_to_date(jd: i32) -> Result<Date, DecodeError> {
 // Keyword tables
 // ---------------------------------------------------------------------------
 
-/// Map a reserved spelling to the value it stands for.
+/// Map a reserved spelling to the whole value it stands for. The clock-relative
+/// spellings are [`relative_word`]'s, not these.
 fn special_word(word: &str) -> Option<Special> {
     Some(match word {
         "infinity" => Special::Infinity,
-        "now" => Special::Now,
-        "today" => Special::Today,
-        "tomorrow" => Special::Tomorrow,
-        "yesterday" => Special::Yesterday,
         "epoch" => Special::Epoch,
         _ => return None,
     })
@@ -1184,3 +1879,294 @@ const FIXED_ABBREVS: &[(&str, i32)] = &[
     ("z", 0),
     ("zulu", 0),
 ];
+
+#[cfg(test)]
+mod zone_resolution_tests {
+    use assert2::assert;
+    use jiff::Timestamp;
+
+    use super::{resolve_guc_time_zone, resolve_time_zone};
+
+    /// `1970-01-01T00:00:00Z` — northern-hemisphere winter, standard time.
+    fn winter() -> Timestamp {
+        Timestamp::from_second(0).expect("epoch")
+    }
+
+    /// `2001-07-01T12:00:00Z` — northern-hemisphere summer, daylight time.
+    fn summer() -> Timestamp {
+        Timestamp::from_second(993_988_800).expect("summer instant")
+    }
+
+    /// The offset in seconds and the zone abbreviation a resolved zone reports.
+    ///
+    /// Resolution goes through the `TimeZone` setting's entry point, the one
+    /// that reaches the zone database without the abbreviation table in front
+    /// of it — and also the only entry point whose result is rendered with an
+    /// abbreviation at all, since `AT TIME ZONE` yields a bare `timestamp`.
+    fn rendered(name: &str, at: Timestamp) -> (i32, String) {
+        let tz = resolve_guc_time_zone(name).unwrap_or_else(|| panic!("{name} should resolve"));
+        let info = tz.to_offset_info(at);
+        (info.offset().seconds(), info.abbreviation().to_string())
+    }
+
+    /// Every row was read off `PostgreSQL` 18.4, which resolves against the copy
+    /// of the IANA database it ships. The legacy "backward" link names in the
+    /// second half are the ones a trimmed host `tzdata` does not carry, so they
+    /// only resolve because gres goes through the bundled database.
+    #[test]
+    fn zone_names_render_the_offsets_postgresql_renders() {
+        let cases: &[(&str, i32, &str, i32, &str)] = &[
+            // name, winter offset/abbrev, summer offset/abbrev
+            ("UTC", 0, "UTC", 0, "UTC"),
+            ("America/Los_Angeles", -8 * 3600, "PST", -7 * 3600, "PDT"),
+            ("America/Denver", -7 * 3600, "MST", -6 * 3600, "MDT"),
+            ("Europe/Rome", 3600, "CET", 2 * 3600, "CEST"),
+            ("EST", -5 * 3600, "EST", -5 * 3600, "EST"),
+            ("PST8PDT", -8 * 3600, "PST", -7 * 3600, "PDT"),
+            ("EST5EDT", -5 * 3600, "EST", -4 * 3600, "EDT"),
+            ("CST6CDT", -6 * 3600, "CST", -5 * 3600, "CDT"),
+            ("MST7MDT", -7 * 3600, "MST", -6 * 3600, "MDT"),
+            ("US/Pacific", -8 * 3600, "PST", -7 * 3600, "PDT"),
+            ("US/Eastern", -5 * 3600, "EST", -4 * 3600, "EDT"),
+            ("Navajo", -7 * 3600, "MST", -6 * 3600, "MDT"),
+            ("Japan", 9 * 3600, "JST", 9 * 3600, "JST"),
+            // Britain kept `BST` right through the 1968-1971 winters, so the
+            // 1970 sample is *not* `GMT`.
+            ("GB", 3600, "BST", 3600, "BST"),
+        ];
+        for &(name, winter_offset, winter_abbrev, summer_offset, summer_abbrev) in cases {
+            assert!(
+                rendered(name, winter()) == (winter_offset, winter_abbrev.to_string()),
+                "{name} in winter"
+            );
+            assert!(
+                rendered(name, summer()) == (summer_offset, summer_abbrev.to_string()),
+                "{name} in summer"
+            );
+        }
+    }
+
+    /// Zone names are matched without regard to ASCII case, exactly as
+    /// `PostgreSQL` matches them against its own database.
+    #[test]
+    fn zone_names_resolve_without_regard_to_case() {
+        for (spelling, canonical) in [
+            ("america/los_angeles", "America/Los_Angeles"),
+            ("AMERICA/LOS_ANGELES", "America/Los_Angeles"),
+            ("us/pacific", "US/Pacific"),
+            ("pst8pdt", "PST8PDT"),
+            ("Europe/rome", "Europe/Rome"),
+        ] {
+            let tz =
+                resolve_time_zone(spelling).unwrap_or_else(|| panic!("{spelling} should resolve"));
+            assert!(tz.iana_name() == Some(canonical), "{spelling}");
+        }
+    }
+
+    /// Resolution must stay a property of the binary, so a name the bundled
+    /// database does not carry is rejected however the host is configured.
+    #[test]
+    fn unknown_zone_names_are_rejected() {
+        for name in ["Not/AZone", "posixrules", "America/Nowhere", "  "] {
+            assert!(
+                resolve_time_zone(name).is_none(),
+                "{name} should not resolve"
+            );
+        }
+    }
+}
+
+/// The three sign conventions `PostgreSQL` applies to a zone, and where each one
+/// applies. Every expectation below was read off `PostgreSQL` 18.4.
+#[cfg(test)]
+mod posix_zone_tests {
+    use assert2::assert;
+    use jiff::{Timestamp, tz::TimeZone};
+
+    use super::{resolve_guc_time_zone, resolve_time_zone};
+    use crate::datetime::parse_timestamptz;
+
+    /// `1970-01-01T00:00:00Z`, the instant every offset row is measured at.
+    fn epoch() -> Timestamp {
+        Timestamp::from_second(0).expect("epoch")
+    }
+
+    fn instant(text: &str) -> Timestamp {
+        text.parse().expect("instant")
+    }
+
+    /// The seconds *east* of UTC a resolved zone is at `at`.
+    fn seconds_east(tz: &TimeZone, at: Timestamp) -> i32 {
+        tz.to_offset_info(at).offset().seconds()
+    }
+
+    /// `AT TIME ZONE`, `timezone()` and `date_trunc`'s zone argument all read
+    /// their text as a `POSIX` specification, whose offset counts *west* of
+    /// Greenwich. Writing `'-08:00'` there therefore selects UTC+8.
+    #[test]
+    fn a_zone_specification_counts_its_offset_west_of_greenwich() {
+        let cases: &[(&str, i32)] = &[
+            ("-08:00", 28800),
+            ("+08:00", -28800),
+            ("08:00", -28800),
+            ("-13:00", 46800),
+            ("-00:30", 1800),
+            ("00:30", -1800),
+            ("-04:15", 15300),
+            ("04:15", -15300),
+            ("-04:30", 16200),
+            ("04:30", -16200),
+            ("UTC-2", 7200),
+            ("UTC+10", -36000),
+            ("-08", 28800),
+            ("+10", -36000),
+            ("2", -7200),
+            ("0", 0),
+            ("+16:00", -57600),
+            ("00:00", 0),
+            ("+02:00", -7200),
+        ];
+        for &(spec, east) in cases {
+            let tz = resolve_time_zone(spec).unwrap_or_else(|| panic!("{spec} should resolve"));
+            assert!(seconds_east(&tz, epoch()) == east, "AT TIME ZONE {spec}");
+        }
+    }
+
+    /// The `TimeZone` setting is the one place a bare number keeps the ISO sign:
+    /// a value that is wholly a number counts hours *east*. The very same offset
+    /// written with a colon is no longer a number, falls through to the `POSIX`
+    /// grammar, and lands on the opposite side of Greenwich.
+    #[test]
+    fn the_time_zone_setting_reads_a_whole_number_as_hours_east() {
+        let cases: &[(&str, i32)] = &[
+            // Numeric: east.
+            ("-08", -28800),
+            ("+10", 36000),
+            ("2", 7200),
+            ("0", 0),
+            ("-1.5", -5400),
+            ("-0.5", -1800),
+            ("16", 57600),
+            ("+00", 0),
+            // POSIX: west.
+            ("00:00", 0),
+            ("+02:00", -7200),
+            ("-13:00", 46800),
+            ("-00:30", 1800),
+            ("00:30", -1800),
+            ("-04:30", 16200),
+            ("04:30", -16200),
+            ("-04:15", 15300),
+            ("04:15", -15300),
+            ("UTC-2", 7200),
+        ];
+        for &(value, east) in cases {
+            let tz = resolve_guc_time_zone(value).unwrap_or_else(|| panic!("{value} should set"));
+            assert!(seconds_east(&tz, epoch()) == east, "SET TimeZone = {value}");
+        }
+    }
+
+    /// The setting does not consult the abbreviation table, so a spelling that is
+    /// only an abbreviation is a `SET` error even though `AT TIME ZONE` takes it.
+    #[test]
+    fn the_time_zone_setting_refuses_abbreviations_at_time_zone_accepts() {
+        for abbrev in ["PST", "EDT", "ACST", "MSK"] {
+            assert!(
+                resolve_guc_time_zone(abbrev).is_none(),
+                "SET TimeZone = {abbrev} should fail"
+            );
+            assert!(
+                resolve_time_zone(abbrev).is_some(),
+                "AT TIME ZONE {abbrev} should resolve"
+            );
+        }
+    }
+
+    /// Where a spelling is both an abbreviation and a database name, each entry
+    /// point picks a different one — visible only outside standard time, since
+    /// the abbreviation is a fixed offset and the database name is not.
+    #[test]
+    fn an_abbreviation_outranks_a_database_name_of_the_same_spelling() {
+        let summer = instant("2001-07-01T12:00:00Z");
+        for (spelling, abbrev_east, zone_east) in [
+            ("CET", 3600, 7200),
+            ("MET", 3600, 7200),
+            ("EET", 7200, 10800),
+        ] {
+            let by_spec = resolve_time_zone(spelling).expect("abbreviation resolves");
+            assert!(seconds_east(&by_spec, summer) == abbrev_east, "{spelling}");
+            let by_setting = resolve_guc_time_zone(spelling).expect("database name resolves");
+            assert!(seconds_east(&by_setting, summer) == zone_east, "{spelling}");
+        }
+    }
+
+    /// A `POSIX` specification may carry a daylight-saving transition rule, and
+    /// the transition lands on the instant the rule names.
+    #[test]
+    fn posix_specifications_carry_daylight_saving_rules() {
+        let cases: &[(&str, &str, i32)] = &[
+            ("PST8PDT,M3.2.0,M11.1.0", "2014-03-09T09:59:00Z", -28800),
+            ("PST8PDT,M3.2.0,M11.1.0", "2014-03-09T10:01:00Z", -25200),
+            ("PST8PDT,M3.2.0,M11.1.0", "2014-11-02T08:59:00Z", -25200),
+            ("PST8PDT,M3.2.0,M11.1.0", "2014-11-02T09:01:00Z", -28800),
+            ("CST7CDT,M4.1.0,M10.5.0", "2014-01-15T12:00:00Z", -25200),
+            ("CST7CDT,M4.1.0,M10.5.0", "2014-07-15T12:00:00Z", -21600),
+            // A daylight abbreviation with no rule of its own takes
+            // PostgreSQL's default, which is the United States rule.
+            ("FOO8BAR", "2014-01-15T12:00:00Z", -28800),
+            ("FOO8BAR", "2014-07-15T12:00:00Z", -25200),
+        ];
+        for &(spec, at, east) in cases {
+            let at = instant(at);
+            let by_spec =
+                resolve_time_zone(spec).unwrap_or_else(|| panic!("{spec} should resolve"));
+            assert!(seconds_east(&by_spec, at) == east, "{spec} at {at}");
+            let by_setting =
+                resolve_guc_time_zone(spec).unwrap_or_else(|| panic!("{spec} should set"));
+            assert!(seconds_east(&by_setting, at) == east, "SET {spec} at {at}");
+        }
+    }
+
+    /// The zone of a *literal* is a separate grammar that neither resolver is
+    /// reachable from: a numeric offset there keeps the ISO sign, so
+    /// `'... -08:00'` is eight hours behind UTC and not eight ahead. Only a
+    /// zone *name* in a literal reaches the `POSIX` grammar, which is why
+    /// `'UTC-2'` still inverts.
+    #[test]
+    fn a_literals_own_offset_keeps_the_iso_sign() {
+        let cases: &[(&str, &str)] = &[
+            ("1997-02-10 17:32:01 -0800", "1997-02-11T01:32:01Z"),
+            ("1997-02-10 17:32:01 -08:00", "1997-02-11T01:32:01Z"),
+            ("1997-02-10 17:32:01 -08", "1997-02-11T01:32:01Z"),
+            ("1997-02-10 17:32:01 +08:00", "1997-02-10T09:32:01Z"),
+            ("1997-02-10 17:32:01 +0815", "1997-02-10T09:17:01Z"),
+            // An abbreviation, and then a POSIX specification.
+            ("1997-02-10 17:32:01 PST", "1997-02-11T01:32:01Z"),
+            ("1997-02-10 17:32:01 UTC-2", "1997-02-10T15:32:01Z"),
+        ];
+        for &(literal, expected) in cases {
+            let parsed = parse_timestamptz(literal, &TimeZone::UTC)
+                .unwrap_or_else(|e| panic!("{literal}: {e}"));
+            assert!(parsed == instant(expected), "{literal}");
+        }
+    }
+
+    /// Text that is neither a number, a name nor a well-formed specification
+    /// resolves nowhere.
+    #[test]
+    fn malformed_specifications_resolve_nowhere() {
+        for spec in [
+            "Not/AZone",
+            "PST8PDT,nonsense",
+            "-",
+            "+",
+            "UTC-",
+            "UTC-99",
+            "",
+            "   ",
+        ] {
+            assert!(resolve_time_zone(spec).is_none(), "AT TIME ZONE {spec}");
+            assert!(resolve_guc_time_zone(spec).is_none(), "SET TimeZone {spec}");
+        }
+    }
+}

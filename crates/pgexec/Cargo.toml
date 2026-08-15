@@ -30,8 +30,9 @@ crabka-pgwire = { version = "0.4.0", path = "../pgwire" }
 # published.
 crabka-trace-context = { version = "0.4.0", path = "../trace-context" }
 bytes = { workspace = true }
+shlex = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs"] }
 async-trait = { workspace = true }
 zerocopy = { workspace = true }
 bigdecimal = { workspace = true }
@@ -44,7 +45,11 @@ sha2 = { workspace = true }
 md-5 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
+pglz = { workspace = true }
 unicode-normalization = { workspace = true }
+unicode-general-category = { workspace = true }
+encoding_rs = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

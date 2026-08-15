@@ -40,8 +40,23 @@ fn len_i32(len: usize) -> i32 {
     i32::try_from(len).expect("Postgres byte length fits in i32")
 }
 
+/// Write one protocol string: its bytes, then the terminating NUL.
+///
+/// An embedded NUL is dropped rather than written through. A client reads the
+/// field as ending at that byte and takes everything after it as the *next*
+/// field of the same message, so one stray NUL desynchronizes the whole frame
+/// — an `ErrorResponse` loses its message and grows a field nobody wrote. A
+/// real `PostgreSQL` server cannot emit one, every string it sends being a C
+/// string already; dropping the byte keeps crabka byte-exact for every input a
+/// real server could produce, and keeps an internal encoding that leaks into a
+/// message from corrupting the connection.
 fn put_cstr(out: &mut BytesMut, s: &str) {
-    out.put_slice(s.as_bytes());
+    let bytes = s.as_bytes();
+    if bytes.contains(&0) {
+        out.extend(bytes.iter().copied().filter(|byte| *byte != 0));
+    } else {
+        out.put_slice(bytes);
+    }
     out.put_u8(0);
 }
 
@@ -110,20 +125,53 @@ pub fn notification_response(out: &mut BytesMut, process_id: i32, channel: &str,
     });
 }
 
-/// Encode a COPY-in response.
-///
-/// # Panics
-///
-/// Panics if `overall_format` does not fit in the protocol's one-byte format
-/// field or if the number of column formats exceeds the protocol limit.
-pub fn copy_in_response(out: &mut BytesMut, overall_format: i16, column_formats: &[i16]) {
-    msg(out, b'G', |b| {
+/// Body shared by `CopyInResponse` and `CopyOutResponse`, which differ only in
+/// their message tag: int8 overall format, int16 column count, then one int16
+/// format code per column.
+fn copy_response(out: &mut BytesMut, tag: u8, overall_format: i16, column_formats: &[i16]) {
+    msg(out, tag, |b| {
         b.put_u8(u8::try_from(overall_format).expect("COPY format code fits in u8"));
         b.put_i16(count_i16(column_formats.len()));
         for format in column_formats {
             b.put_i16(*format);
         }
     });
+}
+
+/// Encode a `CopyInResponse`, which puts the connection into copy-in mode.
+///
+/// # Panics
+///
+/// Panics if `overall_format` does not fit in the protocol's one-byte format
+/// field or if the number of column formats exceeds the protocol limit.
+pub fn copy_in_response(out: &mut BytesMut, overall_format: i16, column_formats: &[i16]) {
+    copy_response(out, b'G', overall_format, column_formats);
+}
+
+/// Encode a `CopyOutResponse`, which puts the connection into copy-out mode.
+///
+/// `overall_format` is 0 for text and 1 for binary; a text copy carries a
+/// zero format code for every column and a binary copy carries a one.
+///
+/// # Panics
+///
+/// Panics if `overall_format` does not fit in the protocol's one-byte format
+/// field or if the number of column formats exceeds the protocol limit.
+pub fn copy_out_response(out: &mut BytesMut, overall_format: i16, column_formats: &[i16]) {
+    copy_response(out, b'H', overall_format, column_formats);
+}
+
+/// Encode one `CopyData` frame. `PostgreSQL` emits a frame per row for a text
+/// copy; a binary copy carries its file header on the first frame and its
+/// `0xffff` trailer as a frame of its own.
+pub fn copy_data(out: &mut BytesMut, data: &[u8]) {
+    msg(out, b'd', |b| b.put_slice(data));
+}
+
+/// Encode `CopyDone`, which ends copy mode and is followed by
+/// `CommandComplete`.
+pub fn copy_done(out: &mut BytesMut) {
+    msg(out, b'c', |_| {});
 }
 
 pub fn empty_query_response(out: &mut BytesMut) {
@@ -203,6 +251,13 @@ fn diagnostic_response(out: &mut BytesMut, tag: u8, diagnostic: &PgError) {
         for (tag, value) in [
             (b'D', fields.and_then(|fields| fields.detail.as_deref())),
             (b'H', fields.and_then(|fields| fields.hint.as_deref())),
+            (
+                b'P',
+                fields
+                    .and_then(|fields| fields.position.as_ref())
+                    .map(usize::to_string)
+                    .as_deref(),
+            ),
             (b'W', fields.and_then(|fields| fields.context.as_deref())),
             (b's', fields.and_then(|fields| fields.schema.as_deref())),
             (b't', fields.and_then(|fields| fields.table.as_deref())),
@@ -297,6 +352,51 @@ mod tests {
         }
     }
 
+    /// A NUL inside a protocol string would end its field early and leave the
+    /// remainder to be read as the *next* field — the message would lose its
+    /// text and grow a field nobody wrote. Every string a message carries is
+    /// checked, because the framing damage is the same wherever the byte gets
+    /// in.
+    #[test]
+    fn embedded_nuls_never_split_a_protocol_string() {
+        let mut out = BytesMut::new();
+        error_response(
+            &mut out,
+            &PgError::error(
+                sqlstate::SYNTAX_ERROR,
+                "column \"\0expr:(a * 2)\" does not exist",
+            ),
+        );
+        assert2::assert!(
+            &out[..]
+                == b"E\x00\x00\x00\x40SERROR\0VERROR\0C42601\0Mcolumn \"expr:(a * 2)\" does not \
+                     exist\0\0"
+                    .as_slice()
+        );
+
+        // The same guarantee for a column name, which is the other string a
+        // client parses positionally.
+        let mut out = BytesMut::new();
+        row_description(
+            &mut out,
+            &[FieldDescription {
+                name: "a\0b".into(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: 25,
+                type_size: -1,
+                type_modifier: -1,
+                format: 0,
+            }],
+        );
+        assert2::assert!(
+            &out[..]
+                == b"T\x00\x00\x00\x1b\x00\x01ab\0\x00\x00\x00\x00\x00\x00\
+                     \x00\x00\x00\x19\xff\xff\xff\xff\xff\xff\x00\x00"
+                    .as_slice()
+        );
+    }
+
     #[test]
     fn encodes_fatal_error_response_with_hint_only() {
         let mut out = BytesMut::new();
@@ -371,6 +471,74 @@ mod tests {
         let mut out = BytesMut::new();
         notification_response(&mut out, 1, "c", "");
         assert2::assert!(&out[..] == b"A\x00\x00\x00\x0b\x00\x00\x00\x01c\0\0");
+    }
+
+    /// Bytes captured from a pinned `PostgreSQL` 18.4 backend answering
+    /// `COPY t TO STDOUT` over a two-column table, in text and binary formats
+    /// and over an empty single-column table.
+    struct CopyResponseCase {
+        overall_format: i16,
+        column_formats: &'static [i16],
+        expected_in: &'static [u8],
+        expected_out: &'static [u8],
+    }
+
+    #[test]
+    fn encodes_copy_mode_messages_exactly_as_postgres_does() {
+        let cases = [
+            CopyResponseCase {
+                overall_format: 0,
+                column_formats: &[0, 0],
+                expected_in: b"G\x00\x00\x00\x0b\x00\x00\x02\x00\x00\x00\x00",
+                expected_out: b"H\x00\x00\x00\x0b\x00\x00\x02\x00\x00\x00\x00",
+            },
+            CopyResponseCase {
+                overall_format: 1,
+                column_formats: &[1, 1],
+                expected_in: b"G\x00\x00\x00\x0b\x01\x00\x02\x00\x01\x00\x01",
+                expected_out: b"H\x00\x00\x00\x0b\x01\x00\x02\x00\x01\x00\x01",
+            },
+            CopyResponseCase {
+                overall_format: 0,
+                column_formats: &[0],
+                expected_in: b"G\x00\x00\x00\x09\x00\x00\x01\x00\x00",
+                expected_out: b"H\x00\x00\x00\x09\x00\x00\x01\x00\x00",
+            },
+        ];
+
+        for case in cases {
+            let mut out = BytesMut::new();
+            copy_in_response(&mut out, case.overall_format, case.column_formats);
+            assert2::assert!(&out[..] == case.expected_in);
+
+            let mut out = BytesMut::new();
+            copy_out_response(&mut out, case.overall_format, case.column_formats);
+            assert2::assert!(&out[..] == case.expected_out);
+        }
+    }
+
+    #[test]
+    fn encodes_copy_data_frames_and_copy_done() {
+        let mut out = BytesMut::new();
+        // The three rows Postgres streamed for `COPY t TO STDOUT`, where the
+        // second column is NULL on row two and holds an escaped tab on row
+        // three, then the terminator that ends copy-out mode.
+        copy_data(&mut out, b"1\tone\n");
+        copy_data(&mut out, b"2\t\\N\n");
+        copy_data(&mut out, b"3\tth\\tree\n");
+        copy_done(&mut out);
+
+        assert2::assert!(
+            &out[..]
+                == &b"d\x00\x00\x00\x0a1\tone\nd\x00\x00\x00\x092\t\\N\nd\x00\x00\x00\x0e3\tth\\tree\nc\x00\x00\x00\x04"[..]
+        );
+    }
+
+    #[test]
+    fn encodes_empty_copy_data_frame() {
+        let mut out = BytesMut::new();
+        copy_data(&mut out, b"");
+        assert2::assert!(&out[..] == b"d\x00\x00\x00\x04");
     }
 
     #[test]

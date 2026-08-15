@@ -19,8 +19,8 @@ pub enum TypeError {
     },
     #[error("{message}")]
     TypeMismatch { message: String },
-    #[error("value too long for type character varying")]
-    StringDataRightTruncation,
+    #[error("value too long for type {type_name}")]
+    StringDataRightTruncation { type_name: String },
     /// SP28: a `LIKE`/`ILIKE` pattern ending in a lone escape `\` (22025).
     #[error("LIKE pattern must not end with escape character")]
     InvalidEscape,
@@ -49,12 +49,28 @@ pub enum TypeError {
         type_name: &'static str,
         value: String,
     },
+    /// SP38: a `to_timestamp`/`to_date` template that does not fit its input
+    /// (22007).
+    ///
+    /// Free-form rather than shaped, because `PostgreSQL` raises a different
+    /// sentence for each way a template can fail — a value that is not an
+    /// integer, a field set twice, Gregorian and ISO week fields mixed — and the
+    /// message is the whole diagnosis. The DETAIL and HINT lines it attaches
+    /// alongside are not carried: the error channel has room for one message.
+    #[error("{message}")]
+    InvalidDatetimeTemplate { message: String },
     /// SP37: a date/time field out of range (e.g. month 13) (22008).
     #[error("date/time field value out of range: \"{value}\"")]
     DatetimeFieldOverflow { value: String },
-    /// A date/time value that leaves its type's range. It carries PostgreSQL's
-    /// exact message for the context: `timestamp out of range`, `interval out
-    /// of range`, or `cannot subtract infinite dates` (22008).
+    /// SP37: an `interval` field out of range (22015). SQL99 gives interval its
+    /// own SQLSTATE, so `interval_in` promotes every field overflow the shared
+    /// decoder reports into this one — `date/time field value out of range` is
+    /// never what an `interval` literal raises.
+    #[error("interval field value out of range: \"{value}\"")]
+    IntervalFieldOverflow { value: String },
+    /// A date/time value that leaves its type's range, carrying PostgreSQL's
+    /// exact message for the context — `timestamp out of range`, `interval out
+    /// of range`, `cannot subtract infinite dates` (22008).
     #[error("{message}")]
     DatetimeOutOfRange { message: String },
     /// A date/time literal whose UTC offset is outside ±15:59:59 (22009).
@@ -86,6 +102,46 @@ pub enum TypeError {
         sqlstate: &'static str,
         message: String,
     },
+    #[error("malformed range literal: \"{value}\"")]
+    RangeMalformed { value: String, detail: &'static str },
+    /// `cidr_in`'s own rejection (22P02): the text parses as an address, but a
+    /// bit is set to the right of the netmask, which no `cidr` may have. Its
+    /// message and DETAIL differ from the generic `invalid input syntax`.
+    #[error("invalid cidr value: \"{value}\"")]
+    InvalidCidr { value: String },
+    /// Like [`TypeError::Coded`], but carrying `PostgreSQL`'s HINT as well —
+    /// the `macaddr8` → `macaddr` narrowing is the one type-layer error that
+    /// spells out which values are eligible.
+    #[error("{message}")]
+    CodedWithHint {
+        sqlstate: &'static str,
+        message: String,
+        hint: &'static str,
+    },
+    /// `json_in` / `jsonb_in`'s rejection of malformed JSON. Alone among the
+    /// type-layer errors it carries a CONTEXT as well as a DETAIL, because
+    /// `PostgreSQL` reports the offending token *and* an excerpt of the line it
+    /// sits on, and both are per-value rather than per-variant. The message is
+    /// `invalid input syntax for type json` for `jsonb` too — the two types
+    /// share one lexer, so they share its complaints.
+    #[error("{message}")]
+    JsonSyntax {
+        sqlstate: &'static str,
+        message: &'static str,
+        detail: String,
+        context: String,
+    },
+    /// `xml_in` / `XMLPARSE`'s rejection of a malformed value (`2200M` for a
+    /// document, `2200N` for content). The DETAIL is multi-line — libxml's
+    /// complaint, the offending input line and a caret under the column, once
+    /// per fault — because libxml keeps parsing after a recoverable error and
+    /// `PostgreSQL` prints everything it reported.
+    #[error("{message}")]
+    XmlSyntax {
+        sqlstate: &'static str,
+        message: &'static str,
+        detail: String,
+    },
 }
 
 impl TypeError {
@@ -96,18 +152,62 @@ impl TypeError {
             TypeError::DivisionByZero => "22012",
             TypeError::InvalidText { .. } => "22P02",
             TypeError::TypeMismatch { .. } => "42804",
-            TypeError::StringDataRightTruncation => "22001",
+            TypeError::StringDataRightTruncation { .. } => "22001",
             TypeError::InvalidEscape | TypeError::InvalidEscapeString => "22025",
             TypeError::CannotCast { .. } => "42846",
             TypeError::Domain { sqlstate, .. } => sqlstate,
-            TypeError::InvalidDatetimeFormat { .. } => "22007",
+            TypeError::InvalidDatetimeFormat { .. } | TypeError::InvalidDatetimeTemplate { .. } => {
+                "22007"
+            }
             TypeError::DatetimeFieldOverflow { .. } => "22008",
+            TypeError::IntervalFieldOverflow { .. } => "22015",
             TypeError::DatetimeOutOfRange { .. } => "22008",
             TypeError::TimezoneDisplacementOverflow { .. } => "22009",
             TypeError::UnknownTimeZone { .. } => "22023",
             TypeError::FeatureNotSupported { .. } => "0A000",
             TypeError::OutOfRange { .. } => "22003",
             TypeError::Coded { sqlstate, .. } => sqlstate,
+            TypeError::RangeMalformed { .. } => "22P02",
+            TypeError::InvalidCidr { .. } => "22P02",
+            TypeError::CodedWithHint { sqlstate, .. } => sqlstate,
+            TypeError::JsonSyntax { sqlstate, .. } => sqlstate,
+            TypeError::XmlSyntax { sqlstate, .. } => sqlstate,
+        }
+    }
+
+    /// `PostgreSQL`'s DETAIL for this error. Borrowed where the wording is fixed
+    /// per variant, owned where it names the offending value — `json_in`'s
+    /// `Token "x" is invalid.` cannot be a `&'static str`.
+    #[must_use]
+    pub fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            TypeError::RangeMalformed { detail, .. } => Some(std::borrow::Cow::Borrowed(*detail)),
+            TypeError::InvalidCidr { .. } => Some(std::borrow::Cow::Borrowed(
+                "Value has bits set to right of mask.",
+            )),
+            TypeError::JsonSyntax { detail, .. } | TypeError::XmlSyntax { detail, .. } => {
+                Some(std::borrow::Cow::Borrowed(detail.as_str()))
+            }
+            _ => None,
+        }
+    }
+
+    /// `PostgreSQL`'s CONTEXT for this error — the excerpt of the input line the
+    /// JSON lexer stopped on. No other type-layer error has one.
+    #[must_use]
+    pub fn context(&self) -> Option<&str> {
+        match self {
+            TypeError::JsonSyntax { context, .. } => Some(context),
+            _ => None,
+        }
+    }
+
+    /// `PostgreSQL`'s HINT for this error, when it has one.
+    #[must_use]
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            TypeError::CodedWithHint { hint, .. } => Some(hint),
+            _ => None,
         }
     }
 
@@ -189,7 +289,13 @@ mod tests {
             .sqlstate(),
             "42804"
         );
-        assert_eq!(TypeError::StringDataRightTruncation.sqlstate(), "22001");
+        assert_eq!(
+            TypeError::StringDataRightTruncation {
+                type_name: "character varying(3)".into(),
+            }
+            .sqlstate(),
+            "22001"
+        );
         assert_eq!(TypeError::InvalidEscape.sqlstate(), "22025");
         assert_eq!(
             TypeError::CannotCast {

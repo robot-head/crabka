@@ -37,11 +37,11 @@ fn named_relation(sql: &str) -> RelationRef {
         | Statement::Delete { table, .. }
         | Statement::Merge { table, .. }
         | Statement::AlterTable { table, .. }
-        | Statement::CreateIndex { table, .. }
-        | Statement::GrantTablePrivileges { table, .. }
-        | Statement::RevokeTablePrivileges { table, .. } => table,
+        | Statement::CreateIndex { table, .. } => table,
+        Statement::GrantTablePrivileges { mut tables, .. }
+        | Statement::RevokeTablePrivileges { mut tables, .. } => tables.remove(0),
+        Statement::Truncate { mut targets, .. } => targets.remove(0).name,
         Statement::DropTable { mut names, .. }
-        | Statement::Truncate { mut names, .. }
         | Statement::DropType { mut names, .. }
         | Statement::DropDomain { mut names, .. }
         | Statement::LockTable {

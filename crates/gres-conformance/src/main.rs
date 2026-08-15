@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         std::fs::write(&args.regress_summary, regress_report.markdown_summary())?;
         println!(
-            "pg_regress parity: {:.1}% ({} / {}) -> {} / {}",
+            "adopted pg_regress corpus parity: {:.1}% ({} / {}) -> {} / {}",
             regress_report.parity_percent,
             regress_report.matched,
             regress_report.total,
@@ -134,11 +134,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let baseline: RegressBaseline = serde_json::from_str(&text)?;
             match baseline.check_report(&regress_report) {
                 Ok(()) => println!(
-                    "pg_regress baseline gate passed: {}/{} matched",
+                    "adopted pg_regress corpus baseline gate passed: {}/{} matched",
                     regress_report.matched, regress_report.total
                 ),
                 Err(msg) => {
-                    eprintln!("pg_regress baseline gate FAILED: {msg}");
+                    eprintln!("adopted pg_regress corpus baseline gate FAILED: {msg}");
                     std::process::exit(1);
                 }
             }

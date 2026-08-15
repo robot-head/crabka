@@ -478,6 +478,26 @@ impl Kv for KeyspaceKv {
         Ok(out)
     }
 
+    fn for_each_key(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        visit: &mut dyn FnMut(&[u8]),
+    ) -> Result<usize, KvError> {
+        let snapshot = self.db.read_tx();
+        let mut seen = 0;
+        for guard in snapshot
+            .range(&self.ks, start.to_vec()..end.to_vec())
+            .take(limit)
+        {
+            // `key` leaves the value where it is; `into_inner` would fetch it.
+            visit(&guard.key().map_err(io)?);
+            seen += 1;
+        }
+        Ok(seen)
+    }
+
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError> {
         match self.persist_mode {
             // Group commit amortizes the per-commit fsync across concurrent
@@ -664,6 +684,16 @@ impl Kv for FjallKv {
         self.inner.scan_range(start, end)
     }
 
+    fn for_each_key(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        visit: &mut dyn FnMut(&[u8]),
+    ) -> Result<usize, KvError> {
+        self.inner.for_each_key(start, end, limit, visit)
+    }
+
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError> {
         self.inner.write_batch(ops)
     }
@@ -789,6 +819,35 @@ mod tests {
                 (b"t/1/b".to_vec(), b"B".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn for_each_key_on_fjall_stops_early_and_agrees_with_scan_range() {
+        use assert2::check;
+
+        let dir = temp();
+        let kv = FjallKv::open(dir.path()).expect("open");
+        for i in [1_u8, 3, 5, 7, 9] {
+            kv.put(vec![b'k', i], vec![i]).expect("put");
+        }
+
+        for limit in 0..=6 {
+            let mut keys = Vec::new();
+            let seen = kv
+                .for_each_key(&[b'k', 0], &[b'k', 255], limit, &mut |key| {
+                    keys.push(key.to_vec());
+                })
+                .expect("for_each_key");
+            let expected: Vec<Vec<u8>> = kv
+                .scan_range(&[b'k', 0], &[b'k', 255])
+                .expect("scan_range")
+                .into_iter()
+                .map(|(key, _)| key)
+                .take(limit)
+                .collect();
+            check!(keys == expected);
+            check!(seen == expected.len());
+        }
     }
 
     #[test]

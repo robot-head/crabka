@@ -33,6 +33,30 @@ pub fn apply_varchar_typmod(
     apply_string_typmod(value, limit, false, how)
 }
 
+/// The `bpchar → text` cast: strip the blank padding [`apply_char_typmod`] added.
+///
+/// `PostgreSQL` reaches every other string type from `character(n)` through this
+/// one cast function (`text(bpchar)`, which is `rtrim1`), registered in `pg_cast`
+/// as an *implicit* conversion. So the padding is invisible to everything the
+/// type does not own: `lower`, `||`, `length`, a comparison against `text`, and
+/// a written `::text` all see the trimmed value, and the documentation states it
+/// as a rule of the type rather than of any one function — "trailing spaces are
+/// removed when converting a `character` value to one of the other string
+/// types".
+///
+/// The padding survives only where `PostgreSQL` has a `bpchar` overload that
+/// reads the stored datum: `bpcharout` (so a projected `char(8)` column still
+/// prints eight wide), `bpcharoctetlen`, `bpcharlike`, `bpcharregexeq`, and the
+/// output-function paths (`concat`, `format`, an array or record member).
+///
+/// The `bpchar` comparison operators (`bpchareq`, `bpcharlt`, `hashbpchar`) do
+/// not read the padding either — they measure with `bcTruelen` — so trimming a
+/// `character` operand before an ordinary text comparison reproduces them.
+#[must_use]
+pub fn bpchar_to_text(value: &str) -> &str {
+    value.trim_end_matches(' ')
+}
+
 /// Apply a `char(n)`/`character(n)` modifier to a text value.
 ///
 /// # Errors
@@ -59,7 +83,16 @@ fn apply_string_typmod(
     let limit = usize::from(limit);
     let char_count = value.chars().count();
     if char_count > limit {
-        return truncate(value, limit, how);
+        return truncate(
+            value,
+            limit,
+            how,
+            if pad_to_limit {
+                "character"
+            } else {
+                "character varying"
+            },
+        );
     }
     if !pad_to_limit || char_count == limit {
         return Ok(value.to_string());
@@ -74,7 +107,12 @@ fn apply_string_typmod(
 /// Cut `value` to `limit` characters, then decide if the loss of the rest is
 /// allowed. Trailing spaces are always safe to discard: they hold no information
 /// for a bounded string type, so even an assignment accepts them.
-fn truncate(value: &str, limit: usize, how: Coercion) -> Result<String, TypeError> {
+fn truncate(
+    value: &str,
+    limit: usize,
+    how: Coercion,
+    type_name: &str,
+) -> Result<String, TypeError> {
     let mut out = String::new();
     let mut chars = value.chars();
     for _ in 0..limit {
@@ -86,15 +124,34 @@ fn truncate(value: &str, limit: usize, how: Coercion) -> Result<String, TypeErro
     if how == Coercion::Explicit || chars.all(|ch| ch == ' ') {
         Ok(out)
     } else {
-        Err(TypeError::StringDataRightTruncation)
+        Err(TypeError::StringDataRightTruncation {
+            type_name: format!("{type_name}({limit})"),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use Coercion::{Assignment, Explicit};
+    use assert2::assert;
 
     use super::*;
+
+    /// The cast undoes exactly what [`apply_char_typmod`] added, and nothing
+    /// else: only blanks go, only from the end, and a value that is all blanks
+    /// becomes the empty string rather than staying one blank wide.
+    #[test]
+    fn the_text_cast_removes_only_the_blank_padding() {
+        for (limit, value) in [(8_u16, "xxxx"), (3, "a"), (5, "  a"), (2, "")] {
+            let padded = apply_char_typmod(value, Some(limit), Assignment).expect("pads");
+            assert!(padded.chars().count() == usize::from(limit));
+            assert!(bpchar_to_text(&padded) == value.trim_end_matches(' '));
+        }
+        // Leading and interior blanks are data, and a tab is not padding.
+        assert!(bpchar_to_text("  a  b  ") == "  a  b");
+        assert!(bpchar_to_text("a\t") == "a\t");
+        assert!(bpchar_to_text("   ") == "");
+    }
 
     #[test]
     fn varchar_typmod_enforces_character_length() {
@@ -104,7 +161,7 @@ mod tests {
         assert_eq!(ok("abc  ", Some(3)), "abc");
         assert!(matches!(
             apply_varchar_typmod("abcd", Some(3), Assignment),
-            Err(TypeError::StringDataRightTruncation)
+            Err(TypeError::StringDataRightTruncation { .. })
         ));
     }
 
@@ -116,7 +173,7 @@ mod tests {
         assert_eq!(ok("unconstrained", None), "unconstrained");
         assert!(matches!(
             apply_char_typmod("abcd", Some(3), Assignment),
-            Err(TypeError::StringDataRightTruncation)
+            Err(TypeError::StringDataRightTruncation { .. })
         ));
     }
 

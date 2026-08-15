@@ -1,14 +1,14 @@
-//! Versioned (de)serialization of a table schema.
-//!
-//! The schema is the value stored under `crabka_pgkv::key::catalog_key(name)`.
-//! The format is a version byte, `table_id` (u32 BE), and a column count
-//! (u32 BE). Each column then holds a u32 name length, the name bytes, and a
-//! type tag. Table option flags (u8) follow, then a `foreign` flag byte.
-//!
-//! A `0` flag byte means an ordinary table and adds no further payload. A `1`
-//! flag byte means a foreign table. It adds a server name length (u32), the
-//! server name bytes, and an option count (u32). Each option then follows as a
-//! key length (u32), the key bytes, a value length (u32), and the value bytes.
+//! Versioned (de)serialization of a table schema — the value stored under
+//! `crabka_pgkv::key::catalog_key(name)`. Format: version byte, `table_id`
+//! (u32 BE), column count (u32 BE), then per column: u32 name length, name bytes,
+//! type tag; table option flags (u8: sharded, row security, forced row
+//! security); the owning role (u32 length + name bytes);
+//! followed by a `foreign` flag byte: `0` = ordinary table (no further payload),
+//! `1` = foreign table (server name len u32, server name bytes, option count
+//! u32, then per option: key len u32, key bytes, value len u32, value bytes);
+//! the `CHECK` constraint list; and a `materialized` flag byte: `0` = not a
+//! materialized view (no further payload), `1` = materialized view (definition
+//! len u32, definition bytes, `relispopulated` byte).
 //!
 //! Foreign-data-wrapper, foreign-server, and user-mapping objects use their own
 //! simple binary format, not the schema format.
@@ -17,45 +17,67 @@ use crabka_pgkv::KvError;
 use crabka_pgtypes::{
     ColumnType, Datum,
     numeric::Typmod,
-    usertype::{CompositeField, DomainBody, DomainCheck, UserType, UserTypeBody},
+    usertype::{
+        BaseBody, CompositeField, DomainBody, DomainCheck, RangeBody, UserType, UserTypeBody,
+    },
 };
 
 use crate::{
-    CheckConstraint, Column, ColumnDefault, ForeignDataWrapper, ForeignKey, ForeignServer,
-    ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint, IndexMethod,
-    IndexPlacement, MatchType, ReferentialAction, Sequence, ShardingStrategy, TableOptions,
-    UserMapping, View,
+    CheckConstraint, Column, ColumnDefault, ConstraintDeferral, ExclusionOperator,
+    ForeignDataWrapper, ForeignKey, ForeignServer, ForeignTableMeta, GeneratedColumn,
+    GeneratedKind, HashSharding, IdentityKind, Index, IndexConstraint, IndexMethod, IndexPlacement,
+    MatchType, MaterializedView, ReferentialAction, Sequence, ShardingStrategy, TableOptions,
+    UserMapping, View, ViewCheckOption, ViewOptions,
 };
 
-/// Everything [`deserialize_schema`] recovers from a stored table schema.
+/// Everything [`deserialize_schema`] recovers from a stored table schema:
+/// `table_id`, columns, storage options, owning role, foreign metadata,
+/// `CHECK` constraints, and materialized-view metadata.
 pub type DecodedSchema = (
     u32,
     Vec<Column>,
     TableOptions,
+    String,
     Option<ForeignTableMeta>,
     Vec<CheckConstraint>,
+    Option<MaterializedView>,
 );
 
-/// The single schema-value format version.
-///
-/// Every table carries this version byte, ordinary and foreign alike. A flag
-/// byte after the column list separates ordinary (`0`) from foreign (`1`), and
-/// a `CHECK` constraint list closes the record.
-pub const SCHEMA_VERSION: u8 = 7;
+/// The single schema-value format version. Every stored relation — ordinary,
+/// foreign, or materialized view — is written with this version byte; a flag
+/// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
+/// `CHECK` constraint list and a materialized-view flag byte close the record.
+pub const SCHEMA_VERSION: u8 = 12;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
+const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
+const TABLE_OPTION_FORCE_ROW_SECURITY: u8 = 0b0000_0100;
+/// Every bit [`read_table_options`] knows how to decode. A bit outside this
+/// mask is a record from a build this one does not understand, and the reader
+/// refuses it rather than guessing — see the comment on `read_table_options`.
+const TABLE_OPTION_KNOWN: u8 =
+    TABLE_OPTION_SHARDED | TABLE_OPTION_ROW_SECURITY | TABLE_OPTION_FORCE_ROW_SECURITY;
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 3;
+const INDEX_VERSION: u8 = 7;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
 const INDEX_METHOD_BTREE: u8 = 0;
 const INDEX_METHOD_GIN: u8 = 1;
+const INDEX_METHOD_HASH: u8 = 2;
+const INDEX_METHOD_GIST: u8 = 3;
+const INDEX_METHOD_SPGIST: u8 = 4;
 const INDEX_CONSTRAINT_NONE: u8 = 0;
 const INDEX_CONSTRAINT_PRIMARY_KEY: u8 = 1;
 const INDEX_CONSTRAINT_UNIQUE: u8 = 2;
+const INDEX_CONSTRAINT_EXCLUSION: u8 = 3;
+const INDEX_DEFERRAL_IMMEDIATE: u8 = 0;
+const INDEX_DEFERRAL_DEFERRABLE: u8 = 1;
+const INDEX_DEFERRAL_DEFERRED: u8 = 2;
+const EXCLUSION_OPERATOR_EQUAL: u8 = 0;
+const EXCLUSION_OPERATOR_OVERLAPS: u8 = 1;
 const FOREIGN_KEY_VERSION: u8 = 1;
 const REFERENTIAL_ACTION_NO_ACTION: u8 = 0;
 const REFERENTIAL_ACTION_RESTRICT: u8 = 1;
@@ -103,6 +125,42 @@ mod datum_tag {
     pub const REGCLASS: u8 = 11;
     pub const TSVECTOR: u8 = 12;
     pub const TSQUERY: u8 = 13;
+    pub const RANGE: u8 = 14;
+    pub const MULTIRANGE: u8 = 15;
+    pub const JSONPATH: u8 = 16;
+    /// A network address — `inet`, `cidr`, `macaddr` or `macaddr8` — stored as
+    /// a one-column `crabka_pgkv::rowenc` row (u32 length + bytes), which
+    /// already tags the variant and holds the `is_cidr` flag. Append-only — no
+    /// version bump.
+    pub const NETWORK: u8 = 17;
+    /// A `bit` / `bit varying` value, stored as a one-column
+    /// `crabka_pgkv::rowenc` row, which already carries the bit count and the
+    /// `varying` flag. Append-only — no version bump.
+    pub const BITSTRING: u8 = 18;
+    /// A `money` value, stored as its `i64` minor-unit count. Append-only — no
+    /// version bump.
+    pub const MONEY: u8 = 19;
+    /// `json` — followed by the input text (u32 length + bytes), stored and
+    /// returned verbatim. Distinct from [`JSONB`] because a `jsonb` round trip
+    /// would normalise it. Append-only — no version bump.
+    pub const JSON: u8 = 20;
+    /// A system identifier value — `oid`, `xid`, `xid8`, `cid`, `tid` or
+    /// `pg_lsn` — stored as a one-column `crabka_pgkv::rowenc` row, which
+    /// already tags which of the six it is. Append-only — no version bump.
+    pub const SYSID: u8 = 21;
+    /// `xml` — followed by the document text (u32 length + bytes), stored and
+    /// returned verbatim, exactly as [`JSON`] is. Append-only — no version bump.
+    pub const XML: u8 = 22;
+    /// A `"char"` value, stored as the byte itself. Not [`TEXT`]: the escaped
+    /// `\ooo` spelling is the type's text form, not its value, and the high
+    /// half of its range has no text form that is valid UTF-8. Append-only —
+    /// no version bump.
+    pub const INTERNAL_CHAR: u8 = 23;
+    /// A `pg_snapshot` or `txid_snapshot` value — followed by its canonical
+    /// `xmin:xmax:xip` text (u32 length + bytes), the way [`TSVECTOR`] and
+    /// [`TSQUERY`] store theirs. The text form is the canonical form here, so
+    /// nothing is lost by it. Append-only — no version bump.
+    pub const PG_SNAPSHOT: u8 = 24;
 }
 
 mod type_tag {
@@ -156,9 +214,115 @@ mod type_tag {
     pub const USER: u8 = 21;
     pub const TSVECTOR: u8 = 22;
     pub const TSQUERY: u8 = 23;
+    /// `point`. Append-only — no version bump.
+    pub const POINT: u8 = 24;
+    /// `path`. Append-only — no version bump.
+    pub const PATH: u8 = 25;
+    /// `PostgreSQL` `oidvector`. Append-only — no version bump.
+    pub const OIDVECTOR: u8 = 26;
+    /// `PostgreSQL` `regtype`. Append-only — no version bump.
+    pub const REGTYPE: u8 = 27;
+    /// `PostgreSQL` `regprocedure`. Append-only — no version bump.
+    pub const REGPROCEDURE: u8 = 28;
+    /// `PostgreSQL` `jsonpath`. Append-only — no version bump.
+    pub const JSONPATH: u8 = 29;
+    /// `PostgreSQL` `int2vector`. Append-only — no version bump.
+    pub const INT2VECTOR: u8 = 30;
+    /// `PostgreSQL` `lseg`. Append-only — no version bump.
+    pub const LSEG: u8 = 31;
+    /// `PostgreSQL` `line`. Append-only — no version bump.
+    pub const LINE: u8 = 32;
+    /// `PostgreSQL` `circle`. Append-only — no version bump.
+    pub const CIRCLE: u8 = 33;
+    /// `PostgreSQL` `box`. Append-only — no version bump.
+    pub const BOX: u8 = 34;
+    /// `PostgreSQL` `regnamespace`. Append-only — no version bump.
+    pub const REGNAMESPACE: u8 = 35;
+    /// `PostgreSQL` `inet`. Append-only — no version bump.
+    pub const INET: u8 = 36;
+    /// `PostgreSQL` `cidr`. Append-only — no version bump.
+    pub const CIDR: u8 = 37;
+    /// `PostgreSQL` `macaddr`. Append-only — no version bump.
+    pub const MACADDR: u8 = 38;
+    /// `PostgreSQL` `macaddr8`. Append-only — no version bump.
+    pub const MACADDR8: u8 = 39;
+    /// `PostgreSQL` `bit`, with its optional length modifier. Append-only — no
+    /// version bump.
+    pub const BIT: u8 = 40;
+    /// `PostgreSQL` `bit varying`, with its optional length modifier.
+    /// Append-only — no version bump.
+    pub const VARBIT: u8 = 41;
+    /// `PostgreSQL` `money`. Append-only — no version bump.
+    pub const MONEY: u8 = 42;
+    /// `json`. Append-only — no version bump.
+    pub const JSON: u8 = 43;
+    /// `PostgreSQL` `oid`. Append-only — no version bump.
+    pub const OID: u8 = 44;
+    /// `PostgreSQL` `xid`. Append-only — no version bump.
+    pub const XID: u8 = 45;
+    /// `PostgreSQL` `xid8`. Append-only — no version bump.
+    pub const XID8: u8 = 46;
+    /// `PostgreSQL` `cid`. Append-only — no version bump.
+    pub const CID: u8 = 47;
+    /// `PostgreSQL` `tid`. Append-only — no version bump.
+    pub const TID: u8 = 48;
+    /// `PostgreSQL` `pg_lsn`. Append-only — no version bump.
+    pub const PG_LSN: u8 = 49;
+    /// `PostgreSQL` `regproc`. Append-only — no version bump.
+    pub const REGPROC: u8 = 50;
+    /// `PostgreSQL` `regoper`. Append-only — no version bump.
+    pub const REGOPER: u8 = 51;
+    /// `PostgreSQL` `regoperator`. Append-only — no version bump.
+    pub const REGOPERATOR: u8 = 52;
+    /// `PostgreSQL` `regconfig`. Append-only — no version bump.
+    pub const REGCONFIG: u8 = 53;
+    /// `PostgreSQL` `regdictionary`. Append-only — no version bump.
+    pub const REGDICTIONARY: u8 = 54;
+    /// `PostgreSQL` `regrole`. Append-only — no version bump.
+    pub const REGROLE: u8 = 55;
+    /// `PostgreSQL` `regcollation`. Append-only — no version bump.
+    pub const REGCOLLATION: u8 = 56;
+    /// `xml`. Append-only — no version bump.
+    pub const XML: u8 = 57;
+    /// `PostgreSQL` `polygon`. Append-only — no version bump.
+    pub const POLYGON: u8 = 58;
+    /// `PostgreSQL` `"char"`, the one-byte type — not [`BPCHAR`], which is
+    /// `character(n)`. Append-only — no version bump.
+    pub const INTERNAL_CHAR: u8 = 59;
+    /// `PostgreSQL` `pg_snapshot`. Append-only — no version bump.
+    pub const PG_SNAPSHOT: u8 = 60;
+    /// `PostgreSQL` `txid_snapshot`. Its own tag rather than
+    /// [`PG_SNAPSHOT`]'s, because the two are different SQL types at different
+    /// oids: a column declared `txid_snapshot` must still report 2970 after a
+    /// restart, which only a tag of its own preserves. Append-only — no
+    /// version bump.
+    pub const TXID_SNAPSHOT: u8 = 61;
 }
 
-/// Append a column's type: the tag byte, plus the numeric typmod payload.
+#[derive(Debug)]
+pub(crate) enum UserTypeDecodeError {
+    Corrupt(KvError),
+    UnresolvedUserType(u32),
+}
+
+impl UserTypeDecodeError {
+    pub(crate) fn into_kv_error(self) -> KvError {
+        match self {
+            Self::Corrupt(error) => error,
+            Self::UnresolvedUserType(oid) => {
+                KvError::CorruptRow(format!("column type oid {oid} is not a registered type"))
+            }
+        }
+    }
+}
+
+impl From<KvError> for UserTypeDecodeError {
+    fn from(error: KvError) -> Self {
+        Self::Corrupt(error)
+    }
+}
+
+/// Append a column's type (tag byte, plus the numeric typmod payload).
 pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
     match ty {
         ColumnType::Bool => out.push(type_tag::BOOL),
@@ -170,6 +334,13 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Char(limit) => write_optional_u16_type(out, type_tag::BPCHAR, limit),
         ColumnType::Float4 => out.push(type_tag::FLOAT4),
         ColumnType::Float8 => out.push(type_tag::FLOAT8),
+        ColumnType::Point => out.push(type_tag::POINT),
+        ColumnType::Path => out.push(type_tag::PATH),
+        ColumnType::Polygon => out.push(type_tag::POLYGON),
+        ColumnType::Lseg => out.push(type_tag::LSEG),
+        ColumnType::Line => out.push(type_tag::LINE),
+        ColumnType::Circle => out.push(type_tag::CIRCLE),
+        ColumnType::Box => out.push(type_tag::BOX),
         ColumnType::Numeric(tm) => {
             out.push(type_tag::NUMERIC);
             match tm {
@@ -205,9 +376,40 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Bytea => out.push(type_tag::BYTEA),
         ColumnType::Uuid => out.push(type_tag::UUID),
         ColumnType::Regclass => out.push(type_tag::REGCLASS),
+        ColumnType::Regtype => out.push(type_tag::REGTYPE),
+        ColumnType::Regprocedure => out.push(type_tag::REGPROCEDURE),
+        ColumnType::Regnamespace => out.push(type_tag::REGNAMESPACE),
+        ColumnType::Regproc => out.push(type_tag::REGPROC),
+        ColumnType::Regoper => out.push(type_tag::REGOPER),
+        ColumnType::Regoperator => out.push(type_tag::REGOPERATOR),
+        ColumnType::Regconfig => out.push(type_tag::REGCONFIG),
+        ColumnType::Regdictionary => out.push(type_tag::REGDICTIONARY),
+        ColumnType::Regrole => out.push(type_tag::REGROLE),
+        ColumnType::Regcollation => out.push(type_tag::REGCOLLATION),
+        ColumnType::OidVector => out.push(type_tag::OIDVECTOR),
+        ColumnType::Int2Vector => out.push(type_tag::INT2VECTOR),
         ColumnType::TsVector => out.push(type_tag::TSVECTOR),
         ColumnType::TsQuery => out.push(type_tag::TSQUERY),
+        ColumnType::Inet => out.push(type_tag::INET),
+        ColumnType::Cidr => out.push(type_tag::CIDR),
+        ColumnType::MacAddr => out.push(type_tag::MACADDR),
+        ColumnType::MacAddr8 => out.push(type_tag::MACADDR8),
+        ColumnType::Money => out.push(type_tag::MONEY),
+        ColumnType::InternalChar => out.push(type_tag::INTERNAL_CHAR),
+        ColumnType::Oid => out.push(type_tag::OID),
+        ColumnType::Xid => out.push(type_tag::XID),
+        ColumnType::Xid8 => out.push(type_tag::XID8),
+        ColumnType::Cid => out.push(type_tag::CID),
+        ColumnType::Tid => out.push(type_tag::TID),
+        ColumnType::PgLsn => out.push(type_tag::PG_LSN),
+        ColumnType::PgSnapshot => out.push(type_tag::PG_SNAPSHOT),
+        ColumnType::TxidSnapshot => out.push(type_tag::TXID_SNAPSHOT),
+        ColumnType::Bit(len) => write_optional_i32_type(out, type_tag::BIT, len),
+        ColumnType::VarBit(len) => write_optional_i32_type(out, type_tag::VARBIT, len),
+        ColumnType::Json => out.push(type_tag::JSON),
+        ColumnType::Xml => out.push(type_tag::XML),
         ColumnType::Jsonb => out.push(type_tag::JSONB),
+        ColumnType::JsonPath => out.push(type_tag::JSONPATH),
         ColumnType::Array(elem) => {
             out.push(type_tag::ARRAY);
             // `write_code`, not `code()`: the bare code byte loses the length
@@ -216,9 +418,7 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
             elem.write_code(out);
         }
         // A user-defined type is stored by oid; the definition is the type
-        // catalog's. The anonymous `record` is a pseudo-type and is refused as
-        // a column type before it reaches here, so its oid stands for "no
-        // registered type" and fails the read back.
+        // catalog's. The anonymous `record` pseudo-type uses its built-in oid.
         ColumnType::Record(named) => {
             out.push(type_tag::USER);
             out.extend_from_slice(
@@ -231,15 +431,35 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
             out.push(type_tag::USER);
             out.extend_from_slice(&named.oid.to_be_bytes());
         }
+        ColumnType::Range(range) => {
+            out.push(type_tag::USER);
+            out.extend_from_slice(&range.oid.to_be_bytes());
+        }
+        ColumnType::Multirange(multirange) => {
+            out.push(type_tag::USER);
+            out.extend_from_slice(&multirange.oid.to_be_bytes());
+        }
         ColumnType::Domain(domain) => {
             out.push(type_tag::USER);
             out.extend_from_slice(&domain.oid.to_be_bytes());
+        }
+        ColumnType::Base(base) => {
+            out.push(type_tag::USER);
+            out.extend_from_slice(&base.oid.to_be_bytes());
         }
     }
 }
 
 /// Read a column's type, consuming the tag (and the numeric typmod payload).
 pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
+    read_type_with(cur, &crabka_pgtypes::usertype::column_type_for_oid)
+        .map_err(UserTypeDecodeError::into_kv_error)
+}
+
+fn read_type_with(
+    cur: &mut &[u8],
+    resolve_user_type: &dyn Fn(u32) -> Option<ColumnType>,
+) -> Result<ColumnType, UserTypeDecodeError> {
     Ok(match take_u8(cur)? {
         type_tag::BOOL => ColumnType::Bool,
         type_tag::INT2 => ColumnType::Int2,
@@ -250,6 +470,13 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::BPCHAR => ColumnType::Char(read_optional_u16_type(cur)?),
         type_tag::FLOAT4 => ColumnType::Float4,
         type_tag::FLOAT8 => ColumnType::Float8,
+        type_tag::POINT => ColumnType::Point,
+        type_tag::PATH => ColumnType::Path,
+        type_tag::POLYGON => ColumnType::Polygon,
+        type_tag::LSEG => ColumnType::Lseg,
+        type_tag::LINE => ColumnType::Line,
+        type_tag::CIRCLE => ColumnType::Circle,
+        type_tag::BOX => ColumnType::Box,
         type_tag::NUMERIC => {
             if take_u8(cur)? == 1 {
                 let precision = u16::from_be_bytes(take_n(cur, 2)?.try_into().expect("2"));
@@ -263,64 +490,154 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::TIME => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Time
         }
         type_tag::TIMETZ => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Timetz
         }
         type_tag::TIMESTAMP => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Timestamp
         }
         type_tag::TIMESTAMPTZ => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Timestamptz
         }
         type_tag::INTERVAL => {
             let reserved = take_u8(cur)?;
             if reserved != 0 {
-                return Err(KvError::CorruptRow("unsupported datetime precision".into()));
+                return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
             ColumnType::Interval
         }
         type_tag::BYTEA => ColumnType::Bytea,
         type_tag::UUID => ColumnType::Uuid,
         type_tag::REGCLASS => ColumnType::Regclass,
+        type_tag::REGTYPE => ColumnType::Regtype,
+        type_tag::REGPROCEDURE => ColumnType::Regprocedure,
+        type_tag::REGNAMESPACE => ColumnType::Regnamespace,
+        type_tag::REGPROC => ColumnType::Regproc,
+        type_tag::REGOPER => ColumnType::Regoper,
+        type_tag::REGOPERATOR => ColumnType::Regoperator,
+        type_tag::REGCONFIG => ColumnType::Regconfig,
+        type_tag::REGDICTIONARY => ColumnType::Regdictionary,
+        type_tag::REGROLE => ColumnType::Regrole,
+        type_tag::REGCOLLATION => ColumnType::Regcollation,
+        type_tag::OIDVECTOR => ColumnType::OidVector,
+        type_tag::INT2VECTOR => ColumnType::Int2Vector,
         type_tag::TSVECTOR => ColumnType::TsVector,
         type_tag::TSQUERY => ColumnType::TsQuery,
+        type_tag::INET => ColumnType::Inet,
+        type_tag::CIDR => ColumnType::Cidr,
+        type_tag::MACADDR => ColumnType::MacAddr,
+        type_tag::MACADDR8 => ColumnType::MacAddr8,
+        type_tag::MONEY => ColumnType::Money,
+        type_tag::INTERNAL_CHAR => ColumnType::InternalChar,
+        type_tag::OID => ColumnType::Oid,
+        type_tag::XID => ColumnType::Xid,
+        type_tag::XID8 => ColumnType::Xid8,
+        type_tag::CID => ColumnType::Cid,
+        type_tag::TID => ColumnType::Tid,
+        type_tag::PG_LSN => ColumnType::PgLsn,
+        type_tag::PG_SNAPSHOT => ColumnType::PgSnapshot,
+        type_tag::TXID_SNAPSHOT => ColumnType::TxidSnapshot,
+        type_tag::BIT => ColumnType::Bit(read_optional_i32_type(cur)?),
+        type_tag::VARBIT => ColumnType::VarBit(read_optional_i32_type(cur)?),
+        type_tag::JSON => ColumnType::Json,
+        type_tag::XML => ColumnType::Xml,
         type_tag::JSONB => ColumnType::Jsonb,
-        type_tag::ARRAY => {
-            let elem = crabka_pgtypes::ElemType::read_code(cur)
-                .ok_or_else(|| KvError::CorruptRow("unknown array element type encoding".into()))?;
-            ColumnType::Array(elem)
-        }
+        type_tag::JSONPATH => ColumnType::JsonPath,
+        type_tag::ARRAY => ColumnType::Array(read_elem_type_with(cur, resolve_user_type)?),
         type_tag::USER => {
             let raw = take_n(cur, 4)?;
             let oid = u32::from_be_bytes(raw.try_into().expect("4 bytes fit u32"));
-            crabka_pgtypes::usertype::lookup_oid(oid)
-                .ok_or_else(|| {
-                    KvError::CorruptRow(format!("column type oid {oid} is not a registered type"))
-                })?
-                .column_type()
+            if oid == crabka_pgtypes::oids::RECORD {
+                ColumnType::Record(None)
+            } else if let Some(builtin) = crabka_pgtypes::ColumnType::builtin_range(oid)
+                .or_else(|| crabka_pgtypes::ColumnType::builtin_multirange(oid))
+            {
+                builtin
+            } else {
+                resolve_user_type(oid).ok_or(UserTypeDecodeError::UnresolvedUserType(oid))?
+            }
         }
         other => {
-            return Err(KvError::CorruptRow(format!(
-                "unknown column type tag {other}"
-            )));
+            return Err(KvError::CorruptRow(format!("unknown column type tag {other}")).into());
         }
     })
+}
+
+fn read_elem_type_with(
+    cur: &mut &[u8],
+    resolve_user_type: &dyn Fn(u32) -> Option<ColumnType>,
+) -> Result<crabka_pgtypes::ElemType, UserTypeDecodeError> {
+    let Some(code) = cur.first().copied() else {
+        return Err(KvError::CorruptRow("unknown array element type encoding".into()).into());
+    };
+    if !matches!(code, 18 | 19) {
+        return crabka_pgtypes::ElemType::read_code(cur).ok_or_else(|| {
+            KvError::CorruptRow("unknown array element type encoding".into()).into()
+        });
+    }
+
+    let _ = take_u8(cur)?;
+    let oid = u32::from_be_bytes(
+        take_n(cur, 4)?
+            .try_into()
+            .expect("4 bytes fit user array element oid"),
+    );
+    let ty = if code == 18 {
+        ColumnType::builtin_range(oid).or_else(|| resolve_user_type(oid))
+    } else {
+        ColumnType::builtin_multirange(oid).or_else(|| resolve_user_type(oid))
+    }
+    .ok_or(UserTypeDecodeError::UnresolvedUserType(oid))?;
+    match (code, ty) {
+        (18, ColumnType::Range(range)) => Ok(crabka_pgtypes::ElemType::Range(range)),
+        (19, ColumnType::Multirange(multirange)) => {
+            Ok(crabka_pgtypes::ElemType::Multirange(multirange))
+        }
+        _ => Err(
+            KvError::CorruptRow(format!("array element oid {oid} has the wrong type kind")).into(),
+        ),
+    }
+}
+
+/// The same shape as [`write_optional_u16_type`] over the wider range a
+/// `bit(n)` length modifier occupies.
+fn write_optional_i32_type(out: &mut Vec<u8>, tag: u8, value: Option<i32>) {
+    out.push(tag);
+    match value {
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn read_optional_i32_type(cur: &mut &[u8]) -> Result<Option<i32>, KvError> {
+    match take_u8(cur)? {
+        0 => Ok(None),
+        1 => Ok(Some(i32::from_be_bytes(
+            take_n(cur, 4)?.try_into().expect("4"),
+        ))),
+        flag => Err(KvError::CorruptRow(format!(
+            "unknown bit typmod flag {flag}"
+        ))),
+    }
 }
 
 fn write_optional_u16_type(out: &mut Vec<u8>, tag: u8, value: Option<u16>) {
@@ -386,6 +703,10 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::TEXT);
             write_str(out, value);
         }
+        Datum::JsonPath(value) => {
+            out.push(datum_tag::JSONPATH);
+            write_str(out, value);
+        }
         Datum::Float4(value) => {
             out.push(datum_tag::FLOAT4);
             out.extend_from_slice(&value.to_bits().to_be_bytes());
@@ -402,9 +723,17 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::JSONB);
             write_str(out, &value.to_text());
         }
+        Datum::Json(text) => {
+            out.push(datum_tag::JSON);
+            write_str(out, text);
+        }
+        Datum::Xml(text) => {
+            out.push(datum_tag::XML);
+            write_str(out, text);
+        }
         Datum::Array(array) => {
             out.push(datum_tag::ARRAY);
-            out.push(array.elem.code());
+            array.elem.write_code(out);
             write_bytes(out, &crabka_pgkv::rowenc::encode_row(&array.elems));
         }
         // Only the oid: the relation name is re-derived on read.
@@ -416,11 +745,74 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::TSVECTOR);
             write_str(out, &value.to_string());
         }
+        Datum::PgSnapshot(value) => {
+            out.push(datum_tag::PG_SNAPSHOT);
+            write_str(out, &value.to_string());
+        }
         Datum::TsQuery(value) => {
             out.push(datum_tag::TSQUERY);
             write_str(out, &value.to_string());
         }
+        // The row encoder already distinguishes the four network types and
+        // keeps `inet`'s `is_cidr` flag, so a default round-trips through it.
+        Datum::Money(value) => {
+            out.push(datum_tag::MONEY);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        Datum::InternalChar(value) => {
+            out.push(datum_tag::INTERNAL_CHAR);
+            out.push(*value);
+        }
+        // The row encoder keeps the bit count and the `varying` flag, so a
+        // `bit`/`bit varying` default round-trips through it.
+        Datum::BitString(_) => {
+            out.push(datum_tag::BITSTRING);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
+        Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_) => {
+            out.push(datum_tag::NETWORK);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
+        Datum::Oid(_)
+        | Datum::Xid(_)
+        | Datum::Xid8(_)
+        | Datum::Cid(_)
+        | Datum::Tid(_)
+        | Datum::PgLsn(_) => {
+            out.push(datum_tag::SYSID);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
+        Datum::Range(_) => {
+            out.push(datum_tag::RANGE);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
+        Datum::Multirange(_) => {
+            out.push(datum_tag::MULTIRANGE);
+            write_bytes(
+                out,
+                &crabka_pgkv::rowenc::encode_row(std::slice::from_ref(default)),
+            );
+        }
         Datum::Date(_)
+        | Datum::Point(_)
+        | Datum::Path(_)
+        | Datum::Polygon(_)
+        | Datum::Lseg(_)
+        | Datum::Line(_)
+        | Datum::Circle(_)
+        | Datum::Box(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
         | Datum::Timestamp(_)
@@ -428,6 +820,7 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         | Datum::Interval(_)
         | Datum::Record(_)
         | Datum::Enum(_)
+        | Datum::OidVector(_)
         | Datum::Bytea(_) => {
             unreachable!("unsupported defaults are rejected before catalog write")
         }
@@ -463,6 +856,7 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
         datum_tag::INT4 => Datum::Int4(i32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4"))),
         datum_tag::INT8 => Datum::Int8(i64::from_be_bytes(take_n(cur, 8)?.try_into().expect("8"))),
         datum_tag::TEXT => Datum::Text(read_string(cur)?),
+        datum_tag::JSONPATH => Datum::JsonPath(read_string(cur)?),
         datum_tag::FLOAT4 => {
             let bits = u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4"));
             Datum::Float4(f32::from_bits(bits))
@@ -486,11 +880,11 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
                     .map_err(|_| KvError::CorruptRow(format!("invalid jsonb default {raw:?}")))?,
             )
         }
+        datum_tag::JSON => Datum::Json(read_string(cur)?),
+        datum_tag::XML => Datum::Xml(read_string(cur)?),
         datum_tag::ARRAY => {
-            let code = take_u8(cur)?;
-            let elem = crabka_pgtypes::ElemType::from_code(code).ok_or_else(|| {
-                KvError::CorruptRow(format!("unknown array element type code {code}"))
-            })?;
+            let elem = crabka_pgtypes::ElemType::read_code(cur)
+                .ok_or_else(|| KvError::CorruptRow("unknown array element type code".into()))?;
             let elems = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
             Datum::Array(crabka_pgtypes::ArrayValue::new(elem, elems))
         }
@@ -504,10 +898,77 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 KvError::CorruptRow(format!("invalid tsvector default: {error}"))
             })?)
         }
+        datum_tag::PG_SNAPSHOT => {
+            Datum::PgSnapshot(Box::new(read_string(cur)?.parse().map_err(|error| {
+                KvError::CorruptRow(format!("invalid pg_snapshot default: {error}"))
+            })?))
+        }
         datum_tag::TSQUERY => {
             Datum::TsQuery(read_string(cur)?.parse().map_err(|error| {
                 KvError::CorruptRow(format!("invalid tsquery default: {error}"))
             })?)
+        }
+        datum_tag::MONEY => Datum::Money(i64::from_be_bytes(
+            take_n(cur, 8)?
+                .try_into()
+                .map_err(|_| KvError::CorruptRow("invalid money default".into()))?,
+        )),
+        datum_tag::INTERNAL_CHAR => Datum::InternalChar(take_u8(cur)?),
+        datum_tag::BITSTRING => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1 || !matches!(values.first(), Some(Datum::BitString(_))) {
+                return Err(KvError::CorruptRow("invalid bit string default".into()));
+            }
+            values.pop().expect("length checked")
+        }
+        datum_tag::NETWORK => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1
+                || !matches!(
+                    values.first(),
+                    Some(Datum::Inet(_) | Datum::MacAddr(_) | Datum::MacAddr8(_))
+                )
+            {
+                return Err(KvError::CorruptRow(
+                    "invalid network address default".into(),
+                ));
+            }
+            values.pop().expect("length checked")
+        }
+        datum_tag::SYSID => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1
+                || !matches!(
+                    values.first(),
+                    Some(
+                        Datum::Oid(_)
+                            | Datum::Xid(_)
+                            | Datum::Xid8(_)
+                            | Datum::Cid(_)
+                            | Datum::Tid(_)
+                            | Datum::PgLsn(_)
+                    )
+                )
+            {
+                return Err(KvError::CorruptRow(
+                    "invalid system identifier default".into(),
+                ));
+            }
+            values.pop().expect("length checked")
+        }
+        datum_tag::RANGE => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1 || !matches!(values.first(), Some(Datum::Range(_))) {
+                return Err(KvError::CorruptRow("invalid range default".into()));
+            }
+            values.pop().expect("length checked")
+        }
+        datum_tag::MULTIRANGE => {
+            let mut values = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            if values.len() != 1 || !matches!(values.first(), Some(Datum::Multirange(_))) {
+                return Err(KvError::CorruptRow("invalid multirange default".into()));
+            }
+            values.pop().expect("length checked")
         }
         tag => {
             return Err(KvError::CorruptRow(format!(
@@ -588,12 +1049,18 @@ fn read_options(cur: &mut &[u8]) -> Result<Vec<(String, String)>, KvError> {
 
 // ── Table schema ──────────────────────────────────────────────────────────────
 
-/// Serialize a table schema, ordinary or foreign.
+/// Serialize a table schema (ordinary, foreign, or materialized view).
 ///
-/// This function always writes version byte `5`, then the column list and the
-/// table option flags. A foreign flag closes that head: `0` for an ordinary
-/// table, and `1` for a foreign table, followed by the foreign metadata
-/// payload.
+/// Always writes [`SCHEMA_VERSION`], then the column list, table option flags,
+/// the owning role, and a foreign flag: `0` for an ordinary table, `1` for a
+/// foreign table followed by the foreign metadata payload. The `CHECK`
+/// constraint list follows, and then a materialized flag: `0` for a relation
+/// that is not a materialized view, `1` for one followed by its definition and
+/// `relispopulated` byte.
+///
+/// The two relation-kind payloads are written independently even though a
+/// relation carries at most one of them — the encoder does not police the
+/// exclusion, so a decoder never has to guess which flag won.
 ///
 /// # Panics
 ///
@@ -603,7 +1070,9 @@ pub fn serialize_schema(
     table_id: u32,
     columns: &[Column],
     options: TableOptions,
+    owner: &str,
     meta: Option<&ForeignTableMeta>,
+    materialized: Option<&MaterializedView>,
     checks: &[CheckConstraint],
 ) -> Vec<u8> {
     let mut out = vec![SCHEMA_VERSION];
@@ -618,10 +1087,12 @@ pub fn serialize_schema(
         write_type(&mut out, c.ty);
         out.push(u8::from(c.not_null));
         write_default(&mut out, c.default.as_ref());
-        write_generated(&mut out, c.generated.as_deref());
+        write_generated(&mut out, c.generated.as_ref());
         out.push(identity_flag(c.identity));
+        write_collation(&mut out, c.collation.as_deref());
     }
     out.push(table_option_flags(options));
+    write_str(&mut out, owner);
     match meta {
         None => out.push(0),
         Some(m) => {
@@ -631,27 +1102,81 @@ pub fn serialize_schema(
         }
     }
     write_checks(&mut out, checks);
+    match materialized {
+        None => out.push(0),
+        Some(m) => {
+            out.push(1);
+            write_str(&mut out, &m.definition);
+            out.push(u8::from(m.populated));
+        }
+    }
     out
 }
 
-/// `GENERATED ALWAYS AS (expr) STORED`: a present/absent flag byte, then the
-/// expression source when present.
-fn write_generated(out: &mut Vec<u8>, generated: Option<&str>) {
+const GENERATED_NONE: u8 = 0;
+const GENERATED_STORED: u8 = 1;
+const GENERATED_VIRTUAL: u8 = 2;
+
+/// `GENERATED ALWAYS AS (expr)`: a kind byte — [`GENERATED_NONE`] for a column
+/// that is not generated, [`GENERATED_STORED`] for `STORED`, and
+/// [`GENERATED_VIRTUAL`] for `VIRTUAL` — followed by the expression source for
+/// the two generated kinds.
+fn write_generated(out: &mut Vec<u8>, generated: Option<&GeneratedColumn>) {
     match generated {
-        None => out.push(0),
-        Some(expr) => {
-            out.push(1);
-            write_str(out, expr);
+        None => out.push(GENERATED_NONE),
+        Some(g) => {
+            out.push(match g.kind {
+                GeneratedKind::Stored => GENERATED_STORED,
+                GeneratedKind::Virtual => GENERATED_VIRTUAL,
+            });
+            write_str(out, &g.expr);
         }
     }
 }
 
-fn read_generated(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
+/// Reads back what [`write_generated`] wrote, refusing any kind byte outside
+/// the three it defines.
+fn read_generated(cur: &mut &[u8]) -> Result<Option<GeneratedColumn>, KvError> {
+    let kind = match take_u8(cur)? {
+        GENERATED_NONE => return Ok(None),
+        GENERATED_STORED => GeneratedKind::Stored,
+        GENERATED_VIRTUAL => GeneratedKind::Virtual,
+        flag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown generated-column flag {flag}"
+            )));
+        }
+    };
+    Ok(Some(GeneratedColumn {
+        expr: read_string(cur)?,
+        kind,
+    }))
+}
+
+const COLLATION_DEFAULT: u8 = 0;
+const COLLATION_NAMED: u8 = 1;
+
+/// A column's written `COLLATE "name"`: a presence byte, followed by the name
+/// when one was written. `None` is the type's own default collation, which is
+/// what every column had before the clause was accepted.
+fn write_collation(out: &mut Vec<u8>, collation: Option<&str>) {
+    match collation {
+        None => out.push(COLLATION_DEFAULT),
+        Some(name) => {
+            out.push(COLLATION_NAMED);
+            write_str(out, name);
+        }
+    }
+}
+
+/// Reads back what [`write_collation`] wrote, refusing any presence byte
+/// outside the two it writes.
+fn read_collation(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
     match take_u8(cur)? {
-        0 => Ok(None),
-        1 => Ok(Some(read_string(cur)?)),
+        COLLATION_DEFAULT => Ok(None),
+        COLLATION_NAMED => Ok(Some(read_string(cur)?)),
         flag => Err(KvError::CorruptRow(format!(
-            "unknown generated-column flag {flag}"
+            "unknown column-collation flag {flag}"
         ))),
     }
 }
@@ -718,21 +1243,36 @@ fn read_checks(cur: &mut &[u8]) -> Result<Vec<CheckConstraint>, KvError> {
 }
 
 fn table_option_flags(options: TableOptions) -> u8 {
+    let mut flags = 0;
     if options.sharded {
-        TABLE_OPTION_SHARDED
-    } else {
-        0
+        flags |= TABLE_OPTION_SHARDED;
     }
+    if options.row_security {
+        flags |= TABLE_OPTION_ROW_SECURITY;
+    }
+    if options.force_row_security {
+        flags |= TABLE_OPTION_FORCE_ROW_SECURITY;
+    }
+    flags
 }
 
+/// Decode the table-option byte, refusing any bit this build does not know.
+///
+/// The strictness is a security property, not tidiness. Row security lives in
+/// this byte, and a tolerant reader — one that masked unknown bits away — would
+/// decode a record written with a later flag layout as a table with row
+/// security *off*, which is a silent, total policy bypass. Refusing the record
+/// fails the read instead.
 fn read_table_options(flags: u8) -> Result<TableOptions, KvError> {
-    if flags & !TABLE_OPTION_SHARDED != 0 {
+    if flags & !TABLE_OPTION_KNOWN != 0 {
         return Err(KvError::CorruptRow(format!(
             "unknown table option flags {flags:#04x}"
         )));
     }
     Ok(TableOptions {
         sharded: flags & TABLE_OPTION_SHARDED != 0,
+        row_security: flags & TABLE_OPTION_ROW_SECURITY != 0,
+        force_row_security: flags & TABLE_OPTION_FORCE_ROW_SECURITY != 0,
     })
 }
 
@@ -874,12 +1414,36 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
     out.push(match index.method {
         IndexMethod::Btree => INDEX_METHOD_BTREE,
         IndexMethod::Gin => INDEX_METHOD_GIN,
+        IndexMethod::Hash => INDEX_METHOD_HASH,
+        IndexMethod::Gist => INDEX_METHOD_GIST,
+        IndexMethod::Spgist => INDEX_METHOD_SPGIST,
     });
-    out.push(match index.constraint {
+    out.push(u8::from(index.without_overlaps));
+    out.push(u8::from(index.clustered));
+    out.push(match index.deferral {
+        ConstraintDeferral::Immediate => INDEX_DEFERRAL_IMMEDIATE,
+        ConstraintDeferral::Deferrable => INDEX_DEFERRAL_DEFERRABLE,
+        ConstraintDeferral::Deferred => INDEX_DEFERRAL_DEFERRED,
+    });
+    out.push(match &index.constraint {
         None => INDEX_CONSTRAINT_NONE,
         Some(IndexConstraint::PrimaryKey) => INDEX_CONSTRAINT_PRIMARY_KEY,
         Some(IndexConstraint::Unique) => INDEX_CONSTRAINT_UNIQUE,
+        Some(IndexConstraint::Exclusion(_)) => INDEX_CONSTRAINT_EXCLUSION,
     });
+    if let Some(IndexConstraint::Exclusion(operators)) = &index.constraint {
+        out.extend_from_slice(
+            &u32::try_from(operators.len())
+                .expect("exclusion operator count must fit in u32")
+                .to_be_bytes(),
+        );
+        for operator in operators {
+            out.push(match operator {
+                ExclusionOperator::Equal => EXCLUSION_OPERATOR_EQUAL,
+                ExclusionOperator::Overlaps => EXCLUSION_OPERATOR_OVERLAPS,
+            });
+        }
+    }
     out.extend_from_slice(
         &u32::try_from(index.columns.len())
             .expect("index column count must fit in u32")
@@ -904,7 +1468,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
 pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
-    if !matches!(version, 2 | INDEX_VERSION) {
+    if version != INDEX_VERSION {
         return Err(KvError::CorruptRow(format!(
             "unknown index version {version}"
         )));
@@ -931,23 +1495,69 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
             )));
         }
     };
-    let method = if version >= 3 {
-        match take_u8(&mut cur)? {
-            INDEX_METHOD_BTREE => IndexMethod::Btree,
-            INDEX_METHOD_GIN => IndexMethod::Gin,
-            tag => {
-                return Err(KvError::CorruptRow(format!(
-                    "unknown index method tag {tag}"
-                )));
-            }
+    let method = match take_u8(&mut cur)? {
+        INDEX_METHOD_BTREE => IndexMethod::Btree,
+        INDEX_METHOD_GIN => IndexMethod::Gin,
+        INDEX_METHOD_HASH => IndexMethod::Hash,
+        INDEX_METHOD_GIST => IndexMethod::Gist,
+        INDEX_METHOD_SPGIST => IndexMethod::Spgist,
+        tag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index method tag {tag}"
+            )));
         }
-    } else {
-        IndexMethod::Btree
+    };
+    let without_overlaps = match take_u8(&mut cur)? {
+        0 => false,
+        1 => true,
+        flag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index WITHOUT OVERLAPS flag {flag}"
+            )));
+        }
+    };
+    let clustered = match take_u8(&mut cur)? {
+        0 => false,
+        1 => true,
+        flag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index clustered flag {flag}"
+            )));
+        }
+    };
+    let deferral = match take_u8(&mut cur)? {
+        INDEX_DEFERRAL_IMMEDIATE => ConstraintDeferral::Immediate,
+        INDEX_DEFERRAL_DEFERRABLE => ConstraintDeferral::Deferrable,
+        INDEX_DEFERRAL_DEFERRED => ConstraintDeferral::Deferred,
+        tag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index deferral tag {tag}"
+            )));
+        }
     };
     let constraint = match take_u8(&mut cur)? {
         INDEX_CONSTRAINT_NONE => None,
         INDEX_CONSTRAINT_PRIMARY_KEY => Some(IndexConstraint::PrimaryKey),
         INDEX_CONSTRAINT_UNIQUE => Some(IndexConstraint::Unique),
+        INDEX_CONSTRAINT_EXCLUSION => {
+            let count = usize::try_from(u32::from_be_bytes(
+                take_n(&mut cur, 4)?.try_into().expect("4"),
+            ))
+            .expect("u32 fits in usize on supported targets");
+            let mut operators = Vec::with_capacity(count.min(16));
+            for _ in 0..count {
+                operators.push(match take_u8(&mut cur)? {
+                    EXCLUSION_OPERATOR_EQUAL => ExclusionOperator::Equal,
+                    EXCLUSION_OPERATOR_OVERLAPS => ExclusionOperator::Overlaps,
+                    tag => {
+                        return Err(KvError::CorruptRow(format!(
+                            "unknown exclusion operator tag {tag}"
+                        )));
+                    }
+                });
+            }
+            Some(IndexConstraint::Exclusion(operators))
+        }
         tag => {
             return Err(KvError::CorruptRow(format!(
                 "unknown index constraint tag {tag}"
@@ -967,6 +1577,13 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     for _ in 0..column_count {
         columns.push(read_string(&mut cur)?);
     }
+    if let Some(IndexConstraint::Exclusion(operators)) = &constraint
+        && operators.len() != columns.len()
+    {
+        return Err(KvError::CorruptRow(
+            "exclusion operator count does not match index column count".into(),
+        ));
+    }
     Ok(Index {
         id,
         name,
@@ -977,6 +1594,9 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         placement,
         method,
         constraint,
+        without_overlaps,
+        clustered,
+        deferral,
     })
 }
 
@@ -1244,14 +1864,13 @@ pub fn deserialize_sequence(bytes: &[u8]) -> Result<Sequence, KvError> {
     })
 }
 
-/// Deserialize a table schema.
+/// Deserialize a table schema into a [`DecodedSchema`].
 ///
-/// This function returns
-/// `(table_id, columns, table_options, Option<ForeignTableMeta>)`.
-///
-/// It returns `KvError::CorruptRow` if the version byte is not `5`, if the
-/// table option flags contain unknown bits, or if the foreign flag after the
-/// option flags is not `0` (ordinary) or `1` (foreign).
+/// Returns `KvError::CorruptRow` if the version byte is not [`SCHEMA_VERSION`],
+/// if the table option flags contain unknown bits, if the foreign flag after
+/// the owner is not `0` (ordinary) or `1` (foreign), or if the materialized
+/// flag closing the record is not `0` (not a materialized view) or `1` (a
+/// materialized view, followed by its definition and populated byte).
 ///
 /// # Errors
 ///
@@ -1287,6 +1906,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
         let default = read_default(&mut cur)?;
         let generated = read_generated(&mut cur)?;
         let identity = read_identity(&mut cur)?;
+        let collation = read_collation(&mut cur)?;
         columns.push(Column {
             name,
             ty,
@@ -1294,9 +1914,11 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
             default,
             generated,
             identity,
+            collation,
         });
     }
     let options = read_table_options(take_u8(&mut cur)?)?;
+    let owner = read_string(&mut cur)?;
     let foreign = match take_u8(&mut cur)? {
         0 => None,
         1 => {
@@ -1309,7 +1931,39 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
         }
     };
     let checks = read_checks(&mut cur)?;
-    Ok((table_id, columns, options, foreign, checks))
+    let materialized = match take_u8(&mut cur)? {
+        0 => None,
+        1 => {
+            let definition = read_string(&mut cur)?;
+            let populated = match take_u8(&mut cur)? {
+                0 => false,
+                1 => true,
+                flag => {
+                    return Err(KvError::CorruptRow(format!(
+                        "unknown materialized populated flag {flag}"
+                    )));
+                }
+            };
+            Some(MaterializedView {
+                definition,
+                populated,
+            })
+        }
+        flag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown materialized flag {flag}"
+            )));
+        }
+    };
+    Ok((
+        table_id,
+        columns,
+        options,
+        owner,
+        foreign,
+        checks,
+        materialized,
+    ))
 }
 
 // ── Foreign-data wrapper ──────────────────────────────────────────────────────
@@ -1337,16 +1991,15 @@ pub fn deserialize_fdw(bytes: &[u8]) -> Result<ForeignDataWrapper, KvError> {
 
 // ── User-defined types ────────────────────────────────────────────────────────
 
-/// Serialize a user-defined type.
-///
-/// The record is the `oid`, the name, a kind byte, and then the kind's own
-/// payload. That payload is a composite's fields, an enum's labels, or a
-/// domain's base type, nullability, default and checks.
+/// Serialize a user-defined type: `oid`, its legacy flattened lookup name, a
+/// kind byte, the kind's payload, then a versioned structured identity trailer.
+/// Keeping the legacy name first lets an older binary read a new record, while
+/// the trailer preserves identifiers containing dots without reconstruction.
 #[must_use]
 pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&ty.oid.to_be_bytes());
-    write_str(&mut out, &ty.name);
+    write_str(&mut out, &ty.qualified_name());
     match &ty.body {
         UserTypeBody::Composite(fields) => {
             out.push(USER_TYPE_COMPOSITE);
@@ -1361,6 +2014,31 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
             write_count(&mut out, labels.len());
             for label in labels {
                 write_str(&mut out, label);
+            }
+        }
+        UserTypeBody::Range(range) => {
+            out.push(USER_TYPE_RANGE);
+            write_type(&mut out, range.subtype);
+            match &range.collation {
+                Some(collation) => {
+                    out.push(1);
+                    write_str(&mut out, collation);
+                }
+                None => out.push(0),
+            }
+            match (&range.multirange_schema, &range.multirange_name) {
+                (Some(schema), Some(name)) => {
+                    out.push(1);
+                    write_str(
+                        &mut out,
+                        &if schema == crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA {
+                            name.clone()
+                        } else {
+                            format!("{schema}.{name}")
+                        },
+                    );
+                }
+                _ => out.push(0),
             }
         }
         UserTypeBody::Domain(domain) => {
@@ -1380,6 +2058,31 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
                 write_str(&mut out, &check.expr);
             }
         }
+        UserTypeBody::Shell => out.push(USER_TYPE_SHELL),
+        UserTypeBody::Base(base) => {
+            out.push(USER_TYPE_BASE);
+            write_type(&mut out, base.representation);
+            write_str(&mut out, &base.input);
+            write_str(&mut out, &base.output);
+            write_str(&mut out, &base.category);
+            out.push(u8::from(base.preferred));
+            write_str(&mut out, &base.delimiter);
+        }
+    }
+    out.push(USER_TYPE_IDENTITY_V2);
+    write_str(&mut out, &ty.schema);
+    write_str(&mut out, &ty.name);
+    match &ty.body {
+        UserTypeBody::Range(RangeBody {
+            multirange_schema: Some(schema),
+            multirange_name: Some(name),
+            ..
+        }) => {
+            out.push(1);
+            write_str(&mut out, schema);
+            write_str(&mut out, name);
+        }
+        _ => out.push(0),
     }
     out
 }
@@ -1396,10 +2099,18 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
 /// reader just asked for. That cannot happen: `take_n` either yields exactly
 /// that many bytes or returns the corruption error above.
 pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
+    deserialize_user_type_with(bytes, &crabka_pgtypes::usertype::column_type_for_oid)
+        .map_err(UserTypeDecodeError::into_kv_error)
+}
+
+pub(crate) fn deserialize_user_type_with(
+    bytes: &[u8],
+    resolve_user_type: &dyn Fn(u32) -> Option<ColumnType>,
+) -> Result<UserType, UserTypeDecodeError> {
     let mut cur = bytes;
     let oid = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4 bytes fit u32"));
-    let name = read_string(&mut cur)?;
-    let body = match take_u8(&mut cur)? {
+    let legacy_name = read_string(&mut cur)?;
+    let mut body = match take_u8(&mut cur)? {
         USER_TYPE_COMPOSITE => {
             let count = read_count(&mut cur)?;
             let mut fields = Vec::with_capacity(count.min(1024));
@@ -1407,7 +2118,7 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
                 let field_name = read_string(&mut cur)?;
                 fields.push(CompositeField {
                     name: field_name,
-                    ty: read_type(&mut cur)?,
+                    ty: read_type_with(&mut cur, resolve_user_type)?,
                 });
             }
             UserTypeBody::Composite(fields)
@@ -1420,8 +2131,26 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
             }
             UserTypeBody::Enum(labels)
         }
+        USER_TYPE_RANGE => {
+            let subtype = read_type_with(&mut cur, resolve_user_type)?;
+            let collation = match take_u8(&mut cur)? {
+                0 => None,
+                _ => Some(read_string(&mut cur)?),
+            };
+            let multirange_name = if cur.is_empty() || take_u8(&mut cur)? == 0 {
+                None
+            } else {
+                Some(read_string(&mut cur)?)
+            };
+            UserTypeBody::Range(RangeBody {
+                subtype,
+                collation,
+                multirange_schema: None,
+                multirange_name,
+            })
+        }
         USER_TYPE_DOMAIN => {
-            let base = read_type(&mut cur)?;
+            let base = read_type_with(&mut cur, resolve_user_type)?;
             let not_null = take_u8(&mut cur)? != 0;
             let default = match take_u8(&mut cur)? {
                 0 => None,
@@ -1443,18 +2172,124 @@ pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
                 checks,
             })
         }
+        USER_TYPE_SHELL => UserTypeBody::Shell,
+        USER_TYPE_BASE => {
+            let representation = read_type_with(&mut cur, resolve_user_type)?;
+            let input = read_string(&mut cur)?;
+            let output = read_string(&mut cur)?;
+            let category = read_string(&mut cur)?;
+            let preferred = take_u8(&mut cur)? != 0;
+            let delimiter = read_string(&mut cur)?;
+            UserTypeBody::Base(BaseBody {
+                representation,
+                input,
+                output,
+                category,
+                preferred,
+                delimiter,
+            })
+        }
         other => {
-            return Err(KvError::CorruptRow(format!(
-                "unknown user type kind {other}"
-            )));
+            return Err(KvError::CorruptRow(format!("unknown user type kind {other}")).into());
         }
     };
-    Ok(UserType { oid, name, body })
+    let (schema, name, structured_companion) = if cur.is_empty() {
+        let (schema, name) = legacy_user_type_identity(&legacy_name);
+        (schema, name, None)
+    } else {
+        let version = take_u8(&mut cur)?;
+        match version {
+            USER_TYPE_IDENTITY_V1 | USER_TYPE_IDENTITY_V2 => {}
+            version => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown user type identity version {version}"
+                ))
+                .into());
+            }
+        }
+        let schema = read_string(&mut cur)?;
+        let name = read_string(&mut cur)?;
+        let companion = if version == USER_TYPE_IDENTITY_V2 {
+            match take_u8(&mut cur)? {
+                0 => None,
+                1 => Some((read_string(&mut cur)?, read_string(&mut cur)?)),
+                flag => {
+                    return Err(KvError::CorruptRow(format!(
+                        "unknown user type companion flag {flag}"
+                    ))
+                    .into());
+                }
+            }
+        } else {
+            None
+        };
+        if !cur.is_empty() {
+            return Err(
+                KvError::CorruptRow("trailing bytes after user type identity".into()).into(),
+            );
+        }
+        (schema, name, companion)
+    };
+    if let UserTypeBody::Range(range) = &mut body {
+        if let Some((schema, name)) = structured_companion {
+            range.multirange_schema = Some(schema);
+            range.multirange_name = Some(name);
+        } else if let Some(legacy_companion) = range.multirange_name.take() {
+            let (schema, name) = legacy_user_type_identity(&legacy_companion);
+            range.multirange_schema = Some(schema);
+            range.multirange_name = Some(name);
+        } else {
+            // Records written before CREATE materialized PostgreSQL's derived
+            // companion identity used the old suffix-replacement algorithm at
+            // lookup time. Freeze that historical identity during migration so
+            // upgrading does not silently rename an existing companion.
+            range.multirange_schema = Some(schema.clone());
+            range.multirange_name = Some(legacy_default_multirange_name(&name));
+        }
+    }
+    Ok(UserType {
+        oid,
+        schema,
+        name,
+        body,
+    })
+}
+
+/// Decode records written before structured type identities were appended.
+/// Such records could not distinguish a dotted identifier from qualification.
+/// The permanent migration policy is the historical last-dot split: it keeps
+/// every unambiguous old identity stable, while inherently ambiguous quoted-dot
+/// records must be recreated or renamed by an operator. New records never rely
+/// on this lossy representation.
+fn legacy_user_type_identity(name: &str) -> (String, String) {
+    name.rsplit_once('.').map_or_else(
+        || {
+            (
+                crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
+                name.to_string(),
+            )
+        },
+        |(schema, name)| (schema.to_string(), name.to_string()),
+    )
+}
+
+fn legacy_default_multirange_name(range_name: &str) -> String {
+    range_name.strip_suffix("range").map_or_else(
+        || format!("{range_name}_multirange"),
+        |stem| format!("{stem}multirange"),
+    )
 }
 
 const USER_TYPE_COMPOSITE: u8 = 1;
 const USER_TYPE_ENUM: u8 = 2;
 const USER_TYPE_DOMAIN: u8 = 3;
+const USER_TYPE_RANGE: u8 = 4;
+/// `CREATE TYPE name;` — a shell, with no body at all.
+const USER_TYPE_SHELL: u8 = 5;
+/// `CREATE TYPE name (INPUT = …, OUTPUT = …)` — a user-defined base type.
+const USER_TYPE_BASE: u8 = 6;
+const USER_TYPE_IDENTITY_V1: u8 = 1;
+const USER_TYPE_IDENTITY_V2: u8 = 2;
 
 fn write_count(out: &mut Vec<u8>, count: usize) {
     out.extend_from_slice(
@@ -1531,7 +2366,7 @@ pub fn deserialize_user_mapping(bytes: &[u8]) -> Result<UserMapping, KvError> {
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
-const VIEW_VERSION: u8 = 1;
+const VIEW_VERSION: u8 = 4;
 
 /// Serialize a view definition and its resolved output schema.
 ///
@@ -1543,6 +2378,7 @@ pub fn serialize_view(view: &View) -> Vec<u8> {
     let mut out = vec![VIEW_VERSION];
     write_relation(&mut out, &view.name);
     write_str(&mut out, &view.definition);
+    write_str(&mut out, &view.owner);
     out.extend_from_slice(
         &u32::try_from(view.columns.len())
             .expect("view column count must fit in u32")
@@ -1552,6 +2388,13 @@ pub fn serialize_view(view: &View) -> Vec<u8> {
         write_str(&mut out, &column.name);
         write_type(&mut out, column.ty);
     }
+    out.push(u8::from(view.options.security_invoker));
+    out.push(u8::from(view.options.security_barrier));
+    out.push(match view.options.check_option {
+        None => 0,
+        Some(ViewCheckOption::Local) => 1,
+        Some(ViewCheckOption::Cascaded) => 2,
+    });
     out
 }
 
@@ -1576,6 +2419,7 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
     }
     let name = read_relation(&mut cur)?;
     let definition = read_string(&mut cur)?;
+    let owner = read_string(&mut cur)?;
     let column_count = usize::try_from(u32::from_be_bytes(
         take_n(&mut cur, 4)?.try_into().expect("4"),
     ))
@@ -1589,15 +2433,35 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
             default: None,
             generated: None,
             identity: None,
+            // A view's stored column list is name and type only: the collation a
+            // view column derives from its body is not persisted, so `\d` on a
+            // view reports the type's own.
+            collation: None,
         });
     }
+    let options = ViewOptions {
+        security_invoker: take_u8(&mut cur)? != 0,
+        security_barrier: take_u8(&mut cur)? != 0,
+        check_option: match take_u8(&mut cur)? {
+            0 => None,
+            1 => Some(ViewCheckOption::Local),
+            2 => Some(ViewCheckOption::Cascaded),
+            other => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown view check option {other}"
+                )));
+            }
+        },
+    };
     if !cur.is_empty() {
         return Err(KvError::CorruptRow("trailing bytes in view record".into()));
     }
     Ok(View {
         name,
         definition,
+        owner,
         columns,
+        options,
     })
 }
 
@@ -1646,6 +2510,7 @@ mod tests {
                 default: None,
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "ratio".into(),
@@ -1654,13 +2519,34 @@ mod tests {
                 default: None,
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column::new("code", ColumnType::Varchar(Some(8))),
             Column::new("flag", ColumnType::Char(Some(2))),
             Column::new("public_id", ColumnType::Uuid),
+            // A written `COLLATE` survives the round trip, and so does the
+            // absence of one on a column of the very same type — the two are
+            // distinct states, not one nullable string that defaults.
+            Column {
+                name: "sorted".into(),
+                ty: ColumnType::Text,
+                not_null: false,
+                default: None,
+                generated: None,
+                identity: None,
+                collation: Some("POSIX".into()),
+            },
         ];
-        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
-        let (id, cols, options, foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(
+            table_id,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (id, cols, options, _owner, foreign, ..) = deserialize_schema(&bytes).expect("decode");
         assert_eq!(id, table_id);
         assert_eq!(cols, columns);
         assert!(!options.sharded);
@@ -1677,18 +2563,115 @@ mod tests {
             default: Some(ColumnDefault::Value(Datum::Text("anon".into()))),
             generated: None,
             identity: None,
+            collation: None,
         }];
 
-        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
-        let (_id, decoded, _options, _foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(
+            table_id,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (_id, decoded, _options, _owner, _foreign, ..) =
+            deserialize_schema(&bytes).expect("decode");
 
         assert_eq!(decoded, columns);
     }
 
-    /// `jsonb` and array DEFAULT values survive the catalog round trip, the
-    /// awkward shapes included. Those shapes are a nested object or array
-    /// document, an array that holds NULL elements, an empty array whose
-    /// element type lives only in the tag, and an array of `jsonb`.
+    /// A generated column's kind travels with its expression: `STORED` and
+    /// `VIRTUAL` each come back as written, as does a column that is not
+    /// generated at all.
+    #[test]
+    fn roundtrip_generated_column_kinds() {
+        use assert2::assert;
+
+        for generated in [
+            None,
+            Some(GeneratedColumn {
+                expr: "id * 2".into(),
+                kind: GeneratedKind::Stored,
+            }),
+            Some(GeneratedColumn {
+                expr: "id + 1".into(),
+                kind: GeneratedKind::Virtual,
+            }),
+        ] {
+            let columns = vec![Column {
+                name: "derived".into(),
+                ty: ColumnType::Int4,
+                not_null: false,
+                default: None,
+                generated,
+                identity: None,
+                collation: None,
+            }];
+
+            let bytes = serialize_schema(
+                7,
+                &columns,
+                TableOptions::default(),
+                "postgres",
+                None,
+                None,
+                &[],
+            );
+            let (_id, decoded, _options, _owner, _foreign, ..) =
+                deserialize_schema(&bytes).expect("decode");
+
+            assert!(decoded == columns);
+        }
+    }
+
+    /// A generated-column kind byte outside the three the encoder writes comes
+    /// from a build this one does not understand. The reader must refuse it
+    /// rather than guess a kind — reading a `VIRTUAL` column as stored would
+    /// hand back the NULL placeholder as the column's value.
+    #[test]
+    fn unknown_generated_flag_byte_errors() {
+        use assert2::assert;
+
+        let encode = |generated| {
+            serialize_schema(
+                1,
+                &[Column {
+                    name: "x".into(),
+                    ty: ColumnType::Int4,
+                    not_null: false,
+                    default: None,
+                    generated,
+                    identity: None,
+                    collation: None,
+                }],
+                TableOptions::default(),
+                "postgres",
+                None,
+                None,
+                &[],
+            )
+        };
+        let mut bytes = encode(None);
+        // A generated column changes exactly one byte before it appends its
+        // expression, which locates the kind byte without restating the layout.
+        let kind_offset = bytes
+            .iter()
+            .zip(encode(Some(GeneratedColumn {
+                expr: String::new(),
+                kind: GeneratedKind::Stored,
+            })))
+            .position(|(absent, stored)| *absent != stored)
+            .expect("a generated column changes the record");
+        bytes[kind_offset] = 3;
+
+        assert!(deserialize_schema(&bytes).is_err());
+    }
+
+    /// `jsonb` and array DEFAULT values survive the catalog round trip, including
+    /// the awkward shapes: a nested object/array document, an array holding NULL
+    /// elements, an empty array (whose element type lives only in the tag), and
+    /// an array of `jsonb`.
     #[test]
     fn roundtrip_jsonb_and_array_column_defaults() {
         use assert2::assert;
@@ -1703,6 +2686,7 @@ mod tests {
                 default: Some(ColumnDefault::Value(Datum::Jsonb(doc.clone()))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "holes".into(),
@@ -1714,6 +2698,7 @@ mod tests {
                 )))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "empty".into(),
@@ -1725,6 +2710,7 @@ mod tests {
                 )))),
                 generated: None,
                 identity: None,
+                collation: None,
             },
             Column {
                 name: "docs".into(),
@@ -1736,11 +2722,42 @@ mod tests {
                 )))),
                 generated: None,
                 identity: None,
+                collation: None,
+            },
+            Column {
+                name: "path".into(),
+                ty: ColumnType::JsonPath,
+                not_null: false,
+                default: Some(ColumnDefault::Value(Datum::JsonPath("$.\"a\"".into()))),
+                generated: None,
+                identity: None,
+                collation: None,
+            },
+            Column {
+                name: "paths".into(),
+                ty: ColumnType::Array(ElemType::JsonPath),
+                not_null: false,
+                default: Some(ColumnDefault::Value(Datum::Array(ArrayValue::new(
+                    ElemType::JsonPath,
+                    vec![Datum::JsonPath("$.\"a\"".into()), Datum::Null],
+                )))),
+                generated: None,
+                identity: None,
+                collation: None,
             },
         ];
 
-        let bytes = serialize_schema(31, &columns, TableOptions::default(), None, &[]);
-        let (_id, decoded, _options, _foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(
+            31,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (_id, decoded, _options, _owner, _foreign, ..) =
+            deserialize_schema(&bytes).expect("decode");
 
         assert!(decoded == columns);
     }
@@ -1755,8 +2772,16 @@ mod tests {
             Column::new("fired_utc", ColumnType::Timestamptz),
             Column::new("duration", ColumnType::Interval),
         ];
-        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
-        let (id, cols, options, foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let bytes = serialize_schema(
+            table_id,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (id, cols, options, _owner, foreign, ..) = deserialize_schema(&bytes).expect("decode");
         assert_eq!(id, table_id);
         assert_eq!(cols, columns);
         assert!(!options.sharded);
@@ -1779,8 +2804,26 @@ mod tests {
                 ColumnType::Array(elem),
             ));
         }
-        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None, &[]);
-        let (id, cols, _options, _foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let ColumnType::Range(range) =
+            ColumnType::builtin_range(crabka_pgtypes::oids::INT8RANGE).expect("int8range")
+        else {
+            unreachable!()
+        };
+        columns.push(Column::new(
+            "ranges",
+            ColumnType::Array(ElemType::Range(range)),
+        ));
+        let bytes = serialize_schema(
+            table_id,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (id, cols, _options, _owner, _foreign, ..) =
+            deserialize_schema(&bytes).expect("decode");
         assert!(id == table_id);
         assert!(cols == columns);
     }
@@ -1793,7 +2836,15 @@ mod tests {
             "arr",
             ColumnType::Array(crabka_pgtypes::ElemType::Int4),
         )];
-        let mut bytes = serialize_schema(3, &columns, TableOptions::default(), None, &[]);
+        let mut bytes = serialize_schema(
+            3,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
         // The element code is the byte after the ARRAY tag; corrupt it.
         let tag_at = bytes
             .iter()
@@ -1836,6 +2887,19 @@ mod tests {
             ColumnType::Uuid,
             ColumnType::Regclass,
             ColumnType::Jsonb,
+            ColumnType::JsonPath,
+            // All seven geometric types. `polygon` and `path` are the pair worth
+            // watching: they hold the same shape of value, so a missing read arm
+            // would let one decode as the other rather than as a failure.
+            ColumnType::Point,
+            ColumnType::Lseg,
+            ColumnType::Path,
+            ColumnType::Box,
+            ColumnType::Polygon,
+            ColumnType::Line,
+            ColumnType::Circle,
+            ColumnType::Record(None),
+            ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("built-in range"),
         ];
 
         // Every element type has an array type, and the length-modified families
@@ -1857,8 +2921,13 @@ mod tests {
         }
     }
 
-    /// No two `ColumnType` tags may collide. A collision makes one type decode
-    /// as the other, and no single-type round trip can detect that.
+    /// No two `ColumnType` tags may collide — a collision makes one type decode
+    /// as the other, which no single-type round trip can detect.
+    ///
+    /// The tag space is **append-only**: it is persisted, so a new type must
+    /// take a byte no existing type uses and no existing byte may change
+    /// meaning. Listing every distinctly-tagged type here is what turns a reused
+    /// byte into a test failure instead of silently mis-decoded catalog rows.
     #[test]
     fn column_type_tags_are_distinct() {
         let types = [
@@ -1867,8 +2936,11 @@ mod tests {
             ColumnType::Int4,
             ColumnType::Int8,
             ColumnType::Text,
+            ColumnType::Varchar(None),
+            ColumnType::Char(None),
             ColumnType::Float4,
             ColumnType::Float8,
+            ColumnType::Numeric(None),
             ColumnType::Date,
             ColumnType::Time,
             ColumnType::Timetz,
@@ -1878,7 +2950,44 @@ mod tests {
             ColumnType::Bytea,
             ColumnType::Uuid,
             ColumnType::Regclass,
+            ColumnType::Regtype,
+            ColumnType::Regprocedure,
+            ColumnType::Regnamespace,
+            ColumnType::Regproc,
+            ColumnType::Regoper,
+            ColumnType::Regoperator,
+            ColumnType::Regconfig,
+            ColumnType::Regdictionary,
+            ColumnType::Regrole,
+            ColumnType::Regcollation,
+            ColumnType::OidVector,
+            ColumnType::Int2Vector,
+            ColumnType::TsVector,
+            ColumnType::TsQuery,
+            ColumnType::Point,
+            ColumnType::Lseg,
+            ColumnType::Path,
+            ColumnType::Box,
+            ColumnType::Polygon,
+            ColumnType::Line,
+            ColumnType::Circle,
+            ColumnType::Inet,
+            ColumnType::Cidr,
+            ColumnType::MacAddr,
+            ColumnType::MacAddr8,
+            ColumnType::Bit(None),
+            ColumnType::VarBit(None),
+            ColumnType::Money,
+            ColumnType::Oid,
+            ColumnType::Xid,
+            ColumnType::Xid8,
+            ColumnType::Cid,
+            ColumnType::Tid,
+            ColumnType::PgLsn,
+            ColumnType::Json,
+            ColumnType::Xml,
             ColumnType::Jsonb,
+            ColumnType::JsonPath,
         ];
 
         let mut tags = std::collections::BTreeMap::new();
@@ -1890,6 +2999,37 @@ mod tests {
                 panic!("tag {tag} is shared by {previous:?} and {ty:?}");
             }
         }
+    }
+
+    /// A `polygon` column must survive a whole-schema serialize/deserialize, not
+    /// just `write_type`/`read_type` in isolation — and the columns around it
+    /// must come through untouched, since a new tag that shifted the cursor
+    /// would corrupt its neighbours rather than itself.
+    #[test]
+    fn polygon_column_round_trips_through_a_whole_schema() {
+        use assert2::assert;
+        let columns = vec![
+            Column::new("id", ColumnType::Int4),
+            Column::new("label", ColumnType::Text),
+            Column::new("region", ColumnType::Polygon),
+            Column::new("route", ColumnType::Path),
+            Column::new("doc", ColumnType::Jsonb),
+            Column::new(
+                "tags",
+                ColumnType::Array(crabka_pgtypes::ElemType::Varchar(Some(3))),
+            ),
+        ];
+        let bytes = serialize_schema(
+            9,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (_, decoded, ..) = deserialize_schema(&bytes).expect("schema reads back");
+        assert!(decoded == columns);
     }
 
     #[test]
@@ -1911,10 +3051,12 @@ mod tests {
             table_id,
             &columns,
             TableOptions::default(),
+            "postgres",
             Some(&meta),
+            None,
             &[],
         );
-        let (id, cols, options, foreign, _) = deserialize_schema(&bytes).expect("decode");
+        let (id, cols, options, _owner, foreign, ..) = deserialize_schema(&bytes).expect("decode");
         assert_eq!(id, table_id);
         assert_eq!(cols, columns);
         assert!(!options.sharded);
@@ -1958,6 +3100,67 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_range_type_metadata() {
+        let ty = UserType {
+            oid: 300_000,
+            schema: "catalog_types".into(),
+            name: "textrange".into(),
+            body: UserTypeBody::Range(RangeBody {
+                subtype: ColumnType::Text,
+                collation: Some("C".into()),
+                multirange_schema: Some("multirange_schema".into()),
+                multirange_name: Some("multirange_of_text".into()),
+            }),
+        };
+        assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));
+    }
+
+    #[test]
+    fn user_type_identity_roundtrips_dotted_identifiers() {
+        let ty = UserType {
+            oid: 300_004,
+            schema: "schema.with.dot".into(),
+            name: "type.with.dot".into(),
+            body: UserTypeBody::Composite(Vec::new()),
+        };
+        assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));
+    }
+
+    #[test]
+    fn user_type_legacy_records_still_decode() {
+        let mut bytes = 300_008u32.to_be_bytes().to_vec();
+        write_str(&mut bytes, "catalog_types.legacy_pair");
+        bytes.push(USER_TYPE_COMPOSITE);
+        write_count(&mut bytes, 0);
+
+        let ty = deserialize_user_type(&bytes).expect("legacy user type decodes");
+        assert_eq!(ty.schema, "catalog_types");
+        assert_eq!(ty.name, "legacy_pair");
+        assert_eq!(ty.body, UserTypeBody::Composite(Vec::new()));
+    }
+
+    #[test]
+    fn legacy_ranges_keep_their_pre_upgrade_companion_names() {
+        for (oid, range_name, companion_name) in [
+            (300_012, "textrange", "textmultirange"),
+            (300_016, "textrange1", "textrange1_multirange"),
+        ] {
+            let mut bytes = u32::to_be_bytes(oid).to_vec();
+            write_str(&mut bytes, range_name);
+            bytes.push(USER_TYPE_RANGE);
+            write_type(&mut bytes, ColumnType::Text);
+            bytes.push(0); // no collation
+            bytes.push(0); // default companion was derived by the old binary
+
+            let ty = deserialize_user_type(&bytes).expect("legacy range decodes");
+            assert_eq!(
+                ty.multirange_identity(),
+                Some(("public".into(), companion_name.into()))
+            );
+        }
+    }
+
+    #[test]
     fn unknown_version_errors() {
         assert!(deserialize_schema(&[1, 0, 0, 0, 0]).is_err());
         assert!(deserialize_schema(&[99, 0, 0, 0, 0]).is_err());
@@ -1966,8 +3169,16 @@ mod tests {
     #[test]
     fn ordinary_table_flag_zero_roundtrip() {
         let columns = vec![Column::new("x", ColumnType::Int4)];
-        let bytes = serialize_schema(1, &columns, TableOptions::default(), None, &[]);
-        let (_, _, options, foreign, _) =
+        let bytes = serialize_schema(
+            1,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (_, _, options, _owner, foreign, ..) =
             deserialize_schema(&bytes).expect("ordinary table decode");
         assert!(!options.sharded, "ordinary table has no sharded flag");
         assert!(foreign.is_none(), "ordinary table has no foreign meta");
@@ -1976,8 +3187,20 @@ mod tests {
     #[test]
     fn sharded_option_roundtrips() {
         let columns = vec![Column::new("x", ColumnType::Int4)];
-        let bytes = serialize_schema(1, &columns, TableOptions { sharded: true }, None, &[]);
-        let (_, _, options, foreign, _) = deserialize_schema(&bytes).expect("sharded decode");
+        let bytes = serialize_schema(
+            1,
+            &columns,
+            TableOptions {
+                sharded: true,
+                ..TableOptions::default()
+            },
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (_, _, options, _owner, foreign, ..) =
+            deserialize_schema(&bytes).expect("sharded decode");
         assert!(options.sharded);
         assert!(foreign.is_none());
     }
@@ -2059,21 +3282,139 @@ mod tests {
 
     #[test]
     fn index_record_roundtrips() {
-        let index = Index {
-            id: 7,
-            name: "orders_email_idx".into(),
-            table: RelationName::public("orders"),
-            table_id: 3,
-            columns: vec!["email".into()],
-            unique: true,
-            placement: IndexPlacement::Global,
-            method: IndexMethod::Gin,
-            constraint: None,
+        for method in [
+            IndexMethod::Btree,
+            IndexMethod::Hash,
+            IndexMethod::Gist,
+            IndexMethod::Gin,
+            IndexMethod::Spgist,
+        ] {
+            let index = Index {
+                id: 7,
+                name: "orders_email_idx".into(),
+                table: RelationName::public("orders"),
+                table_id: 3,
+                columns: vec!["email".into()],
+                unique: true,
+                placement: IndexPlacement::Global,
+                method,
+                constraint: None,
+                without_overlaps: false,
+                clustered: false,
+                deferral: ConstraintDeferral::Immediate,
+            };
+            assert_eq!(
+                deserialize_index(&serialize_index(&index)).expect("index decode"),
+                index
+            );
+        }
+
+        let exclusion = Index {
+            id: 8,
+            name: "booking_room_during_excl".into(),
+            table: RelationName::public("booking"),
+            table_id: 4,
+            columns: vec!["room".into(), "during".into()],
+            unique: false,
+            placement: IndexPlacement::Local,
+            method: IndexMethod::Gist,
+            constraint: Some(IndexConstraint::Exclusion(vec![
+                ExclusionOperator::Equal,
+                ExclusionOperator::Overlaps,
+            ])),
+            without_overlaps: false,
+            clustered: false,
+            deferral: ConstraintDeferral::Immediate,
         };
+        assert_eq!(
+            deserialize_index(&serialize_index(&exclusion)).expect("exclusion index decode"),
+            exclusion
+        );
 
-        let bytes = serialize_index(&index);
+        // A `PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)` is catalogued as a
+        // primary key, not an exclusion constraint, so the temporal flag is the
+        // only thing that survives to tell the enforcement path which
+        // comparison to use.
+        let temporal = Index {
+            id: 9,
+            name: "temporal_rng_pk".into(),
+            table: RelationName::public("temporal_rng"),
+            table_id: 5,
+            columns: vec!["id".into(), "valid_at".into()],
+            unique: true,
+            placement: IndexPlacement::Local,
+            method: IndexMethod::Gist,
+            constraint: Some(IndexConstraint::PrimaryKey),
+            without_overlaps: true,
+            clustered: false,
+            deferral: ConstraintDeferral::Immediate,
+        };
+        assert_eq!(
+            deserialize_index(&serialize_index(&temporal)).expect("temporal index decode"),
+            temporal
+        );
+    }
 
-        assert_eq!(deserialize_index(&bytes).expect("index decode"), index);
+    /// `indisclustered` is durable state: it decides which index a later bare
+    /// `CLUSTER <table>` reorders by, so it has to survive the wire format in
+    /// both settings and not be confused with the flag beside it.
+    #[test]
+    fn the_clustered_flag_round_trips_independently_of_without_overlaps() {
+        use assert2::assert;
+
+        for clustered in [false, true] {
+            for without_overlaps in [false, true] {
+                let index = Index {
+                    id: 11,
+                    name: "orders_placed_idx".into(),
+                    table: RelationName::public("orders"),
+                    table_id: 3,
+                    columns: vec!["placed".into()],
+                    unique: false,
+                    placement: IndexPlacement::Local,
+                    method: IndexMethod::Btree,
+                    constraint: None,
+                    without_overlaps,
+                    clustered,
+                    deferral: ConstraintDeferral::Immediate,
+                };
+                let decoded =
+                    deserialize_index(&serialize_index(&index)).expect("clustered index decode");
+                assert!(decoded == index, "{clustered} {without_overlaps}");
+            }
+        }
+    }
+
+    /// A `UNIQUE`/`PRIMARY KEY` constraint's deferrability decides when the key
+    /// is checked, so it has to survive the wire format with the three shapes
+    /// `condeferrable`/`condeferred` can take and no fourth.
+    #[test]
+    fn the_constraint_deferral_round_trips_through_the_index_record() {
+        use assert2::assert;
+
+        for deferral in [
+            ConstraintDeferral::Immediate,
+            ConstraintDeferral::Deferrable,
+            ConstraintDeferral::Deferred,
+        ] {
+            let index = Index {
+                id: 12,
+                name: "unique_tbl_i_key".into(),
+                table: RelationName::public("unique_tbl"),
+                table_id: 6,
+                columns: vec!["i".into()],
+                unique: true,
+                placement: IndexPlacement::Local,
+                method: IndexMethod::Btree,
+                constraint: Some(IndexConstraint::Unique),
+                without_overlaps: false,
+                clustered: false,
+                deferral,
+            };
+            let decoded =
+                deserialize_index(&serialize_index(&index)).expect("deferrable index decode");
+            assert!(decoded == index, "{deferral:?}");
+        }
     }
 
     fn foreign_key_fixture() -> ForeignKey {
@@ -2223,20 +3564,224 @@ mod tests {
         }
     }
 
+    /// Neither relation-kind flag may be read loosely: a byte outside the two
+    /// each defines comes from a build this one does not understand, and
+    /// guessing would hand back a relation of the wrong kind.
     #[test]
     fn unknown_flag_byte_errors() {
+        use assert2::assert;
+
         let columns = vec![Column::new("x", ColumnType::Int4)];
-        let mut bytes = serialize_schema(1, &columns, TableOptions::default(), None, &[]);
-        let last = bytes.last_mut().expect("foreign flag byte exists");
-        *last = 2;
+        let matview = MaterializedView {
+            definition: String::new(),
+            populated: false,
+        };
+        let plain = serialize_schema(
+            1,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        // Setting one payload changes exactly one byte before it appends its
+        // own contents, which locates each flag without restating the layout.
+        let flag_offset = |set: &[u8]| {
+            plain
+                .iter()
+                .zip(set)
+                .position(|(clear, set)| clear != set)
+                .expect("a relation-kind payload changes the record")
+        };
+        let foreign_flag = flag_offset(&serialize_schema(
+            1,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            Some(&ForeignTableMeta {
+                server: String::new(),
+                options: Vec::new(),
+            }),
+            None,
+            &[],
+        ));
+        let materialized_flag = flag_offset(&serialize_schema(
+            1,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            Some(&matview),
+            &[],
+        ));
+        assert!(foreign_flag != materialized_flag);
+
+        for offset in [foreign_flag, materialized_flag] {
+            let mut bytes = plain.clone();
+            bytes[offset] = 2;
+            assert!(deserialize_schema(&bytes).is_err());
+        }
+    }
+
+    /// The version byte is what stops a record laid out by another build from
+    /// being read as though it had this one's layout. Materialized-view
+    /// metadata moved it to `11`, and every other value is refused rather than
+    /// decoded on a guess.
+    #[test]
+    fn the_schema_version_byte_is_twelve_and_no_other_value_decodes() {
+        use assert2::assert;
+
+        let columns = vec![Column::new("x", ColumnType::Int4)];
+        let bytes = serialize_schema(
+            1,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            Some(&MaterializedView {
+                definition: "SELECT 1".into(),
+                populated: true,
+            }),
+            &[],
+        );
+        assert!(bytes[0] == 12);
+
+        for version in u8::MIN..=u8::MAX {
+            let mut written = bytes.clone();
+            written[0] = version;
+            assert!(deserialize_schema(&written).is_ok() == (version == 12));
+        }
+    }
+
+    /// A record cut short anywhere in the materialized-view payload — mid
+    /// definition, before the populated byte — is a corrupt row, not a panic:
+    /// the decoder runs on bytes read back from storage, so a short read must
+    /// surface as an error the caller can report.
+    #[test]
+    fn a_truncated_materialized_view_payload_is_a_corrupt_row() {
+        use assert2::assert;
+
+        let columns = vec![Column::new("x", ColumnType::Int4)];
+        let bytes = serialize_schema(
+            1,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            Some(&MaterializedView {
+                definition: "SELECT 价格 FROM orders".into(),
+                populated: true,
+            }),
+            &[],
+        );
+
+        for cut in 0..bytes.len() {
+            assert!(let Err(KvError::CorruptRow(_)) = deserialize_schema(&bytes[..cut]));
+        }
+        assert!(deserialize_schema(&bytes).is_ok());
+    }
+
+    /// The populated byte carries the same strictness as every other flag: a
+    /// value outside `0`/`1` would otherwise decode as "populated", which is a
+    /// scan of a heap the refresh never filled.
+    #[test]
+    fn an_unknown_populated_flag_byte_errors() {
+        use assert2::assert;
+
+        let columns = vec![Column::new("x", ColumnType::Int4)];
+        let encode = |populated| {
+            serialize_schema(
+                1,
+                &columns,
+                TableOptions::default(),
+                "postgres",
+                None,
+                Some(&MaterializedView {
+                    definition: "SELECT 1".into(),
+                    populated,
+                }),
+                &[],
+            )
+        };
+        let mut bytes = encode(false);
+        let populated_offset = bytes
+            .iter()
+            .zip(encode(true))
+            .position(|(clear, set)| *clear != set)
+            .expect("a populated matview changes the record");
+        bytes[populated_offset] = 2;
+
         assert!(deserialize_schema(&bytes).is_err());
     }
 
+    /// The two relation-kind payloads occupy separate slots in the record, so a
+    /// foreign table decodes with no materialized-view metadata and a
+    /// materialized view with no foreign metadata — neither reads the other's
+    /// bytes.
+    #[test]
+    fn foreign_and_materialized_metadata_decode_independently() {
+        use assert2::assert;
+
+        let columns = vec![Column::new("x", ColumnType::Int4)];
+        let meta = ForeignTableMeta {
+            server: "kafka_srv".into(),
+            options: vec![("topic".into(), "orders".into())],
+        };
+        let matview = MaterializedView {
+            definition: "SELECT x FROM orders".into(),
+            populated: true,
+        };
+
+        for (foreign, materialized) in [
+            (None, None),
+            (Some(meta.clone()), None),
+            (None, Some(matview.clone())),
+            (Some(meta), Some(matview)),
+        ] {
+            let bytes = serialize_schema(
+                1,
+                &columns,
+                TableOptions::default(),
+                "postgres",
+                foreign.as_ref(),
+                materialized.as_ref(),
+                &[],
+            );
+
+            assert!(
+                deserialize_schema(&bytes).expect("decode")
+                    == (
+                        1,
+                        columns.clone(),
+                        TableOptions::default(),
+                        "postgres".to_string(),
+                        foreign,
+                        Vec::new(),
+                        materialized,
+                    )
+            );
+        }
+    }
+
+    /// The reader must refuse an option bit it does not know rather than
+    /// treating it as clear: a later version puts row-level security in one of
+    /// those bits, and reading it as "off" is a silent security bypass.
     #[test]
     fn unknown_table_option_flags_error() {
         let columns = vec![Column::new("x", ColumnType::Int4)];
-        let mut bytes = serialize_schema(1, &columns, TableOptions::default(), None, &[]);
-        let option_flag_offset = bytes.len() - 2;
+        let encode = |options| serialize_schema(1, &columns, options, "postgres", None, None, &[]);
+        let mut bytes = encode(TableOptions::default());
+        // The one option the encoder knows changes exactly one byte, which
+        // locates the flags without restating the layout here.
+        let option_flag_offset = bytes
+            .iter()
+            .zip(encode(TableOptions {
+                sharded: true,
+                ..TableOptions::default()
+            }))
+            .position(|(clear, set)| *clear != set)
+            .expect("a set option changes the record");
         bytes[option_flag_offset] = 0b1000_0000;
         assert!(deserialize_schema(&bytes).is_err());
     }
@@ -2244,6 +3789,45 @@ mod tests {
     #[test]
     fn truncated_errors_not_panics() {
         assert!(deserialize_schema(&[SCHEMA_VERSION, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn roundtrip_view_preserves_owner() {
+        use assert2::assert;
+
+        for owner in ["postgres", "regress_view_user", ""] {
+            let view = View {
+                name: RelationName::public("sales_view"),
+                definition: "SELECT 1 AS total, 'x'::text AS label".into(),
+                owner: owner.into(),
+                columns: vec![
+                    Column::new("total", ColumnType::Int4),
+                    Column::new("label", ColumnType::Text),
+                ],
+                options: ViewOptions {
+                    security_invoker: true,
+                    security_barrier: true,
+                    check_option: Some(ViewCheckOption::Cascaded),
+                },
+            };
+            assert!(deserialize_view(&serialize_view(&view)).expect("round trip") == view);
+        }
+    }
+
+    #[test]
+    fn view_record_from_a_superseded_version_is_rejected() {
+        use assert2::assert;
+
+        let view = View {
+            name: RelationName::public("v"),
+            definition: "SELECT 1".into(),
+            owner: "postgres".into(),
+            columns: Vec::new(),
+            options: ViewOptions::default(),
+        };
+        let mut bytes = serialize_view(&view);
+        bytes[0] = VIEW_VERSION - 1;
+        assert!(deserialize_view(&bytes).is_err());
     }
 
     #[test]

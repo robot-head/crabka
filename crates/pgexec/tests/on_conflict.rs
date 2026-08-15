@@ -805,3 +805,104 @@ async fn parameters_bind_in_do_update_set_and_action_where() {
             == vec![row(&["1", "x!", "15"]), row(&["2", "b", "20"])]
     );
 }
+
+// -------------------------------------------------- subqueries in the action
+
+/// **`DO UPDATE`'s assignments and its `WHERE` may hold a subquery.**
+///
+/// The conflict action is an `UPDATE` written inside an `INSERT`, and the write
+/// path folded every *other* clause's uncorrelated subqueries — `VALUES`, an
+/// `UPDATE`'s own `SET` and `WHERE`, a `MERGE` condition — while walking past
+/// this one, so the scalar evaluator met a raw subquery node and refused the
+/// statement. Upstream's `with` and `subselect` suites both lean on the shape.
+#[tokio::test]
+async fn a_conflict_action_may_hold_a_subquery() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE upserted (k int4 PRIMARY KEY, v text)",
+        "CREATE TABLE src (a int4, b text)",
+        "INSERT INTO src VALUES (1, 'from src')",
+        "INSERT INTO upserted VALUES (1, 'original')",
+    ])
+    .await;
+
+    // A subquery on the right of an assignment.
+    assert!(
+        tag(
+            &mut s,
+            "INSERT INTO upserted VALUES (1, 'ignored')
+               ON CONFLICT (k) DO UPDATE SET v = (SELECT b FROM src)",
+        )
+        .await
+            == "INSERT 0 1"
+    );
+    assert!(query(&mut s, "SELECT v FROM upserted").await == vec![row(&["from src"])]);
+
+    // A subquery in the action's WHERE, which decides whether the update
+    // happens at all. This one is false, so the row is left as it was and the
+    // statement still reports one row for the insert it attempted.
+    assert!(
+        tag(
+            &mut s,
+            "INSERT INTO upserted VALUES (1, 'ignored')
+               ON CONFLICT (k) DO UPDATE SET v = 'changed'
+               WHERE upserted.k = (SELECT a + 100 FROM src)",
+        )
+        .await
+            == "INSERT 0 0"
+    );
+    assert!(query(&mut s, "SELECT v FROM upserted").await == vec![row(&["from src"])]);
+
+    // The same WHERE, satisfied.
+    assert!(
+        tag(
+            &mut s,
+            "INSERT INTO upserted VALUES (1, 'ignored')
+               ON CONFLICT (k) DO UPDATE SET v = 'changed'
+               WHERE upserted.k = (SELECT a FROM src)",
+        )
+        .await
+            == "INSERT 0 1"
+    );
+    assert!(query(&mut s, "SELECT v FROM upserted").await == vec![row(&["changed"])]);
+}
+
+/// **A `RETURNING` list may hold a subquery, on every statement that has one.**
+///
+/// `RETURNING` is evaluated per written row, but an uncorrelated subquery in it
+/// has one value for the whole statement, so it folds with the rest rather than
+/// being refused. The three DML verbs carry their own `RETURNING` field and are
+/// resolved separately, so each is checked.
+#[tokio::test]
+async fn a_returning_list_may_hold_a_subquery() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE r (k int4 PRIMARY KEY, v text)",
+        "CREATE TABLE lookup (a int4)",
+        "INSERT INTO lookup VALUES (7)",
+    ])
+    .await;
+
+    assert!(
+        query(
+            &mut s,
+            "INSERT INTO r VALUES (1, 'x') RETURNING k, (SELECT a FROM lookup)",
+        )
+        .await
+            == vec![row(&["1", "7"])]
+    );
+    assert!(
+        query(
+            &mut s,
+            "UPDATE r SET v = 'y' WHERE k = 1 RETURNING k, EXISTS (SELECT 1 FROM lookup)",
+        )
+        .await
+            == vec![row(&["1", "t"])]
+    );
+    assert!(
+        query(
+            &mut s,
+            "DELETE FROM r WHERE k = 1 RETURNING k, k IN (SELECT a FROM lookup)",
+        )
+        .await
+            == vec![row(&["1", "f"])]
+    );
+}

@@ -1116,7 +1116,9 @@ fn scanned_rows_bytes<'a>(rows: impl Iterator<Item = &'a ScannedRow>) -> usize {
 pub(crate) fn datum_row_bytes(row: &[crabka_pgtypes::Datum]) -> usize {
     row.iter().fold(0usize, |bytes, datum| {
         let variable = match datum {
-            crabka_pgtypes::Datum::Text(value) => value.len(),
+            crabka_pgtypes::Datum::Text(value) | crabka_pgtypes::Datum::JsonPath(value) => {
+                value.len()
+            }
             crabka_pgtypes::Datum::Bytea(value) => value.len(),
             crabka_pgtypes::Datum::Numeric(value) => value.to_string().len(),
             _ => 0,
@@ -2283,6 +2285,15 @@ mod cursor_contract_tests {
         }
     }
 
+    #[test]
+    fn jsonpath_payload_counts_toward_the_query_memory_budget() {
+        let value = Datum::JsonPath("$.a".into());
+        assert_eq!(
+            super::datum_row_bytes(&[value]),
+            std::mem::size_of::<Datum>() + 3
+        );
+    }
+
     #[tokio::test]
     async fn materialized_adapter_returns_only_the_requested_page() {
         let mut cursor = MaterializedRangeCursor::new(vec![row(1), row(2), row(3)]);
@@ -2345,11 +2356,15 @@ mod cursor_contract_tests {
         };
         let table = Table {
             id: 42,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("items"),
             columns: vec![Column::new("id", ColumnType::Int8)],
             sharded: true,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
 
@@ -2388,11 +2403,15 @@ mod cursor_contract_tests {
         };
         let table = Table {
             id: 42,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("items"),
             columns: vec![Column::new("id", ColumnType::Int8)],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let error = super::collect_cursor_bounded(
@@ -2465,11 +2484,15 @@ mod streaming_aggregate_tests {
     fn table() -> Table {
         Table {
             id: 42,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("items"),
             columns: vec![Column::new("v", ColumnType::Int8)],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }

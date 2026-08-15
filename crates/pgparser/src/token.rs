@@ -10,6 +10,10 @@ pub enum Token {
     /// The executor types it `float8`, because crabgresql has no `numeric`.
     FloatLit(String),
     StringLit(String),
+    /// A `B'…'` or `X'…'` bit-string literal, with its `b`/`x` marker kept as
+    /// the first character exactly as `PostgreSQL`'s grammar hands it to
+    /// `bit_in` — that marker is what selects binary or hexadecimal digits.
+    BitStringLit(String),
     LParen,
     RParen,
     Comma,
@@ -40,19 +44,53 @@ pub enum Token {
     JsonGetPath,
     /// The jsonb `#>>` operator (element at a text path, as text).
     JsonGetPathText,
+    /// The geometric `~=` (same as), `<<|` (strictly below) and `|>>`
+    /// (strictly above) operators.
+    Same,
+    StrictlyBelow,
+    StrictlyAbove,
+    /// `&<|` (does not extend above) and `|&>` (does not extend below).
+    DoesNotExtendAbove,
+    DoesNotExtendBelow,
+    /// `##` — the point on the second geometric operand closest to the first.
+    ClosestPoint,
+    /// `?#` — do the two geometric operands intersect?
+    Intersects,
+    /// `?-` — horizontality. Infix it asks whether two points share a `y`;
+    /// prefix it asks whether one line/lseg is horizontal.
+    Horizontal,
+    /// `?-|` — are the two lines/lsegs perpendicular?
+    Perpendicular,
+    /// `?||` — are the two lines/lsegs parallel?
+    Parallel,
+    /// `<^` — is the first operand below (or, for boxes, below or level with)
+    /// the second?
+    BelowEq,
+    /// `>^` — is the first operand above (or, for boxes, above or level with)
+    /// the second?
+    AboveEq,
+    /// `@-@` — prefix length of an lseg or path. Prefix-only: `PostgreSQL` has
+    /// no infix `@-@`.
+    Length,
     /// The jsonb/array `@>` containment operator.
     Contains,
     /// The jsonb/array `<@` "contained by" operator.
     ContainedBy,
     /// The jsonb `?` key-existence operator.
     KeyExists,
-    /// The jsonb `?|` "any key exists" operator.
+    /// The jsonb `?|` "any key exists" operator. Also the geometric verticality
+    /// operator: infix on two points, prefix on a line or lseg.
     KeyExistsAny,
     /// The jsonb `?&` "all keys exist" operator.
     KeyExistsAll,
     /// The array `&&` overlap operator.
     Overlaps,
-    /// `<->`: adjacent-lexeme phrase query composition.
+    /// Range does not extend right/left and adjacency operators.
+    DoesNotExtendRight,
+    DoesNotExtendLeft,
+    Adjacent,
+    /// `<->` — adjacent-lexeme phrase query composition, and the geometric
+    /// distance operator.
     Phrase,
     /// `!!`: prefix tsquery negation.
     TsNot,
@@ -72,16 +110,19 @@ pub enum Token {
     Amp,
     /// `|`: bitwise OR on integers.
     Pipe,
-    /// `#`: bitwise XOR on integers.
-    ///
-    /// This is NOT exponentiation. `PostgreSQL` spells XOR `#` and
-    /// exponentiation `^`.
+    /// `#` — bitwise XOR on integers (NOT exponentiation; `PostgreSQL` spells
+    /// XOR `#` and exponentiation `^`). Also the geometric intersection-point
+    /// operator when infix, and the path/polygon point count when prefix.
     Hash,
     /// `<<`: bitwise left shift.
     Shl,
     /// `>>`: bitwise right shift.
     Shr,
-    /// `^`: exponentiation (`2^3` is 8). Left-associative in `PostgreSQL`.
+    /// `<<=` — `inet`/`cidr` "is contained by or equals".
+    ContainedByOrEq,
+    /// `>>=` — `inet`/`cidr` "contains or equals".
+    ContainsOrEq,
+    /// `^` — exponentiation (`2^3` is 8). Left-associative in `PostgreSQL`.
     Caret,
     /// `%`: modulo (integer/numeric remainder).
     Percent,
@@ -89,7 +130,8 @@ pub enum Token {
     At,
     /// `@?`: tests if the jsonpath on the right finds any item in the jsonb on the left.
     JsonPathExists,
-    /// `@@`: the jsonpath predicate on the right, checked against the jsonb on the left.
+    /// `@@` — the jsonpath predicate on the right, checked against the jsonb on
+    /// the left. Also the geometric prefix "centre of" operator.
     JsonPathMatch,
     /// `|/`: prefix square root (`float8`).
     SquareRoot,
@@ -101,6 +143,13 @@ pub enum Token {
     /// lexeme. `.5` and `2.` stay a single `FloatLit`.
     Dot,
     Eq,
+    /// `=>` — the label separator of a named function argument (`f(x => 1)`).
+    ///
+    /// `PostgreSQL` reserves the spelling for this one purpose: `CREATE
+    /// OPERATOR =>` is refused, so no user operator can ever claim it. The
+    /// token therefore never has to compete with an infix `=` followed by a
+    /// prefix `>`, which is not a reading `PostgreSQL` allows.
+    NamedArg,
     Ne,
     Lt,
     Le,

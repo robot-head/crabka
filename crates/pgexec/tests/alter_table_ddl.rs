@@ -61,6 +61,52 @@ fn text_row(values: &[&str]) -> Vec<Option<String>> {
     values.iter().map(|v| Some((*v).to_string())).collect()
 }
 
+#[tokio::test]
+async fn gist_exclusion_constraints_reject_conflicting_ranges() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE test_range_excl (room int4range, speaker int4range, during tstzrange, \
+         EXCLUDE USING gist (room WITH =, during WITH &&), \
+         EXCLUDE USING gist (speaker WITH =, during WITH &&))",
+        "INSERT INTO test_range_excl VALUES \
+         ('[123,124)', '[1,2)', '[2010-01-02 10:00,2010-01-02 11:00)'), \
+         ('[123,124)', '[2,3)', '[2010-01-02 11:00,2010-01-02 12:00)')",
+        "SET datestyle = 'Postgres, MDY'",
+    ])
+    .await;
+
+    assert!(
+        err_code(
+            &mut s,
+            "INSERT INTO test_range_excl VALUES \
+             ('[123,124)', '[3,4)', '[2010-01-02 10:10,2010-01-02 11:00)')",
+        )
+        .await
+            == "23P01"
+    );
+    let error = s
+        .simple_query(
+            "INSERT INTO test_range_excl VALUES \
+             ('[123,124)', '[3,4)', '[2010-01-02 10:10,2010-01-02 11:00)')",
+        )
+        .await
+        .expect_err("expected exclusion violation");
+    assert!(
+        error
+            .diagnostics
+            .and_then(|diagnostics| diagnostics.detail)
+            .is_some_and(|detail| detail.contains("Sat Jan 02 10:10:00 2010"))
+    );
+    assert!(
+        err_code(
+            &mut s,
+            "INSERT INTO test_range_excl VALUES \
+             ('[124,125)', '[1,2)', '[2010-01-02 10:10,2010-01-02 11:00)')",
+        )
+        .await
+            == "23P01"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ADD COLUMN with a constraint, over a table that already has rows.
 
@@ -588,7 +634,90 @@ async fn generated_columns_depend_on_the_columns_they_read() {
     assert!(err_code(&mut s, "SELECT b FROM t").await == "42703");
 }
 
-/// `NOT VALID` applies only to constraints `PostgreSQL` can validate lazily. An
+/// `PostgreSQL` runs the DROP COLUMN pass before it builds constraints added by
+/// the same ALTER TABLE, regardless of their written order. The missing key is
+/// therefore a 42703 and the whole statement leaves both schema and catalog
+/// untouched.
+#[tokio::test]
+async fn drop_column_precedes_an_added_unique_constraint() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE staged_unique (a int4, keep int4)",
+        "INSERT INTO staged_unique VALUES (1, 2)",
+    ])
+    .await;
+
+    let sql = "ALTER TABLE staged_unique ADD UNIQUE (a), DROP COLUMN a";
+    assert!(err_code(&mut s, sql).await == "42703");
+    assert!(err_message(&mut s, sql).await == "column \"a\" named in key does not exist");
+    assert!(
+        query(&mut s, "SELECT a, keep FROM staged_unique").await == vec![text_row(&["1", "2"])]
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT conname FROM pg_constraint WHERE conname = 'staged_unique_a_key'",
+        )
+        .await
+            == Vec::<Vec<Option<String>>>::new()
+    );
+}
+
+/// DROP COLUMN, ADD COLUMN, and ADD CONSTRAINT run in separate `PostgreSQL`
+/// passes. Their written order therefore cannot make a constraint bind to the
+/// dropped incarnation of a same-named column.
+#[tokio::test]
+async fn drop_and_readd_column_precedes_an_added_unique_constraint() {
+    for (table, actions) in [
+        (
+            "staged_order_one",
+            "ADD UNIQUE (a), DROP COLUMN a, ADD COLUMN a int4 DEFAULT 9",
+        ),
+        (
+            "staged_order_two",
+            "DROP COLUMN a, ADD UNIQUE (a), ADD COLUMN a int4 DEFAULT 9",
+        ),
+    ] {
+        let (_engine, mut s) = engine_with(&[
+            &format!("CREATE TABLE {table} (a int4, keep int4)"),
+            &format!("INSERT INTO {table} VALUES (1, 2)"),
+        ])
+        .await;
+
+        run(&mut s, &format!("ALTER TABLE {table} {actions}")).await;
+        assert!(
+            query(&mut s, &format!("SELECT a, keep FROM {table}")).await
+                == vec![text_row(&["9", "2"])]
+        );
+        assert!(err_code(&mut s, &format!("INSERT INTO {table} VALUES (3, 9)")).await == "23505");
+    }
+}
+
+/// SET NOT NULL is `PostgreSQL`'s column-attribute pass, before the pass that
+/// builds a UNIQUE index. A row set containing both NULLs and duplicate keys
+/// must therefore report the null failure first, independent of written order.
+#[tokio::test]
+async fn set_not_null_precedes_an_added_unique_constraint() {
+    for actions in [
+        "ADD UNIQUE (a), ALTER COLUMN a SET NOT NULL",
+        "ALTER COLUMN a SET NOT NULL, ADD UNIQUE (a)",
+    ] {
+        let (_engine, mut s) = engine_with(&[
+            "CREATE TABLE staged_not_null (a int4)",
+            "INSERT INTO staged_not_null VALUES (NULL), (NULL), (1), (1)",
+        ])
+        .await;
+
+        assert!(
+            err_code(&mut s, &format!("ALTER TABLE staged_not_null {actions}")).await == "23502",
+            "{actions}"
+        );
+        assert!(
+            query(&mut s, "SELECT count(*) FROM staged_not_null").await == vec![text_row(&["4"])]
+        );
+    }
+}
+
+/// `NOT VALID` applies only to constraints `PostgreSQL` can validate lazily; an
 /// index-backed one has to be built now.
 #[tokio::test]
 async fn not_valid_is_refused_for_index_backed_constraints() {
@@ -641,6 +770,8 @@ async fn alter_table_on_a_view_reports_the_unsupported_action() {
             "ALTER TABLE v ADD CONSTRAINT c CHECK (id > 0)",
             "ADD CONSTRAINT",
         ),
+        ("ALTER TABLE v ADD PRIMARY KEY (id)", "ADD CONSTRAINT"),
+        ("ALTER TABLE v ADD UNIQUE (id)", "ADD CONSTRAINT"),
         ("ALTER TABLE v VALIDATE CONSTRAINT c", "VALIDATE CONSTRAINT"),
     ] {
         assert!(err_code(&mut s, sql).await == "42809", "{sql}");
@@ -684,4 +815,181 @@ async fn comment_on_missing_relation_kinds_report_42p01() {
             "{sql}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Back-validation inside an open transaction.
+
+/// One `BEGIN; INSERT …; <back-validating DDL>` case: the setup that seeds the
+/// relation, the row the open transaction adds, the statement that must refuse
+/// it, and the `(SQLSTATE, message)` `PostgreSQL` 18.4 reports.
+struct UncommittedCase {
+    setup: &'static [&'static str],
+    insert: &'static str,
+    ddl: &'static str,
+    code: &'static str,
+    message: &'static str,
+}
+
+/// `ALTER TABLE` back-validation scans the relation as the *open transaction*
+/// sees it, not as the last commit left it.
+///
+/// A row this transaction inserted and has not committed is part of what the
+/// relation will hold the moment the constraint takes effect, so validating
+/// without it lets `BEGIN; INSERT …; ALTER TABLE … ADD CONSTRAINT …` commit
+/// rows the new constraint forbids — a relation that violates its own
+/// constraint from the instant it exists. Every back-validating subcommand
+/// shares the one scan, so every one of them is checked here.
+#[tokio::test]
+async fn back_validation_sees_the_transactions_own_uncommitted_rows() {
+    let cases = [
+        UncommittedCase {
+            setup: &["CREATE TABLE c (a int)"],
+            insert: "INSERT INTO c VALUES (-1)",
+            ddl: "ALTER TABLE c ADD CONSTRAINT c_ck CHECK (a > 0)",
+            code: "23514",
+            message: "check constraint \"c_ck\" of relation \"c\" is violated by some row",
+        },
+        UncommittedCase {
+            setup: &["CREATE TABLE p (a int)"],
+            insert: "INSERT INTO p VALUES (1), (1)",
+            ddl: "ALTER TABLE p ADD PRIMARY KEY (a)",
+            code: "23505",
+            message: "could not create unique index \"p_pkey\"",
+        },
+        UncommittedCase {
+            setup: &["CREATE TABLE n (a int)"],
+            insert: "INSERT INTO n VALUES (NULL)",
+            ddl: "ALTER TABLE n ALTER COLUMN a SET NOT NULL",
+            code: "23502",
+            message: "column \"a\" of relation \"n\" contains null values",
+        },
+        UncommittedCase {
+            setup: &["CREATE TABLE u (a int)"],
+            insert: "INSERT INTO u VALUES (2), (2)",
+            ddl: "ALTER TABLE u ADD CONSTRAINT u_uq UNIQUE (a)",
+            code: "23505",
+            message: "could not create unique index \"u_uq\"",
+        },
+        UncommittedCase {
+            setup: &[
+                "CREATE TABLE e (room int4range, during tstzrange)",
+                "INSERT INTO e VALUES ('[1,2)', tstzrange('2018-01-01','2018-02-01'))",
+            ],
+            insert: "INSERT INTO e VALUES ('[1,2)', tstzrange('2018-01-15','2018-03-01'))",
+            ddl: "ALTER TABLE e ADD CONSTRAINT e_ex \
+                  EXCLUDE USING gist (room WITH =, during WITH &&)",
+            code: "23P01",
+            message: "could not create exclusion constraint \"e_ex\"",
+        },
+        UncommittedCase {
+            setup: &[
+                "CREATE TABLE par (a int) PARTITION BY RANGE (a)",
+                "CREATE TABLE ch (a int)",
+            ],
+            insert: "INSERT INTO ch VALUES (99)",
+            ddl: "ALTER TABLE par ATTACH PARTITION ch FOR VALUES FROM (0) TO (10)",
+            code: "23514",
+            message: "partition constraint of relation \"ch\" is violated by some row",
+        },
+    ];
+    for case in cases {
+        let (_engine, mut s) = engine_with(case.setup).await;
+        run(&mut s, "BEGIN").await;
+        run(&mut s, case.insert).await;
+        let error = s
+            .simple_query(case.ddl)
+            .await
+            .expect_err("the uncommitted row must fail back-validation");
+        assert!(error.code == case.code, "{}: {error:?}", case.ddl);
+        assert!(error.message == case.message, "{}: {error:?}", case.ddl);
+        run(&mut s, "ROLLBACK").await;
+    }
+}
+
+/// The same scan must not over-reach: a row the transaction has *deleted* is
+/// gone from what the constraint has to hold, and rows only the transaction can
+/// see still validate normally when they conform.
+#[tokio::test]
+async fn back_validation_respects_the_transactions_own_deletes() {
+    let (_engine, mut s) = engine_with(&["CREATE TABLE t (a int)"]).await;
+    run(&mut s, "INSERT INTO t VALUES (-1)").await;
+    run(&mut s, "BEGIN").await;
+    run(&mut s, "DELETE FROM t WHERE a = -1").await;
+    run(&mut s, "INSERT INTO t VALUES (7)").await;
+    // The only offending row is deleted, and the only surviving one is this
+    // transaction's own — the constraint holds.
+    run(&mut s, "ALTER TABLE t ADD CONSTRAINT t_ck CHECK (a > 0)").await;
+    run(&mut s, "COMMIT").await;
+    assert!(query(&mut s, "SELECT a FROM t").await == vec![text_row(&["7"])]);
+    assert!(err_code(&mut s, "INSERT INTO t VALUES (-2)").await == "23514");
+}
+
+/// A `CHECK` written on an inheriting child may constrain a column the child
+/// inherits rather than one it declares — that is the point of the clause — so
+/// the predicate is analysed against the merged column list, and the
+/// constraint's generated name is derived from the same list.
+///
+/// The name matters because it is what a violation reports and what `ALTER
+/// TABLE … DROP CONSTRAINT` has to be given: `PostgreSQL` names a `CHECK` after
+/// the single column its predicate references, falling back to
+/// `<table>_check` when it references none or several.
+#[tokio::test]
+async fn a_check_on_an_inheriting_child_sees_the_inherited_columns() {
+    let (_engine, mut s) = engine_with(&["CREATE TABLE parent (a int)"]).await;
+    run(
+        &mut s,
+        "CREATE TABLE only_inherited (CHECK (a > 0)) INHERITS (parent)",
+    )
+    .await;
+    run(
+        &mut s,
+        "CREATE TABLE mixed (b int, CHECK (a > 0 AND b > 0)) INHERITS (parent)",
+    )
+    .await;
+    assert!(
+        err_message(
+            &mut s,
+            "CREATE TABLE unknown_col (CHECK (nosuch > 0)) INHERITS (parent)"
+        )
+        .await
+            == "column \"nosuch\" does not exist"
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT conrelid::regclass::text, conname FROM pg_constraint
+              WHERE conrelid IN ('only_inherited'::regclass, 'mixed'::regclass)
+              ORDER BY 1, 2"
+        )
+        .await
+            == vec![
+                text_row(&["mixed", "mixed_check"]),
+                text_row(&["only_inherited", "only_inherited_a_check"]),
+            ]
+    );
+    run(&mut s, "INSERT INTO only_inherited VALUES (5)").await;
+    assert!(err_code(&mut s, "INSERT INTO only_inherited VALUES (-5)").await == "23514");
+    run(&mut s, "INSERT INTO mixed VALUES (5, 5)").await;
+    assert!(err_code(&mut s, "INSERT INTO mixed VALUES (5, -5)").await == "23514");
+    assert!(
+        query(&mut s, "SELECT a FROM parent ORDER BY a").await
+            == vec![text_row(&["5"]), text_row(&["5"])]
+    );
+}
+
+/// Naming one column twice in an `INSERT` column list leaves the statement's
+/// intent undecidable, so `PostgreSQL` refuses it rather than letting the
+/// second value win.
+#[tokio::test]
+async fn an_insert_column_list_may_not_name_a_column_twice() {
+    let (_engine, mut s) = engine_with(&["CREATE TABLE t (a int, b int)"]).await;
+    let error = s
+        .simple_query("INSERT INTO t (a, b, a) VALUES (1, 2, 3)")
+        .await
+        .expect_err("expected error");
+    assert!(error.code == "42701");
+    assert!(error.message == "column \"a\" specified more than once");
+    run(&mut s, "INSERT INTO t (a, b) VALUES (1, 2)").await;
+    assert!(query(&mut s, "SELECT a, b FROM t").await == vec![text_row(&["1", "2"])]);
 }

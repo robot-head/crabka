@@ -69,8 +69,38 @@ pub trait Kv: Send + Sync {
     ///
     /// Returns [`KvError`] when the backing store cannot complete the scan.
     fn scan_range(&self, start: &[u8], end: &[u8]) -> Result<KvScan, KvError>;
-    /// Applies all ops atomically and durably. A durable backend fsyncs. The
-    /// batch is all-or-nothing across a crash.
+    /// Show `visit` up to `limit` keys with `start <= key < end`, in key order,
+    /// and return how many it saw.
+    ///
+    /// Two things distinguish this from [`Kv::scan_range`], and a caller
+    /// counting a keyspace needs both: the bound means answering "are there more
+    /// than `limit` keys here?" costs `limit` keys rather than the range, and
+    /// borrowing each key to a callback means the answer costs no allocation and
+    /// reads no values.
+    ///
+    /// The provided implementation is correct for every store but reads the
+    /// whole range, values included; a store whose iterator can stop early and
+    /// yield keys alone should override it, because that is the entire point.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvError`] when the backing store cannot complete the scan.
+    fn for_each_key(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        visit: &mut dyn FnMut(&[u8]),
+    ) -> Result<usize, KvError> {
+        let mut seen = 0;
+        for (key, _) in self.scan_range(start, end)?.iter().take(limit) {
+            visit(key);
+            seen += 1;
+        }
+        Ok(seen)
+    }
+    /// Apply all ops atomically and durably (fsync on a durable backend).
+    /// All-or-nothing across a crash.
     ///
     /// # Errors
     ///
@@ -194,6 +224,27 @@ impl Kv for MemKv {
             .range(start.to_vec()..end.to_vec())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect())
+    }
+
+    fn for_each_key(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        visit: &mut dyn FnMut(&[u8]),
+    ) -> Result<usize, KvError> {
+        let mut seen = 0;
+        for (key, _) in self
+            .map
+            .read()
+            .expect("kv lock")
+            .range(start.to_vec()..end.to_vec())
+            .take(limit)
+        {
+            visit(key);
+            seen += 1;
+        }
+        Ok(seen)
     }
 
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError> {
@@ -340,6 +391,86 @@ mod tests {
                 (b"t/1/b".to_vec(), b"B".to_vec()),
             ]
         );
+    }
+
+    /// A store that implements only what [`Kv`] requires, so `scan_keys` here is
+    /// the trait's provided implementation rather than an override.
+    struct DefaultsOnlyKv(MemKv);
+
+    impl Kv for DefaultsOnlyKv {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError> {
+            self.0.get(key)
+        }
+        fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), KvError> {
+            self.0.put(key, value)
+        }
+        fn delete(&self, key: &[u8]) -> Result<(), KvError> {
+            self.0.delete(key)
+        }
+        fn scan_prefix(&self, prefix: &[u8]) -> Result<KvScan, KvError> {
+            self.0.scan_prefix(prefix)
+        }
+        fn scan_range(&self, start: &[u8], end: &[u8]) -> Result<KvScan, KvError> {
+            self.0.scan_range(start, end)
+        }
+        fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError> {
+            self.0.write_batch(ops)
+        }
+    }
+
+    fn collect_keys(kv: &dyn Kv, start: &[u8], end: &[u8], limit: usize) -> Vec<Vec<u8>> {
+        let mut keys = Vec::new();
+        kv.for_each_key(start, end, limit, &mut |key| keys.push(key.to_vec()))
+            .expect("for_each_key");
+        keys
+    }
+
+    /// Scan window, key budget, and the keys the window should yield.
+    type ForEachKeyCase = (&'static [u8; 2], &'static [u8; 2], usize, Vec<Vec<u8>>);
+
+    #[test]
+    fn for_each_key_visits_the_first_limit_keys_the_same_way_however_it_is_implemented() {
+        use assert2::check;
+
+        let seeded = || {
+            let kv = MemKv::new();
+            for i in [1_u8, 3, 5, 7, 9] {
+                kv.put(vec![b'k', i], vec![i]).expect("put");
+            }
+            kv
+        };
+        let overriding = seeded();
+        let defaulted = DefaultsOnlyKv(seeded());
+        let cases: [ForEachKeyCase; 5] = [
+            // The bound is on what is read, not only on what is returned.
+            (b"k\x00", b"k\xff", 0, vec![]),
+            (
+                b"k\x00",
+                b"k\xff",
+                2,
+                vec![b"k\x01".to_vec(), b"k\x03".to_vec()],
+            ),
+            // A limit past the end of the range is not an error.
+            (
+                b"k\x00",
+                b"k\xff",
+                99,
+                [1_u8, 3, 5, 7, 9].iter().map(|i| vec![b'k', *i]).collect(),
+            ),
+            // Inclusive start, exclusive end, exactly as `scan_range` has them.
+            (
+                b"k\x03",
+                b"k\x07",
+                99,
+                vec![b"k\x03".to_vec(), b"k\x05".to_vec()],
+            ),
+            (b"k\xc8", b"k\xff", 99, vec![]),
+        ];
+
+        for (start, end, limit, expected) in cases {
+            check!(collect_keys(&overriding, start, end, limit) == expected);
+            check!(collect_keys(&defaulted, start, end, limit) == expected);
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Static result-type inference builds a stable RowDescription before any row
 //! is produced.
 
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use crabka_pgparser::ast::{BinaryOp, Expr, MatchKind, UnaryOp};
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, TypeError, ops};
@@ -38,11 +38,31 @@ use crate::{
 /// frame size on the smallest stack the tests run on.
 const MAX_EVAL_DEPTH: usize = 100;
 
-/// Evaluate `expr` against a row.
+/// Parser-produced trees stop at depth 50. A deeper tree can only have been
+/// built programmatically, so finish that defense-in-depth evaluation on a
+/// stack large enough to reach [`MAX_EVAL_DEPTH`] even in an unoptimized test
+/// build (where this function's frame is much larger than in production).
+const EVAL_STACK_SWITCH_DEPTH: usize = 51;
+const DEEP_EVAL_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// The relation a failed column reference may still name as a *whole row*.
 ///
-/// `values` is the row, aligned to `scope.columns`. `ctx` carries the session
-/// time zone and the transaction/statement clock. Non-temporal evaluation
-/// ignores `ctx`, and UTC/epoch reproduces prior behavior.
+/// `PostgreSQL` tries the range table only after the column search comes up
+/// empty, and only for an unqualified name — `s.t` is read as "column `t` of
+/// range-table entry `s`" and reports a missing FROM entry for `s`, never as the
+/// whole row of `s.t`. An ambiguous name (42702) is already an error there too,
+/// so only 42703 opens this door.
+fn whole_row_reference<'a>(
+    qualifier: Option<&str>,
+    name: &'a str,
+    error: &ExecError,
+) -> Option<&'a str> {
+    (qualifier.is_none() && matches!(error, ExecError::UndefinedColumn(_))).then_some(name)
+}
+
+/// Evaluate `expr` against a row (`values`, aligned to `scope.columns`). `ctx`
+/// carries the session time zone and the transaction/statement clock; non-temporal
+/// evaluation ignores it (UTC/epoch reproduces prior behavior).
 pub(crate) fn eval(
     expr: &Expr,
     scope: &Scope,
@@ -53,13 +73,167 @@ pub(crate) fn eval(
     eval_depth(expr, scope, values, ctx, 0)
 }
 
-/// Depth-tracking core of [`eval`].
+/// Executor-level cast, adding the `jsonpath` input function to the pure type
+/// layer's Datum-preserving cast table.
 ///
-/// `depth` is the current recursion level. Every recursive descent increments
-/// it, so a runaway tree is bounded on every path. This includes direct calls
-/// AND the child-evaluation closures given to the shared `eval_*`/`func::*`
-/// combinators. This function returns `54001` once `depth` exceeds
-/// `MAX_EVAL_DEPTH`.
+/// Every style but the zone is left at its default, so a `text → date`/
+/// `timestamp` arm reads an ambiguous all-numeric literal as `MDY` whatever the
+/// session says. Prefer [`cast_value_in`] wherever the context is at hand.
+pub(crate) fn cast_value(
+    value: &Datum,
+    target: ColumnType,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, ExecError> {
+    cast_value_in(
+        value,
+        target,
+        crabka_pgtypes::encoding::OutputStyle::with_zone(time_zone),
+    )
+}
+
+/// Apply `PostgreSQL`'s `bpchar → text` cast to a value whose *static* type is
+/// `character(n)`.
+///
+/// The value layer cannot do this on its own. `character`, `character varying`
+/// and `text` all reach the row as a bare [`Datum::Text`], so nothing about the
+/// padded string says the padding is a `character(n)` artifact rather than data
+/// a `text` column really holds. Only the static type knows, and only the
+/// executor holds the static type — so the cast that
+/// [`crabka_pgtypes::string::bpchar_to_text`] describes is applied here, at each
+/// point a `character` expression enters a `text` context.
+///
+/// Both guards are load-bearing. The trailing-space test settles the ordinary
+/// case without a type inference at all, which matters because this sits inside
+/// the per-row expression loop; and the inference itself is what keeps a `text`
+/// column that genuinely ends in a space (`'a '::text = 'a '`) intact.
+/// `Ok(None)` means the value is not a padded `character`, so the caller keeps
+/// the one it already has rather than paying for a copy.
+pub(crate) fn bpchar_to_text_value(
+    expr: &Expr,
+    scope: &Scope,
+    value: &Datum,
+) -> Result<Option<Datum>, ExecError> {
+    let Datum::Text(text) = value else {
+        return Ok(None);
+    };
+    if !text.ends_with(' ') || !matches!(infer_type(expr, scope)?, ColumnType::Char(_)) {
+        return Ok(None);
+    }
+    Ok(Some(Datum::Text(
+        crabka_pgtypes::string::bpchar_to_text(text).to_owned(),
+    )))
+}
+
+/// [`bpchar_to_text_value`] over an operand pair, for the comparison and
+/// concatenation operators — the families with no `bpchar` overload of their
+/// own, so `PostgreSQL` resolves them through the implicit cast to `text`.
+///
+/// `LIKE` and the regular-expression operators are deliberately absent:
+/// `bpcharlike` and `bpcharregexeq` read the padded datum, so `'a'::char(3) LIKE
+/// 'a'` is false on `PostgreSQL` exactly as it is here.
+///
+/// Each side is judged separately, because `'x'::char(8) = 'x '::text` is false
+/// on `PostgreSQL` — only the `character` side is trimmed.
+fn bpchar_to_text_operands(
+    op: BinaryOp,
+    left: (&Expr, &Datum),
+    right: (&Expr, &Datum),
+    scope: &Scope,
+) -> Result<(Option<Datum>, Option<Datum>), ExecError> {
+    if !matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::Concat
+    ) {
+        return Ok((None, None));
+    }
+    Ok((
+        bpchar_to_text_value(left.0, scope, left.1)?,
+        bpchar_to_text_value(right.0, scope, right.1)?,
+    ))
+}
+
+/// Everything an explicit `expr :: type` does once the operand is a value.
+///
+/// This is the whole of the cast that does *not* depend on how the operand was
+/// spelled, and it is deliberately the only copy. The scalar evaluator reaches
+/// it from `Expr::Cast`, and [`crate::agg`]'s grouped evaluator — a second,
+/// parallel walk over the same AST — reaches it from its own `Expr::Cast`. When
+/// the two disagreed, `SELECT tableoid::regclass … GROUP BY tableoid` printed a
+/// bare oid where `SELECT tableoid::regclass` printed the relation's name: the
+/// grouped arm called the pure value-layer cast, which has no catalog and so no
+/// name to attach.
+///
+/// The `reg*` family is the one set of casts that needs the catalog: a name has
+/// to be resolved to its oid (`PostgreSQL`'s `reg*in`), and an oid has to be
+/// resolved *back* to the name `reg*out` prints, because the value layer that
+/// renders it has no catalog handle. `ctx` is where both the catalog and the
+/// session's search path are in scope, so the name is attached here and travels
+/// with the value. Without a catalog — a planning context or a unit test — the
+/// pure cast below yields the bare-oid rendering.
+///
+/// # Errors
+///
+/// Whatever the conversion raises: 22P02 for an unparsable text operand, 22003
+/// for overflow, 42846 for an undefined cast, 42P01 for a `reg*` name no object
+/// carries, and the domain's own 23502/23514 for a cast to a domain.
+pub(crate) fn cast_operand(
+    value: &Datum,
+    ty: ColumnType,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    if let Some(kind) = crate::reg_fn::RegKind::of(ty)
+        && let Some(resolved) = crate::reg_fn::reg_cast(kind, value, ctx)?
+    {
+        return Ok(resolved);
+    }
+    if ty == ColumnType::Array(ElemType::Regtype)
+        && let Datum::OidVector(arguments) = value
+    {
+        let elems = arguments
+            .elems
+            .iter()
+            .map(|argument| {
+                crate::reg_fn::reg_cast(crate::reg_fn::RegKind::Type, argument, ctx)?
+                    .ok_or_else(|| ExecError::TypeMismatch("cannot cast oid to regtype".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Datum::Array(crabka_pgtypes::ArrayValue::with_dims(
+            ElemType::Regtype,
+            elems,
+            arguments.dims.clone(),
+        )));
+    }
+    let cast = cast_value_in(value, ty, ctx.output_style())?;
+    // A cast to a domain converts through the base type and then has to satisfy
+    // the domain's own NOT NULL and CHECK constraints.
+    crate::usertype::check_domain(ty, &cast, ctx)?;
+    Ok(cast)
+}
+
+/// [`cast_value`] in the session's styles, so an ambiguous all-numeric date
+/// literal is read under the session's `DateStyle` field order.
+pub(crate) fn cast_value_in(
+    value: &Datum,
+    target: ColumnType,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Datum, ExecError> {
+    match target.storage_type() {
+        ColumnType::JsonPath => crate::jsonpath::cast_datum(value),
+        ColumnType::Array(ElemType::JsonPath) => crate::jsonpath::cast_array_datum(value),
+        _ => crabka_pgtypes::cast::cast_in(value, target, style).map_err(ExecError::from),
+    }
+}
+
+/// Depth-tracking core of [`eval`]. `depth` is the current recursion level; every
+/// recursive descent (direct calls AND the child-evaluation closures handed to
+/// the shared `eval_*`/`func::*` combinators) increments it, so a runaway tree is
+/// bounded on every path. Returns `54001` once it exceeds `MAX_EVAL_DEPTH`.
 fn eval_depth(
     expr: &Expr,
     scope: &Scope,
@@ -70,6 +244,31 @@ fn eval_depth(
     if depth > MAX_EVAL_DEPTH {
         return Err(ExecError::StackDepthExceeded);
     }
+    if depth == EVAL_STACK_SWITCH_DEPTH {
+        return std::thread::scope(|thread_scope| {
+            let handle = std::thread::Builder::new()
+                .name("crabka-deep-expression".into())
+                .stack_size(DEEP_EVAL_STACK_BYTES)
+                .spawn_scoped(thread_scope, || {
+                    eval_depth_inner(expr, scope, values, ctx, depth)
+                })
+                .map_err(|_| ExecError::StackDepthExceeded)?;
+            match handle.join() {
+                Ok(result) => result,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        });
+    }
+    eval_depth_inner(expr, scope, values, ctx, depth)
+}
+
+fn eval_depth_inner(
+    expr: &Expr,
+    scope: &Scope,
+    values: &[Datum],
+    ctx: &EvalCtx,
+    depth: usize,
+) -> Result<Datum, ExecError> {
     // One level deeper for every child this frame evaluates.
     let d = depth + 1;
     match expr {
@@ -85,11 +284,22 @@ fn eval_depth(
                 })
             }),
         Expr::StringLiteral(s) => Ok(Datum::Text(s.clone())),
+        // `B'…'` / `X'…'` — already decoded to binary digits by the parser,
+        // which also ran `bit_in`, so the value cannot fail here.
+        Expr::BitStringLiteral(bits) => Ok(Datum::BitString(
+            crabka_pgtypes::BitString::parse(bits, false)
+                .expect("the parser validated the bit-string literal"),
+        )),
         Expr::BoolLiteral(b) => Ok(Datum::Bool(*b)),
         Expr::NullLiteral => Ok(Datum::Null),
-        Expr::Param(_) => Err(ExecError::Unsupported(
-            "query parameters ($n) are not supported".into(),
-        )),
+        // A parameter that reached evaluation was never bound. The simple
+        // protocol supplies none, so PostgreSQL reports the placeholder as
+        // undefined rather than as an unimplemented feature -- 42P02, the same
+        // code and wording a view body already raises.
+        Expr::Param(number) => Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42P02",
+            format!("there is no parameter ${number}"),
+        ))),
         Expr::Default => Err(ExecError::Syntax(
             "DEFAULT is not allowed in this context".into(),
         )),
@@ -107,12 +317,18 @@ fn eval_depth(
             if table.is_none()
                 && let Some(call) = crate::func::niladic_keyword_call(name)
             {
-                return crate::func::eval_scalar(&call, ctx, |e| {
+                return crate::func::eval_scalar(&call, Some(scope), ctx, |e| {
                     eval_depth(e, scope, values, ctx, d)
                 });
             }
-            let idx = scope.resolve(table.as_deref(), name)?;
-            Ok(values[idx].clone())
+            match scope.resolve(table.as_deref(), name) {
+                Ok(idx) => Ok(values[idx].clone()),
+                // A bare name that is no column may still name a relation in the
+                // FROM clause, and then it is that relation's whole row.
+                Err(error) => whole_row_reference(table.as_deref(), name, &error)
+                    .and_then(|q| scope.refs_value(q, values))
+                    .ok_or(error),
+            }
         }
         Expr::Unary { op, expr } => {
             let v = eval_depth(expr, scope, values, ctx, d)?;
@@ -127,6 +343,18 @@ fn eval_depth(
                 return Ok(result);
             }
             let l = eval_depth(left, scope, values, ctx, d)?;
+            // The boolean connectives stop once the left operand settles the
+            // answer: the three-valued tables give `false AND anything` = false
+            // and `true OR anything` = true, so the right operand cannot change
+            // it. Evaluating it regardless is not merely wasted work — a
+            // conjunct like `WHERE k < 3 AND EXISTS (…)` runs the correlated
+            // subquery for every row rather than the three that pass, which is
+            // how one upstream test came to take 892 seconds.
+            match (op, &l) {
+                (BinaryOp::And, Datum::Bool(false)) => return Ok(Datum::Bool(false)),
+                (BinaryOp::Or, Datum::Bool(true)) => return Ok(Datum::Bool(true)),
+                _ => {}
+            }
             let r = eval_depth(right, scope, values, ctx, d)?;
             apply_binary_of(*op, left, right, &l, &r, scope, ctx)
         }
@@ -146,8 +374,20 @@ fn eval_depth(
         Expr::Func(fc) if crate::catalog_fn::is_catalog_func(&fc.name) => {
             crate::catalog_fn::eval_catalog(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
+        // The object-identifier family: `to_regclass(…)` and the type-as-function
+        // spelling `regclass(…)`, both of which resolve against the catalog.
+        Expr::Func(fc) if crate::reg_fn::is_reg_func(&fc.name) => {
+            crate::reg_fn::eval_reg_func(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
+        // `currtid2(relation, tid)`, which resolves a relation *and* reads its
+        // rows, so it sits with the other families that reach the catalog.
+        Expr::Func(fc) if crate::tid_fn::is_tid_func(&fc.name) => {
+            crate::tid_fn::eval_tid(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
-            crate::func::eval_scalar(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+            crate::func::eval_scalar(fc, Some(scope), ctx, |e| {
+                eval_depth(e, scope, values, ctx, d)
+            })
         }
         // SP37: a date/time function (clock family, extract/date_part, date_trunc,
         // age, timezone). Tried after scalar, before the aggregate-context error.
@@ -159,6 +399,14 @@ fn eval_depth(
         // datetime, before the aggregate-context error.
         Expr::Func(fc) if crate::format_fn::is_format_func(&fc.name) => {
             crate::format_fn::eval_format(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
+        // `json_populate_record` and its `jsonb_` twin, ahead of the general
+        // JSON arm because they are the one family whose result *shape* comes
+        // from an argument's declared type rather than from its value —
+        // `NULL::jpop` is a bare `Datum::Null` by the time the general arm sees
+        // it, and the composite it was cast to is only in the scope.
+        Expr::Func(fc) if json_fn::is_record_func(&fc.name) => {
+            json_fn::eval_record_func(fc, scope, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
         // The jsonb + array function families, tried after the older families and
         // before the aggregate-context error, exactly like the arms above.
@@ -187,6 +435,14 @@ fn eval_depth(
                 return Ok(result);
             }
             let v = eval_depth(expr, scope, values, ctx, d)?;
+            // Every composite operand is tested field by field, not just a
+            // whole-row reference: `PostgreSQL` sets `argisrow` from the
+            // operand's type, so a column of a composite type obeys the same
+            // rule. Reading the shape off the value settles it without the two
+            // scope scans naming the operand used to cost per row.
+            if let Some(result) = rowexpr::composite_is_null(&v, *negated) {
+                return Ok(result);
+            }
             Ok(Datum::Bool(v.is_null() ^ *negated))
         }
         Expr::InList {
@@ -194,13 +450,21 @@ fn eval_depth(
             list,
             negated,
         } => {
+            reject_uncomparable_in_list(expr, list, scope)?;
             if let Some(result) = rowexpr::eval_in_list(expr, list, *negated, |e| {
                 eval_depth(e, scope, values, ctx, d)
             })? {
                 return Ok(result);
             }
+            // `x IN (a, b)` is `x = a OR x = b`, so every operand takes the same
+            // `character → text` cast the `=` operator takes.
             let x = eval_depth(expr, scope, values, ctx, d)?;
-            eval_in_list(&x, list, *negated, |e| eval_depth(e, scope, values, ctx, d))
+            let x = bpchar_to_text_value(expr, scope, &x)?.unwrap_or(x);
+            let element = in_list_element_type(expr, list, scope)?;
+            eval_in_list(expr, &x, list, element, *negated, ctx, |e| {
+                let item = eval_depth(e, scope, values, ctx, d)?;
+                Ok(bpchar_to_text_value(e, scope, &item)?.unwrap_or(item))
+            })
         }
         Expr::Between {
             expr,
@@ -208,10 +472,17 @@ fn eval_depth(
             high,
             negated,
         } => {
+            reject_uncomparable_comparison(BinaryOp::Ge, expr, low, scope)?;
+            reject_uncomparable_comparison(BinaryOp::Le, expr, high, scope)?;
+            // `x BETWEEN lo AND hi` expands to two comparisons, which take the
+            // `character → text` cast as `>=` and `<=` do.
             let x = eval_depth(expr, scope, values, ctx, d)?;
+            let x = bpchar_to_text_value(expr, scope, &x)?.unwrap_or(x);
             let lo = eval_depth(low, scope, values, ctx, d)?;
+            let lo = bpchar_to_text_value(low, scope, &lo)?.unwrap_or(lo);
             let hi = eval_depth(high, scope, values, ctx, d)?;
-            eval_between(&x, &lo, &hi, *negated, ctx)
+            let hi = bpchar_to_text_value(high, scope, &hi)?.unwrap_or(hi);
+            eval_between((expr, &x), (low, &lo), (high, &hi), *negated, ctx)
         }
         Expr::Like {
             expr,
@@ -232,9 +503,17 @@ fn eval_depth(
             operand,
             whens,
             else_result,
-        } => eval_case(operand.as_deref(), whens, else_result.as_deref(), |e| {
-            eval_depth(e, scope, values, ctx, d)
-        }),
+        } => {
+            reject_uncomparable_simple_case(operand.as_deref(), whens, scope)?;
+            eval_case(
+                operand.as_deref(),
+                whens,
+                else_result.as_deref(),
+                infer_case_type(whens, else_result.as_deref(), scope)?,
+                ctx,
+                |e| eval_depth(e, scope, values, ctx, d),
+            )
+        }
         // SP31: explicit cast — evaluate the operand, then convert. A text-parse
         // failure (22P02), numeric overflow (22003), or undefined cast (42846)
         // surfaces here; NULL casts to NULL. The session zone comes from `ctx`.
@@ -245,27 +524,27 @@ fn eval_depth(
                 return Ok(empty);
             }
             let v = eval_depth(expr, scope, values, ctx, d)?;
-            // `::regclass` is the one cast that needs the catalog: a name has to
-            // be resolved to its oid (PostgreSQL's regclassin), and an oid has
-            // to be resolved *back* to the name `regclassout` prints, because
-            // the value layer that renders it has no catalog handle. This is the
-            // point where one is in scope, so the name is attached here and
-            // travels with the value — and it is also where the session's search
-            // path is in scope, which is what decides the schema a bare name
-            // lands in. Without a catalog — a planning context or a unit test —
-            // the pure cast below yields the bare-oid rendering.
-            if *ty == crabka_pgtypes::ColumnType::Regclass
-                && let Some(catalog) = ctx.catalog()
-                && let Some(resolved) =
-                    crate::catalog_fn::regclass_cast(catalog, ctx.resolution(), &v)?
+            // `character → text`/`varchar` (and `name`, which shares `Text`
+            // here) is the written spelling of the one cast function every
+            // implicit coercion also goes through, so it drops the blank padding
+            // here too: `'x'::char(8)::text` is `'x'`. A cast BACK to
+            // `character` is not this cast — `bpchar(bpchar)` re-pads to the new
+            // length — so those targets are excluded.
+            let v = match ty {
+                ColumnType::Text | ColumnType::Varchar(_) => {
+                    bpchar_to_text_value(expr, scope, &v)?.unwrap_or(v)
+                }
+                _ => v,
+            };
+            // A cast the user declared with `CREATE CAST` is the only route in
+            // or out of a user-defined base type, and the built-in conversion
+            // table below knows nothing about it.
+            if crabka_pgtypes::usercast::any_declared()
+                && let Some(coerced) = crate::usercast::coerce_declared(expr, *ty, &v, scope, ctx)?
             {
-                return Ok(resolved);
+                return Ok(coerced);
             }
-            let cast = crabka_pgtypes::cast::cast_in(&v, *ty, ctx.output_style())?;
-            // A cast to a domain converts through the base type and then has to
-            // satisfy the domain's own NOT NULL and CHECK constraints.
-            crate::usertype::check_domain(*ty, &cast, ctx)?;
-            Ok(cast)
+            cast_operand(&v, *ty, ctx)
         }
         // `ARRAY[e1, e2, …]`: every element is coerced to the constructor's
         // unified element type, so the built array is homogeneous.
@@ -294,10 +573,12 @@ fn eval_depth(
         Expr::Subscript { base, index } => {
             let b = eval_depth(base, scope, values, ctx, d)?;
             let i = eval_depth(index, scope, values, ctx, d)?;
-            if matches!(b, Datum::Jsonb(_)) || infer_type(base, scope)? == ColumnType::Jsonb {
-                return json_fn::jsonb_subscript(&b, &i);
+            match subscript_kind(&b, base, scope)? {
+                SubscriptKind::Json => Err(cannot_subscript(ColumnType::Json)),
+                SubscriptKind::Jsonb => json_fn::jsonb_subscript(&b, &i),
+                SubscriptKind::Geometric => geometric_subscript(&b, &i),
+                SubscriptKind::Array => array_fn::array_subscript(&b, &i),
             }
-            array_fn::array_subscript(&b, &i)
         }
         // `base[s1][s2]…` — a multi-subscript or sliced reference, which
         // PostgreSQL resolves as ONE array reference rather than a chain.
@@ -312,6 +593,7 @@ fn eval_depth(
             all,
             array,
         } => {
+            reject_uncomparable_quantified(*op, expr, array, scope)?;
             let x = eval_depth(expr, scope, values, ctx, d)?;
             let a = eval_depth(array, scope, values, ctx, d)?;
             // `33 = ANY('{1,2,3}')`: a bare literal on the array side is
@@ -326,7 +608,10 @@ fn eval_depth(
                             elem.name()
                         ))
                     })?;
-                    crabka_pgtypes::cast::cast(&a, target, &ctx.time_zone)?
+                    // `array_in` runs the element type's input function, so
+                    // the session's `DateStyle` order decides how an ambiguous
+                    // all-numeric element is read.
+                    crabka_pgtypes::cast::cast_in(&a, target, ctx.output_style())?
                 }
                 _ => a,
             };
@@ -358,10 +643,17 @@ fn eval_depth(
 /// - Otherwise the result is NULL if any element was NULL, and false if not.
 ///
 /// `NOT IN` is the boolean negation. NULL stays NULL.
+///
+/// `element` is the array element type the list resolves its `unknown` literals
+/// through, from [`in_list_element_type`]. `None` leaves each element to the
+/// pairwise `=` resolution the OR-chain form uses.
 pub(crate) fn eval_in_list(
+    operand: &Expr,
     x: &Datum,
     list: &[Expr],
+    element: Option<ColumnType>,
     negated: bool,
+    ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
     // An empty list is decided before the operand is even considered: `x IN ()`
@@ -376,7 +668,24 @@ pub(crate) fn eval_in_list(
     let mut saw_null = false;
     for item in list {
         let v = eval_child(item)?;
-        match ops::compare(x, &v)? {
+        // `x IN (a, b)` is `x = a OR x = b`, and each of those equalities
+        // resolves its own `unknown` literal — so `c.oid IN ('1','2')` compares
+        // as oids while `'10' IN ('9', 20)` still compares '10' to '9' as text.
+        // The array form resolves the whole list at once instead, through the
+        // common type's own input function; only the literal converts, because
+        // the operand already has that type.
+        let (xc, vc) = match element {
+            Some(ty) if matches!(item, Expr::StringLiteral(_)) && matches!(v, Datum::Text(_)) => {
+                (None, Some(cast_operand(&v, ty, ctx)?))
+            }
+            _ => coerce_untyped_literal_operands(BinaryOp::Eq, operand, item, x, &v, ctx)?,
+        };
+        let (x, v) = (xc.as_ref().unwrap_or(x), vc.as_ref().unwrap_or(&v));
+        if runtime_equality_short_circuit(x, v) == Some(false) {
+            continue;
+        }
+        require_runtime_equality(x, v)?;
+        match ops::compare(x, v)? {
             Some(Ordering::Equal) => return Ok(Datum::Bool(!negated)),
             Some(_) => {}
             None => saw_null = true,
@@ -389,19 +698,19 @@ pub(crate) fn eval_in_list(
     }
 }
 
-/// `x BETWEEN lo AND hi` ≡ `x >= lo AND x <= hi`.
-///
-/// `NOT BETWEEN` negates it. NULL propagates exactly as three-valued AND/NOT
-/// define.
+/// `x BETWEEN lo AND hi` ≡ `x >= lo AND x <= hi`; `NOT BETWEEN` negates it. NULL
+/// propagates exactly as three-valued AND/NOT define. Each operand is paired
+/// with the expression it came from because the two comparisons resolve their
+/// `unknown` literals independently, exactly as PostgreSQL's expansion does.
 pub(crate) fn eval_between(
-    x: &Datum,
-    lo: &Datum,
-    hi: &Datum,
+    x: (&Expr, &Datum),
+    lo: (&Expr, &Datum),
+    hi: (&Expr, &Datum),
     negated: bool,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
-    let ge = apply_binary(BinaryOp::Ge, x, lo, ctx)?;
-    let le = apply_binary(BinaryOp::Le, x, hi, ctx)?;
+    let ge = apply_comparison_of(BinaryOp::Ge, x, lo, ctx)?;
+    let le = apply_comparison_of(BinaryOp::Le, x, hi, ctx)?;
     let res = ops::and(&ge, &le)?;
     Ok(if negated { ops::not(&res)? } else { res })
 }
@@ -420,6 +729,19 @@ pub(crate) fn eval_like(
 ) -> Result<Datum, ExecError> {
     if s.is_null() || pat.is_null() || escape.is_some_and(Datum::is_null) {
         return Ok(Datum::Null);
+    }
+    // `bytea` has a `~~` of its own, matched byte by byte. It has no
+    // case-insensitive or `SIMILAR TO` form, so only plain `LIKE` routes here;
+    // the other two fall through and report the type mismatch.
+    if matches!(kind, MatchKind::Like)
+        && let (Datum::Bytea(subject), Datum::Bytea(pattern)) = (s, pat)
+    {
+        let escape = match escape {
+            Some(e) => crate::pattern::escape_byte(e)?,
+            None => Some(b'\\'),
+        };
+        let m = crate::bytea_fn::like_match(subject, pattern, escape)?;
+        return Ok(Datum::Bool(m ^ negated));
     }
     let escape = match escape {
         Some(e) => crate::pattern::escape_char(e)?,
@@ -539,13 +861,18 @@ pub(crate) fn eval_case(
     operand: Option<&Expr>,
     whens: &[(Expr, Expr)],
     else_result: Option<&Expr>,
+    result_type: ColumnType,
+    ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
     match operand {
         None => {
             for (cond, result) in whens {
                 match eval_child(cond)? {
-                    Datum::Bool(true) => return eval_child(result),
+                    Datum::Bool(true) => {
+                        let value = eval_child(result)?;
+                        return cast_value(&value, result_type, &ctx.time_zone);
+                    }
                     Datum::Bool(false) | Datum::Null => {}
                     _ => {
                         return Err(ExecError::TypeMismatch(
@@ -559,14 +886,28 @@ pub(crate) fn eval_case(
             let ov = eval_child(op)?;
             for (val, result) in whens {
                 let vv = eval_child(val)?;
-                if matches!(ops::compare(&ov, &vv)?, Some(Ordering::Equal)) {
-                    return eval_child(result);
+                // A simple `CASE` is a chain of equalities, so `CASE oid WHEN
+                // '1' …` resolves the bare literal from the operand just as
+                // `oid = '1'` would.
+                let (oc, vc) =
+                    coerce_untyped_literal_operands(BinaryOp::Eq, op, val, &ov, &vv, ctx)?;
+                let (ov, vv) = (oc.as_ref().unwrap_or(&ov), vc.as_ref().unwrap_or(&vv));
+                if runtime_equality_short_circuit(ov, vv) == Some(false) {
+                    continue;
+                }
+                require_runtime_equality(ov, vv)?;
+                if matches!(ops::compare(ov, vv)?, Some(Ordering::Equal)) {
+                    let value = eval_child(result)?;
+                    return cast_value(&value, result_type, &ctx.time_zone);
                 }
             }
         }
     }
     match else_result {
-        Some(e) => eval_child(e),
+        Some(e) => {
+            let value = eval_child(e)?;
+            cast_value(&value, result_type, &ctx.time_zone)
+        }
         None => Ok(Datum::Null),
     }
 }
@@ -602,11 +943,38 @@ pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datu
             // without inventing a zero operand — so `-'NaN'::numeric` is `NaN`
             // and the display scale is the operand's own.
             Datum::Numeric(n) => Ok(Datum::Numeric(crabka_pgtypes::numeric::neg(n))),
+            // `money` has no unary minus at all in PostgreSQL, and the generic
+            // `0 - v` fallback would otherwise report an integer-operand
+            // mismatch instead of the missing operator.
+            // Neither `money` nor any system identifier type has a unary
+            // minus in PostgreSQL, and the generic `0 - v` fallback would
+            // otherwise report an integer-operand mismatch (42804) instead of
+            // the missing operator (42883).
+            Datum::Money(_)
+            | Datum::BitString(_)
+            | Datum::Oid(_)
+            | Datum::Xid(_)
+            | Datum::Xid8(_)
+            | Datum::Cid(_)
+            | Datum::Tid(_)
+            | Datum::PgLsn(_) => Err(undefined_prefix_operator(op, v)),
             _ => Ok(ops::sub(&Datum::Int4(0), v)?),
         },
-        UnaryOp::Plus | UnaryOp::BitNot | UnaryOp::Abs | UnaryOp::Sqrt | UnaryOp::Cbrt => {
-            apply_prefix_op(op, v)
-        }
+        UnaryOp::Plus
+        | UnaryOp::BitNot
+        | UnaryOp::Abs
+        | UnaryOp::Sqrt
+        | UnaryOp::Cbrt
+        | UnaryOp::NPoints
+        | UnaryOp::Length
+        | UnaryOp::Center
+        | UnaryOp::IsHorizontal
+        | UnaryOp::IsVertical => apply_prefix_op(op, v),
+        // `IS [NOT] DOCUMENT` is the one postfix test that is NOT total: a
+        // NULL `xml` yields NULL, because unlike the boolean tests it asks a
+        // question about a value rather than about its definedness.
+        UnaryOp::IsDocument => crate::xml_fn::is_document(v, false),
+        UnaryOp::IsNotDocument => crate::xml_fn::is_document(v, true),
         // The postfix boolean tests. Each is total over its operand — the whole
         // point of `IS TRUE` over `= TRUE` is that a NULL operand yields FALSE
         // rather than NULL — so none of them can return NULL.
@@ -693,6 +1061,14 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
             Datum::Int2(x) => Ok(Datum::Int2(!x)),
             Datum::Int4(x) => Ok(Datum::Int4(!x)),
             Datum::Int8(x) => Ok(Datum::Int8(!x)),
+            // `~inet` inverts every address bit and keeps the netmask; a `cidr`
+            // widens to `inet` first, so the result is always an `inet`.
+            // `bitnot` inverts every bit and keeps the length; a `bit varying`
+            // becomes a `bit`, because the operator is declared over `bit`.
+            Datum::BitString(value) => Ok(Datum::BitString(value.not())),
+            Datum::Inet(value) => Ok(Datum::Inet(value.not())),
+            Datum::MacAddr(value) => Ok(Datum::MacAddr(value.not())),
+            Datum::MacAddr8(value) => Ok(Datum::MacAddr8(value.not())),
             other => Err(undefined_prefix_operator(op, other)),
         },
         UnaryOp::Abs => match v {
@@ -732,6 +1108,11 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
                 Ok(Datum::Float8(x.cbrt()))
             }
         }
+        UnaryOp::NPoints
+        | UnaryOp::Length
+        | UnaryOp::Center
+        | UnaryOp::IsHorizontal
+        | UnaryOp::IsVertical => apply_geometric_prefix(op, v),
         UnaryOp::Not
         | UnaryOp::Neg
         | UnaryOp::IsTrue
@@ -740,8 +1121,53 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
         | UnaryOp::IsNotFalse
         | UnaryOp::IsUnknown
         | UnaryOp::IsNotUnknown
+        | UnaryOp::IsDocument
+        | UnaryOp::IsNotDocument
         | UnaryOp::TsNot => Err(undefined_prefix_operator(op, v)),
     }
+}
+
+/// The five geometric prefix operators: `#` (the number of points in a path or
+/// polygon), `@-@` (the length of an lseg or path), `@@` (the centre of a box,
+/// circle, lseg or polygon — but NOT a path, which has none), and `?-` / `?|`
+/// (is this line or lseg horizontal / vertical?).
+///
+/// Every one is 42883 on any other operand, including on `integer`: PostgreSQL
+/// lexes `@-@ 5` as one operator and finds no `@-@ integer`.
+fn apply_geometric_prefix(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
+    match (op, v) {
+        (UnaryOp::NPoints, Datum::Path(path)) => Ok(Datum::Int4(path.npoints())),
+        (UnaryOp::NPoints, Datum::Polygon(polygon)) => Ok(Datum::Int4(polygon.npoints())),
+        (UnaryOp::Length, Datum::Lseg(lseg)) => Ok(Datum::Float8(lseg.length())),
+        (UnaryOp::Length, Datum::Path(path)) => Ok(Datum::Float8(path.length())),
+        (UnaryOp::Center, Datum::Box(value)) => Ok(Datum::Point(value.center())),
+        (UnaryOp::Center, Datum::Circle(circle)) => Ok(Datum::Point(circle.to_point())),
+        (UnaryOp::Center, Datum::Lseg(lseg)) => Ok(Datum::Point(lseg.center())),
+        (UnaryOp::Center, Datum::Polygon(polygon)) => Ok(Datum::Point(polygon.center())),
+        (UnaryOp::IsHorizontal, Datum::Line(line)) => Ok(Datum::Bool(line.is_horizontal())),
+        (UnaryOp::IsHorizontal, Datum::Lseg(lseg)) => Ok(Datum::Bool(lseg.is_horizontal())),
+        (UnaryOp::IsVertical, Datum::Line(line)) => Ok(Datum::Bool(line.is_vertical())),
+        (UnaryOp::IsVertical, Datum::Lseg(lseg)) => Ok(Datum::Bool(lseg.is_vertical())),
+        _ => Err(undefined_prefix_operator(op, v)),
+    }
+}
+
+/// The static result type of a geometric prefix operator over its operand, or
+/// `None` when PostgreSQL declares no such operator. `@@` over a `path` is the
+/// one that surprises: `path` has a length and a point count but no centre.
+fn geometric_prefix_result_type(op: UnaryOp, ty: ColumnType) -> Option<ColumnType> {
+    Some(match (op, ty) {
+        (UnaryOp::NPoints, ColumnType::Path | ColumnType::Polygon) => ColumnType::Int4,
+        (UnaryOp::Length, ColumnType::Lseg | ColumnType::Path) => ColumnType::Float8,
+        (
+            UnaryOp::Center,
+            ColumnType::Box | ColumnType::Circle | ColumnType::Lseg | ColumnType::Polygon,
+        ) => ColumnType::Point,
+        (UnaryOp::IsHorizontal | UnaryOp::IsVertical, ColumnType::Line | ColumnType::Lseg) => {
+            ColumnType::Bool
+        }
+        _ => return None,
+    })
 }
 
 /// Promote a numeric-tower Datum to `f64`, for the operators `PostgreSQL`
@@ -775,16 +1201,26 @@ fn prefix_spelling(op: UnaryOp) -> &'static str {
         UnaryOp::Neg => "-",
         UnaryOp::Plus => "+",
         UnaryOp::TsNot => "!!",
+        UnaryOp::NPoints => "#",
+        UnaryOp::Length => "@-@",
+        UnaryOp::Center => "@@",
+        UnaryOp::IsHorizontal => "?-",
+        UnaryOp::IsVertical => "?|",
         _ => "NOT",
     }
 }
 
 /// 42883 for a prefix operator applied to a type it is not defined for.
 fn undefined_prefix_operator(op: UnaryOp, v: &Datum) -> ExecError {
+    undefined_prefix_operator_named(op, v.column_type().map_or("unknown", ColumnType::name))
+}
+
+/// [`undefined_prefix_operator`] with the operand type already spelled, for the
+/// plan-time rejections that have a `ColumnType` rather than a value.
+fn undefined_prefix_operator_named(op: UnaryOp, ty: &str) -> ExecError {
     ExecError::UndefinedFunction(format!(
-        "operator does not exist: {} {}",
-        prefix_spelling(op),
-        v.column_type().map_or("unknown", ColumnType::name)
+        "operator does not exist: {} {ty}",
+        prefix_spelling(op)
     ))
 }
 
@@ -972,6 +1408,37 @@ pub(crate) fn apply_binary_of(
     scope: &Scope,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
+    reject_uncomparable_comparison(op, left, right, scope)?;
+    // These overloaded strict operators must still be resolved before value-
+    // time NULL handling. Keep the runtime fast paths from accepting an invalid
+    // typed pair such as `int4range @> NULL::text` in a predicate that did not
+    // go through projection type inference.
+    if matches!(
+        op,
+        BinaryOp::Contains
+            | BinaryOp::ContainedBy
+            | BinaryOp::Overlaps
+            | BinaryOp::DoesNotExtendRight
+            | BinaryOp::DoesNotExtendLeft
+            | BinaryOp::Adjacent
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::ContainedByOrEq
+            | BinaryOp::ContainsOrEq
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+    ) {
+        infer_binary_type(op, left, right, scope)?;
+    }
+    // A `character` operand is cast to `text` first: `=`, the other five
+    // comparisons and `||` have no `bpchar` overload, so PostgreSQL reaches them
+    // through the implicit cast, and the padding never takes part. `LIKE` and
+    // the regular-expression operators are NOT here — `bpcharlike` and
+    // `bpcharregexeq` read the padded datum, so `'a'::char(3) LIKE 'a'` is false
+    // on PostgreSQL exactly as it is here.
+    let (lb, rb) = bpchar_to_text_operands(op, (left, l), (right, r), scope)?;
+    let (l, r) = (lb.as_ref().unwrap_or(l), rb.as_ref().unwrap_or(r));
     let (lc, rc) = coerce_untyped_literal_operands(op, left, right, l, r, ctx)?;
     let (l, r) = (lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r));
     if op == BinaryOp::Concat {
@@ -979,6 +1446,21 @@ pub(crate) fn apply_binary_of(
         return apply_concat(kind, l, r, ctx);
     }
     apply_binary(op, l, r, ctx)
+}
+
+/// Apply a comparison to two already-evaluated operands, resolving a bare
+/// `unknown` literal from the other side first. `BETWEEN` and `IN` expand into
+/// comparisons that PostgreSQL resolves one at a time, and neither has a
+/// [`BinaryOp`] expression of its own to hand to [`apply_binary_of`], so each
+/// operand arrives here paired with the expression that produced it.
+pub(crate) fn apply_comparison_of(
+    op: BinaryOp,
+    (le, l): (&Expr, &Datum),
+    (re, r): (&Expr, &Datum),
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let (lc, rc) = coerce_untyped_literal_operands(op, le, re, l, r, ctx)?;
+    apply_binary(op, lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r), ctx)
 }
 
 /// Convert an `unknown` string-literal operand's *value* to the type the
@@ -1024,7 +1506,16 @@ fn coerce_untyped_literal_operands(
         // An array counterpart resolves the literal to that array type for the
         // array-only operators and the comparisons — but NOT for `||`, where
         // `ARRAY['a'] || 'b'` must stay `anyarray || anyelement`.
-        if let Datum::Array(a) = other {
+        let array_type = match other {
+            Datum::Array(array) => Some(array.column_type()),
+            Datum::OidVector(v) => Some(if v.elem == crabka_pgtypes::ElemType::Int2 {
+                ColumnType::Int2Vector
+            } else {
+                ColumnType::OidVector
+            }),
+            _ => None,
+        };
+        if let Some(array_type) = array_type {
             return match op {
                 BinaryOp::Contains
                 | BinaryOp::ContainedBy
@@ -1034,7 +1525,259 @@ fn coerce_untyped_literal_operands(
                 | BinaryOp::Lt
                 | BinaryOp::Le
                 | BinaryOp::Gt
-                | BinaryOp::Ge => Some(a.column_type()),
+                | BinaryOp::Ge => Some(array_type),
+                _ => None,
+            };
+        }
+        if let Datum::Range(range) = other {
+            return match op {
+                BinaryOp::Contains
+                | BinaryOp::ContainedBy
+                | BinaryOp::Overlaps
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::DoesNotExtendRight
+                | BinaryOp::DoesNotExtendLeft
+                | BinaryOp::Adjacent
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => Some(range.column_type()),
+                _ => None,
+            };
+        }
+        if let Datum::Multirange(multirange) = other {
+            return match op {
+                BinaryOp::Contains
+                | BinaryOp::ContainedBy
+                | BinaryOp::Overlaps
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::DoesNotExtendRight
+                | BinaryOp::DoesNotExtendLeft
+                | BinaryOp::Adjacent
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => Some(multirange.column_type()),
+                _ => None,
+            };
+        }
+        // A system identifier counterpart resolves the literal to its own type,
+        // which is how `f1 = '1234'` compares two `oid`s and `t = '(0,1)'` two
+        // `tid`s. `pg_lsn` also takes `-` here, and deliberately: PostgreSQL
+        // has both `pg_lsn - pg_lsn` and `pg_lsn - numeric`, and its preference
+        // for the exact-match candidate is what makes `lsn - '16'` a 22P02
+        // rather than an offset. `+` is left out because `pg_lsn + numeric` is
+        // its only candidate, so the literal there is a `numeric`.
+        let sysid_type = match other {
+            Datum::Oid(_) => Some(ColumnType::Oid),
+            Datum::Xid(_) => Some(ColumnType::Xid),
+            Datum::Xid8(_) => Some(ColumnType::Xid8),
+            Datum::Cid(_) => Some(ColumnType::Cid),
+            Datum::Tid(_) => Some(ColumnType::Tid),
+            Datum::PgLsn(_) => Some(ColumnType::PgLsn),
+            _ => None,
+        };
+        if let Some(sysid_type) = sysid_type {
+            return match op {
+                BinaryOp::Sub if sysid_type == ColumnType::PgLsn => Some(sysid_type),
+                // `pg_lsn + numeric` is the only `+` candidate, so an unknown
+                // literal there is a `numeric` and `lsn + '16'` is an offset.
+                BinaryOp::Add if sysid_type == ColumnType::PgLsn => Some(ColumnType::Numeric(None)),
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(sysid_type),
+                _ => None,
+            };
+        }
+        // A network counterpart resolves the literal to its own type, which is
+        // how `b < '08:00:2b:01:02:04'` compares two `macaddr`s and
+        // `i <<= '192.168.1.0/24'` is a containment test. An `inet`/`cidr`
+        // counterpart resolves the literal to `inet`, the category's preferred
+        // type, exactly as PostgreSQL's operator resolution does.
+        // A `money` counterpart resolves the literal to `money`: `m + '123'`
+        // adds $123.00 and `m = '$123.00'` compares two cash values.
+        if matches!(other, Datum::Money(_)) {
+            return match op {
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Div
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(ColumnType::Money),
+                // `money * x` has candidates for every numeric width, so the
+                // literal's meaning is not decidable here — as in PostgreSQL.
+                _ => None,
+            };
+        }
+        // A `"char"` counterpart resolves the literal to `"char"`, which is how
+        // `relkind = 'r'` compares two bytes rather than reporting that a
+        // one-byte type and `text` have no comparison. `||` is deliberately
+        // absent: `PostgreSQL`'s only candidate there is `anynonarray || text`,
+        // so `c || 'y'` concatenates the byte's *text* and the literal stays a
+        // `text`.
+        if matches!(other, Datum::InternalChar(_)) {
+            return match op {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(ColumnType::InternalChar),
+                _ => None,
+            };
+        }
+        // A bit-string counterpart resolves the literal to a bit string, which
+        // is how `b = '1010'` compares two `bit`s and `v || '01'` concatenates.
+        if let Datum::BitString(bits) = other {
+            return match op {
+                BinaryOp::Concat
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(if bits.varying {
+                    ColumnType::VarBit(None)
+                } else {
+                    ColumnType::Bit(None)
+                }),
+                // `bit << int` is a shift, so the literal beside one is an
+                // integer rather than a bit string.
+                _ => None,
+            };
+        }
+        let network_type = match other {
+            Datum::Inet(_) => Some(ColumnType::Inet),
+            Datum::MacAddr(_) => Some(ColumnType::MacAddr),
+            Datum::MacAddr8(_) => Some(ColumnType::MacAddr8),
+            _ => None,
+        };
+        if let Some(network_type) = network_type {
+            return match op {
+                BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::ContainedByOrEq
+                | BinaryOp::ContainsOrEq
+                | BinaryOp::Overlaps
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::IsDistinctFrom
+                | BinaryOp::IsNotDistinctFrom => Some(network_type),
+                // `inet - inet` is a difference, but `inet - bigint` is an
+                // offset, so the literal's meaning is not decidable here.
+                _ => None,
+            };
+        }
+        // A geometric counterpart resolves the literal to whichever type the
+        // operator's one surviving candidate wants — its own for
+        // `p.f1 << '(0,0)'`, but a `point` for `b.f1 + '(1,2)'`, whose only
+        // candidate is `box + point`.
+        if let Some(geometric_type) = other.column_type().filter(|ty| is_geometric_type(*ty)) {
+            return geometric_literal_type(op, geometric_type);
+        }
+        // A scalar counterpart resolves the literal to its own type, which is how
+        // psql's `c.oid = '20001'` finds an `oid` comparison and `1 + '1'` stays
+        // integer arithmetic. `regclass` is deliberately absent: PostgreSQL's
+        // `regclass =` is `oideq`, so its bare literal is read as an *oid* and
+        // `'pg_class'::regclass = 'pg_class'` is an oid syntax error, not a name
+        // lookup.
+        let scalar_type = match other {
+            Datum::Bool(_)
+            | Datum::Int2(_)
+            | Datum::Int4(_)
+            | Datum::Int8(_)
+            | Datum::Float4(_)
+            | Datum::Float8(_)
+            | Datum::Numeric(_)
+            | Datum::Bytea(_) => other.column_type(),
+            _ => None,
+        };
+        if let Some(scalar_type) = scalar_type {
+            let comparison = matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::IsDistinctFrom
+                    | BinaryOp::IsNotDistinctFrom
+            );
+            let resolves = comparison
+                || match other {
+                    Datum::Bool(_) => matches!(op, BinaryOp::And | BinaryOp::Or),
+                    Datum::Int2(_) | Datum::Int4(_) | Datum::Int8(_) => matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
+                            | BinaryOp::Pow
+                            | BinaryOp::BitAnd
+                            | BinaryOp::BitOr
+                            | BinaryOp::BitXor
+                            | BinaryOp::Shl
+                            | BinaryOp::Shr
+                    ),
+                    Datum::Float4(_) | Datum::Float8(_) | Datum::Numeric(_) => matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
+                            | BinaryOp::Pow
+                    ),
+                    _ => false,
+                };
+            return resolves.then_some(scalar_type);
+        }
+        // A `json` counterpart resolves a literal for the two PATH operators
+        // only. PostgreSQL gives `json` six operators and no more; of those,
+        // `->` and `->>` take `text` (which the literal already is) or
+        // `integer`, and `#>`/`#>>` take `text[]`, which a `Datum::Text` is not.
+        if matches!(other, Datum::Json(_)) {
+            return match op {
+                BinaryOp::JsonGetPath | BinaryOp::JsonGetPathText => {
+                    ColumnType::array_of(ColumnType::Text)
+                }
                 _ => None,
             };
         }
@@ -1064,6 +1807,7 @@ fn coerce_untyped_literal_operands(
             | BinaryOp::Le
             | BinaryOp::Gt
             | BinaryOp::Ge => Some(ColumnType::Jsonb),
+            BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch => Some(ColumnType::JsonPath),
             _ => None,
         }
     };
@@ -1072,11 +1816,66 @@ fn coerce_untyped_literal_operands(
             return Ok(None);
         }
         match target(other) {
-            Some(ty) => Ok(Some(crabka_pgtypes::cast::cast(v, ty, &ctx.time_zone)?)),
+            Some(ty) => Ok(Some(cast_value(v, ty, &ctx.time_zone)?)),
             None => Ok(None),
         }
     };
     Ok((convert(left, l, r)?, convert(right, r, l)?))
+}
+
+/// Is this value one of the six date/time types — the gate that decides whether
+/// [`coerce_to_operator_signature`] has anything to do?
+fn is_temporal_datum(value: &Datum) -> bool {
+    matches!(
+        value,
+        Datum::Date(_)
+            | Datum::Time(_)
+            | Datum::Timetz(_)
+            | Datum::Timestamp(_)
+            | Datum::Timestamptz(_)
+            | Datum::Interval(_)
+    )
+}
+
+/// Convert each operand to the declared parameter type of the `pg_operator` row
+/// the call resolves to, which is `PostgreSQL`'s second step after `oper()`
+/// chooses that row.
+///
+/// A row is reachable through an implicit cast, so its parameter types need not
+/// be either operand's own: `date - time` selects `date - interval`, and the
+/// `time` has to *become* an interval before the operator runs. Each operand
+/// that already has the declared type is returned untouched, so the common case
+/// clones nothing.
+///
+/// An operand pair the resolver refuses (42883, 42725) is returned unchanged
+/// rather than raised here. Parse analysis already reports those, from
+/// [`infer_binary_type`], with the operand types the query wrote; a value-time
+/// copy would only restate it per row.
+fn coerce_to_operator_signature<'a>(
+    op: BinaryOp,
+    l: &'a Datum,
+    r: &'a Datum,
+    ctx: &EvalCtx,
+) -> Result<(Cow<'a, Datum>, Cow<'a, Datum>), ExecError> {
+    let unchanged = || (Cow::Borrowed(l), Cow::Borrowed(r));
+    // A NULL carries no type to resolve a row with, and every arithmetic
+    // operator propagates it, so the families below answer it unaided.
+    let (Some(lt), Some(rt)) = (l.column_type(), r.column_type()) else {
+        return Ok(unchanged());
+    };
+    let Some(Ok(signature)) = crate::temporal_arith::resolve(op, lt, rt) else {
+        return Ok(unchanged());
+    };
+    let convert = |value: &'a Datum, from: ColumnType, to: ColumnType| {
+        if from.storage_type().oid() == to.oid() {
+            return Ok(Cow::Borrowed(value));
+        }
+        cast_value(value, to, &ctx.time_zone).map(Cow::Owned)
+    };
+    Ok((
+        convert(l, lt, signature.left)?,
+        convert(r, rt, signature.right)?,
+    ))
 }
 
 /// Apply a binary operator to two already-evaluated operands.
@@ -1089,6 +1888,29 @@ pub(crate) fn apply_binary(
     r: &Datum,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
+    // PostgreSQL resolves a date/time `+ - * /` to a `pg_operator` row and then
+    // coerces both operands to that row's declared parameter types. The row is
+    // `crate::temporal_arith`'s answer and this is the coercion; without it a
+    // row reached through an implicit cast resolves and then fails on the
+    // operand nothing converted.
+    //
+    // It runs BEFORE the timestamptz path below, so an operand the chosen row
+    // widened from `timestamp` to `timestamptz` still reaches the zone-aware
+    // arithmetic rather than the zone-free one.
+    //
+    // The operand test is written out here rather than left to the callee: this
+    // is a PER-ROW path, and hoisting it keeps a row of integers to two inlined
+    // discriminant comparisons with no call at all.
+    let (left, right) = if matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+    ) && (is_temporal_datum(l) || is_temporal_datum(r))
+    {
+        coerce_to_operator_signature(op, l, r, ctx)?
+    } else {
+        (Cow::Borrowed(l), Cow::Borrowed(r))
+    };
+    let (l, r) = (left.as_ref(), right.as_ref());
     // SP37: tz-AWARE temporal arithmetic involving `timestamptz` is computed here
     // (where `ctx.time_zone` is available) — `crabka_pgtypes::ops` would `TypeMismatch` on
     // a `Timestamptz` operand. A non-timestamptz pair falls through to `ops`, so all
@@ -1098,7 +1920,71 @@ pub(crate) fn apply_binary(
     {
         return Ok(result);
     }
+    // Every geometric operator is resolved by the EXACT (operator, left type,
+    // right type) triple PostgreSQL declares, so this claims nothing but a
+    // geometric operand pair and the families below keep their spellings.
+    //
+    // The operand test is written out here rather than left to the callee: this
+    // is a PER-ROW path, and hoisting it keeps a row of integers to two inlined
+    // discriminant comparisons with no call at all.
+    if (is_geometric_datum(l) || is_geometric_datum(r))
+        && let Some(result) = apply_geometric_operator(op, l, r)
+    {
+        return result;
+    }
+    // `<<`, `>>`, `&&`, `&`, `|`, `+` and `-` are shared with the bitwise,
+    // range and arithmetic families; a network operand is what selects the
+    // inet/cidr meaning, so this must run before the `match` below claims them.
+    if let Some(result) = crate::network_fn::apply_network_operator(op, l, r)? {
+        return Ok(result);
+    }
+    // `||`, `&`, `|`, `#`, `<<` and `>>` are shared with the string, bitwise
+    // and network families; a bit-string operand is what selects this meaning,
+    // so this must run before the `match` below claims them.
+    if let Some(result) = crate::bit_fn::apply_bit_operator(op, l, r)? {
+        return Ok(result);
+    }
+    // `money` shares `+ - * /` with the numeric family, so a `money` operand is
+    // what selects the cash arithmetic — including its truncating integer
+    // division, which the numeric rules would otherwise round.
+    if let Some(result) = crate::money_fn::apply_money_operator(op, l, r)? {
+        return Ok(result);
+    }
+    // `pg_lsn` shares `+` and `-` with the numeric family, and its `-` against
+    // another `pg_lsn` leaves the type entirely (it is a `numeric` byte count),
+    // so a `pg_lsn` operand has to select this meaning before the numeric rules
+    // below claim it.
+    if let Some(result) = crate::sysid_fn::apply_sysid_operator(op, l, r)? {
+        return Ok(result);
+    }
+    // A `json` operand has to be turned away from every family below before one
+    // of them claims it: `ops::compare` would order two documents as text and
+    // `ops::sub` would report a 42804 where PostgreSQL reports a 42883.
+    if let Some(error) = json_operator_rejection(op, l, r) {
+        return Err(error);
+    }
     match op {
+        // `<<=` / `>>=` exist only for the network family, so anything that
+        // reaches here is a type error rather than another overload.
+        BinaryOp::ContainedByOrEq | BinaryOp::ContainsOrEq => {
+            if l.is_null() || r.is_null() {
+                Ok(Datum::Null)
+            } else {
+                Err(undefined_operator_for(op, l, r))
+            }
+        }
+        BinaryOp::Add if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
+            let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Range(crabka_pgtypes::range::union(a, b)?))
+        }
+        BinaryOp::Add if matches!((l, r), (Datum::Multirange(_), Datum::Multirange(_))) => {
+            let (Datum::Multirange(a), Datum::Multirange(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Multirange(crabka_pgtypes::multirange::union(a, b)?))
+        }
         BinaryOp::Add => Ok(ops::add(l, r)?),
         // jsonb `-` (delete a key, an index, or a set of keys) overloads the
         // arithmetic `-`; a jsonb LEFT operand is what selects it, so every
@@ -1106,7 +1992,35 @@ pub(crate) fn apply_binary(
         BinaryOp::Sub if matches!(l, Datum::Jsonb(_)) => {
             json_fn::eval_json_operator(JsonOp::Delete, l, r)
         }
+        BinaryOp::Sub if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
+            let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Range(crabka_pgtypes::range::difference(a, b)?))
+        }
+        BinaryOp::Sub if matches!((l, r), (Datum::Multirange(_), Datum::Multirange(_))) => {
+            let (Datum::Multirange(a), Datum::Multirange(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Multirange(crabka_pgtypes::multirange::difference(
+                a, b,
+            )?))
+        }
         BinaryOp::Sub => Ok(ops::sub(l, r)?),
+        BinaryOp::Mul if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
+            let (Datum::Range(a), Datum::Range(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Range(crabka_pgtypes::range::intersection(a, b)?))
+        }
+        BinaryOp::Mul if matches!((l, r), (Datum::Multirange(_), Datum::Multirange(_))) => {
+            let (Datum::Multirange(a), Datum::Multirange(b)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Multirange(crabka_pgtypes::multirange::intersection(
+                a, b,
+            )?))
+        }
         BinaryOp::Mul => Ok(ops::mul(l, r)?),
         BinaryOp::Div => Ok(ops::div(l, r)?),
         BinaryOp::And => Ok(ops::and(l, r)?),
@@ -1141,7 +2055,12 @@ pub(crate) fn apply_binary(
         BinaryOp::JsonPathMatch => json_fn::eval_json_operator(JsonOp::PathMatch, l, r),
         // `@>` / `<@` are defined for BOTH jsonb and arrays.
         BinaryOp::Contains | BinaryOp::ContainedBy => apply_containment(op, l, r),
-        // `&&` is array-only; `array_overlap` already yields NULL for a NULL side.
+        BinaryOp::Overlaps if matches!((l, r), (Datum::Range(_), Datum::Range(_))) => {
+            let (Datum::Range(left), Datum::Range(right)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::Bool(crabka_pgtypes::range::overlaps(left, right)?))
+        }
         BinaryOp::Overlaps if matches!((l, r), (Datum::TsQuery(_), Datum::TsQuery(_))) => {
             let (Datum::TsQuery(left), Datum::TsQuery(right)) = (l, r) else {
                 unreachable!()
@@ -1151,7 +2070,49 @@ pub(crate) fn apply_binary(
                 Box::new(right.clone()),
             )))
         }
-        BinaryOp::Overlaps => array_fn::array_overlap(l, r),
+        BinaryOp::Overlaps if l.is_null() || r.is_null() => Ok(Datum::Null),
+        BinaryOp::Overlaps => match (l, r) {
+            (Datum::Range(range), Datum::Multirange(multirange))
+            | (Datum::Multirange(multirange), Datum::Range(range)) => Ok(Datum::Bool(
+                crabka_pgtypes::multirange::overlaps_range(multirange, range)?,
+            )),
+            (Datum::Multirange(left), Datum::Multirange(right)) => Ok(Datum::Bool(
+                crabka_pgtypes::multirange::overlaps(left, right)?,
+            )),
+            _ => array_fn::array_overlap(l, r),
+        },
+        BinaryOp::Same
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::Adjacent
+        | BinaryOp::Shl
+        | BinaryOp::Shr
+            if matches!(l, Datum::Range(_) | Datum::Multirange(_))
+                && matches!(r, Datum::Range(_) | Datum::Multirange(_)) =>
+        {
+            Ok(Datum::Bool(apply_range_directional(op, l, r)?))
+        }
+        BinaryOp::Same
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::Adjacent => {
+            if l.is_null() || r.is_null() {
+                Ok(Datum::Null)
+            } else {
+                Err(undefined_operator_for(op, l, r))
+            }
+        }
+        // `<->` is the tsquery phrase operator and the geometric distance
+        // operator; the operand types pick the overload, and the geometric one
+        // was already claimed by `apply_geometric_operator` above.
         BinaryOp::Phrase => match (l, r) {
             (Datum::TsQuery(left), Datum::TsQuery(right)) => Ok(Datum::TsQuery(
                 crabka_pgtypes::TsQuery::Phrase(Box::new(left.clone()), Box::new(right.clone()), 1),
@@ -1159,6 +2120,21 @@ pub(crate) fn apply_binary(
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
             _ => Err(undefined_operator_for(op, l, r)),
         },
+        // The seven operators PostgreSQL declares for geometry ALONE. Anything
+        // reaching here had no geometric operand, so there is no overload left.
+        BinaryOp::ClosestPoint
+        | BinaryOp::Intersects
+        | BinaryOp::Horizontal
+        | BinaryOp::Perpendicular
+        | BinaryOp::Parallel
+        | BinaryOp::BelowEq
+        | BinaryOp::AboveEq => {
+            if l.is_null() || r.is_null() {
+                Ok(Datum::Null)
+            } else {
+                Err(undefined_operator_for(op, l, r))
+            }
+        }
         BinaryOp::Match | BinaryOp::MatchCi | BinaryOp::NotMatch | BinaryOp::NotMatchCi => {
             apply_regex_match(op, l, r)
         }
@@ -1170,22 +2146,98 @@ pub(crate) fn apply_binary(
         // Null-safe (in)equality: two NULLs are not distinct, a NULL and a
         // non-NULL are, and the result is never NULL.
         BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => {
+            if let Some(equal) = runtime_equality_short_circuit(l, r) {
+                let distinct = !equal;
+                return Ok(Datum::Bool(distinct ^ (op == BinaryOp::IsNotDistinctFrom)));
+            }
+            // Both forms are resolved through the type's `=`, so a geometric
+            // operand with no equality operator is named that way — which
+            // `require_runtime_equality` does for every construct that expands
+            // into an equality.
+            require_runtime_equality(l, r)?;
             let distinct = rowexpr::is_distinct(l, r)?;
             Ok(Datum::Bool(distinct ^ (op == BinaryOp::IsNotDistinctFrom)))
         }
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            if (is_geometric_datum(l) || is_geometric_datum(r))
+                && let Some(result) = apply_geometric_comparison(op, l, r)
+            {
+                return result;
+            }
+            if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+                if let Some(equal) = runtime_equality_short_circuit(l, r) {
+                    return Ok(Datum::Bool(equal ^ (op == BinaryOp::Ne)));
+                }
+                require_runtime_equality(l, r)?;
+            } else {
+                require_runtime_comparison(l, r)?;
+            }
             let ord = ops::compare(l, r)?;
             Ok(cmp_result(op, ord))
         }
     }
 }
 
-/// `@>` / `<@`, where the operand values pick the jsonb or the array family.
-///
-/// The static types already agreed at plan time. Both families are strict, so
-/// two SQL NULLs need no family at all.
+/// `@>` / `<@`: the operand values pick the jsonb, array, range, or text-search
+/// family (the static types already agreed at plan time). Every family is
+/// strict, so a SQL NULL operand produces SQL NULL before runtime dispatch.
 fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
+    if l.is_null() || r.is_null() {
+        return Ok(Datum::Null);
+    }
     let contains = op == BinaryOp::Contains;
+    if let (Datum::Range(left), Datum::Range(right)) = (l, r) {
+        return Ok(Datum::Bool(if contains {
+            crabka_pgtypes::range::contains_range(left, right)?
+        } else {
+            crabka_pgtypes::range::contains_range(right, left)?
+        }));
+    }
+    match (l, r, contains) {
+        (Datum::Range(range), Datum::Multirange(multirange), true)
+        | (Datum::Multirange(multirange), Datum::Range(range), false) => {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::range_contains(
+                range, multirange,
+            )?));
+        }
+        (Datum::Multirange(multirange), Datum::Range(range), true)
+        | (Datum::Range(range), Datum::Multirange(multirange), false) => {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::contains_range(
+                multirange, range,
+            )?));
+        }
+        (Datum::Multirange(left), Datum::Multirange(right), true) => {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::contains(
+                left, right,
+            )?));
+        }
+        (Datum::Multirange(left), Datum::Multirange(right), false) => {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::contains(
+                right, left,
+            )?));
+        }
+        _ => {}
+    }
+    if contains {
+        if let Datum::Range(range) = l {
+            return Ok(Datum::Bool(crabka_pgtypes::range::contains_element(
+                range, r,
+            )?));
+        }
+        if let Datum::Multirange(multirange) = l {
+            return Ok(Datum::Bool(crabka_pgtypes::multirange::contains_element(
+                multirange, r,
+            )?));
+        }
+    } else if let Datum::Range(range) = r {
+        return Ok(Datum::Bool(crabka_pgtypes::range::contains_element(
+            range, l,
+        )?));
+    } else if let Datum::Multirange(multirange) = r {
+        return Ok(Datum::Bool(crabka_pgtypes::multirange::contains_element(
+            multirange, l,
+        )?));
+    }
     if matches!(l, Datum::Jsonb(_)) || matches!(r, Datum::Jsonb(_)) {
         let json_op = if contains {
             JsonOp::Contains
@@ -1194,7 +2246,9 @@ fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecEr
         };
         return json_fn::eval_json_operator(json_op, l, r);
     }
-    if matches!(l, Datum::Array(_)) || matches!(r, Datum::Array(_)) {
+    if matches!(l, Datum::Array(_) | Datum::OidVector(_))
+        || matches!(r, Datum::Array(_) | Datum::OidVector(_))
+    {
         return if contains {
             array_fn::array_contains(l, r)
         } else {
@@ -1214,6 +2268,65 @@ fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecEr
     Err(undefined_operator_for(op, l, r))
 }
 
+fn apply_range_directional(op: BinaryOp, l: &Datum, r: &Datum) -> Result<bool, ExecError> {
+    type RangeRelation = fn(
+        &crabka_pgtypes::RangeValue,
+        &crabka_pgtypes::RangeValue,
+    ) -> Result<bool, crabka_pgtypes::TypeError>;
+    let (left_last, right_last, relation): (bool, bool, RangeRelation) = match op {
+        BinaryOp::DoesNotExtendRight => (
+            true,
+            true,
+            crabka_pgtypes::range::does_not_extend_right as _,
+        ),
+        BinaryOp::DoesNotExtendLeft => (
+            false,
+            false,
+            crabka_pgtypes::range::does_not_extend_left as _,
+        ),
+        BinaryOp::Shl => (true, false, crabka_pgtypes::range::strictly_left as _),
+        BinaryOp::Shr => (false, true, crabka_pgtypes::range::strictly_right as _),
+        BinaryOp::Adjacent => {
+            if let (Datum::Multirange(multirange), Datum::Range(range))
+            | (Datum::Range(range), Datum::Multirange(multirange)) = (l, r)
+            {
+                return Ok(crabka_pgtypes::multirange::adjacent_range(
+                    multirange, range,
+                )?);
+            }
+            let Some(left_first) = range_boundary(l, false) else {
+                return Ok(false);
+            };
+            let Some(left_last) = range_boundary(l, true) else {
+                return Ok(false);
+            };
+            let Some(right_first) = range_boundary(r, false) else {
+                return Ok(false);
+            };
+            let Some(right_last) = range_boundary(r, true) else {
+                return Ok(false);
+            };
+            return Ok(crabka_pgtypes::range::adjacent(left_last, right_first)?
+                || crabka_pgtypes::range::adjacent(left_first, right_last)?);
+        }
+        _ => unreachable!(),
+    };
+    let (Some(left), Some(right)) = (range_boundary(l, left_last), range_boundary(r, right_last))
+    else {
+        return Ok(false);
+    };
+    Ok(relation(left, right)?)
+}
+
+fn range_boundary(value: &Datum, last: bool) -> Option<&crabka_pgtypes::RangeValue> {
+    match value {
+        Datum::Range(range) if !range.empty => Some(range),
+        Datum::Multirange(multirange) if last => multirange.ranges.last(),
+        Datum::Multirange(multirange) => multirange.ranges.first(),
+        _ => None,
+    }
+}
+
 /// Which of PostgreSQL's concatenation operators a `||` resolves to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConcatKind {
@@ -1228,6 +2341,9 @@ enum ConcatKind {
     TsVector,
     /// `tsquery || tsquery` (boolean OR).
     TsQuery,
+    /// `bitcat` — `bit varying || bit varying`, which `bit` reaches through its
+    /// binary coercion and whose result is always `bit varying`.
+    BitString,
 }
 
 /// Resolve `left || right` from the operands' STATIC types.
@@ -1245,12 +2361,11 @@ fn resolve_concat(
 }
 
 /// This codebase types a bare `NULL` literal as `text`, but PostgreSQL resolves
-/// the literal's `unknown` type against the other operand.
-///
-/// That matters for `||`. `ARRAY[1,2] || NULL` must pick `array_cat`, which
-/// gives `{1,2}`, and must not pick `array_append`, which would give
-/// `{1,2,NULL}`. Only jsonb and arrays adopt, because they are the two families
-/// whose `||` a text fallback would take.
+/// the literal's `unknown` type against the other operand. That matters for `||`:
+/// `ARRAY[1,2] || NULL` must pick `array_cat` (yielding `{1,2}`), not
+/// `array_append` (which would yield `{1,2,NULL}`). Only the two families whose
+/// `||` a text fallback would silently steal — jsonb and arrays — are adopted.
+/// `json` has no `||`, so there is nothing for a literal beside one to steal.
 fn adopt_null_literal_type(
     left: &Expr,
     right: &Expr,
@@ -1261,7 +2376,8 @@ fn adopt_null_literal_type(
         matches!(
             t,
             ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery
-        ) || t.array_element().is_some()
+        ) || crate::bit_fn::is_bit_type(t)
+            || t.array_element().is_some()
     };
     if matches!(left, Expr::NullLiteral) && adopts(rt) {
         (rt, rt)
@@ -1275,14 +2391,11 @@ fn adopt_null_literal_type(
 /// PostgreSQL leaves a bare string literal `unknown` and resolves it against the
 /// other operand. This codebase types it `text` at once.
 ///
-/// Adopt it into `jsonb` when the other side is jsonb, so `j @> '{"a":1}'` and
-/// `j || '{"b":2}'` mean what they do in PostgreSQL. Without this, `||` is the
-/// dangerous case. A jsonb/text pair falls through to *string* concatenation
-/// and returns a plausible-looking wrong answer instead of a merge.
-///
-/// This adoption is deliberately jsonb-only. An array must NOT adopt, because
-/// PostgreSQL's `anyarray || anyelement` is what makes `ARRAY['a'] || 'b'`
-/// append `'b'` as an element instead of concatenating two arrays.
+/// Deliberately jsonb-only. An array must NOT adopt, because PostgreSQL's
+/// `anyarray || anyelement` is what makes `ARRAY['a'] || 'b'` append `'b'` as an
+/// element rather than concatenating two arrays. `json` must not adopt either,
+/// and for the opposite reason: it has no `||` of its own, so `j || 'b'` is
+/// `anynonarray || text` and really does concatenate the document's text.
 fn adopt_string_literal_type(
     left: &Expr,
     right: &Expr,
@@ -1293,7 +2406,7 @@ fn adopt_string_literal_type(
     let adopts = |t: ColumnType| {
         matches!(
             t,
-            ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery
+            ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery | ColumnType::Range(_)
         )
     };
     if untyped(left) && adopts(rt) {
@@ -1317,6 +2430,12 @@ fn adopt_json_operand_types(
     lt: ColumnType,
     rt: ColumnType,
 ) -> (ColumnType, ColumnType) {
+    if lt == ColumnType::Jsonb
+        && matches!(op, BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch)
+        && is_unknown_literal(right)
+    {
+        return (lt, ColumnType::JsonPath);
+    }
     // The array containment/overlap operators have no text overload, so an
     // `unknown` literal on either side adopts the other's array type — which is
     // what makes `array_shuffle(a) <@ '{1,2,3}'` resolve in PostgreSQL.
@@ -1324,12 +2443,52 @@ fn adopt_json_operand_types(
         op,
         BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps
     ) {
+        // A bare NULL is PostgreSQL's `unknown`, so the other operand selects
+        // the containment family before strict evaluation returns NULL. Typed
+        // NULLs deliberately do not adopt: their declared type participates in
+        // operator lookup and can make the pair invalid.
+        if matches!(left, Expr::NullLiteral) {
+            return (rt, rt);
+        }
+        if matches!(right, Expr::NullLiteral) {
+            return (lt, lt);
+        }
         if matches!(right, Expr::StringLiteral(_)) && lt.array_element().is_some() {
             return (lt, lt);
         }
         if matches!(left, Expr::StringLiteral(_)) && rt.array_element().is_some() {
             return (rt, rt);
         }
+        if matches!(right, Expr::StringLiteral(_)) && matches!(lt, ColumnType::Range(_)) {
+            return (lt, lt);
+        }
+        if matches!(left, Expr::StringLiteral(_)) && matches!(rt, ColumnType::Range(_)) {
+            return (rt, rt);
+        }
+        if let ColumnType::Multirange(_) = lt
+            && matches!(right, Expr::StringLiteral(_))
+        {
+            return (lt, lt);
+        }
+        if let ColumnType::Multirange(_) = rt
+            && matches!(left, Expr::StringLiteral(_))
+        {
+            return (rt, rt);
+        }
+    }
+    // `json` resolves a literal for its two PATH operators only. Its `->` and
+    // `->>` take `text` (which the literal already is) or `integer`, and it has
+    // no `@>`, `?|`, `?&`, `@?` or `@@` for a literal to adopt a type for — so
+    // the literal stays `text` and the operator does not resolve, which is
+    // exactly PostgreSQL's outcome.
+    if matches!(right, Expr::StringLiteral(_)) && lt == ColumnType::Json {
+        let expected = match op {
+            BinaryOp::JsonGetPath | BinaryOp::JsonGetPathText => {
+                ColumnType::array_of(ColumnType::Text)
+            }
+            _ => None,
+        };
+        return (lt, expected.unwrap_or(rt));
     }
     if !matches!(right, Expr::StringLiteral(_)) || lt != ColumnType::Jsonb {
         return adopt_string_literal_type(left, right, lt, rt);
@@ -1340,6 +2499,7 @@ fn adopt_json_operand_types(
         | BinaryOp::KeyExistsAny
         | BinaryOp::KeyExistsAll => ColumnType::array_of(ColumnType::Text),
         BinaryOp::Contains | BinaryOp::ContainedBy => Some(ColumnType::Jsonb),
+        BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch => Some(ColumnType::JsonPath),
         _ => None,
     };
     (lt, expected.unwrap_or(rt))
@@ -1463,7 +2623,7 @@ pub(crate) fn coerce_unknown_args(
         if v.is_null() || v.column_type() == Some(ty) {
             continue;
         }
-        *v = crabka_pgtypes::cast::cast(v, ty, &ctx.time_zone)?;
+        *v = cast_value(v, ty, &ctx.time_zone)?;
     }
     Ok(())
 }
@@ -1556,6 +2716,10 @@ fn comparison_category(ty: ColumnType) -> Option<ComparisonFamily> {
         ColumnType::Time | ColumnType::Timetz => Some(ComparisonFamily::TimeOfDay),
         ColumnType::Bool => Some(ComparisonFamily::Boolean),
         ColumnType::Jsonb => Some(ComparisonFamily::Json),
+        // `json` is deliberately absent — it is not a *family* of one, it has
+        // no comparison operator at all. Putting it here would say
+        // `json = jsonb` resolves; [`reject_uncomparable_comparison`] turns
+        // every comparison over it away before this is consulted.
         _ => None,
     }
 }
@@ -1565,11 +2729,68 @@ pub(crate) fn is_unknown_literal(e: &Expr) -> bool {
     matches!(e, Expr::StringLiteral(_) | Expr::NullLiteral)
 }
 
-/// PostgreSQL's 42804 for a polymorphic parameter, `anyarray` or `anyelement`,
-/// that nothing in the call resolves.
+/// The array element type an `IN` list resolves its `unknown` literals through,
+/// or `None` when the list resolves each literal against the operand one `=` at
+/// a time.
 ///
-/// Every argument that could resolve it is an `unknown` literal, as in
-/// `cardinality('{1,2}')` and `to_jsonb('a')`.
+/// `PostgreSQL` has two spellings for `IN` and picks between them in
+/// `transformAExprIn`. With more than one right-hand item free of `Var`s it
+/// builds `x = ANY (ARRAY[…])`, whose element type is `select_common_type` over
+/// the operand and the whole list; each `unknown` literal then reaches that type
+/// through the type's own INPUT function. With one such item or none it builds
+/// an OR-chain of `=` instead, and each literal reaches only the type the `=`
+/// operator declares.
+///
+/// The two answers differ for the `reg*` family alone, because its equality is
+/// `oideq` over the *oid* the value is binary-coercible to. Measured on 18.4:
+/// `'pg_class'::regclass IN ('pg_class', 'pg_type')` is true, while
+/// `'pg_class'::regclass = 'pg_class'`, `… IN ('pg_class')` and
+/// `… NOT IN ('pg_type')` all raise `invalid input syntax for type oid`. Every
+/// other type crabka resolves a literal against declares its equality over
+/// itself, so both rules land on the same type and this returns `None`.
+pub(crate) fn in_list_element_type(
+    operand: &Expr,
+    list: &[Expr],
+    scope: &Scope,
+) -> Result<Option<ColumnType>, ExecError> {
+    if list.iter().filter(|item| !reads_a_column(item)).count() < 2 {
+        return Ok(None);
+    }
+    let operand_type = infer_type(operand, scope)?;
+    Ok(crate::reg_fn::RegKind::of(operand_type).map(|_| operand_type))
+}
+
+/// Whether `expr` reads a column, which is `PostgreSQL`'s `contain_vars_of_level`
+/// test for whether an `IN`-list item counts towards the array form.
+fn reads_a_column(expr: &Expr) -> bool {
+    let mut found = false;
+    crate::grouping::visit_expr(expr, &mut |node| {
+        found |= matches!(node, Expr::Column { .. });
+    });
+    found
+}
+
+/// The operand types an operator resolves against, with a bare `unknown`
+/// literal's placeholder `text` replaced by its sibling's type. This is what
+/// keeps `1 + '1'` an `integer` sum rather than widening through an unresolved
+/// `text` operand. Two bare literals resolve each other to nothing, so the pair
+/// is returned unchanged and the caller's own `unknown`/`text` rule applies.
+fn adopt_unknown_literal_types(
+    left: &Expr,
+    right: &Expr,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> (ColumnType, ColumnType) {
+    match (is_unknown_literal(left), is_unknown_literal(right)) {
+        (true, false) => (rt, rt),
+        (false, true) => (lt, lt),
+        _ => (lt, rt),
+    }
+}
+
+/// PostgreSQL's 42804 for a polymorphic parameter (`anyarray`, `anyelement`)
+/// that nothing in the call resolves, because every argument that could have is
+/// an `unknown` literal — `cardinality('{1,2}')`, `to_jsonb('a')`.
 pub(crate) fn undetermined_polymorphic_type() -> ExecError {
     ExecError::TypeMismatch(
         "could not determine polymorphic type because input has type unknown".into(),
@@ -1591,6 +2812,12 @@ fn concat_kind(lt: ColumnType, rt: ColumnType) -> Option<(ConcatKind, ColumnType
     if lt == ColumnType::Jsonb && rt == ColumnType::Jsonb {
         return Some((ConcatKind::Jsonb, ColumnType::Jsonb));
     }
+    // `bitcat` must be reached before the text fallback below: `bit || bit`
+    // has no text operand at all, and a bit string beside an `unknown` literal
+    // resolves to `bitcat` rather than to string concatenation.
+    if crate::bit_fn::is_bit_type(lt) && crate::bit_fn::is_bit_type(rt) {
+        return Some((ConcatKind::BitString, ColumnType::VarBit(None)));
+    }
     if let (Some(form), Some(ty)) = (
         array_fn::concat_form(lt, rt),
         array_fn::concat_result_type(lt, rt),
@@ -1606,6 +2833,11 @@ fn concat_kind(lt: ColumnType, rt: ColumnType) -> Option<(ConcatKind, ColumnType
 
 fn apply_concat(kind: ConcatKind, l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     match kind {
+        ConcatKind::BitString => match (l, r) {
+            (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
+            _ => crate::bit_fn::apply_bit_operator(BinaryOp::Concat, l, r)?
+                .ok_or_else(|| undefined_operator_for(BinaryOp::Concat, l, r)),
+        },
         ConcatKind::Text => Ok(ops::concat(l, r, ctx.output_style())?),
         ConcatKind::Jsonb => json_fn::eval_json_operator(JsonOp::Concat, l, r),
         ConcatKind::Array(form) => array_fn::array_concat(form, l, r, ctx),
@@ -1639,6 +2871,14 @@ fn apply_text_search_match(l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result<Datum,
                     .expect("registered GUC has a value");
             crate::text_search_fn::to_tsvector(&config, text, ctx.catalog())?.matches(query)
         }
+        (Datum::Text(document), Datum::Text(query)) => {
+            let config =
+                crate::session::current_setting_runtime("default_text_search_config", false)?
+                    .expect("registered GUC has a value");
+            let vector = crate::text_search_fn::to_tsvector(&config, document, ctx.catalog())?;
+            let query = crate::text_search_fn::plain_query(&config, query, false, ctx.catalog())?;
+            vector.matches(&query)
+        }
         _ => return Err(undefined_operator_for(BinaryOp::JsonPathMatch, l, r)),
     };
     Ok(Datum::Bool(matches))
@@ -1662,9 +2902,750 @@ fn json_op_of(op: BinaryOp) -> Option<JsonOp> {
     })
 }
 
-/// A binary operator's SQL spelling, for error messages.
-fn op_spelling(op: BinaryOp) -> &'static str {
+/// One of `PostgreSQL`'s seven geometric types, as an operator-resolution key.
+///
+/// `pg_operator` declares the geometric operators pair by pair — `box <-> lseg`
+/// exists and `box <-> circle` does not — so resolving one means naming both
+/// operand types exactly, not asking whether each is "geometric enough".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeoType {
+    Point,
+    Box,
+    Circle,
+    Line,
+    Lseg,
+    Path,
+    Polygon,
+}
+
+impl GeoType {
+    fn of_column(ty: ColumnType) -> Option<Self> {
+        Some(match ty {
+            ColumnType::Point => Self::Point,
+            ColumnType::Box => Self::Box,
+            ColumnType::Circle => Self::Circle,
+            ColumnType::Line => Self::Line,
+            ColumnType::Lseg => Self::Lseg,
+            ColumnType::Path => Self::Path,
+            ColumnType::Polygon => Self::Polygon,
+            _ => return None,
+        })
+    }
+
+    fn of_datum(value: &Datum) -> Option<Self> {
+        Some(match value {
+            Datum::Point(_) => Self::Point,
+            Datum::Box(_) => Self::Box,
+            Datum::Circle(_) => Self::Circle,
+            Datum::Line(_) => Self::Line,
+            Datum::Lseg(_) => Self::Lseg,
+            Datum::Path(_) => Self::Path,
+            Datum::Polygon(_) => Self::Polygon,
+            _ => return None,
+        })
+    }
+}
+
+/// Is this one of the seven geometric types?
+fn is_geometric_type(ty: ColumnType) -> bool {
+    GeoType::of_column(ty).is_some()
+}
+
+/// Is this value one of the seven geometric types? A single discriminant test,
+/// and the guard [`apply_binary`] inlines at its own call site so a row with no
+/// geometric operand never enters (or even calls into) the geometric dispatch.
+#[inline]
+fn is_geometric_datum(value: &Datum) -> bool {
+    matches!(
+        value,
+        Datum::Point(_)
+            | Datum::Box(_)
+            | Datum::Circle(_)
+            | Datum::Line(_)
+            | Datum::Lseg(_)
+            | Datum::Path(_)
+            | Datum::Polygon(_)
+    )
+}
+
+/// The operators `PostgreSQL` gives a geometric overload. `=`, `<>` and the
+/// four orderings are deliberately absent: they are declared type by type over
+/// a *different* table and answered by [`apply_geometric_comparison`].
+fn is_geometric_operator(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::BitXor
+            | BinaryOp::ClosestPoint
+            | BinaryOp::Overlaps
+            | BinaryOp::DoesNotExtendRight
+            | BinaryOp::DoesNotExtendLeft
+            | BinaryOp::DoesNotExtendAbove
+            | BinaryOp::DoesNotExtendBelow
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Phrase
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::StrictlyBelow
+            | BinaryOp::StrictlyAbove
+            | BinaryOp::Contains
+            | BinaryOp::ContainedBy
+            | BinaryOp::BelowEq
+            | BinaryOp::AboveEq
+            | BinaryOp::Intersects
+            | BinaryOp::Horizontal
+            | BinaryOp::KeyExistsAny
+            | BinaryOp::Perpendicular
+            | BinaryOp::Parallel
+            | BinaryOp::Same
+    )
+}
+
+/// The type an `unknown` literal adopts beside a geometric operand, or `None`
+/// when nothing resolves it. `PostgreSQL` runs full operator resolution here;
+/// this reproduces the cases where exactly one candidate survives, so
+/// `p.f1 << '(0,0)'` picks `point << point` and `b.f1 + '(1,2)'` picks
+/// `box + point` rather than a second box.
+fn geometric_literal_type(op: BinaryOp, sibling: ColumnType) -> Option<ColumnType> {
+    let geo = GeoType::of_column(sibling)?;
+    Some(match op {
+        // `path + path` is `path_add`, an exact match beside a path; every
+        // other geometric arithmetic operator's only partner is a point.
+        BinaryOp::Add if geo == GeoType::Path => ColumnType::Path,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => ColumnType::Point,
+        // The same-type operators, where the sibling's own type is the only
+        // candidate — plus the comparisons, which are same-type throughout.
+        BinaryOp::Shl
+        | BinaryOp::Shr
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow
+        | BinaryOp::Overlaps
+        | BinaryOp::Same
+        | BinaryOp::BitXor
+        | BinaryOp::Intersects
+        | BinaryOp::Horizontal
+        | BinaryOp::KeyExistsAny
+        | BinaryOp::Perpendicular
+        | BinaryOp::Parallel
+        | BinaryOp::BelowEq
+        | BinaryOp::AboveEq
+        | BinaryOp::Contains
+        | BinaryOp::ContainedBy
+        | BinaryOp::Phrase
+        | BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge => sibling,
+        // `##` has two candidates beside every operand it takes, and
+        // PostgreSQL calls that ambiguous rather than picking one.
+        _ => return None,
+    })
+}
+
+/// The result type when a geometric operator has one bare `unknown` literal.
+/// PostgreSQL resolves the literal from its sibling, so `p.f1 << '(0,0)'` picks
+/// the `point` operator; the literal's *value* is converted to the same type
+/// later, by `coerce_untyped_literal_operands`.
+fn geometric_literal_operator(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    scope: &Scope,
+) -> Result<Option<ColumnType>, ExecError> {
+    let unknown_left = is_unknown_literal(left);
+    if unknown_left == is_unknown_literal(right) {
+        return Ok(None);
+    }
+    let sibling = if unknown_left {
+        infer_type(right, scope)?
+    } else {
+        infer_type(left, scope)?
+    };
+    let Some(literal) = geometric_literal_type(op, sibling) else {
+        return Ok(None);
+    };
+    let (lt, rt) = if unknown_left {
+        (literal, sibling)
+    } else {
+        (sibling, literal)
+    };
+    Ok(geometric_operator_result_type(op, lt, rt))
+}
+
+/// The static result type of a geometric operator over the two operand types,
+/// or `None` when `pg_operator` declares no such pair. This is the plan-time
+/// twin of [`apply_geometric_operator`]; a test cross-checks that the two agree
+/// on every one of the 7×7 pairs for every operator.
+fn geometric_operator_result_type(
+    op: BinaryOp,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> Option<ColumnType> {
+    let (left, right) = (GeoType::of_column(lt)?, GeoType::of_column(rt)?);
+    geometric_pair_result(op, left, right)
+}
+
+/// `Some(result)` — or `Some(Err)` for an undeclared pair — when at least one
+/// operand of a geometric-capable operator is geometric, so the operator can
+/// only be the geometric one. `None` leaves the operator's other overloads
+/// (bitwise, network, range, jsonb, …) to the caller.
+fn geometric_operand_result(
+    op: BinaryOp,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> Option<Result<ColumnType, ExecError>> {
+    if !is_geometric_operator(op) || !(is_geometric_type(lt) || is_geometric_type(rt)) {
+        return None;
+    }
+    Some(
+        geometric_operator_result_type(op, lt, rt)
+            .ok_or_else(|| undefined_operator(op_spelling(op), lt, rt)),
+    )
+}
+
+/// The declared (operator, left, right) matrix, as `pg_operator` records it.
+fn geometric_pair_result(op: BinaryOp, left: GeoType, right: GeoType) -> Option<ColumnType> {
+    use GeoType::{Box, Circle, Line, Lseg, Path, Point, Polygon};
+    let pair = (left, right);
     match op {
+        // `#` — `box_intersect`, `line_interpt` and `lseg_interpt`.
+        BinaryOp::BitXor => match pair {
+            (Box, Box) => Some(ColumnType::Box),
+            (Line, Line) | (Lseg, Lseg) => Some(ColumnType::Point),
+            _ => None,
+        },
+        // `##` — the point of the RIGHT operand closest to the left one.
+        BinaryOp::ClosestPoint => matches!(
+            pair,
+            (Line, Lseg)
+                | (Lseg, Box)
+                | (Lseg, Lseg)
+                | (Point, Box)
+                | (Point, Line)
+                | (Point, Lseg)
+        )
+        .then_some(ColumnType::Point),
+        // `&&`, `&<`, `&>`, `&<|` and `|&>` — the five tests `point` has no
+        // spelling of.
+        BinaryOp::Overlaps
+        | BinaryOp::DoesNotExtendRight
+        | BinaryOp::DoesNotExtendLeft
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow => {
+            matches!(pair, (Box, Box) | (Circle, Circle) | (Polygon, Polygon))
+                .then_some(ColumnType::Bool)
+        }
+        // `<<`, `>>`, `<<|`, `|>>` and `~=` — the same four families plus
+        // `point`.
+        BinaryOp::Shl
+        | BinaryOp::Shr
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::Same => matches!(
+            pair,
+            (Box, Box) | (Circle, Circle) | (Point, Point) | (Polygon, Polygon)
+        )
+        .then_some(ColumnType::Bool),
+        // `<^` / `>^` — `box_below_eq` and `point_below`, which despite the
+        // shared spelling are not the same relation.
+        BinaryOp::BelowEq | BinaryOp::AboveEq => {
+            matches!(pair, (Box, Box) | (Point, Point)).then_some(ColumnType::Bool)
+        }
+        BinaryOp::Contains => matches!(
+            pair,
+            (Box, Box)
+                | (Box, Point)
+                | (Circle, Circle)
+                | (Circle, Point)
+                | (Path, Point)
+                | (Polygon, Point)
+                | (Polygon, Polygon)
+        )
+        .then_some(ColumnType::Bool),
+        // `<@` has four pairs `@>` has no commutator for — `lseg <@ box`,
+        // `lseg <@ line`, `point <@ line` and `point <@ lseg`.
+        BinaryOp::ContainedBy => matches!(
+            pair,
+            (Box, Box)
+                | (Circle, Circle)
+                | (Lseg, Box)
+                | (Lseg, Line)
+                | (Point, Box)
+                | (Point, Circle)
+                | (Point, Line)
+                | (Point, Lseg)
+                | (Point, Path)
+                | (Point, Polygon)
+                | (Polygon, Polygon)
+        )
+        .then_some(ColumnType::Bool),
+        BinaryOp::Intersects => matches!(
+            pair,
+            (Box, Box)
+                | (Line, Box)
+                | (Line, Line)
+                | (Lseg, Box)
+                | (Lseg, Line)
+                | (Lseg, Lseg)
+                | (Path, Path)
+        )
+        .then_some(ColumnType::Bool),
+        // `?-` and `?|` between two points ask whether they share a horizontal
+        // or a vertical; the same spellings are the prefix tests on a line.
+        BinaryOp::Horizontal | BinaryOp::KeyExistsAny => {
+            matches!(pair, (Point, Point)).then_some(ColumnType::Bool)
+        }
+        BinaryOp::Perpendicular | BinaryOp::Parallel => {
+            matches!(pair, (Line, Line) | (Lseg, Lseg)).then_some(ColumnType::Bool)
+        }
+        BinaryOp::Phrase => geometric_distance_pair(left, right).then_some(ColumnType::Float8),
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+            geometric_arithmetic_result(op, left, right)
+        }
+        _ => None,
+    }
+}
+
+/// The 24 pairs `<->` is declared over. Every other pair — `box <-> circle`
+/// and `point <-> path`'s missing siblings among them — is 42883, NOT the
+/// bounding-box distance that would otherwise answer them.
+fn geometric_distance_pair(left: GeoType, right: GeoType) -> bool {
+    use GeoType::{Box, Circle, Line, Lseg, Path, Point, Polygon};
+    matches!(
+        (left, right),
+        (Box, Box)
+            | (Box, Lseg)
+            | (Box, Point)
+            | (Circle, Circle)
+            | (Circle, Point)
+            | (Circle, Polygon)
+            | (Line, Line)
+            | (Line, Lseg)
+            | (Line, Point)
+            | (Lseg, Box)
+            | (Lseg, Line)
+            | (Lseg, Lseg)
+            | (Lseg, Point)
+            | (Path, Path)
+            | (Path, Point)
+            | (Point, Box)
+            | (Point, Circle)
+            | (Point, Line)
+            | (Point, Lseg)
+            | (Point, Path)
+            | (Point, Point)
+            | (Point, Polygon)
+            | (Polygon, Circle)
+            | (Polygon, Point)
+            | (Polygon, Polygon)
+    )
+}
+
+/// `+`, `-`, `*` and `/`. Every one translates (or rotates and scales) a shape
+/// by a POINT and keeps the shape's type; `path + path` alone concatenates.
+fn geometric_arithmetic_result(op: BinaryOp, left: GeoType, right: GeoType) -> Option<ColumnType> {
+    if op == BinaryOp::Add && (left, right) == (GeoType::Path, GeoType::Path) {
+        return Some(ColumnType::Path);
+    }
+    if right != GeoType::Point {
+        return None;
+    }
+    Some(match left {
+        GeoType::Box => ColumnType::Box,
+        GeoType::Circle => ColumnType::Circle,
+        GeoType::Path => ColumnType::Path,
+        GeoType::Point => ColumnType::Point,
+        // `lseg`, `line` and `polygon` have no arithmetic operator at all.
+        GeoType::Lseg | GeoType::Line | GeoType::Polygon => return None,
+    })
+}
+
+/// The bounding box a geometric operand compares as for the eight DIRECTIONAL
+/// positional tests, which is the one place `PostgreSQL` genuinely reduces to
+/// one: `box_left`, `circle_left` and `poly_left` are each written as a
+/// comparison of the operands' extents. A point bounds to itself.
+fn bounding_box(value: &Datum) -> Option<crabka_pgtypes::geometry::Box2> {
+    use crabka_pgtypes::geometry::Box2;
+    match value {
+        Datum::Point(point) => Some(Box2::of_point(*point)),
+        Datum::Box(value) => Some(*value),
+        Datum::Circle(circle) => Some(Box2::of_circle(*circle)),
+        Datum::Polygon(polygon) => Some(polygon.bounding_box()),
+        _ => None,
+    }
+}
+
+/// Every geometric operator except the comparisons, resolved EXACTLY by the
+/// (operator, left type, right type) triple `pg_operator` declares.
+///
+/// Returns `None` when neither operand is geometric, leaving the operator's
+/// bitwise / network / range / jsonb / text-search overloads to the caller —
+/// this runs early in [`apply_binary`], so it must claim nothing that is not
+/// geometric. A geometric operand with an undeclared partner is 42883 rather
+/// than a bounding-box approximation, and a NULL operand is SQL NULL.
+fn apply_geometric_operator(
+    op: BinaryOp,
+    left: &Datum,
+    right: &Datum,
+) -> Option<Result<Datum, ExecError>> {
+    if !is_geometric_operator(op) || !(is_geometric_datum(left) || is_geometric_datum(right)) {
+        return None;
+    }
+    // Every geometric operator is strict.
+    if left.is_null() || right.is_null() {
+        return Some(Ok(Datum::Null));
+    }
+    Some(
+        geometric_predicate(op, left, right)
+            .map(|held| Ok(Datum::Bool(held)))
+            .or_else(|| geometric_distance(op, left, right))
+            .or_else(|| geometric_construction(op, left, right).map(Ok))
+            .or_else(|| geometric_arithmetic(op, left, right))
+            .unwrap_or_else(|| Err(undefined_operator_for(op, left, right))),
+    )
+}
+
+/// The boolean-valued geometric operators.
+fn geometric_predicate(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    geometric_positional(op, left, right)
+        .or_else(|| geometric_containment(op, left, right))
+        .or_else(|| geometric_relation(op, left, right))
+}
+
+/// `~=`, `&&`, `<^`, `>^` and the eight directional tests.
+fn geometric_positional(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    match (op, left, right) {
+        // `~=` is structural for all four families it is declared over —
+        // `box_same` compares corners, not the areas `box_eq` compares.
+        (BinaryOp::Same, Datum::Box(a), Datum::Box(b)) => Some(a.same(*b)),
+        (BinaryOp::Same, Datum::Circle(a), Datum::Circle(b)) => Some(a.same(*b)),
+        (BinaryOp::Same, Datum::Point(a), Datum::Point(b)) => Some(a.eq_point(*b)),
+        (BinaryOp::Same, Datum::Polygon(a), Datum::Polygon(b)) => Some(a.same(b)),
+        // `&&` is a true overlap test, not a bounding-box one: `circle_overlap`
+        // measures centre distance against the radii.
+        (BinaryOp::Overlaps, Datum::Box(a), Datum::Box(b)) => Some(a.overlaps(*b)),
+        (BinaryOp::Overlaps, Datum::Circle(a), Datum::Circle(b)) => Some(a.overlaps(*b)),
+        (BinaryOp::Overlaps, Datum::Polygon(a), Datum::Polygon(b)) => Some(a.overlaps(b)),
+        // `<^` / `>^` are `box_below_eq` for boxes and the STRICT `point_below`
+        // for points, which is why they cannot share the box reduction.
+        (BinaryOp::BelowEq, Datum::Box(a), Datum::Box(b)) => Some(a.below_or_equal(*b)),
+        (BinaryOp::BelowEq, Datum::Point(a), Datum::Point(b)) => Some(a.is_below(*b)),
+        (BinaryOp::AboveEq, Datum::Box(a), Datum::Box(b)) => Some(a.above_or_equal(*b)),
+        (BinaryOp::AboveEq, Datum::Point(a), Datum::Point(b)) => Some(a.is_above(*b)),
+        _ => geometric_directional(op, left, right),
+    }
+}
+
+/// `<<`, `>>`, `<<|`, `|>>`, `&<`, `&>`, `&<|` and `|&>`.
+///
+/// `point` has only the four STRICT spellings; the four "does not extend"
+/// tests are declared for `box`, `circle` and `polygon` alone.
+fn geometric_directional(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    let strict = matches!(
+        op,
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::StrictlyBelow | BinaryOp::StrictlyAbove
+    );
+    let declared = match (left, right) {
+        (Datum::Box(_), Datum::Box(_))
+        | (Datum::Circle(_), Datum::Circle(_))
+        | (Datum::Polygon(_), Datum::Polygon(_)) => true,
+        (Datum::Point(_), Datum::Point(_)) => strict,
+        _ => false,
+    };
+    if !declared {
+        return None;
+    }
+    let (a, b) = (bounding_box(left)?, bounding_box(right)?);
+    Some(match op {
+        BinaryOp::Shl => a.strictly_left_of(b),
+        BinaryOp::Shr => a.strictly_right_of(b),
+        BinaryOp::StrictlyBelow => a.strictly_below(b),
+        BinaryOp::StrictlyAbove => a.strictly_above(b),
+        BinaryOp::DoesNotExtendRight => a.does_not_extend_right(b),
+        BinaryOp::DoesNotExtendLeft => a.does_not_extend_left(b),
+        BinaryOp::DoesNotExtendAbove => a.does_not_extend_above(b),
+        BinaryOp::DoesNotExtendBelow => a.does_not_extend_below(b),
+        _ => return None,
+    })
+}
+
+/// `@>` and `<@`. The two are NOT mirror images: `PostgreSQL` declares
+/// `lseg <@ box`, `lseg <@ line`, `point <@ line` and `point <@ lseg` with no
+/// commutator, so `box @> lseg` is 42883.
+fn geometric_containment(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    let contained_by = match op {
+        BinaryOp::Contains => false,
+        BinaryOp::ContainedBy => true,
+        _ => return None,
+    };
+    let (outer, inner) = if contained_by {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    Some(match (outer, inner) {
+        (Datum::Box(a), Datum::Box(b)) => a.contains(*b),
+        (Datum::Box(a), Datum::Point(p)) => a.contains_point(*p),
+        (Datum::Circle(a), Datum::Circle(b)) => a.contains(*b),
+        (Datum::Circle(a), Datum::Point(p)) => a.contains_point(*p),
+        (Datum::Path(a), Datum::Point(p)) => a.contains_point(*p),
+        (Datum::Polygon(a), Datum::Point(p)) => a.contains_point(*p),
+        (Datum::Polygon(a), Datum::Polygon(b)) => a.contains_polygon(b),
+        (Datum::Box(a), Datum::Lseg(s)) if contained_by => a.contains_lseg(*s),
+        (Datum::Line(a), Datum::Lseg(s)) if contained_by => a.contains_lseg(*s),
+        (Datum::Line(a), Datum::Point(p)) if contained_by => a.contains_point(*p),
+        (Datum::Lseg(a), Datum::Point(p)) if contained_by => a.contains_point(*p),
+        _ => return None,
+    })
+}
+
+/// `?#`, `?-`, `?|`, `?-|` and `?||`.
+fn geometric_relation(op: BinaryOp, left: &Datum, right: &Datum) -> Option<bool> {
+    match (op, left, right) {
+        (BinaryOp::Intersects, Datum::Box(a), Datum::Box(b)) => Some(a.overlaps(*b)),
+        (BinaryOp::Intersects, Datum::Line(a), Datum::Box(b)) => Some(a.intersects_box(*b)),
+        (BinaryOp::Intersects, Datum::Line(a), Datum::Line(b)) => Some(a.intersects(*b)),
+        (BinaryOp::Intersects, Datum::Lseg(s), Datum::Box(b)) => Some(b.intersects_lseg(*s)),
+        (BinaryOp::Intersects, Datum::Lseg(s), Datum::Line(a)) => Some(s.intersects_line(*a)),
+        (BinaryOp::Intersects, Datum::Lseg(a), Datum::Lseg(b)) => Some(a.intersects(*b)),
+        (BinaryOp::Intersects, Datum::Path(a), Datum::Path(b)) => Some(a.intersects(b)),
+        (BinaryOp::Horizontal, Datum::Point(a), Datum::Point(b)) => Some(a.is_horizontal_with(*b)),
+        (BinaryOp::KeyExistsAny, Datum::Point(a), Datum::Point(b)) => Some(a.is_vertical_with(*b)),
+        (BinaryOp::Perpendicular, Datum::Line(a), Datum::Line(b)) => {
+            Some(a.is_perpendicular_to(*b))
+        }
+        (BinaryOp::Perpendicular, Datum::Lseg(a), Datum::Lseg(b)) => {
+            Some(a.is_perpendicular_to(*b))
+        }
+        (BinaryOp::Parallel, Datum::Line(a), Datum::Line(b)) => Some(a.is_parallel_to(*b)),
+        (BinaryOp::Parallel, Datum::Lseg(a), Datum::Lseg(b)) => Some(a.is_parallel_to(*b)),
+        _ => None,
+    }
+}
+
+/// `<->` over the 24 pairs `pg_operator` declares. `path <-> path` and
+/// `polygon <-> polygon` are the two that can be NULL (an empty operand).
+fn geometric_distance(
+    op: BinaryOp,
+    left: &Datum,
+    right: &Datum,
+) -> Option<Result<Datum, ExecError>> {
+    if op != BinaryOp::Phrase {
+        return None;
+    }
+    let float = |value: f64| Some(Ok(Datum::Float8(value)));
+    let nullable = |value: Option<f64>| Some(Ok(value.map_or(Datum::Null, Datum::Float8)));
+    match (left, right) {
+        (Datum::Box(a), Datum::Box(b)) => float(a.distance(*b)),
+        (Datum::Box(a), Datum::Lseg(s)) | (Datum::Lseg(s), Datum::Box(a)) => {
+            float(a.distance_to_lseg(*s))
+        }
+        (Datum::Box(a), Datum::Point(p)) | (Datum::Point(p), Datum::Box(a)) => {
+            float(a.distance_to_point(*p))
+        }
+        (Datum::Circle(a), Datum::Circle(b)) => float(a.distance(*b)),
+        (Datum::Circle(a), Datum::Point(p)) | (Datum::Point(p), Datum::Circle(a)) => {
+            float(a.distance_to_point(*p))
+        }
+        (Datum::Circle(a), Datum::Polygon(g)) | (Datum::Polygon(g), Datum::Circle(a)) => {
+            float(a.distance_to_polygon(g))
+        }
+        (Datum::Line(a), Datum::Line(b)) => float(a.distance(*b)),
+        (Datum::Line(a), Datum::Lseg(s)) | (Datum::Lseg(s), Datum::Line(a)) => {
+            float(a.distance_to_lseg(*s))
+        }
+        (Datum::Line(a), Datum::Point(p)) | (Datum::Point(p), Datum::Line(a)) => {
+            float(a.distance_to_point(*p))
+        }
+        (Datum::Lseg(a), Datum::Lseg(b)) => float(a.distance(*b)),
+        (Datum::Lseg(s), Datum::Point(p)) | (Datum::Point(p), Datum::Lseg(s)) => {
+            float(s.distance_to_point(*p))
+        }
+        (Datum::Path(a), Datum::Path(b)) => nullable(a.distance(b)),
+        (Datum::Path(a), Datum::Point(p)) | (Datum::Point(p), Datum::Path(a)) => {
+            float(a.distance_to_point(*p))
+        }
+        (Datum::Point(a), Datum::Point(b)) => float(a.distance(*b)),
+        (Datum::Point(p), Datum::Polygon(g)) | (Datum::Polygon(g), Datum::Point(p)) => {
+            float(g.distance_to_point(*p))
+        }
+        (Datum::Polygon(a), Datum::Polygon(b)) => nullable(a.distance(b)),
+        _ => None,
+    }
+}
+
+/// `#` (the intersection of two boxes, lines or segments) and `##` (the point
+/// on the RIGHT operand closest to the left one). Both are NULL wherever the
+/// construction is undefined — disjoint boxes, parallel lines.
+fn geometric_construction(op: BinaryOp, left: &Datum, right: &Datum) -> Option<Datum> {
+    let point = match (op, left, right) {
+        (BinaryOp::BitXor, Datum::Box(a), Datum::Box(b)) => {
+            return Some(a.intersection(*b).map_or(Datum::Null, Datum::Box));
+        }
+        (BinaryOp::BitXor, Datum::Line(a), Datum::Line(b)) => a.intersection_point(*b),
+        (BinaryOp::BitXor, Datum::Lseg(a), Datum::Lseg(b)) => a.intersection_point(*b),
+        (BinaryOp::ClosestPoint, Datum::Line(a), Datum::Lseg(s)) => a.closest_point_to_lseg(*s),
+        (BinaryOp::ClosestPoint, Datum::Lseg(s), Datum::Box(b)) => b.closest_point_to_lseg(*s),
+        (BinaryOp::ClosestPoint, Datum::Lseg(a), Datum::Lseg(b)) => a.closest_point_to_lseg(*b),
+        (BinaryOp::ClosestPoint, Datum::Point(p), Datum::Box(b)) => b.closest_point_to(*p),
+        (BinaryOp::ClosestPoint, Datum::Point(p), Datum::Line(a)) => a.closest_point_to(*p),
+        (BinaryOp::ClosestPoint, Datum::Point(p), Datum::Lseg(s)) => s.closest_point_to(*p),
+        _ => return None,
+    };
+    Some(point.map_or(Datum::Null, Datum::Point))
+}
+
+/// `+`, `-`, `*` and `/`. `geometry.rs` already reports 22003 (overflow /
+/// underflow) and 22012 (division by zero) as a `TypeError`.
+fn geometric_arithmetic(
+    op: BinaryOp,
+    left: &Datum,
+    right: &Datum,
+) -> Option<Result<Datum, ExecError>> {
+    if !matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+    ) {
+        return None;
+    }
+    // `path + path` is `path_add`: plain concatenation, and NULL when either
+    // operand is a closed path.
+    if let (BinaryOp::Add, Datum::Path(a), Datum::Path(b)) = (op, left, right) {
+        return Some(Ok(a.concat(b).map_or(Datum::Null, Datum::Path)));
+    }
+    let Datum::Point(point) = right else {
+        return None;
+    };
+    let point = *point;
+    let value = match left {
+        Datum::Box(a) => match op {
+            BinaryOp::Add => a.add_point(point),
+            BinaryOp::Sub => a.sub_point(point),
+            BinaryOp::Mul => a.mul_point(point),
+            _ => a.div_point(point),
+        }
+        .map(Datum::Box),
+        Datum::Circle(a) => match op {
+            BinaryOp::Add => a.add_point(point),
+            BinaryOp::Sub => a.sub_point(point),
+            BinaryOp::Mul => a.mul_point(point),
+            _ => a.div_point(point),
+        }
+        .map(Datum::Circle),
+        Datum::Path(a) => match op {
+            BinaryOp::Add => a.add_point(point),
+            BinaryOp::Sub => a.sub_point(point),
+            BinaryOp::Mul => a.mul_point(point),
+            _ => a.div_point(point),
+        }
+        .map(Datum::Path),
+        Datum::Point(a) => match op {
+            BinaryOp::Add => a.add_point(point),
+            BinaryOp::Sub => a.sub_point(point),
+            BinaryOp::Mul => a.mul_point(point),
+            _ => a.div_point(point),
+        }
+        .map(Datum::Point),
+        _ => return None,
+    };
+    Some(value.map_err(ExecError::Type))
+}
+
+/// `=`, `<>` and the four orderings over a geometric operand.
+///
+/// `PostgreSQL` declares these one type at a time and inconsistently: `point`
+/// has `<>` but no `=`, `box` has `=` but no `<>`, `polygon` has neither, and
+/// `line` has `=` alone. Where the operator exists, what it MEANS also varies —
+/// `box = box` compares areas while `lseg = lseg` compares endpoints. Returns
+/// `None` when neither operand is geometric.
+fn apply_geometric_comparison(
+    op: BinaryOp,
+    left: &Datum,
+    right: &Datum,
+) -> Option<Result<Datum, ExecError>> {
+    if !is_geometric_datum(left) && !is_geometric_datum(right) {
+        return None;
+    }
+    if left.is_null() || right.is_null() {
+        return Some(Ok(Datum::Null));
+    }
+    if let Some(error) = geometric_comparison_rejection(op, left, right) {
+        return Some(Err(error));
+    }
+    Some(match (op, left, right) {
+        // `lseg_eq` / `lseg_ne` compare ENDPOINTS, where `lseg_lt` and friends
+        // compare length — so equality cannot go through `ops::compare`.
+        (BinaryOp::Eq, Datum::Lseg(a), Datum::Lseg(b)) => Ok(Datum::Bool(a.eq_lseg(*b))),
+        (BinaryOp::Ne, Datum::Lseg(a), Datum::Lseg(b)) => Ok(Datum::Bool(a.ne_lseg(*b))),
+        // `point` and `polygon` order nothing; `<>` is all `point` has.
+        (BinaryOp::Ne, Datum::Point(a), Datum::Point(b)) => Ok(Datum::Bool(a.ne_point(*b))),
+        // `circle_ne` is not the negation of `circle_eq` for a NaN area, so it
+        // is answered by its own function rather than by inverting `=`.
+        (BinaryOp::Ne, Datum::Circle(a), Datum::Circle(b)) => Ok(Datum::Bool(a.ne_circle(*b))),
+        _ => ops::compare(left, right)
+            .map(|ord| cmp_result(op, ord))
+            .map_err(ExecError::from),
+    })
+}
+
+/// The 42883 for a geometric comparison `pg_operator` does not declare, or
+/// `None` when the pair is one it does. `IS [NOT] DISTINCT FROM` resolves
+/// through the type's `=`, so its caller passes [`BinaryOp::Eq`].
+fn geometric_comparison_rejection(op: BinaryOp, left: &Datum, right: &Datum) -> Option<ExecError> {
+    // A NULL carries no type, so it resolves the operator from its sibling and
+    // there is nothing to refuse: `box IS DISTINCT FROM NULL` is `t`.
+    if left.is_null() || right.is_null() {
+        return None;
+    }
+    if !is_geometric_datum(left) && !is_geometric_datum(right) {
+        return None;
+    }
+    let declared = GeoType::of_datum(left)
+        .zip(GeoType::of_datum(right))
+        .is_some_and(|(a, b)| a == b && geometric_comparison_declared(op, a));
+    (!declared).then(|| undefined_operator_for(op, left, right))
+}
+
+/// The btree surface `pg_operator` gives each geometric type, verified against
+/// PostgreSQL 18.4:
+///
+/// | type | `=` | `<>` | `<` `<=` `>` `>=` |
+/// |---|---|---|---|
+/// | `point` | no | yes | no |
+/// | `box` | yes | no | yes |
+/// | `circle` | yes | yes | yes |
+/// | `line` | yes | no | no |
+/// | `lseg` | yes | yes | yes |
+/// | `path` | yes | no | yes |
+/// | `polygon` | no | no | no |
+fn geometric_comparison_declared(op: BinaryOp, ty: GeoType) -> bool {
+    use GeoType::{Box, Circle, Line, Lseg, Path, Point};
+    match op {
+        BinaryOp::Eq => matches!(ty, Box | Circle | Line | Lseg | Path),
+        BinaryOp::Ne => matches!(ty, Circle | Lseg | Point),
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            matches!(ty, Box | Circle | Lseg | Path)
+        }
+        _ => false,
+    }
+}
+
+/// A binary operator's SQL spelling, for error messages.
+pub(crate) fn op_spelling(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Same => "~=",
+        BinaryOp::DoesNotExtendAbove => "&<|",
+        BinaryOp::DoesNotExtendBelow => "|&>",
+        BinaryOp::StrictlyBelow => "<<|",
+        BinaryOp::StrictlyAbove => "|>>",
         BinaryOp::Add => "+",
         BinaryOp::Sub => "-",
         BinaryOp::Mul => "*",
@@ -1682,6 +3663,16 @@ fn op_spelling(op: BinaryOp) -> &'static str {
         BinaryOp::JsonPathExists => "@?",
         BinaryOp::JsonPathMatch => "@@",
         BinaryOp::Overlaps => "&&",
+        BinaryOp::DoesNotExtendRight => "&<",
+        BinaryOp::DoesNotExtendLeft => "&>",
+        BinaryOp::Adjacent => "-|-",
+        BinaryOp::ClosestPoint => "##",
+        BinaryOp::Intersects => "?#",
+        BinaryOp::Horizontal => "?-",
+        BinaryOp::Perpendicular => "?-|",
+        BinaryOp::Parallel => "?||",
+        BinaryOp::BelowEq => "<^",
+        BinaryOp::AboveEq => ">^",
         BinaryOp::Phrase => "<->",
         BinaryOp::Match => "~",
         BinaryOp::MatchCi => "~*",
@@ -1692,6 +3683,8 @@ fn op_spelling(op: BinaryOp) -> &'static str {
         BinaryOp::BitXor => "#",
         BinaryOp::Shl => "<<",
         BinaryOp::Shr => ">>",
+        BinaryOp::ContainedByOrEq => "<<=",
+        BinaryOp::ContainsOrEq => ">>=",
         BinaryOp::Pow => "^",
         BinaryOp::Mod => "%",
         BinaryOp::Eq => "=",
@@ -1707,25 +3700,258 @@ fn op_spelling(op: BinaryOp) -> &'static str {
     }
 }
 
-fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
-    ExecError::UndefinedFunction(format!(
-        "operator does not exist: {} {op} {}",
-        lt.name(),
-        rt.name()
-    ))
+pub(crate) fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
+    undefined_operator_named(op, lt.name(), rt.name())
 }
 
-/// The same 42883, reported from the runtime values.
+/// The same 42883 with the operand types already spelled. The `json` rejections
+/// need it because PostgreSQL names an unresolved literal operand `unknown`
+/// (`json = unknown`), and this codebase has no `ColumnType` for that.
+fn undefined_operator_named(op: &str, lt: &str, rt: &str) -> ExecError {
+    ExecError::UndefinedFunction(format!("operator does not exist: {lt} {op} {rt}"))
+}
+
+/// The 42883 for an operator `json` does not have.
 ///
-/// An untyped SQL NULL has no type to name.
-fn undefined_operator_for(op: BinaryOp, l: &Datum, r: &Datum) -> ExecError {
+/// PostgreSQL gives `json` exactly six operators — `->` and `->>` (by object
+/// key and by array index) and `#>` / `#>>` — and nothing else: no `=`, no
+/// ordering, no `@>`/`<@`, no `?`/`?|`/`?&`, no `||`, no `-`, no `@?`/`@@`.
+/// Every one of those spellings is `jsonb`'s alone. Without this, a `json`
+/// operand reaching the value-time families below would be *answered* rather
+/// than rejected: `ops::compare` renders both sides as text and would order
+/// `'{"a":1}'` against `'{"a": 1}'`, and `ops::sub` reports 42804 where
+/// PostgreSQL reports 42883.
+///
+/// `||` is deliberately absent: `json || 'x'` is PostgreSQL's
+/// `anynonarray || text`, which renders the document and really does apply.
+fn json_operator_rejection(op: BinaryOp, l: &Datum, r: &Datum) -> Option<ExecError> {
+    if !matches!(l, Datum::Json(_)) && !matches!(r, Datum::Json(_)) {
+        return None;
+    }
+    let spelled = match op {
+        // `IS DISTINCT FROM` is resolved through the type's `=` operator, so
+        // that is the spelling PostgreSQL names when there is none.
+        BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => "=",
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge
+        | BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::Pow
+        | BinaryOp::Contains
+        | BinaryOp::ContainedBy
+        | BinaryOp::Overlaps
+        | BinaryOp::KeyExists
+        | BinaryOp::KeyExistsAny
+        | BinaryOp::KeyExistsAll
+        | BinaryOp::JsonPathExists
+        | BinaryOp::JsonPathMatch => op_spelling(op),
+        _ => return None,
+    };
     let name = |d: &Datum| d.column_type().map_or("unknown", ColumnType::name);
-    ExecError::UndefinedFunction(format!(
-        "operator does not exist: {} {} {}",
-        name(l),
-        op_spelling(op),
-        name(r)
-    ))
+    Some(undefined_operator_named(spelled, name(l), name(r)))
+}
+
+fn ambiguous_operator(op: &str) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "42725",
+        message: format!("operator is not unique: unknown {op} unknown"),
+    }
+}
+
+/// The types crabka supports that PostgreSQL gives no default btree operator
+/// class — `jsonpath` and `json`, and the array type over each.
+///
+/// `json` is in the list for the reason the type exists at all: it stores the
+/// document's original text, so two values that differ only in whitespace or
+/// key order are the same document but not the same bytes, and PostgreSQL
+/// refuses to say which of `GROUP BY`, `DISTINCT`, `ORDER BY`, `UNION` and the
+/// quantified comparisons meant. `jsonb`, which normalizes on input, has the
+/// opclass.
+fn has_no_operator_class(ty: ColumnType) -> bool {
+    matches!(
+        ty.storage_type(),
+        ColumnType::JsonPath
+            | ColumnType::Array(ElemType::JsonPath)
+            | ColumnType::Json
+            | ColumnType::Array(ElemType::Json)
+            | ColumnType::Xml
+            | ColumnType::Array(ElemType::Xml)
+    )
+}
+
+/// The types with a **hash** operator class but no **btree** one, so equality,
+/// `GROUP BY`, `DISTINCT` and the set operations all work while `ORDER BY` and
+/// a btree index do not.
+///
+/// `xid` and `cid` are the pair PostgreSQL puts here, and `xid.c` says why:
+/// transaction ids compare with modular arithmetic, which does not respect the
+/// triangle inequality, so there is no total order for a btree to sort by. The
+/// consequence a corpus notices is that `SELECT DISTINCT x` over an `xid`
+/// column succeeds and `ORDER BY x` is 42883.
+fn has_no_btree_operator_class(ty: ColumnType) -> bool {
+    has_no_operator_class(ty) || has_no_btree_opclass(ty)
+}
+
+/// The types with a hash opclass but no btree one — see
+/// [`has_no_btree_operator_class`], which is this plus the types with no
+/// operator class at all.
+pub(crate) fn has_no_btree_opclass(ty: ColumnType) -> bool {
+    matches!(ty.storage_type(), ColumnType::Xid | ColumnType::Cid)
+}
+
+pub(crate) fn is_scalar_jsonpath(ty: ColumnType) -> bool {
+    ty.storage_type() == ColumnType::JsonPath
+}
+
+/// Is this `json` or `xml` itself (through any domain over either)? An ARRAY of
+/// one is deliberately not: `json[] = json[]` resolves `array_eq` at parse
+/// analysis and only fails when it looks for the ELEMENT operator, so its error
+/// is `could not identify an equality operator for type json`, not
+/// `operator does not exist`.
+/// `json` and `xml` are the two types `PostgreSQL` declares with no comparison
+/// operator of any kind, so every construct that reaches for one has to refuse
+/// them both and name whichever it was given.
+pub(crate) fn is_uncomparable_scalar(ty: ColumnType) -> bool {
+    matches!(ty.storage_type(), ColumnType::Json | ColumnType::Xml)
+}
+
+pub(crate) fn require_runtime_equality(left: &Datum, right: &Datum) -> Result<(), ExecError> {
+    // `point` and `polygon` have no `=` operator at all, and every construct
+    // that expands into one — `IN (…)`, a simple `CASE`, a row comparison,
+    // `IS DISTINCT FROM` — names the missing OPERATOR, not a missing opclass.
+    // The operand test is inlined here because this is a per-row path.
+    if (is_geometric_datum(left) || is_geometric_datum(right))
+        && let Some(error) = geometric_comparison_rejection(BinaryOp::Eq, left, right)
+    {
+        return Err(error);
+    }
+    let needs_operator = match (left, right) {
+        (Datum::JsonPath(_), Datum::JsonPath(_)) => true,
+        (Datum::Array(left), Datum::Array(right))
+            if left.elem == ElemType::JsonPath && right.elem == ElemType::JsonPath =>
+        {
+            left.dims == right.dims
+        }
+        _ => false,
+    };
+    if needs_operator {
+        return Err(ExecError::UndefinedFunction(
+            "could not identify an equality operator for type jsonpath".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `array_eq` compares dimensions before looking up its element equality
+/// operator. Differently-shaped jsonpath arrays are therefore simply unequal,
+/// while equal-shaped ones reach the missing jsonpath operator.
+pub(crate) fn runtime_equality_short_circuit(left: &Datum, right: &Datum) -> Option<bool> {
+    match (left, right) {
+        (Datum::Array(left), Datum::Array(right))
+            if left.elem == ElemType::JsonPath
+                && right.elem == ElemType::JsonPath
+                && left.dims != right.dims =>
+        {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn require_runtime_comparison(left: &Datum, right: &Datum) -> Result<(), ExecError> {
+    // The types with equality (or, for `point` and `polygon`, not even that)
+    // but no ordering operator at all. `line` has `=`; `point` has only `<>`;
+    // `polygon` has neither. `xid` and `cid` are the same situation outside the
+    // geometric family — transaction ids compare modularly, which has no total
+    // order. The four geometric types PostgreSQL DOES order (`box`, `circle`,
+    // `lseg` and `path`) fall through, as does every other pair.
+    //
+    // The spelling is `<` because this is the ordering gate: the callers that
+    // reach it are `ORDER BY`, `min`/`max`, array and row comparison, all of
+    // which PostgreSQL resolves through the type's `<`. A written `>` or `<=`
+    // over these types is named exactly by [`apply_geometric_comparison`],
+    // which runs first.
+    let unordered = match (left, right) {
+        (Datum::Line(_), Datum::Line(_)) => Some("line"),
+        (Datum::Point(_), Datum::Point(_)) => Some("point"),
+        (Datum::Polygon(_), Datum::Polygon(_)) => Some("polygon"),
+        (Datum::Xid(_), Datum::Xid(_)) => Some("xid"),
+        (Datum::Cid(_), Datum::Cid(_)) => Some("cid"),
+        _ => None,
+    };
+    if let Some(name) = unordered {
+        return Err(ExecError::UndefinedFunction(format!(
+            "operator does not exist: {name} < {name}"
+        )));
+    }
+    if matches!((left, right), (Datum::JsonPath(_), Datum::JsonPath(_)))
+        || matches!(
+            (left, right),
+            (Datum::Array(left), Datum::Array(right))
+                if left.elem == ElemType::JsonPath && right.elem == ElemType::JsonPath
+        )
+    {
+        return Err(ExecError::UndefinedFunction(
+            "could not identify a comparison function for type jsonpath".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject operations whose implementation requires a PostgreSQL equality
+/// operator class. `Datum` still implements Rust equality for storage
+/// invariants; SQL must not accidentally expose that internal relation.
+pub(crate) fn require_equality_operator(ty: ColumnType) -> Result<(), ExecError> {
+    if has_no_operator_class(ty) {
+        return Err(ExecError::UndefinedFunction(format!(
+            "could not identify an equality operator for type {}",
+            ty.name()
+        )));
+    }
+    Ok(())
+}
+
+/// Reject ORDER BY and other btree-dependent operations for the types with no
+/// btree opclass ([`has_no_operator_class`]).
+pub(crate) fn require_ordering_operator(ty: ColumnType) -> Result<(), ExecError> {
+    if has_no_btree_operator_class(ty) {
+        return Err(ExecError::UndefinedFunction(format!(
+            "could not identify an ordering operator for type {}",
+            ty.name()
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `greatest`/`least` over a type with no btree opclass.
+///
+/// PostgreSQL resolves these two through `btree`'s **comparison function**
+/// rather than through an ordering operator, and names the missing thing
+/// accordingly: `greatest('1'::xid, '2'::xid)` is `could not identify a
+/// comparison function for type xid`, not the `ordering operator` wording
+/// `ORDER BY` uses.
+pub(crate) fn require_comparison_function(ty: ColumnType) -> Result<(), ExecError> {
+    if has_no_btree_operator_class(ty) {
+        return Err(ExecError::UndefinedFunction(format!(
+            "could not identify a comparison function for type {}",
+            ty.name()
+        )));
+    }
+    Ok(())
+}
+
+/// The same 42883, reported from the runtime values (an untyped SQL NULL has no
+/// type to name).
+pub(crate) fn undefined_operator_for(op: BinaryOp, l: &Datum, r: &Datum) -> ExecError {
+    let name = |d: &Datum| d.column_type().map_or("unknown", ColumnType::name);
+    undefined_operator_named(op_spelling(op), name(l), name(r))
 }
 
 pub(crate) fn quantifier_of(all: bool) -> Quantifier {
@@ -1804,15 +4030,15 @@ pub(crate) fn cmp_result(op: BinaryOp, ord: Option<Ordering>) -> Datum {
     }
 }
 
-/// Only the string types carry a collation.
+/// Only the string types carry a collation. `PostgreSQL` rejects `COLLATE` on
+/// anything else at parse analysis, naming the offending type.
 ///
-/// `PostgreSQL` rejects `COLLATE` on every other type at parse analysis, and it
-/// names the offending type.
+/// A domain carries whatever its base type carries, and an array carries
+/// whatever its elements carry — `text[] COLLATE "C"` is legal there and
+/// `pg_type.typcollation` of `_text` is the same `100` as `text`'s — so both
+/// are answered by the type they wrap rather than refused outright.
 pub(crate) fn require_collatable(ty: ColumnType) -> Result<(), ExecError> {
-    if matches!(
-        ty,
-        ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_)
-    ) {
+    if is_collatable(ty) {
         return Ok(());
     }
     Err(ExecError::TypeMismatch(format!(
@@ -1821,11 +4047,19 @@ pub(crate) fn require_collatable(ty: ColumnType) -> Result<(), ExecError> {
     )))
 }
 
-/// `(composite).field` at run time.
-///
-/// The result is the attribute's value, or NULL when the whole composite is
-/// NULL. `PostgreSQL` propagates a NULL row through field selection instead of
-/// failing.
+/// Whether a value of `ty` can carry a collation at all.
+fn is_collatable(ty: ColumnType) -> bool {
+    match ty {
+        ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_) => true,
+        ColumnType::Domain(domain) => is_collatable(*domain.base),
+        ColumnType::Array(elem) => is_collatable(elem.column_type()),
+        _ => false,
+    }
+}
+
+/// `(composite).field` at run time: the attribute's value, or NULL when the
+/// whole composite is NULL — `PostgreSQL` propagates a NULL row through field
+/// selection rather than failing.
 pub(crate) fn select_field(value: &Datum, field: &str) -> Result<Datum, ExecError> {
     match value {
         Datum::Null => Ok(Datum::Null),
@@ -1890,13 +4124,23 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // SP32: a decimal/exponent literal types as unconstrained `numeric`.
         Expr::NumericLiteral(_) => Ok(ColumnType::Numeric(None)),
         Expr::StringLiteral(_) => Ok(ColumnType::Text),
+        // A bit-string literal is `bit` with no length modifier — PostgreSQL's
+        // `make_const` types `T_BitString` as `BITOID` with typmod -1, which is
+        // why storing `B'10'` in a `bit(11)` column complains about the value's
+        // own length rather than the literal's declared one.
+        Expr::BitStringLiteral(_) => Ok(ColumnType::Bit(None)),
         Expr::BoolLiteral(_) => Ok(ColumnType::Bool),
         // PostgreSQL types a bare NULL as "unknown"; the slice uses text as a
         // concrete stand-in so RowDescription has a real OID.
         Expr::NullLiteral => Ok(ColumnType::Text),
-        Expr::Param(_) => Err(ExecError::Unsupported(
-            "query parameters ($n) are not supported".into(),
-        )),
+        // A parameter that reached evaluation was never bound. The simple
+        // protocol supplies none, so PostgreSQL reports the placeholder as
+        // undefined rather than as an unimplemented feature -- 42P02, the same
+        // code and wording a view body already raises.
+        Expr::Param(number) => Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42P02",
+            format!("there is no parameter ${number}"),
+        ))),
         Expr::Default => Err(ExecError::Syntax(
             "DEFAULT is not allowed in this context".into(),
         )),
@@ -1911,8 +4155,16 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             {
                 return crate::func::scalar_result_type(&call, scope);
             }
-            let idx = scope.resolve(table.as_deref(), name)?;
-            Ok(scope.ty_at(idx))
+            match scope.resolve(table.as_deref(), name) {
+                Ok(idx) => Ok(scope.ty_at(idx)),
+                Err(error) => whole_row_reference(table.as_deref(), name, &error)
+                    .filter(|q| scope.whole_row(q).is_some())
+                    // The relation's composite type is not registered in
+                    // `pg_type` here, so a whole row reports the anonymous
+                    // `record` rather than PostgreSQL's per-relation row type.
+                    .map(|_| ColumnType::Record(None))
+                    .ok_or(error),
+            }
         }
         Expr::Unary { op, expr } => match op {
             UnaryOp::Not => Ok(ColumnType::Bool),
@@ -1928,9 +4180,38 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             // `float8`-only `dsqrt`/`dcbrt`, so they report `float8` whatever
             // the operand is.
             UnaryOp::Plus | UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::Abs => {
-                infer_type(expr, scope)
+                let operand = infer_type(expr, scope)?;
+                // `~cidr` is `~inet` after the implicit widening, so it reports
+                // `inet` rather than the operand's own type.
+                if *op == UnaryOp::BitNot && matches!(operand, ColumnType::Inet | ColumnType::Cidr)
+                {
+                    return Ok(ColumnType::Inet);
+                }
+                Ok(operand)
             }
             UnaryOp::Sqrt | UnaryOp::Cbrt => Ok(ColumnType::Float8),
+            // The geometric prefix operators are declared operand type by
+            // operand type, so PostgreSQL rejects `@-@ 5` at parse analysis —
+            // which is here — rather than on the first row.
+            UnaryOp::NPoints
+            | UnaryOp::Length
+            | UnaryOp::Center
+            | UnaryOp::IsHorizontal
+            | UnaryOp::IsVertical => {
+                let operand = infer_type(expr, scope)?;
+                geometric_prefix_result_type(*op, operand)
+                    .ok_or_else(|| undefined_prefix_operator_named(*op, operand.name()))
+            }
+            // `IS DOCUMENT` is boolean-valued over an `xml` operand, and
+            // PostgreSQL rejects any other operand type right here.
+            UnaryOp::IsDocument | UnaryOp::IsNotDocument => {
+                crate::xml_fn::check_is_document_operand(
+                    expr,
+                    scope,
+                    *op == UnaryOp::IsNotDocument,
+                )?;
+                Ok(ColumnType::Bool)
+            }
             // The boolean tests are boolean-valued, but only over a boolean
             // operand: PostgreSQL rejects `1 IS TRUE` at parse analysis, which
             // is here. A bare literal is still `unknown` and adopts `boolean`,
@@ -1970,6 +4251,12 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         Expr::Func(fc) if crate::catalog_fn::is_catalog_func(&fc.name) => {
             crate::catalog_fn::catalog_func_result_type(fc, scope)
         }
+        Expr::Func(fc) if crate::reg_fn::is_reg_func(&fc.name) => {
+            crate::reg_fn::reg_func_result_type(fc, scope)
+        }
+        Expr::Func(fc) if crate::tid_fn::is_tid_func(&fc.name) => {
+            crate::tid_fn::tid_func_result_type(fc, scope)
+        }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::scalar_result_type(fc, scope)
         }
@@ -2008,12 +4295,26 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         }
         Expr::Func(fc) => crate::agg::func_result_type(fc, scope),
         // SP28: predicates are boolean; CASE unifies its branch result types.
-        Expr::IsNull { .. } | Expr::InList { .. } | Expr::Between { .. } | Expr::Like { .. } => {
+        Expr::IsNull { .. } | Expr::Like { .. } => Ok(ColumnType::Bool),
+        Expr::InList { expr, list, .. } => {
+            reject_uncomparable_in_list(expr, list, scope)?;
+            Ok(ColumnType::Bool)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            reject_uncomparable_comparison(BinaryOp::Ge, expr, low, scope)?;
+            reject_uncomparable_comparison(BinaryOp::Le, expr, high, scope)?;
             Ok(ColumnType::Bool)
         }
         Expr::Case {
-            whens, else_result, ..
-        } => infer_case_type(whens, else_result.as_deref(), scope),
+            operand,
+            whens,
+            else_result,
+        } => {
+            reject_uncomparable_simple_case(operand.as_deref(), whens, scope)?;
+            infer_case_type(whens, else_result.as_deref(), scope)
+        }
         // SP31: a cast's static result type is the target type — but only if the
         // cast is defined; an undefined `(from, to)` pair is 42846 at plan time
         // (so it is rejected before any row is produced). A bare `NULL` infers as
@@ -2040,10 +4341,13 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // SP34: EXISTS / IN-subquery / quantified comparison are always boolean
         // (typeable without executing — used by `describe`). The array form of a
         // quantified comparison (`= ANY(arr)`) is boolean for the same reason.
-        Expr::Exists(_)
-        | Expr::InSubquery { .. }
-        | Expr::Quantified { .. }
-        | Expr::QuantifiedArray { .. } => Ok(ColumnType::Bool),
+        Expr::Exists(_) | Expr::InSubquery { .. } | Expr::Quantified { .. } => Ok(ColumnType::Bool),
+        Expr::QuantifiedArray {
+            expr, op, array, ..
+        } => {
+            reject_uncomparable_quantified(*op, expr, array, scope)?;
+            Ok(ColumnType::Bool)
+        }
         // `ARRAY[…]` types as an array of its unified element type.
         Expr::ArrayLiteral(items) => Ok(ColumnType::Array(array_literal_elem_type(items, scope)?)),
         // Like a scalar subquery, resolved to `Const` before inference runs.
@@ -2074,18 +4378,21 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         Expr::Subscript { base, .. } => {
             let bt = infer_type(base, scope)?;
             // PostgreSQL's jsonb subscripting yields jsonb at every level, so
-            // `j['a']['b']` type-checks without the base being an array.
+            // `j['a']['b']` type-checks without the base being an array. `json`
+            // deliberately does NOT follow it here: the subscript handler is
+            // jsonb's alone, so a `json` base falls through to the error below.
             if bt == ColumnType::Jsonb {
                 return Ok(ColumnType::Jsonb);
             }
+            // `point[i]` and `line[i]` are `float8`; `box[i]` and `lseg[i]` are
+            // `point`. `circle`, `path` and `polygon` have no handler and fall
+            // through to the 42804 below.
+            if let Some(elem) = geometric_subscript_element(bt) {
+                return Ok(elem);
+            }
             bt.array_element()
                 .map(ElemType::column_type)
-                .ok_or_else(|| {
-                    ExecError::TypeMismatch(format!(
-                        "cannot subscript type {} because it does not support subscripting",
-                        bt.name()
-                    ))
-                })
+                .ok_or_else(|| cannot_subscript(bt))
         }
         // A subscript chain containing a slice yields the ARRAY type; one made
         // only of indexes reaches an element.
@@ -2094,12 +4401,13 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             if bt == ColumnType::Jsonb {
                 return Ok(ColumnType::Jsonb);
             }
-            let elem = bt.array_element().ok_or_else(|| {
-                ExecError::TypeMismatch(format!(
-                    "cannot subscript type {} because it does not support subscripting",
-                    bt.name()
-                ))
-            })?;
+            // A fixed-length geometric type has one dimension and cannot be
+            // sliced, so every chain over one reports the element type; the
+            // slice itself is refused when the reference evaluates.
+            if let Some(elem) = geometric_subscript_element(bt) {
+                return Ok(elem);
+            }
+            let elem = bt.array_element().ok_or_else(|| cannot_subscript(bt))?;
             if subscripts
                 .iter()
                 .any(crabka_pgparser::ast::ArraySubscript::is_slice)
@@ -2125,9 +4433,53 @@ fn infer_binary_type(
     right: &Expr,
     scope: &Scope,
 ) -> Result<ColumnType, ExecError> {
+    reject_uncomparable_comparison(op, left, right, scope)?;
+    if let Some(resolved) = geometric_literal_operator(op, left, right, scope)? {
+        return Ok(resolved);
+    }
+    if let Some(resolved) = crate::network_fn::network_operator_result_type(op, left, right, scope)?
+    {
+        return Ok(resolved);
+    }
+    if let Some(resolved) = crate::bit_fn::bit_operator_result_type(op, left, right, scope)? {
+        return Ok(resolved);
+    }
+    if let Some(resolved) = crate::money_fn::money_operator_result_type(op, left, right, scope)? {
+        return Ok(resolved);
+    }
+    if let Some(resolved) = crate::sysid_fn::sysid_operator_result_type(op, left, right, scope)? {
+        return Ok(resolved);
+    }
     match op {
-        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+        // `<<=` and `>>=` have no non-network overload.
+        BinaryOp::ContainedByOrEq | BinaryOp::ContainsOrEq => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            Err(undefined_operator(op_spelling(op), lt, rt))
+        }
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+            if is_unknown_literal(left) && is_unknown_literal(right) {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            // A geometric operand selects `box + point`, `path + path` and
+            // their siblings; every undeclared pair (`polygon + point`,
+            // `lseg + point`, `point + box`) is 42883 right here.
+            if let Some(resolved) = geometric_operand_result(op, lt, rt) {
+                return resolved;
+            }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
+                match (lt, rt) {
+                    (ColumnType::Range(a), ColumnType::Range(b)) if a == b => return Ok(lt),
+                    (ColumnType::Multirange(a), ColumnType::Multirange(b)) if a == b => {
+                        return Ok(lt);
+                    }
+                    (ColumnType::Range(_), _) if is_unknown_literal(right) => return Ok(lt),
+                    (_, ColumnType::Range(_)) if is_unknown_literal(left) => return Ok(rt),
+                    (ColumnType::Multirange(_), _) if is_unknown_literal(right) => return Ok(lt),
+                    (_, ColumnType::Multirange(_)) if is_unknown_literal(left) => return Ok(rt),
+                    _ => {}
+                }
+            }
             // jsonb `-` (delete) overloads the arithmetic `-`. Only a jsonb LEFT
             // operand selects it, so every numeric/date pair below is unchanged;
             // a jsonb left operand with an unsupported right operand is 42883
@@ -2136,8 +4488,21 @@ fn infer_binary_type(
                 return json_fn::json_operator_result_type(JsonOp::Delete, lt, rt)
                     .ok_or_else(|| undefined_operator("-", lt, rt));
             }
-            // SP37: a temporal operand resolves via PG's date/time arithmetic
-            // matrix first; a non-temporal pair falls through to the numeric tower.
+            // SP37: a temporal operand selects a `pg_operator` row the way
+            // `oper()` does — by implicit cast, then by preference — so the
+            // answer is a row, a 42883 or a 42725, all three derived from the
+            // catalog rather than asserted. An `unknown` literal beside a
+            // temporal value is excluded: it carries no type to match rows
+            // with, and PostgreSQL resolves that case by a separate
+            // category-guessing heuristic that this does not model.
+            if !is_unknown_literal(left)
+                && !is_unknown_literal(right)
+                && let Some(resolved) = crate::temporal_arith::resolve(op, lt, rt)
+            {
+                return resolved.map(|signature| signature.result);
+            }
+            // The matrix still answers the `unknown`-literal pairs the resolver
+            // above stands back from.
             if let Some(ty) = datetime_result_type(op, lt, rt) {
                 return Ok(ty);
             }
@@ -2151,6 +4516,7 @@ fn infer_binary_type(
             if !usable(left, lt) || !usable(right, rt) {
                 return Err(undefined_operator(op_spelling(op), lt, rt));
             }
+            let (lt, rt) = adopt_unknown_literal_types(left, right, lt, rt);
             Ok(numeric_result_type(lt, rt))
         }
         // `||` is text, jsonb, or one of the three array concatenations, resolved
@@ -2159,10 +4525,10 @@ fn infer_binary_type(
         BinaryOp::Phrase => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             if lt == ColumnType::TsQuery && rt == ColumnType::TsQuery {
-                Ok(ColumnType::TsQuery)
-            } else {
-                Err(undefined_operator("<->", lt, rt))
+                return Ok(ColumnType::TsQuery);
             }
+            geometric_operand_result(op, lt, rt)
+                .unwrap_or_else(|| Err(undefined_operator("<->", lt, rt)))
         }
         // `@@` is shared by jsonpath and full-text search. A text-search
         // operand selects the latter overload; a bare query literal adopts
@@ -2171,6 +4537,8 @@ fn infer_binary_type(
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             let (lt, rt) = if lt == ColumnType::TsVector && is_unknown_literal(right) {
                 (lt, ColumnType::TsQuery)
+            } else if lt == ColumnType::Jsonb && is_unknown_literal(right) {
+                (lt, ColumnType::JsonPath)
             } else {
                 (lt, rt)
             };
@@ -2178,6 +4546,7 @@ fn infer_binary_type(
                 (lt, rt),
                 (ColumnType::TsVector | ColumnType::Text, ColumnType::TsQuery)
                     | (ColumnType::TsQuery, ColumnType::TsVector | ColumnType::Text)
+                    | (ColumnType::Text, ColumnType::Text)
             ) {
                 return Ok(ColumnType::Bool);
             }
@@ -2185,6 +4554,9 @@ fn infer_binary_type(
                 .ok_or_else(|| undefined_operator("@@", lt, rt))
         }
         BinaryOp::Overlaps => {
+            if is_unknown_literal(left) && is_unknown_literal(right) {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
             if alt == ColumnType::TsQuery && art == ColumnType::TsQuery {
@@ -2205,6 +4577,12 @@ fn infer_binary_type(
         | BinaryOp::KeyExistsAny
         | BinaryOp::KeyExistsAll
         | BinaryOp::JsonPathExists => {
+            if matches!(op, BinaryOp::Contains | BinaryOp::ContainedBy)
+                && is_unknown_literal(left)
+                && is_unknown_literal(right)
+            {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
             if matches!(op, BinaryOp::Contains | BinaryOp::ContainedBy)
@@ -2219,10 +4597,47 @@ fn infer_binary_type(
         // The bitwise operators are integer-only. `&`/`|`/`#` widen to the wider
         // operand; a shift keeps the LEFT operand's width (its count is an
         // ordinary integer, not part of the result type).
-        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+        BinaryOp::DoesNotExtendRight | BinaryOp::DoesNotExtendLeft | BinaryOp::Adjacent => {
+            if is_unknown_literal(left) && is_unknown_literal(right) {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            if let Some(resolved) = geometric_operand_result(op, lt, rt) {
+                return resolved;
+            }
+            if range_family_compatible(lt, rt)
+                || matches!(lt, ColumnType::Range(_) | ColumnType::Multirange(_))
+                    && is_unknown_literal(right)
+                || matches!(rt, ColumnType::Range(_) | ColumnType::Multirange(_))
+                    && is_unknown_literal(left)
+            {
+                Ok(ColumnType::Bool)
+            } else {
+                Err(undefined_operator(op_spelling(op), lt, rt))
+            }
+        }
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            if is_unknown_literal(left) && is_unknown_literal(right) {
+                return Err(ambiguous_operator(op_spelling(op)));
+            }
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            // `<<`, `>>` and `#` all double as geometric operators, and a
+            // geometric operand is what selects that meaning.
+            if let Some(resolved) = geometric_operand_result(op, lt, rt) {
+                return resolved;
+            }
+            if matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                && (range_family_compatible(lt, rt)
+                    || matches!(lt, ColumnType::Range(_) | ColumnType::Multirange(_))
+                        && is_unknown_literal(right)
+                    || matches!(rt, ColumnType::Range(_) | ColumnType::Multirange(_))
+                        && is_unknown_literal(left))
+            {
+                return Ok(ColumnType::Bool);
+            }
             let is_int =
                 |t: ColumnType| matches!(t, ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8);
+            let (lt, rt) = adopt_unknown_literal_types(left, right, lt, rt);
             if !is_int(lt) || !is_int(rt) {
                 return Err(undefined_operator(op_spelling(op), lt, rt));
             }
@@ -2243,6 +4658,7 @@ fn infer_binary_type(
         // selects the exact `numeric` operator.
         BinaryOp::Pow => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let (lt, rt) = adopt_unknown_literal_types(left, right, lt, rt);
             if lt == ColumnType::Float8 || rt == ColumnType::Float8 {
                 Ok(ColumnType::Float8)
             } else if lt.is_numeric() || rt.is_numeric() {
@@ -2256,6 +4672,7 @@ fn infer_binary_type(
         // runtime type error.
         BinaryOp::Mod => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let (lt, rt) = adopt_unknown_literal_types(left, right, lt, rt);
             let modulo_able = |t: ColumnType| {
                 matches!(t, ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8)
                     || t.is_numeric()
@@ -2265,8 +4682,253 @@ fn infer_binary_type(
             }
             Ok(numeric_result_type(lt, rt))
         }
+        // The geometry-only operators, plus the five whose other overload is
+        // the range family. `##` alone is not a predicate — it yields the
+        // closest point — so none of these can fall through to the `boolean`
+        // default below without being resolved first.
+        BinaryOp::ClosestPoint
+        | BinaryOp::Intersects
+        | BinaryOp::Horizontal
+        | BinaryOp::Perpendicular
+        | BinaryOp::Parallel
+        | BinaryOp::BelowEq
+        | BinaryOp::AboveEq
+        | BinaryOp::Same
+        | BinaryOp::StrictlyBelow
+        | BinaryOp::StrictlyAbove
+        | BinaryOp::DoesNotExtendAbove
+        | BinaryOp::DoesNotExtendBelow => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            match geometric_operand_result(op, lt, rt) {
+                Some(resolved) => resolved,
+                // `~=`, `<<|`, `|>>`, `&<|` and `|&>` are also range operators,
+                // which the value layer answers; `##` and the other five are
+                // geometry's alone and are 42883 without a geometric operand.
+                None if matches!(
+                    op,
+                    BinaryOp::Same
+                        | BinaryOp::StrictlyBelow
+                        | BinaryOp::StrictlyAbove
+                        | BinaryOp::DoesNotExtendAbove
+                        | BinaryOp::DoesNotExtendBelow
+                ) =>
+                {
+                    Ok(ColumnType::Bool)
+                }
+                None => Err(undefined_operator(op_spelling(op), lt, rt)),
+            }
+        }
         _ => Ok(ColumnType::Bool),
     }
+}
+
+/// PLAN-time 42883 for a comparison over a type that has no comparison
+/// operator: `jsonpath`, and `json` (see [`has_no_operator_class`]).
+///
+/// Both reach here through every syntax that resolves to one — `=`, the
+/// ordering operators, `IS DISTINCT FROM`, `IN (…)`, `BETWEEN` and the simple
+/// `CASE` — because PostgreSQL rejects them all at parse analysis, before a
+/// single row is fetched.
+fn reject_uncomparable_comparison(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    scope: &Scope,
+) -> Result<(), ExecError> {
+    if !matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::IsDistinctFrom
+            | BinaryOp::IsNotDistinctFrom
+    ) {
+        return Ok(());
+    }
+    crate::rowexpr::validate_comparison(op, left, right, scope)?;
+    let (mut left_type, mut right_type) = (infer_type(left, scope)?, infer_type(right, scope)?);
+    // `IS DISTINCT FROM` is resolved through the type's `=`, so that is the
+    // spelling PostgreSQL names when the type has none.
+    let spelled = if matches!(op, BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom) {
+        "="
+    } else {
+        op_spelling(op)
+    };
+    // `json` and `xml` have no comparison operator at ANY width, so an
+    // `unknown` literal beside one adopts nothing — PostgreSQL leaves it
+    // `unknown` and names it that way (`operator does not exist: xml =
+    // unknown`).
+    if is_uncomparable_scalar(left_type) || is_uncomparable_scalar(right_type) {
+        let name = |e: &Expr, t: ColumnType| {
+            if is_unknown_literal(e) {
+                "unknown"
+            } else {
+                t.name()
+            }
+        };
+        return Err(undefined_operator_named(
+            spelled,
+            name(left, left_type),
+            name(right, right_type),
+        ));
+    }
+    // The system identifier family's comparison partners are exactly what
+    // `pg_operator` declares plus what `pg_cast` marks implicit — a much
+    // shorter list than the value layer would otherwise accept. `oid` takes the
+    // integer widths and the `reg*` types (all implicit coercions), `xid` takes
+    // `int4` alone (`xideqint4`), and the other four take only themselves. An
+    // `unknown` literal beside any of them adopts it.
+    if let Some(error) = sysid_comparison_rejection(spelled, left, left_type, right, right_type) {
+        return Err(error);
+    }
+    // `xid` and `cid` have no ordering operator at any width, and `cid` has no
+    // `<>` either — `pg_operator` gives it `cideq` alone. Like `json`, an
+    // `unknown` literal beside one adopts nothing, so `'1'::xid < '2'` is
+    // `operator does not exist: xid < unknown`, naming the literal `unknown`.
+    let missing_operator = |ty: ColumnType| match ty.storage_type() {
+        ColumnType::Xid => matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ),
+        ColumnType::Cid => matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Ne
+        ),
+        _ => false,
+    };
+    let unordered = |e: &Expr, ty: ColumnType| !is_unknown_literal(e) && missing_operator(ty);
+    if unordered(left, left_type) || unordered(right, right_type) {
+        let name = |e: &Expr, t: ColumnType| {
+            if is_unknown_literal(e) {
+                "unknown"
+            } else {
+                t.name()
+            }
+        };
+        return Err(undefined_operator_named(
+            spelled,
+            name(left, left_type),
+            name(right, right_type),
+        ));
+    }
+    if !is_scalar_jsonpath(left_type) && !is_scalar_jsonpath(right_type) {
+        return Ok(());
+    }
+    if is_unknown_literal(left) {
+        left_type = right_type;
+    }
+    if is_unknown_literal(right) {
+        right_type = left_type;
+    }
+    Err(undefined_operator(spelled, left_type, right_type))
+}
+
+/// The 42883 for a system identifier compared with a type it has no operator
+/// against, or `None` when the pair is one PostgreSQL declares.
+fn sysid_comparison_rejection(
+    spelled: &str,
+    left: &Expr,
+    left_type: ColumnType,
+    right: &Expr,
+    right_type: ColumnType,
+) -> Option<ExecError> {
+    let sysid = |e: &Expr, ty: ColumnType| {
+        (!is_unknown_literal(e)
+            && matches!(
+                ty.storage_type(),
+                ColumnType::Oid
+                    | ColumnType::Xid
+                    | ColumnType::Xid8
+                    | ColumnType::Cid
+                    | ColumnType::Tid
+                    | ColumnType::PgLsn
+            ))
+        .then(|| ty.storage_type())
+    };
+    let (family, other, other_expr, reflected) =
+        match (sysid(left, left_type), sysid(right, right_type)) {
+            (Some(family), _) => (family, right_type, right, false),
+            (None, Some(family)) => (family, left_type, left, true),
+            (None, None) => return None,
+        };
+    // An `unknown` literal takes the identifier's own type, so `f1 = '1234'`
+    // never reaches the partner check.
+    if is_unknown_literal(other_expr) {
+        return None;
+    }
+    let allowed = match family {
+        ColumnType::Oid => matches!(
+            other.storage_type(),
+            ColumnType::Oid
+                | ColumnType::Int2
+                | ColumnType::Int4
+                | ColumnType::Int8
+                | ColumnType::Regclass
+                | ColumnType::Regtype
+                | ColumnType::Regprocedure
+                | ColumnType::Regnamespace
+        ),
+        // `xideqint4` / `xidneqint4` have no commutator, so the integer must be
+        // on the RIGHT: `'1'::xid = 1` resolves and `1 = '1'::xid` does not.
+        // `int2` reaches it through the implicit widening to `int4`.
+        ColumnType::Xid => {
+            other.storage_type() == ColumnType::Xid
+                || (!reflected
+                    && matches!(other.storage_type(), ColumnType::Int2 | ColumnType::Int4))
+        }
+        other_family => other.storage_type() == other_family,
+    };
+    (!allowed).then(|| undefined_operator_named(spelled, left_type.name(), right_type.name()))
+}
+
+fn reject_uncomparable_in_list(expr: &Expr, list: &[Expr], scope: &Scope) -> Result<(), ExecError> {
+    for item in list {
+        reject_uncomparable_comparison(BinaryOp::Eq, expr, item, scope)?;
+    }
+    Ok(())
+}
+
+fn reject_uncomparable_simple_case(
+    operand: Option<&Expr>,
+    whens: &[(Expr, Expr)],
+    scope: &Scope,
+) -> Result<(), ExecError> {
+    let Some(operand) = operand else {
+        return Ok(());
+    };
+    for (when, _) in whens {
+        reject_uncomparable_comparison(BinaryOp::Eq, operand, when, scope)?;
+    }
+    Ok(())
+}
+
+/// `x <op> ANY|ALL (array)` over an element type with no comparison operator —
+/// `'{}'::json = ANY(ARRAY['{}'::json])` is `operator does not exist: json = json`.
+fn reject_uncomparable_quantified(
+    op: BinaryOp,
+    expr: &Expr,
+    array: &Expr,
+    scope: &Scope,
+) -> Result<(), ExecError> {
+    let mut left = infer_type(expr, scope)?;
+    let array_type = infer_type(array, scope)?;
+    let mut right = array_type
+        .array_element()
+        .map(ElemType::column_type)
+        .unwrap_or(array_type);
+    if is_unknown_literal(expr) {
+        left = right;
+    }
+    if is_unknown_literal(array) {
+        right = left;
+    }
+    if has_no_operator_class(left) || has_no_operator_class(right) {
+        return Err(undefined_operator(op_spelling(op), left, right));
+    }
+    Ok(())
 }
 
 /// The static result type of a jsonb or array operator, or `None` when the
@@ -2288,21 +4950,74 @@ fn json_or_array_operator_result_type(
     if matches!(
         op,
         BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps
-    ) && let (Some(le), Some(re)) = (lt.array_element(), rt.array_element())
-        && le == re
-    {
-        return Some(ColumnType::Bool);
+    ) {
+        let same_array_family = match (lt, rt) {
+            (ColumnType::Array(left), ColumnType::Array(right)) => left == right,
+            (ColumnType::OidVector, ColumnType::OidVector)
+            | (ColumnType::Int2Vector, ColumnType::Int2Vector) => true,
+            _ => false,
+        };
+        if same_array_family {
+            return Some(ColumnType::Bool);
+        }
     }
-    None
+    // The geometric operators resolve by the exact operand pair; an undeclared
+    // one is `None` here and the caller reports 42883.
+    if let Some(resolved) = geometric_operator_result_type(op, lt, rt) {
+        return Some(resolved);
+    }
+    match (op, lt, rt) {
+        (
+            BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps,
+            ColumnType::Range(left),
+            ColumnType::Range(right),
+        ) if left == right => return Some(ColumnType::Bool),
+        (BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps, left, right)
+            if range_family_compatible(left, right) =>
+        {
+            return Some(ColumnType::Bool);
+        }
+        (BinaryOp::Contains, ColumnType::Range(range), element) if *range.subtype == element => {
+            return Some(ColumnType::Bool);
+        }
+        (BinaryOp::ContainedBy, element, ColumnType::Range(range)) if element == *range.subtype => {
+            return Some(ColumnType::Bool);
+        }
+        (BinaryOp::Contains, ColumnType::Multirange(multirange), element)
+            if *multirange.range.subtype == element =>
+        {
+            return Some(ColumnType::Bool);
+        }
+        (BinaryOp::ContainedBy, element, ColumnType::Multirange(multirange))
+            if element == *multirange.range.subtype =>
+        {
+            return Some(ColumnType::Bool);
+        }
+        _ => {}
+    }
+    let storage = (lt.storage_type(), rt.storage_type());
+    (storage != (lt, rt))
+        .then(|| json_or_array_operator_result_type(op, storage.0, storage.1))
+        .flatten()
 }
 
-/// The element type of an `ARRAY[…]` constructor.
-///
-/// This function unifies the elements exactly as `CASE`/`COALESCE` unify their
-/// branches. A bare `NULL` element imposes no constraint, and an all-NULL list
-/// falls back to `text`, which is PostgreSQL's `unknown` → `text`. `ARRAY[]`
-/// has nothing to unify, so it is 42P18, and a cast supplies the type. An
-/// element type crabka has no array type for is 0A000.
+fn range_family_compatible(left: ColumnType, right: ColumnType) -> bool {
+    match (left, right) {
+        (ColumnType::Range(a), ColumnType::Range(b)) => a == b,
+        (ColumnType::Range(range), ColumnType::Multirange(multirange))
+        | (ColumnType::Multirange(multirange), ColumnType::Range(range)) => {
+            range == multirange.range
+        }
+        (ColumnType::Multirange(a), ColumnType::Multirange(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The element type of an `ARRAY[…]` constructor: its elements unified exactly as
+/// `CASE`/`COALESCE` unify their branches, so a bare `NULL` element imposes no
+/// constraint and an all-NULL list falls back to `text` (PostgreSQL's `unknown` →
+/// `text`). `ARRAY[]` has nothing to unify — 42P18, and a cast supplies the type.
+/// An element type crabka has no array type for is 0A000.
 pub(crate) fn array_literal_elem_type(
     items: &[Expr],
     scope: &Scope,
@@ -2350,7 +5065,7 @@ fn eval_array_constructor(
         let value = eval_depth(item, scope, values, ctx, depth)?;
         parts.push(match item {
             Expr::ArrayLiteral(_) => value,
-            _ => crabka_pgtypes::cast::cast(&value, target, &ctx.time_zone)?,
+            _ => cast_value(&value, target, &ctx.time_zone)?,
         });
     }
     array_fn::build_constructor(elem, parts)
@@ -2369,10 +5084,121 @@ fn eval_array_ref(
 ) -> Result<Datum, ExecError> {
     let evaluated = eval_depth(base, scope, values, ctx, depth)?;
     let args = eval_subscripts(subscripts, scope, values, ctx, depth)?;
-    if matches!(evaluated, Datum::Jsonb(_)) || infer_type(base, scope)? == ColumnType::Jsonb {
-        return eval_jsonb_subscript_chain(&evaluated, subscripts, &args);
+    match subscript_kind(&evaluated, base, scope)? {
+        SubscriptKind::Json => Err(cannot_subscript(ColumnType::Json)),
+        SubscriptKind::Jsonb => eval_jsonb_subscript_chain(&evaluated, subscripts, &args),
+        SubscriptKind::Geometric => geometric_array_ref(&evaluated, &args),
+        SubscriptKind::Array => array_fn::array_ref(&evaluated, &args),
     }
-    array_fn::array_ref(&evaluated, &args)
+}
+
+/// Which subscripting rule `base[…]` follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriptKind {
+    /// The SQL array rule: 1-based, sliceable, out-of-range is SQL NULL.
+    Array,
+    /// `jsonb`'s `subscript_handler`: by key or by 0-based index.
+    Jsonb,
+    /// `json`, which has NO subscript handler at all — the reference is an
+    /// error rather than a different rule.
+    Json,
+    /// `point`, `box`, `lseg` and `line`: a fixed-length, **0-based** reference
+    /// into the value's own fields, which cannot be sliced.
+    Geometric,
+}
+
+/// The rule a base value (or, when the value carries no type of its own, the
+/// base expression's static type) selects.
+///
+/// `circle`, `path` and `polygon` are the three geometric types with no
+/// subscript handler at all, so they are rejected here rather than falling
+/// through to `array_fn`'s "assume it is an array" default — which would have
+/// produced the same 42804 message, but only for a non-NULL value.
+fn subscript_kind(value: &Datum, base: &Expr, scope: &Scope) -> Result<SubscriptKind, ExecError> {
+    let ty = match value {
+        Datum::Jsonb(_) => return Ok(SubscriptKind::Jsonb),
+        Datum::Json(_) => return Ok(SubscriptKind::Json),
+        Datum::Point(_) => ColumnType::Point,
+        Datum::Box(_) => ColumnType::Box,
+        Datum::Lseg(_) => ColumnType::Lseg,
+        Datum::Line(_) => ColumnType::Line,
+        Datum::Circle(_) => ColumnType::Circle,
+        Datum::Path(_) => ColumnType::Path,
+        Datum::Polygon(_) => ColumnType::Polygon,
+        _ => infer_type(base, scope)?,
+    };
+    Ok(match ty {
+        ColumnType::Jsonb => SubscriptKind::Jsonb,
+        ColumnType::Json => SubscriptKind::Json,
+        ColumnType::Point | ColumnType::Box | ColumnType::Lseg | ColumnType::Line => {
+            SubscriptKind::Geometric
+        }
+        ColumnType::Circle | ColumnType::Path | ColumnType::Polygon => {
+            return Err(cannot_subscript(ty));
+        }
+        _ => SubscriptKind::Array,
+    })
+}
+
+/// The element type `base[i]` yields for the four subscriptable geometric
+/// types, or `None` for every other type.
+fn geometric_subscript_element(ty: ColumnType) -> Option<ColumnType> {
+    match ty {
+        ColumnType::Point | ColumnType::Line => Some(ColumnType::Float8),
+        ColumnType::Box | ColumnType::Lseg => Some(ColumnType::Point),
+        _ => None,
+    }
+}
+
+/// `point[i]`, `box[i]`, `lseg[i]` and `line[i]` — `PostgreSQL`'s fixed-length
+/// subscripting, which is **0-based** where the array rule is 1-based. Every
+/// out-of-range index is SQL NULL, a negative one included.
+fn geometric_subscript(base: &Datum, index: &Datum) -> Result<Datum, ExecError> {
+    let Some(index) = array_fn::subscript_int(index)? else {
+        return Ok(Datum::Null);
+    };
+    Ok(match (base, index) {
+        (Datum::Point(point), 0) => Datum::Float8(point.x),
+        (Datum::Point(point), 1) => Datum::Float8(point.y),
+        // `box_subscript` reads the HIGH corner first, which is also the order
+        // `box_out` prints them in.
+        (Datum::Box(value), 0) => Datum::Point(value.high),
+        (Datum::Box(value), 1) => Datum::Point(value.low),
+        (Datum::Lseg(lseg), 0) => Datum::Point(lseg.start),
+        (Datum::Lseg(lseg), 1) => Datum::Point(lseg.end),
+        (Datum::Line(line), 0) => Datum::Float8(line.a),
+        (Datum::Line(line), 1) => Datum::Float8(line.b),
+        (Datum::Line(line), 2) => Datum::Float8(line.c),
+        _ => Datum::Null,
+    })
+}
+
+/// [`geometric_subscript`] over a whole subscript chain. A fixed-length type
+/// has exactly one dimension, so a longer chain is SQL NULL (`box[0][1]` is a
+/// two-dimensional reference, not `(box[0])[1]`), and a slice is 0A000.
+fn geometric_array_ref(
+    base: &Datum,
+    subscripts: &[array_fn::SubscriptArg],
+) -> Result<Datum, ExecError> {
+    if subscripts.iter().any(array_fn::SubscriptArg::is_slice) {
+        return Err(ExecError::Unsupported(
+            "slices of fixed-length arrays not implemented".into(),
+        ));
+    }
+    let [array_fn::SubscriptArg::Index(index)] = subscripts else {
+        return Ok(Datum::Null);
+    };
+    geometric_subscript(base, index)
+}
+
+/// PostgreSQL's 42804 for a base type with no subscripting operator. `json` is
+/// one: only `jsonb` has a `subscript_handler`, so `('{"a":1}'::json)['a']` is
+/// this error rather than a field lookup.
+fn cannot_subscript(ty: ColumnType) -> ExecError {
+    ExecError::TypeMismatch(format!(
+        "cannot subscript type {} because it does not support subscripting",
+        ty.name()
+    ))
 }
 
 /// [`eval_subscripts`] for an assignment target, whose bounds are evaluated
@@ -2461,11 +5287,10 @@ fn indeterminate_type(message: &str) -> ExecError {
     ExecError::IndeterminateType(message.to_string())
 }
 
-/// Infer a `CASE`'s result type from every THEN result and the ELSE.
-///
-/// A bare `NULL` branch imposes no constraint. An all-NULL CASE is `text`,
-/// which is PG's "unknown" → text. Incompatible branch types are 42804.
-fn infer_case_type(
+/// Infer a `CASE`'s result type by unifying every THEN result and the ELSE. A
+/// bare `NULL` branch imposes no constraint; an all-NULL CASE is `text` (PG's
+/// "unknown" → text); incompatible branch types are 42804.
+pub(crate) fn infer_case_type(
     whens: &[(Expr, Expr)],
     else_result: Option<&Expr>,
     scope: &Scope,
@@ -2480,17 +5305,16 @@ fn infer_case_type(
     Ok(acc.unwrap_or(ColumnType::Text))
 }
 
-/// Fold one branch or argument into a running unified type.
-///
-/// A bare `NULL` is type-neutral and imposes no constraint. `CASE` type
-/// inference and SP29's `coalesce`/`greatest`/`least` share this function.
+/// Fold one branch/argument into a running unified type. An untyped string or
+/// `NULL` is type-neutral and adopts the concrete branch type. Shared by `CASE`
+/// type inference and SP29's `coalesce`/`greatest`/`least`.
 pub(crate) fn unify_branch(
     acc: Option<ColumnType>,
     expr: &Expr,
     scope: &Scope,
 ) -> Result<Option<ColumnType>, ExecError> {
-    if matches!(expr, Expr::NullLiteral) {
-        return Ok(acc); // a bare NULL branch is type-neutral
+    if is_unknown_literal(expr) {
+        return Ok(acc);
     }
     let t = infer_type(expr, scope)?;
     match acc {
@@ -2646,25 +5470,41 @@ mod tests {
         let no_children = |_: &Expr| -> Result<Datum, ExecError> {
             panic!("an empty list must not evaluate any child")
         };
+        let ctx = crate::clock::EvalCtx::test_default();
+        let operand = Expr::IntLiteral("1".into());
 
         assert!(
-            eval_in_list(&Datum::Null, &[], false, no_children).expect("empty IN")
+            eval_in_list(&operand, &Datum::Null, &[], None, false, &ctx, no_children)
+                .expect("empty IN")
                 == Datum::Bool(false)
         );
         assert!(
-            eval_in_list(&Datum::Null, &[], true, no_children).expect("empty NOT IN")
+            eval_in_list(&operand, &Datum::Null, &[], None, true, &ctx, no_children)
+                .expect("empty NOT IN")
                 == Datum::Bool(true)
         );
         assert!(
-            eval_in_list(&Datum::Int4(1), &[], false, no_children).expect("empty IN")
+            eval_in_list(
+                &operand,
+                &Datum::Int4(1),
+                &[],
+                None,
+                false,
+                &ctx,
+                no_children
+            )
+            .expect("empty IN")
                 == Datum::Bool(false)
         );
         // A NULL operand against a NON-empty list is still unknown.
         assert!(
             eval_in_list(
+                &operand,
                 &Datum::Null,
                 &[Expr::IntLiteral("1".into())],
+                None,
                 false,
+                &ctx,
                 |_| Ok(Datum::Int4(1))
             )
             .expect("NULL IN (1)")
@@ -2680,14 +5520,18 @@ mod tests {
     fn table() -> Table {
         Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![
                 Column::new("a", ColumnType::Int4),
                 Column::new("b", ColumnType::Int4),
             ],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -2717,6 +5561,189 @@ mod tests {
     /// rejects a non-boolean boolean test.
     fn infer_err(sql: &str) -> ExecError {
         infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect_err("must fail")
+    }
+
+    /// PostgreSQL resolves an `unknown` literal from its geometric sibling, so
+    /// `p.f1 << '(0,0)'` picks the `point` operator rather than failing to find
+    /// one. The literal adopts the sibling's own type — `circle @> '(0.5,0)'`
+    /// reads the literal as a *circle*, not as the point it looks like.
+    #[test]
+    fn a_bare_literal_adopts_its_geometric_siblings_type() {
+        // (expression, result) — verified against PostgreSQL 18.4.
+        let cases: &[(&str, Datum)] = &[
+            ("point '(1,2)' << '(3,4)'", Datum::Bool(true)),
+            ("'(3,4)' >> point '(1,2)'", Datum::Bool(true)),
+            ("point '(1,2)' >> '(3,4)'", Datum::Bool(false)),
+            ("point '(1,2)' <<| '(3,4)'", Datum::Bool(true)),
+            ("point '(1,2)' |>> '(3,4)'", Datum::Bool(false)),
+            ("point '(5.1,34.5)' ~= '(5.1,34.5)'", Datum::Bool(true)),
+            ("point '(0,0)' <-> '(3,4)'", Datum::Float8(5.0)),
+            ("box '((0,0),(2,2))' && '((1,1),(3,3))'", Datum::Bool(true)),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == *expected, "{sql}");
+        }
+        // The literal is read as the sibling's type, so a point-shaped literal
+        // against a circle is a circle syntax error, not a silent point.
+        assert2::assert!(
+            ev_err("circle '<(0,0),1>' @> '(0.5,0)'")
+                .into_pg()
+                .message
+                .contains("invalid input syntax for type circle")
+        );
+    }
+
+    /// A quoted literal with no cast is type `unknown` and adopts the type of
+    /// the operand it is compared against — the rule psql's `\d` leans on when
+    /// it writes `WHERE c.oid = '20001'`. Every cell was verified against
+    /// PostgreSQL 18.4.
+    #[test]
+    fn a_bare_literal_adopts_its_scalar_siblings_type() {
+        // (expression, result)
+        let cases: &[(&str, Datum)] = &[
+            // The integer family, in both operand orders.
+            ("1 = '1'", Datum::Bool(true)),
+            ("'1' = 1", Datum::Bool(true)),
+            ("1::int2 = '1'", Datum::Bool(true)),
+            ("1::int8 = '1'", Datum::Bool(true)),
+            ("1::oid = '1'", Datum::Bool(true)),
+            ("1 = '01'", Datum::Bool(true)),
+            ("1 = '+1'", Datum::Bool(true)),
+            ("5 = ' 5'", Datum::Bool(true)),
+            ("-1 = '-1'", Datum::Bool(true)),
+            // Every comparison, not just equality.
+            ("1 < '2'", Datum::Bool(true)),
+            ("1 >= '2'", Datum::Bool(false)),
+            ("1 <> '2'", Datum::Bool(true)),
+            // numeric and the floats.
+            ("1.5 = '1.5'", Datum::Bool(true)),
+            ("1.5 = '1.50'", Datum::Bool(true)),
+            ("1.5::float8 = '1.5'", Datum::Bool(true)),
+            ("1.5::float4 = '1.5'", Datum::Bool(true)),
+            ("'NaN'::float8 = 'NaN'", Datum::Bool(true)),
+            // boolean, whose input syntax accepts far more than `t`/`f`.
+            ("true = 't'", Datum::Bool(true)),
+            ("'t' = true", Datum::Bool(true)),
+            ("true = 'yes'", Datum::Bool(true)),
+            ("true > 'f'", Datum::Bool(true)),
+            ("true AND 't'", Datum::Bool(true)),
+            // bytea and the date/time family.
+            ("'\\x0102'::bytea > '\\x01'", Datum::Bool(true)),
+            ("'2020-01-01'::date = '2020-01-01'", Datum::Bool(true)),
+            ("'01:02:03'::time = '01:02:03'", Datum::Bool(true)),
+            ("'1 day'::interval = '1 day'", Datum::Bool(true)),
+            // `BETWEEN`, `IN` and a simple `CASE` expand into comparisons that
+            // each resolve their own literal — so a pair of bare literals still
+            // compares as text ('10' < '9') even with a typed sibling nearby.
+            ("2 BETWEEN '1' AND '3'", Datum::Bool(true)),
+            ("'2' BETWEEN 1 AND 3", Datum::Bool(true)),
+            ("'10' BETWEEN '9' AND 20", Datum::Bool(false)),
+            ("1 IN ('1','2')", Datum::Bool(true)),
+            ("'1' IN (1,2)", Datum::Bool(true)),
+            ("1 NOT IN ('2')", Datum::Bool(true)),
+            ("'10' IN ('9', 20)", Datum::Bool(false)),
+            ("'2020-01-01'::date IN ('2020-01-01')", Datum::Bool(true)),
+            (
+                "CASE 1 WHEN '1' THEN 'y' ELSE 'n' END",
+                Datum::Text("y".into()),
+            ),
+            (
+                "CASE 1 WHEN '2' THEN 'y' ELSE 'n' END",
+                Datum::Text("n".into()),
+            ),
+            ("1 IS DISTINCT FROM '1'", Datum::Bool(false)),
+            ("1 IS NOT DISTINCT FROM '1'", Datum::Bool(true)),
+            // Arithmetic and the bitwise operators resolve the same way.
+            ("1 + '1'", Datum::Int4(2)),
+            ("'1' + 1", Datum::Int4(2)),
+            ("1 - '1'", Datum::Int4(0)),
+            ("6 / '2'", Datum::Int4(3)),
+            ("7 % '3'", Datum::Int4(1)),
+            ("2 ^ '3'", Datum::Float8(8.0)),
+            ("1::int8 * '3'", Datum::Int8(3)),
+            ("1.5 * '2' = 3.0", Datum::Bool(true)),
+            ("1 & '3'", Datum::Int4(1)),
+            ("1 | '2'", Datum::Int4(3)),
+            ("1 # '3'", Datum::Int4(2)),
+            ("1 << '2'", Datum::Int4(4)),
+            ("8 >> '2'", Datum::Int4(2)),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == *expected, "{sql}");
+        }
+    }
+
+    /// Resolving the literal fixes the operator's *result* type too: `1 + '1'`
+    /// is an `integer` sum in PostgreSQL, not a pair widened through an
+    /// unresolved operand.
+    #[test]
+    fn an_adopted_literal_sets_the_operators_result_type() {
+        // (expression, inferred type)
+        let cases: &[(&str, ColumnType)] = &[
+            ("1 + '1'", ColumnType::Int4),
+            ("'1' + 1", ColumnType::Int4),
+            ("1::int2 + '1'", ColumnType::Int2),
+            ("1::int8 + '1'", ColumnType::Int8),
+            ("1.5 + '1'", ColumnType::Numeric(None)),
+            ("1::float8 / '4'", ColumnType::Float8),
+            ("7 % '3'", ColumnType::Int4),
+            ("2 ^ '3'", ColumnType::Float8),
+            ("1 & '3'", ColumnType::Int4),
+            ("1 << '2'", ColumnType::Int4),
+        ];
+        for (sql, expected) in cases {
+            let got = infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect("infer");
+            assert2::assert!(got == *expected, "{sql}");
+        }
+    }
+
+    /// Adopting a type is not the same as accepting anything. A literal that is
+    /// not valid input for the type it adopted fails with that type's own input
+    /// error, and a value that is *genuinely* `text` never adopts at all —
+    /// PostgreSQL has no `integer = text` operator and neither does crabka.
+    #[test]
+    fn only_an_unknown_literal_adopts_and_only_when_it_parses() {
+        // (expression, message fragment)
+        let cases: &[(&str, &str)] = &[
+            (
+                "1 = 'abc'",
+                "invalid input syntax for type integer: \"abc\"",
+            ),
+            ("1 = ''", "invalid input syntax for type integer: \"\""),
+            ("1 > ''", "invalid input syntax for type integer: \"\""),
+            (
+                "true = 'xyz'",
+                "invalid input syntax for type boolean: \"xyz\"",
+            ),
+            (
+                "1.5 = 'abc'",
+                "invalid input syntax for type numeric: \"abc\"",
+            ),
+            (
+                "1::int2 = '99999'",
+                "value \"99999\" is out of range for type smallint",
+            ),
+            (
+                "1 IN ('abc')",
+                "invalid input syntax for type integer: \"abc\"",
+            ),
+            (
+                "2 BETWEEN '1' AND 'abc'",
+                "invalid input syntax for type integer: \"abc\"",
+            ),
+            (
+                "CASE 1 WHEN 'abc' THEN 'y' END",
+                "invalid input syntax for type integer: \"abc\"",
+            ),
+            // Genuinely `text`: an explicit cast, and a text-returning function.
+            ("1 = '1'::text", "cannot compare integer and text"),
+            ("1 = upper('1')", "cannot compare integer and text"),
+            ("1 + '1'::text", "operator does not exist: integer + text"),
+        ];
+        for (sql, fragment) in cases {
+            let message = ev_err(sql).into_pg().message;
+            assert2::assert!(message.contains(fragment), "{sql} produced {message}");
+        }
     }
 
     #[test]
@@ -3074,6 +6101,10 @@ mod tests {
         assert_eq!(ev("3 / 2.0", None, &[]), num("1.5000000000000000"));
         assert_eq!(ev("- 2.5", None, &[]), num("-2.5"));
         assert_eq!(
+            ev("-1 * 11528652096115048448::numeric", None, &[]),
+            num("-11528652096115048448")
+        );
+        assert_eq!(
             infer_type(&pexpr("a + 1.0").expect("parse"), &scope_of(Some(&table())))
                 .expect("infer"),
             ColumnType::Numeric(None)
@@ -3147,14 +6178,18 @@ mod tests {
         // infer_type agrees on the result types for these cells (no plan/eval drift).
         let tstz_col = Table {
             id: 9,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("tz"),
             columns: vec![
                 Column::new("ts", ColumnType::Timestamptz),
                 Column::new("iv", ColumnType::Interval),
             ],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let tstz_scope = scope_of(Some(&tstz_col));
@@ -3172,6 +6207,109 @@ mod tests {
         );
     }
 
+    /// The pairs that reach their `pg_operator` row only through a coercion.
+    ///
+    /// Each of these resolves to a row neither operand's type spells, so it
+    /// answers nothing at all until `apply_binary` converts the operands to the
+    /// row's declared parameter types. `date - time` runs `date - interval`,
+    /// `timestamptz - timestamp` runs `timestamptz - timestamptz`, and so on.
+    /// The three exact rows the resolver can now select
+    /// (`time - time`, `date + timetz`, `timetz + date`) are here too, because
+    /// selecting a row the value layer does not implement fails the same way.
+    ///
+    /// Every expected value is `PostgreSQL` 18.4's own answer under
+    /// `TimeZone = UTC`. Each case asserts the result TYPE beside the value, so
+    /// a coercion that produced the right text under the wrong type would still
+    /// fail.
+    #[test]
+    fn a_coerced_operand_reaches_the_operator_row_that_resolution_chose() {
+        use assert2::assert;
+
+        let ctx = crate::clock::EvalCtx::test_default();
+        let cases = [
+            (
+                "date '2000-01-01' - time '04:05:06'",
+                "timestamp without time zone",
+                "1999-12-31 19:54:54",
+            ),
+            (
+                "date '2000-01-01' + timetz '11:00-5'",
+                "timestamp with time zone",
+                "2000-01-01 16:00:00+00",
+            ),
+            (
+                "timestamp '2000-01-02' - date '2000-01-01'",
+                "interval",
+                "1 day",
+            ),
+            (
+                "timestamp '2000-01-02 01:00' + time '01:00'",
+                "timestamp without time zone",
+                "2000-01-02 02:00:00",
+            ),
+            (
+                "time '01:00' + timetz '02:00-05'",
+                "time with time zone",
+                "03:00:00-05",
+            ),
+            ("time '01:00' - time '00:30'", "interval", "00:30:00"),
+            (
+                "timetz '01:00-05' - time '00:30'",
+                "time with time zone",
+                "00:30:00-05",
+            ),
+            (
+                "timestamptz '2000-01-01' - timestamp '2000-01-01'",
+                "interval",
+                "00:00:00",
+            ),
+            // `time - time` is signed and does not wrap, unlike the
+            // `time - interval` row that shares its spelling.
+            ("time '00:30' - time '01:00'", "interval", "-00:30:00"),
+            // The offset the `timetz` carries is the whole of the zone
+            // information: no session zone took part in either of these, and
+            // they differ by the ten hours between the two offsets.
+            (
+                "timetz '11:00+05' + date '2000-01-01'",
+                "timestamp with time zone",
+                "2000-01-01 06:00:00+00",
+            ),
+            // A `date` infinity survives the operator rather than being
+            // computed with.
+            (
+                "date 'infinity' + timetz '11:00-05'",
+                "timestamp with time zone",
+                "infinity",
+            ),
+            // `time → interval` also puts `time` inside `interval * float8`,
+            // which is why a clock reading can be scaled at all.
+            ("time '04:05:06' * 3", "interval", "12:15:18"),
+            // A NULL operand carries no type to resolve a row with, so the
+            // coercion stands back and the operator propagates the NULL. The
+            // static type still comes from the row the operand TYPES choose.
+            (
+                "NULL::date + timetz '11:00-05'",
+                "timestamp with time zone",
+                "NULL",
+            ),
+        ];
+        for (sql, expected_type, expected_text) in cases {
+            let inferred = infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect("infer");
+            let value =
+                eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx).expect("eval");
+            let rendered = if value.is_null() {
+                "NULL".to_string()
+            } else {
+                let bytes = crabka_pgtypes::encoding::encode_text(&value, &ctx.time_zone);
+                String::from_utf8(bytes).expect("temporal text is utf-8")
+            };
+            assert!(
+                (inferred.name(), rendered.as_str()) == (expected_type, expected_text),
+                "{sql}"
+            );
+        }
+    }
+
     #[test]
     fn undefined_column_is_42703() {
         let t = table();
@@ -3187,11 +6325,16 @@ mod tests {
     }
 
     #[test]
-    fn parameter_is_0a000() {
+    fn an_unbound_parameter_is_42p02() {
         let ctx = crate::clock::EvalCtx::test_default();
         let err = eval(&pexpr("$1").expect("parse"), &scope_of(None), &[], &ctx)
             .expect_err("eval $1 should fail");
-        assert_eq!(err.into_pg().code, "0A000");
+        let err = err.into_pg();
+        // PostgreSQL reports an unbound placeholder as undefined, not as an
+        // unimplemented feature: the simple protocol supplies no parameters, so
+        // `$1` names nothing rather than asking for something gres cannot do.
+        assert_eq!(err.code, "42P02");
+        assert_eq!(err.message, "there is no parameter $1");
     }
 
     #[test]
@@ -3385,11 +6528,15 @@ mod tests {
         // a float8 column → bool has no defined cast.
         let ft = Table {
             id: 1,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("t"),
             columns: vec![Column::new("a", ColumnType::Float8)],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         };
         let err = infer_type(&pexpr("a::bool").expect("parse"), &scope_of(Some(&ft)))
@@ -3432,13 +6579,20 @@ mod tests {
             .expect("infer"),
             ColumnType::Int4
         );
-        // incompatible branch types -> 42804.
-        let err = infer_type(
-            &pexpr("case when a > 0 then 1 else 'x' end").expect("parse"),
-            &scope,
-        )
-        .expect_err("incompatible");
-        assert_eq!(err.into_pg().code, "42804");
+        // A bare string is `unknown`, adopts int4 from the other branch, and
+        // is parsed only if that branch is selected.
+        assert_eq!(
+            infer_type(
+                &pexpr("case when a > 0 then 1 else 'x' end").expect("parse"),
+                &scope,
+            )
+            .expect("infer"),
+            ColumnType::Int4,
+        );
+        assert_eq!(
+            err_code("case when false then 1 else 'x' end", None, &[]),
+            "22P02"
+        );
     }
 
     // ---- SP37 Task 11: temporal result-type inference + unary-minus interval ----
@@ -3473,6 +6627,7 @@ mod tests {
     fn jt() -> Table {
         Table {
             id: 2,
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
             name: RelationName::public("jt"),
             columns: vec![
                 Column::new("j", ColumnType::Jsonb),
@@ -3480,10 +6635,14 @@ mod tests {
                 Column::new("ta", ColumnType::Array(ElemType::Text)),
                 Column::new("i", ColumnType::Int4),
                 Column::new("s", ColumnType::Text),
+                Column::new("jn", ColumnType::Json),
             ],
             sharded: false,
+            row_security: false,
+            force_row_security: false,
             sharding: None,
             foreign: None,
+            materialized: None,
             checks: Vec::new(),
         }
     }
@@ -3491,6 +6650,17 @@ mod tests {
     fn jb(text: &str) -> Datum {
         Datum::Jsonb(crabka_pgtypes::jsonb::parse(text).expect("jsonb literal"))
     }
+
+    /// A `json` value, which is its input text and nothing else.
+    fn jn(text: &str) -> Datum {
+        crabka_pgtypes::json::validate(text).expect("json literal");
+        Datum::Json(text.to_string())
+    }
+
+    /// The `json` document bound to `jt.jn`. Its spacing, key order and escape
+    /// are all load-bearing: `jsonb` would erase every one of them, so a `json`
+    /// operator that answered from a re-serialized document would show up here.
+    const JSON_ROW: &str = r#"{"a":{"b":  1}, "c": [1,  2], "s": "x\ty"}"#;
 
     fn int_array(elems: &[i32]) -> Datum {
         Datum::Array(ArrayValue::new(
@@ -3510,6 +6680,7 @@ mod tests {
             )),
             Datum::Int4(2),
             Datum::Text("a".into()),
+            jn(JSON_ROW),
         ]
     }
 
@@ -3629,11 +6800,288 @@ mod tests {
         }
     }
 
-    /// `||` resolves to five different operators. The operands' STATIC types
-    /// make the choice. That is the only way `ARRAY[1,2] || NULL`, a
-    /// concatenation that gives `{1,2}`, can differ from
-    /// `ARRAY[1,2] || NULL::int`, an append that gives `{1,2,NULL}`, once both
-    /// right sides have evaluated to SQL NULL.
+    // ---- `json`, which is a different type from `jsonb` ----
+
+    /// The 42883 every `json` rejection carries, verbatim from PostgreSQL 18.4.
+    const NO_OPERATOR_HINT: &str = "No operator matches the given name and argument types. \
+                                    You might need to add explicit type casts.";
+
+    /// The SQLSTATE, message and HINT a plan-time failure reports.
+    fn plan_failure(sql: &str) -> (String, String, Option<String>) {
+        let error = infer_jt(sql).expect_err("must not resolve").into_pg();
+        let hint = error.diagnostics.as_ref().and_then(|d| d.hint.clone());
+        (error.code, error.message, hint)
+    }
+
+    /// PostgreSQL gives `json` six operators and no more: `->` and `->>` by
+    /// object key and by array index, and `#>` / `#>>` by path. `->`/`#>` yield
+    /// `json`; `->>`/`#>>` yield `text`.
+    #[test]
+    fn json_infers_the_result_types_of_its_six_operators() {
+        let cases: &[(&str, ColumnType)] = &[
+            ("jn -> 'a'", ColumnType::Json),
+            ("jn -> 0", ColumnType::Json),
+            ("jn ->> 'a'", ColumnType::Text),
+            ("jn ->> 0", ColumnType::Text),
+            ("jn #> ARRAY['a']", ColumnType::Json),
+            ("jn #>> ARRAY['a']", ColumnType::Text),
+            // An `unknown` literal beside `#>`/`#>>` adopts `text[]` — the only
+            // adoption `json` makes, since its other two operators take the
+            // `text` the literal already is.
+            ("jn #> '{a}'", ColumnType::Json),
+            ("jn #>> '{a}'", ColumnType::Text),
+            // `json` has NO `||`; `anynonarray || text` renders the document.
+            ("jn || s", ColumnType::Text),
+            ("s || jn", ColumnType::Text),
+            // The `jsonb` column in the same table still resolves to `jsonb`,
+            // so neither type is answering for the other.
+            ("j -> 'a'", ColumnType::Jsonb),
+            ("j ->> 'a'", ColumnType::Text),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(infer_jt(sql).expect("infer") == *want, "for {sql}");
+        }
+    }
+
+    /// `json` returns the ORIGINAL text of the sub-document, spacing and escapes
+    /// intact — the one property that makes it a different type from `jsonb`,
+    /// which would return `{"b": 1}` for every one of these.
+    #[test]
+    fn json_operators_return_the_original_sub_text() {
+        let cases: &[(&str, Datum)] = &[
+            ("jn -> 'a'", jn(r#"{"b":  1}"#)),
+            ("jn ->> 'a'", Datum::Text(r#"{"b":  1}"#.into())),
+            ("jn -> 'c' -> 0", jn("1")),
+            // A negative array index counts from the end.
+            ("jn -> 'c' -> -1", jn("2")),
+            // `->` keeps a JSON string quoted and escaped; `->>` de-escapes it.
+            ("jn -> 's'", jn(r#""x\ty""#)),
+            ("jn ->> 's'", Datum::Text("x\ty".into())),
+            ("jn #> ARRAY['a', 'b']", jn("1")),
+            ("jn #>> ARRAY['a', 'b']", Datum::Text("1".into())),
+            ("jn #> '{a,b}'", jn("1")),
+            // A missing key, and an array index into an object, are SQL NULL
+            // rather than an error.
+            ("jn -> 'zz'", Datum::Null),
+            ("jn ->> 0", Datum::Null),
+            // All six are strict.
+            ("null::json -> 'a'", Datum::Null),
+            ("jn -> null", Datum::Null),
+            ("jn #> null", Datum::Null),
+            // `json || text` renders the document, which is `anynonarray || text`.
+            ("jn || s", Datum::Text(format!("{JSON_ROW}a"))),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(eval_jt(sql).expect("eval") == *want, "for {sql}");
+        }
+    }
+
+    /// Every operator PostgreSQL does NOT give `json`, with its exact message
+    /// and HINT. Without this the fall-throughs are silent rather than wrong:
+    /// `=` would order two documents as text and `-` would report a 42804.
+    #[test]
+    fn json_reports_42883_for_every_operator_it_does_not_have() {
+        let cases: &[(&str, &str)] = &[
+            // No equality and no ordering, at any spelling that resolves one.
+            ("jn = jn", "operator does not exist: json = json"),
+            ("jn <> jn", "operator does not exist: json <> json"),
+            ("jn < jn", "operator does not exist: json < json"),
+            ("jn <= jn", "operator does not exist: json <= json"),
+            ("jn > jn", "operator does not exist: json > json"),
+            ("jn >= jn", "operator does not exist: json >= json"),
+            (
+                "jn IS DISTINCT FROM jn",
+                "operator does not exist: json = json",
+            ),
+            (
+                "jn IS NOT DISTINCT FROM jn",
+                "operator does not exist: json = json",
+            ),
+            ("jn IN (jn)", "operator does not exist: json = json"),
+            (
+                "jn BETWEEN jn AND jn",
+                "operator does not exist: json >= json",
+            ),
+            (
+                "CASE jn WHEN jn THEN 1 END",
+                "operator does not exist: json = json",
+            ),
+            (
+                "jn = ANY(ARRAY[jn])",
+                "operator does not exist: json = json",
+            ),
+            // `json` is not `jsonb` and not `text`, in either direction.
+            ("jn = j", "operator does not exist: json = jsonb"),
+            ("jn = s", "operator does not exist: json = text"),
+            ("jn @> j", "operator does not exist: json @> jsonb"),
+            ("j @> jn", "operator does not exist: jsonb @> json"),
+            // PostgreSQL leaves a literal beside a `json` operand `unknown`,
+            // because there is no operator for it to adopt a type from.
+            ("jn = '{}'", "operator does not exist: json = unknown"),
+            ("'{}' = jn", "operator does not exist: unknown = json"),
+            // The jsonb-only containment, existence and jsonpath operators.
+            ("jn @> jn", "operator does not exist: json @> json"),
+            ("jn <@ jn", "operator does not exist: json <@ json"),
+            ("jn && jn", "operator does not exist: json && json"),
+            ("jn ? s", "operator does not exist: json ? text"),
+            (
+                "jn ?| ARRAY['a']",
+                "operator does not exist: json ?| text[]",
+            ),
+            (
+                "jn ?& ARRAY['a']",
+                "operator does not exist: json ?& text[]",
+            ),
+            // `||` and `-` resolve for `jsonb` and for nothing about `json`.
+            ("jn || jn", "operator does not exist: json || json"),
+            ("jn - s", "operator does not exist: json - text"),
+            ("jn - 1", "operator does not exist: json - integer"),
+            // The six that DO exist still reject an operand they have no
+            // overload for.
+            ("jn -> true", "operator does not exist: json -> boolean"),
+            (
+                "jn #> ARRAY[1]",
+                "operator does not exist: json #> integer[]",
+            ),
+            // …and no other left operand acquires them.
+            ("s -> s", "operator does not exist: text -> text"),
+            ("i #> ta", "operator does not exist: integer #> text[]"),
+            ("s #>> ta", "operator does not exist: text #>> text[]"),
+        ];
+        for (sql, message) in cases {
+            assert2::assert!(
+                plan_failure(sql)
+                    == (
+                        "42883".to_string(),
+                        (*message).to_string(),
+                        Some(NO_OPERATOR_HINT.to_string())
+                    ),
+                "for {sql}"
+            );
+        }
+    }
+
+    /// Only `jsonb` has a subscript handler, so a `json` base is 42804 — at
+    /// plan time and at value time, for a single subscript and for a chain.
+    #[test]
+    fn json_does_not_support_subscripting() {
+        let want = (
+            "42804".to_string(),
+            "cannot subscript type json because it does not support subscripting".to_string(),
+        );
+        for sql in ["jn['a']", "jn[1]", "jn['a']['b']"] {
+            let planned = infer_jt(sql).expect_err("no subscripting").into_pg();
+            assert2::assert!((planned.code, planned.message) == want, "planning {sql}");
+            let evaluated = eval_jt(sql).expect_err("no subscripting").into_pg();
+            assert2::assert!(
+                (evaluated.code, evaluated.message) == want,
+                "evaluating {sql}"
+            );
+        }
+        // `jsonb`'s subscripting is untouched.
+        assert2::assert!(eval_jt("j['a']").expect("jsonb subscript") == jb("1"));
+    }
+
+    /// `json` has no default btree operator class, so everything that needs one
+    /// — GROUP BY, DISTINCT, ORDER BY, the set operations, a window PARTITION —
+    /// names the missing operator rather than inventing a text order.
+    #[test]
+    fn json_has_no_btree_operator_class() {
+        let cases: &[(ColumnType, &str)] = &[
+            (ColumnType::Json, "json"),
+            (ColumnType::Array(ElemType::Json), "json[]"),
+        ];
+        for (ty, name) in cases {
+            let equality = require_equality_operator(*ty)
+                .expect_err("no equality operator")
+                .into_pg();
+            assert2::assert!(
+                (equality.code.as_str(), equality.message.as_str())
+                    == (
+                        "42883",
+                        format!("could not identify an equality operator for type {name}").as_str()
+                    ),
+                "for {name}"
+            );
+            let ordering = require_ordering_operator(*ty)
+                .expect_err("no ordering operator")
+                .into_pg();
+            assert2::assert!(
+                (ordering.code.as_str(), ordering.message.as_str())
+                    == (
+                        "42883",
+                        format!("could not identify an ordering operator for type {name}").as_str()
+                    ),
+                "for {name}"
+            );
+        }
+        // `jsonb` normalizes on input and therefore HAS the opclass.
+        assert2::assert!(require_equality_operator(ColumnType::Jsonb).is_ok());
+        assert2::assert!(require_ordering_operator(ColumnType::Jsonb).is_ok());
+    }
+
+    /// The same rejections from the VALUES alone — the path `agg`'s grouped
+    /// evaluator takes, which has no operand expressions to type first.
+    #[test]
+    fn json_values_reject_the_operators_json_does_not_have() {
+        let ctx = crate::clock::EvalCtx::test_default();
+        let doc = jn("{}");
+        let text = Datum::Text("a".into());
+        let cases: &[(BinaryOp, &Datum, &str)] = &[
+            (BinaryOp::Eq, &doc, "operator does not exist: json = json"),
+            (BinaryOp::Ne, &doc, "operator does not exist: json <> json"),
+            (BinaryOp::Lt, &doc, "operator does not exist: json < json"),
+            (BinaryOp::Ge, &doc, "operator does not exist: json >= json"),
+            (
+                BinaryOp::IsDistinctFrom,
+                &doc,
+                "operator does not exist: json = json",
+            ),
+            (
+                BinaryOp::Contains,
+                &doc,
+                "operator does not exist: json @> json",
+            ),
+            (
+                BinaryOp::ContainedBy,
+                &doc,
+                "operator does not exist: json <@ json",
+            ),
+            (BinaryOp::Sub, &text, "operator does not exist: json - text"),
+            (BinaryOp::Add, &text, "operator does not exist: json + text"),
+            (
+                BinaryOp::KeyExists,
+                &text,
+                "operator does not exist: json ? text",
+            ),
+            (
+                BinaryOp::JsonPathMatch,
+                &doc,
+                "operator does not exist: json @@ json",
+            ),
+        ];
+        for (op, right, message) in cases {
+            let error = apply_binary(*op, &doc, right, &ctx)
+                .expect_err("no operator")
+                .into_pg();
+            assert2::assert!(
+                (error.code.as_str(), error.message.as_str()) == ("42883", *message),
+                "for {}",
+                op_spelling(*op)
+            );
+        }
+        // `||` is the one shared spelling `json` really resolves, and it must
+        // NOT be turned away with the rest.
+        assert2::assert!(
+            apply_binary(BinaryOp::Concat, &doc, &text, &ctx).expect("concat")
+                == Datum::Text("{}a".into())
+        );
+    }
+
+    /// `||` resolves to five different operators; the choice is made from the
+    /// operands' STATIC types, which is the only way `ARRAY[1,2] || NULL` (a
+    /// concatenation, `{1,2}`) can differ from `ARRAY[1,2] || NULL::int` (an
+    /// append, `{1,2,NULL}`) once both right sides have evaluated to SQL NULL.
     #[test]
     fn concat_resolves_text_jsonb_and_the_three_array_forms() {
         let with_null = Datum::Array(ArrayValue::new(
@@ -3731,13 +7179,17 @@ mod tests {
             eval_jt("ARRAY[]::int[]").expect("eval")
                 == Datum::Array(ArrayValue::new(ElemType::Int4, Vec::new()))
         );
-        // Incompatible elements are the same 42804 `CASE` reports.
+        // A bare string is `unknown` and adopts int4 from the typed element.
         assert2::assert!(
-            infer_jt("ARRAY[1, 'x']")
-                .expect_err("incompatible")
+            infer_jt("ARRAY[1, 'x']").expect("infer") == ColumnType::Array(ElemType::Int4)
+        );
+        assert2::assert!(eval_jt("ARRAY[1, '2']").expect("eval") == int_array(&[1, 2]));
+        assert2::assert!(
+            eval_jt("ARRAY[1, 'x']")
+                .expect_err("invalid integer input")
                 .into_pg()
                 .code
-                == "42804"
+                == "22P02"
         );
     }
 
@@ -3999,5 +7451,249 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn range_operators_resolve_domains_by_their_storage_type() {
+        let base = Box::leak(Box::new(
+            ColumnType::builtin_multirange(crabka_pgtypes::oids::INT4MULTIRANGE)
+                .expect("int4multirange"),
+        ));
+        let domain = ColumnType::Domain(crabka_pgtypes::usertype::DomainRef {
+            oid: 900_001,
+            name: "restrictedmultirange_test",
+            base,
+        });
+        assert_eq!(
+            json_or_array_operator_result_type(BinaryOp::Contains, domain, ColumnType::Int4),
+            Some(ColumnType::Bool)
+        );
+
+        let subtype = Box::leak(Box::new(ColumnType::Domain(
+            crabka_pgtypes::usertype::DomainRef {
+                oid: 900_002,
+                name: "range_subtype_domain_test",
+                base: Box::leak(Box::new(ColumnType::Int4)),
+            },
+        )));
+        let range = crabka_pgtypes::usertype::RangeRef {
+            oid: 900_003,
+            name: "range_over_domain_test",
+            subtype,
+        };
+        let multirange = ColumnType::Multirange(crabka_pgtypes::usertype::MultirangeRef {
+            oid: 900_004,
+            name: "multirange_over_domain_test",
+            range,
+        });
+        assert_eq!(
+            json_or_array_operator_result_type(BinaryOp::Contains, multirange, *subtype),
+            Some(ColumnType::Bool)
+        );
+    }
+
+    #[test]
+    fn a_range_is_not_adjacent_to_an_internal_multirange_edge() {
+        use assert2::assert;
+
+        assert!(
+            ev(
+                "int4range(20,25) -|- int4multirange(int4range(10,20),int4range(30,40))",
+                None,
+                &[]
+            ) == Datum::Bool(false)
+        );
+        assert!(
+            ev(
+                "int4range(40,50) -|- int4multirange(int4range(10,20),int4range(30,40))",
+                None,
+                &[]
+            ) == Datum::Bool(true)
+        );
+    }
+
+    /// The plan-time table and the value-time dispatch answer the SAME set of
+    /// (operator, left type, right type) triples.
+    ///
+    /// [`geometric_operator_result_type`] is what decides at plan time whether
+    /// `box <-> circle` exists, and [`apply_geometric_operator`] is what decides
+    /// it per row. A pair one of them accepts and the other does not is a
+    /// divergence a corpus would see as a query that describes and then fails,
+    /// or the other way round — so this walks all 26 geometric operators over
+    /// every one of the 7×7 pairs and requires the two to agree 1274 times.
+    #[test]
+    fn plan_time_and_value_time_agree_on_every_geometric_pair() {
+        use assert2::assert;
+
+        let ctx = crate::clock::EvalCtx::test_default();
+        for op in GEOMETRIC_BINARY_OPERATORS {
+            for (lt, left) in geometric_samples() {
+                for (rt, right) in geometric_samples() {
+                    let planned = geometric_operator_result_type(op, lt, rt);
+                    let evaluated = apply_geometric_operator(op, &left, &right)
+                        .expect("a geometric operand pair is always claimed");
+                    assert!(
+                        planned.is_some() == evaluated.is_ok(),
+                        "{} {} {}: plan {:?}, value {:?}",
+                        lt.name(),
+                        op_spelling(op),
+                        rt.name(),
+                        planned,
+                        evaluated
+                    );
+                    // A declared pair's value really has the type the plan
+                    // promised, so a RowDescription built from the plan
+                    // describes the rows the executor then sends.
+                    if let (Some(ty), Ok(value)) = (planned, &evaluated)
+                        && !value.is_null()
+                    {
+                        assert!(
+                            value.column_type() == Some(ty),
+                            "{} {} {} produced {value:?}, not {}",
+                            lt.name(),
+                            op_spelling(op),
+                            rt.name(),
+                            ty.name()
+                        );
+                    }
+                    // The full `apply_binary` path agrees with the dispatch it
+                    // delegates to, so nothing downstream re-claims a pair.
+                    let whole = apply_binary(op, &left, &right, &ctx);
+                    assert!(whole.is_ok() == evaluated.is_ok());
+                }
+            }
+        }
+    }
+
+    /// Every geometric operator is strict: one NULL operand is one NULL result,
+    /// whichever side it is on and whether or not the pair is declared.
+    #[test]
+    fn a_null_operand_makes_every_geometric_operator_null() {
+        use assert2::assert;
+
+        for op in GEOMETRIC_BINARY_OPERATORS {
+            for (ty, value) in geometric_samples() {
+                for pair in [(value.clone(), Datum::Null), (Datum::Null, value.clone())] {
+                    let result = apply_geometric_operator(op, &pair.0, &pair.1);
+                    assert!(
+                        result.map(Result::ok) == Some(Some(Datum::Null)),
+                        "{} {}",
+                        op_spelling(op),
+                        ty.name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The geometric dispatch runs SECOND in `apply_binary`'s prelude, ahead of
+    /// the network, bit-string, money and system-identifier families. It must
+    /// therefore claim nothing that has no geometric operand — including two
+    /// NULLs, which carry no type at all.
+    #[test]
+    fn the_geometric_dispatch_claims_nothing_without_a_geometric_operand() {
+        use assert2::assert;
+
+        let others = [
+            Datum::Null,
+            Datum::Int4(5),
+            Datum::Int8(5),
+            Datum::Float8(1.5),
+            Datum::Text("x".into()),
+            Datum::Bool(true),
+        ];
+        for op in GEOMETRIC_BINARY_OPERATORS {
+            for left in &others {
+                for right in &others {
+                    assert!(
+                        apply_geometric_operator(op, left, right).is_none(),
+                        "{op:?} claimed {left:?} and {right:?}"
+                    );
+                    assert!(apply_geometric_comparison(op, left, right).is_none());
+                }
+            }
+        }
+    }
+
+    /// Every `BinaryOp` PostgreSQL gives a geometric overload.
+    const GEOMETRIC_BINARY_OPERATORS: [BinaryOp; 26] = [
+        BinaryOp::BitXor,
+        BinaryOp::ClosestPoint,
+        BinaryOp::Overlaps,
+        BinaryOp::DoesNotExtendRight,
+        BinaryOp::DoesNotExtendLeft,
+        BinaryOp::DoesNotExtendAbove,
+        BinaryOp::DoesNotExtendBelow,
+        BinaryOp::Add,
+        BinaryOp::Sub,
+        BinaryOp::Mul,
+        BinaryOp::Div,
+        BinaryOp::Phrase,
+        BinaryOp::Shl,
+        BinaryOp::Shr,
+        BinaryOp::StrictlyBelow,
+        BinaryOp::StrictlyAbove,
+        BinaryOp::Contains,
+        BinaryOp::ContainedBy,
+        BinaryOp::BelowEq,
+        BinaryOp::AboveEq,
+        BinaryOp::Intersects,
+        BinaryOp::Horizontal,
+        BinaryOp::KeyExistsAny,
+        BinaryOp::Perpendicular,
+        BinaryOp::Parallel,
+        BinaryOp::Same,
+    ];
+
+    /// One well-formed value of each geometric type. The coordinates are chosen
+    /// so no pair overflows, divides by zero or leaves an operand empty — the
+    /// point of the sweep is which pairs RESOLVE, not what they answer.
+    fn geometric_samples() -> [(ColumnType, Datum); 7] {
+        use crabka_pgtypes::{
+            Path, Point, Polygon,
+            geometry::{Box2, Circle, Line, Lseg},
+        };
+
+        let point = Point { x: 1.0, y: 2.0 };
+        let other = Point { x: 3.0, y: 4.0 };
+        [
+            (ColumnType::Point, Datum::Point(point)),
+            (ColumnType::Box, Datum::Box(Box2::normalized(point, other))),
+            (
+                ColumnType::Circle,
+                Datum::Circle(Circle {
+                    center: point,
+                    radius: 1.0,
+                }),
+            ),
+            (
+                ColumnType::Line,
+                Datum::Line(Line {
+                    a: 1.0,
+                    b: -1.0,
+                    c: 0.0,
+                }),
+            ),
+            (
+                ColumnType::Lseg,
+                Datum::Lseg(Lseg {
+                    start: point,
+                    end: other,
+                }),
+            ),
+            (
+                ColumnType::Path,
+                Datum::Path(Path {
+                    closed: false,
+                    points: vec![point, other],
+                }),
+            ),
+            (
+                ColumnType::Polygon,
+                Datum::Polygon(Polygon {
+                    points: vec![point, other, Point { x: 5.0, y: 1.0 }],
+                }),
+            ),
+        ]
     }
 }

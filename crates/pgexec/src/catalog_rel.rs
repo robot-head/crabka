@@ -21,14 +21,20 @@
 use std::collections::BTreeMap;
 
 use crabka_pgcatalog::{
-    Column, CommentObject, ForeignKeyId, IndexConstraint, MatchType, ReferentialAction,
-    RelationName, Table,
+    Column, CommentObject, ConstraintDeferral as Deferral, ForeignKeyId, IndexConstraint,
+    MatchType, ReferentialAction, RelationName, Table,
 };
 use crabka_pgkv::Kv;
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
 
 use crate::error::ExecError;
 
+/// First oid of the band reserved for ordinary table relations. It sits above
+/// PostgreSQL's `FirstNormalObjectId` (16384) so the upstream sanity queries
+/// that separate catalogs from user objects with `c.oid < 16384` classify a
+/// crabka table the way they classify a PostgreSQL one, and below the index
+/// band so the two cannot overlap.
+const TABLE_OID_BASE: i32 = 20_000;
 /// First oid of the band reserved for view relations.
 const VIEW_OID_BASE: i32 = 60_000;
 /// First oid of the band reserved for sequence relations.
@@ -55,10 +61,36 @@ const INDEX_OID_BASE: i32 = 50_000;
 /// Oid of the single database crabka exposes.
 pub(crate) const DATABASE_OID: i32 = 5;
 /// Oid of the `pg_default` tablespace, as in PostgreSQL.
-const DEFAULT_TABLESPACE_OID: i32 = 1663;
+pub(crate) const DEFAULT_TABLESPACE_OID: i32 = 1663;
 /// Oid of the `btree` access method, as in PostgreSQL.
 pub(crate) const BTREE_AM_OID: i32 = 403;
+pub(crate) const HASH_AM_OID: i32 = 405;
+pub(crate) const GIST_AM_OID: i32 = 783;
 pub(crate) const GIN_AM_OID: i32 = 2742;
+pub(crate) const SPGIST_AM_OID: i32 = 4000;
+
+/// PostgreSQL's oid for a built-in index access method.
+pub(crate) fn access_method_oid(name: &str) -> Option<i32> {
+    Some(match name {
+        "btree" => BTREE_AM_OID,
+        "hash" => HASH_AM_OID,
+        "gist" => GIST_AM_OID,
+        "gin" => GIN_AM_OID,
+        "spgist" => SPGIST_AM_OID,
+        "brin" => 3580,
+        _ => return None,
+    })
+}
+
+pub(crate) fn builtin_operator_family_oid(method: &str, name: &str) -> Option<i32> {
+    crate::builtin_opfamilies::BUILTIN_OPERATOR_FAMILIES
+        .iter()
+        .find(|(_, candidate_method, candidate_name)| {
+            *candidate_method == method && *candidate_name == name
+        })
+        .map(|(oid, _, _)| *oid)
+}
+
 /// Oid of the `default` collation, as in PostgreSQL.
 pub(crate) const DEFAULT_COLLATION_OID: i32 = 100;
 
@@ -84,11 +116,16 @@ pub(crate) fn relation_names() -> &'static [&'static str] {
 }
 
 const PG_CATALOG_RELATIONS: &[&str] = &[
+    "pg_aggregate",
     "pg_am",
+    "pg_amop",
+    "pg_amproc",
     "pg_attrdef",
     "pg_authid",
+    "pg_cast",
     "pg_collation",
     "pg_constraint",
+    "pg_conversion",
     "pg_database",
     "pg_depend",
     "pg_description",
@@ -97,10 +134,16 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_extension",
     "pg_indexes",
     "pg_inherits",
+    "pg_init_privs",
     "pg_language",
     "pg_locks",
+    "pg_matviews",
     "pg_partitioned_table",
+    "pg_policies",
     "pg_policy",
+    "pg_opclass",
+    "pg_opfamily",
+    "pg_operator",
     "pg_proc",
     "pg_publication",
     "pg_publication_namespace",
@@ -109,6 +152,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_rewrite",
     "pg_sequence",
     "pg_shdescription",
+    "pg_shmem_allocations_numa",
     "pg_statistic_ext",
     "pg_stat_activity",
     "pg_tables",
@@ -133,11 +177,16 @@ const INFORMATION_SCHEMA_RELATIONS: &[&str] = &[
 ];
 
 static RELATION_NAMES: &[&str] = &[
+    "pg_aggregate",
     "pg_am",
+    "pg_amop",
+    "pg_amproc",
     "pg_attrdef",
     "pg_authid",
+    "pg_cast",
     "pg_collation",
     "pg_constraint",
+    "pg_conversion",
     "pg_database",
     "pg_depend",
     "pg_description",
@@ -146,10 +195,16 @@ static RELATION_NAMES: &[&str] = &[
     "pg_extension",
     "pg_indexes",
     "pg_inherits",
+    "pg_init_privs",
     "pg_language",
     "pg_locks",
+    "pg_matviews",
     "pg_partitioned_table",
+    "pg_policies",
     "pg_policy",
+    "pg_opclass",
+    "pg_opfamily",
+    "pg_operator",
     "pg_proc",
     "pg_publication",
     "pg_publication_namespace",
@@ -158,6 +213,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_rewrite",
     "pg_sequence",
     "pg_shdescription",
+    "pg_shmem_allocations_numa",
     "pg_statistic_ext",
     "pg_stat_activity",
     "pg_tables",
@@ -185,11 +241,16 @@ static RELATION_NAMES: &[&str] = &[
 /// nothing depends on.
 pub(crate) fn relation_oid(name: &str) -> i32 {
     match name {
+        "pg_aggregate" => 2600,
         "pg_am" => 2601,
+        "pg_amop" => 2602,
+        "pg_amproc" => 2603,
         "pg_attrdef" => 2604,
         "pg_authid" => 1260,
+        "pg_cast" => 2605,
         "pg_collation" => 3456,
         "pg_constraint" => 2606,
+        "pg_conversion" => 2607,
         "pg_database" => 1262,
         "pg_depend" => 2608,
         "pg_description" => 2609,
@@ -197,9 +258,13 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_event_trigger" => 3466,
         "pg_extension" => 3079,
         "pg_inherits" => 2611,
+        "pg_init_privs" => 3394,
         "pg_language" => 2612,
         "pg_partitioned_table" => 3350,
         "pg_policy" => 3256,
+        "pg_opclass" => 2616,
+        "pg_opfamily" => 2753,
+        "pg_operator" => 2617,
         "pg_proc" => 1255,
         "pg_publication" => 6104,
         "pg_publication_namespace" => 6237,
@@ -227,6 +292,9 @@ fn system_view_oid(name: &str) -> i32 {
         "pg_stat_activity" => 120_004,
         "pg_tables" => 120_005,
         "pg_views" => 120_006,
+        "pg_shmem_allocations_numa" => 120_007,
+        "pg_policies" => 120_008,
+        "pg_matviews" => 120_009,
         "information_schema.applicable_roles" => 120_010,
         "information_schema.column_privileges" => 120_011,
         "information_schema.constraint_column_usage" => 120_012,
@@ -424,17 +492,28 @@ pub(crate) fn not_null_constraint_oids(
     Ok(banded_oids(NOT_NULL_OID_BASE, &keys))
 }
 
-/// Every `FOREIGN KEY` constraint's oid, indexed by the `<child table>.<name>`
-/// text `pg_get_constraintdef` reverses an oid through.
+/// Every `FOREIGN KEY` constraint's oid, indexed by its child table and name.
 ///
 /// The oid itself comes from [`foreign_key_oid`]. This map is a lookup index
 /// over that oid, not the definition of it.
-pub(crate) fn foreign_key_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
+///
+/// The key is the **pair**, not `format!("{table}.{name}")`. A rendered key
+/// cannot be an identity: `RelationName`'s own `Display` is not injective —
+/// `a.b` plus `c` and `a` plus `b.c` render alike, which its doc comment warns
+/// about — and any future change to how a schema renders silently merges two
+/// constraints into one entry. That is not hypothetical: rendering a temporary
+/// relation's schema as `pg_temp` rather than `pg_temp_<backend id>`, which is
+/// what `PostgreSQL` shows, would make two sessions' identically-named
+/// constraints collide here, and `pg_get_constraintdef` would then hand one
+/// session the other's definition text.
+pub(crate) fn foreign_key_constraint_oids(
+    kv: &dyn Kv,
+) -> Result<BTreeMap<(RelationName, String), i32>, ExecError> {
     crabka_pgcatalog::list_foreign_keys(kv)?
         .into_iter()
         .map(|foreign_key| {
             Ok((
-                format!("{}.{}", foreign_key.table, foreign_key.name),
+                (foreign_key.table.clone(), foreign_key.name.clone()),
                 foreign_key_oid(foreign_key.id)?,
             ))
         })
@@ -486,9 +565,153 @@ pub(crate) fn index_relation_oid(index_id: u32) -> Result<i32, ExecError> {
         .ok_or_else(|| ExecError::Unsupported("index oid leaves its band".into()))
 }
 
-/// The `pg_class` oid of a table, which is its catalog id.
-fn table_relation_oid(table_id: u32) -> Result<i32, ExecError> {
+/// The `pg_class` oid of a trigger's relation. `Trigger::table_id` is
+/// polymorphic: a table's catalog id, or — when the trigger is `INSTEAD OF` on
+/// a view — that view's `pg_class` oid already. A catalog id is always inside
+/// the band width, and every relation oid band starts well above it, so the
+/// magnitude tells the two apart.
+pub(crate) fn trigger_relation_oid(table_id: u32) -> Result<i32, ExecError> {
+    if table_id < u32::try_from(OID_BAND_WIDTH).unwrap_or(u32::MAX) {
+        return table_relation_oid(table_id);
+    }
     i32::try_from(table_id).map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))
+}
+
+/// The `pg_class` oid of a table: its catalog id inside the table band.
+///
+/// # Errors
+///
+/// Returns `0A000` when the catalog id is wider than the band, which would
+/// otherwise let a table's oid collide with the index band above it.
+pub fn table_relation_oid(table_id: u32) -> Result<i32, ExecError> {
+    i32::try_from(table_id)
+        .ok()
+        .filter(|id| *id < OID_BAND_WIDTH)
+        .and_then(|id| TABLE_OID_BASE.checked_add(id))
+        .ok_or_else(|| ExecError::Unsupported("table oid leaves its band".into()))
+}
+
+/// The slot `oid` occupies in the band starting at `base`, or `None` when it
+/// falls outside that band.
+fn band_slot(base: i32, oid: i32) -> Option<u32> {
+    oid.checked_sub(base)
+        .filter(|slot| (0..OID_BAND_WIDTH).contains(slot))
+        .map(i32::unsigned_abs)
+}
+
+/// The catalog name of the relation `oid` names, or `None` when no relation
+/// carries it.
+///
+/// The inverse of the oid derivations above, and deliberately band-directed:
+/// an oid names exactly one relation kind, so reading the catalogs the other
+/// three kinds live in would be wasted work. A table — the overwhelmingly
+/// common case, and the one `pg_table_is_visible` is asked about once per row
+/// of a `\d` listing — costs a single id-keyed `get` rather than a scan.
+///
+/// A composite type's row relation sits above every band, keyed by the type's
+/// own oid, so it is looked for last and only when nothing else can match.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub(crate) fn relation_for_oid(kv: &dyn Kv, oid: i32) -> Result<Option<RelationName>, ExecError> {
+    if let Some(id) = band_slot(TABLE_OID_BASE, oid) {
+        return Ok(crabka_pgcatalog::relation_name_of(kv, id)?);
+    }
+    if band_slot(INDEX_OID_BASE, oid).is_some() {
+        return Ok(crabka_pgcatalog::list_indexes(kv)?
+            .into_iter()
+            .find(|index| index_relation_oid(index.id) == Ok(oid))
+            .map(|index| index.qualified_name()));
+    }
+    if band_slot(VIEW_OID_BASE, oid).is_some() {
+        return Ok(view_oids(kv)?
+            .into_iter()
+            .find(|(_, candidate)| *candidate == oid)
+            .map(|(name, _)| name));
+    }
+    if band_slot(SEQUENCE_OID_BASE, oid).is_some() {
+        return Ok(sequence_oids(kv)?
+            .into_iter()
+            .find(|(_, candidate)| *candidate == oid)
+            .map(|(name, _)| name));
+    }
+    if let Some(name) = virtual_relation_for_oid(oid) {
+        return Ok(Some(name));
+    }
+    Ok(composite_relation_for_oid(kv, oid)?)
+}
+
+/// The catalog name of the synthesised `pg_catalog`/`information_schema`
+/// relation `oid` names.
+fn virtual_relation_for_oid(oid: i32) -> Option<RelationName> {
+    virtual_relations()
+        .iter()
+        .find(|(_, candidate)| **candidate == oid)
+        .map(|(name, _)| name.clone())
+}
+
+/// Does a synthesised catalog relation answer to exactly this name?
+///
+/// The per-schema probe [`crate::visibility`] repeats while walking the search
+/// path, alongside [`crabka_pgcatalog::relation_exists`] for the four kinds the
+/// catalog stores.
+pub(crate) fn virtual_relation_named(name: &RelationName) -> bool {
+    virtual_relations().contains_key(name)
+}
+
+/// Every synthesised catalog relation, keyed by its catalog name.
+///
+/// [`crate::exec`] keys those relations by a flat spelling, so the schema is
+/// read back off the spelling: an `information_schema.` prefix names that
+/// schema and every other spelling is `pg_catalog`.
+/// The catalogs' own oid indexes are included: they are `pg_class` rows like
+/// any other, so `pg_table_is_visible(2662)` has to answer for
+/// `pg_class_oid_index` rather than report that no relation carries the oid.
+fn virtual_relations() -> &'static BTreeMap<RelationName, i32> {
+    static NAMES: std::sync::LazyLock<BTreeMap<RelationName, i32>> =
+        std::sync::LazyLock::new(|| {
+            crate::exec::virtual_table_names()
+                .iter()
+                .map(|spelled| {
+                    let name = match spelled.split_once('.') {
+                        Some((schema, relation)) => RelationName::new(schema, relation),
+                        None => RelationName::new(crate::search_path::PG_CATALOG, *spelled),
+                    };
+                    (name, crate::exec::virtual_relation_oid(spelled))
+                })
+                .chain(
+                    crate::exec::BUILTIN_CATALOG_OID_INDEXES
+                        .iter()
+                        .map(|index| {
+                            (
+                                RelationName::new(crate::search_path::PG_CATALOG, index.name),
+                                index.oid,
+                            )
+                        }),
+                )
+                .collect()
+        });
+    &NAMES
+}
+
+/// The name of the row relation a composite type owns, when `oid` is one.
+fn composite_relation_for_oid(
+    kv: &dyn Kv,
+    oid: i32,
+) -> Result<Option<RelationName>, crabka_pgcatalog::CatalogError> {
+    let Ok(oid) = u32::try_from(oid) else {
+        return Ok(None);
+    };
+    Ok(crabka_pgcatalog::list_user_types(kv)?
+        .into_iter()
+        .find(|ty| {
+            matches!(
+                ty.body,
+                crabka_pgtypes::usertype::UserTypeBody::Composite(_)
+            ) && crabka_pgtypes::usertype::composite_relation_oid(ty.oid) == oid
+        })
+        .map(|ty| RelationName::new(ty.schema, ty.name)))
 }
 
 /// Build a column list from `(name, type)` pairs.
@@ -521,10 +744,29 @@ pub(crate) fn columns(name: &str) -> Vec<Column> {
     }
 }
 
-/// The relation's rows.
+/// What a catalog projection knows about the session that is reading it.
 ///
-/// `backend_pid` is the querying session's backend id, which
-/// `pg_stat_activity` reports as its one row's `pid`.
+/// Two of these relations describe the reader rather than the schema, and both
+/// were wrong while the facts were constants: `pg_stat_activity` needs the
+/// backend id it announced, and `pg_database`, `pg_init_privs` and every
+/// `information_schema` `*_catalog` column need the database the session
+/// connected to.
+#[derive(Clone, Copy)]
+pub(crate) struct SessionIdent<'a> {
+    /// The database the session connected to, as its startup packet spelled it.
+    pub database: &'a str,
+    /// The querying session's backend id, which `pg_stat_activity` reports as
+    /// its one row's `pid`.
+    pub backend_pid: i32,
+    /// The session's text-output settings. A relation that answers a *deparsed*
+    /// definition — `pg_views`, `pg_matviews`, `pg_attrdef`, `pg_policies` —
+    /// prints its constants through their types' output functions, exactly as
+    /// `pg_get_viewdef` does, so `DateStyle` and `IntervalStyle` decide what
+    /// they say.
+    pub style: crabka_pgtypes::encoding::OutputStyle<'a>,
+}
+
+/// The relation's rows.
 ///
 /// # Errors
 ///
@@ -532,30 +774,173 @@ pub(crate) fn columns(name: &str) -> Vec<Column> {
 pub(crate) fn rows(
     kv: &dyn Kv,
     name: &str,
-    backend_pid: i32,
+    session: SessionIdent<'_>,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let SessionIdent {
+        database,
+        backend_pid,
+        style,
+    } = session;
     match name {
+        "pg_aggregate" => pg_aggregate_rows(kv),
         "pg_am" => Ok(pg_am_rows()),
+        "pg_amop" => pg_amop_rows(kv),
+        "pg_amproc" => pg_amproc_rows(kv),
         "pg_language" => Ok(pg_language_rows()),
         "pg_proc" => crate::routine::pg_proc_rows(kv),
-        "pg_attrdef" => pg_attrdef_rows(kv),
+        "pg_attrdef" => pg_attrdef_rows(kv, style),
         "pg_authid" => pg_authid_rows(kv),
+        "pg_cast" => pg_cast_rows(kv),
         "pg_collation" => Ok(pg_collation_rows()),
         "pg_constraint" => pg_constraint_rows(kv),
-        "pg_database" => Ok(pg_database_rows()),
+        "pg_conversion" => Ok(pg_conversion_rows()),
+        "pg_database" => pg_database_rows(kv, database),
+        "pg_init_privs" => Ok(pg_init_privs_rows()),
+        "pg_opclass" => pg_opclass_rows(kv),
+        "pg_opfamily" => pg_opfamily_rows(kv),
+        "pg_operator" => pg_operator_rows(kv),
         "pg_depend" => pg_depend_rows(kv),
         "pg_description" => pg_description_rows(kv),
         "pg_event_trigger" => pg_event_trigger_rows(kv),
         "pg_indexes" => pg_indexes_rows(kv),
         "pg_rewrite" => pg_rewrite_rows(kv),
         "pg_sequence" => pg_sequence_rows(kv),
-        "pg_stat_activity" => Ok(pg_stat_activity_rows(backend_pid)),
+        "pg_shmem_allocations_numa" => Err(ExecError::Unsupported(
+            "libnuma initialization failed or NUMA is not supported on this platform".into(),
+        )),
+        "pg_stat_activity" => Ok(pg_stat_activity_rows(database, backend_pid)),
+        "pg_policies" => pg_policies_rows(kv, style),
+        "pg_policy" => pg_policy_rows(kv, style),
+        "pg_matviews" => pg_matviews_rows(kv, style),
         "pg_tables" => pg_tables_rows(kv),
-        "pg_tablespace" => Ok(pg_tablespace_rows()),
+        "pg_tablespace" => pg_tablespace_rows(kv),
         "pg_trigger" => pg_trigger_rows(kv),
-        "pg_views" => pg_views_rows(kv),
-        _ => information_schema_rows(kv, name),
+        "pg_views" => pg_views_rows(kv, style),
+        _ => information_schema_rows(kv, database, name, style),
     }
+}
+
+/// `pg_aggregate`: the pinned built-in rows, then one per user-defined
+/// aggregate.
+fn pg_aggregate_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = builtin_pg_aggregate_rows();
+    rows.extend(crate::useragg::pg_aggregate_rows(kv)?);
+    Ok(rows)
+}
+
+fn builtin_pg_aggregate_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_aggregates::BUILTIN_AGGREGATES
+        .iter()
+        .map(|row| {
+            let oid = |index: usize| int(row[index].parse().expect("pinned aggregate oid"));
+            let flag = |index: usize| Datum::Bool(row[index] == "t");
+            let nullable = |index: usize| {
+                if row[index] == "_null_" {
+                    Datum::Null
+                } else {
+                    text(row[index])
+                }
+            };
+            let optional_oid = |index: usize| {
+                if row[index] == "-" {
+                    int(0)
+                } else {
+                    oid(index)
+                }
+            };
+            vec![
+                oid(0),
+                text(row[1]),
+                small(row[2].parse().expect("pinned aggregate direct args")),
+                oid(3),
+                optional_oid(4),
+                optional_oid(5),
+                optional_oid(6),
+                optional_oid(7),
+                optional_oid(8),
+                optional_oid(9),
+                optional_oid(10),
+                flag(11),
+                flag(12),
+                text(row[13]),
+                text(row[14]),
+                oid(15),
+                oid(16),
+                oid(17),
+                oid(18),
+                oid(19),
+                nullable(20),
+                nullable(21),
+            ]
+        })
+        .collect()
+}
+
+/// `pg_cast`: the generated built-in rows, then whatever `CREATE CAST`
+/// recorded. A declared cast that the cast path honours but `pg_cast` does not
+/// show would be a catalog that disagrees with the engine.
+fn pg_cast_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows: Vec<Vec<Datum>> = crate::builtin_casts::BUILTIN_CASTS
+        .iter()
+        .map(|&(oid, source, target, function, context, method)| {
+            vec![
+                int(oid),
+                int(source),
+                int(target),
+                int(function),
+                text(context),
+                text(method),
+            ]
+        })
+        .collect();
+    for cast in crabka_pgcatalog::list_user_casts(kv)? {
+        rows.push(vec![
+            int(i32::try_from(cast.oid).unwrap_or(0)),
+            int(i32::try_from(cast.source).unwrap_or(0)),
+            int(i32::try_from(cast.target).unwrap_or(0)),
+            // `WITHOUT FUNCTION` is the only method gres records, so `castfunc`
+            // is always 0 — exactly what PostgreSQL writes for a binary cast.
+            int(0),
+            text(&cast.context.to_string()),
+            text(&cast.method.to_string()),
+        ]);
+    }
+    Ok(rows)
+}
+
+fn pg_conversion_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_conversions::BUILTIN_CONVERSIONS
+        .iter()
+        .map(
+            |&(oid, name, namespace, owner, source, target, function, default)| {
+                vec![
+                    int(oid),
+                    text(name),
+                    int(namespace),
+                    int(owner),
+                    int(source),
+                    int(target),
+                    int(function),
+                    Datum::Bool(default),
+                ]
+            },
+        )
+        .collect()
+}
+
+/// PostgreSQL's identity, polymorphic-target, and implicit binary-relabelling
+/// coercions. The finite relation is the same one exposed through `pg_cast`.
+pub(crate) fn is_binary_coercible(source: u32, target: u32) -> bool {
+    source == target
+        || matches!(target, 2276 | 2283 | 5077)
+        || crate::builtin_casts::BUILTIN_CASTS.iter().any(
+            |&(_, cast_source, cast_target, _, context, method)| {
+                u32::try_from(cast_source) == Ok(source)
+                    && u32::try_from(cast_target) == Ok(target)
+                    && context == "i"
+                    && method == "b"
+            },
+        )
 }
 
 fn pg_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -603,14 +988,17 @@ fn pg_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             }
             Ok(vec![
                 int(i32::try_from(trigger.oid).unwrap_or(0)),
-                int(i32::try_from(trigger.table_id).unwrap_or(0)),
+                int(trigger_relation_oid(trigger.table_id)?),
                 int(i32::try_from(trigger.parent_oid).unwrap_or(0)),
                 text(&trigger.name),
                 int(i32::try_from(trigger.function_oid).unwrap_or(0)),
                 small(ty),
                 text(&trigger.enabled.catalog_code().to_string()),
                 Datum::Bool(trigger.is_internal),
-                int(i32::try_from(trigger.referenced_table_id.unwrap_or(0)).unwrap_or(0)),
+                match trigger.referenced_table_id {
+                    Some(referenced) => int(trigger_relation_oid(referenced)?),
+                    None => int(0),
+                },
                 int(0),
                 int(i32::try_from(trigger.constraint_oid).unwrap_or(0)),
                 Datum::Bool(trigger.deferrable),
@@ -648,7 +1036,7 @@ fn pg_depend_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             int(oid),
             int(0),
             int(relation_class),
-            int(i32::try_from(trigger.table_id).unwrap_or(0)),
+            int(trigger_relation_oid(trigger.table_id)?),
             int(0),
             text("a"),
         ]);
@@ -711,6 +1099,30 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
     use ColumnType::{Bool, Float4, Int2, Int4, Int8, Text, Timestamptz};
     let acl = ColumnType::Array(ElemType::Text);
     match name {
+        "pg_aggregate" => cols(&[
+            ("aggfnoid", Int4),
+            ("aggkind", Text),
+            ("aggnumdirectargs", Int2),
+            ("aggtransfn", Int4),
+            ("aggfinalfn", Int4),
+            ("aggcombinefn", Int4),
+            ("aggserialfn", Int4),
+            ("aggdeserialfn", Int4),
+            ("aggmtransfn", Int4),
+            ("aggminvtransfn", Int4),
+            ("aggmfinalfn", Int4),
+            ("aggfinalextra", Bool),
+            ("aggmfinalextra", Bool),
+            ("aggfinalmodify", Text),
+            ("aggmfinalmodify", Text),
+            ("aggsortop", Int4),
+            ("aggtranstype", Int4),
+            ("aggtransspace", Int4),
+            ("aggmtranstype", Int4),
+            ("aggmtransspace", Int4),
+            ("agginitval", Text),
+            ("aggminitval", Text),
+        ]),
         "pg_am" => cols(&[
             ("oid", Int4),
             ("amname", Text),
@@ -737,6 +1149,14 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("rolpassword", Text),
             ("rolvaliduntil", Timestamptz),
         ]),
+        "pg_cast" => cols(&[
+            ("oid", Int4),
+            ("castsource", Int4),
+            ("casttarget", Int4),
+            ("castfunc", Int4),
+            ("castcontext", Text),
+            ("castmethod", Text),
+        ]),
         "pg_collation" => cols(&[
             ("oid", Int4),
             ("collname", Text),
@@ -752,6 +1172,16 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("collversion", Text),
         ]),
         "pg_constraint" => pg_constraint_columns(),
+        "pg_conversion" => cols(&[
+            ("oid", Int4),
+            ("conname", Text),
+            ("connamespace", Int4),
+            ("conowner", Int4),
+            ("conforencoding", Int4),
+            ("contoencoding", Int4),
+            ("conproc", Int4),
+            ("condefault", Bool),
+        ]),
         "pg_database" => pg_database_columns(),
         "pg_depend" => cols(&[
             ("classid", Int4),
@@ -791,6 +1221,13 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("inhseqno", Int4),
             ("inhdetachpending", Bool),
         ]),
+        "pg_init_privs" => cols(&[
+            ("objoid", Int4),
+            ("classoid", Int4),
+            ("objsubid", Int4),
+            ("privtype", Text),
+            ("initprivs", ColumnType::Array(ElemType::Text)),
+        ]),
         "pg_partitioned_table" => cols(&[
             ("partrelid", Int4),
             ("partstrat", Text),
@@ -802,6 +1239,60 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("partexprs", Text),
         ]),
         "pg_proc" => pg_proc_columns(),
+        "pg_amop" => cols(&[
+            ("oid", Int4),
+            ("amopfamily", Int4),
+            ("amoplefttype", Int4),
+            ("amoprighttype", Int4),
+            ("amopstrategy", Int2),
+            ("amoppurpose", Text),
+            ("amopopr", Int4),
+            ("amopmethod", Int4),
+            ("amopsortfamily", Int4),
+        ]),
+        "pg_amproc" => cols(&[
+            ("oid", Int4),
+            ("amprocfamily", Int4),
+            ("amproclefttype", Int4),
+            ("amprocrighttype", Int4),
+            ("amprocnum", Int2),
+            ("amproc", Int4),
+        ]),
+        "pg_opclass" => cols(&[
+            ("oid", Int4),
+            ("opcmethod", Int4),
+            ("opcname", Text),
+            ("opcnamespace", Int4),
+            ("opcowner", Int4),
+            ("opcfamily", Int4),
+            ("opcintype", Int4),
+            ("opcdefault", Bool),
+            ("opckeytype", Int4),
+        ]),
+        "pg_opfamily" => cols(&[
+            ("oid", Int4),
+            ("opfmethod", Int4),
+            ("opfname", Text),
+            ("opfnamespace", Int4),
+            ("opfowner", Int4),
+        ]),
+        "pg_operator" => cols(&[
+            ("oid", Int4),
+            ("oprname", Text),
+            ("oprnamespace", Int4),
+            ("oprowner", Int4),
+            ("oprkind", Text),
+            ("oprcanmerge", Bool),
+            ("oprcanhash", Bool),
+            ("oprleft", Int4),
+            ("oprright", Int4),
+            ("oprresult", Int4),
+            ("oprcom", Int4),
+            ("oprnegate", Int4),
+            ("oprcode", Int4),
+            ("oprrest", Int4),
+            ("oprjoin", Int4),
+        ]),
         "pg_rewrite" => cols(&[
             ("oid", Int4),
             ("rulename", Text),
@@ -879,6 +1370,19 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("lanvalidator", Int4),
             ("lanacl", ColumnType::Array(ElemType::Text)),
         ]),
+        // PostgreSQL's `pg_policies` view, in its column order. `polroles` is
+        // an OID array in the catalog and a name array here, which is the whole
+        // point of the view.
+        "pg_policies" => cols(&[
+            ("schemaname", Text),
+            ("tablename", Text),
+            ("policyname", Text),
+            ("permissive", Text),
+            ("roles", ColumnType::Array(ElemType::Text)),
+            ("cmd", Text),
+            ("qual", Text),
+            ("with_check", Text),
+        ]),
         "pg_policy" => cols(&[
             ("oid", Int4),
             ("polname", Text),
@@ -937,6 +1441,7 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("waitstart", Timestamptz),
         ]),
         "pg_replication_slots" => pg_replication_slots_columns(),
+        "pg_shmem_allocations_numa" => cols(&[("name", Text), ("numa_node", Int4), ("size", Int8)]),
         "pg_stat_activity" => pg_stat_activity_columns(),
         "pg_indexes" => cols(&[
             ("schemaname", Text),
@@ -959,6 +1464,15 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("schemaname", Text),
             ("viewname", Text),
             ("viewowner", Text),
+            ("definition", Text),
+        ]),
+        "pg_matviews" => cols(&[
+            ("schemaname", Text),
+            ("matviewname", Text),
+            ("matviewowner", Text),
+            ("tablespace", Text),
+            ("hasindexes", Bool),
+            ("ispopulated", Bool),
             ("definition", Text),
         ]),
         _ => Vec::new(),
@@ -1038,7 +1552,7 @@ fn pg_proc_columns() -> Vec<Column> {
         ("procost", Float4),
         ("prorows", Float4),
         ("provariadic", Int4),
-        ("prosupport", Text),
+        ("prosupport", Int4),
         ("prokind", Text),
         ("prosecdef", Bool),
         ("proleakproof", Bool),
@@ -1049,7 +1563,7 @@ fn pg_proc_columns() -> Vec<Column> {
         ("pronargs", Int2),
         ("pronargdefaults", Int2),
         ("prorettype", Int4),
-        ("proargtypes", Text),
+        ("proargtypes", ColumnType::OidVector),
         ("proallargtypes", oids),
         ("proargmodes", ColumnType::Array(ElemType::Text)),
         ("proargnames", texts),
@@ -1125,10 +1639,10 @@ fn pg_stat_activity_columns() -> Vec<Column> {
 fn pg_am_rows() -> Vec<Vec<Datum>> {
     [
         (BTREE_AM_OID, "btree", "i"),
-        (405, "hash", "i"),
-        (783, "gist", "i"),
+        (HASH_AM_OID, "hash", "i"),
+        (GIST_AM_OID, "gist", "i"),
         (GIN_AM_OID, "gin", "i"),
-        (4000, "spgist", "i"),
+        (SPGIST_AM_OID, "spgist", "i"),
         (3580, "brin", "i"),
         (2, "heap", "t"),
     ]
@@ -1168,27 +1682,59 @@ fn pg_language_rows() -> Vec<Vec<Datum>> {
     .collect()
 }
 
-/// One row per column default.
+/// One row per column default *or* generation expression. `adbin` holds the
+/// source text — crabka stores both as text, so `pg_get_expr(adbin, adrelid)`
+/// is the identity.
 ///
-/// `adbin` holds the default's source text. Crabka stores defaults as text, so
-/// `pg_get_expr(adbin, adrelid)` is the identity.
-fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+/// A generated column belongs here as much as a defaulted one: PostgreSQL keeps
+/// its expression in `pg_attrdef` too, and that is where psql's `\d` reads the
+/// body of `generated always as (…) stored` from. A column can carry only one
+/// of the two — `CREATE TABLE` refuses both together — so the pair is an
+/// either/or rather than two rows.
+fn pg_attrdef_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    /// The source text `adbin` reports for one column, or `None` when the
+    /// column has neither a default nor a generation expression.
+    fn source_text(
+        kv: &dyn Kv,
+        column: &crabka_pgcatalog::Column,
+        style: crabka_pgtypes::encoding::OutputStyle<'_>,
+    ) -> Option<String> {
+        if let Some(generated) = &column.generated {
+            // Stored bare, as the catalog holds it. PostgreSQL's non-pretty
+            // `pg_get_expr` wraps an operator expression in parens and its
+            // pretty form does not; crabka's `pg_get_expr` is the identity and
+            // has only one text to give, so this is the spelling psql's `\d`
+            // asks for — the one place the difference is visible.
+            return Some(generated.expr.clone());
+        }
+        let default = column.default.as_ref()?;
+        Some(crate::catalog_fn::default_source_text(
+            kv, default, column.ty, style,
+        ))
+    }
+
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(kv)? {
-        let relid = i32::try_from(table.id)
-            .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
+        let relid = table_relation_oid(table.id)?;
+        let sources = table
+            .columns
+            .iter()
+            .map(|column| source_text(kv, column, style))
+            .collect::<Vec<_>>();
         let keys = table
             .columns
             .iter()
             .enumerate()
-            .filter(|(_, column)| column.default.is_some())
-            .map(|(idx, column)| format!("{}.{}.{idx}", table.name, column.name))
+            .zip(&sources)
+            .filter(|(_, source)| source.is_some())
+            .map(|((idx, column), _)| format!("{}.{}.{idx}", table.name, column.name))
             .collect::<Vec<_>>();
         let oids = banded_oids(ATTRDEF_OID_BASE, &keys);
-        for (idx, column) in table.columns.iter().enumerate() {
-            let Some(default) = &column.default else {
-                continue;
-            };
+        for ((idx, column), source) in table.columns.iter().enumerate().zip(sources) {
+            let Some(source) = source else { continue };
             let key = format!("{}.{}.{idx}", table.name, column.name);
             let attnum = i16::try_from(idx + 1)
                 .map_err(|_| ExecError::Unsupported("attnum exceeds int2 range".into()))?;
@@ -1196,9 +1742,7 @@ fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(oids.get(&key).copied().unwrap_or(0)),
                 int(relid),
                 small(attnum),
-                text(&crate::catalog_fn::default_source_text(
-                    kv, default, column.ty,
-                )),
+                text(&source),
             ]);
         }
     }
@@ -1206,21 +1750,25 @@ fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 }
 
 fn pg_authid_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crabka_pgcatalog::RoleAttribute;
     let oids = role_oids(kv)?;
     Ok(crabka_pgcatalog::list_roles(kv)?
         .into_iter()
-        .map(|role| (role.name, role.can_login))
-        .map(|(name, can_login)| {
+        .map(|role| {
+            // The bootstrap owner is a superuser by construction; every other
+            // role reports exactly what `CREATE`/`ALTER ROLE` stored.
+            let bootstrap = role.name == crate::catalog_fn::OBJECT_OWNER;
+            let attributes = role.attributes;
             vec![
-                int(oids.get(&name).copied().unwrap_or(0)),
-                text(&name),
-                Datum::Bool(false),
-                Datum::Bool(true),
-                Datum::Bool(false),
-                Datum::Bool(false),
-                Datum::Bool(can_login),
-                Datum::Bool(false),
-                Datum::Bool(false),
+                int(oids.get(&role.name).copied().unwrap_or(0)),
+                text(&role.name),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::Superuser)),
+                Datum::Bool(attributes.has(RoleAttribute::Inherit)),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::CreateRole)),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::CreateDb)),
+                Datum::Bool(role.can_login),
+                Datum::Bool(attributes.has(RoleAttribute::Replication)),
+                Datum::Bool(bootstrap || attributes.has(RoleAttribute::BypassRls)),
                 int(-1),
                 Datum::Null,
                 Datum::Null,
@@ -1229,48 +1777,74 @@ fn pg_authid_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
-/// The three collations every UTF-8 PostgreSQL cluster has.
+/// The three collations every UTF-8 PostgreSQL cluster has, with the oids
+/// PostgreSQL itself assigns them. crabka compares text with memcmp semantics,
+/// which is what `C` describes; `default` is the database default and is what
+/// every column reports.
 ///
-/// Crabka compares text with memcmp semantics, which is what `C` describes.
-/// `default` is the database default and is what every column reports.
-fn pg_collation_rows() -> Vec<Vec<Datum>> {
-    [
-        (DEFAULT_COLLATION_OID, "default", "d", 0),
-        (950, "C", "c", -1),
-        (951, "POSIX", "c", -1),
-    ]
-    .into_iter()
-    .map(|(oid, name, provider, encoding)| {
-        vec![
-            int(oid),
-            text(name),
-            int(crate::exec::PG_CATALOG_NAMESPACE_OID),
-            int(10),
-            text(provider),
-            Datum::Bool(true),
-            int(encoding),
-            Datum::Null,
-            Datum::Null,
-            Datum::Null,
-            Datum::Null,
-            Datum::Null,
-        ]
-    })
-    .collect()
+/// `regcollation` reads the same table, so `951::regcollation` and
+/// `SELECT oid FROM pg_collation WHERE collname = 'POSIX'` can never drift
+/// apart.
+pub(crate) const BUILTIN_COLLATIONS: &[(i32, &str, &str, i32)] = &[
+    (DEFAULT_COLLATION_OID, "default", "d", 0),
+    (950, "C", "c", -1),
+    (951, "POSIX", "c", -1),
+];
+
+/// The oid `pg_collation` gives a collation name, or `None` when no row has it.
+/// The parser only ever admits a name this table holds, so a `None` here means
+/// the caller invented one rather than that the user wrote a bad one.
+pub(crate) fn collation_oid(name: &str) -> Option<i32> {
+    BUILTIN_COLLATIONS
+        .iter()
+        .find(|(_, collname, _, _)| *collname == name)
+        .map(|(oid, _, _, _)| *oid)
 }
 
-/// The single database crabka exposes, which matches what `current_database()`
-/// says.
-fn pg_database_rows() -> Vec<Vec<Datum>> {
-    vec![vec![
+fn pg_collation_rows() -> Vec<Vec<Datum>> {
+    BUILTIN_COLLATIONS
+        .iter()
+        .copied()
+        .map(|(oid, name, provider, encoding)| {
+            vec![
+                int(oid),
+                text(name),
+                int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                int(10),
+                text(provider),
+                Datum::Bool(true),
+                int(encoding),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+            ]
+        })
+        .collect()
+}
+
+/// The single database crabka exposes, named the way the reading session
+/// connected to it and matching what `current_database()` says.
+///
+/// `dathasloginevt` is computed, not pinned. `PostgreSQL` sets the flag when a
+/// login event trigger is created so a backend can skip the catalog scan at
+/// connection time when no such trigger exists; the flag is therefore exactly
+/// "a login event trigger exists". Answering a fixed `false` would have said
+/// no login trigger existed on a database that had just fired one.
+fn pg_database_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let has_login_event = crabka_pgcatalog::trigger::list_event_triggers(kv)?
+        .iter()
+        .any(|trigger| trigger.event == crabka_pgcatalog::trigger::EventTriggerEvent::Login);
+    Ok(vec![vec![
         int(DATABASE_OID),
-        text(crate::exec::CURRENT_DATABASE),
+        text(database),
         int(10),
         int(crate::catalog_fn::UTF8_ENCODING),
         text("c"),
         Datum::Bool(false),
         Datum::Bool(true),
-        Datum::Bool(false),
+        Datum::Bool(has_login_event),
         int(-1),
         Datum::Int8(1),
         Datum::Int8(1),
@@ -1281,29 +1855,413 @@ fn pg_database_rows() -> Vec<Vec<Datum>> {
         Datum::Null,
         Datum::Null,
         Datum::Null,
-    ]]
+    ]])
 }
 
-fn pg_tablespace_rows() -> Vec<Vec<Datum>> {
-    [(DEFAULT_TABLESPACE_OID, "pg_default"), (1664, "pg_global")]
-        .into_iter()
-        .map(|(oid, name)| vec![int(oid), text(name), int(10), Datum::Null, Datum::Null])
+/// `pg_init_privs`: the privileges the bootstrap catalogs were created with.
+///
+/// Upstream fills this at `initdb` so `pg_dump` can tell a privilege the
+/// cluster was born with from one an administrator granted later, and dumps
+/// only the difference. The rule for what belongs here is therefore "a
+/// privilege that exists because the object was created, not because anyone
+/// granted it".
+///
+/// crabka's bootstrap privileges are exactly one fact, and it is a real one:
+/// every catalog relation this engine projects is readable by every session.
+/// A `pg_catalog` or `information_schema` read never consults an ACL — the
+/// projections are computed, and no session can be refused one — which is the
+/// same right upstream spells `=r/postgres` in `relacl`. So there is one row
+/// per projected catalog relation, granting `SELECT` to `PUBLIC`, and no row
+/// for anything else: a user relation is not bootstrap state, and crabka
+/// bootstraps no routines or types with non-default privileges.
+///
+/// `objsubid` is 0 throughout, because the grant is on the relation and not on
+/// a column, and `privtype` is `i` — from `initdb` — because none of it comes
+/// from an extension.
+fn pg_init_privs_rows() -> Vec<Vec<Datum>> {
+    let public_select = format!("=r/{}", crabka_pgcatalog::BOOTSTRAP_ROLE);
+    crate::exec::virtual_table_names()
+        .iter()
+        .map(|name| {
+            vec![
+                int(crate::exec::virtual_relation_oid(name)),
+                int(crate::catalog_fn::PG_CLASS_OID),
+                int(0),
+                text("i"),
+                Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Text,
+                    vec![Datum::Text(public_select.clone())],
+                )),
+            ]
+        })
         .collect()
 }
 
-/// The current backend, as `pg_stat_activity` describes it.
-///
-/// Crabka has no cross-session backend registry, so it reports exactly one row.
-/// That row is the backend that runs the query, which is what a health check or
-/// a "who am I" probe reads.
+fn pg_tablespace_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let role_oids = role_oids(kv)?;
+    let mut rows: Vec<Vec<Datum>> = [(DEFAULT_TABLESPACE_OID, "pg_default"), (1664, "pg_global")]
+        .into_iter()
+        .map(|(oid, name)| vec![int(oid), text(name), int(10), Datum::Null, Datum::Null])
+        .collect();
+    rows.extend(
+        crabka_pgcatalog::list_tablespaces(kv)?
+            .into_iter()
+            .map(|tablespace| {
+                let options = if tablespace.options.is_empty() {
+                    Datum::Null
+                } else {
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        ElemType::Text,
+                        tablespace
+                            .options
+                            .into_iter()
+                            .map(|(name, value)| Datum::Text(format!("{name}={value}")))
+                            .collect(),
+                    ))
+                };
+                vec![
+                    int(tablespace.oid as i32),
+                    text(&tablespace.name),
+                    int(*role_oids
+                        .get(&tablespace.owner)
+                        .unwrap_or(&crate::catalog_fn::BOOTSTRAP_ROLE_OID)),
+                    Datum::Null,
+                    options,
+                ]
+            }),
+    );
+    Ok(rows)
+}
+
+fn pg_opfamily_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let owners = role_oids(kv)?;
+    let mut rows = crate::builtin_opfamilies::BUILTIN_OPERATOR_FAMILIES
+        .iter()
+        .map(|(oid, method, name)| {
+            vec![
+                int(*oid),
+                int(access_method_oid(method).unwrap_or_default()),
+                text(name),
+                int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+            ]
+        })
+        .collect::<Vec<_>>();
+    rows.extend(
+        crabka_pgcatalog::list_operator_families(kv)?
+            .into_iter()
+            .map(|family| {
+                Ok(vec![
+                    int(i32::try_from(family.oid).map_err(|_| {
+                        ExecError::Unsupported("operator family oid exceeds int4".into())
+                    })?),
+                    int(access_method_oid(&family.method).unwrap_or_default()),
+                    text(&family.name.name),
+                    int(namespace_oid(&family.name.schema)),
+                    int(owners.get(&family.owner).copied().unwrap_or_default()),
+                ])
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
+    );
+    Ok(rows)
+}
+
+fn pg_amop_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = crate::builtin_amop::BUILTIN_AMOP
+        .iter()
+        .map(
+            |(oid, family, left, right, strategy, purpose, operator, method, sort_family)| {
+                vec![
+                    int(*oid),
+                    int(*family),
+                    int(*left),
+                    int(*right),
+                    Datum::Int2(*strategy),
+                    text(&char::from(*purpose).to_string()),
+                    int(*operator),
+                    int(*method),
+                    int(*sort_family),
+                ]
+            },
+        )
+        .collect::<Vec<_>>();
+    // A member may hang off a family PostgreSQL ships as well as off a
+    // user-created one, so `amopmethod` has to be answerable for both.
+    let mut methods = crate::builtin_opfamilies::BUILTIN_OPERATOR_FAMILIES
+        .iter()
+        .filter_map(|(oid, method, _)| {
+            Some((
+                u32::try_from(*oid).ok()?,
+                access_method_oid(method).unwrap_or_default(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    methods.extend(
+        crabka_pgcatalog::list_operator_families(kv)?
+            .into_iter()
+            .map(|family| {
+                (
+                    family.oid,
+                    access_method_oid(&family.method).unwrap_or_default(),
+                )
+            }),
+    );
+    // A family member normally names a built-in operator, but `CREATE OPERATOR`
+    // followed by `ALTER OPERATOR FAMILY … ADD` is the documented way to build a
+    // cross-type family, so `amopopr` has to resolve a user-defined symbol too.
+    let user_operators = crabka_pgcatalog::list_user_operators(kv)?
+        .into_iter()
+        .map(|operator| {
+            (
+                (
+                    operator.symbol,
+                    i32::try_from(operator.left_type_oid).unwrap_or_default(),
+                    i32::try_from(operator.right_type_oid).unwrap_or_default(),
+                ),
+                i32::try_from(operator.oid).unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (index, (family, member)) in crabka_pgcatalog::list_operator_family_members(kv)?
+        .into_iter()
+        .filter(|(_, member)| {
+            matches!(
+                member,
+                crabka_pgcatalog::OperatorFamilyMember::Operator { .. }
+            )
+        })
+        .enumerate()
+    {
+        let crabka_pgcatalog::OperatorFamilyMember::Operator {
+            number,
+            operator,
+            left_type_oid,
+            right_type_oid,
+            order_family_oid,
+        } = member
+        else {
+            continue;
+        };
+        let operator = operator.rsplit('.').next().unwrap_or(&operator);
+        let left = i32::try_from(left_type_oid).unwrap_or_default();
+        let right = i32::try_from(right_type_oid).unwrap_or_default();
+        let operator_oid = crate::builtin_operators::BUILTIN_OPERATORS
+            .iter()
+            .find(|(_, name, _, _, _, builtin_left, builtin_right, ..)| {
+                *name == operator && *builtin_left == left && *builtin_right == right
+            })
+            .map_or_else(
+                || {
+                    user_operators
+                        .get(&(operator.to_string(), left, right))
+                        .copied()
+                        .unwrap_or_default()
+                },
+                |row| row.0,
+            );
+        rows.push(vec![
+            int(330_000 + i32::try_from(index).unwrap_or_default()),
+            int(i32::try_from(family).unwrap_or_default()),
+            int(i32::try_from(left_type_oid).unwrap_or_default()),
+            int(i32::try_from(right_type_oid).unwrap_or_default()),
+            Datum::Int2(i16::try_from(number).unwrap_or_default()),
+            text(if order_family_oid == 0 { "s" } else { "o" }),
+            int(operator_oid),
+            int(*methods.get(&family).unwrap_or(&0)),
+            int(i32::try_from(order_family_oid).unwrap_or_default()),
+        ]);
+    }
+    Ok(rows)
+}
+
+fn pg_amproc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = crate::builtin_amproc::BUILTIN_AMPROC
+        .iter()
+        .map(|(oid, family, left, right, number, procedure)| {
+            vec![
+                int(*oid),
+                int(*family),
+                int(*left),
+                int(*right),
+                Datum::Int2(*number),
+                int(*procedure),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let mut procedures = crate::routine::builtin_pg_proc_rows()?
+        .into_iter()
+        .filter_map(|row| match (&row[0], &row[1], &row[19]) {
+            (Datum::Int4(oid), Datum::Text(name), Datum::OidVector(arguments)) => Some((
+                (
+                    name.clone(),
+                    arguments
+                        .elems
+                        .iter()
+                        .map(|argument| match argument {
+                            Datum::Int4(oid) => u32::try_from(*oid).ok(),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                *oid,
+            )),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for routine in crabka_pgcatalog::routine::list_routines(kv)? {
+        let arguments = routine
+            .input_params()
+            .map(|param| param.ty.column.map(ColumnType::oid))
+            .collect::<Option<Vec<_>>>();
+        if let Some(arguments) = arguments {
+            procedures.insert(
+                (routine.name, arguments),
+                i32::try_from(routine.oid).unwrap_or_default(),
+            );
+        }
+    }
+    for (index, (family, member)) in crabka_pgcatalog::list_operator_family_members(kv)?
+        .into_iter()
+        .filter(|(_, member)| {
+            matches!(
+                member,
+                crabka_pgcatalog::OperatorFamilyMember::Function { .. }
+            )
+        })
+        .enumerate()
+    {
+        let crabka_pgcatalog::OperatorFamilyMember::Function {
+            number,
+            function,
+            left_type_oid,
+            right_type_oid,
+            argument_type_oids,
+        } = member
+        else {
+            continue;
+        };
+        let name = function.rsplit('.').next().unwrap_or(&function).to_string();
+        let procedure = procedures
+            .get(&(name, argument_type_oids))
+            .copied()
+            .unwrap_or_default();
+        rows.push(vec![
+            int(340_000 + i32::try_from(index).unwrap_or_default()),
+            int(i32::try_from(family).unwrap_or_default()),
+            int(i32::try_from(left_type_oid).unwrap_or_default()),
+            int(i32::try_from(right_type_oid).unwrap_or_default()),
+            Datum::Int2(i16::try_from(number).unwrap_or_default()),
+            int(procedure),
+        ]);
+    }
+    Ok(rows)
+}
+
+/// `pg_operator`: the pinned built-in rows, then one per user-defined operator.
+fn pg_operator_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = builtin_pg_operator_rows();
+    rows.extend(crate::useroperator::pg_operator_rows(kv)?);
+    Ok(rows)
+}
+
+fn builtin_pg_operator_rows() -> Vec<Vec<Datum>> {
+    crate::builtin_operators::BUILTIN_OPERATORS
+        .iter()
+        .map(
+            |(
+                oid,
+                name,
+                kind,
+                can_merge,
+                can_hash,
+                left,
+                right,
+                result,
+                commutator,
+                negator,
+                code,
+                restriction,
+                join,
+            )| {
+                vec![
+                    int(*oid),
+                    text(name),
+                    int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                    int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                    text(&char::from(*kind).to_string()),
+                    Datum::Bool(*can_merge),
+                    Datum::Bool(*can_hash),
+                    int(*left),
+                    int(*right),
+                    int(*result),
+                    int(*commutator),
+                    int(*negator),
+                    int(*code),
+                    int(*restriction),
+                    int(*join),
+                ]
+            },
+        )
+        .collect()
+}
+
+fn pg_opclass_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let owners = role_oids(kv)?;
+    let mut rows = crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+        .iter()
+        .map(
+            |(oid, method, name, family, input_type, default, key_type)| {
+                vec![
+                    int(*oid),
+                    int(*method),
+                    text(name),
+                    int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                    int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                    int(*family),
+                    int(*input_type),
+                    Datum::Bool(*default),
+                    int(*key_type),
+                ]
+            },
+        )
+        .collect::<Vec<_>>();
+    rows.extend(
+        crabka_pgcatalog::list_operator_classes(kv)?
+            .into_iter()
+            .map(|class| {
+                let oid = |oid: u32| {
+                    i32::try_from(oid).map_err(|_| {
+                        ExecError::Unsupported("operator class oid exceeds int4".into())
+                    })
+                };
+                Ok(vec![
+                    int(oid(class.oid)?),
+                    int(access_method_oid(&class.method).unwrap_or_default()),
+                    text(&class.name.name),
+                    int(namespace_oid(&class.name.schema)),
+                    int(owners.get(&class.owner).copied().unwrap_or_default()),
+                    int(oid(class.family_oid)?),
+                    int(oid(class.input_type_oid)?),
+                    Datum::Bool(class.default),
+                    int(oid(class.key_type_oid)?),
+                ])
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
+    );
+    Ok(rows)
+}
+
+/// The current backend, as `pg_stat_activity` describes it. crabka has no
+/// cross-session backend registry, so exactly one row is reported: the backend
+/// running the query, which is what a health check or a "who am I" probe reads.
 ///
 /// The `pid` is the querying session's backend id, so
 /// `WHERE pid = pg_backend_pid()` selects the row. Every "am I still connected"
 /// probe depends on that pairing.
-fn pg_stat_activity_rows(backend_pid: i32) -> Vec<Vec<Datum>> {
+fn pg_stat_activity_rows(database: &str, backend_pid: i32) -> Vec<Vec<Datum>> {
     vec![vec![
         int(DATABASE_OID),
-        text(crate::exec::CURRENT_DATABASE),
+        text(database),
         int(backend_pid),
         Datum::Null,
         int(10),
@@ -1377,10 +2335,43 @@ fn pg_sequence_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// the column number for a column comment, and 0 for every other comment. Both
 /// `obj_description` and `col_description` read exactly these two columns.
 fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let mut rows = Vec::new();
+    let corrupt = || ExecError::Unsupported("built-in pg_description fixture is corrupt".into());
+    let descriptions =
+        zstd::decode_all(crate::builtin_proc_descriptions::BUILTIN_PROC_DESCRIPTIONS)
+            .map_err(|_| corrupt())?;
+    let descriptions = std::str::from_utf8(&descriptions).map_err(|_| corrupt())?;
+    let mut rows = descriptions
+        .lines()
+        .map(|line| {
+            let (oid, description) = line.split_once('\t').ok_or_else(&corrupt)?;
+            Ok(vec![
+                int(oid.parse::<i32>().map_err(|_| corrupt())?),
+                int(relation_oid("pg_proc")),
+                int(0),
+                text(description),
+            ])
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    let descriptions =
+        zstd::decode_all(crate::builtin_operator_descriptions::BUILTIN_OPERATOR_DESCRIPTIONS)
+            .map_err(|_| corrupt())?;
+    let descriptions = std::str::from_utf8(&descriptions).map_err(|_| corrupt())?;
+    rows.extend(
+        descriptions
+            .lines()
+            .map(|line| {
+                let (oid, description) = line.split_once('\t').ok_or_else(&corrupt)?;
+                Ok(vec![
+                    int(oid.parse::<i32>().map_err(|_| corrupt())?),
+                    int(relation_oid("pg_operator")),
+                    int(0),
+                    text(description),
+                ])
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
+    );
     for table in crabka_pgcatalog::list_tables(kv)? {
-        let relid = i32::try_from(table.id)
-            .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
+        let relid = table_relation_oid(table.id)?;
         if let Some(comment) =
             crabka_pgcatalog::get_comment(kv, "table", CommentObject::Relation(&table.name))?
         {
@@ -1438,6 +2429,7 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         let contype = match kind {
             IndexConstraint::PrimaryKey => "p",
             IndexConstraint::Unique => "u",
+            IndexConstraint::Exclusion(_) => "x",
         };
         rows.push(constraint_row(ConstraintRow {
             oid: index_constraint_oid(index.id)?,
@@ -1449,8 +2441,8 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             conkey: Some(conkey),
             conbin: Datum::Null,
             validated: true,
-            condeferrable: false,
-            condeferred: false,
+            deferral: index.deferral,
+            conperiod: index.without_overlaps,
             referent: Referent::default(),
         }));
     }
@@ -1493,8 +2485,8 @@ fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError
             conkey: Some(attnums(&child, &foreign_key.columns)?),
             conbin: Datum::Null,
             validated: foreign_key.validated,
-            condeferrable: foreign_key.deferrable,
-            condeferred: foreign_key.initially_deferred,
+            deferral: Deferral::of(foreign_key.deferrable, foreign_key.initially_deferred),
+            conperiod: false,
             referent: Referent {
                 confrelid: table_relation_oid(foreign_key.referenced_table_id)?,
                 confupdtype: referential_action_code(foreign_key.on_update),
@@ -1571,8 +2563,8 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 conkey: None,
                 conbin: text(&check.expr),
                 validated: check.validated,
-                condeferrable: false,
-                condeferred: false,
+                deferral: Deferral::Immediate,
+                conperiod: false,
                 referent: Referent::default(),
             }));
         }
@@ -1593,8 +2585,8 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 conkey: Some(vec![Datum::Int2(attnum)]),
                 conbin: Datum::Null,
                 validated: true,
-                condeferrable: false,
-                condeferred: false,
+                deferral: Deferral::Immediate,
+                conperiod: false,
                 referent: Referent::default(),
             }));
         }
@@ -1608,7 +2600,7 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// The name is the *unqualified* table name, an underscore, the column and
 /// `_not_null`. A constraint name is never schema-qualified. `connamespace`
 /// holds the schema instead.
-fn not_null_constraint_name(table: &RelationName, column: &str) -> String {
+pub(crate) fn not_null_constraint_name(table: &RelationName, column: &str) -> String {
     format!("{}_{column}_not_null", table.name)
 }
 
@@ -1627,15 +2619,19 @@ struct ConstraintRow<'a> {
     conkey: Option<Vec<Datum>>,
     conbin: Datum,
     validated: bool,
-    condeferrable: bool,
-    condeferred: bool,
+    /// When the constraint is checked, which fills `condeferrable` and
+    /// `condeferred` together — the pair has only three meaningful shapes.
+    deferral: Deferral,
+    /// `conperiod` — the key's last column is a `WITHOUT OVERLAPS` range.
+    /// psql's `\d` keys off this to echo the constraint definition verbatim
+    /// instead of synthesizing a `PRIMARY KEY, btree (…)` line.
+    conperiod: bool,
     referent: Referent,
 }
 
-/// The `conf*` columns, which only a `FOREIGN KEY` fills in.
-///
-/// [`Default`] is PostgreSQL's "references nothing" spelling: `confrelid` 0, a
-/// single space in each of the three `"char"` codes, and NULL attnum arrays.
+/// The `conf*` columns, which only a `FOREIGN KEY` fills in. [`Default`] is
+/// PostgreSQL's "references nothing" spelling: `confrelid` 0, a single space in
+/// each of the three `"char"` codes, and NULL attnum arrays.
 struct Referent {
     confrelid: i32,
     confupdtype: &'static str,
@@ -1672,13 +2668,14 @@ fn attnum_array(attnums: Option<Vec<Datum>>) -> Datum {
 /// One `pg_constraint` tuple, in PostgreSQL 18.4's 28-column order.
 fn constraint_row(row: ConstraintRow<'_>) -> Vec<Datum> {
     let referent = row.referent;
+    let (deferrable, deferred) = row.deferral.columns();
     vec![
         int(row.oid),
         text(row.name),
         int(namespace_oid(row.schema)),
         text(row.contype),
-        Datum::Bool(row.condeferrable),
-        Datum::Bool(row.condeferred),
+        Datum::Bool(deferrable),
+        Datum::Bool(deferred),
         Datum::Bool(true),
         Datum::Bool(row.validated),
         int(row.conrelid),
@@ -1692,7 +2689,7 @@ fn constraint_row(row: ConstraintRow<'_>) -> Vec<Datum> {
         Datum::Bool(true),
         small(0),
         Datum::Bool(false),
-        Datum::Bool(false),
+        Datum::Bool(row.conperiod),
         attnum_array(row.conkey),
         attnum_array(referent.confkey),
         Datum::Null,
@@ -1721,6 +2718,120 @@ fn pg_indexes_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect()
 }
 
+/// `pg_policy`, PostgreSQL's own catalog: one row per policy, roles as OIDs.
+///
+/// A policy's `TO PUBLIC` is the zero OID in `polroles`, not an empty array —
+/// reading an empty array as "no role matches" is the inversion the whole
+/// default-deny fold exists to avoid, so the projection spells the convention
+/// out the way PostgreSQL stores it.
+fn pg_policy_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let role_oids = role_oids(kv)?;
+    let relation_oids = policy_relation_oids(kv)?;
+    crabka_pgcatalog::policy::list_policies(kv)?
+        .into_iter()
+        .map(|policy| {
+            let roles = if policy.applies_to_public() {
+                vec![Datum::Int4(0)]
+            } else {
+                policy
+                    .roles
+                    .iter()
+                    .map(|role| Datum::Int4(role_oids.get(role).copied().unwrap_or(0)))
+                    .collect()
+            };
+            Ok(vec![
+                int(i32::try_from(policy.oid).unwrap_or(0)),
+                text(&policy.name),
+                int(relation_oids
+                    .get(&policy.table_id)
+                    .map_or(0, |(oid, _)| *oid)),
+                text(&policy.command.catalog_code().to_string()),
+                Datum::Bool(policy.permissive),
+                Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::Int4, roles)),
+                policy_qual(policy.using.as_deref(), style),
+                policy_qual(policy.with_check.as_deref(), style),
+            ])
+        })
+        .collect()
+}
+
+/// A stored policy qual as the catalog reports it: PostgreSQL's deparsed form,
+/// not the source text the author wrote.
+///
+/// The catalog keeps the text so `pgcatalog` needs no parser, so reporting the
+/// deparsed form means re-parsing here. That parse cannot fail on anything
+/// `CREATE`/`ALTER POLICY` stored — both validate the qual by parsing it
+/// (`crate::rls::validate_policy_qual`) before writing it — but a catalog scan
+/// is the wrong place to discover otherwise. Text that will not parse falls
+/// back to itself, so `pg_policy` answers a slightly unnormalized row rather
+/// than failing the whole scan and taking every unrelated policy down with it.
+fn policy_qual(source: Option<&str>, style: crabka_pgtypes::encoding::OutputStyle<'_>) -> Datum {
+    source.map_or(Datum::Null, |source| {
+        crabka_pgparser::parser::parse_expression(source).map_or_else(
+            |_| text(source),
+            |expr| text(&crate::viewdef::expression_text(&expr, style)),
+        )
+    })
+}
+
+/// `pg_policies`, the readable view over `pg_policy`: relation and role names
+/// instead of OIDs, and the command spelled as a word.
+fn pg_policies_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let relation_oids = policy_relation_oids(kv)?;
+    crabka_pgcatalog::policy::list_policies(kv)?
+        .into_iter()
+        .map(|policy| {
+            let relation = relation_oids.get(&policy.table_id).map(|(_, name)| name);
+            let roles = policy
+                .roles
+                .iter()
+                .map(|role| text(role))
+                .collect::<Vec<_>>();
+            Ok(vec![
+                relation.map_or(Datum::Null, |name| text(&name.schema)),
+                relation.map_or(Datum::Null, |name| text(&name.name)),
+                text(&policy.name),
+                text(if policy.permissive {
+                    "PERMISSIVE"
+                } else {
+                    "RESTRICTIVE"
+                }),
+                // PostgreSQL renders `TO PUBLIC` as the one-element array
+                // `{public}` here, not as an empty array.
+                Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Text,
+                    if roles.is_empty() {
+                        vec![text("public")]
+                    } else {
+                        roles
+                    },
+                )),
+                text(policy.command.keyword()),
+                policy_qual(policy.using.as_deref(), style),
+                policy_qual(policy.with_check.as_deref(), style),
+            ])
+        })
+        .collect()
+}
+
+/// Every relation that can carry a policy, by table id, with the `pg_class` oid
+/// and name each projection needs. One catalog listing rather than one lookup
+/// per policy.
+fn policy_relation_oids(
+    kv: &dyn Kv,
+) -> Result<BTreeMap<crabka_pgcatalog::TableId, (i32, crabka_pgcatalog::RelationName)>, ExecError> {
+    crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .map(|table| Ok((table.id, (table_relation_oid(table.id)?, table.name))))
+        .collect()
+}
+
 fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let indexed = crabka_pgcatalog::list_indexes(kv)?
         .into_iter()
@@ -1728,31 +2839,80 @@ fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect::<std::collections::BTreeSet<_>>();
     Ok(crabka_pgcatalog::list_tables(kv)?
         .into_iter()
-        .filter(|table| table.foreign.is_none())
+        // `pg_tables` is `relkind IN ('r','p')`: a foreign table has its own
+        // view and a materialized view is reported by `pg_matviews`, so neither
+        // belongs here even though both are stored relations.
+        .filter(|table| table.foreign.is_none() && table.materialized.is_none())
         .map(|table| {
             vec![
                 text(&table.name.schema),
                 text(&table.name.name),
-                text(crate::catalog_fn::OBJECT_OWNER),
+                text(&table.owner),
                 Datum::Null,
                 Datum::Bool(indexed.contains(&table.name)),
                 Datum::Bool(false),
                 Datum::Bool(false),
-                Datum::Bool(false),
+                Datum::Bool(table.row_security),
             ]
         })
         .collect())
 }
 
-fn pg_views_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+/// `pg_matviews` — one row per materialized view, the counterpart `pg_views` is
+/// for ordinary views and `pg_tables` for tables.
+///
+/// `ispopulated` is the column that has no analogue in either of those: a
+/// materialized view created `WITH NO DATA`, or refreshed `WITH NO DATA`, exists
+/// and has a shape but holds nothing, and reading one is an error rather than an
+/// empty result. `definition` is deparsed through the same path `pg_views` uses,
+/// so a matview and a view over the same query read identically — including
+/// after a `RENAME COLUMN`, because the deparser names output columns from the
+/// relation's own catalog column list rather than from the stored text.
+fn pg_matviews_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let indexed = crabka_pgcatalog::list_indexes(kv)?
+        .into_iter()
+        .map(|index| index.table)
+        .collect::<std::collections::BTreeSet<_>>();
+    crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .filter(|table| table.materialized.is_some())
+        .map(|table| {
+            let matview = table
+                .materialized
+                .as_ref()
+                .expect("the filter kept only materialized views");
+            Ok(vec![
+                text(&table.name.schema),
+                text(&table.name.name),
+                text(&table.owner),
+                Datum::Null,
+                Datum::Bool(indexed.contains(&table.name)),
+                Datum::Bool(matview.populated),
+                text(&crate::catalog_fn::materialized_definition_text(
+                    &table, false, style,
+                )),
+            ])
+        })
+        .collect()
+}
+
+fn pg_views_rows(
+    kv: &dyn Kv,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(crabka_pgcatalog::list_views(kv)?
         .into_iter()
         .map(|view| {
             vec![
                 text(&view.name.schema),
                 text(&view.name.name),
-                text(crate::catalog_fn::OBJECT_OWNER),
-                text(&crate::catalog_fn::view_definition_text(&view, false)),
+                text(&view.owner),
+                text(&crate::catalog_fn::view_definition_text(
+                    &view, false, style,
+                )),
             ]
         })
         .collect())
@@ -1909,18 +3069,23 @@ fn information_schema_columns_rest(name: &str) -> Vec<Column> {
 }
 
 /// Rows for the SQL-standard views.
-fn information_schema_rows(kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn information_schema_rows(
+    kv: &dyn Kv,
+    database: &str,
+    name: &str,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
-        "information_schema.table_constraints" => table_constraint_rows(kv),
-        "information_schema.key_column_usage" => key_column_usage_rows(kv),
-        "information_schema.constraint_column_usage" => constraint_column_usage_rows(kv),
-        "information_schema.referential_constraints" => referential_constraint_rows(kv),
-        "information_schema.views" => information_schema_view_rows(kv),
+        "information_schema.table_constraints" => table_constraint_rows(kv, database),
+        "information_schema.key_column_usage" => key_column_usage_rows(kv, database),
+        "information_schema.constraint_column_usage" => constraint_column_usage_rows(kv, database),
+        "information_schema.referential_constraints" => referential_constraint_rows(kv, database),
+        "information_schema.views" => information_schema_view_rows(kv, database, style),
         "information_schema.enabled_roles" => enabled_role_rows(kv),
         "information_schema.applicable_roles" => Ok(Vec::new()),
-        "information_schema.sequences" => sequence_view_rows(kv),
-        "information_schema.table_privileges" => table_privilege_rows(kv),
-        "information_schema.column_privileges" => Ok(Vec::new()),
+        "information_schema.sequences" => sequence_view_rows(kv, database),
+        "information_schema.table_privileges" => table_privilege_rows(kv, database),
+        "information_schema.column_privileges" => column_privilege_rows(kv, database),
         // `routines`/`parameters` need user-defined routines, which crabka has
         // no object kind for yet, so both are correctly empty rather than
         // absent.
@@ -1928,8 +3093,8 @@ fn information_schema_rows(kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum>>, E
     }
 }
 
-fn catalog_name() -> Datum {
-    text(crate::exec::CURRENT_DATABASE)
+fn catalog_name(database: &str) -> Datum {
+    text(database)
 }
 
 /// A constraint's `information_schema` identity: catalog, schema, name.
@@ -1937,16 +3102,20 @@ fn catalog_name() -> Datum {
 /// A constraint has no schema of its own. It belongs to the schema of the
 /// relation it constrains, which is what `pg_constraint.connamespace` records
 /// and what the standard views report as `constraint_schema`.
-fn constraint_identity(schema: &str, name: &str) -> [Datum; 3] {
-    [catalog_name(), text(schema), text(name)]
+fn constraint_identity(database: &str, schema: &str, name: &str) -> [Datum; 3] {
+    [catalog_name(database), text(schema), text(name)]
 }
 
 /// A relation's `information_schema` identity: catalog, schema, name.
 ///
 /// This is the `table_catalog`/`table_schema`/`table_name` triple every
 /// standard view carries. It reports the relation's real schema.
-fn relation_identity(relation: &RelationName) -> [Datum; 3] {
-    [catalog_name(), text(&relation.schema), text(&relation.name)]
+fn relation_identity(database: &str, relation: &RelationName) -> [Datum; 3] {
+    [
+        catalog_name(database),
+        text(&relation.schema),
+        text(&relation.name),
+    ]
 }
 
 /// The `information_schema` spelling of a boolean-valued `character_data` column.
@@ -1960,7 +3129,7 @@ fn ordinal(position: usize) -> Result<i32, ExecError> {
         .map_err(|_| ExecError::Unsupported("ordinal exceeds int4 range".into()))
 }
 
-fn table_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn table_constraint_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for index in crabka_pgcatalog::list_indexes(kv)? {
         let Some(kind) = index.constraint else {
@@ -1969,18 +3138,22 @@ fn table_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         let constraint_type = match kind {
             IndexConstraint::PrimaryKey => "PRIMARY KEY",
             IndexConstraint::Unique => "UNIQUE",
+            IndexConstraint::Exclusion(_) => "EXCLUDE",
         };
+        let (deferrable, initially_deferred) = index.deferral.columns();
         rows.push(table_constraint_row(
+            database,
             &index.name,
             &index.table,
             constraint_type,
-            false,
-            false,
+            deferrable,
+            initially_deferred,
         ));
     }
     for table in crabka_pgcatalog::list_tables(kv)? {
         for check in &table.checks {
             rows.push(table_constraint_row(
+                database,
                 &check.name,
                 &table.name,
                 "CHECK",
@@ -1989,10 +3162,9 @@ fn table_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             ));
         }
     }
-    // A foreign key is the one constraint kind crabka can defer, so it is the
-    // one that reports anything but NO/NO.
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
         rows.push(table_constraint_row(
+            database,
             &foreign_key.name,
             &foreign_key.table,
             "FOREIGN KEY",
@@ -2004,14 +3176,15 @@ fn table_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 }
 
 fn table_constraint_row(
+    database: &str,
     name: &str,
     table: &RelationName,
     constraint_type: &str,
     deferrable: bool,
     initially_deferred: bool,
 ) -> Vec<Datum> {
-    let mut row = constraint_identity(&table.schema, name).to_vec();
-    row.extend(relation_identity(table));
+    let mut row = constraint_identity(database, &table.schema, name).to_vec();
+    row.extend(relation_identity(database, table));
     row.extend([
         text(constraint_type),
         text(yes_no(deferrable)),
@@ -2032,13 +3205,18 @@ fn table_constraint_row(
 /// referent is a bare `CREATE UNIQUE INDEX` instead of a `PRIMARY KEY` or
 /// `UNIQUE` constraint. PostgreSQL's view LEFT JOINs `pg_constraint` to name
 /// the referent, so an index with no constraint marker gives no name.
-fn referential_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn referential_constraint_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
         let referent = crabka_pgcatalog::get_index(kv, &referenced_index_name(&foreign_key))?;
-        let mut row = constraint_identity(&foreign_key.table.schema, &foreign_key.name).to_vec();
+        let mut row =
+            constraint_identity(database, &foreign_key.table.schema, &foreign_key.name).to_vec();
         if referent.constraint.is_some() {
-            row.extend(constraint_identity(&referent.table.schema, &referent.name));
+            row.extend(constraint_identity(
+                database,
+                &referent.table.schema,
+                &referent.name,
+            ));
         } else {
             row.extend([Datum::Null, Datum::Null, Datum::Null]);
         }
@@ -2083,20 +3261,20 @@ fn referential_action_rule(action: ReferentialAction) -> &'static str {
     }
 }
 
-fn key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn key_column_usage_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for index in crabka_pgcatalog::list_indexes(kv)? {
         if index.constraint.is_none() {
             continue;
         }
         for (position, column) in index.columns.iter().enumerate() {
-            let mut row = constraint_identity(&index.table.schema, &index.name).to_vec();
-            row.extend(relation_identity(&index.table));
+            let mut row = constraint_identity(database, &index.table.schema, &index.name).to_vec();
+            row.extend(relation_identity(database, &index.table));
             row.extend([text(column), int(ordinal(position)?), Datum::Null]);
             rows.push(row);
         }
     }
-    rows.extend(foreign_key_column_usage_rows(kv)?);
+    rows.extend(foreign_key_column_usage_rows(kv, database)?);
     Ok(rows)
 }
 
@@ -2107,7 +3285,10 @@ fn key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// within the referenced *index*. That is why it can disagree with
 /// `ordinal_position`. A permuted composite key pairs by written order, while
 /// the index keeps its own order.
-fn foreign_key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn foreign_key_column_usage_rows(
+    kv: &dyn Kv,
+    database: &str,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
         let referent = crabka_pgcatalog::get_index(kv, &referenced_index_name(&foreign_key))?;
@@ -2121,8 +3302,9 @@ fn foreign_key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErr
                 None => Datum::Null,
             };
             let mut row =
-                constraint_identity(&foreign_key.table.schema, &foreign_key.name).to_vec();
-            row.extend(relation_identity(&foreign_key.table));
+                constraint_identity(database, &foreign_key.table.schema, &foreign_key.name)
+                    .to_vec();
+            row.extend(relation_identity(database, &foreign_key.table));
             row.extend([text(column), int(ordinal(position)?), in_unique]);
             rows.push(row);
         }
@@ -2130,7 +3312,7 @@ fn foreign_key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErr
     Ok(rows)
 }
 
-fn constraint_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn constraint_column_usage_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for index in crabka_pgcatalog::list_indexes(kv)? {
         if index.constraint.is_none() {
@@ -2138,6 +3320,7 @@ fn constraint_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
         }
         for column in &index.columns {
             rows.push(column_usage_row(
+                database,
                 &index.table,
                 column,
                 &index.table.schema,
@@ -2151,6 +3334,7 @@ fn constraint_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
         for column in table.columns.iter().filter(|column| column.not_null) {
             let name = not_null_constraint_name(&table.name, &column.name);
             rows.push(column_usage_row(
+                database,
                 &table.name,
                 &column.name,
                 &table.name.schema,
@@ -2163,6 +3347,7 @@ fn constraint_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
         for column in &foreign_key.referenced_columns {
             rows.push(column_usage_row(
+                database,
                 &foreign_key.referenced_table,
                 column,
                 &foreign_key.table.schema,
@@ -2179,23 +3364,40 @@ fn constraint_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
 /// key separates them. The columns are the *parent's*, while the constraint
 /// belongs to the child's schema.
 fn column_usage_row(
+    database: &str,
     table: &RelationName,
     column: &str,
     constraint_schema: &str,
     constraint: &str,
 ) -> Vec<Datum> {
-    let mut row = relation_identity(table).to_vec();
+    let mut row = relation_identity(database, table).to_vec();
     row.push(text(column));
-    row.extend(constraint_identity(constraint_schema, constraint));
+    row.extend(constraint_identity(database, constraint_schema, constraint));
     row
 }
 
-fn information_schema_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+/// The SQL standard's `is_updatable` asks whether a row can be updated *and*
+/// deleted through the view, so it needs both bits; `is_insertable_into` asks
+/// only about `INSERT`. Both pass `include_triggers = false`, because the
+/// standard's question is about the view definition rather than about what an
+/// `INSTEAD OF` trigger might do — the three `is_trigger_*` columns answer that.
+fn information_schema_view_rows(
+    kv: &dyn Kv,
+    database: &str,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crate::viewwrite::{DELETE_EVENT, INSERT_EVENT, UPDATE_EVENT};
+    const ROW_WRITABLE: i32 = UPDATE_EVENT | DELETE_EVENT;
     crabka_pgcatalog::list_views(kv)?
         .into_iter()
         .map(|view| {
-            let updatable = crate::catalog_fn::view_is_auto_updatable(&view);
-            let flag = if updatable { "YES" } else { "NO" };
+            let auto = crate::viewwrite::relation_updatable_events(kv, &view.name, false, None, 0);
+            let yes_or_no = |held: bool| if held { "YES" } else { "NO" };
+            let check_option = match view.options.check_option {
+                Some(crabka_pgcatalog::ViewCheckOption::Local) => "LOCAL",
+                Some(crabka_pgcatalog::ViewCheckOption::Cascaded) => "CASCADED",
+                None => "NONE",
+            };
             let view_id = crate::catalog_rel::view_oids(kv)?
                 .get(&view.name)
                 .copied()
@@ -2213,12 +3415,14 @@ fn information_schema_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
                     "NO"
                 }
             };
-            let mut row = relation_identity(&view.name).to_vec();
+            let mut row = relation_identity(database, &view.name).to_vec();
             row.extend([
-                text(&crate::catalog_fn::view_definition_text(&view, false)),
-                text("NONE"),
-                text(flag),
-                text(flag),
+                text(&crate::catalog_fn::view_definition_text(
+                    &view, false, style,
+                )),
+                text(check_option),
+                text(yes_or_no(auto & ROW_WRITABLE == ROW_WRITABLE)),
+                text(yes_or_no(auto & INSERT_EVENT == INSERT_EVENT)),
                 text(instead(|events| events.update)),
                 text(instead(|events| events.delete)),
                 text(instead(|events| events.insert)),
@@ -2235,11 +3439,11 @@ fn enabled_role_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
-fn sequence_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn sequence_view_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(crabka_pgcatalog::list_sequences(kv)?
         .into_iter()
         .map(|(name, sequence)| {
-            let mut row = relation_identity(&name).to_vec();
+            let mut row = relation_identity(database, &name).to_vec();
             row.extend([
                 text("bigint"),
                 int(64),
@@ -2261,7 +3465,7 @@ fn sequence_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 ///
 /// PostgreSQL lists the owner's seven table privileges in ACL bit order, all
 /// grantable, and sets `with_hierarchy` only for `SELECT`.
-fn table_privilege_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn table_privilege_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
     const OWNER_PRIVILEGES: [&str; 7] = [
         "INSERT",
         "SELECT",
@@ -2274,12 +3478,20 @@ fn table_privilege_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let owner = crate::catalog_fn::OBJECT_OWNER;
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(kv)? {
+        // A materialized view is grantable — `has_table_privilege` answers for
+        // one — but `information_schema` does not know the relation kind at all,
+        // so PostgreSQL leaves it out of this view exactly as it does out of
+        // `information_schema.tables`.
+        if table.materialized.is_some() {
+            continue;
+        }
         for privilege in OWNER_PRIVILEGES {
-            rows.push(privilege_row(owner, &table.name, privilege, true));
+            rows.push(privilege_row(database, owner, &table.name, privilege, true));
         }
     }
     for privilege in crabka_pgcatalog::list_table_privileges(kv)? {
         rows.push(privilege_row(
+            database,
             &privilege.grantee,
             &privilege.table,
             &privilege.privilege.to_ascii_uppercase(),
@@ -2289,9 +3501,45 @@ fn table_privilege_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
-fn privilege_row(grantee: &str, table: &RelationName, privilege: &str, owned: bool) -> Vec<Datum> {
+/// Every explicit column-level `GRANT`, one row per column, grantee and
+/// privilege.
+///
+/// Unlike `table_privileges` this view carries no implicit owner rows.
+/// PostgreSQL builds `column_privileges` from `pg_attribute.attacl` alone,
+/// which is NULL until somebody writes a column grant, and the owner's rights
+/// over the whole relation are already reported by `table_privileges`.
+///
+/// `is_grantable` is NO throughout, for the reason the relation-level view
+/// gives: crabka stores no `WITH GRANT OPTION`, so claiming YES would be a
+/// claim about a right the catalog cannot hold.
+fn column_privilege_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_column_privileges(kv)?
+        .into_iter()
+        .map(|privilege| {
+            let mut row = vec![
+                text(crate::catalog_fn::OBJECT_OWNER),
+                text(&privilege.grantee),
+            ];
+            row.extend(relation_identity(database, &privilege.table));
+            row.extend([
+                text(&privilege.column),
+                text(&privilege.privilege.to_ascii_uppercase()),
+                text("NO"),
+            ]);
+            row
+        })
+        .collect())
+}
+
+fn privilege_row(
+    database: &str,
+    grantee: &str,
+    table: &RelationName,
+    privilege: &str,
+    owned: bool,
+) -> Vec<Datum> {
     let mut row = vec![text(crate::catalog_fn::OBJECT_OWNER), text(grantee)];
-    row.extend(relation_identity(table));
+    row.extend(relation_identity(database, table));
     row.extend([
         text(privilege),
         text(if owned { "YES" } else { "NO" }),
@@ -2312,6 +3560,18 @@ mod tests {
     use crabka_pgtypes::ArrayValue;
 
     use super::*;
+
+    /// The reader a projection test stands in for: the engine's default
+    /// database and no backend id.
+    fn test_session() -> SessionIdent<'static> {
+        static UTC: std::sync::LazyLock<jiff::tz::TimeZone> =
+            std::sync::LazyLock::new(|| jiff::tz::TimeZone::UTC);
+        SessionIdent {
+            database: crate::exec::DEFAULT_DATABASE,
+            backend_pid: 0,
+            style: crabka_pgtypes::encoding::OutputStyle::with_zone(&UTC),
+        }
+    }
 
     #[test]
     fn every_named_relation_resolves_qualified_and_bare() {
@@ -2338,6 +3598,32 @@ mod tests {
             assert!(oid != 0, "{name} has no oid");
             assert!(oids.insert(oid), "{name} reuses oid {oid}");
         }
+    }
+
+    #[test]
+    fn numa_allocations_relation_exists_but_reports_unsupported() {
+        const RELATION: &str = "pg_shmem_allocations_numa";
+        assert!(catalog_relation(RELATION) == Some(RELATION));
+        assert!(catalog_relation("pg_catalog.pg_shmem_allocations_numa") == Some(RELATION));
+        assert!(relation_names().contains(&RELATION));
+        assert!(relation_oid(RELATION) != 0);
+        assert!(
+            columns(RELATION)
+                == vec![
+                    Column::new("name", ColumnType::Text),
+                    Column::new("numa_node", ColumnType::Int4),
+                    Column::new("size", ColumnType::Int8),
+                ]
+        );
+
+        let error = rows(&MemKv::default(), RELATION, test_session())
+            .expect_err("NUMA allocations require platform support")
+            .into_pg();
+        assert!(error.code == "0A000");
+        assert!(
+            error.message
+                == "libnuma initialization failed or NUMA is not supported on this platform"
+        );
     }
 
     #[test]
@@ -2393,10 +3679,10 @@ mod tests {
             Some(IndexConstraint::PrimaryKey),
         );
 
-        let tables = rows(&kv, "pg_tables", 0).expect("pg_tables");
-        let indexes = rows(&kv, "pg_indexes", 0).expect("pg_indexes");
-        let constraints = rows(&kv, "pg_constraint", 0).expect("pg_constraint");
-        let standard = rows(&kv, VIEW, 0).expect("table_constraints");
+        let tables = rows(&kv, "pg_tables", test_session()).expect("pg_tables");
+        let indexes = rows(&kv, "pg_indexes", test_session()).expect("pg_indexes");
+        let constraints = rows(&kv, "pg_constraint", test_session()).expect("pg_constraint");
+        let standard = rows(&kv, VIEW, test_session()).expect("table_constraints");
 
         assert!(field("pg_tables", &tables[0], "schemaname") == text("app"));
         assert!(field("pg_indexes", &indexes[0], "schemaname") == text("app"));
@@ -2448,6 +3734,8 @@ mod tests {
                 method: IndexMethod::Btree,
                 placement: IndexPlacement::Local,
                 constraint,
+                without_overlaps: false,
+                deferral: crabka_pgcatalog::ConstraintDeferral::Immediate,
             },
         )
         .expect("index ops");
@@ -2636,7 +3924,7 @@ mod tests {
     }
 
     fn oid_of(table_id: TableId) -> Datum {
-        int(i32::try_from(table_id).expect("relation oid"))
+        int(table_relation_oid(table_id).expect("relation oid"))
     }
 
     /// Every `pg_constraint` column of a foreign-key row, in PostgreSQL 18.4's
@@ -2646,14 +3934,14 @@ mod tests {
     fn pg_constraint_foreign_key_row_matches_postgresql_column_for_column() {
         let (kv, schema) = oracle_catalog();
         let oids = foreign_key_constraint_oids(&kv).expect("oids");
-        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+        let all = rows(&kv, "pg_constraint", test_session()).expect("rows");
 
         let row = row_named("pg_constraint", &all, "conname", "cc_a_fkey");
 
         assert!(row.len() == columns("pg_constraint").len());
         assert!(
             row == vec![
-                int(oids["cc.cc_a_fkey"]),
+                int(oids[&(RelationName::public("cc"), "cc_a_fkey".to_string())]),
                 text("cc_a_fkey"),
                 int(crate::exec::PUBLIC_NAMESPACE_OID),
                 text("f"),
@@ -2723,7 +4011,7 @@ mod tests {
     fn pg_constraint_foreign_key_rows_match_the_verified_oracle() {
         let (kv, schema) = oracle_catalog();
         let parent = oid_of(schema.parent);
-        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+        let all = rows(&kv, "pg_constraint", test_session()).expect("rows");
         let cases = [
             (
                 "cc_a_fkey",
@@ -2822,7 +4110,7 @@ mod tests {
             }
         }
 
-        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+        let all = rows(&kv, "pg_constraint", test_session()).expect("rows");
 
         for (_, code) in actions {
             for (_, match_code) in matches {
@@ -2848,7 +4136,7 @@ mod tests {
     fn pg_constraint_keeps_composite_key_columns_in_written_order() {
         let kv = permuted_catalog();
 
-        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+        let all = rows(&kv, "pg_constraint", test_session()).expect("rows");
         let row = row_named("pg_constraint", &all, "conname", "cperm_b_a_fkey");
 
         assert!(field("pg_constraint", &row, "conkey") == int2s(&[2, 1]));
@@ -2886,7 +4174,7 @@ mod tests {
             },
         );
 
-        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+        let all = rows(&kv, "pg_constraint", test_session()).expect("rows");
 
         let with = row_named("pg_constraint", &all, "conname", "cc_setcols");
         assert!(field("pg_constraint", &with, "confdelsetcols") == int2s(&[3, 2]));
@@ -2902,11 +4190,15 @@ mod tests {
 
         assert!(oids.len() == 4);
         // Constraint names are unique per relation, not per catalog, so the key
-        // carries the child relation.
-        assert!(oids.contains_key("cc.cc_a_fkey"));
+        // carries the child relation — as a pair, not as rendered text, so that
+        // two relations rendering alike cannot merge into one entry.
+        assert!(oids.contains_key(&(RelationName::public("cc"), "cc_a_fkey".to_string())));
         let band = FOREIGN_KEY_OID_BASE..FOREIGN_KEY_OID_BASE + OID_BAND_WIDTH;
-        for (key, oid) in &oids {
-            assert!(band.contains(oid), "{key} oid {oid} is out of band");
+        for ((table, name), oid) in &oids {
+            assert!(
+                band.contains(oid),
+                "{table}.{name} oid {oid} is out of band"
+            );
         }
         let distinct = oids.values().collect::<std::collections::BTreeSet<_>>();
         assert!(distinct.len() == oids.len());
@@ -3008,7 +4300,7 @@ mod tests {
                 expr: "c > 0".to_string(),
                 validated: true,
             }],
-            crabka_pgcatalog::TableIdSource::Counter,
+            crabka_pgcatalog::TableCreation::bootstrap(),
         )
         .expect("table ops");
         kv.write_batch(&ops).expect("write table");
@@ -3077,7 +4369,7 @@ mod tests {
 
         let checks = check_constraint_oids(&kv).expect("check oids");
         let not_nulls = not_null_constraint_oids(&kv).expect("not null oids");
-        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+        let all = rows(&kv, "pg_constraint", test_session()).expect("rows");
 
         assert!(checks.len() == 2, "a CHECK constraint lost its own key");
         assert!(
@@ -3102,7 +4394,7 @@ mod tests {
     fn referential_constraints_spell_out_the_oracle_rules() {
         const VIEW: &str = "information_schema.referential_constraints";
         let (kv, _) = oracle_catalog();
-        let all = rows(&kv, VIEW, 0).expect("rows");
+        let all = rows(&kv, VIEW, test_session()).expect("rows");
         let cases = [
             ("cc_a_fkey", "pp_pkey", "NONE", "NO ACTION", "NO ACTION"),
             ("cc_def", "pp_k_key", "NONE", "NO ACTION", "SET DEFAULT"),
@@ -3113,10 +4405,10 @@ mod tests {
             let row = row_named(VIEW, &all, "constraint_name", name);
             assert!(
                 row == vec![
-                    catalog_name(),
+                    catalog_name(crate::exec::DEFAULT_DATABASE),
                     text("public"),
                     text(name),
-                    catalog_name(),
+                    catalog_name(crate::exec::DEFAULT_DATABASE),
                     text("public"),
                     text(unique),
                     text(match_option),
@@ -3147,12 +4439,12 @@ mod tests {
             },
         );
 
-        let all = rows(&kv, VIEW, 0).expect("rows");
+        let all = rows(&kv, VIEW, test_session()).expect("rows");
 
         assert!(
             row_named(VIEW, &all, "constraint_name", "cc_bare")
                 == vec![
-                    catalog_name(),
+                    catalog_name(crate::exec::DEFAULT_DATABASE),
                     text("public"),
                     text("cc_bare"),
                     Datum::Null,
@@ -3171,16 +4463,16 @@ mod tests {
     fn table_constraints_report_real_deferrability_for_foreign_keys() {
         const VIEW: &str = "information_schema.table_constraints";
         let (kv, _) = oracle_catalog();
-        let all = rows(&kv, VIEW, 0).expect("rows");
+        let all = rows(&kv, VIEW, test_session()).expect("rows");
         let cases = [("cc_a_fkey", "NO", "NO"), ("cc_def", "YES", "YES")];
         for (name, deferrable, deferred) in cases {
             let row = row_named(VIEW, &all, "constraint_name", name);
             assert!(
                 row == vec![
-                    catalog_name(),
+                    catalog_name(crate::exec::DEFAULT_DATABASE),
                     text("public"),
                     text(name),
-                    catalog_name(),
+                    catalog_name(crate::exec::DEFAULT_DATABASE),
                     text("public"),
                     text("cc"),
                     text("FOREIGN KEY"),
@@ -3207,16 +4499,16 @@ mod tests {
         const VIEW: &str = "information_schema.key_column_usage";
         let kv = permuted_catalog();
 
-        let all = rows(&kv, VIEW, 0).expect("rows");
+        let all = rows(&kv, VIEW, test_session()).expect("rows");
 
         assert!(
             rows_named(VIEW, &all, "constraint_name", "cperm_b_a_fkey")
                 == vec![
                     vec![
-                        catalog_name(),
+                        catalog_name(crate::exec::DEFAULT_DATABASE),
                         text("public"),
                         text("cperm_b_a_fkey"),
-                        catalog_name(),
+                        catalog_name(crate::exec::DEFAULT_DATABASE),
                         text("public"),
                         text("cperm"),
                         text("b"),
@@ -3224,10 +4516,10 @@ mod tests {
                         int(2),
                     ],
                     vec![
-                        catalog_name(),
+                        catalog_name(crate::exec::DEFAULT_DATABASE),
                         text("public"),
                         text("cperm_b_a_fkey"),
-                        catalog_name(),
+                        catalog_name(crate::exec::DEFAULT_DATABASE),
                         text("public"),
                         text("cperm"),
                         text("a"),
@@ -3246,16 +4538,16 @@ mod tests {
         const VIEW: &str = "information_schema.constraint_column_usage";
         let (kv, _) = oracle_catalog();
 
-        let all = rows(&kv, VIEW, 0).expect("rows");
+        let all = rows(&kv, VIEW, test_session()).expect("rows");
 
         assert!(
             rows_named(VIEW, &all, "constraint_name", "cc_def")
                 == vec![vec![
-                    catalog_name(),
+                    catalog_name(crate::exec::DEFAULT_DATABASE),
                     text("public"),
                     text("pp"),
                     text("k"),
-                    catalog_name(),
+                    catalog_name(crate::exec::DEFAULT_DATABASE),
                     text("public"),
                     text("cc_def"),
                 ]]

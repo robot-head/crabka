@@ -2,7 +2,7 @@ use assert2::assert;
 use crabka_pgparser::parser::parse_expr_for_test as pexpr;
 use crabka_pgtypes::{ColumnType, Datum};
 
-use super::Prng;
+use super::{Prng, configured_random_seed};
 use crate::{clock::EvalCtx, scope::Scope};
 
 /// Evaluate a FROM-less expression and render it the way the wire would, so a
@@ -316,8 +316,38 @@ fn the_generator_is_reproducible_per_seed() {
     }
 }
 
-/// The bounded draw must never leave `[0, range]`, for ranges on either side of
-/// a power-of-two boundary, where the rejection loop does the work.
+#[test]
+fn setseed_survives_across_statement_contexts() {
+    let mut ctx = EvalCtx::test_default();
+    ctx.random = Some(std::sync::Arc::new(std::sync::Mutex::new(Prng::seeded(9))));
+    let eval = |sql: &str| {
+        crate::eval::eval(
+            &pexpr(sql).expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx.clone(),
+        )
+        .expect("eval")
+    };
+
+    eval("setseed(0.5)");
+    let first = [eval("random()"), eval("random()")];
+    eval("setseed(0.5)");
+    let replay = [eval("random()"), eval("random()")];
+    assert!(first == replay);
+}
+
+#[test]
+fn configured_seed_accepts_only_a_u64() {
+    assert!(configured_random_seed(Some("0")) == Some(0));
+    assert!(configured_random_seed(Some("18446744073709551615")) == Some(u64::MAX));
+    assert!(configured_random_seed(Some("-1")).is_none());
+    assert!(configured_random_seed(Some("not-a-number")).is_none());
+    assert!(configured_random_seed(None).is_none());
+}
+
+/// The bounded draw must never leave `[0, range]`, for ranges either side of a
+/// power-of-two boundary (where the rejection loop does the work).
 #[test]
 fn the_bounded_draw_never_escapes_its_range() {
     let mut prng = Prng::seeded(12345);
@@ -325,5 +355,70 @@ fn the_bounded_draw_never_escapes_its_range() {
         for _ in 0..64 {
             assert!(prng.next_below(range) <= range, "range {range}");
         }
+    }
+}
+
+/// `width_bucket(operand, thresholds)` counts the thresholds the operand is at
+/// or above, using the element type's btree ordering — which is also what puts
+/// a NaN above every other value.
+#[test]
+fn width_bucket_over_a_threshold_array_counts_the_thresholds_at_or_below() {
+    let cases = [
+        ("width_bucket(0, ARRAY[1, 3, 5, 10])", "0"),
+        ("width_bucket(1, ARRAY[1, 3, 5, 10])", "1"),
+        ("width_bucket(4, ARRAY[1, 3, 5, 10])", "2"),
+        ("width_bucket(10, ARRAY[1, 3, 5, 10])", "4"),
+        ("width_bucket(11, ARRAY[1, 3, 5, 10])", "4"),
+        ("width_bucket(5, ARRAY[3])", "1"),
+        // An `unknown` array literal takes the operand's own type.
+        ("width_bucket(5, '{}')", "0"),
+        (
+            "width_bucket(0.5::numeric, ARRAY[0, 5.5, 9.99]::numeric[])",
+            "1",
+        ),
+        // NaN is the largest float8, so it lands past every threshold and a NaN
+        // threshold ends the search short of the ones behind it.
+        ("width_bucket('NaN'::float8, ARRAY[1, 3, 9]::float8[])", "3"),
+        (
+            "width_bucket(77::float8, ARRAY[1, 3, 9, 'NaN'::float8, 'NaN'::float8]::float8[])",
+            "3",
+        ),
+        (
+            "width_bucket('NaN'::float8, ARRAY[1, 3, 9, 'NaN'::float8, 'NaN'::float8]::float8[])",
+            "5",
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert!(text_of(sql) == expected, "{sql}");
+    }
+    assert!(result_type("width_bucket(5, ARRAY[3])") == ColumnType::Int4);
+}
+
+#[test]
+fn width_bucket_rejects_thresholds_it_cannot_search() {
+    let cases = [
+        (
+            "width_bucket(5, ARRAY[3, 4, NULL])",
+            "22004",
+            "thresholds array must not contain NULLs",
+        ),
+        (
+            "width_bucket(5, ARRAY[ARRAY[1, 2], ARRAY[3, 4]])",
+            "2202E",
+            "thresholds must be one-dimensional array",
+        ),
+        // `anycompatible` cannot unify text with integer, so there is no
+        // candidate at all rather than a cross-family comparison.
+        (
+            "width_bucket('5'::text, ARRAY[3, 4]::integer[])",
+            "42883",
+            "function width_bucket(text, integer[]) does not exist",
+        ),
+    ];
+    for (sql, code, message) in cases {
+        assert!(
+            error_of(sql) == (code.to_string(), message.to_string()),
+            "{sql}"
+        );
     }
 }

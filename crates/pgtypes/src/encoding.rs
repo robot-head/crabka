@@ -18,9 +18,30 @@ use crate::Datum;
 #[derive(Debug, Clone, Copy)]
 pub struct OutputStyle<'a> {
     pub time_zone: &'a jiff::tz::TimeZone,
+    /// `extra_float_digits`: `>= 1` renders the shortest round-tripping float,
+    /// `<= 0` rounds to `DIG + extra_float_digits` significant digits.
+    pub extra_float_digits: i32,
     pub date_style: crate::datetime::DateStyle,
     pub date_order: crate::datetime::DateOrder,
     pub interval_style: crate::datetime::IntervalStyle,
+    /// `bytea_output`, which decides which of `byteaout`'s two spellings a
+    /// `bytea` renders in.
+    pub bytea_output: ByteaOutput,
+}
+
+/// The `bytea_output` GUC: which spelling `byteaout` produces.
+///
+/// Both are accepted on input regardless of the setting, so this affects
+/// reading a value back and nothing else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ByteaOutput {
+    /// `\x` followed by two lowercase hex digits per byte. PostgreSQL's default
+    /// since 9.0.
+    #[default]
+    Hex,
+    /// The pre-9.0 spelling: printable ASCII as itself, a backslash doubled,
+    /// and everything else as a three-digit octal escape.
+    Escape,
 }
 
 impl<'a> OutputStyle<'a> {
@@ -31,9 +52,12 @@ impl<'a> OutputStyle<'a> {
     pub fn with_zone(time_zone: &'a jiff::tz::TimeZone) -> Self {
         Self {
             time_zone,
+            // PostgreSQL's default since v12.
+            extra_float_digits: 1,
             date_style: crate::datetime::DateStyle::default(),
             date_order: crate::datetime::DateOrder::default(),
             interval_style: crate::datetime::IntervalStyle::default(),
+            bytea_output: ByteaOutput::default(),
         }
     }
 }
@@ -56,8 +80,82 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Int4(n) => n.to_string().into_bytes(),
         Datum::Int8(n) => n.to_string().into_bytes(),
         Datum::Text(s) => s.clone().into_bytes(),
-        Datum::Float4(f) => encode_float4_text(*f).into_bytes(),
-        Datum::Float8(f) => encode_float8_text(*f).into_bytes(),
+        Datum::JsonPath(s) => s.clone().into_bytes(),
+        Datum::Float4(f) => encode_float4_text(*f, style.extra_float_digits).into_bytes(),
+        Datum::Float8(f) => encode_float8_text(*f, style.extra_float_digits).into_bytes(),
+        Datum::Point(point) => format!(
+            "({},{})",
+            encode_float8_text(point.x, style.extra_float_digits),
+            encode_float8_text(point.y, style.extra_float_digits)
+        )
+        .into_bytes(),
+        // `box_out` writes the high corner first and uses no outer brackets.
+        Datum::Box(value) => format!(
+            "({},{}),({},{})",
+            encode_float8_text(value.high.x, style.extra_float_digits),
+            encode_float8_text(value.high.y, style.extra_float_digits),
+            encode_float8_text(value.low.x, style.extra_float_digits),
+            encode_float8_text(value.low.y, style.extra_float_digits)
+        )
+        .into_bytes(),
+        // `circle_out` always writes the angle-bracket form.
+        Datum::Circle(circle) => format!(
+            "<({},{}),{}>",
+            encode_float8_text(circle.center.x, style.extra_float_digits),
+            encode_float8_text(circle.center.y, style.extra_float_digits),
+            encode_float8_text(circle.radius, style.extra_float_digits)
+        )
+        .into_bytes(),
+        // `line_out` always writes the coefficient form.
+        Datum::Line(line) => format!(
+            "{{{},{},{}}}",
+            encode_float8_text(line.a, style.extra_float_digits),
+            encode_float8_text(line.b, style.extra_float_digits),
+            encode_float8_text(line.c, style.extra_float_digits)
+        )
+        .into_bytes(),
+        // `lseg_out` always writes the bracketed two-point form, whatever
+        // spelling the input used.
+        Datum::Lseg(lseg) => format!(
+            "[({},{}),({},{})]",
+            encode_float8_text(lseg.start.x, style.extra_float_digits),
+            encode_float8_text(lseg.start.y, style.extra_float_digits),
+            encode_float8_text(lseg.end.x, style.extra_float_digits),
+            encode_float8_text(lseg.end.y, style.extra_float_digits)
+        )
+        .into_bytes(),
+        Datum::Path(path) => {
+            let mut out = String::from(if path.closed { "(" } else { "[" });
+            for (index, point) in path.points.iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                out.push('(');
+                out.push_str(&encode_float8_text(point.x, style.extra_float_digits));
+                out.push(',');
+                out.push_str(&encode_float8_text(point.y, style.extra_float_digits));
+                out.push(')');
+            }
+            out.push(if path.closed { ')' } else { ']' });
+            out.into_bytes()
+        }
+        // `poly_out` is `path_encode(PATH_CLOSED, …)`: always parenthesised,
+        // never bracketed, because a polygon has no open spelling.
+        Datum::Polygon(polygon) => {
+            let mut out = String::from("(");
+            for (index, point) in polygon.points.iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                out.push('(');
+                out.push_str(&encode_float8_text(point.x, style.extra_float_digits));
+                out.push(',');
+                out.push_str(&encode_float8_text(point.y, style.extra_float_digits));
+                out.push(')');
+            }
+            out.push(')');
+            out.into_bytes()
+        }
         // SP32: PostgreSQL `numeric_out` (plain decimal, dscale fractional digits).
         Datum::Numeric(d) => crate::numeric::to_text(d).into_bytes(),
         // SP37: text encodings. `Timestamptz` renders in the supplied session zone.
@@ -77,16 +175,44 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Interval(i) => {
             crate::datetime::interval_to_text_in(*i, style.interval_style).into_bytes()
         }
-        // SP40: PostgreSQL `byteaout` hex format: `\x` + lowercase hex digits.
-        Datum::Bytea(b) => {
-            let mut out = Vec::with_capacity(2 + b.len() * 2);
-            out.extend_from_slice(b"\\x");
-            for byte in b {
-                out.push(b"0123456789abcdef"[usize::from(*byte >> 4)]);
-                out.push(b"0123456789abcdef"[usize::from(*byte & 0xf)]);
+        // SP40: PostgreSQL `byteaout`, in whichever of its two spellings
+        // `bytea_output` selects.
+        Datum::Bytea(b) => match style.bytea_output {
+            ByteaOutput::Hex => {
+                let mut out = Vec::with_capacity(2 + b.len() * 2);
+                out.extend_from_slice(b"\\x");
+                for byte in b {
+                    out.push(b"0123456789abcdef"[usize::from(*byte >> 4)]);
+                    out.push(b"0123456789abcdef"[usize::from(*byte & 0xf)]);
+                }
+                out
             }
-            out
-        }
+            ByteaOutput::Escape => {
+                let mut out = Vec::with_capacity(b.len());
+                for byte in b {
+                    match byte {
+                        b'\\' => out.extend_from_slice(b"\\\\"),
+                        // Printable ASCII passes through; everything else,
+                        // control bytes and the whole high half alike, becomes
+                        // a three-digit octal escape.
+                        0x20..=0x7e => out.push(*byte),
+                        _ => {
+                            out.push(b'\\');
+                            out.push(b'0' + (byte >> 6));
+                            out.push(b'0' + ((byte >> 3) & 7));
+                            out.push(b'0' + (byte & 7));
+                        }
+                    }
+                }
+                out
+            }
+        },
+        // `json_out`: the bytes `json_in` accepted, unchanged.
+        Datum::Json(text) => text.clone().into_bytes(),
+        // `xml_out` is *not* the identity: it re-renders the XML declaration,
+        // dropping a redundant one. The `xml → text` cast bypasses this,
+        // because `pg_cast` declares it binary-coercible.
+        Datum::Xml(text) => crate::xml::output_text(text).into_bytes(),
         // `jsonb_out`: the canonical re-rendering of the decomposed value.
         Datum::Jsonb(j) => j.to_text().into_bytes(),
         // `array_out`: `{...}` with each element rendered by its own output
@@ -104,6 +230,22 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
                 .collect();
             crate::array::literal_text(&a.dims, &elements).into_bytes()
         }
+        // `oidvectorout` prints `%u` per element, `int2vectorout` `%d`. Both
+        // land in this variant, so the element type picks the reading: an
+        // `oidvector` element is a `u32` carried in an `Int4`, and printing it
+        // signed would turn `4294967295` into `-1`.
+        Datum::OidVector(a) => a
+            .elems
+            .iter()
+            .map(|value| match value {
+                Datum::Int4(oid) if matches!(a.elem, crate::ElemType::Int4) => {
+                    oid.cast_unsigned().to_string()
+                }
+                other => String::from_utf8(encode_text_in(other, style)).expect("valid datum text"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .into_bytes(),
         // `record_out`: `(f1,f2,…)`, a NULL field written as nothing and any
         // field that would otherwise be ambiguous double-quoted.
         Datum::Record(r) => {
@@ -126,67 +268,142 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         Datum::Regclass(r) => r.name.as_bytes().to_vec(),
         Datum::TsVector(vector) => vector.to_string().into_bytes(),
         Datum::TsQuery(query) => query.to_string().into_bytes(),
+        // `cash_out`, which renders through `lc_monetary` — `C` here, so
+        // `$1,234.56`.
+        Datum::Money(value) => crate::money::to_text(*value).into_bytes(),
+        // `charout`: the byte itself below 0x80, `\ooo` above it, and the
+        // empty string for NUL.
+        Datum::InternalChar(value) => crate::internal_char::to_text(*value).into_bytes(),
+        // `bit_out` / `varbit_out` are the same routine: one character per bit.
+        Datum::BitString(value) => value.to_text().into_bytes(),
+        // `inet_out` / `cidr_out`: the value's own `is_cidr` picks which.
+        Datum::Inet(value) => value.to_text().into_bytes(),
+        Datum::MacAddr(value) => value.to_text().into_bytes(),
+        Datum::MacAddr8(value) => value.to_text().into_bytes(),
+        // `oidout` / `xidout` / `cidout` / `xid8out` all print `%u`: the
+        // unsigned value, which is the whole difference from `int4out`.
+        Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => value.to_string().into_bytes(),
+        Datum::Xid8(value) => value.to_string().into_bytes(),
+        // `tidout`: `(block,offset)`, no space.
+        Datum::Tid(value) => value.to_text().into_bytes(),
+        // `pg_lsn_out`: `%X/%X`, upper case and unpadded.
+        Datum::PgLsn(value) => crate::sysid::lsn_to_text(*value).into_bytes(),
+        // `pg_snapshot_out` — also `txid_snapshot_out`, which is the same
+        // routine under another name.
+        Datum::PgSnapshot(value) => value.to_string().into_bytes(),
+        Datum::Range(range) => crate::range::to_text(range, |bound| {
+            String::from_utf8(encode_text_in(bound, style))
+                .expect("a Datum's text encoding is always valid UTF-8")
+        })
+        .into_bytes(),
+        Datum::Multirange(multirange) => crate::multirange::to_text(multirange, |bound| {
+            String::from_utf8(encode_text_in(bound, style))
+                .expect("a Datum's text encoding is always valid UTF-8")
+        })
+        .into_bytes(),
     }
 }
 
 /// The `jsonb` binary-format version byte. PostgreSQL prefixes `jsonb_send`
 /// output with it; only version 1 is defined.
 pub const JSONB_BINARY_VERSION: u8 = 1;
+/// Version byte used by PostgreSQL's `jsonpath_send`/`jsonpath_recv` format.
+pub const JSONPATH_BINARY_VERSION: u8 = 1;
 
-/// PostgreSQL `float8out` text rendering.
+/// Lay out a float the way `printf %g` does: fixed-point while the decimal
+/// exponent is in `-4 .. digits`, scientific outside it with a signed
+/// two-digit exponent (`1e+16`, `1e-05`), and no trailing zeros either way.
 ///
-/// This function spells the IEEE specials exactly as PostgreSQL does
-/// (`Infinity`/`-Infinity`/`NaN`). Finite values use Rust's `f64` `Display`,
-/// which is the shortest round-tripping decimal, as PG has been since v12. The
-/// two therefore agree byte-for-byte for moderate magnitudes (`1.5`, `2.0`→`2`,
-/// `-0.0`→`-0`). The one documented divergence is scientific notation for
-/// |x| ≥ 1e16 / 0 < |x| < 1e-4, which PG emits and Rust does not.
-fn encode_float8_text(f: f64) -> String {
-    if f.is_nan() {
-        "NaN".to_string()
-    } else if f.is_infinite() {
-        if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string()
-    } else {
-        format!("{f}")
+/// Only the `extra_float_digits <= 0` path comes through here. The default
+/// path is Ryu's own layout, in [`crate::shortest_dec`].
+fn layout_g(mantissa: &str, exponent: i32, fixed: &str, digits: i32) -> String {
+    if (-4..digits).contains(&exponent) {
+        return fixed.to_string();
     }
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("{mantissa}e{sign}{:02}", exponent.abs())
 }
 
-/// PostgreSQL `float4out` text rendering (`extra_float_digits >= 1`, the default
-/// since PG 12).
-///
-/// The output is the shortest decimal that round-trips through `f32`, laid out
-/// like `printf %g` with precision `FLT_DIG`. It is fixed-point while the
-/// decimal exponent is in `-4 ..= 5` and scientific outside it, with a signed
-/// two-digit exponent (`1e+06`, `1e-05`, `3.4028235e+38`). The IEEE specials are
-/// spelled `Infinity` / `-Infinity` / `NaN`.
-///
-/// Rust supplies both halves: `{:e}` is the shortest round-tripping mantissa
-/// plus the decimal exponent, and `{}` is the same digits laid out fixed-point.
-fn encode_float4_text(f: f32) -> String {
-    if f.is_nan() {
-        return "NaN".to_string();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
-    }
-    let scientific = format!("{f:e}");
+/// Round to `precision` significant digits and lay the result out like `%g`.
+/// This is the `extra_float_digits <= 0` path, where PostgreSQL formats with
+/// `%.*g` at `DIG + extra_float_digits` rather than the shortest round trip.
+fn format_g(value: f64, precision: usize) -> String {
+    let precision = precision.max(1);
+    let scientific = format!("{value:.*e}", precision - 1);
     let (mantissa, exponent) = scientific
         .split_once('e')
         .expect("Rust's LowerExp always emits an `e`");
     let exponent: i32 = exponent
         .parse()
         .expect("Rust's LowerExp exponent is a decimal integer");
-    if (-4..FLOAT4_FIXED_EXPONENT_LIMIT).contains(&exponent) {
-        format!("{f}")
-    } else {
-        let sign = if exponent < 0 { '-' } else { '+' };
-        format!("{mantissa}e{sign}{:02}", exponent.abs())
-    }
+    let mantissa = trim_trailing_zeros(mantissa);
+    let fixed = {
+        let decimals = usize::try_from(precision as i32 - 1 - exponent).unwrap_or(0);
+        trim_trailing_zeros(&format!("{value:.decimals$}"))
+    };
+    layout_g(
+        &mantissa,
+        exponent,
+        &fixed,
+        i32::try_from(precision).unwrap_or(i32::MAX),
+    )
 }
 
-/// `FLT_DIG`: the decimal exponent at which `float4out` switches to scientific
-/// notation. It matches `%g`'s precision-driven threshold.
-const FLOAT4_FIXED_EXPONENT_LIMIT: i32 = 6;
+/// Drop a fractional part's trailing zeros, and the point if nothing is left —
+/// `%g`'s default behaviour, which PostgreSQL relies on.
+fn trim_trailing_zeros(value: &str) -> String {
+    if !value.contains('.') {
+        return value.to_string();
+    }
+    value
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+/// `DBL_DIG` / `FLT_DIG`: the significant digits `%g` uses at
+/// `extra_float_digits = 0`, and the exponent at which each type switches to
+/// scientific notation.
+const FLOAT8_DIG: i32 = 15;
+const FLOAT4_DIG: i32 = 6;
+
+/// PostgreSQL `float8out`. The IEEE specials are spelled exactly as PostgreSQL
+/// does (`Infinity`/`-Infinity`/`NaN`). `extra_float_digits >= 1` — the default
+/// since PG 12 — takes PostgreSQL's own Ryu spelling from
+/// [`crate::shortest_dec`]; `<= 0` rounds to `DBL_DIG + extra_float_digits`
+/// significant digits.
+fn encode_float8_text(f: f64, extra_float_digits: i32) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if extra_float_digits <= 0 {
+        return format_g(
+            f,
+            usize::try_from(FLOAT8_DIG + extra_float_digits).unwrap_or(1),
+        );
+    }
+    crate::shortest_dec::float8_shortest(f)
+}
+
+/// PostgreSQL `float4out`, the `f32` counterpart of [`encode_float8_text`].
+fn encode_float4_text(f: f32, extra_float_digits: i32) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if extra_float_digits <= 0 {
+        return format_g(
+            f64::from(f),
+            usize::try_from(FLOAT4_DIG + extra_float_digits).unwrap_or(1),
+        );
+    }
+    crate::shortest_dec::float4_shortest(f)
+}
 
 /// PostgreSQL binary-format encoding of a (non-null) value.
 pub fn encode_binary(d: &Datum) -> Vec<u8> {
@@ -197,9 +414,131 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::Int4(n) => n.to_be_bytes().to_vec(),
         Datum::Int8(n) => n.to_be_bytes().to_vec(),
         Datum::Text(s) => s.clone().into_bytes(),
+        Datum::JsonPath(s) => {
+            let mut out = Vec::with_capacity(s.len() + 1);
+            out.push(JSONPATH_BINARY_VERSION);
+            out.extend_from_slice(s.as_bytes());
+            out
+        }
+        Datum::Range(range) => {
+            if range.empty {
+                return vec![0x01];
+            }
+            let mut flags = 0;
+            if range.lower_inclusive {
+                flags |= 0x02;
+            }
+            if range.upper_inclusive {
+                flags |= 0x04;
+            }
+            if range.lower.is_none() {
+                flags |= 0x08;
+            }
+            if range.upper.is_none() {
+                flags |= 0x10;
+            }
+            let mut out = vec![flags];
+            for bound in [&range.lower, &range.upper].into_iter().flatten() {
+                let bytes = encode_binary(bound);
+                out.extend_from_slice(
+                    &i32::try_from(bytes.len())
+                        .expect("range bound exceeds PostgreSQL's wire limit")
+                        .to_be_bytes(),
+                );
+                out.extend_from_slice(&bytes);
+            }
+            out
+        }
+        Datum::Multirange(multirange) => {
+            let mut out = Vec::new();
+            out.extend_from_slice(
+                &i32::try_from(multirange.ranges.len())
+                    .expect("multirange has more than i32::MAX ranges")
+                    .to_be_bytes(),
+            );
+            for range in &multirange.ranges {
+                let bytes = encode_binary(&Datum::Range(range.clone()));
+                out.extend_from_slice(
+                    &i32::try_from(bytes.len())
+                        .expect("multirange component exceeds PostgreSQL's wire limit")
+                        .to_be_bytes(),
+                );
+                out.extend_from_slice(&bytes);
+            }
+            out
+        }
         // IEEE-754 big-endian, matching PostgreSQL's float4send / float8send.
         Datum::Float4(f) => f.to_be_bytes().to_vec(),
         Datum::Float8(f) => f.to_be_bytes().to_vec(),
+        Datum::Point(point) => {
+            let mut out = Vec::with_capacity(16);
+            out.extend_from_slice(&point.x.to_be_bytes());
+            out.extend_from_slice(&point.y.to_be_bytes());
+            out
+        }
+        // `box_send`: high x, high y, low x, low y.
+        Datum::Box(value) => {
+            let mut out = Vec::with_capacity(32);
+            for coordinate in [value.high.x, value.high.y, value.low.x, value.low.y] {
+                out.extend_from_slice(&coordinate.to_be_bytes());
+            }
+            out
+        }
+        // `circle_send`: centre x, centre y, radius.
+        Datum::Circle(circle) => {
+            let mut out = Vec::with_capacity(24);
+            for value in [circle.center.x, circle.center.y, circle.radius] {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            out
+        }
+        // `line_send`: three float8 coefficients.
+        Datum::Line(line) => {
+            let mut out = Vec::with_capacity(24);
+            for coefficient in [line.a, line.b, line.c] {
+                out.extend_from_slice(&coefficient.to_be_bytes());
+            }
+            out
+        }
+        // `lseg_send`: four float8s, start then end.
+        Datum::Lseg(lseg) => {
+            let mut out = Vec::with_capacity(32);
+            for coordinate in [lseg.start.x, lseg.start.y, lseg.end.x, lseg.end.y] {
+                out.extend_from_slice(&coordinate.to_be_bytes());
+            }
+            out
+        }
+        Datum::Path(path) => {
+            let mut out = Vec::with_capacity(5 + path.points.len() * 16);
+            out.push(u8::from(path.closed));
+            out.extend_from_slice(
+                &i32::try_from(path.points.len())
+                    .expect("path has more than i32::MAX points")
+                    .to_be_bytes(),
+            );
+            for point in &path.points {
+                out.extend_from_slice(&point.x.to_be_bytes());
+                out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            out
+        }
+        // `poly_send`: the point count then the points, and **not** the bounding
+        // box. Upstream's `poly_recv` recomputes the box rather than trusting a
+        // transmitted one, so it is deliberately left out of the wire form.
+        // There is no closed flag either — a polygon is always closed.
+        Datum::Polygon(polygon) => {
+            let mut out = Vec::with_capacity(4 + polygon.points.len() * 16);
+            out.extend_from_slice(
+                &i32::try_from(polygon.points.len())
+                    .expect("polygon has more than i32::MAX points")
+                    .to_be_bytes(),
+            );
+            for point in &polygon.points {
+                out.extend_from_slice(&point.x.to_be_bytes());
+                out.extend_from_slice(&point.y.to_be_bytes());
+            }
+            out
+        }
         // SP32: PostgreSQL `numeric_send` (base-10000 NBASE wire format).
         Datum::Numeric(d) => crate::numeric::binary(d),
         // SP37: binary encodings (Task 4). PG 2000-01-01 epoch for date/timestamp.
@@ -211,6 +550,12 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::Interval(i) => crate::datetime::interval_to_binary(*i).to_vec(),
         // SP40: `byteasend` — raw bytes (no transformation).
         Datum::Bytea(b) => b.clone(),
+        // `json_send` is `text`'s: the document as written, with no version
+        // byte. Only `jsonb_send` prefixes one.
+        Datum::Json(text) => text.clone().into_bytes(),
+        // `xml_send` is `xml_out_internal` too, not `textsend`: the declaration
+        // is re-rendered on the binary path exactly as on the text one.
+        Datum::Xml(text) => crate::xml::output_text(text).into_bytes(),
         // `jsonb_send`: a version byte then the canonical JSON text.
         Datum::Jsonb(j) => {
             let text = j.to_text();
@@ -221,7 +566,8 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         }
         // `array_send`: the standard big-endian array header then each element
         // as `i32 length` (-1 for NULL) plus its own binary encoding.
-        Datum::Array(a) => encode_array_binary(a),
+        Datum::Array(a) => encode_array_binary(a, a.elem.oid()),
+        Datum::OidVector(a) => encode_array_binary(a, crate::oids::OID),
         // `record_send`: the field count, then per field its type oid and its
         // own binary encoding with an `i32` length (-1 for NULL).
         Datum::Record(r) => encode_record_binary(r),
@@ -234,6 +580,47 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         // layouts are implemented. Their OIDs and text format are exact.
         Datum::TsVector(vector) => vector.to_string().into_bytes(),
         Datum::TsQuery(query) => query.to_string().into_bytes(),
+        // `cash_send`: a big-endian int64.
+        Datum::Money(value) => crate::money::to_binary(*value),
+        // `charsend`: the one byte, with no encoding conversion — `char.c`
+        // calls that dubious and keeps it, because the type is often a 1-byte
+        // binary field rather than a character.
+        Datum::InternalChar(value) => vec![*value],
+        // `bit_send` / `varbit_send`: the bit count, then the packed bytes.
+        Datum::BitString(value) => value.to_binary(),
+        // `inet_send` / `cidr_send`: family, netmask, is_cidr, length, address.
+        Datum::Inet(value) => value.to_binary(),
+        // `macaddr_send` / `macaddr8_send`: the raw bytes, most significant
+        // first.
+        Datum::MacAddr(value) => value.0.to_vec(),
+        Datum::MacAddr8(value) => value.0.to_vec(),
+        // `oidsend` / `xidsend` / `cidsend`: a big-endian uint32.
+        Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => value.to_be_bytes().to_vec(),
+        // `xid8send` / `pg_lsn_send`: a big-endian uint64.
+        Datum::Xid8(value) | Datum::PgLsn(value) => value.to_be_bytes().to_vec(),
+        // `tidsend`: the block number then the offset, each big-endian.
+        Datum::Tid(value) => {
+            let mut out = Vec::with_capacity(6);
+            out.extend_from_slice(&value.block.to_be_bytes());
+            out.extend_from_slice(&value.offset.to_be_bytes());
+            out
+        }
+        // `pg_snapshot_send`: the count of running ids as a big-endian uint32,
+        // then `xmin`, `xmax` and each running id as a big-endian uint64. The
+        // count leads, which is why the reader can size its array before it
+        // reads the window.
+        Datum::PgSnapshot(value) => {
+            let xip = value.xip();
+            let mut out = Vec::with_capacity(4 + 16 + 8 * xip.len());
+            let count = u32::try_from(xip.len()).unwrap_or(u32::MAX);
+            out.extend_from_slice(&count.to_be_bytes());
+            out.extend_from_slice(&value.xmin().to_be_bytes());
+            out.extend_from_slice(&value.xmax().to_be_bytes());
+            for id in xip {
+                out.extend_from_slice(&id.to_be_bytes());
+            }
+            out
+        }
     }
 }
 
@@ -263,16 +650,16 @@ fn encode_record_binary(r: &crate::datum::RecordValue) -> Vec<u8> {
 }
 
 /// PostgreSQL `array_send`. An empty array is the 12-byte `ndim = 0` header with
-/// no dimension block, the form libpq and `tokio-postgres` emit, which must
-/// round-trip. Every other array carries one `(length, lower bound)` pair per
-/// dimension ahead of its row-major elements.
-fn encode_array_binary(a: &crate::datum::ArrayValue) -> Vec<u8> {
+/// no dimension block — the form libpq and `tokio-postgres` emit, which must
+/// round-trip — and every other array carries one `(length, lower bound)` pair
+/// per dimension ahead of its row-major elements.
+fn encode_array_binary(a: &crate::datum::ArrayValue, elem_oid: u32) -> Vec<u8> {
     let has_null = a.elems.iter().any(Datum::is_null);
     let ndim = i32::try_from(a.dims.len()).expect("array dimensions exceed i32");
     let mut out = Vec::with_capacity(20 + a.elems.len() * 8);
     out.extend_from_slice(&ndim.to_be_bytes());
     out.extend_from_slice(&i32::from(has_null).to_be_bytes());
-    out.extend_from_slice(&a.elem.oid().to_be_bytes());
+    out.extend_from_slice(&elem_oid.to_be_bytes());
     for dim in &a.dims {
         out.extend_from_slice(&dim.len.to_be_bytes());
         out.extend_from_slice(&dim.lower.to_be_bytes());
@@ -401,6 +788,10 @@ mod tests {
         assert_eq!(encode_binary(&Datum::Int4(1)), 1i32.to_be_bytes().to_vec());
         assert_eq!(encode_binary(&Datum::Int8(1)), 1i64.to_be_bytes().to_vec());
         assert_eq!(encode_binary(&Datum::Text("hi".into())), b"hi".to_vec());
+        assert_eq!(
+            encode_binary(&Datum::JsonPath("$.\"a\"".into())),
+            b"\x01$.\"a\"".to_vec()
+        );
         // float8 is IEEE-754 big-endian (PG float8send).
         assert_eq!(
             encode_binary(&Datum::Float8(1.5)),
@@ -486,6 +877,18 @@ mod tests {
     }
 
     #[test]
+    fn oidvector_binary_uses_oid_elements() {
+        use assert2::assert;
+        let value = Datum::OidVector(crate::datum::ArrayValue::with_dims(
+            crate::ElemType::Int4,
+            vec![Datum::Int4(23), Datum::Int4(25)],
+            vec![crate::ArrayDim::new(0, 2)],
+        ));
+        let encoded = encode_binary(&value);
+        assert!(encoded[8..12] == crate::oids::OID.to_be_bytes());
+    }
+
+    #[test]
     fn array_binary_flags_nulls_and_uses_minus_one_lengths() {
         use assert2::assert;
         let encoded = encode_binary(&int_array(&[None, Some(7)]));
@@ -529,6 +932,91 @@ mod tests {
         // elem oid is jsonb (3802) and the element carries its version byte.
         assert!(encoded[8..12] == 3802u32.to_be_bytes());
         assert!(encoded[24] == JSONB_BINARY_VERSION);
+    }
+
+    fn polygon(text: &str) -> Datum {
+        Datum::Polygon(crate::geometry::Polygon::parse(text).expect(text))
+    }
+
+    /// Every expectation is `SELECT polygon '…'::text` on PostgreSQL 18.4.
+    /// `poly_out` is `path_encode(PATH_CLOSED, …)`, so the result is always
+    /// parenthesised and always closed however the input was spelled — there is
+    /// no open polygon and no bracketed form.
+    #[test]
+    fn polygon_text_matches_poly_out() {
+        use assert2::assert;
+        let tz = utc();
+        let cases: &[(&str, &str)] = &[
+            ("((1,2),(3,4))", "((1,2),(3,4))"),
+            // Three input spellings `poly_in` accepts, one output spelling.
+            ("(0,0),(1,0),(1,1),(0,1)", "((0,0),(1,0),(1,1),(0,1))"),
+            ("0,0,1,0,1,1", "((0,0),(1,0),(1,1))"),
+            ("((0,0),(1,0),(1,1))", "((0,0),(1,0),(1,1))"),
+            // A single vertex is a polygon.
+            ("((1,2))", "((1,2))"),
+            // Coordinates render through `float8out`, specials included, and a
+            // negative zero keeps its sign.
+            ("((1.0000000000000002,2))", "((1.0000000000000002,2))"),
+            (
+                "(NaN,Infinity),(-Infinity,-0)",
+                "((NaN,Infinity),(-Infinity,-0))",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert!(
+                encode_text(&polygon(input), &tz) == expected.as_bytes(),
+                "poly_out({input})"
+            );
+        }
+    }
+
+    /// Geometric coordinates go through `float8out` and therefore honour
+    /// `extra_float_digits`, which `geometry.sql` runs at -3. Both spellings are
+    /// `SELECT polygon '…'::text` on PostgreSQL 18.4 at the two settings.
+    #[test]
+    fn polygon_text_honours_extra_float_digits() {
+        use assert2::assert;
+        let tz = utc();
+        let value = polygon("((1.0000000000000002,0.3333333333333333),(1e100,1e-100))");
+        let style = |extra_float_digits| OutputStyle {
+            extra_float_digits,
+            ..OutputStyle::with_zone(&tz)
+        };
+        assert!(
+            encode_text_in(&value, style(1))
+                == b"((1.0000000000000002,0.3333333333333333),(1e+100,1e-100))"
+        );
+        assert!(encode_text_in(&value, style(-3)) == b"((1,0.333333333333),(1e+100,1e-100))");
+    }
+
+    /// `poly_send` writes `int32 npts` then the points, and **nothing else**:
+    /// `poly_recv` recomputes the bounding box rather than reading a transmitted
+    /// one, so the box is deliberately absent from the wire form. There is no
+    /// closed flag either, which is the whole difference from `path_send`.
+    ///
+    /// The bytes are `COPY (SELECT polygon '((0,0),(2,0),(2,2))') TO STDOUT
+    /// (FORMAT binary)` on PostgreSQL 18.4, whose field length is 0x34 = 52 =
+    /// 4 + 3 × 16.
+    #[test]
+    fn polygon_binary_is_the_point_count_then_the_points() {
+        use assert2::assert;
+        let encoded = encode_binary(&polygon("((0,0),(2,0),(2,2))"));
+        let expected: Vec<u8> = [
+            &3i32.to_be_bytes()[..],
+            &0.0f64.to_be_bytes()[..],
+            &0.0f64.to_be_bytes()[..],
+            &2.0f64.to_be_bytes()[..],
+            &0.0f64.to_be_bytes()[..],
+            &2.0f64.to_be_bytes()[..],
+            &2.0f64.to_be_bytes()[..],
+        ]
+        .concat();
+        assert!(encoded == expected);
+        assert!(encoded.len() == 52);
+        // `path_send` prefixes a closed flag, so the same vertices are one byte
+        // longer as a path — the two wire forms must not be confused.
+        let path = Datum::Path(crate::Path::parse("((0,0),(2,0),(2,2))").expect("path"));
+        assert!(encode_binary(&path).len() == 53);
     }
 
     #[test]
