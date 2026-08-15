@@ -33,6 +33,12 @@ cleanup() {
     kubectl get events -A --sort-by=.lastTimestamp >"$ARTIFACT_DIR/events.txt" 2>&1 || true
     kubectl logs -n crabka-operator deploy/crabka-gres-operator --timestamps \
         >"$ARTIFACT_DIR/operator.log" 2>&1 || true
+    kubectl logs -l 'app.kubernetes.io/name=crabka-gres,app.kubernetes.io/instance=tenant-a' \
+        --all-containers=true --prefix --ignore-errors=true >"$ARTIFACT_DIR/compute.log" 2>&1 || true
+    kubectl logs -l 'app.kubernetes.io/name=crabka-gres,app.kubernetes.io/instance=tenant-a' \
+        --all-containers=true --prefix --previous --ignore-errors=true \
+        >"$ARTIFACT_DIR/compute-previous.log" 2>&1 || true
+    kubectl logs demo-brokers-0 -c broker --timestamps >"$ARTIFACT_DIR/broker.log" 2>&1 || true
     kubectl get gres,grestenant,deploy,pod,svc -A -o yaml \
         >"$ARTIFACT_DIR/final-objects.yaml" 2>&1 || true
     if [ "$status" -ne 0 ] || [ "${CRABKA_GRES_KIND_KEEP_CLUSTER:-0}" = 1 ]; then
