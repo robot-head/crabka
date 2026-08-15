@@ -17,7 +17,7 @@
 //! Request fields: `transactional_id`, `producer_id`, `producer_epoch`, `committed`.
 //! Response fields: `throttle_time_ms`, `error_code`.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::atomic::Ordering};
 
 use bytes::{Bytes, BytesMut};
 use crabka_log::ProducerId;
@@ -587,10 +587,25 @@ pub(crate) async fn dispatch_markers(
     let mut by_leader: HashMap<NodeId, Vec<TopicPartition>> = HashMap::new();
 
     for tp in &entry.partitions {
-        let leader = image
-            .partition(&tp.topic, tp.partition.get())
-            .map_or(node_id, |p| p.leader);
-        by_leader.entry(leader).or_default().push(tp.clone());
+        let leader = if let Some(partition) = image.partition(&tp.topic, tp.partition.get()) {
+            Some(partition.leader)
+        } else if let Some(partition) = partitions.get(&tp.topic, tp.partition) {
+            if partition.current_leader.load(Ordering::Acquire) != node_id.0 {
+                return Err(BrokerError::Txn(format!(
+                    "transaction marker target {}-{} is materialized locally but missing from metadata",
+                    tp.topic,
+                    tp.partition.get()
+                )));
+            }
+            Some(node_id)
+        } else {
+            // The partition was deleted after joining the transaction. There
+            // is no log left to mark, so it must not block completion.
+            None
+        };
+        if let Some(leader) = leader {
+            by_leader.entry(leader).or_default().push(tp.clone());
+        }
     }
 
     for (leader, tps) in by_leader {
@@ -1169,6 +1184,84 @@ mod tests {
 
         assert!(request.markers.len() == 1);
         assert!(request.markers[0].coordinator_epoch == 42);
+    }
+
+    #[tokio::test]
+    async fn marker_dispatch_skips_deleted_partition() {
+        let image = MetadataImage::default();
+        let client = plaintext_client();
+        let partitions = std::sync::Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let mut entry = marker_entry();
+        entry.partitions.insert(tps().remove(0));
+
+        let result = dispatch_markers(
+            MarkerDispatchContext {
+                node_id: NodeId(1),
+                coordinator_epoch: 0,
+                image: &image,
+                inter_broker_client: &client,
+                inter_broker_protocol: ListenerProtocol::Plaintext,
+                inter_broker_listener_name: "PLAINTEXT",
+                inter_broker_server_name: "localhost",
+                group_coordinator: None,
+            },
+            &partitions,
+            &entry,
+            MarkerType::Commit,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn marker_dispatch_marks_materialized_partition_missing_from_image() {
+        use crabka_log::{Log, LogConfig, Offset};
+
+        let image = MetadataImage::default();
+        let client = plaintext_client();
+        let partitions = std::sync::Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let part_dir = crate::log_dir::partition_dir(dir.path(), "t", 0);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let part = crate::broker::spawn_partition(
+            "t".to_string(),
+            PartitionIndex(0),
+            dir.path().to_path_buf(),
+            Log::open(&part_dir, LogConfig::default()).unwrap(),
+            crate::log_dir_status::LogDirRegistry::default(),
+            std::sync::Arc::new(crate::producer_state::ProducerState::new()),
+            false,
+        );
+        part.current_leader.store(2, Ordering::Release);
+        partitions.insert("t".to_string(), PartitionIndex(0), part.clone());
+        let mut entry = marker_entry();
+        entry.partitions.insert(tps().remove(0));
+
+        let context = MarkerDispatchContext {
+            node_id: NodeId(1),
+            coordinator_epoch: 0,
+            image: &image,
+            inter_broker_client: &client,
+            inter_broker_protocol: ListenerProtocol::Plaintext,
+            inter_broker_listener_name: "PLAINTEXT",
+            inter_broker_server_name: "localhost",
+            group_coordinator: None,
+        };
+        assert!(
+            dispatch_markers(context, &partitions, &entry, MarkerType::Commit)
+                .await
+                .is_err()
+        );
+        assert!(part.log_end_offset() == Offset(0));
+
+        part.current_leader.store(1, Ordering::Release);
+        dispatch_markers(context, &partitions, &entry, MarkerType::Commit)
+            .await
+            .unwrap();
+
+        assert!(part.log_end_offset() == Offset(1));
+        assert!(part.lso() == Offset(1));
     }
 
     /// A client with no TLS connector and no SASL creds — fine here, every

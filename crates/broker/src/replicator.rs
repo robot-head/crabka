@@ -545,13 +545,29 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                     "replicator: stopping on fenced epoch from stale target");
                 return LoopAction::StopNotLeader;
             }
-            warn!(
-                topic = %cfg.topic,
-                partition = cfg.partition.get(),
-                error_code = part_resp.error_code,
-                "replicator: fenced/unknown leader epoch; calling OffsetForLeaderEpoch"
-            );
-            let _ = handle_epoch_fence(cfg).await;
+            if part_resp.error_code == codes::FENCED_LEADER_EPOCH {
+                warn!(
+                    topic = %cfg.topic,
+                    partition = cfg.partition.get(),
+                    "replicator: fenced leader epoch; calling OffsetForLeaderEpoch"
+                );
+                if let Err(error) = handle_epoch_fence(cfg).await {
+                    warn!(
+                        topic = %cfg.topic,
+                        partition = cfg.partition.get(),
+                        %error,
+                        "replicator: OffsetForLeaderEpoch recovery failed"
+                    );
+                }
+            } else {
+                // The leader is behind our metadata image. It cannot answer an
+                // epoch lookup yet, so leave the log untouched and retry Fetch.
+                warn!(
+                    topic = %cfg.topic,
+                    partition = cfg.partition.get(),
+                    "replicator: leader does not know current epoch; retrying Fetch"
+                );
+            }
             // Back off before re-fetching so a persistent fence (e.g. our
             // leader_epoch hasn't caught up to the new leader's yet) doesn't
             // hot-spin the CPU between fetch and fence.
@@ -633,9 +649,9 @@ async fn handle_offset_out_of_range(
 /// Aligns the local log with the epoch history of the leader after an epoch
 /// fence.
 ///
-/// On `FENCED_LEADER_EPOCH` or `UNKNOWN_LEADER_EPOCH`, this function calls
-/// `OffsetForLeaderEpoch` against the leader to find the truncation point. It
-/// then truncates the local log to that point.
+/// On `FENCED_LEADER_EPOCH`, this function calls `OffsetForLeaderEpoch`
+/// against the leader to find the truncation point. It then truncates the local
+/// log to that point.
 ///
 /// KIP-101: the follower sends its current `leader_epoch`. The leader replies
 /// with `end_offset`, the first offset of the next epoch, which is the safe
@@ -682,15 +698,21 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         .map_err(|e| format!("handle_epoch_fence: send: {e}"))?;
 
     // Find our (topic, partition) in the response.
-    let Some(end_offset) = resp
+    let Some(epoch_result) = resp
         .topics
         .iter()
         .find(|t| t.topic == cfg.topic)
         .and_then(|t| t.partitions.iter().find(|p| p.partition == cfg.partition))
-        .map(|p| p.end_offset)
     else {
         return Ok(());
     };
+    if epoch_result.error_code != codes::NONE {
+        return Err(format!(
+            "handle_epoch_fence: OffsetForLeaderEpoch error {}",
+            epoch_result.error_code
+        ));
+    }
+    let end_offset = epoch_result.end_offset;
 
     let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) else {
         return Ok(());
@@ -1167,6 +1189,33 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(response_task.await.unwrap() == LoopAction::Continue);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_leader_epoch_retries_without_epoch_lookup() {
+        let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        ensure_local_partition(&cfg).unwrap();
+        cfg.replication.epoch_fence_backoff = secs(37);
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        cfg.leader_port = listener.local_addr().unwrap().port();
+        let response = fetch_response(
+            TOPIC,
+            WIRE_TOPIC_ID,
+            partition_response(PARTITION, codes::UNKNOWN_LEADER_EPOCH),
+        );
+
+        let response_task = tokio::spawn(async move { handle_response(response, &cfg).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(37)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            response_task.is_finished(),
+            "UNKNOWN_LEADER_EPOCH attempted an OffsetForLeaderEpoch connection"
+        );
+        assert!(response_task.await.unwrap() == LoopAction::Continue);
+        assert!(listener.accept().is_err(), "unexpected epoch lookup");
     }
 
     #[test]

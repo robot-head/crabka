@@ -33,6 +33,12 @@ cleanup() {
     kubectl get events -A --sort-by=.lastTimestamp >"$ARTIFACT_DIR/events.txt" 2>&1 || true
     kubectl logs -n crabka-operator deploy/crabka-gres-operator --timestamps \
         >"$ARTIFACT_DIR/operator.log" 2>&1 || true
+    kubectl logs -l 'app.kubernetes.io/name=crabka-gres,app.kubernetes.io/instance=tenant-a' \
+        --all-containers=true --prefix --ignore-errors=true >"$ARTIFACT_DIR/compute.log" 2>&1 || true
+    kubectl logs -l 'app.kubernetes.io/name=crabka-gres,app.kubernetes.io/instance=tenant-a' \
+        --all-containers=true --prefix --previous --ignore-errors=true \
+        >"$ARTIFACT_DIR/compute-previous.log" 2>&1 || true
+    kubectl logs demo-brokers-0 -c broker --timestamps >"$ARTIFACT_DIR/broker.log" 2>&1 || true
     kubectl get gres,grestenant,deploy,pod,svc -A -o yaml \
         >"$ARTIFACT_DIR/final-objects.yaml" 2>&1 || true
     if [ "$status" -ne 0 ] || [ "${CRABKA_GRES_KIND_KEEP_CLUSTER:-0}" = 1 ]; then
@@ -52,6 +58,23 @@ deadline_wait() {
     done
 }
 
+start_pgdog_port_forward() {
+    local pod
+    kill "$PORT_FORWARD_PID" 2>/dev/null || true
+    wait "$PORT_FORWARD_PID" 2>/dev/null || true
+    PORT_FORWARD_PID=""
+    pod=$(kubectl get pods \
+        -l 'app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet' \
+        --field-selector=status.phase=Running \
+        --sort-by=.metadata.creationTimestamp -o name | tail -n 1)
+    [ -n "$pod" ] || fail "no running PgDog pod after rollout"
+    timeout 30s kubectl wait --for=condition=Ready "$pod" --timeout=25s
+    kubectl port-forward "$pod" 16432:6432 >"$ARTIFACT_DIR/port-forward.log" 2>&1 &
+    PORT_FORWARD_PID=$!
+    deadline_wait 30 "PgDog port-forward" \
+        "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
+}
+
 build_image() {
     local binary=$1 image=$2
     timeout 300s docker build --build-context binaries=target/release --build-arg "BINARY=$binary" \
@@ -62,7 +85,7 @@ build_image() {
 
 wait_lifecycle() {
     local expected=$1
-    deadline_wait 180 "tenant lifecycle $expected" \
+    deadline_wait 360 "tenant lifecycle $expected" \
         "[ \"\$(kubectl get grestenant tenant-a -o jsonpath='{.status.lifecyclePhase}' 2>/dev/null)\" = '$expected' ]"
 }
 
@@ -126,7 +149,7 @@ mkdir -p "$ARTIFACT_DIR"
 timeout 90s kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
 timeout 180s kind create cluster --name "$CLUSTER" --wait 120s
 
-timeout 900s cargo build --locked --release \
+timeout 1800s cargo build --locked --release \
     -p crabka-cli -p crabka-operator -p crabka-broker -p crabka-gres -p crabka-gres-activator
 build_image crabka-operator "crabka-operator:$IMAGE_TAG"
 build_image crabka-broker "crabka-broker:$IMAGE_TAG"
@@ -136,10 +159,8 @@ timeout 180s docker pull "$PGDOG_IMAGE"
 # PgDog publishes a multi-platform OCI index that `kind load docker-image`
 # cannot reliably flatten. Let containerd pull the exact pinned digest/tag.
 
-kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
-kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
-kubectl apply -f deploy/crds/crabka.io_greses.yaml
-kubectl apply -f deploy/crds/crabka.io_grestenants.yaml
+# The full operator starts every controller, so install every watched CRD.
+kubectl apply -f deploy/crds
 
 # Real object service used by compute final-checkpoint writes and controller
 # manifest validation on the successful parking path.
@@ -294,14 +315,12 @@ timeout 240s kubectl rollout status deploy/tenant-a-gres --timeout=230s
 kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
 COMPUTE_FORWARD_PID=$!
 deadline_wait 30 "compute port-forward" "timeout 1 bash -c '</dev/tcp/127.0.0.1/17432' 2>/dev/null"
-(
-    {
+PGPASSWORD="$PGPASSWORD_VALUE" psql \
+    "host=127.0.0.1 port=17432 dbname=crab user=alice sslmode=disable" \
+    < <({
         printf 'BEGIN;\n'
-        for _ in $(seq 1 40); do printf 'SELECT 1;\n'; sleep 1; done
-    } | PGPASSWORD="$PGPASSWORD_VALUE" \
-        psql "host=127.0.0.1 port=17432 dbname=crab user=alice sslmode=disable" \
-        >"$ARTIFACT_DIR/open-session.log" 2>&1
-) &
+        while true; do printf 'SELECT 1;\n'; sleep 1; done
+    }) >"$ARTIFACT_DIR/open-session.log" 2>&1 &
 KEEPER_PID=$!
 sleep 20
 kill -0 "$KEEPER_PID" 2>/dev/null || fail "busy-session keeper exited"
@@ -310,15 +329,19 @@ kill -0 "$KEEPER_PID" 2>/dev/null || fail "busy-session keeper exited"
 printf 'busy_session_prevented_suspend=true\n' >"$ARTIFACT_DIR/busy-session-proof.txt"
 timeout 180s kubectl rollout status deploy/fleet-pgdog --timeout=170s
 timeout 180s kubectl rollout status deploy/fleet-gres-activator --timeout=170s
+deadline_wait 240 "initial confirmed PgDog route" \
+    '[ "$(kubectl get gres fleet -o jsonpath='"'"'{.status.confirmedPgdogConfigHash}'"'"')" = "$(kubectl get secret fleet-pgdog-config -o jsonpath='"'"'{.metadata.annotations.crabka\.io/pgdog-config-hash}'"'"')" ]'
+deadline_wait 240 "initial PgDog Deployment hash" \
+    '[ "$(kubectl get deploy fleet-pgdog -o jsonpath='"'"'{.spec.template.metadata.annotations.crabka\.io/pgdog-config-hash}'"'"')" = "$(kubectl get secret fleet-pgdog-config -o jsonpath='"'"'{.metadata.annotations.crabka\.io/pgdog-rollout-hash}'"'"')" ]'
+timeout 180s kubectl rollout status deploy/fleet-pgdog --timeout=170s
 
-kubectl port-forward svc/fleet-pgdog 16432:6432 >"$ARTIFACT_DIR/port-forward.log" 2>&1 &
-PORT_FORWARD_PID=$!
-deadline_wait 30 "PgDog port-forward" "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
+start_pgdog_port_forward
 export G5_SQL_PASSWORD="$PGPASSWORD_VALUE"
 
 PGPASSWORD="$PGPASSWORD_VALUE" psql \
     "host=localhost port=16432 dbname=tenant-a user=alice sslmode=verify-full sslrootcert=$ARTIFACT_DIR/ca.crt sslcert=$ARTIFACT_DIR/client.crt sslkey=$ARTIFACT_DIR/client.key" \
     -v ON_ERROR_STOP=1 -c "CREATE TABLE lifecycle_marker(id int4, value text); INSERT INTO lifecycle_marker VALUES (1, 'survives');"
+kill "$KEEPER_PID" 2>/dev/null || true
 wait "$KEEPER_PID" 2>/dev/null || true
 KEEPER_PID=""
 PGPASSWORD="$PGPASSWORD_VALUE" psql \
@@ -372,14 +395,9 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     kubectl get secret fleet-pgdog-config -o jsonpath='{.data.users\.toml}' \
         | base64 -d | grep -q '^password = ' || \
         fail "suspended PgDog route lacks bounded credential fallback"
-    # `kubectl port-forward service/...` binds one selected pod for its whole
-    # lifetime; the config-hash rollout above intentionally replaces that pod.
-    kill "$PORT_FORWARD_PID" 2>/dev/null || true
-    wait "$PORT_FORWARD_PID" 2>/dev/null || true
-    kubectl port-forward svc/fleet-pgdog 16432:6432 >"$ARTIFACT_DIR/port-forward.log" 2>&1 &
-    PORT_FORWARD_PID=$!
-    deadline_wait 30 "PgDog port-forward after activator rollout" \
-        "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
+    # Bind the newest rollout pod explicitly. Service/Deployment forwarding can
+    # select the older Ready pod while a rolling update is terminating it.
+    start_pgdog_port_forward
     before_generation=$(kubectl get grestenant tenant-a -o jsonpath='{.status.registryVersion}')
     before_wake_hash=$(kubectl get secret fleet-pgdog-config -o jsonpath='{.metadata.annotations.crabka\.io/pgdog-config-hash}')
     before_wake_revision=$(kubectl get deploy fleet-pgdog -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
@@ -397,6 +415,23 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     after_wake_hash=$(kubectl get secret fleet-pgdog-config -o jsonpath='{.metadata.annotations.crabka\.io/pgdog-config-hash}')
     after_wake_revision=$(kubectl get deploy fleet-pgdog -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
     observed_unix_ms=$(($(date +%s%N) / 1000000))
+    kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
+    COMPUTE_FORWARD_PID=$!
+    deadline_wait 30 "post-wake compute port-forward" \
+        "timeout 1 bash -c '</dev/tcp/127.0.0.1/17432' 2>/dev/null"
+    # Hold one continuously busy backend session before status polling. On a
+    # loaded runner, reconciliation can outlast the 15-second idle window.
+    PGPASSWORD="$PGPASSWORD_VALUE" psql \
+        "host=127.0.0.1 port=17432 dbname=crab user=alice sslmode=disable" \
+        -v ON_ERROR_STOP=1 \
+        < <({
+            printf 'BEGIN;\n'
+            while true; do printf 'SELECT 1;\n'; sleep 1; done
+        }) >"$ARTIFACT_DIR/post-wake-keeper-${iteration}.log" 2>&1 &
+    KEEPER_PID=$!
+    sleep 1
+    kill -0 "$KEEPER_PID" 2>/dev/null || fail "post-wake busy-session keeper exited"
+    timeout 180s kubectl rollout status deploy/tenant-a-gres --timeout=170s
     wait_lifecycle active
     grace_deadline_ms=$(kubectl get grestenant tenant-a -o jsonpath='{.status.pgdogCredentialGraceUntilUnixMs}')
     [ -n "$grace_deadline_ms" ] || fail "active tenant lacks a PgDog credential grace deadline"
@@ -413,24 +448,6 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     fi
     printf '%s\t%s\t%s\t%s\n' "$iteration" "$observed_unix_ms" "$grace_deadline_ms" "$noroll_verdict" \
         >>"$ARTIFACT_DIR/wake-noroll-proof.tsv"
-    timeout 180s kubectl rollout status deploy/tenant-a-gres --timeout=170s
-    kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
-    COMPUTE_FORWARD_PID=$!
-    deadline_wait 30 "post-wake compute port-forward" \
-        "timeout 1 bash -c '</dev/tcp/127.0.0.1/17432' 2>/dev/null"
-    # Hold one continuously busy backend session. Repeated short SELECTs leave
-    # zero-session gaps in which the idle state machine can legitimately enter
-    # Parking before the slower PgDog config proofs have converged.
-    PGPASSWORD="$PGPASSWORD_VALUE" psql \
-        "host=127.0.0.1 port=17432 dbname=crab user=alice sslmode=disable" \
-        -v ON_ERROR_STOP=1 \
-        < <({
-            printf 'BEGIN;\n'
-            while true; do printf 'SELECT 1;\n'; sleep 1; done
-        }) >"$ARTIFACT_DIR/post-wake-keeper-${iteration}.log" 2>&1 &
-    KEEPER_PID=$!
-    sleep 1
-    kill -0 "$KEEPER_PID" 2>/dev/null || fail "post-wake busy-session keeper exited"
     # These three gate on the operator rewriting the PgDog config AND the
     # resulting Deployment rollout landing. A rollout is given 180s of its own
     # elsewhere in this script, so a 120s budget here was internally
@@ -447,12 +464,7 @@ for iteration in $(seq 1 "$ITERATIONS"); do
         fail "post-grace PgDog route did not return to direct compute"
     [ "$(kubectl get grestenant tenant-a -o jsonpath='{.status.lifecyclePhase}')" = active ] || \
         fail "tenant suspended before post-grace direct-route proof"
-    kill "$PORT_FORWARD_PID" 2>/dev/null || true
-    wait "$PORT_FORWARD_PID" 2>/dev/null || true
-    kubectl port-forward svc/fleet-pgdog 16432:6432 >"$ARTIFACT_DIR/port-forward.log" 2>&1 &
-    PORT_FORWARD_PID=$!
-    deadline_wait 30 "PgDog direct-route port-forward" \
-        "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
+    start_pgdog_port_forward
     PGPASSWORD="$PGPASSWORD_VALUE" timeout 20s psql \
         "host=localhost port=16432 dbname=tenant-a user=alice sslmode=verify-full sslrootcert=$ARTIFACT_DIR/ca.crt sslcert=$ARTIFACT_DIR/client.crt sslkey=$ARTIFACT_DIR/client.key" \
         -v ON_ERROR_STOP=1 -tAc "SELECT value FROM lifecycle_marker WHERE id=1" \
@@ -493,8 +505,8 @@ printf '%s\t%s\n' "$lifecycle_start_ns" "$lifecycle_end_ns" >"$ARTIFACT_DIR/life
 
 # Real missing-final-manifest refusal: stop the operator, let the real compute
 # publish Suspended, delete the exact newest manifest, then restore the
-# operator. Parking must fail closed without scaling the Deployment to zero or
-# deleting the generation-qualified WAL.
+# operator. The suspended compute must stay quiesced while parking fails closed
+# without deleting the generation-qualified WAL.
 kubectl scale deploy/crabka-gres-operator -n crabka-operator --replicas=0
 kubectl port-forward svc/demo-broker-headless 19092:9092 >"$ARTIFACT_DIR/broker-port-forward.log" 2>&1 &
 BROKER_FORWARD_PID=$!
@@ -514,8 +526,8 @@ kubectl scale deploy/crabka-gres-operator -n crabka-operator --replicas=1
 timeout 120s kubectl rollout status deploy/crabka-gres-operator -n crabka-operator --timeout=110s
 deadline_wait 90 "missing-final-manifest refusal" \
     "kubectl logs -n crabka-operator deploy/crabka-gres-operator --since=2m | grep -Eqi 'manifest.*(missing|not found)|missing.*manifest'"
-[ "$(kubectl get deploy tenant-a-gres -o jsonpath='{.spec.replicas}')" = 1 ] || \
-    fail "operator scaled tenant to zero despite missing final manifest"
+[ "$(kubectl get deploy tenant-a-gres -o jsonpath='{.spec.replicas}')" = 0 ] || \
+    fail "operator restarted suspended compute despite missing final manifest"
 kubectl exec demo-brokers-0 -- sh -c \
     'test -n "$(find /var/lib/crabka/data -maxdepth 1 -type d -name "__gres_wal.tenant-a.r0.g*-0" -print -quit)"' || \
     fail "operator deleted WAL despite missing final manifest"

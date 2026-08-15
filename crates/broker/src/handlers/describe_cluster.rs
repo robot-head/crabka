@@ -303,6 +303,7 @@ mod tests {
         seed_broker(&broker_handle).await;
         let broker = broker_handle.broker_arc_for_test();
         broker.liveness.record_fenced_heartbeat(42).await;
+        assert!(broker.liveness.apply_fencing(42, true, true).await);
         let p = principal("admin");
         let peer = peer();
         let ctx = test_context(&p, &peer);

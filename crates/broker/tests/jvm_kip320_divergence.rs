@@ -1301,6 +1301,12 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
         .partition_record_for_test(TOPIC, 0)
         .expect("partition record present after wait");
     let parked_epoch = LeaderEpoch(partition.leader_epoch.0 + 1);
+
+    // Freeze the JVM replica before parking replication. Otherwise it can
+    // copy part of the deliberately forged suffix while the phantom-leader
+    // metadata is still propagating, making its authoritative prefix longer.
+    set_container_paused(CONTAINER, true);
+
     c1.submit_metadata_record_for_test(MetadataRecord::V1Partition(PartitionRecord {
         topic: TOPIC.to_string(),
         partition: 0,
@@ -1315,22 +1321,8 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
     }))
     .await
     .expect("park reverse-direction replicas behind phantom leader");
-    let parked_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if c1
-            .partition_record_for_test(TOPIC, 0)
-            .is_some_and(|record| {
-                record.leader == crabka_broker::NodeId(99) && record.leader_epoch == parked_epoch
-            })
-        {
-            break;
-        }
-        assert2::assert!(
-            Instant::now() <= parked_deadline,
-            "phantom-leader metadata did not apply before reverse divergence"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    c1.wait_until_local_partition_target(TOPIC, 0, crabka_broker::NodeId(99), parked_epoch)
+        .await;
 
     c1.produce_records_for_test(TOPIC, 0, 5)
         .await
@@ -1361,6 +1353,9 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
     }))
     .await
     .expect("promote JVM broker for reverse-direction recovery");
+
+    set_container_paused(CONTAINER, false);
+
     wait_for_described_leader(&bootstrap_all, TOPIC, 3, Duration::from_secs(45)).await;
 
     // 5. Observe the truncation itself, before adding any new leader records.
