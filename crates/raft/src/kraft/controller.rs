@@ -1484,18 +1484,24 @@ impl Engine {
                     // follower claim leadership of the current epoch — a strict
                     // KRaft follower (the JVM) caches that, then fatal-faults when
                     // the true leader's BeginQuorumEpoch arrives ("inconsistent
-                    // leader at the same epoch"). With no known leader, let the
-                    // request fail so the caller's fetch watchdog can elect one.
-                    let Some(advertised_leader) = self.core.quorum_state().leader_id else {
-                        return;
-                    };
-                    let resp = wire::PeerResponse::Fetch {
-                        leader_id: advertised_leader,
-                        leader_epoch: self.core.quorum_state().leader_epoch,
-                        diverging,
-                        snapshot_id,
-                        hwm: self.log.hwm().0,
-                        records,
+                    // leader at the same epoch"). With no known leader, return
+                    // `NOT_LEADER_OR_FOLLOWER` without closing the transport;
+                    // the caller keeps its fetch watchdog armed and elects.
+                    let leader_epoch = self.core.quorum_state().leader_epoch;
+                    let resp = if let Some(advertised_leader) = self.core.quorum_state().leader_id {
+                        wire::PeerResponse::Fetch {
+                            leader_id: advertised_leader,
+                            leader_epoch,
+                            diverging,
+                            snapshot_id,
+                            hwm: self.log.hwm().0,
+                            records,
+                        }
+                    } else {
+                        wire::PeerResponse::FetchError {
+                            leader_epoch,
+                            error_code: wire::NOT_LEADER_OR_FOLLOWER,
+                        }
                     };
                     let _ = reply.send(resp.encode());
                 }
@@ -4503,6 +4509,34 @@ mod tests {
                 records,
                 ..
             } if records.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_without_leader_returns_error_instead_of_dropping_reply() {
+        let (mut follower, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        let leader_epoch = follower.core.quorum_state().leader_epoch;
+        let (reply, mut response) = oneshot::channel();
+
+        follower.on_inbound(Inbound::Fetch {
+            req: wire::PeerRequest::Fetch {
+                from: NodeId(2),
+                fetch_epoch: leader_epoch,
+                fetch_offset: 0,
+            }
+            .encode(),
+            reply,
+        });
+
+        let body = response
+            .try_recv()
+            .expect("leaderless Fetch returned an error");
+        assert2::assert!(matches!(
+            wire::PeerResponse::decode_fetch(&body),
+            Some(wire::PeerResponse::FetchError {
+                leader_epoch: response_epoch,
+                error_code: wire::NOT_LEADER_OR_FOLLOWER,
+            }) if response_epoch == leader_epoch
         ));
     }
 

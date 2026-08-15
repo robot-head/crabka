@@ -52,6 +52,23 @@ deadline_wait() {
     done
 }
 
+start_pgdog_port_forward() {
+    local pod
+    kill "$PORT_FORWARD_PID" 2>/dev/null || true
+    wait "$PORT_FORWARD_PID" 2>/dev/null || true
+    PORT_FORWARD_PID=""
+    pod=$(kubectl get pods \
+        -l 'app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet' \
+        --field-selector=status.phase=Running \
+        --sort-by=.metadata.creationTimestamp -o name | tail -n 1)
+    [ -n "$pod" ] || fail "no running PgDog pod after rollout"
+    timeout 30s kubectl wait --for=condition=Ready "$pod" --timeout=25s
+    kubectl port-forward "$pod" 16432:6432 >"$ARTIFACT_DIR/port-forward.log" 2>&1 &
+    PORT_FORWARD_PID=$!
+    deadline_wait 30 "PgDog port-forward" \
+        "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
+}
+
 build_image() {
     local binary=$1 image=$2
     timeout 300s docker build --build-context binaries=target/release --build-arg "BINARY=$binary" \
@@ -311,9 +328,7 @@ printf 'busy_session_prevented_suspend=true\n' >"$ARTIFACT_DIR/busy-session-proo
 timeout 180s kubectl rollout status deploy/fleet-pgdog --timeout=170s
 timeout 180s kubectl rollout status deploy/fleet-gres-activator --timeout=170s
 
-kubectl port-forward svc/fleet-pgdog 16432:6432 >"$ARTIFACT_DIR/port-forward.log" 2>&1 &
-PORT_FORWARD_PID=$!
-deadline_wait 30 "PgDog port-forward" "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
+start_pgdog_port_forward
 export G5_SQL_PASSWORD="$PGPASSWORD_VALUE"
 
 PGPASSWORD="$PGPASSWORD_VALUE" psql \
@@ -372,14 +387,9 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     kubectl get secret fleet-pgdog-config -o jsonpath='{.data.users\.toml}' \
         | base64 -d | grep -q '^password = ' || \
         fail "suspended PgDog route lacks bounded credential fallback"
-    # `kubectl port-forward service/...` binds one selected pod for its whole
-    # lifetime; the config-hash rollout above intentionally replaces that pod.
-    kill "$PORT_FORWARD_PID" 2>/dev/null || true
-    wait "$PORT_FORWARD_PID" 2>/dev/null || true
-    kubectl port-forward svc/fleet-pgdog 16432:6432 >"$ARTIFACT_DIR/port-forward.log" 2>&1 &
-    PORT_FORWARD_PID=$!
-    deadline_wait 30 "PgDog port-forward after activator rollout" \
-        "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
+    # Bind the newest rollout pod explicitly. Service/Deployment forwarding can
+    # select the older Ready pod while a rolling update is terminating it.
+    start_pgdog_port_forward
     before_generation=$(kubectl get grestenant tenant-a -o jsonpath='{.status.registryVersion}')
     before_wake_hash=$(kubectl get secret fleet-pgdog-config -o jsonpath='{.metadata.annotations.crabka\.io/pgdog-config-hash}')
     before_wake_revision=$(kubectl get deploy fleet-pgdog -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
@@ -447,12 +457,7 @@ for iteration in $(seq 1 "$ITERATIONS"); do
         fail "post-grace PgDog route did not return to direct compute"
     [ "$(kubectl get grestenant tenant-a -o jsonpath='{.status.lifecyclePhase}')" = active ] || \
         fail "tenant suspended before post-grace direct-route proof"
-    kill "$PORT_FORWARD_PID" 2>/dev/null || true
-    wait "$PORT_FORWARD_PID" 2>/dev/null || true
-    kubectl port-forward svc/fleet-pgdog 16432:6432 >"$ARTIFACT_DIR/port-forward.log" 2>&1 &
-    PORT_FORWARD_PID=$!
-    deadline_wait 30 "PgDog direct-route port-forward" \
-        "timeout 1 bash -c '</dev/tcp/127.0.0.1/16432' 2>/dev/null"
+    start_pgdog_port_forward
     PGPASSWORD="$PGPASSWORD_VALUE" timeout 20s psql \
         "host=localhost port=16432 dbname=tenant-a user=alice sslmode=verify-full sslrootcert=$ARTIFACT_DIR/ca.crt sslcert=$ARTIFACT_DIR/client.crt sslkey=$ARTIFACT_DIR/client.key" \
         -v ON_ERROR_STOP=1 -tAc "SELECT value FROM lifecycle_marker WHERE id=1" \

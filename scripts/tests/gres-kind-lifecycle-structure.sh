@@ -27,6 +27,12 @@ done
 
 test "$(grep -Fc 'kubectl port-forward deploy/tenant-a-gres 17432:5432' "$gate")" -eq 2
 ! grep -Fq 'kubectl port-forward svc/tenant-a-gres 17432:5432' "$gate"
+test "$(grep -Ec '^[[:space:]]*start_pgdog_port_forward$' "$gate")" -eq 3
+grep -Fq -- '--field-selector=status.phase=Running' "$gate"
+grep -Fq -- '--sort-by=.metadata.creationTimestamp' "$gate"
+grep -Fq 'kubectl port-forward "$pod" 16432:6432' "$gate"
+! grep -Fq 'kubectl port-forward svc/fleet-pgdog' "$gate"
+! grep -Fq 'kubectl port-forward deploy/fleet-pgdog' "$gate"
 ! grep -Fq '.items[0].metadata.uid' "$gate"
 
 grep -Fq -- '-p crabka-gres -p crabka-gres-activator' packaging/melange/crabka.yaml
