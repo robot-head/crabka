@@ -1321,22 +1321,8 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
     }))
     .await
     .expect("park reverse-direction replicas behind phantom leader");
-    let parked_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if c1
-            .partition_record_for_test(TOPIC, 0)
-            .is_some_and(|record| {
-                record.leader == crabka_broker::NodeId(99) && record.leader_epoch == parked_epoch
-            })
-        {
-            break;
-        }
-        assert2::assert!(
-            Instant::now() <= parked_deadline,
-            "phantom-leader metadata did not apply before reverse divergence"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    c1.wait_until_local_partition_target(TOPIC, 0, crabka_broker::NodeId(99), parked_epoch)
+        .await;
 
     c1.produce_records_for_test(TOPIC, 0, 5)
         .await

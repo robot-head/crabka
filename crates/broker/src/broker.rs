@@ -3467,6 +3467,41 @@ impl BrokerHandle {
         );
     }
 
+    /// Test-only: await until the local partition runtime installs a specific
+    /// replication leader and epoch. Unlike the Produce-readiness waiter, this
+    /// does not require the local broker to own the leader's ISR state.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn wait_until_local_partition_target(
+        &self,
+        topic: &str,
+        partition: i32,
+        leader: crabka_raft::NodeId,
+        leader_epoch: crabka_metadata::LeaderEpoch,
+    ) {
+        let result = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
+            loop {
+                if self
+                    .broker
+                    .partitions
+                    .get(topic, PartitionIndex(partition))
+                    .is_some_and(|part| {
+                        part.current_leader.load(Ordering::Acquire) == leader.0
+                            && part.current_leader_epoch.load(Ordering::Acquire) == leader_epoch.0
+                    })
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "local partition {topic}-{partition} did not install leader {leader} at epoch {leader_epoch:?} within 30s"
+        );
+    }
+
     /// Test-only: return the current ISR for `(topic, partition)` as seen
     /// by this broker's metadata image. Returns `None` if the partition is
     /// not yet in the image.

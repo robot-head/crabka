@@ -54,6 +54,10 @@ pub(crate) struct PendingRead {
     pub(crate) topic_name: String,
     pub(crate) topic_id: WireUuid,
     pub(crate) partition_index: i32,
+    /// Epoch the follower supplied with the original Fetch request.
+    pub(crate) current_leader_epoch: i32,
+    /// Epoch of the follower's last fetched record.
+    pub(crate) last_fetched_epoch: i32,
     pub(crate) fetch_offset: i64,
     pub(crate) max_bytes: i32,
     /// `true` when `isolation_level == 1` on a consumer fetch, and not on a
@@ -94,6 +98,8 @@ impl PendingRead {
             topic_name: topic_name.to_owned(),
             topic_id,
             partition_index: partition.partition,
+            current_leader_epoch: partition.current_leader_epoch,
+            last_fetched_epoch: partition.last_fetched_epoch,
             fetch_offset: partition.fetch_offset,
             max_bytes: partition.partition_max_bytes,
             read_committed: mode.0,
@@ -1454,16 +1460,14 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
 }
 
 /// Wait with a timeout for the `append_notify` of any readable partition to
-/// fire, then read every partition once more.
+/// fire, then revalidate the request epoch and read every partition once more.
 ///
 /// The function resets each partition's accumulated records before it reads
 /// again, so the new read replaces the old one.
 // cargo-mutants: long-poll serve-loop glue — parks on partition append/HW
-// notifiers, then replays `do_read` per partition. The surviving `Ok(())`
-// mutant only manifests under a live parked-consumer long poll (a notifier
-// fires and the re-read must repopulate `p.out`), which the fetch integration
-// suite drives; there is no in-file signal without a full HW-advanced
-// partition + notifier fixture.
+// notifiers, then replays `do_read` per partition. The live fetch integration
+// suite covers notifier-driven re-reads; the focused unit test below covers
+// epoch revalidation after the wait.
 #[cfg_attr(test, mutants::skip)]
 async fn long_poll_then_reread(
     broker: &Broker,
@@ -1497,6 +1501,7 @@ async fn long_poll_then_reread(
     let max_wait = Duration::from_millis(u64::from(u32::try_from(max_wait_ms).unwrap_or(0)));
     let _ = tokio::time::timeout(max_wait, futures_util::future::select_all(waits)).await;
 
+    let image = broker.controller.current_image();
     for p in pending.iter_mut() {
         let Some(part) = p.partition.clone() else {
             continue;
@@ -1505,6 +1510,23 @@ async fn long_poll_then_reread(
             partition_index: p.partition_index,
             ..Default::default()
         };
+        let request = EffectivePartition {
+            partition: p.partition_index,
+            current_leader_epoch: p.current_leader_epoch,
+            last_fetched_epoch: p.last_fetched_epoch,
+            fetch_offset: p.fetch_offset,
+            partition_max_bytes: p.max_bytes,
+        };
+        if apply_epoch_checks(
+            &image,
+            &p.topic_name,
+            p.partition_index,
+            &request,
+            &part,
+            &mut p.out,
+        ) {
+            continue;
+        }
         // Time the re-read so its duration accumulates into the same
         // per-partition CPU counter as the first pass (wall-clock delta;
         // see the first-pass comment for why this replaces TaskMonitor).
@@ -1789,6 +1811,68 @@ mod tests {
                 Some(RecordsPayload::Raw(ref records)) if !records.is_empty()
             ));
         }
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn long_poll_reread_rechecks_follower_epoch() {
+        const TOPIC: &str = "long-poll-epoch";
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let broker_handle = Broker::start(crate::config::BrokerConfig::for_tests(
+            dir.path().to_path_buf(),
+        ))
+        .await
+        .expect("start broker");
+        let broker = broker_handle.broker_arc_for_test();
+        let part_dir = dir.path().join(format!("{TOPIC}-0"));
+        std::fs::create_dir_all(&part_dir).expect("partition dir");
+        let part = crate::broker::spawn_partition(
+            TOPIC.to_string(),
+            PartitionIndex(0),
+            dir.path().to_path_buf(),
+            Log::open(&part_dir, LogConfig::default()).expect("open partition log"),
+            broker.log_dir_status.clone(),
+            broker.producer_state.clone(),
+            false,
+        );
+        let request = super::EffectivePartition {
+            partition: 0,
+            current_leader_epoch: 0,
+            last_fetched_epoch: -1,
+            fetch_offset: 0,
+            partition_max_bytes: 1024,
+        };
+        let mut pending = [super::PendingRead::planned(
+            TOPIC,
+            super::WireUuid::ZERO,
+            &request,
+            (false, true),
+            Some(std::sync::Arc::clone(&part)),
+            super::PartitionData {
+                partition_index: 0,
+                ..Default::default()
+            },
+        )];
+
+        part.install_leader_change(1, 1).await;
+        part.produce_batch(RecordBatch {
+            partition_leader_epoch: 1,
+            records: vec![Record {
+                value: Some(Bytes::from_static(b"new-epoch")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("append new-epoch record");
+
+        super::long_poll_then_reread(&broker, &mut pending, 0, false)
+            .await
+            .expect("re-read");
+
+        assert!(pending[0].out.error_code == crate::codes::FENCED_LEADER_EPOCH);
+        assert!(pending[0].out.records.is_none());
         broker_handle.shutdown().await;
     }
 

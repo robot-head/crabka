@@ -149,7 +149,7 @@ mkdir -p "$ARTIFACT_DIR"
 timeout 90s kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
 timeout 180s kind create cluster --name "$CLUSTER" --wait 120s
 
-timeout 900s cargo build --locked --release \
+timeout 1800s cargo build --locked --release \
     -p crabka-cli -p crabka-operator -p crabka-broker -p crabka-gres -p crabka-gres-activator
 build_image crabka-operator "crabka-operator:$IMAGE_TAG"
 build_image crabka-broker "crabka-broker:$IMAGE_TAG"
