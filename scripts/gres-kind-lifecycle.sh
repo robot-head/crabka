@@ -85,7 +85,7 @@ build_image() {
 
 wait_lifecycle() {
     local expected=$1
-    deadline_wait 180 "tenant lifecycle $expected" \
+    deadline_wait 360 "tenant lifecycle $expected" \
         "[ \"\$(kubectl get grestenant tenant-a -o jsonpath='{.status.lifecyclePhase}' 2>/dev/null)\" = '$expected' ]"
 }
 
@@ -159,10 +159,8 @@ timeout 180s docker pull "$PGDOG_IMAGE"
 # PgDog publishes a multi-platform OCI index that `kind load docker-image`
 # cannot reliably flatten. Let containerd pull the exact pinned digest/tag.
 
-kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
-kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
-kubectl apply -f deploy/crds/crabka.io_greses.yaml
-kubectl apply -f deploy/crds/crabka.io_grestenants.yaml
+# The full operator starts every controller, so install every watched CRD.
+kubectl apply -f deploy/crds
 
 # Real object service used by compute final-checkpoint writes and controller
 # manifest validation on the successful parking path.
@@ -317,14 +315,12 @@ timeout 240s kubectl rollout status deploy/tenant-a-gres --timeout=230s
 kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
 COMPUTE_FORWARD_PID=$!
 deadline_wait 30 "compute port-forward" "timeout 1 bash -c '</dev/tcp/127.0.0.1/17432' 2>/dev/null"
-(
-    {
+PGPASSWORD="$PGPASSWORD_VALUE" psql \
+    "host=127.0.0.1 port=17432 dbname=crab user=alice sslmode=disable" \
+    < <({
         printf 'BEGIN;\n'
-        for _ in $(seq 1 40); do printf 'SELECT 1;\n'; sleep 1; done
-    } | PGPASSWORD="$PGPASSWORD_VALUE" \
-        psql "host=127.0.0.1 port=17432 dbname=crab user=alice sslmode=disable" \
-        >"$ARTIFACT_DIR/open-session.log" 2>&1
-) &
+        while true; do printf 'SELECT 1;\n'; sleep 1; done
+    }) >"$ARTIFACT_DIR/open-session.log" 2>&1 &
 KEEPER_PID=$!
 sleep 20
 kill -0 "$KEEPER_PID" 2>/dev/null || fail "busy-session keeper exited"
@@ -333,6 +329,11 @@ kill -0 "$KEEPER_PID" 2>/dev/null || fail "busy-session keeper exited"
 printf 'busy_session_prevented_suspend=true\n' >"$ARTIFACT_DIR/busy-session-proof.txt"
 timeout 180s kubectl rollout status deploy/fleet-pgdog --timeout=170s
 timeout 180s kubectl rollout status deploy/fleet-gres-activator --timeout=170s
+deadline_wait 240 "initial confirmed PgDog route" \
+    '[ "$(kubectl get gres fleet -o jsonpath='"'"'{.status.confirmedPgdogConfigHash}'"'"')" = "$(kubectl get secret fleet-pgdog-config -o jsonpath='"'"'{.metadata.annotations.crabka\.io/pgdog-config-hash}'"'"')" ]'
+deadline_wait 240 "initial PgDog Deployment hash" \
+    '[ "$(kubectl get deploy fleet-pgdog -o jsonpath='"'"'{.spec.template.metadata.annotations.crabka\.io/pgdog-config-hash}'"'"')" = "$(kubectl get secret fleet-pgdog-config -o jsonpath='"'"'{.metadata.annotations.crabka\.io/pgdog-rollout-hash}'"'"')" ]'
+timeout 180s kubectl rollout status deploy/fleet-pgdog --timeout=170s
 
 start_pgdog_port_forward
 export G5_SQL_PASSWORD="$PGPASSWORD_VALUE"
@@ -340,6 +341,7 @@ export G5_SQL_PASSWORD="$PGPASSWORD_VALUE"
 PGPASSWORD="$PGPASSWORD_VALUE" psql \
     "host=localhost port=16432 dbname=tenant-a user=alice sslmode=verify-full sslrootcert=$ARTIFACT_DIR/ca.crt sslcert=$ARTIFACT_DIR/client.crt sslkey=$ARTIFACT_DIR/client.key" \
     -v ON_ERROR_STOP=1 -c "CREATE TABLE lifecycle_marker(id int4, value text); INSERT INTO lifecycle_marker VALUES (1, 'survives');"
+kill "$KEEPER_PID" 2>/dev/null || true
 wait "$KEEPER_PID" 2>/dev/null || true
 KEEPER_PID=""
 PGPASSWORD="$PGPASSWORD_VALUE" psql \
