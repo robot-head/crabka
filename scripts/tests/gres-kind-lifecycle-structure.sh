@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 gate=scripts/gres-kind-lifecycle.sh
+controller=crates/operator/src/controller/gres_tenant.rs
 test -x "$gate"
 
 required_patterns=(
@@ -34,6 +35,7 @@ grep -Fq 'kubectl port-forward "$pod" 16432:6432' "$gate"
 ! grep -Fq 'kubectl port-forward svc/fleet-pgdog' "$gate"
 ! grep -Fq 'kubectl port-forward deploy/fleet-pgdog' "$gate"
 ! grep -Fq '.items[0].metadata.uid' "$gate"
+grep -Fq '.owns(deployments, watcher::Config::default())' "$controller"
 
 grep -Fq -- '-p crabka-gres -p crabka-gres-activator' packaging/melange/crabka.yaml
 test -f packaging/apko/crabka-gres.yaml

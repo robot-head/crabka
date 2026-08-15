@@ -1261,11 +1261,11 @@ pub mod wire {
         }
 
         #[test]
-        fn fetch_error_with_known_leader_preserves_redirect() {
+        fn fetch_error_with_zero_leader_preserves_redirect() {
             use crabka_protocol::{Decode, Encode, owned::fetch_response::FetchResponse};
 
             let success = PeerResponse::Fetch {
-                leader_id: NodeId(2),
+                leader_id: NodeId(0),
                 leader_epoch: 5,
                 diverging: None,
                 snapshot_id: None,
@@ -1283,7 +1283,7 @@ pub mod wire {
             assert2::assert!(matches!(
                 PeerResponse::decode_fetch(&encoded),
                 Some(PeerResponse::Fetch {
-                    leader_id: NodeId(2),
+                    leader_id: NodeId(0),
                     leader_epoch: 5,
                     ..
                 })

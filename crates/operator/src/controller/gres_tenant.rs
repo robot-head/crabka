@@ -37,7 +37,6 @@ use kube::{
     api::{Api, DeleteParams, ListParams, Patch, PatchParams},
     runtime::{
         controller::{Action, Controller},
-        reflector::ObjectRef,
         watcher,
     },
 };
@@ -83,15 +82,9 @@ const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
 /// Returns an error when the requested operation cannot be completed.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let tenant_api: Api<GresTenant> = Api::all(ctx.client.clone());
-    let gres_api: Api<Gres> = Api::all(ctx.client.clone());
-    let kafka_api: Api<Kafka> = Api::all(ctx.client.clone());
+    let deployments: Api<Deployment> = Api::all(ctx.client.clone());
     Controller::new(tenant_api, watcher::Config::default())
-        .watches(gres_api, watcher::Config::default(), |_gres| {
-            Vec::<ObjectRef<GresTenant>>::new().into_iter()
-        })
-        .watches(kafka_api, watcher::Config::default(), |_kafka| {
-            Vec::<ObjectRef<GresTenant>>::new().into_iter()
-        })
+        .owns(deployments, watcher::Config::default())
         .run(reconcile, error_policy, Arc::new(ctx))
         .for_each(|res| async move {
             match res {
