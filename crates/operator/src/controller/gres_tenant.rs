@@ -24,7 +24,7 @@ use k8s_openapi::{
     ByteString,
     api::{
         apps::v1::Deployment,
-        core::v1::{Secret, Service},
+        core::v1::{Pod, Secret, Service},
         networking::v1::{
             NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
             NetworkPolicySpec,
@@ -34,10 +34,9 @@ use k8s_openapi::{
 };
 use kube::{
     Resource, ResourceExt as _,
-    api::{Api, DeleteParams, Patch, PatchParams},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams},
     runtime::{
         controller::{Action, Controller},
-        reflector::ObjectRef,
         watcher,
     },
 };
@@ -81,17 +80,14 @@ const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
+// cargo-mutants: forever-running controller wiring is covered structurally by
+// gres-kind-lifecycle-structure.sh and end-to-end by the Kind lifecycle gate.
+#[cfg_attr(test, mutants::skip)]
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let tenant_api: Api<GresTenant> = Api::all(ctx.client.clone());
-    let gres_api: Api<Gres> = Api::all(ctx.client.clone());
-    let kafka_api: Api<Kafka> = Api::all(ctx.client.clone());
+    let deployments: Api<Deployment> = Api::all(ctx.client.clone());
     Controller::new(tenant_api, watcher::Config::default())
-        .watches(gres_api, watcher::Config::default(), |_gres| {
-            Vec::<ObjectRef<GresTenant>>::new().into_iter()
-        })
-        .watches(kafka_api, watcher::Config::default(), |_kafka| {
-            Vec::<ObjectRef<GresTenant>>::new().into_iter()
-        })
+        .owns(deployments, watcher::Config::default())
         .run(reconcile, error_policy, Arc::new(ctx))
         .for_each(|res| async move {
             match res {
@@ -322,6 +318,7 @@ async fn patch_cluster_not_ready(
     .await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn reconcile_inner(
     obj: Arc<GresTenant>,
     ctx: Arc<Context>,
@@ -364,6 +361,32 @@ async fn reconcile_inner(
         None
     };
     let reconcile_result: Result<Action, ReconcileError> = async {
+        let mut compute_config = ComputeDeploymentConfig {
+            ranges: &tenant_ranges,
+            bootstrap: &bootstrap,
+            wal_topic: &wal_topic,
+            config_topic: &cfg_topic,
+            policy: &policy,
+            image: &compute_image,
+            compute_policy,
+            lifecycle_state,
+            kafka_sasl,
+            range_control_enabled,
+            range_tls_hash: range_tls_hash.as_deref(),
+            tracing: tracing.as_ref(),
+        };
+        let precomputed_deployments_ready = if matches!(
+            lifecycle_state,
+            TenantState::ResumeRequested | TenantState::Suspended | TenantState::Parking
+        ) {
+            let ready = reconcile_compute_deployments(&ctx, &ns, &obj, &compute_config).await?;
+            if lifecycle_state != TenantState::ResumeRequested && !ready {
+                return Ok(lifecycle_requeue(&compute_policy));
+            }
+            ready.then_some(true)
+        } else {
+            None
+        };
         let admin_handle = ctx.admin_client_for(&cluster, &bootstrap).await?;
         let mut admin = admin_handle.lock().await;
         let password = provision_tenant_resources(
@@ -429,26 +452,8 @@ async fn reconcile_inner(
             || range_parking_progress == ParkingProgress::DeletionPending
         {
             drop(admin);
-            let _ready = reconcile_compute_deployments(
-                &ctx,
-                &ns,
-                &obj,
-                &ComputeDeploymentConfig {
-                    ranges: &tenant_ranges,
-                    bootstrap: &bootstrap,
-                    wal_topic: &wal_topic,
-                    config_topic: &cfg_topic,
-                    policy: &policy,
-                    image: &compute_image,
-                    compute_policy,
-                    lifecycle_state: record.state,
-                    kafka_sasl,
-                    range_control_enabled,
-                    range_tls_hash: range_tls_hash.as_deref(),
-                    tracing: tracing.as_ref(),
-                },
-            )
-            .await?;
+            compute_config.lifecycle_state = record.state;
+            reconcile_compute_deployments(&ctx, &ns, &obj, &compute_config).await?;
             return Ok(lifecycle_requeue(&compute_policy));
         }
         if matches!(
@@ -501,6 +506,7 @@ async fn reconcile_inner(
             range_control_enabled,
             range_tls_hash: range_tls_hash.as_deref(),
             tracing: tracing.as_ref(),
+            precomputed_deployments_ready,
         })
         .await
     }
@@ -711,31 +717,36 @@ struct ComputeStatusConfig<'a> {
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
     tracing: Option<&'a Tracing>,
+    precomputed_deployments_ready: Option<bool>,
 }
 
 async fn reconcile_compute_and_status(
     config: &ComputeStatusConfig<'_>,
 ) -> Result<Action, ReconcileError> {
-    let deployments_ready = reconcile_compute_deployments(
-        config.ctx,
-        config.namespace,
-        config.obj,
-        &ComputeDeploymentConfig {
-            ranges: config.tenant_ranges,
-            bootstrap: config.bootstrap,
-            wal_topic: config.wal_topic,
-            config_topic: config.config_topic,
-            policy: config.policy,
-            image: config.image,
-            compute_policy: config.compute_policy,
-            lifecycle_state: config.record.state,
-            kafka_sasl: config.kafka_sasl,
-            range_control_enabled: config.range_control_enabled,
-            range_tls_hash: config.range_tls_hash,
-            tracing: config.tracing,
-        },
-    )
-    .await?;
+    let deployments_ready = if let Some(ready) = config.precomputed_deployments_ready {
+        ready
+    } else {
+        reconcile_compute_deployments(
+            config.ctx,
+            config.namespace,
+            config.obj,
+            &ComputeDeploymentConfig {
+                ranges: config.tenant_ranges,
+                bootstrap: config.bootstrap,
+                wal_topic: config.wal_topic,
+                config_topic: config.config_topic,
+                policy: config.policy,
+                image: config.image,
+                compute_policy: config.compute_policy,
+                lifecycle_state: config.record.state,
+                kafka_sasl: config.kafka_sasl,
+                range_control_enabled: config.range_control_enabled,
+                range_tls_hash: config.range_tls_hash,
+                tracing: config.tracing,
+            },
+        )
+        .await?
+    };
     if deployments_ready && let Some(operation) = config.active_split {
         let mutation_client =
             operator_control_mutation_client(config.ctx, config.namespace, config.obj).await?;
@@ -861,6 +872,7 @@ async fn reconcile_compute_deployments(
 ) -> Result<bool, ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
     let tenant_name = obj.name_any();
+    let desired = compute_replicas(config.lifecycle_state);
     let mut all_ready = true;
     for range in config.ranges {
         let deployment = render_deployment(
@@ -877,7 +889,7 @@ async fn reconcile_compute_deployments(
                 config_topic: config.config_topic,
                 policy: config.policy,
                 compute_policy: config.compute_policy,
-                replicas: compute_replicas(config.lifecycle_state),
+                replicas: desired,
                 operator_config: &ctx.config,
                 kafka_sasl: config.kafka_sasl,
                 range_control_enabled: config.range_control_enabled,
@@ -894,21 +906,46 @@ async fn reconcile_compute_deployments(
         let observed = dep_api
             .get(&deployment_name(&tenant_name, range.range_id))
             .await?;
-        all_ready &= deployment_is_ready(&observed);
+        all_ready &= deployment_is_ready(&observed, desired);
+    }
+    if desired == 0 {
+        let selector = selector_labels(obj)
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+        all_ready &= pods
+            .list(&ListParams::default().labels(&selector))
+            .await?
+            .items
+            .iter()
+            .all(|pod| {
+                matches!(
+                    pod.status
+                        .as_ref()
+                        .and_then(|status| status.phase.as_deref()),
+                    Some("Failed" | "Succeeded")
+                )
+            });
     }
     Ok(all_ready)
 }
 
-fn deployment_is_ready(deployment: &Deployment) -> bool {
-    let desired = deployment
+fn deployment_is_ready(deployment: &Deployment, desired: i32) -> bool {
+    let applied = deployment
         .spec
         .as_ref()
         .and_then(|spec| spec.replicas)
         .unwrap_or(1);
+    if applied != desired {
+        return false;
+    }
     let generation = deployment.metadata.generation.unwrap_or_default();
     deployment.status.as_ref().is_some_and(|status| {
         status.observed_generation.unwrap_or_default() >= generation
             && status.available_replicas.unwrap_or_default() >= desired
+            && (desired != 0 || status.replicas.unwrap_or_default() == 0)
     })
 }
 
@@ -954,7 +991,7 @@ async fn park_suspended_tenant_wal(
         *record = control
             .replace_tenant_if_version(record, expected_record_version)
             .await?;
-        record.record_version
+        return Ok(ParkingProgress::DeletionPending);
     } else {
         expected_record_version.ok_or_else(|| {
             ReconcileError::Malformed(format!("parking tenant {tenant} has no registry version"))
@@ -3179,7 +3216,11 @@ mod tests {
             PgScramVerifier::parse(&record.scram_verifier)
                 .is_ok_and(|verifier| verifier.iterations == 12_288)
         );
-        assert!(!record.scram_verifier.contains(&password));
+        assert!(verifier_matches_password(
+            &record.scram_verifier,
+            &password,
+            defaults.scram_iterations
+        ));
         assert!(record.checkpoint_frames == Some(37));
 
         let mut changed_defaults = defaults;
@@ -4559,20 +4600,26 @@ mod tests {
             }))
             .expect("deployment status"),
         );
-        assert!(!deployment_is_ready(&deployment));
+        assert!(!deployment_is_ready(&deployment, 1));
 
         deployment
             .status
             .as_mut()
             .expect("status")
             .observed_generation = Some(4);
-        assert!(deployment_is_ready(&deployment));
+        assert!(deployment_is_ready(&deployment, 1));
         deployment
             .status
             .as_mut()
             .expect("status")
             .available_replicas = Some(0);
-        assert!(!deployment_is_ready(&deployment));
+        assert!(!deployment_is_ready(&deployment, 1));
+
+        deployment.spec.as_mut().expect("spec").replicas = Some(0);
+        deployment.status.as_mut().expect("status").replicas = Some(1);
+        assert!(!deployment_is_ready(&deployment, 0));
+        deployment.status.as_mut().expect("status").replicas = Some(0);
+        assert!(deployment_is_ready(&deployment, 0));
     }
 
     #[test]

@@ -319,6 +319,8 @@ pub mod wire {
     const QUORUM_EPOCH_VERSION: i16 = 1;
     const FETCH_VERSION: i16 = 17;
     const FETCH_SNAPSHOT_VERSION: i16 = 1;
+    /// Kafka `NOT_LEADER_OR_FOLLOWER`.
+    pub(crate) const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 
     fn records_payload_to_bytes(payload: &RecordsPayload) -> Bytes {
         match payload {
@@ -394,6 +396,12 @@ pub mod wire {
             hwm: i64,
             /// Verbatim concatenated `RecordBatch` bytes for `[fetch_offset, log_end)`.
             records: Bytes,
+        },
+        /// Fetch could not identify a leader. The requester keeps its fetch
+        /// watchdog armed instead of treating this as a successful heartbeat.
+        FetchError {
+            leader_epoch: Epoch,
+            error_code: i16,
         },
         FetchSnapshot {
             snapshot_id: (i64, i32),
@@ -781,6 +789,31 @@ pub mod wire {
                     };
                     encode_body(&resp, FETCH_VERSION)
                 }
+                PeerResponse::FetchError {
+                    leader_epoch,
+                    error_code,
+                } => {
+                    let resp = FetchResponse {
+                        responses: vec![fetch_resp::FetchableTopicResponse {
+                            topic: METADATA_TOPIC.to_string(),
+                            topic_id: METADATA_TOPIC_ID,
+                            partitions: vec![fetch_resp::PartitionData {
+                                partition_index: METADATA_PARTITION,
+                                error_code: *error_code,
+                                high_watermark: -1,
+                                current_leader: fetch_resp::LeaderIdAndEpoch {
+                                    leader_id: -1,
+                                    leader_epoch: epoch_to_wire(*leader_epoch),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
+                    encode_body(&resp, FETCH_VERSION)
+                }
                 PeerResponse::FetchSnapshot {
                     snapshot_id,
                     size,
@@ -829,8 +862,14 @@ pub mod wire {
             let mut cur = buf;
             let resp = FetchResponse::decode(&mut cur, FETCH_VERSION).ok()?;
             let p = resp.responses.first()?.partitions.first()?;
-            let leader_id = node_from_wire(p.current_leader.leader_id);
             let leader_epoch = epoch_from_wire(p.current_leader.leader_epoch);
+            if p.error_code != 0 && p.current_leader.leader_id < 0 {
+                return Some(PeerResponse::FetchError {
+                    leader_epoch,
+                    error_code: p.error_code,
+                });
+            }
+            let leader_id = node_from_wire(p.current_leader.leader_id);
             // diverging_epoch defaults to (-1, -1); a real divergence carries a
             // non-negative end_offset.
             let diverging = if p.diverging_epoch.end_offset >= 0 {
@@ -1194,6 +1233,61 @@ pub mod wire {
                 records: Bytes::new(),
             };
             assert2::assert!(PeerResponse::decode_fetch(&diverged.encode()) == Some(diverged));
+        }
+
+        #[test]
+        fn fetch_error_round_trips_with_unknown_leader() {
+            use crabka_protocol::{Decode, owned::fetch_response::FetchResponse};
+
+            let resp = PeerResponse::FetchError {
+                leader_epoch: 5,
+                error_code: NOT_LEADER_OR_FOLLOWER,
+            };
+            let encoded = resp.encode();
+            assert2::assert!(PeerResponse::decode_fetch(&encoded) == Some(resp));
+
+            let mut cur = &encoded[..];
+            let raw = FetchResponse::decode(&mut cur, FETCH_VERSION).expect("decode Fetch error");
+            let partition = &raw.responses[0].partitions[0];
+            check!(
+                (
+                    raw.error_code,
+                    partition.error_code,
+                    partition.high_watermark,
+                    partition.current_leader.leader_id,
+                    partition.current_leader.leader_epoch,
+                ) == (0, NOT_LEADER_OR_FOLLOWER, -1, -1, 5)
+            );
+        }
+
+        #[test]
+        fn fetch_error_with_zero_leader_preserves_redirect() {
+            use crabka_protocol::{Decode, Encode, owned::fetch_response::FetchResponse};
+
+            let success = PeerResponse::Fetch {
+                leader_id: NodeId(0),
+                leader_epoch: 5,
+                diverging: None,
+                snapshot_id: None,
+                hwm: -1,
+                records: Bytes::new(),
+            }
+            .encode();
+            let mut cur = &success[..];
+            let mut raw = FetchResponse::decode(&mut cur, FETCH_VERSION).expect("decode Fetch");
+            raw.responses[0].partitions[0].error_code = NOT_LEADER_OR_FOLLOWER;
+            let mut encoded = BytesMut::new();
+            raw.encode(&mut encoded, FETCH_VERSION)
+                .expect("encode Fetch error");
+
+            assert2::assert!(matches!(
+                PeerResponse::decode_fetch(&encoded),
+                Some(PeerResponse::Fetch {
+                    leader_id: NodeId(0),
+                    leader_epoch: 5,
+                    ..
+                })
+            ));
         }
 
         #[test]

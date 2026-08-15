@@ -23,7 +23,7 @@ mod shared;
 
 use shared::{
     MockRule, MockState,
-    fake_admin::{FakeAdminClient, RecordedCall, TopicState},
+    fake_admin::{FakeAdminClient, InjectableError, RecordedCall, TopicState},
     fixture_ctx, json_response, mock_client,
 };
 
@@ -382,6 +382,22 @@ fn ready_deployment_body(name: &str, replicas: i32) -> serde_json::Value {
             "template": { "metadata": { "labels": { "app": name } }, "spec": { "containers": [{ "name": "gres", "image": "gres" }] } }
         },
         "status": { "observedGeneration": 1, "availableReplicas": replicas }
+    })
+}
+
+fn pod_list_body(pods: &[(&str, &str)]) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "PodList",
+        "metadata": {},
+        "items": pods.iter().map(|(name, phase)| serde_json::json!({
+            "metadata": {
+                "name": name,
+                "namespace": "ns",
+                "deletionTimestamp": "2026-08-15T00:00:00Z"
+            },
+            "status": { "phase": phase }
+        })).collect::<Vec<_>>()
     })
 }
 
@@ -761,6 +777,11 @@ fn tenant_reconcile_rules() -> Vec<MockRule> {
             response: json_response(200, &ready_deployment_body("tenant-a-gres", 1)),
         },
         MockRule {
+            method: Method::GET,
+            path_substr: "/pods".into(),
+            response: json_response(200, &pod_list_body(&[])),
+        },
+        MockRule {
             method: Method::PATCH,
             path_substr: "/networkpolicies/tenant-a-gres-range-policy".into(),
             response: json_response(
@@ -774,6 +795,35 @@ fn tenant_reconcile_rules() -> Vec<MockRule> {
             response: json_response(200, &tenant_body()),
         },
     ]
+}
+
+fn tenant_reconcile_rules_with_compute(replicas: i32, pods: &[(&str, &str)]) -> Vec<MockRule> {
+    let mut rules = tenant_reconcile_rules();
+    for rule in &mut rules {
+        if rule.path_substr == "/deployments/tenant-a-gres" {
+            rule.response = json_response(200, &ready_deployment_body("tenant-a-gres", replicas));
+        } else if rule.path_substr == "/pods" {
+            rule.response = json_response(200, &pod_list_body(pods));
+        }
+    }
+    rules
+}
+
+fn deployment_reconcile_rules(replicas: i32) -> Vec<MockRule> {
+    let mut rules = [Method::PATCH, Method::GET]
+        .into_iter()
+        .map(|method| MockRule {
+            method,
+            path_substr: "/deployments/tenant-a-gres".into(),
+            response: json_response(200, &ready_deployment_body("tenant-a-gres", replicas)),
+        })
+        .collect::<Vec<_>>();
+    rules.push(MockRule {
+        method: Method::GET,
+        path_substr: "/pods".into(),
+        response: json_response(200, &pod_list_body(&[])),
+    });
+    rules
 }
 
 #[tokio::test]
@@ -880,8 +930,20 @@ async fn repeated_reconcile_preserves_scram_and_does_not_replace_the_registry_re
 }
 
 #[tokio::test]
-async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
-    let state = MockState::new(tenant_reconcile_rules());
+async fn suspended_registry_state_quiesces_compute_before_parking_wal() {
+    let mut rules = tenant_reconcile_rules();
+    rules.extend(tenant_reconcile_rules_with_compute(
+        0,
+        &[("tenant-a-gres-terminating", "Running")],
+    ));
+    rules.extend(tenant_reconcile_rules_with_compute(
+        0,
+        &[("tenant-a-gres-failed", "Failed")],
+    ));
+    rules.extend(deployment_reconcile_rules(0));
+    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(deployment_reconcile_rules(0));
+    let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let mut ctx = fixture_ctx(client, "ns");
     Arc::get_mut(&mut ctx.config)
@@ -911,17 +973,20 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
     ctx.insert_gres_control_for_test("ns", "demo", control.clone())
         .await;
 
-    reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
+    reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
+        .await
+        .unwrap();
 
     let calls = admin.lock().await.calls();
-    assert!(admin.lock().await.delete_topic_timeouts() == [crabka_units::millis(5_432)]);
-    assert!(calls.iter().any(|call| matches!(call, RecordedCall::DeleteTopics(names) if names == &vec!["__gres_wal.tenant-a.r0.g0000000004".to_string()])));
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, RecordedCall::DeleteTopics(_)))
+    );
     let upserts = control.upserts.lock().await;
-    assert!(upserts.len() == 2);
-    assert!(upserts[0].state == TenantState::Parking);
-    assert!(upserts[0].wal_generation == 5);
-    assert!(upserts[1].state == TenantState::Suspended);
-    assert!(upserts[1].final_checkpoint == Some(final_checkpoint(4)));
+    assert!(upserts.is_empty());
+    drop(upserts);
+    assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Suspended);
     let observed = state.take_observed();
     let deployment = observed
         .iter()
@@ -934,6 +999,52 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
         .expect("deployment patch captured");
     let body: serde_json::Value = serde_json::from_slice(deployment.body()).unwrap();
     assert!(body["spec"]["replicas"] == 0);
+
+    reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
+        .await
+        .unwrap();
+
+    assert!(
+        admin
+            .lock()
+            .await
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, RecordedCall::DeleteTopics(_)))
+    );
+    assert!(control.upserts.lock().await.is_empty());
+    assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Suspended);
+
+    reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
+        .await
+        .unwrap();
+
+    assert!(
+        admin
+            .lock()
+            .await
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, RecordedCall::DeleteTopics(_)))
+    );
+    assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Parking);
+    let upserts = control.upserts.lock().await;
+    assert!(upserts.len() == 1);
+    assert!(upserts[0].state == TenantState::Parking);
+    assert!(upserts[0].wal_generation == 5);
+    drop(upserts);
+
+    reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
+
+    let calls = admin.lock().await.calls();
+    assert!(admin.lock().await.delete_topic_timeouts() == [crabka_units::millis(5_432)]);
+    assert!(calls.iter().any(|call| matches!(call, RecordedCall::DeleteTopics(names) if names == &vec!["__gres_wal.tenant-a.r0.g0000000004".to_string()])));
+    let upserts = control.upserts.lock().await;
+    assert!(upserts.len() == 2);
+    assert!(upserts[1].state == TenantState::Suspended);
+    assert!(upserts[1].final_checkpoint == Some(final_checkpoint(4)));
+    drop(upserts);
+    let observed = state.take_observed();
     let status = observed
         .iter()
         .find(|request| {
@@ -1045,9 +1156,13 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
 
 #[tokio::test]
 async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
-    let mut rules = tenant_reconcile_rules();
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
     set_lifecycle_requeue(&mut rules, 1_234);
-    rules.extend(tenant_reconcile_rules());
+    rules.extend(deployment_reconcile_rules(0));
+    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(deployment_reconcile_rules(0));
+    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(deployment_reconcile_rules(0));
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
@@ -1098,6 +1213,9 @@ async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
     let body: serde_json::Value = serde_json::from_slice(deployment.body()).unwrap();
     assert!(body["spec"]["replicas"] == 0);
 
+    reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
+        .await
+        .expect("quiesced compute allows WAL deletion");
     admin
         .lock()
         .await
@@ -1111,8 +1229,11 @@ async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
 
 #[tokio::test]
 async fn failed_parking_intent_replacement_keeps_wal_until_retry_then_converges_once() {
-    let mut rules = tenant_reconcile_rules();
-    rules.extend(tenant_reconcile_rules());
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
+    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(deployment_reconcile_rules(0));
+    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(deployment_reconcile_rules(0));
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
@@ -1163,9 +1284,9 @@ async fn failed_parking_intent_replacement_keeps_wal_until_retry_then_converges_
             == 4
     );
 
-    reconcile(Arc::new(tenant()), Arc::new(ctx))
+    reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
         .await
-        .expect("retry persists the intent and deletes WAL");
+        .expect("retry persists the parking intent");
     assert!(
         control
             .current
@@ -1182,6 +1303,18 @@ async fn failed_parking_intent_replacement_keeps_wal_until_retry_then_converges_
             .await
             .calls()
             .iter()
+            .all(|call| !matches!(call, RecordedCall::DeleteTopics(_)))
+    );
+
+    reconcile(Arc::new(tenant()), Arc::new(ctx))
+        .await
+        .expect("quiesced retry deletes WAL");
+    assert!(
+        admin
+            .lock()
+            .await
+            .calls()
+            .iter()
             .filter(|call| matches!(call, RecordedCall::DeleteTopics(_)))
             .count()
             == 1
@@ -1190,8 +1323,11 @@ async fn failed_parking_intent_replacement_keeps_wal_until_retry_then_converges_
 
 #[tokio::test]
 async fn failed_wal_deletion_keeps_parking_intent_and_retry_converges() {
-    let mut rules = tenant_reconcile_rules();
-    rules.extend(tenant_reconcile_rules());
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
+    rules.extend(deployment_reconcile_rules(0));
+    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(deployment_reconcile_rules(0));
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
@@ -1225,8 +1361,12 @@ async fn failed_wal_deletion_keeps_parking_intent_and_retry_converges() {
 
     reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
         .await
-        .expect_err("WAL deletion fails after parking intent persists");
+        .expect("parking intent persists before WAL deletion");
     assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Parking);
+
+    reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
+        .await
+        .expect_err("WAL deletion fails after compute quiesces");
     admin.lock().await.injected.lock().unwrap().delete_topics = None;
 
     reconcile(Arc::new(tenant()), Arc::new(ctx))
@@ -1365,7 +1505,7 @@ async fn suspended_tenant_failure_preserves_lifecycle_without_reactivating_routi
 
 #[tokio::test]
 async fn registry_suspension_is_preserved_when_a_later_dependency_fails() {
-    let mut rules = tenant_reconcile_rules();
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
     rules[2].response = json_response(
         404,
         &serde_json::json!({
@@ -1417,7 +1557,7 @@ async fn registry_suspension_is_preserved_when_a_later_dependency_fails() {
 
 #[tokio::test]
 async fn missing_final_checkpoint_manifest_blocks_suspended_parking() {
-    let state = MockState::new(tenant_reconcile_rules());
+    let state = MockState::new(tenant_reconcile_rules_with_compute(0, &[]));
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
@@ -1454,7 +1594,9 @@ async fn missing_final_checkpoint_manifest_blocks_suspended_parking() {
 
 #[tokio::test]
 async fn parked_tenant_reconciles_again_without_revalidating_stale_checkpoint() {
-    let state = MockState::new(tenant_reconcile_rules());
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
+    rules.extend(deployment_reconcile_rules(0));
+    let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
@@ -1485,7 +1627,16 @@ async fn parked_tenant_reconciles_again_without_revalidating_stale_checkpoint() 
         .await
         .unwrap();
     control.manifests.lock().await.clear();
-    state.rules.lock().unwrap().extend(tenant_reconcile_rules());
+    state
+        .rules
+        .lock()
+        .unwrap()
+        .extend(tenant_reconcile_rules_with_compute(0, &[]));
+    state
+        .rules
+        .lock()
+        .unwrap()
+        .extend(deployment_reconcile_rules(0));
     reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
 
     assert!(control.upserts.lock().await.len() == 2);
@@ -1585,4 +1736,38 @@ async fn resume_requested_ensures_wal_and_scales_compute_to_one() {
     let resumed = control.current.lock().await.clone().unwrap();
     assert!(resumed.state == TenantState::ResumeRequested);
     assert!(resumed.record_version == 9);
+}
+
+#[tokio::test]
+async fn resume_requested_scales_compute_before_wal_provision_failure() {
+    let state = MockState::new(tenant_reconcile_rules());
+    let client = mock_client(&state, "ns");
+    let ctx = fixture_ctx(client, "ns");
+    let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    admin.lock().await.injected.lock().unwrap().create_topics = Some(InjectableError::Transport);
+    let control = Arc::new(FakeGresControl {
+        current: Mutex::new(Some(tenant_record(TenantState::ResumeRequested, 5))),
+        ..Default::default()
+    });
+    ctx.insert_admin_client_for_test("demo", admin).await;
+    ctx.insert_gres_control_for_test("ns", "demo", control)
+        .await;
+
+    reconcile(Arc::new(tenant()), Arc::new(ctx))
+        .await
+        .expect_err("WAL provisioning fails after the wake is scaled");
+
+    let observed = state.take_observed();
+    let deployment = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains("/deployments/tenant-a-gres")
+        })
+        .expect("wake deployment patch captured before WAL provisioning");
+    let body: serde_json::Value = serde_json::from_slice(deployment.body()).unwrap();
+    assert!(body["spec"]["replicas"] == 1);
 }

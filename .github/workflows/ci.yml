@@ -1652,12 +1652,12 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.broker_integration == 'true' }}
     runs-on: ubuntu-latest
-    # 30-minute budget: this runs the whole non-ignored broker suite (plus
+    # 45-minute budget: this runs the whole non-ignored broker suite (plus
     # client-admin) twice under llvm-cov instrumentation (~2-3x slowdown), and
     # the suite has grown substantially (share groups, client metrics, etc.).
-    # The work progresses steadily; it just no longer fits the old 15-minute
-    # wall. (A genuinely hung test still surfaces well inside half an hour.)
-    timeout-minutes: 30
+    # Leave time for coverage upload and the Rust cache save after the tests.
+    # Per-test stalls remain bounded by the nextest CI profile.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       # `llvm-cov clean` + two instrumented `--no-report` runs generate a large
