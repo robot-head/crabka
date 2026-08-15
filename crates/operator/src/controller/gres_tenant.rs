@@ -80,6 +80,9 @@ const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
+// cargo-mutants: forever-running controller wiring is covered structurally by
+// gres-kind-lifecycle-structure.sh and end-to-end by the Kind lifecycle gate.
+#[cfg_attr(test, mutants::skip)]
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let tenant_api: Api<GresTenant> = Api::all(ctx.client.clone());
     let deployments: Api<Deployment> = Api::all(ctx.client.clone());
