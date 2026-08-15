@@ -3441,8 +3441,8 @@ impl BrokerHandle {
         }
     }
 
-    /// Test-only: await until the local partition runtime, rather than only
-    /// this broker's metadata image, has installed `leader`.
+    /// Test-only: await until the local partition runtime has installed the
+    /// metadata leader, epoch, and ISR used by the Produce readiness gate.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_until_local_partition_leader(
@@ -3453,13 +3453,20 @@ impl BrokerHandle {
     ) {
         let result = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if self
-                    .broker
-                    .partitions
-                    .get(topic, PartitionIndex(partition))
-                    .is_some_and(|part| part.current_leader.load(Ordering::Acquire) == leader.0)
+                let image = self.broker.controller.current_image();
+                if let (Some(record), Some(part)) = (
+                    image.partition(topic, partition),
+                    self.broker.partitions.get(topic, PartitionIndex(partition)),
+                ) && record.leader == leader
+                    && part.current_leader.load(Ordering::Acquire) == leader.0
                 {
-                    return;
+                    let state = part.replica_state.lock().await;
+                    if state.current_leader_epoch.0 == record.leader_epoch.0
+                        && state.isr.len() == record.isr.len()
+                        && record.isr.iter().all(|node| state.isr.contains(node))
+                    {
+                        return;
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -3467,7 +3474,7 @@ impl BrokerHandle {
         .await;
         assert!(
             result.is_ok(),
-            "local partition leader for {topic}-{partition} did not become {leader} within 30s"
+            "local partition {topic}-{partition} did not become produce-ready with leader {leader} within 30s"
         );
     }
 
