@@ -587,10 +587,15 @@ pub(crate) async fn dispatch_markers(
     let mut by_leader: HashMap<NodeId, Vec<TopicPartition>> = HashMap::new();
 
     for tp in &entry.partitions {
-        let leader = image
-            .partition(&tp.topic, tp.partition.get())
-            .map_or(node_id, |p| p.leader);
-        by_leader.entry(leader).or_default().push(tp.clone());
+        let Some(partition) = image.partition(&tp.topic, tp.partition.get()) else {
+            // The partition was deleted after it joined the transaction. There
+            // is no log left to mark, so it must not block transaction completion.
+            continue;
+        };
+        by_leader
+            .entry(partition.leader)
+            .or_default()
+            .push(tp.clone());
     }
 
     for (leader, tps) in by_leader {
@@ -1169,6 +1174,34 @@ mod tests {
 
         assert!(request.markers.len() == 1);
         assert!(request.markers[0].coordinator_epoch == 42);
+    }
+
+    #[tokio::test]
+    async fn marker_dispatch_skips_deleted_partition() {
+        let image = MetadataImage::default();
+        let client = plaintext_client();
+        let partitions = std::sync::Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let mut entry = marker_entry();
+        entry.partitions.insert(tps().remove(0));
+
+        let result = dispatch_markers(
+            MarkerDispatchContext {
+                node_id: NodeId(1),
+                coordinator_epoch: 0,
+                image: &image,
+                inter_broker_client: &client,
+                inter_broker_protocol: ListenerProtocol::Plaintext,
+                inter_broker_listener_name: "PLAINTEXT",
+                inter_broker_server_name: "localhost",
+                group_coordinator: None,
+            },
+            &partitions,
+            &entry,
+            MarkerType::Commit,
+        )
+        .await;
+
+        assert!(result.is_ok());
     }
 
     /// A client with no TLS connector and no SASL creds — fine here, every
