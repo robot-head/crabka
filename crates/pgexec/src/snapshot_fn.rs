@@ -315,26 +315,30 @@ fn assigned_xact_id(txn: &TxnRuntime) -> Option<u64> {
 
 /// `pg_xact_status` over the clog and the running set.
 fn xact_status(ctx: &EvalCtx, txn: &TxnRuntime, xid: u64) -> Result<Datum, ExecError> {
-    // The live registry rather than the statement's snapshot:
-    // `TransactionIdInRecentPast` reads `ReadNextFullTransactionId()`, so an id
-    // handed out since the statement began is in the past, not the future.
-    let live = txn.procarray.snapshot();
     if xid == crabka_pgmvcc::xid::INVALID_XID {
         // `TransactionIdInRecentPast` refuses an invalid id before it looks at
         // anything else, and the caller turns that refusal into NULL.
         return Ok(Datum::Null);
     }
+    if xid < crabka_pgmvcc::xid::FIRST_NORMAL_XID {
+        // `TransactionIdInRecentPast` accepts a non-normal id straight away —
+        // "for non-normal transaction IDs, we can ignore the epoch" — so this
+        // precedes the future test rather than following it.
+        // `TransactionLogFetch` then answers without reading the clog, and
+        // both reserved ids that name a transaction are committed by
+        // definition: `BootstrapTransactionId` wrote the initial catalog and
+        // `FrozenTransactionId` is every frozen row's always-visible creator.
+        return Ok(status_text("committed"));
+    }
+    // The live registry rather than the statement's snapshot:
+    // `TransactionIdInRecentPast` reads `ReadNextFullTransactionId()`, so an id
+    // handed out since the statement began is in the past, not the future.
+    let live = txn.procarray.snapshot();
     if xid >= live.xmax {
         return Err(ExecError::FunctionError {
             sqlstate: "22023",
             message: format!("transaction ID {xid} is in the future"),
         });
-    }
-    if xid < crabka_pgmvcc::xid::FIRST_NORMAL_XID {
-        // The frozen id is every relation's always-visible creator, which is
-        // committed by definition. `TransactionIdDidCommit` says the same of
-        // every id it considers non-normal.
-        return Ok(status_text("committed"));
     }
     // Running is checked before the clog, as it is for a row: a transaction
     // that has written its commit record and not yet left the running set is

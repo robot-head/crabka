@@ -457,14 +457,38 @@ async fn a_running_id_is_in_progress_and_a_future_one_is_refused() {
             )
     );
     run(&client, "COMMIT").await;
-    // The frozen id is the always-visible creator, so it is committed; the
-    // invalid id names no transaction at all.
-    assert!(text(&client, "SELECT pg_xact_status('1'::xid8)").await == "committed");
-    assert!(
-        maybe_text(&client, "SELECT pg_xact_status('0'::xid8)")
-            .await
-            .is_none()
-    );
+}
+
+/// `PostgreSQL` reserves three transaction ids, and `pg_xact_status` answers
+/// for every one of them without reading the clog.
+///
+/// Id 2 is the one this can get wrong. The engine reserves only 0 and 1, so 2
+/// is an ordinary id it hands to the first real transaction — old enough by
+/// now that its clog entry has been truncated. Left to the clog path it reads
+/// as "no longer known" and comes back NULL, where `TransactionLogFetch`
+/// answers `FrozenTransactionId` "committed" before it looks anything up.
+#[tokio::test]
+async fn the_reserved_transaction_ids_answer_as_postgresql_does() {
+    let client = connect(spawn().await).await;
+    // `InvalidTransactionId` names no transaction, so it is NULL.
+    // `BootstrapTransactionId` wrote the initial catalog and
+    // `FrozenTransactionId` is every frozen row's creator: both committed.
+    for (xid, expected) in [
+        (0_u64, None),
+        (1, Some("committed")),
+        (2, Some("committed")),
+    ] {
+        let modern = maybe_text(&client, &format!("SELECT pg_xact_status('{xid}'::xid8)")).await;
+        let legacy = maybe_text(&client, &format!("SELECT txid_status({xid})")).await;
+        assert!(
+            modern.as_deref() == expected,
+            "pg_xact_status({xid}) was {modern:?}, expected {expected:?}"
+        );
+        assert!(
+            legacy.as_deref() == expected,
+            "txid_status({xid}) was {legacy:?}, expected {expected:?}"
+        );
+    }
 }
 
 /// The exported snapshot is the engine's own, so the two relations
