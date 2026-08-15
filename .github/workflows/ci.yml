@@ -1498,7 +1498,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
