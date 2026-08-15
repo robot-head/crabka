@@ -24,7 +24,7 @@ use k8s_openapi::{
     ByteString,
     api::{
         apps::v1::Deployment,
-        core::v1::{Secret, Service},
+        core::v1::{Pod, Secret, Service},
         networking::v1::{
             NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
             NetworkPolicySpec,
@@ -34,7 +34,7 @@ use k8s_openapi::{
 };
 use kube::{
     Resource, ResourceExt as _,
-    api::{Api, DeleteParams, Patch, PatchParams},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams},
     runtime::{
         controller::{Action, Controller},
         reflector::ObjectRef,
@@ -364,6 +364,25 @@ async fn reconcile_inner(
         None
     };
     let reconcile_result: Result<Action, ReconcileError> = async {
+        let mut compute_config = ComputeDeploymentConfig {
+            ranges: &tenant_ranges,
+            bootstrap: &bootstrap,
+            wal_topic: &wal_topic,
+            config_topic: &cfg_topic,
+            policy: &policy,
+            image: &compute_image,
+            compute_policy,
+            lifecycle_state,
+            kafka_sasl,
+            range_control_enabled,
+            range_tls_hash: range_tls_hash.as_deref(),
+            tracing: tracing.as_ref(),
+        };
+        if lifecycle_state == TenantState::Parking
+            && !reconcile_compute_deployments(&ctx, &ns, &obj, &compute_config).await?
+        {
+            return Ok(lifecycle_requeue(&compute_policy));
+        }
         let admin_handle = ctx.admin_client_for(&cluster, &bootstrap).await?;
         let mut admin = admin_handle.lock().await;
         let password = provision_tenant_resources(
@@ -429,26 +448,8 @@ async fn reconcile_inner(
             || range_parking_progress == ParkingProgress::DeletionPending
         {
             drop(admin);
-            let _ready = reconcile_compute_deployments(
-                &ctx,
-                &ns,
-                &obj,
-                &ComputeDeploymentConfig {
-                    ranges: &tenant_ranges,
-                    bootstrap: &bootstrap,
-                    wal_topic: &wal_topic,
-                    config_topic: &cfg_topic,
-                    policy: &policy,
-                    image: &compute_image,
-                    compute_policy,
-                    lifecycle_state: record.state,
-                    kafka_sasl,
-                    range_control_enabled,
-                    range_tls_hash: range_tls_hash.as_deref(),
-                    tracing: tracing.as_ref(),
-                },
-            )
-            .await?;
+            compute_config.lifecycle_state = record.state;
+            reconcile_compute_deployments(&ctx, &ns, &obj, &compute_config).await?;
             return Ok(lifecycle_requeue(&compute_policy));
         }
         if matches!(
@@ -861,6 +862,7 @@ async fn reconcile_compute_deployments(
 ) -> Result<bool, ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
     let tenant_name = obj.name_any();
+    let desired = compute_replicas(config.lifecycle_state);
     let mut all_ready = true;
     for range in config.ranges {
         let deployment = render_deployment(
@@ -877,7 +879,7 @@ async fn reconcile_compute_deployments(
                 config_topic: config.config_topic,
                 policy: config.policy,
                 compute_policy: config.compute_policy,
-                replicas: compute_replicas(config.lifecycle_state),
+                replicas: desired,
                 operator_config: &ctx.config,
                 kafka_sasl: config.kafka_sasl,
                 range_control_enabled: config.range_control_enabled,
@@ -894,21 +896,38 @@ async fn reconcile_compute_deployments(
         let observed = dep_api
             .get(&deployment_name(&tenant_name, range.range_id))
             .await?;
-        all_ready &= deployment_is_ready(&observed);
+        all_ready &= deployment_is_ready(&observed, desired);
+    }
+    if desired == 0 {
+        let selector = selector_labels(obj)
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+        all_ready &= pods
+            .list(&ListParams::default().labels(&selector))
+            .await?
+            .items
+            .is_empty();
     }
     Ok(all_ready)
 }
 
-fn deployment_is_ready(deployment: &Deployment) -> bool {
-    let desired = deployment
+fn deployment_is_ready(deployment: &Deployment, desired: i32) -> bool {
+    let applied = deployment
         .spec
         .as_ref()
         .and_then(|spec| spec.replicas)
         .unwrap_or(1);
+    if applied != desired {
+        return false;
+    }
     let generation = deployment.metadata.generation.unwrap_or_default();
     deployment.status.as_ref().is_some_and(|status| {
         status.observed_generation.unwrap_or_default() >= generation
             && status.available_replicas.unwrap_or_default() >= desired
+            && (desired != 0 || status.replicas.unwrap_or_default() == 0)
     })
 }
 
@@ -954,7 +973,7 @@ async fn park_suspended_tenant_wal(
         *record = control
             .replace_tenant_if_version(record, expected_record_version)
             .await?;
-        record.record_version
+        return Ok(ParkingProgress::DeletionPending);
     } else {
         expected_record_version.ok_or_else(|| {
             ReconcileError::Malformed(format!("parking tenant {tenant} has no registry version"))
@@ -4559,20 +4578,30 @@ mod tests {
             }))
             .expect("deployment status"),
         );
-        assert!(!deployment_is_ready(&deployment));
+        assert!(!deployment_is_ready(&deployment, 1));
 
         deployment
             .status
             .as_mut()
             .expect("status")
             .observed_generation = Some(4);
-        assert!(deployment_is_ready(&deployment));
+        assert!(deployment_is_ready(&deployment, 1));
         deployment
             .status
             .as_mut()
             .expect("status")
             .available_replicas = Some(0);
-        assert!(!deployment_is_ready(&deployment));
+        assert!(!deployment_is_ready(&deployment, 1));
+
+        deployment.spec.as_mut().expect("spec").replicas = Some(0);
+        deployment
+            .status
+            .as_mut()
+            .expect("status")
+            .replicas = Some(1);
+        assert!(!deployment_is_ready(&deployment, 0));
+        deployment.status.as_mut().expect("status").replicas = Some(0);
+        assert!(deployment_is_ready(&deployment, 0));
     }
 
     #[test]
