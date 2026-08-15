@@ -2988,17 +2988,16 @@ mod two_broker_sasl {
 
     use super::*;
 
-    /// Reserve `n` ephemeral loopback ports with the bind-and-drop method.
-    async fn reserve_ports(n: usize) -> Vec<SocketAddr> {
-        let mut out = Vec::with_capacity(n);
+    /// Reserve `n` ephemeral loopback ports and keep their listeners open.
+    async fn reserve_listeners(n: usize) -> (Vec<SocketAddr>, Vec<tokio::net::TcpListener>) {
+        let mut addrs = Vec::with_capacity(n);
         let mut listeners = Vec::with_capacity(n);
         for _ in 0..n {
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            out.push(l.local_addr().unwrap());
+            addrs.push(l.local_addr().unwrap());
             listeners.push(l);
         }
-        drop(listeners);
-        out
+        (addrs, listeners)
     }
 
     /// Build a SASL-enabled broker config with two listeners.
@@ -3074,9 +3073,9 @@ mod two_broker_sasl {
             .with_test_writer()
             .try_init();
 
-        let plaintext_addrs = reserve_ports(2).await;
-        let sasl_addrs = reserve_ports(2).await;
-        let controller_addrs = reserve_ports(2).await;
+        let (plaintext_addrs, plaintext_listeners) = reserve_listeners(2).await;
+        let (sasl_addrs, sasl_listeners) = reserve_listeners(2).await;
+        let (controller_addrs, controller_listeners) = reserve_listeners(2).await;
         let voters: Vec<(u64, SocketAddr)> = (0..2_u64)
             .map(|i| (i + 1, controller_addrs[usize::try_from(i).unwrap()]))
             .collect();
@@ -3107,10 +3106,22 @@ mod two_broker_sasl {
         // them concurrently: `Broker::start` blocks until a leader is committed,
         // which needs a voter majority up, so a sequential `start().await` on
         // broker0 alone would deadlock.
+        let mut listeners = plaintext_listeners
+            .into_iter()
+            .zip(sasl_listeners)
+            .zip(controller_listeners);
+        let ((plaintext0, sasl0), controller0) = listeners.next().unwrap();
+        let ((plaintext1, sasl1), controller1) = listeners.next().unwrap();
         let cfg0_for_spawn = cfg0.clone();
         let cfg1_for_spawn = cfg1.clone();
-        let join0 = tokio::spawn(async move { Broker::start(cfg0_for_spawn).await });
-        let join1 = tokio::spawn(async move { Broker::start(cfg1_for_spawn).await });
+        let join0 = tokio::spawn(async move {
+            Broker::start_with_listeners(cfg0_for_spawn, Some(controller0), [plaintext0, sasl0])
+                .await
+        });
+        let join1 = tokio::spawn(async move {
+            Broker::start_with_listeners(cfg1_for_spawn, Some(controller1), [plaintext1, sasl1])
+                .await
+        });
         let broker0 = join0.await.expect("join0 spawn").expect("broker0 start");
         let broker1 = join1.await.expect("join1 spawn").expect("broker1 start");
         vec![(broker0, cfg0, dir0), (broker1, cfg1, dir1)]
