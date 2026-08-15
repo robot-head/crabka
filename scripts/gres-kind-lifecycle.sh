@@ -413,6 +413,23 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     after_wake_hash=$(kubectl get secret fleet-pgdog-config -o jsonpath='{.metadata.annotations.crabka\.io/pgdog-config-hash}')
     after_wake_revision=$(kubectl get deploy fleet-pgdog -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
     observed_unix_ms=$(($(date +%s%N) / 1000000))
+    kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
+    COMPUTE_FORWARD_PID=$!
+    deadline_wait 30 "post-wake compute port-forward" \
+        "timeout 1 bash -c '</dev/tcp/127.0.0.1/17432' 2>/dev/null"
+    # Hold one continuously busy backend session before status polling. On a
+    # loaded runner, reconciliation can outlast the 15-second idle window.
+    PGPASSWORD="$PGPASSWORD_VALUE" psql \
+        "host=127.0.0.1 port=17432 dbname=crab user=alice sslmode=disable" \
+        -v ON_ERROR_STOP=1 \
+        < <({
+            printf 'BEGIN;\n'
+            while true; do printf 'SELECT 1;\n'; sleep 1; done
+        }) >"$ARTIFACT_DIR/post-wake-keeper-${iteration}.log" 2>&1 &
+    KEEPER_PID=$!
+    sleep 1
+    kill -0 "$KEEPER_PID" 2>/dev/null || fail "post-wake busy-session keeper exited"
+    timeout 180s kubectl rollout status deploy/tenant-a-gres --timeout=170s
     wait_lifecycle active
     grace_deadline_ms=$(kubectl get grestenant tenant-a -o jsonpath='{.status.pgdogCredentialGraceUntilUnixMs}')
     [ -n "$grace_deadline_ms" ] || fail "active tenant lacks a PgDog credential grace deadline"
@@ -429,24 +446,6 @@ for iteration in $(seq 1 "$ITERATIONS"); do
     fi
     printf '%s\t%s\t%s\t%s\n' "$iteration" "$observed_unix_ms" "$grace_deadline_ms" "$noroll_verdict" \
         >>"$ARTIFACT_DIR/wake-noroll-proof.tsv"
-    timeout 180s kubectl rollout status deploy/tenant-a-gres --timeout=170s
-    kubectl port-forward deploy/tenant-a-gres 17432:5432 >"$ARTIFACT_DIR/compute-port-forward.log" 2>&1 &
-    COMPUTE_FORWARD_PID=$!
-    deadline_wait 30 "post-wake compute port-forward" \
-        "timeout 1 bash -c '</dev/tcp/127.0.0.1/17432' 2>/dev/null"
-    # Hold one continuously busy backend session. Repeated short SELECTs leave
-    # zero-session gaps in which the idle state machine can legitimately enter
-    # Parking before the slower PgDog config proofs have converged.
-    PGPASSWORD="$PGPASSWORD_VALUE" psql \
-        "host=127.0.0.1 port=17432 dbname=crab user=alice sslmode=disable" \
-        -v ON_ERROR_STOP=1 \
-        < <({
-            printf 'BEGIN;\n'
-            while true; do printf 'SELECT 1;\n'; sleep 1; done
-        }) >"$ARTIFACT_DIR/post-wake-keeper-${iteration}.log" 2>&1 &
-    KEEPER_PID=$!
-    sleep 1
-    kill -0 "$KEEPER_PID" 2>/dev/null || fail "post-wake busy-session keeper exited"
     # These three gate on the operator rewriting the PgDog config AND the
     # resulting Deployment rollout landing. A rollout is given 180s of its own
     # elsewhere in this script, so a 120s budget here was internally

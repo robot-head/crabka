@@ -35,6 +35,8 @@ grep -Fq 'kubectl port-forward "$pod" 16432:6432' "$gate"
 ! grep -Fq 'kubectl port-forward svc/fleet-pgdog' "$gate"
 ! grep -Fq 'kubectl port-forward deploy/fleet-pgdog' "$gate"
 ! grep -Fq '.items[0].metadata.uid' "$gate"
+test "$(grep -nF 'post-wake busy-session keeper exited' "$gate" | cut -d: -f1)" \
+    -lt "$(grep -nF 'wait_lifecycle active' "$gate" | cut -d: -f1)"
 grep -Fq '.owns(deployments, watcher::Config::default())' "$controller"
 
 grep -Fq -- '-p crabka-gres -p crabka-gres-activator' packaging/melange/crabka.yaml

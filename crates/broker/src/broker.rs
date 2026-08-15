@@ -3432,6 +3432,9 @@ impl BrokerHandle {
 
     /// Test-only: await until the local partition runtime has installed the
     /// metadata leader, epoch, and ISR used by the Produce readiness gate.
+    // cargo-mutants: removing this setup synchronizer only turns its bounded
+    // failure into a downstream integration-test timeout.
+    #[cfg_attr(test, mutants::skip)]
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_until_local_partition_leader(
@@ -3470,6 +3473,9 @@ impl BrokerHandle {
     /// Test-only: await until the local partition runtime installs a specific
     /// replication leader and epoch. Unlike the Produce-readiness waiter, this
     /// does not require the local broker to own the leader's ISR state.
+    // cargo-mutants: test-only convergence waiter exercised by the ignored JVM
+    // KIP-320 acceptance gate; mutating it only changes test orchestration.
+    #[cfg_attr(test, mutants::skip)]
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_until_local_partition_target(
