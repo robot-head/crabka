@@ -909,7 +909,13 @@ async fn reconcile_compute_deployments(
             .list(&ListParams::default().labels(&selector))
             .await?
             .items
-            .is_empty();
+            .iter()
+            .all(|pod| {
+                matches!(
+                    pod.status.as_ref().and_then(|status| status.phase.as_deref()),
+                    Some("Failed" | "Succeeded")
+                )
+            });
     }
     Ok(all_ready)
 }

@@ -385,17 +385,18 @@ fn ready_deployment_body(name: &str, replicas: i32) -> serde_json::Value {
     })
 }
 
-fn pod_list_body(names: &[&str]) -> serde_json::Value {
+fn pod_list_body(pods: &[(&str, &str)]) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1",
         "kind": "PodList",
         "metadata": {},
-        "items": names.iter().map(|name| serde_json::json!({
+        "items": pods.iter().map(|(name, phase)| serde_json::json!({
             "metadata": {
                 "name": name,
                 "namespace": "ns",
                 "deletionTimestamp": "2026-08-15T00:00:00Z"
-            }
+            },
+            "status": { "phase": phase }
         })).collect::<Vec<_>>()
     })
 }
@@ -798,7 +799,7 @@ fn tenant_reconcile_rules() -> Vec<MockRule> {
 
 fn tenant_reconcile_rules_with_compute(
     replicas: i32,
-    pod_names: &[&str],
+    pods: &[(&str, &str)],
 ) -> Vec<MockRule> {
     let mut rules = tenant_reconcile_rules();
     for rule in &mut rules {
@@ -808,7 +809,7 @@ fn tenant_reconcile_rules_with_compute(
                 &ready_deployment_body("tenant-a-gres", replicas),
             );
         } else if rule.path_substr == "/pods" {
-            rule.response = json_response(200, &pod_list_body(pod_names));
+            rule.response = json_response(200, &pod_list_body(pods));
         }
     }
     rules
@@ -940,8 +941,14 @@ async fn repeated_reconcile_preserves_scram_and_does_not_replace_the_registry_re
 #[tokio::test]
 async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
     let mut rules = tenant_reconcile_rules();
-    rules.extend(tenant_reconcile_rules_with_compute(0, &["tenant-a-gres-terminating"]));
-    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(tenant_reconcile_rules_with_compute(
+        0,
+        &[("tenant-a-gres-terminating", "Running")],
+    ));
+    rules.extend(tenant_reconcile_rules_with_compute(
+        0,
+        &[("tenant-a-gres-failed", "Failed")],
+    ));
     rules.extend(deployment_reconcile_rules(0));
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
