@@ -504,8 +504,8 @@ printf '%s\t%s\n' "$lifecycle_start_ns" "$lifecycle_end_ns" >"$ARTIFACT_DIR/life
 
 # Real missing-final-manifest refusal: stop the operator, let the real compute
 # publish Suspended, delete the exact newest manifest, then restore the
-# operator. Parking must fail closed without scaling the Deployment to zero or
-# deleting the generation-qualified WAL.
+# operator. The suspended compute must stay quiesced while parking fails closed
+# without deleting the generation-qualified WAL.
 kubectl scale deploy/crabka-gres-operator -n crabka-operator --replicas=0
 kubectl port-forward svc/demo-broker-headless 19092:9092 >"$ARTIFACT_DIR/broker-port-forward.log" 2>&1 &
 BROKER_FORWARD_PID=$!
@@ -525,8 +525,8 @@ kubectl scale deploy/crabka-gres-operator -n crabka-operator --replicas=1
 timeout 120s kubectl rollout status deploy/crabka-gres-operator -n crabka-operator --timeout=110s
 deadline_wait 90 "missing-final-manifest refusal" \
     "kubectl logs -n crabka-operator deploy/crabka-gres-operator --since=2m | grep -Eqi 'manifest.*(missing|not found)|missing.*manifest'"
-[ "$(kubectl get deploy tenant-a-gres -o jsonpath='{.spec.replicas}')" = 1 ] || \
-    fail "operator scaled tenant to zero despite missing final manifest"
+[ "$(kubectl get deploy tenant-a-gres -o jsonpath='{.spec.replicas}')" = 0 ] || \
+    fail "operator restarted suspended compute despite missing final manifest"
 kubectl exec demo-brokers-0 -- sh -c \
     'test -n "$(find /var/lib/crabka/data -maxdepth 1 -type d -name "__gres_wal.tenant-a.r0.g*-0" -print -quit)"' || \
     fail "operator deleted WAL despite missing final manifest"

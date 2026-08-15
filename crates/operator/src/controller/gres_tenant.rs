@@ -322,6 +322,7 @@ async fn patch_cluster_not_ready(
     .await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn reconcile_inner(
     obj: Arc<GresTenant>,
     ctx: Arc<Context>,
@@ -378,13 +379,18 @@ async fn reconcile_inner(
             range_tls_hash: range_tls_hash.as_deref(),
             tracing: tracing.as_ref(),
         };
-        if matches!(
+        let precomputed_deployments_ready = if matches!(
             lifecycle_state,
-            TenantState::Suspended | TenantState::Parking
-        ) && !reconcile_compute_deployments(&ctx, &ns, &obj, &compute_config).await?
-        {
-            return Ok(lifecycle_requeue(&compute_policy));
-        }
+            TenantState::ResumeRequested | TenantState::Suspended | TenantState::Parking
+        ) {
+            let ready = reconcile_compute_deployments(&ctx, &ns, &obj, &compute_config).await?;
+            if lifecycle_state != TenantState::ResumeRequested && !ready {
+                return Ok(lifecycle_requeue(&compute_policy));
+            }
+            ready.then_some(true)
+        } else {
+            None
+        };
         let admin_handle = ctx.admin_client_for(&cluster, &bootstrap).await?;
         let mut admin = admin_handle.lock().await;
         let password = provision_tenant_resources(
@@ -504,6 +510,7 @@ async fn reconcile_inner(
             range_control_enabled,
             range_tls_hash: range_tls_hash.as_deref(),
             tracing: tracing.as_ref(),
+            precomputed_deployments_ready,
         })
         .await
     }
@@ -714,31 +721,36 @@ struct ComputeStatusConfig<'a> {
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
     tracing: Option<&'a Tracing>,
+    precomputed_deployments_ready: Option<bool>,
 }
 
 async fn reconcile_compute_and_status(
     config: &ComputeStatusConfig<'_>,
 ) -> Result<Action, ReconcileError> {
-    let deployments_ready = reconcile_compute_deployments(
-        config.ctx,
-        config.namespace,
-        config.obj,
-        &ComputeDeploymentConfig {
-            ranges: config.tenant_ranges,
-            bootstrap: config.bootstrap,
-            wal_topic: config.wal_topic,
-            config_topic: config.config_topic,
-            policy: config.policy,
-            image: config.image,
-            compute_policy: config.compute_policy,
-            lifecycle_state: config.record.state,
-            kafka_sasl: config.kafka_sasl,
-            range_control_enabled: config.range_control_enabled,
-            range_tls_hash: config.range_tls_hash,
-            tracing: config.tracing,
-        },
-    )
-    .await?;
+    let deployments_ready = if let Some(ready) = config.precomputed_deployments_ready {
+        ready
+    } else {
+        reconcile_compute_deployments(
+            config.ctx,
+            config.namespace,
+            config.obj,
+            &ComputeDeploymentConfig {
+                ranges: config.tenant_ranges,
+                bootstrap: config.bootstrap,
+                wal_topic: config.wal_topic,
+                config_topic: config.config_topic,
+                policy: config.policy,
+                image: config.image,
+                compute_policy: config.compute_policy,
+                lifecycle_state: config.record.state,
+                kafka_sasl: config.kafka_sasl,
+                range_control_enabled: config.range_control_enabled,
+                range_tls_hash: config.range_tls_hash,
+                tracing: config.tracing,
+            },
+        )
+        .await?
+    };
     if deployments_ready && let Some(operation) = config.active_split {
         let mutation_client =
             operator_control_mutation_client(config.ctx, config.namespace, config.obj).await?;
@@ -3208,7 +3220,11 @@ mod tests {
             PgScramVerifier::parse(&record.scram_verifier)
                 .is_ok_and(|verifier| verifier.iterations == 12_288)
         );
-        assert!(!record.scram_verifier.contains(&password));
+        assert!(verifier_matches_password(
+            &record.scram_verifier,
+            &password,
+            defaults.scram_iterations
+        ));
         assert!(record.checkpoint_frames == Some(37));
 
         let mut changed_defaults = defaults;

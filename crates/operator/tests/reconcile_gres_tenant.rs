@@ -23,7 +23,7 @@ mod shared;
 
 use shared::{
     MockRule, MockState,
-    fake_admin::{FakeAdminClient, RecordedCall, TopicState},
+    fake_admin::{FakeAdminClient, InjectableError, RecordedCall, TopicState},
     fixture_ctx, json_response, mock_client,
 };
 
@@ -1736,4 +1736,38 @@ async fn resume_requested_ensures_wal_and_scales_compute_to_one() {
     let resumed = control.current.lock().await.clone().unwrap();
     assert!(resumed.state == TenantState::ResumeRequested);
     assert!(resumed.record_version == 9);
+}
+
+#[tokio::test]
+async fn resume_requested_scales_compute_before_wal_provision_failure() {
+    let state = MockState::new(tenant_reconcile_rules());
+    let client = mock_client(&state, "ns");
+    let ctx = fixture_ctx(client, "ns");
+    let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    admin.lock().await.injected.lock().unwrap().create_topics = Some(InjectableError::Transport);
+    let control = Arc::new(FakeGresControl {
+        current: Mutex::new(Some(tenant_record(TenantState::ResumeRequested, 5))),
+        ..Default::default()
+    });
+    ctx.insert_admin_client_for_test("demo", admin).await;
+    ctx.insert_gres_control_for_test("ns", "demo", control)
+        .await;
+
+    reconcile(Arc::new(tenant()), Arc::new(ctx))
+        .await
+        .expect_err("WAL provisioning fails after the wake is scaled");
+
+    let observed = state.take_observed();
+    let deployment = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains("/deployments/tenant-a-gres")
+        })
+        .expect("wake deployment patch captured before WAL provisioning");
+    let body: serde_json::Value = serde_json::from_slice(deployment.body()).unwrap();
+    assert!(body["spec"]["replicas"] == 1);
 }
