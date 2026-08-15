@@ -1023,19 +1023,7 @@ pub(crate) fn execute_ddl(
                     let owner = resolve_new_owner(kv, fctx, owner)?;
                     crabka_pgcatalog::set_schema_owner_ops(kv, name, &owner)?
                 }
-                AlterSchemaAction::RenameTo(_) => {
-                    if !crabka_pgcatalog::schema_exists(kv, name)? {
-                        return Err(ExecError::Catalog(
-                            crabka_pgcatalog::CatalogError::UndefinedSchema(name.clone()),
-                        ));
-                    }
-                    return Err(ExecError::Unsupported(
-                        "ALTER SCHEMA … RENAME TO is not supported: a relation's catalog name \
-                         carries its schema, so the rename would have to move every relation key \
-                         in the schema"
-                            .into(),
-                    ));
-                }
+                AlterSchemaAction::RenameTo(new_name) => rename_schema_ops(kv, name, new_name)?,
             };
             Ok((command("ALTER SCHEMA"), ops))
         }
@@ -9642,6 +9630,109 @@ pub(crate) fn cascade_drop_notice(
     Ok(cascade_notice(lines))
 }
 
+/// The `NOTICE` an `IF NOT EXISTS` create owes when the object is already there.
+///
+/// `PostgreSQL` reports the skip in place of the `42P07` the bare spelling
+/// raises, and it calls a relation of any kind — table, index, sequence,
+/// materialized view — a `relation`. Computed before the statement runs,
+/// because afterwards the object exists either way and the skip is invisible.
+///
+/// `CREATE SCHEMA IF NOT EXISTS` with an element list is refused outright, so
+/// it never skips and owes nothing.
+/// `resolution` is a thunk because every statement passes through here and
+/// building a scope parses the search path; only the arms below ever need one.
+pub(crate) fn skipped_create_notice(
+    kv: &dyn Kv,
+    resolution: impl FnOnce() -> crate::relname::ResolutionScope,
+    stmt: &Statement,
+) -> Result<Option<crabka_pgwire::error::PgError>, ExecError> {
+    /// The relation the skip names, spelled as `PostgreSQL` spells it: bare,
+    /// because the statement named it bare too.
+    fn skipped(name: &crabka_pgcatalog::RelationName) -> crabka_pgwire::error::PgError {
+        crabka_pgwire::error::PgError::notice(format!(
+            "relation \"{}\" already exists, skipping",
+            name.name
+        ))
+    }
+
+    // Each arm asks exactly what its statement asks before it skips, so the
+    // notice cannot claim a skip the statement did not take.
+    let reference = match stmt {
+        Statement::CreateSchema {
+            name: Some(name),
+            if_not_exists: true,
+            elements,
+            ..
+        } if elements.is_empty() => {
+            return Ok(crabka_pgcatalog::schema_exists(kv, name)?.then(|| {
+                crabka_pgwire::error::PgError::notice(format!(
+                    "schema \"{name}\" already exists, skipping"
+                ))
+            }));
+        }
+        // `CREATE SEQUENCE` borrows the `CREATE INDEX` variant, tagging `table`
+        // with the sentinel the executor splits the two arms on.
+        Statement::CreateIndex {
+            name: Some(name),
+            table,
+            if_not_exists: true,
+            ..
+        } if table.schema.is_none() && table.name == "__crabka_sequence__" => {
+            let resolution = &resolution();
+            let Ok(name) = resolve_relation(kv, resolution, name, SchemaDisposition::Creation)
+            else {
+                return Ok(None);
+            };
+            return Ok(crabka_pgcatalog::get_sequence(kv, &name)
+                .is_ok()
+                .then(|| skipped(&name)));
+        }
+        // An index name is never qualified: an index lands in its table's
+        // schema, whatever the session's creation slot is.
+        Statement::CreateIndex {
+            name: Some(name),
+            table,
+            if_not_exists: true,
+            ..
+        } => {
+            let resolution = &resolution();
+            let (Ok(table), Ok(index)) = (
+                resolve_relation(kv, resolution, table, SchemaDisposition::Utility),
+                resolve_relation(kv, resolution, name, SchemaDisposition::Utility),
+            ) else {
+                return Ok(None);
+            };
+            let index = table.sibling(&index.name);
+            return Ok(crabka_pgcatalog::get_index(kv, &index)
+                .is_ok()
+                .then(|| skipped(&index)));
+        }
+        Statement::CreateTable {
+            name,
+            if_not_exists: true,
+            ..
+        }
+        | Statement::CreateTableAs {
+            name,
+            if_not_exists: true,
+            ..
+        }
+        | Statement::CreateMaterializedView {
+            name,
+            if_not_exists: true,
+            ..
+        } => name,
+        _ => return Ok(None),
+    };
+    let Ok(name) = resolve_relation(kv, &resolution(), reference, SchemaDisposition::Creation)
+    else {
+        return Ok(None);
+    };
+    Ok(crabka_pgcatalog::get_table(kv, &name)
+        .is_ok()
+        .then(|| skipped(&name)))
+}
+
 /// The most dependent objects a `CASCADE` names to the client before the rest
 /// become a count. `PostgreSQL`'s `MAX_REPORTED_DEPS`, which exists because
 /// "client software may not deal well with enormous error strings".
@@ -9740,12 +9831,27 @@ fn schema_cascade_lines(
     let contents = crabka_pgcatalog::schema_contents(kv, schema)?;
     let mut tables: Vec<(crabka_pgcatalog::TableId, crabka_pgcatalog::RelationName)> = Vec::new();
     let mut others: Vec<crabka_pgcatalog::RelationName> = Vec::new();
+    // A `SERIAL` or identity column's sequence belongs to the column rather
+    // than to the schema: upstream records it as an *internal* dependency, and
+    // `reportDependentObjects` never names one of those. So the sequence goes
+    // silently, while a sequence someone wrote `CREATE SEQUENCE` for is
+    // reported like any other relation.
+    let mut owned = HashSet::new();
     for name in contents {
         match crabka_pgcatalog::get_table(kv, &name) {
-            Ok(table) => tables.push((table.id, name)),
+            Ok(table) => {
+                owned.extend(table.columns.iter().filter_map(|column| {
+                    match column.default.as_ref()? {
+                        ColumnDefault::NextVal(sequence) => Some(sequence.clone()),
+                        ColumnDefault::Value(_) => None,
+                    }
+                }));
+                tables.push((table.id, name));
+            }
             Err(_) => others.push(name),
         }
     }
+    others.retain(|name| !owned.contains(&name.to_string()));
     tables.sort_by_key(|(id, _)| *id);
     let roots = tables
         .into_iter()
@@ -30990,11 +31096,11 @@ fn rewrite_identifier_tokens(source: &str, old_name: &str, new_name: &str) -> St
 /// name it left behind was adopted, rows and all, by the next `CREATE TABLE`
 /// that took it.
 ///
-/// `RENAME TO` is the only spelling that changes a relation's catalog name:
-/// `ALTER TABLE … SET SCHEMA` and `ALTER SCHEMA … RENAME TO` are both refused,
-/// and `ALTER MATERIALIZED VIEW … RENAME TO` parses into this same subcommand.
-/// One call site is therefore the whole producer surface, which is what makes
-/// moving the keys sufficient rather than keying them by id instead.
+/// Two spellings change a relation's catalog name: `ALTER TABLE … RENAME TO`,
+/// which `ALTER MATERIALIZED VIEW … RENAME TO` parses into, and
+/// `ALTER SCHEMA … RENAME TO`, which moves every relation in a schema at once.
+/// (`ALTER TABLE … SET SCHEMA` is still refused.) Both call this, so moving the
+/// keys is sufficient and these need not be keyed by id instead.
 fn rename_name_keyed_metadata_ops(
     kv: &dyn Kv,
     old_name: &crabka_pgcatalog::RelationName,
@@ -31004,6 +31110,75 @@ fn rename_name_keyed_metadata_ops(
     ops.extend(crate::partition::rename_ops(kv, old_name, new_name)?);
     ops.extend(crate::relstats::rename_ops(kv, old_name, new_name)?);
     Ok(ops)
+}
+
+/// `ALTER SCHEMA … RENAME TO`.
+///
+/// [`crabka_pgcatalog::rename_schema_ops`] checks the rename and moves what the
+/// schema itself owns. The relations are moved here, one at a time, each read
+/// through a [`StagedKv`] over the batch so far. That is not an optimisation:
+/// a link between two relations of the schema is stored at both ends, and a
+/// second relation read from the base catalog would rebuild its end from the
+/// state the first relation's move already replaced — a child's foreign key
+/// would go on naming the schema its parent had just left.
+///
+/// Each relation also carries the families `pgexec` keys by relation name and
+/// the catalog cannot reach, which are the ones
+/// [`rename_name_keyed_metadata_ops`] moves for a table rename, plus its
+/// triggers, whose key is id-based but whose record names its table.
+fn rename_schema_ops(
+    kv: &dyn Kv,
+    name: &str,
+    new_name: &str,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let mut ops = crabka_pgcatalog::rename_schema_ops(kv, name, new_name)?;
+    reject_schema_qualified_definitions(kv, name)?;
+    let relations = crabka_pgcatalog::schema_contents(kv, name)?;
+    let staged = StagedKv::new(kv, &ops);
+    for relation in &relations {
+        let renamed = crabka_pgcatalog::RelationName::new(new_name, &relation.name);
+        let mut moved = crabka_pgcatalog::move_relation_to_schema_ops(&staged, relation, &renamed)?;
+        moved.extend(rename_name_keyed_metadata_ops(&staged, relation, &renamed)?);
+        if let Ok(table) = crabka_pgcatalog::get_table(&staged, relation) {
+            for mut trigger in crabka_pgcatalog::trigger::triggers_for_table(&staged, table.id)? {
+                trigger.table = renamed.clone();
+                moved.extend(crabka_pgcatalog::trigger::put_trigger_ops(
+                    &staged, &trigger,
+                )?);
+            }
+        }
+        staged.stage(&moved);
+        ops.extend(moved);
+    }
+    Ok(ops)
+}
+
+/// Refuse a schema rename that a stored definition spells the old schema into.
+///
+/// A view body resolves against the schema of the view that holds it, so an
+/// unqualified reference follows its relation to the new schema on its own. A
+/// written `oldschema.t` does not: the catalog keeps view and materialized-view
+/// bodies as SQL text, and rewriting a qualifier there is the same problem that
+/// makes [`rewrite_view_relation_name`] refuse the positions it cannot prove.
+/// Refusing keeps the rename from quietly breaking a definition somewhere else
+/// in the database.
+fn reject_schema_qualified_definitions(kv: &dyn Kv, name: &str) -> Result<(), ExecError> {
+    let views = crabka_pgcatalog::list_views(kv)?
+        .into_iter()
+        .map(|view| (view.name, view.definition));
+    let materialized = crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .filter_map(|table| Some((table.name, table.materialized?.definition)));
+    for (relation, definition) in views.chain(materialized) {
+        if definition_mentions_identifier(&definition, name) {
+            return Err(ExecError::Unsupported(format!(
+                "cannot rename schema {name}: the definition of {relation} spells it out, and \
+                 this catalog stores a definition as SQL text rather than as a dependency it \
+                 could repoint"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Move a relation's comments (and its columns') to a new relation name.

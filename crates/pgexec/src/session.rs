@@ -6907,6 +6907,16 @@ impl SqlSession {
             self.mark_transaction_failed();
             return Err(ExecError::ReadOnlyTransaction(tag));
         }
+        // An `IF NOT EXISTS` create that steps over an existing object says so,
+        // and the skip is invisible afterwards -- the object is there either
+        // way. Asked here rather than on the DDL path because `CREATE TABLE …
+        // AS` and `CREATE MATERIALIZED VIEW` do not take that path, and they
+        // skip too.
+        let skip_notice = crate::exec::skipped_create_notice(
+            &*self.catalog_kv,
+            || self.resolution_scope(),
+            stmt,
+        )?;
         let result = match stmt {
             Statement::CompatibilityRefusal(command) => {
                 Err(ExecError::CompatibilityRefusal(*command))
@@ -7116,6 +7126,11 @@ impl SqlSession {
             Statement::Explain { options, statement } => self.explain(options, statement).await,
             Statement::Utility(utility) => self.utility(utility).await,
         };
+        if result.is_ok()
+            && let Some(notice) = skip_notice
+        {
+            self.plpgsql_notice(notice)?;
+        }
         self.finish_statement(stmt, result).await
     }
 

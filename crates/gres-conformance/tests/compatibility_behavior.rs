@@ -268,19 +268,22 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
 }
 
 #[tokio::test]
-async fn alter_schema_rename_remains_refused() {
+async fn alter_schema_rename_moves_the_schema_and_its_relations() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
-    session
-        .simple_query("CREATE SCHEMA parser_commands_schema")
-        .await
-        .expect("schema setup");
+    for statement in [
+        "CREATE SCHEMA parser_commands_schema",
+        "CREATE TABLE parser_commands_schema.t (a serial, b int UNIQUE)",
+        "ALTER SCHEMA parser_commands_schema RENAME TO renamed_schema",
+        "INSERT INTO renamed_schema.t DEFAULT VALUES",
+    ] {
+        session.simple_query(statement).await.expect(statement);
+    }
     let error = session
-        .simple_query("ALTER SCHEMA parser_commands_schema RENAME TO renamed_schema")
+        .simple_query("ALTER SCHEMA parser_commands_schema RENAME TO other_schema")
         .await
-        .expect_err("ALTER SCHEMA RENAME must stay refused");
-    assert!(error.code == "0A000");
-    assert!(error.message.contains("is not supported"));
+        .expect_err("the old schema must be gone");
+    assert!(error.code == "3F000");
 }
 
 #[tokio::test]

@@ -943,6 +943,29 @@ pub enum CatalogError {
     /// `DROP SCHEMA` named one of the [`SYSTEM_SCHEMAS`] (2BP01).
     #[error("cannot drop schema {0} because it is required by the database system")]
     SystemSchemaDrop(String),
+    /// `ALTER SCHEMA … RENAME TO` named one of the [`SYSTEM_SCHEMAS`] (2BP01).
+    ///
+    /// `PostgreSQL` refuses these on ownership instead, because its system
+    /// schemas are ordinary `pg_namespace` rows a superuser may rewrite. Here
+    /// they are synthesised by name rather than stored — see
+    /// [`BOOTSTRAP_SCHEMAS`] — so a rename would leave their contents
+    /// unreachable rather than move them.
+    #[error("cannot rename schema {0} because it is required by the database system")]
+    SystemSchemaRename(String),
+    /// `ALTER SCHEMA … RENAME TO` found an object in the schema that the
+    /// rename batch cannot relocate (0A000).
+    ///
+    /// The batch moves the relation families and the grants on them. A type,
+    /// an operator and an operator class each carry their schema in their own
+    /// key *and* in oid-linked records that name them, so moving one is not
+    /// the same problem and this refuses rather than strands it.
+    #[error(
+        "cannot rename schema {schema}: it contains {object}, which this catalog cannot move to another schema"
+    )]
+    UnmovableSchemaObject {
+        schema: String,
+        object: &'static str,
+    },
     /// `DROP SCHEMA … RESTRICT` found relations still in the schema (2BP01).
     /// This differs from [`CatalogError::DependentObjectsStillExist`], whose
     /// message is about an index and whose payload is an index name.
@@ -974,10 +997,12 @@ impl CatalogError {
             | CatalogError::TablespaceNotEmpty(_)
             | CatalogError::OperatorFamilyNotEmpty(_)
             | CatalogError::SystemSchemaDrop(_)
+            | CatalogError::SystemSchemaRename(_)
             | CatalogError::SchemaNotEmpty(_) => "2BP01",
             CatalogError::InvalidSequence(_) => "22023",
             CatalogError::NotOrdinaryTable(_)
             | CatalogError::StoredViewDependency(_)
+            | CatalogError::UnmovableSchemaObject { .. }
             | CatalogError::InvalidSharding(_) => "0A000",
             CatalogError::DuplicateObject(_)
             | CatalogError::DuplicateConstraint { .. }
@@ -2466,6 +2491,252 @@ pub fn set_schema_owner_ops(
     }])
 }
 
+/// The comment kinds whose key begins with a relation name, and so whose key
+/// moves when the relation's schema is renamed.
+///
+/// A comment on anything else — a database, a role — keys on a bare name that
+/// is not a schema, and a one-part key is indistinguishable from a relation's
+/// by shape alone. Listing the relation kinds is what tells the two apart.
+const RELATION_COMMENT_KINDS: &[&str] = &[
+    "table",
+    "view",
+    "materialized view",
+    "foreign table",
+    "index",
+    "sequence",
+    "column",
+];
+
+/// Check `ALTER SCHEMA … RENAME TO` and build the half of its batch that the
+/// schema itself owns: the `pg_namespace` row, the grants on the schema, and
+/// the comments on its relations.
+///
+/// The relations are the other half, and they are not here. A relation's
+/// catalog key carries its schema, so each one has to be moved by
+/// [`move_relation_to_schema_ops`] — and moved *one at a time over a view of
+/// the batch so far*, because a foreign key or an inheritance link between two
+/// relations in the schema is read from one end while the other end is being
+/// rewritten. This crate has no such view; the executor has one and drives that
+/// loop. [`schema_contents`] answers what the loop must cover.
+///
+/// The checks and their order come from `RenameSchema` in
+/// `src/backend/commands/schemacmds.c`: the schema must exist, the new name
+/// must be free, and only then is the new name held to
+/// [`RESERVED_SCHEMA_PREFIX`]. Ownership sits between the second and the third
+/// upstream; this catalog has no schema-ownership test for any statement, so
+/// there is none to run here either.
+///
+/// # Errors
+///
+/// Returns undefined-schema, duplicate-schema, reserved-name, system-schema,
+/// unmovable-object, or storage/corruption errors from the catalog KV seam.
+pub fn rename_schema_ops(
+    kv: &dyn Kv,
+    name: &str,
+    new_name: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    if !schema_exists(kv, name)? {
+        return Err(CatalogError::UndefinedSchema(name.to_string()));
+    }
+    if schema_exists(kv, new_name)? {
+        return Err(CatalogError::DuplicateSchema(new_name.to_string()));
+    }
+    if new_name.starts_with(RESERVED_SCHEMA_PREFIX) {
+        return Err(CatalogError::ReservedSchemaName(new_name.to_string()));
+    }
+    if SYSTEM_SCHEMAS.contains(&name) {
+        return Err(CatalogError::SystemSchemaRename(name.to_string()));
+    }
+    reject_unmovable_schema_objects(kv, name)?;
+
+    let mut ops = rename_schema_record_ops(kv, name, new_name)?;
+    ops.extend(move_schema_part_keys(
+        kv,
+        SCHEMA_PRIVILEGE_PREFIX,
+        name,
+        new_name,
+    )?);
+    ops.extend(move_schema_comment_keys(kv, name, new_name)?);
+    Ok(ops)
+}
+
+/// Move one relation of a renamed schema onto its new name.
+///
+/// A table goes through [`rename_table_ops`], which already relocates a
+/// relation's whole subtree — the schema record, the id index, the tablespace
+/// and sharding rows, every index under both of its keys, the table- and
+/// column-level grants, and the foreign-key display names. A view and a
+/// sequence each carry their schema in their own key, and a view carries it
+/// once more in its record.
+///
+/// See [`rename_schema_ops`] for the other half of the batch and for why this
+/// is a call per relation rather than a loop inside it.
+///
+/// # Errors
+///
+/// Returns duplicate-relation or storage/corruption errors from the catalog KV
+/// seam.
+pub fn move_relation_to_schema_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+    new_name: &RelationName,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    if kv.get(&catalog_key(name))?.is_some() {
+        return rename_table_ops(kv, name, new_name);
+    }
+    if let Some(bytes) = kv.get(&view_key(name))? {
+        let mut view = deserialize_view(&bytes)?;
+        view.name = new_name.clone();
+        return Ok(vec![
+            WriteOp::Delete {
+                key: view_key(name),
+            },
+            put_view_op(&view),
+        ]);
+    }
+    if let Some(bytes) = kv.get(&catalog_sequence_key(name))? {
+        return Ok(vec![
+            WriteOp::Delete {
+                key: catalog_sequence_key(name),
+            },
+            WriteOp::Put {
+                key: catalog_sequence_key(new_name),
+                value: bytes,
+            },
+        ]);
+    }
+    Ok(Vec::new())
+}
+
+/// Refuse the rename when the schema holds something the batch cannot move.
+///
+/// Each of these is reachable from an oid held elsewhere — a column's type, an
+/// operator's commutator, an index's operator class — so relocating the key
+/// alone would leave the record naming a schema that no longer exists. The
+/// refusal keeps the failure loud instead of leaving a stranded row behind.
+fn reject_unmovable_schema_objects(kv: &dyn Kv, schema: &str) -> Result<(), CatalogError> {
+    let unmovable = |object: &'static str| CatalogError::UnmovableSchemaObject {
+        schema: schema.to_string(),
+        object,
+    };
+    if list_user_types(kv)?.iter().any(|ty| {
+        ty.schema == schema
+            || ty
+                .multirange_identity()
+                .is_some_and(|(owner, _)| owner == schema)
+    }) {
+        return Err(unmovable("a user-defined type"));
+    }
+    if list_user_operators(kv)?
+        .iter()
+        .any(|operator| operator.schema == schema)
+    {
+        return Err(unmovable("a user-defined operator"));
+    }
+    if list_operator_families(kv)?
+        .iter()
+        .any(|family| family.name.schema == schema)
+    {
+        return Err(unmovable("an operator family"));
+    }
+    if list_operator_classes(kv)?
+        .iter()
+        .any(|class| class.name.schema == schema)
+    {
+        return Err(unmovable("an operator class"));
+    }
+    Ok(())
+}
+
+/// Move the `pg_namespace` row itself, keeping the owner.
+///
+/// A bootstrap schema has no stored row to delete — [`list_schemas`]
+/// synthesises it — so leaving it means writing the same tombstone
+/// [`drop_schema_ops`] writes. Renaming *to* a dropped bootstrap name retires
+/// that name's tombstone, exactly as re-creating it would.
+fn rename_schema_record_ops(
+    kv: &dyn Kv,
+    name: &str,
+    new_name: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let owner = match kv.get(&schema_key(name))? {
+        Some(stored) => String::from_utf8(stored)
+            .map_err(|_| KvError::CorruptRow("non-UTF-8 schema owner".into()))?,
+        // `schema_exists` has already passed, so an absent row means the name
+        // is a live bootstrap schema.
+        None => bootstrap_schema_owner(name)
+            .ok_or_else(|| KvError::CorruptRow("schema row vanished mid-rename".into()))?
+            .to_string(),
+    };
+    let mut ops = vec![
+        WriteOp::Delete {
+            key: schema_key(name),
+        },
+        WriteOp::Put {
+            key: schema_key(new_name),
+            value: owner.into_bytes(),
+        },
+    ];
+    if bootstrap_schema_owner(name).is_some() {
+        ops.push(WriteOp::Put {
+            key: dropped_schema_key(name),
+            value: Vec::new(),
+        });
+    }
+    if bootstrap_schema_owner(new_name).is_some() {
+        ops.push(WriteOp::Delete {
+            key: dropped_schema_key(new_name),
+        });
+    }
+    Ok(ops)
+}
+
+/// Move every key in `prefix` whose leading key part is `name` onto `new_name`,
+/// keeping the value.
+///
+/// This serves the families that hold the schema in the key and nowhere else.
+fn move_schema_part_keys(
+    kv: &dyn Kv,
+    prefix: &[u8],
+    name: &str,
+    new_name: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut scanned = prefix.to_vec();
+    key::push_key_part(&mut scanned, name);
+    let mut moved = prefix.to_vec();
+    key::push_key_part(&mut moved, new_name);
+    let mut ops = Vec::new();
+    for (key, value) in kv.scan_prefix(&scanned)? {
+        let mut renamed = moved.clone();
+        renamed.extend_from_slice(&key[scanned.len()..]);
+        ops.push(WriteOp::Delete { key });
+        ops.push(WriteOp::Put {
+            key: renamed,
+            value,
+        });
+    }
+    Ok(ops)
+}
+
+/// Move the comments on the schema's relations and their columns.
+///
+/// A comment key is the object kind, a `/`, and then the object's name parts,
+/// so the kind has to be split off before the schema part can be recognised.
+fn move_schema_comment_keys(
+    kv: &dyn Kv,
+    name: &str,
+    new_name: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = Vec::new();
+    for kind in RELATION_COMMENT_KINDS {
+        let mut prefix = COMMENT_PREFIX.to_vec();
+        prefix.extend_from_slice(kind.as_bytes());
+        prefix.push(b'/');
+        ops.extend(move_schema_part_keys(kv, &prefix, name, new_name)?);
+    }
+    Ok(ops)
+}
+
 /// The names of every relation, view and sequence stored in `schema`.
 ///
 /// Each family is a prefix scan over the schema's own subtree. A flat namespace
@@ -2582,6 +2853,13 @@ pub fn drop_schema_ops(
 /// than dependency identities; until that representation can be rewritten
 /// safely, any stored view blocks a rename.
 ///
+/// The two names may differ in their schema as well as their relation part —
+/// that is how [`rename_schema_ops`] moves a relation. Two things that a
+/// same-schema rename leaves alone then have to move: an index's by-name key,
+/// which carries the schema, and a `SERIAL` column's default, which names its
+/// sequence as text and so would otherwise keep naming the schema the relation
+/// just left.
+///
 /// # Errors
 ///
 /// Returns missing/wrong-type/duplicate-relation, stored-view-dependency, or
@@ -2603,6 +2881,7 @@ pub fn rename_table_ops(
     }
 
     let (table_id, ..) = deserialize_schema(&schema)?;
+    let schema = move_default_sequences(kv, schema, &name.schema, &new_name.schema)?;
     let mut ops = vec![
         WriteOp::Delete {
             key: catalog_key(name),
@@ -2631,8 +2910,16 @@ pub fn rename_table_ops(
     }
     for (table_index_key, index_bytes) in kv.scan_prefix(&catalog_table_index_prefix(table_id))? {
         let mut index = deserialize_index(&index_bytes)?;
+        let vacated = index.qualified_name();
         index.table = new_name.clone();
         let renamed_index = serialize_index(&index);
+        // An index lives in its table's schema, so the by-name key it answers
+        // to moves with the table even though the index keeps its own name.
+        if vacated != index.qualified_name() {
+            ops.push(WriteOp::Delete {
+                key: catalog_index_key(&vacated),
+            });
+        }
         ops.push(WriteOp::Put {
             key: catalog_index_key(&index.qualified_name()),
             value: renamed_index.clone(),
@@ -2666,6 +2953,72 @@ pub fn rename_table_ops(
     }
     ops.extend(rename_table_foreign_key_ops(kv, table_id, new_name)?);
     Ok(ops)
+}
+
+/// Repoint a relation's `SERIAL` and identity defaults at `to` when they name a
+/// sequence that lives in `from`.
+///
+/// A default names its sequence as the text [`RelationName`] displays, not as an
+/// oid, so a relation that changes schema takes the text with it. Only a
+/// sequence that `from` really holds is repointed: a default may name a
+/// sequence in a third schema, which does not move, and a relation name may
+/// itself contain a dot, which only a lookup can tell from a qualifier.
+///
+/// Returns `schema` unchanged when the relation stays where it is, which is
+/// every `ALTER TABLE … RENAME TO`.
+fn move_default_sequences(
+    kv: &dyn Kv,
+    schema: Vec<u8>,
+    from: &str,
+    to: &str,
+) -> Result<Vec<u8>, CatalogError> {
+    if from == to {
+        return Ok(schema);
+    }
+    let (table_id, mut columns, options, owner, meta, checks, materialized) =
+        deserialize_schema(&schema)?;
+    let mut moved = false;
+    for column in &mut columns {
+        let Some(ColumnDefault::NextVal(sequence)) = &column.default else {
+            continue;
+        };
+        let Some(base) = displayed_relation_in(sequence, from) else {
+            continue;
+        };
+        if kv
+            .get(&catalog_sequence_key(&RelationName::new(from, base)))?
+            .is_none()
+        {
+            continue;
+        }
+        column.default = Some(ColumnDefault::NextVal(
+            RelationName::new(to, base).to_string(),
+        ));
+        moved = true;
+    }
+    if !moved {
+        return Ok(schema);
+    }
+    Ok(serialize_schema(
+        table_id,
+        &columns,
+        options,
+        &owner,
+        meta.as_ref(),
+        materialized.as_ref(),
+        &checks,
+    ))
+}
+
+/// The relation part of `displayed`, when [`RelationName`] would display a
+/// relation of `schema` that way.
+///
+/// A relation in `public` displays bare, so there is no qualifier to strip.
+fn displayed_relation_in<'a>(displayed: &'a str, schema: &str) -> Option<&'a str> {
+    if schema == PUBLIC_SCHEMA {
+        return (!displayed.contains('.')).then_some(displayed);
+    }
+    displayed.strip_prefix(&format!("{}.", displayed_schema(schema)))
 }
 
 /// Build the write batch for creating a table (schema + sequence init +

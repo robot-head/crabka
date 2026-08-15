@@ -434,6 +434,284 @@ async fn re_owning_a_bootstrap_schema_replaces_its_row() {
     );
 }
 
+/// Every relation the schema holds answers to the new name and to nothing else.
+///
+/// A relation's catalog key carries its schema, so the rename is a move of the
+/// whole subtree: the table, the sequence behind its `SERIAL`, both of its
+/// indexes and the view over it. The `SERIAL` default is the piece that a key
+/// move alone would leave behind — it names its sequence as text.
+#[tokio::test]
+async fn renaming_a_schema_moves_every_relation_it_holds() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE SCHEMA before",
+        "SET search_path = before",
+        "CREATE TABLE abc (a serial PRIMARY KEY, b int UNIQUE)",
+        "CREATE VIEW abc_view AS SELECT a + 1 AS a FROM abc",
+        "COMMENT ON TABLE abc IS 'the table'",
+        "INSERT INTO abc DEFAULT VALUES",
+        "RESET search_path",
+        "ALTER SCHEMA before RENAME TO after",
+    ])
+    .await;
+
+    assert!(
+        query(
+            &mut s,
+            "SELECT n.nspname, c.relname, c.relkind FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname IN ('before', 'after') ORDER BY c.relname",
+        )
+        .await
+            == vec![
+                text_row(&["after", "abc", "r"]),
+                text_row(&["after", "abc_a_seq", "S"]),
+                text_row(&["after", "abc_b_key", "i"]),
+                text_row(&["after", "abc_pkey", "i"]),
+                text_row(&["after", "abc_view", "v"]),
+            ]
+    );
+    // The sequence still feeds the column it was created for, under its new
+    // name, and it carries on from where it was rather than restarting.
+    run(&mut s, "INSERT INTO after.abc DEFAULT VALUES").await;
+    assert!(
+        query(&mut s, "SELECT a FROM after.abc_view ORDER BY a").await
+            == vec![text_row(&["2"]), text_row(&["3"])]
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT column_default FROM information_schema.columns \
+             WHERE table_schema = 'after' AND table_name = 'abc' AND column_name = 'a'",
+        )
+        .await
+            == vec![text_row(&["nextval('after.abc_a_seq'::regclass)"])]
+    );
+    assert!(
+        query(&mut s, "SELECT obj_description('after.abc'::regclass)").await
+            == vec![text_row(&["the table"])]
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT nspname FROM pg_namespace WHERE nspname IN ('before', 'after')",
+        )
+        .await
+            == vec![text_row(&["after"])]
+    );
+    // `PostgreSQL` reports the missing *schema* here (3F000). This engine
+    // reports the relation, for every missing schema and not only a renamed
+    // one; the assertion pins what it does today.
+    assert!(
+        failure_of(&mut s, "SELECT * FROM before.abc").await
+            == Failure::new("42P01", "relation \"before.abc\" does not exist")
+    );
+}
+
+/// A link between two relations of the schema survives, from both ends.
+///
+/// Each end of a foreign key and of an inheritance link is stored beside the
+/// relation that holds it, so the two moves have to be built one after the
+/// other over the batch so far. Built independently from the catalog as it was,
+/// the second relation's move rebuilds its end from the state the first
+/// relation's move already replaced, and the link ends up naming a schema that
+/// no longer exists.
+#[tokio::test]
+async fn renaming_a_schema_keeps_the_links_between_its_own_relations() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE SCHEMA before",
+        "SET search_path = before",
+        "CREATE TABLE referenced (a int PRIMARY KEY)",
+        "CREATE TABLE referencing (x int REFERENCES referenced (a))",
+        "CREATE TABLE super_t (i int)",
+        "CREATE TABLE sub_t () INHERITS (super_t)",
+        "INSERT INTO referenced VALUES (1)",
+        "INSERT INTO sub_t VALUES (2)",
+        "RESET search_path",
+        "ALTER SCHEMA before RENAME TO after",
+    ])
+    .await;
+
+    run(&mut s, "INSERT INTO after.referencing VALUES (1)").await;
+    assert!(
+        failure_of(&mut s, "INSERT INTO after.referencing VALUES (99)")
+            .await
+            .code
+            == "23503"
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT inhparent::regclass::text, inhrelid::regclass::text FROM pg_inherits",
+        )
+        .await
+            == vec![text_row(&["after.super_t", "after.sub_t"])]
+    );
+    assert!(query(&mut s, "SELECT i FROM after.super_t").await == vec![text_row(&["2"])]);
+}
+
+/// The rename is checked in `RenameSchema`'s order, and refuses what it cannot
+/// move rather than stranding it.
+#[tokio::test]
+async fn a_schema_rename_reports_what_it_refuses() {
+    struct Case {
+        setup: &'static [&'static str],
+        sql: &'static str,
+        expect: Failure,
+        why: &'static str,
+    }
+
+    let cases = [
+        Case {
+            setup: &[],
+            sql: "ALTER SCHEMA nowhere RENAME TO somewhere",
+            expect: Failure::new("3F000", "schema \"nowhere\" does not exist"),
+            why: "the schema under rename is looked up first",
+        },
+        Case {
+            setup: &["CREATE SCHEMA one", "CREATE SCHEMA two"],
+            sql: "ALTER SCHEMA one RENAME TO two",
+            expect: Failure::new("42P06", "schema \"two\" already exists"),
+            why: "the collision outranks the reserved prefix, as RenameSchema orders them",
+        },
+        Case {
+            setup: &["CREATE SCHEMA one"],
+            sql: "ALTER SCHEMA one RENAME TO pg_anything",
+            expect: Failure::new("42939", "unacceptable schema name \"pg_anything\"")
+                .detail(RESERVED_PREFIX_DETAIL),
+            why: "the prefix is held against the new name",
+        },
+        Case {
+            setup: &[],
+            sql: "ALTER SCHEMA pg_catalog RENAME TO ordinary",
+            expect: Failure::new(
+                "2BP01",
+                "cannot rename schema pg_catalog because it is required by the database system",
+            ),
+            why: "a bootstrap schema is synthesised by name, so renaming it hides its contents",
+        },
+        Case {
+            setup: &[
+                "CREATE SCHEMA one",
+                "CREATE TYPE one.pair AS (a int, b int)",
+            ],
+            sql: "ALTER SCHEMA one RENAME TO two",
+            expect: Failure::new(
+                "0A000",
+                "cannot rename schema one: it contains a user-defined type, which this catalog \
+                 cannot move to another schema",
+            ),
+            why: "a type is reachable from oids held elsewhere, so its key alone cannot move",
+        },
+        Case {
+            setup: &[
+                "CREATE SCHEMA one",
+                "CREATE TABLE one.t (a int)",
+                "CREATE VIEW public.v AS SELECT a FROM one.t",
+            ],
+            sql: "ALTER SCHEMA one RENAME TO two",
+            expect: Failure::new(
+                "0A000",
+                "cannot rename schema one: the definition of v spells it out, and this catalog \
+                 stores a definition as SQL text rather than as a dependency it could repoint",
+            ),
+            why: "a written qualifier in stored view text would go on naming the old schema",
+        },
+    ];
+
+    for case in cases {
+        let (_engine, mut s) = engine_with(case.setup).await;
+        assert!(
+            failure_of(&mut s, case.sql).await == case.expect,
+            "{}",
+            case.why
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What a create skips, and what a drop takes with it
+// ---------------------------------------------------------------------------
+
+/// `IF NOT EXISTS` says what it stepped over.
+///
+/// The statement succeeds either way, so the notice is the only thing that
+/// distinguishes a create from a skip. A relation of any kind is a `relation`
+/// in this message, and a schema is a `schema`.
+#[tokio::test]
+async fn if_not_exists_reports_the_object_it_skipped() {
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    let mut notices = s.take_notices().expect("notice receiver");
+    for sql in [
+        "CREATE SCHEMA app",
+        "CREATE TABLE app.t (i int)",
+        "CREATE INDEX t_i_idx ON app.t (i)",
+        "CREATE SEQUENCE app.q",
+    ] {
+        run(&mut s, sql).await;
+    }
+    assert!(notices.try_recv().is_err());
+
+    for sql in [
+        "CREATE SCHEMA IF NOT EXISTS app",
+        "CREATE TABLE IF NOT EXISTS app.t (i int)",
+        "CREATE INDEX IF NOT EXISTS t_i_idx ON app.t (i)",
+        "CREATE SEQUENCE IF NOT EXISTS app.q",
+    ] {
+        run(&mut s, sql).await;
+    }
+    let reported: Vec<String> = std::iter::from_fn(|| notices.try_recv().ok())
+        .map(|notice| notice.message)
+        .collect();
+    assert!(
+        reported
+            == vec![
+                "schema \"app\" already exists, skipping".to_string(),
+                "relation \"t\" already exists, skipping".to_string(),
+                "relation \"t_i_idx\" already exists, skipping".to_string(),
+                "relation \"q\" already exists, skipping".to_string(),
+            ]
+    );
+}
+
+/// A `CASCADE` names the schema's own objects, but not a `SERIAL`'s sequence.
+///
+/// Upstream records that sequence as an *internal* dependency of the column,
+/// and `reportDependentObjects` never names one of those. A sequence created in
+/// its own right has no such link and is reported like any other relation.
+#[tokio::test]
+async fn dropping_a_schema_does_not_name_the_sequence_behind_a_serial() {
+    let (engine, mut s) = engine_with(&[]).await;
+    drop(engine);
+    let mut notices = s.take_notices().expect("notice receiver");
+    for sql in [
+        "CREATE SCHEMA app",
+        "CREATE TABLE app.t (a serial, b int)",
+        "CREATE SEQUENCE app.standalone",
+        "DROP SCHEMA app CASCADE",
+    ] {
+        run(&mut s, sql).await;
+    }
+    let reported: Vec<(String, Option<String>)> = std::iter::from_fn(|| notices.try_recv().ok())
+        .map(|notice| {
+            (
+                notice.message,
+                notice.diagnostics.unwrap_or_default().detail,
+            )
+        })
+        .collect();
+    assert!(
+        reported
+            == vec![(
+                "drop cascades to 2 other objects".to_string(),
+                Some(
+                    "drop cascades to table app.t\ndrop cascades to sequence app.standalone"
+                        .to_string()
+                )
+            )]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // information_schema.schemata
 // ---------------------------------------------------------------------------
