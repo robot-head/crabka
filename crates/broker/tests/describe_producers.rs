@@ -14,6 +14,7 @@
 use assert2::{assert, check};
 mod support;
 
+use crabka_client_core::Client;
 use crabka_protocol::{
     owned::{
         create_topics_request::{CreatableTopic, CreateTopicsRequest},
@@ -50,9 +51,8 @@ async fn topic_id_for(
         .unwrap_or_default()
 }
 
-async fn create_topic(p: &support::InProcess, name: &str, partitions: i32) {
-    let resp = p
-        .client
+async fn create_topic(client: &Client, name: &str, partitions: i32) {
+    let resp = client
         .send(CreateTopicsRequest {
             topics: vec![CreatableTopic {
                 name: name.into(),
@@ -109,7 +109,7 @@ fn transactional_batch(pid: i64, epoch: i16, base_seq: i32, values: &[&str]) -> 
 #[tokio::test]
 async fn empty_partition_returns_no_active_producers() {
     let p = support::start().await;
-    create_topic(&p, "fresh", 1).await;
+    create_topic(&p.client, "fresh", 1).await;
 
     let resp = p
         .client
@@ -145,7 +145,7 @@ async fn empty_partition_returns_no_active_producers() {
 #[tokio::test]
 async fn after_idempotent_produce_describe_returns_the_producer() {
     let p = support::start().await;
-    create_topic(&p, "t", 1).await;
+    create_topic(&p.client, "t", 1).await;
     let topic_id = topic_id_for(&p, "t").await;
 
     let (pid, epoch) = init_producer(&p).await;
@@ -209,7 +209,7 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
 #[tokio::test]
 async fn transactional_fields_follow_open_and_completed_transactions() {
     let p = support::start().await;
-    create_topic(&p, "transactions", 1).await;
+    create_topic(&p.client, "transactions", 1).await;
     let topic_id = topic_id_for(&p, "transactions").await;
     let (pid, epoch) = init_producer(&p).await;
 
@@ -331,7 +331,7 @@ async fn transactional_fields_follow_open_and_completed_transactions() {
 #[tokio::test]
 async fn multiple_producers_on_same_partition_all_surfaced() {
     let p = support::start().await;
-    create_topic(&p, "shared", 1).await;
+    create_topic(&p.client, "shared", 1).await;
     let topic_id = topic_id_for(&p, "shared").await;
 
     let (pid_a, epoch_a) = init_producer(&p).await;
@@ -421,7 +421,7 @@ async fn unknown_topic_returns_unknown_topic_or_partition() {
 #[tokio::test]
 async fn out_of_range_partition_returns_unknown_topic_or_partition() {
     let p = support::start().await;
-    create_topic(&p, "small", 1).await;
+    create_topic(&p.client, "small", 1).await;
 
     // Partition 5 doesn't exist (topic was created with 1 partition).
     let resp = p
@@ -456,19 +456,44 @@ async fn out_of_range_partition_returns_unknown_topic_or_partition() {
     p.broker.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn metadata_known_partition_not_hosted_locally_returns_not_leader() {
-    let p = support::start().await;
-    create_topic(&p, "remote", 2).await;
-    assert!(p.broker.partition_exists_for_test("remote", 1));
-    p.broker.remove_local_partition_for_test("remote", 1);
+    let cluster = support::start_n_node_with_retry(2).await;
+    support::wait_for_all_brokers_registered(&cluster, 2).await;
 
-    let resp = p
-        .client
+    let admin = Client::builder()
+        .bootstrap(cluster[0].0.listen_addr().to_string())
+        .build()
+        .await
+        .expect("admin client");
+    create_topic(&admin, "remote", 1).await;
+    cluster[0].0.wait_until_partition_present("remote", 0).await;
+
+    let leader = cluster[0]
+        .0
+        .partition_leader_for_test("remote", 0)
+        .expect("remote-0 leader");
+    let nonleader = cluster
+        .iter()
+        .find(|(broker, _, _)| broker.node_id() != leader)
+        .expect("two-node cluster has a nonleader");
+    nonleader.0.wait_until_partition_present("remote", 0).await;
+    assert!(
+        !nonleader.0.partition_exists_for_test("remote", 0),
+        "rf=1 nonleader must not host remote-0"
+    );
+
+    let client = Client::builder()
+        .bootstrap(nonleader.0.listen_addr().to_string())
+        .build()
+        .await
+        .expect("nonleader client");
+
+    let resp = client
         .send(DescribeProducersRequest {
             topics: vec![TopicRequest {
                 name: "remote".into(),
-                partition_indexes: vec![1],
+                partition_indexes: vec![0],
                 ..Default::default()
             }],
             ..Default::default()
@@ -477,9 +502,11 @@ async fn metadata_known_partition_not_hosted_locally_returns_not_leader() {
         .expect("DescribeProducers");
 
     let partition = &resp.topics[0].partitions[0];
-    assert!(partition.partition_index == 1);
+    assert!(partition.partition_index == 0);
     check!(partition.error_code == 6, "expected NOT_LEADER_OR_FOLLOWER");
     check!(partition.active_producers.is_empty());
 
-    p.broker.shutdown().await;
+    for (broker, _, _) in cluster {
+        broker.shutdown().await;
+    }
 }
