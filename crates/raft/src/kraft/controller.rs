@@ -1484,9 +1484,11 @@ impl Engine {
                     // follower claim leadership of the current epoch — a strict
                     // KRaft follower (the JVM) caches that, then fatal-faults when
                     // the true leader's BeginQuorumEpoch arrives ("inconsistent
-                    // leader at the same epoch"). Fall back to `self.me` only when
-                    // no leader is known (mid-election).
-                    let advertised_leader = self.core.quorum_state().leader_id.unwrap_or(self.me);
+                    // leader at the same epoch"). With no known leader, let the
+                    // request fail so the caller's fetch watchdog can elect one.
+                    let Some(advertised_leader) = self.core.quorum_state().leader_id else {
+                        return;
+                    };
                     let resp = wire::PeerResponse::Fetch {
                         leader_id: advertised_leader,
                         leader_epoch: self.core.quorum_state().leader_epoch,
