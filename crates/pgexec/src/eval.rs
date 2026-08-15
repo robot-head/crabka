@@ -460,7 +460,8 @@ fn eval_depth_inner(
             // `character → text` cast the `=` operator takes.
             let x = eval_depth(expr, scope, values, ctx, d)?;
             let x = bpchar_to_text_value(expr, scope, &x)?.unwrap_or(x);
-            eval_in_list(expr, &x, list, *negated, ctx, |e| {
+            let element = in_list_element_type(expr, list, scope)?;
+            eval_in_list(expr, &x, list, element, *negated, ctx, |e| {
                 let item = eval_depth(e, scope, values, ctx, d)?;
                 Ok(bpchar_to_text_value(e, scope, &item)?.unwrap_or(item))
             })
@@ -642,10 +643,15 @@ fn eval_depth_inner(
 /// - Otherwise the result is NULL if any element was NULL, and false if not.
 ///
 /// `NOT IN` is the boolean negation. NULL stays NULL.
+///
+/// `element` is the array element type the list resolves its `unknown` literals
+/// through, from [`in_list_element_type`]. `None` leaves each element to the
+/// pairwise `=` resolution the OR-chain form uses.
 pub(crate) fn eval_in_list(
     operand: &Expr,
     x: &Datum,
     list: &[Expr],
+    element: Option<ColumnType>,
     negated: bool,
     ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
@@ -665,7 +671,15 @@ pub(crate) fn eval_in_list(
         // `x IN (a, b)` is `x = a OR x = b`, and each of those equalities
         // resolves its own `unknown` literal — so `c.oid IN ('1','2')` compares
         // as oids while `'10' IN ('9', 20)` still compares '10' to '9' as text.
-        let (xc, vc) = coerce_untyped_literal_operands(BinaryOp::Eq, operand, item, x, &v, ctx)?;
+        // The array form resolves the whole list at once instead, through the
+        // common type's own input function; only the literal converts, because
+        // the operand already has that type.
+        let (xc, vc) = match element {
+            Some(ty) if matches!(item, Expr::StringLiteral(_)) && matches!(v, Datum::Text(_)) => {
+                (None, Some(cast_operand(&v, ty, ctx)?))
+            }
+            _ => coerce_untyped_literal_operands(BinaryOp::Eq, operand, item, x, &v, ctx)?,
+        };
         let (x, v) = (xc.as_ref().unwrap_or(x), vc.as_ref().unwrap_or(&v));
         if runtime_equality_short_circuit(x, v) == Some(false) {
             continue;
@@ -2713,6 +2727,47 @@ fn comparison_category(ty: ColumnType) -> Option<ComparisonFamily> {
 /// Is `e` a literal PostgreSQL would still call `unknown`?
 pub(crate) fn is_unknown_literal(e: &Expr) -> bool {
     matches!(e, Expr::StringLiteral(_) | Expr::NullLiteral)
+}
+
+/// The array element type an `IN` list resolves its `unknown` literals through,
+/// or `None` when the list resolves each literal against the operand one `=` at
+/// a time.
+///
+/// `PostgreSQL` has two spellings for `IN` and picks between them in
+/// `transformAExprIn`. With more than one right-hand item free of `Var`s it
+/// builds `x = ANY (ARRAY[…])`, whose element type is `select_common_type` over
+/// the operand and the whole list; each `unknown` literal then reaches that type
+/// through the type's own INPUT function. With one such item or none it builds
+/// an OR-chain of `=` instead, and each literal reaches only the type the `=`
+/// operator declares.
+///
+/// The two answers differ for the `reg*` family alone, because its equality is
+/// `oideq` over the *oid* the value is binary-coercible to. Measured on 18.4:
+/// `'pg_class'::regclass IN ('pg_class', 'pg_type')` is true, while
+/// `'pg_class'::regclass = 'pg_class'`, `… IN ('pg_class')` and
+/// `… NOT IN ('pg_type')` all raise `invalid input syntax for type oid`. Every
+/// other type crabka resolves a literal against declares its equality over
+/// itself, so both rules land on the same type and this returns `None`.
+pub(crate) fn in_list_element_type(
+    operand: &Expr,
+    list: &[Expr],
+    scope: &Scope,
+) -> Result<Option<ColumnType>, ExecError> {
+    if list.iter().filter(|item| !reads_a_column(item)).count() < 2 {
+        return Ok(None);
+    }
+    let operand_type = infer_type(operand, scope)?;
+    Ok(crate::reg_fn::RegKind::of(operand_type).map(|_| operand_type))
+}
+
+/// Whether `expr` reads a column, which is `PostgreSQL`'s `contain_vars_of_level`
+/// test for whether an `IN`-list item counts towards the array form.
+fn reads_a_column(expr: &Expr) -> bool {
+    let mut found = false;
+    crate::grouping::visit_expr(expr, &mut |node| {
+        found |= matches!(node, Expr::Column { .. });
+    });
+    found
 }
 
 /// The operand types an operator resolves against, with a bare `unknown`
@@ -5419,17 +5474,26 @@ mod tests {
         let operand = Expr::IntLiteral("1".into());
 
         assert!(
-            eval_in_list(&operand, &Datum::Null, &[], false, &ctx, no_children).expect("empty IN")
+            eval_in_list(&operand, &Datum::Null, &[], None, false, &ctx, no_children)
+                .expect("empty IN")
                 == Datum::Bool(false)
         );
         assert!(
-            eval_in_list(&operand, &Datum::Null, &[], true, &ctx, no_children)
+            eval_in_list(&operand, &Datum::Null, &[], None, true, &ctx, no_children)
                 .expect("empty NOT IN")
                 == Datum::Bool(true)
         );
         assert!(
-            eval_in_list(&operand, &Datum::Int4(1), &[], false, &ctx, no_children)
-                .expect("empty IN")
+            eval_in_list(
+                &operand,
+                &Datum::Int4(1),
+                &[],
+                None,
+                false,
+                &ctx,
+                no_children
+            )
+            .expect("empty IN")
                 == Datum::Bool(false)
         );
         // A NULL operand against a NON-empty list is still unknown.
@@ -5438,6 +5502,7 @@ mod tests {
                 &operand,
                 &Datum::Null,
                 &[Expr::IntLiteral("1".into())],
+                None,
                 false,
                 &ctx,
                 |_| Ok(Datum::Int4(1))

@@ -106,6 +106,7 @@ pub mod rls;
 mod routine;
 mod rowexpr;
 pub mod scanner;
+mod schema_element;
 mod scope;
 mod search_path;
 mod seq;

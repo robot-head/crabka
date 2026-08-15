@@ -975,12 +975,31 @@ pub(crate) fn execute_ddl(
                 None => owner.clone(),
             };
             if !elements.is_empty() {
-                return Err(ExecError::Unsupported(
-                    "CREATE SCHEMA with a schema-element list is not supported: DDL commits one \
-                     catalog batch at a time here, so the schema and its contents could not be \
-                     created atomically"
-                        .into(),
-                ));
+                // An element resolves against a schema that does not exist yet,
+                // and DDL builds one batch rather than committing as it goes.
+                // So the elements read the catalog with the batch so far folded
+                // over it, and each one's own ops join that view before the
+                // next element reads it. The session commits the lot together,
+                // which is what makes the whole `CREATE SCHEMA` atomic.
+                let mut ops = crabka_pgcatalog::create_schema_ops(kv, &name, &owner)?;
+                let staged = StagedKv::new(kv, &ops);
+                // `CreateSchemaCommand` prepends the new schema to
+                // `search_path` for exactly as long as the elements run, so an
+                // unqualified name inside one finds what the list creates. The
+                // elements are also created as the schema's owner, not as the
+                // session's role, which is what `AUTHORIZATION` is for.
+                let scope = resolution.for_stored_body(&name);
+                let inner = ForeignCtx {
+                    current_user: &owner,
+                    resolution: &scope,
+                    ..fctx
+                };
+                for element in &crate::schema_element::plan(&name, elements)? {
+                    let (_, element_ops) = execute_ddl(&staged, element, inner)?;
+                    staged.stage(&element_ops);
+                    ops.extend(element_ops);
+                }
+                return Ok((command("CREATE SCHEMA"), ops));
             }
             // `IF NOT EXISTS` waives only the duplicate: an unacceptable name is
             // still unacceptable, so the reserved-prefix refusal has to come out
@@ -1396,6 +1415,7 @@ pub(crate) fn execute_ddl(
                 .map(|name| resolve_relation(kv, resolution, name, SchemaDisposition::Utility))
                 .transpose()?;
             let name = table.sibling(index_name_or_default(
+                kv,
                 index.as_ref().map(|name| name.name.as_str()),
                 table,
                 keys,
@@ -2470,8 +2490,16 @@ fn sequence_from_options(options: &crabka_pgparser::ast::SequenceOptions) -> Seq
 }
 
 /// `PostgreSQL`'s default index name: `<table>_<key>_…_idx`, with `expr` for a
-/// key that is not a bare column reference.
+/// key that is not a bare column reference, and a numeric suffix on the `_idx`
+/// label whenever the plain name is taken.
+///
+/// The suffix is what makes a second unnamed index on the same key legal — a
+/// second `CREATE INDEX ON t (a)` takes `t_a_idx1`, it does not collide. An
+/// explicitly named index is left exactly as it was written, because that name
+/// is the user's and a collision in it is an error, not something to work
+/// around.
 fn index_name_or_default(
+    kv: &dyn Kv,
     explicit: Option<&str>,
     table: &crabka_pgcatalog::RelationName,
     keys: &[crabka_pgparser::ast::IndexKey],
@@ -2483,7 +2511,8 @@ fn index_name_or_default(
         .iter()
         .map(|key| key.column.as_deref().unwrap_or("expr"))
         .collect();
-    format!("{}_{}_idx", table.name, parts.join("_"))
+    let base = format!("{}_{}_idx", table.name, parts.join("_"));
+    available_index_name(kv, table, &base, &HashSet::new())
 }
 
 /// The durable key list an index can be built from. Expression source uses the
@@ -9435,6 +9464,14 @@ pub(crate) fn ddl_table_id_demand(stmt: &Statement) -> TableIdDemand {
         Statement::CreateTable { .. } | Statement::CreateForeignTable { .. } => {
             TableIdDemand::Fixed(1)
         }
+        // One per `CREATE TABLE` written inside the element list, because each
+        // of them creates a relation of its own.
+        Statement::CreateSchema { elements, .. } => TableIdDemand::Fixed(
+            elements
+                .iter()
+                .filter(|element| matches!(element, Statement::CreateTable { .. }))
+                .count(),
+        ),
         // One foreign table per table the scanner discovers, which is only known
         // once the remote schema has been read.
         Statement::ImportForeignSchema { .. } => TableIdDemand::Unbounded,
@@ -9551,6 +9588,46 @@ pub(crate) fn cascade_drop_notice(
                 )?);
             }
             return Ok(cascade_notice(lines));
+        }
+        // `ALTER TABLE … DROP COLUMN … CASCADE` takes the row-security policies
+        // that read the column, which is the one dependent this engine drops
+        // rather than refuses.
+        Statement::AlterTable { table, actions, .. } => {
+            let dropped: Vec<&String> = actions
+                .iter()
+                .filter_map(|action| match action {
+                    crabka_pgparser::ast::AlterTableAction::DropColumn {
+                        column,
+                        cascade: true,
+                        ..
+                    } => Some(column),
+                    _ => None,
+                })
+                .collect();
+            if dropped.is_empty() {
+                return Ok(None);
+            }
+            let Ok(name) = resolve_relation(kv, resolution, table, SchemaDisposition::Reference)
+            else {
+                return Ok(None);
+            };
+            let Ok(relation) = crabka_pgcatalog::get_table(kv, &name) else {
+                return Ok(None);
+            };
+            let mut lines = Vec::new();
+            for column in dropped {
+                lines.extend(
+                    policies_reading_column(kv, &relation, column)?
+                        .iter()
+                        .map(|policy| policy_dependency_line(&name, &policy.name)),
+                );
+            }
+            return Ok(cascade_notice(
+                lines
+                    .into_iter()
+                    .map(|line| format!("drop cascades to {line}"))
+                    .collect(),
+            ));
         }
         _ => return Ok(None),
     };
@@ -9743,6 +9820,99 @@ pub(crate) fn inheritance_merge_notices(
         }
     }
     Ok(notices)
+}
+
+/// The `merging definition of column "c" for child "t"` notices an
+/// `ALTER TABLE … ADD COLUMN` owes, as `(column, child)` pairs in the order
+/// `PostgreSQL` raises them.
+///
+/// `ATExecAddColumn` recurses one level at a time, deliberately — the comment
+/// in `tablecmds.c` says `find_all_inheritors` cannot be used here. So the walk
+/// follows *edges*, not relations, and a child reachable by two paths is
+/// arrived at twice. The second arrival finds the column already there, merges
+/// into it, raises this notice and stops: everything below that child was
+/// reached by the first arrival already.
+///
+/// A child that spelled the column out by hand is the same case one step
+/// earlier — its *first* arrival already finds the column — so it takes the
+/// notice too, and its own subtree is left alone.
+///
+/// This runs before the statement, off the committed catalog, which is what
+/// lets it see the tree as `PostgreSQL`'s first arrival sees it. It reports
+/// nothing it cannot read: an unreadable child is not a child the notice can
+/// name, and the statement itself will report whatever is really wrong.
+pub(crate) fn add_column_merge_notices(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    stmt: &Statement,
+) -> Result<Vec<(String, String)>, ExecError> {
+    use crabka_pgparser::ast::AlterTableAction as Action;
+
+    let Statement::AlterTable {
+        table,
+        only: false,
+        actions,
+        ..
+    } = stmt
+    else {
+        return Ok(Vec::new());
+    };
+    let Ok(root) = resolve_relation(kv, resolution, table, SchemaDisposition::Reference) else {
+        return Ok(Vec::new());
+    };
+    let Ok(altered) = crabka_pgcatalog::get_table(kv, &root) else {
+        return Ok(Vec::new());
+    };
+    let mut notices = Vec::new();
+    for action in actions {
+        let Action::AddColumn {
+            if_not_exists,
+            column,
+        } = action
+        else {
+            continue;
+        };
+        // `ADD COLUMN IF NOT EXISTS` for a column the relation already has is
+        // dropped whole, descendants included, so it merges into nothing.
+        if *if_not_exists && altered.column_index(&column.name).is_some() {
+            continue;
+        }
+        collect_merge_notices(kv, &root, &column.name, &mut notices)?;
+    }
+    Ok(notices)
+}
+
+/// Walk the tree below `root` edge by edge, recording the arrivals that find
+/// the column already present.
+///
+/// Depth-first, because that is the order `ATExecAddColumn`'s recursion raises
+/// the notices in: a child's whole subtree is walked before the next sibling.
+/// The explicit stack keeps a deep inheritance chain off the call stack, and
+/// `given` — the relations this walk has handed the column to — is what makes a
+/// second arrival recognisable.
+fn collect_merge_notices(
+    kv: &dyn Kv,
+    root: &crabka_pgcatalog::RelationName,
+    column: &str,
+    notices: &mut Vec<(String, String)>,
+) -> Result<(), ExecError> {
+    let mut given: HashSet<crabka_pgcatalog::RelationName> = HashSet::new();
+    let mut pending = direct_children(kv, root)?;
+    pending.reverse();
+    while let Some(child) = pending.pop() {
+        let present = given.contains(&child)
+            || crabka_pgcatalog::get_table(kv, &child)
+                .is_ok_and(|table| table.column_index(column).is_some());
+        if present {
+            notices.push((column.to_string(), child.name.clone()));
+            continue;
+        }
+        given.insert(child.clone());
+        let mut grandchildren = direct_children(kv, &child)?;
+        grandchildren.reverse();
+        pending.extend(grandchildren);
+    }
+    Ok(())
 }
 
 fn table_requires_unique_local_serialization(
@@ -20164,6 +20334,13 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         let stats = relstats.get(&table.name).copied().unwrap_or_default();
         row.reltuples = stats.reltuples;
         row.relhassubclass = stats.has_subclass;
+        // A partitioned table holds no rows of its own, and a foreign table
+        // holds none here at all, so neither carries a store. Every other
+        // stored kind — an ordinary relation, a partition, a materialized
+        // view — is measured.
+        if matches!(relkind, "r" | "m") && needs_toast_relation(&table) {
+            row.reltoastrelid = toast_relation_oid(table.id)?;
+        }
         table_owner_oids.insert(table.name.clone(), row.relowner);
         rows.push(row.build()?);
     }
@@ -20322,6 +20499,136 @@ fn virtual_pg_class_properties(name: &str, oid: i32) -> (&'static str, i32) {
     }
 }
 
+/// First `pg_class` oid of the band reserved for TOAST relations.
+///
+/// The band sits above every other one [`crate::catalog_rel`] hands out, and is
+/// the same 9,000 wide, so a table's TOAST oid is its catalog id offset by this
+/// base — stable across restarts, and distinct per relation.
+///
+/// No `pg_class` row carries one of these oids. crabka stores wide values
+/// inline, so the TOAST relation the oid names does not exist; the oid records
+/// only that `PostgreSQL` would have built one. A query that joins
+/// `reltoastrelid` back to `pg_class.oid` therefore finds nothing — which is
+/// the same nothing the zero it replaces found.
+const TOAST_OID_BASE: i32 = 160_000;
+
+/// Width of the TOAST oid band, which mirrors `catalog_rel`'s.
+const TOAST_OID_BAND_WIDTH: u32 = 9_000;
+
+/// `PostgreSQL`'s `TOAST_TUPLE_THRESHOLD`: `MaximumBytesPerTuple(4)` over the
+/// default 8 kB block, which is the width above which a heap tuple is worth an
+/// out-of-line store.
+const TOAST_TUPLE_THRESHOLD: i32 = 2032;
+
+/// `pg_encoding_max_length(UTF8)`. `server_encoding` is a fixed `UTF8` here, so
+/// the widest byte length of one character is a constant rather than a lookup.
+const MAX_BYTES_PER_CHARACTER: i32 = 4;
+
+/// The `pg_class` oid of a relation's TOAST relation: its catalog id inside the
+/// TOAST band.
+///
+/// # Errors
+///
+/// Returns `0A000` when the catalog id is wider than the band, exactly as the
+/// relation's own oid does.
+fn toast_relation_oid(table_id: u32) -> Result<i32, ExecError> {
+    i32::try_from(table_id)
+        .ok()
+        .filter(|_| table_id < TOAST_OID_BAND_WIDTH)
+        .and_then(|id| TOAST_OID_BASE.checked_add(id))
+        .ok_or_else(|| ExecError::Unsupported("toast oid leaves its band".into()))
+}
+
+/// Whether a relation of this shape gets a TOAST relation, which is
+/// `heapam_relation_needs_toast_table` read off the column list.
+///
+/// Three questions in order, and the order is the whole rule. A relation with
+/// no column that can go out of line never gets one. One that has a column of
+/// unbounded width always does. Otherwise the widest tuple the bounded columns
+/// can build decides it, against a quarter of a block.
+///
+/// The widths are `pg_type.typlen` and `pg_attribute.atttypmod`, as
+/// PostgreSQL's are. The *alignment* is not: crabka publishes `attalign = 'i'`
+/// for every column, so this counts four-byte padding throughout rather than
+/// each type's own. Only a relation whose bounded columns land within a few
+/// bytes of the threshold can tell the two apart.
+fn needs_toast_relation(table: &Table) -> bool {
+    let mut data_length: i32 = 0;
+    let mut unbounded = false;
+    let mut toastable = false;
+    for column in &table.columns {
+        // A virtual generated column occupies no tuple space, so it is not
+        // measured and cannot be what makes the relation need a store.
+        if column.attgenerated() == "v" {
+            continue;
+        }
+        data_length = align_to(data_length, 4);
+        let typlen = i32::from(column.ty.type_size());
+        if typlen > 0 {
+            data_length = data_length.saturating_add(typlen);
+            continue;
+        }
+        match type_maximum_size(column.ty) {
+            Some(max) => data_length = data_length.saturating_add(max),
+            None => unbounded = true,
+        }
+        toastable |= attribute_storage(column.ty) != "p";
+    }
+    if !toastable {
+        return false;
+    }
+    if unbounded {
+        return true;
+    }
+    let natts = i32::try_from(table.columns.len()).unwrap_or(i32::MAX);
+    // `MAXALIGN(SizeofHeapTupleHeader + BITMAPLEN(natts)) + MAXALIGN(data_length)`.
+    // The null bitmap covers every attribute, virtual ones included.
+    let header = align_to(23i32.saturating_add(natts.saturating_add(7) / 8), 8);
+    header.saturating_add(align_to(data_length, 8)) > TOAST_TUPLE_THRESHOLD
+}
+
+/// Round `value` up to the next multiple of `alignment`, which must be a power
+/// of two. Saturates rather than wrapping, so a width near `i32::MAX` stays
+/// above the threshold instead of folding below it.
+fn align_to(value: i32, alignment: i32) -> i32 {
+    value
+        .saturating_add(alignment - 1)
+        .saturating_sub((value.saturating_add(alignment - 1)) % alignment)
+}
+
+/// `PostgreSQL`'s `type_maximum_size`: the widest a value of this type can be,
+/// or `None` for a type whose width has no bound.
+///
+/// Only four types answer at all, and each in its own unit. `character(n)` and
+/// `character varying(n)` count *characters*, so the bound is `n` times the
+/// widest character the encoding has, plus the varlena header. `bit(n)` and
+/// `bit varying(n)` count bits. `numeric(p, s)` is the worst-case digit array.
+/// Every other variable-width type — `text`, `bytea`, `json`, an array — has no
+/// bound at all, which is what makes a relation carrying one need a TOAST
+/// relation outright.
+fn type_maximum_size(ty: ColumnType) -> Option<i32> {
+    /// `VARHDRSZ`.
+    const VARHDRSZ: i32 = 4;
+
+    match ty {
+        ColumnType::Char(Some(n)) | ColumnType::Varchar(Some(n)) => {
+            Some(i32::from(n) * MAX_BYTES_PER_CHARACTER + VARHDRSZ)
+        }
+        ColumnType::Bit(Some(n)) | ColumnType::VarBit(Some(n)) => {
+            Some(n.saturating_add(7) / 8 + 2 * 4)
+        }
+        // `numeric_maximum_size`: four decimal digits per 16-bit `NumericDigit`,
+        // one spare digit for an unaligned decimal point and one more for the
+        // rounding, over an 8-byte `NUMERIC_HDRSZ`.
+        ColumnType::Numeric(Some(typmod)) => {
+            let digits = (i32::from(typmod.precision) + 4 + 3) / 4;
+            Some(8 + digits * 2)
+        }
+        ColumnType::Domain(domain) => type_maximum_size(*domain.base),
+        _ => None,
+    }
+}
+
 /// The handful of `pg_class` fields that actually vary between crabka's
 /// relation kinds. Everything else in the row is the same constant for all of
 /// them, and [`PgClassRow::build`] writes it.
@@ -20369,6 +20676,10 @@ struct PgClassRow<'a> {
     /// and hands it to `pg_get_expr`; crabka's `pg_get_expr` is the identity,
     /// so the column carries the printed clause. Only a partition has one.
     relpartbound: Option<String>,
+    /// `pg_class.reltoastrelid`, from [`toast_relation_oid`]. Zero for every
+    /// relation kind that cannot hold one — a partitioned table, a view, a
+    /// sequence — and for a stored relation whose columns all fit inline.
+    reltoastrelid: i32,
 }
 
 impl<'a> PgClassRow<'a> {
@@ -20402,6 +20713,7 @@ impl<'a> PgClassRow<'a> {
             relowner: crate::catalog_fn::BOOTSTRAP_ROLE_OID,
             relpersistence: 'p',
             relpartbound: None,
+            reltoastrelid: 0,
         }
     }
 
@@ -20425,7 +20737,7 @@ impl<'a> PgClassRow<'a> {
             Datum::Float4(self.reltuples),
             int(0),
             int(0),
-            int(0),
+            int(self.reltoastrelid),
             Datum::Bool(self.relhasindex),
             Datum::Bool(false),
             // Every crabka relation is replica-identity "default"; its
@@ -24893,8 +25205,13 @@ fn partition_definition(
     if crate::partition::scheme_of(kv, parent_name)?.is_none() {
         return Err(ExecError::NotPartitioned(parent_name.to_string()));
     }
-    let (_, extra_checks, sequences, indexes, foreign_keys) =
+    let (_, extra_checks, sequences, mut indexes, foreign_keys) =
         create_table_definition(kv, name, &[], constraints, like, &parent.columns, ctx)?;
+    // The partition takes a copy of every index the parent carries. See
+    // [`partition_index_clones`]: the parent's own copy enforces nothing,
+    // because the parent stores no rows.
+    let clones = partition_index_clones(kv, parent_name, name, &indexes)?;
+    indexes.extend(clones);
     let mut columns = parent.columns.clone();
     for option in &spec.column_options {
         let column = &option.column;
@@ -24935,6 +25252,232 @@ fn partition_definition(
     Ok((columns, checks, sequences, indexes, foreign_keys))
 }
 
+/// The name a partition's copy of `source` is generated under, before the
+/// numeric suffix that resolves a collision.
+///
+/// `PostgreSQL` clones the parent's index with no name at all and lets
+/// `DefineIndex` choose one, so the copy is named after the *partition*, not
+/// after the index it was copied from.
+fn cloned_index_base_name(
+    child: &crabka_pgcatalog::RelationName,
+    source: &crabka_pgcatalog::Index,
+) -> String {
+    let parts = source
+        .columns
+        .iter()
+        .map(|key| {
+            if crabka_pgcatalog::index_key_expression(key).is_some() {
+                "expr"
+            } else {
+                key.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("_");
+    match &source.constraint {
+        Some(crabka_pgcatalog::IndexConstraint::PrimaryKey) => format!("{}_pkey", child.name),
+        Some(crabka_pgcatalog::IndexConstraint::Exclusion(_)) => {
+            format!("{}_{parts}_excl", child.name)
+        }
+        Some(crabka_pgcatalog::IndexConstraint::Unique) => format!("{}_{parts}_key", child.name),
+        None => format!("{}_{parts}_idx", child.name),
+    }
+}
+
+/// `PostgreSQL`'s `ChooseRelationName`: the first of `<base>`, `<base>1`,
+/// `<base>2`, … that nothing in the relation's schema already answers to.
+///
+/// `taken` holds the names this statement has already handed out but not yet
+/// written, which the catalog cannot see.
+fn available_index_name(
+    kv: &dyn Kv,
+    table: &crabka_pgcatalog::RelationName,
+    base: &str,
+    taken: &HashSet<String>,
+) -> String {
+    let occupied = |candidate: &str| {
+        let sibling = table.sibling(candidate);
+        taken.contains(candidate)
+            || crabka_pgcatalog::get_index(kv, &sibling).is_ok()
+            || crabka_pgcatalog::get_table(kv, &sibling).is_ok()
+    };
+    let mut candidate = base.to_string();
+    let mut suffix = 0u32;
+    while occupied(&candidate) {
+        suffix += 1;
+        candidate = format!("{base}{suffix}");
+    }
+    candidate
+}
+
+/// Is `candidate`, already on the partition, the copy of `source` that the
+/// partition owes its parent?
+///
+/// `PostgreSQL` compares the key list, the access method and the uniqueness,
+/// and additionally insists that a parent index backing a constraint be matched
+/// by a child index backing one too — otherwise the partition would carry the
+/// key without carrying the constraint that names it.
+fn matches_parent_index(
+    candidate: &crabka_pgcatalog::Index,
+    source: &crabka_pgcatalog::Index,
+) -> bool {
+    candidate.columns == source.columns
+        && candidate.unique == source.unique
+        && candidate.method == source.method
+        && candidate.without_overlaps == source.without_overlaps
+        && source.constraint.is_none() == candidate.constraint.is_none()
+}
+
+/// Copy `source` onto `child` under a freshly generated name.
+fn cloned_partition_index(
+    name: String,
+    source: &crabka_pgcatalog::Index,
+) -> crabka_pgcatalog::NewIndex {
+    crabka_pgcatalog::NewIndex {
+        name,
+        columns: source.columns.clone(),
+        unique: source.unique,
+        placement: source.placement,
+        method: source.method,
+        constraint: source.constraint.clone(),
+        without_overlaps: source.without_overlaps,
+        // A cloned constraint keeps the parent's check point. Dropping the
+        // deferral would turn `UNIQUE DEFERRABLE` on the parent into an
+        // immediate key on every partition, which is where it is enforced.
+        deferral: source.deferral,
+    }
+}
+
+/// The copies of a partitioned parent's indexes that a brand-new partition owes
+/// it.
+///
+/// A partitioned relation stores no rows, so an index on the parent enforces
+/// nothing: an inserted row is routed to a leaf, and the write path consults
+/// that leaf's own index list. `PostgreSQL` therefore puts a copy of every
+/// parent index on every partition, and it is the copy that enforces the key,
+/// names itself in the 23505 and shows up in `pg_constraint` under the
+/// partition's `conrelid`.
+///
+/// A copy is enforceable on its own because a unique key on a partitioned table
+/// must contain every partition-key column — the refusal in
+/// [`partition_scheme_from_ast`] — so no two partitions can ever hold the same
+/// key.
+///
+/// `declared` are the indexes the `CREATE TABLE` wrote for itself, which have
+/// already claimed their names.
+fn partition_index_clones(
+    kv: &dyn Kv,
+    parent: &crabka_pgcatalog::RelationName,
+    child: &crabka_pgcatalog::RelationName,
+    declared: &[crabka_pgcatalog::NewIndex],
+) -> Result<Vec<crabka_pgcatalog::NewIndex>, ExecError> {
+    let mut taken: HashSet<String> = declared.iter().map(|index| index.name.clone()).collect();
+    let mut clones = Vec::new();
+    for source in crabka_pgcatalog::list_table_indexes(kv, parent)? {
+        // A global index spans the whole relation already, so it has no
+        // per-partition copy to make.
+        if source.placement != crabka_pgcatalog::IndexPlacement::Local {
+            continue;
+        }
+        let name = available_index_name(kv, child, &cloned_index_base_name(child, &source), &taken);
+        taken.insert(name.clone());
+        clones.push(cloned_partition_index(name, &source));
+    }
+    Ok(clones)
+}
+
+/// The index records `ALTER TABLE parent ATTACH PARTITION child` owes, with
+/// their back-validating builds.
+///
+/// `PostgreSQL`'s `AttachPartitionEnsureIndexes` looks for an index on the
+/// candidate that already matches each of the parent's, and creates one only
+/// where there is no match. A relation being attached may already hold rows, so
+/// each created index is backfilled — and a `UNIQUE` copy that two of those
+/// rows would share raises the 23505 there, which is what stops the attach.
+///
+/// The walk covers the attached relation and everything below it, because a
+/// sub-partitioned candidate's own leaves are where the parent's key will
+/// actually be enforced.
+fn attached_partition_index_ops(
+    kv: &dyn Kv,
+    parent: &Table,
+    child: &crabka_pgcatalog::RelationName,
+    own_xid: Option<u64>,
+    build: &IndexBuild<'_>,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let sources = crabka_pgcatalog::list_table_indexes(kv, &parent.name)?;
+    let mut relations = vec![child.clone()];
+    relations.extend(crate::partition::descendants(kv, child)?);
+    clone_indexes_onto_partitions(kv, &sources, &relations, own_xid, build)
+}
+
+/// Put a copy of each of `sources` on every relation in `relations` that has no
+/// equivalent index already, building each copy over the rows that relation
+/// holds.
+///
+/// The shared body of the three statements that owe a partition its parent's
+/// indexes: `CREATE TABLE … PARTITION OF` (which reaches it through
+/// [`partition_index_clones`], because the partition does not exist yet),
+/// `ATTACH PARTITION`, and `ALTER TABLE … ADD CONSTRAINT` on a parent that
+/// already has partitions.
+fn clone_indexes_onto_partitions(
+    kv: &dyn Kv,
+    sources: &[crabka_pgcatalog::Index],
+    relations: &[crabka_pgcatalog::RelationName],
+    own_xid: Option<u64>,
+    build: &IndexBuild<'_>,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    // A global index spans the whole relation already, so it has no
+    // per-partition copy to make.
+    let sources: Vec<&crabka_pgcatalog::Index> = sources
+        .iter()
+        .filter(|source| source.placement == crabka_pgcatalog::IndexPlacement::Local)
+        .collect();
+    if sources.is_empty() || relations.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut ids = crabka_pgcatalog::IndexIds::default();
+    let mut ops = Vec::new();
+    for relation in relations {
+        let table = crabka_pgcatalog::get_table(kv, relation)?;
+        let mut present = crabka_pgcatalog::list_table_indexes(kv, relation)?;
+        let mut taken: HashSet<String> = present.iter().map(|index| index.name.clone()).collect();
+        for &source in &sources {
+            if present
+                .iter()
+                .any(|candidate| matches_parent_index(candidate, source))
+            {
+                continue;
+            }
+            let base = cloned_index_base_name(relation, source);
+            let name = available_index_name(kv, relation, &base, &taken);
+            taken.insert(name.clone());
+            let clone = cloned_partition_index(name, source);
+            let index = crabka_pgcatalog::Index {
+                id: ids.allocate(kv)?,
+                name: clone.name,
+                table: relation.clone(),
+                table_id: table.id,
+                columns: clone.columns,
+                unique: clone.unique,
+                placement: clone.placement,
+                method: clone.method,
+                constraint: clone.constraint,
+                without_overlaps: clone.without_overlaps,
+                clustered: false,
+                deferral: clone.deferral,
+            };
+            ops.extend(crabka_pgcatalog::put_index_ops(&index));
+            ops.extend(local_index_backfill_ops(
+                kv, &table, &index, own_xid, build,
+            )?);
+            present.push(index);
+        }
+    }
+    ops.extend(ids.commit_op());
+    Ok(ops)
+}
+
 /// Resolve a written `PARTITION BY` clause into the stored partition key.
 fn partition_scheme_from_ast(
     spec: &crabka_pgparser::ast::PartitionBy,
@@ -24951,23 +25494,37 @@ fn partition_scheme_from_ast(
         }
     };
     let keys = crate::partition::key_columns(strategy, &spec.keys, columns)?;
-    // PostgreSQL cannot enforce a unique constraint across partitions unless
-    // every partition-key column is part of the key, because two partitions
-    // never see each other's rows.
     for index in indexes {
-        if let Some(missing) = keys.iter().find(|key| !index.columns.contains(key)) {
-            let kind = match index.constraint {
-                Some(crabka_pgcatalog::IndexConstraint::PrimaryKey) => "PRIMARY KEY",
-                _ => "UNIQUE",
-            };
-            return Err(ExecError::Unsupported(format!(
-                "unique constraint on partitioned table must include all partitioning columns: \
-                 the {kind} constraint lacks column \"{missing}\" which is part of the partition \
-                 key"
-            )));
-        }
+        reject_incomplete_partitioned_key(&keys, &index.columns, index.constraint.as_ref())?;
     }
     Ok(crate::partition::Scheme { strategy, keys })
+}
+
+/// Refuse a key on a partitioned relation that leaves a partition-key column
+/// out.
+///
+/// Nothing can enforce such a key. Two partitions never see each other's rows,
+/// so the copy each partition carries proves only that the key is unique
+/// *within* that partition — and a key that omits a partitioning column can put
+/// the same value in two partitions. `PostgreSQL` refuses for the same reason,
+/// and the refusal is what makes the per-partition copies sound.
+fn reject_incomplete_partitioned_key(
+    partition_keys: &[String],
+    columns: &[String],
+    constraint: Option<&crabka_pgcatalog::IndexConstraint>,
+) -> Result<(), ExecError> {
+    let Some(missing) = partition_keys.iter().find(|key| !columns.contains(key)) else {
+        return Ok(());
+    };
+    let kind = match constraint {
+        Some(crabka_pgcatalog::IndexConstraint::PrimaryKey) => "PRIMARY KEY",
+        Some(crabka_pgcatalog::IndexConstraint::Exclusion(_)) => "EXCLUDE",
+        _ => "UNIQUE",
+    };
+    Err(ExecError::Unsupported(format!(
+        "unique constraint on partitioned table must include all partitioning columns: the \
+         {kind} constraint lacks column \"{missing}\" which is part of the partition key"
+    )))
 }
 
 /// Validate a written partition bound against its parent and resolve it into
@@ -28055,7 +28612,7 @@ fn alter_table_action_ops(
                     method,
                     elements,
                 )?;
-                add_exclusion_constraint(kv, state, new_index, &ddl_ctx)
+                add_exclusion_constraint(kv, state, new_index, &IndexBuild::new(&fctx, &ddl_ctx))
             }
         },
         Action::DropConstraint {
@@ -28253,8 +28810,9 @@ fn alter_table_action_ops(
         Action::AttachPartition { partition, bound } => {
             let partition =
                 &resolve_relation(kv, resolution, partition, SchemaDisposition::Utility)?;
+            let build = IndexBuild::new(&fctx, &ddl_ctx);
             let ops =
-                attach_partition_ops(kv, &state.table, partition, bound, state.own_xid, &ddl_ctx)?;
+                attach_partition_ops(kv, &state.table, partition, bound, state.own_xid, &build)?;
             state.ops.extend(ops);
             Ok(())
         }
@@ -28341,8 +28899,9 @@ fn attach_partition_ops(
     child: &crabka_pgcatalog::RelationName,
     bound: &crabka_pgparser::ast::PartitionBound,
     own_xid: Option<u64>,
-    ctx: &crate::clock::EvalCtx,
+    build: &IndexBuild<'_>,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let ctx = build.ctx();
     let scheme = crate::partition::scheme_of(kv, &parent.name)?
         .ok_or_else(|| ExecError::NotPartitioned(parent.name.to_string()))?;
     let candidate = crabka_pgcatalog::get_table(kv, child)?;
@@ -28413,6 +28972,9 @@ fn attach_partition_ops(
     }
     let mut ops = crate::partition::attach_ops(&parent.name, child, &resolved);
     ops.extend(crate::trigger::clone_partition_triggers(kv, parent, child)?);
+    ops.extend(attached_partition_index_ops(
+        kv, parent, child, own_xid, build,
+    )?);
     Ok(ops)
 }
 
@@ -29014,6 +29576,8 @@ fn add_constraint_index(
     }
     state.ops.extend(index_ops);
     state.ops.extend(backfill);
+    let clones = descendant_constraint_clone_ops(kv, state, &index, build)?;
+    state.ops.extend(clones);
     state.created_indexes.push(index);
     Ok(())
 }
@@ -29022,8 +29586,9 @@ fn add_exclusion_constraint(
     kv: &dyn Kv,
     state: &mut AlterTableState,
     new_index: crabka_pgcatalog::NewIndex,
-    ctx: &crate::clock::EvalCtx,
+    build: &IndexBuild<'_>,
 ) -> Result<(), ExecError> {
+    let ctx = build.ctx();
     if state.table.sharded {
         return Err(ExecError::Unsupported(
             "exclusion constraints on sharded tables are not supported".into(),
@@ -29034,8 +29599,39 @@ fn add_exclusion_constraint(
         crabka_pgcatalog::create_constraint_index_ops(kv, &state.table, &new_index)?;
     validate_no_exclusion_conflicts(&state.table, &index, &rows, ctx)?;
     state.ops.extend(index_ops);
+    let clones = descendant_constraint_clone_ops(kv, state, &index, build)?;
+    state.ops.extend(clones);
     state.created_indexes.push(index);
     Ok(())
+}
+
+/// Put a copy of a freshly added constraint index on every partition below the
+/// relation it was added to, and refuse the constraint outright when no copy
+/// could enforce it.
+///
+/// A key added to a partitioned parent is in exactly the position a key
+/// declared with the parent is: the parent holds no rows, so the copies are the
+/// enforcement. The refusal has to be repeated here because
+/// [`partition_scheme_from_ast`] only sees the keys written by the `CREATE
+/// TABLE` that declared the partitioning.
+fn descendant_constraint_clone_ops(
+    kv: &dyn Kv,
+    state: &AlterTableState,
+    index: &crabka_pgcatalog::Index,
+    build: &IndexBuild<'_>,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let Some(scheme) = crate::partition::scheme_of(kv, &state.table.name)? else {
+        return Ok(Vec::new());
+    };
+    reject_incomplete_partitioned_key(&scheme.keys, &index.columns, index.constraint.as_ref())?;
+    let relations = crate::partition::descendants(kv, &state.table.name)?;
+    clone_indexes_onto_partitions(
+        kv,
+        std::slice::from_ref(index),
+        &relations,
+        state.own_xid,
+        build,
+    )
 }
 
 /// Back-validate the rows a table already holds against an exclusion-enforced
@@ -29244,6 +29840,26 @@ fn drop_table_column(
     };
     let table_name = state.table.name.clone();
     reject_partition_key_column(kv, &table_name, "drop", column)?;
+    // A policy that reads the column is a hard dependency: PostgreSQL refuses
+    // the drop and takes the whole `pg_policy` row only under CASCADE. Asked
+    // first, before anything is written, because it refuses the statement.
+    let dependent_policies = policies_reading_column(kv, &state.table, column)?;
+    if !dependent_policies.is_empty() {
+        if !cascade {
+            return Err(dependent_policy_refusal(
+                &table_name,
+                column,
+                &dependent_policies,
+            ));
+        }
+        for policy in &dependent_policies {
+            state.ops.extend(crabka_pgcatalog::policy::drop_policy_ops(
+                kv,
+                state.table.id,
+                &policy.name,
+            )?);
+        }
+    }
     // A grant on the column dies with the column. Leaving it behind would hand
     // the grant to whatever column is added under that name next.
     state
@@ -29253,6 +29869,16 @@ fn drop_table_column(
             &table_name,
             column,
         )?);
+    // And so does its comment, for the same reason: PostgreSQL's
+    // `deleteOneObject` calls `DeleteComments` with the column's `attnum`, so
+    // the `pg_description` row goes with the column and the relation's own
+    // comment stays. Leaving it behind would hand the comment to whatever
+    // column is added under that name next.
+    state.ops.push(crabka_pgcatalog::set_comment_op(
+        "column",
+        crabka_pgcatalog::CommentObject::Column(&table_name, column),
+        None,
+    ));
     let triggers = crabka_pgcatalog::trigger::triggers_for_table(kv, state.table.id)?;
     for trigger in triggers {
         let references_column = trigger
@@ -29594,12 +30220,27 @@ fn generated_columns_reading(table: &Table, column: &str) -> Vec<String> {
 }
 
 fn index_key_reads_column(table: &Table, key: &str, column: &str) -> bool {
+    match crabka_pgcatalog::index_key_expression(key) {
+        Some(source) => expression_reads_column(table, source, column),
+        None => key == column,
+    }
+}
+
+/// Does the stored SQL source `expression`, read against `table`, reference
+/// `table`'s `column`?
+///
+/// The question is answered by parsing and resolving, never by looking for the
+/// name in the text. A column named `a` occurs inside the identifier `abc`,
+/// inside the string `'a'` and inside the function name `avg`, and none of
+/// those is a reference; `t.a` is one, and so is a bare `a` that resolves here.
+///
+/// A source that no longer parses answers `true`. The callers ask in order to
+/// clean up after a dropped column, and treating an unreadable expression as
+/// independent of the column would leave the dependency behind.
+fn expression_reads_column(table: &Table, expression: &str, column: &str) -> bool {
     use crabka_pgparser::ast::Expr;
 
-    let Some(source) = crabka_pgcatalog::index_key_expression(key) else {
-        return key == column;
-    };
-    let Ok(expr) = crabka_pgparser::parser::parse_expression(source) else {
+    let Ok(expr) = crabka_pgparser::parser::parse_expression(expression) else {
         return true;
     };
     let scope = Scope::single(table, &table.name.name);
@@ -29617,6 +30258,60 @@ fn index_key_reads_column(table: &Table, key: &str, column: &str) -> bool {
         }
     });
     reads
+}
+
+/// The row-security policies on `table` whose `USING` or `WITH CHECK` reads
+/// `column`, in the order `pg_policy` stores them.
+fn policies_reading_column(
+    kv: &dyn Kv,
+    table: &Table,
+    column: &str,
+) -> Result<Vec<crabka_pgcatalog::policy::Policy>, ExecError> {
+    Ok(crabka_pgcatalog::policy::policies_for_table(kv, table.id)?
+        .into_iter()
+        .filter(|policy| {
+            [policy.using.as_deref(), policy.with_check.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|source| expression_reads_column(table, source, column))
+        })
+        .collect())
+}
+
+/// How a `DETAIL` line and a `NOTICE` line name a policy.
+fn policy_dependency_line(table: &crabka_pgcatalog::RelationName, policy: &str) -> String {
+    format!("policy {policy} on table {table}")
+}
+
+/// `PostgreSQL`'s 2BP01 for a `DROP COLUMN` that a policy still reads.
+///
+/// A policy's reference to a column is a `DEPENDENCY_NORMAL` `pg_depend` row
+/// against `(pg_class, relid, attnum)`, so `performMultipleDeletions` under
+/// `DROP_RESTRICT` refuses; the whole `pg_policy` row goes only under
+/// `CASCADE`. See `ATExecDropColumn` and `reportDependentObjects`.
+fn dependent_policy_refusal(
+    table: &crabka_pgcatalog::RelationName,
+    column: &str,
+    dependents: &[crabka_pgcatalog::policy::Policy],
+) -> ExecError {
+    let depended_on = format!("column {column} of table {table}");
+    let detail = dependents
+        .iter()
+        .map(|policy| {
+            format!(
+                "{} depends on {depended_on}",
+                policy_dependency_line(table, &policy.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "2BP01",
+        format!(
+            "cannot drop {depended_on} because other objects depend on it\nDETAIL:  \
+             {detail}\nHINT:  Use DROP ... CASCADE to drop the dependent objects too."
+        ),
+    ))
 }
 
 /// Rewrite every stored view's references to a renamed relation.
@@ -31333,6 +32028,340 @@ mod tests {
         assert!(
             text_rows_of(&mut session, "SELECT k, \"K\" FROM v").await
                 == vec![text_row(&["1", "one"])]
+        );
+    }
+
+    /// A `UNIQUE` key written on a partitioned parent is enforced by the copy
+    /// each partition carries, not by the parent's own index: the parent stores
+    /// no rows, so nothing ever reaches that index. The copy is what
+    /// `pg_constraint` reports and what the 23505 names.
+    #[tokio::test]
+    async fn a_partitioned_unique_key_is_cloned_onto_every_partition() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE parted_uniq_tbl (i int UNIQUE DEFERRABLE) PARTITION BY RANGE (i)",
+            "CREATE TABLE parted_uniq_tbl_1 PARTITION OF parted_uniq_tbl \
+             FOR VALUES FROM (0) TO (10)",
+            "CREATE TABLE parted_uniq_tbl_2 PARTITION OF parted_uniq_tbl \
+             FOR VALUES FROM (20) TO (30)",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT conname, conrelid::regclass::text FROM pg_constraint \
+                 WHERE conname LIKE 'parted_uniq%' ORDER BY conname",
+            )
+            .await
+                == vec![
+                    text_row(&["parted_uniq_tbl_1_i_key", "parted_uniq_tbl_1"]),
+                    text_row(&["parted_uniq_tbl_2_i_key", "parted_uniq_tbl_2"]),
+                    text_row(&["parted_uniq_tbl_i_key", "parted_uniq_tbl"]),
+                ]
+        );
+
+        run_s(&mut session, "INSERT INTO parted_uniq_tbl VALUES (1)").await;
+        assert!(
+            error_of(&mut session, "INSERT INTO parted_uniq_tbl VALUES (1)").await
+                == (
+                    "23505".to_string(),
+                    "duplicate key value violates unique constraint \"parted_uniq_tbl_1_i_key\""
+                        .to_string(),
+                )
+        );
+        // The same key in another partition's range is a different key, so the
+        // clone constrains its own partition and nothing else.
+        run_s(&mut session, "INSERT INTO parted_uniq_tbl VALUES (21)").await;
+    }
+
+    /// The clone keeps the parent's deferral. `UNIQUE DEFERRABLE` is checked at
+    /// the end of the statement, so two conflicting rows inserted by one
+    /// statement are fine and two inserted by two statements are not.
+    #[tokio::test]
+    async fn a_cloned_partition_key_keeps_the_parents_deferral() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE swap (i int UNIQUE DEFERRABLE) PARTITION BY RANGE (i)",
+            "CREATE TABLE swap_1 PARTITION OF swap FOR VALUES FROM (0) TO (10)",
+            "INSERT INTO swap VALUES (1), (2)",
+            // Deferred to statement end, so the pair crossing over is legal.
+            "UPDATE swap SET i = 3 - i",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+        assert!(
+            text_rows_of(&mut session, "SELECT i FROM swap ORDER BY i").await
+                == vec![text_row(&["1"]), text_row(&["2"])]
+        );
+        assert!(sqlstate_of(&mut session, "INSERT INTO swap VALUES (1)").await == "23505");
+    }
+
+    /// `ATTACH PARTITION` copies the parent's indexes onto the candidate, and
+    /// the copy is built over the rows the candidate already holds — so a
+    /// candidate whose rows break the parent's key cannot be attached.
+    #[tokio::test]
+    async fn attach_partition_builds_the_parents_indexes_over_existing_rows() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE att (i int, j int, PRIMARY KEY (i)) PARTITION BY RANGE (i)",
+            "CREATE TABLE att_bad (i int NOT NULL, j int)",
+            "INSERT INTO att_bad VALUES (1, 10), (1, 20)",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+        assert!(
+            sqlstate_of(
+                &mut session,
+                "ALTER TABLE att ATTACH PARTITION att_bad FOR VALUES FROM (0) TO (10)",
+            )
+            .await
+                == "23505"
+        );
+
+        run_s(&mut session, "CREATE TABLE att_ok (i int NOT NULL, j int)").await;
+        run_s(&mut session, "INSERT INTO att_ok VALUES (1, 10), (2, 20)").await;
+        run_s(
+            &mut session,
+            "ALTER TABLE att ATTACH PARTITION att_ok FOR VALUES FROM (0) TO (10)",
+        )
+        .await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT conname, conrelid::regclass::text FROM pg_constraint \
+                 WHERE conname LIKE 'att%pkey' ORDER BY conname",
+            )
+            .await
+                == vec![
+                    text_row(&["att_ok_pkey", "att_ok"]),
+                    text_row(&["att_pkey", "att"]),
+                ]
+        );
+        // The copy enforces the parent's key over rows written after the attach.
+        assert!(sqlstate_of(&mut session, "INSERT INTO att VALUES (1, 30)").await == "23505");
+    }
+
+    /// A candidate that already carries an equivalent constraint keeps it:
+    /// `PostgreSQL` matches an existing index rather than building a second one.
+    #[tokio::test]
+    async fn attach_partition_reuses_an_equivalent_index_the_candidate_already_has() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE reuse (i int, PRIMARY KEY (i)) PARTITION BY RANGE (i)",
+            "CREATE TABLE reuse_1 (i int NOT NULL, CONSTRAINT mine PRIMARY KEY (i))",
+            "ALTER TABLE reuse ATTACH PARTITION reuse_1 FOR VALUES FROM (0) TO (10)",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT conname, conrelid::regclass::text FROM pg_constraint \
+                 WHERE conname IN ('mine', 'reuse_pkey', 'reuse_1_pkey') ORDER BY conname",
+            )
+            .await
+                == vec![
+                    text_row(&["mine", "reuse_1"]),
+                    text_row(&["reuse_pkey", "reuse"]),
+                ]
+        );
+    }
+
+    /// A key added to a partitioned parent after its partitions exist is
+    /// copied onto each of them and built over the rows they already hold. A
+    /// key that leaves a partition-key column out is refused instead: no copy
+    /// could enforce it, because two partitions never see each other's rows.
+    #[tokio::test]
+    async fn adding_a_key_to_a_partitioned_parent_reaches_its_partitions() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE late (i int NOT NULL, j int) PARTITION BY RANGE (i)",
+            "CREATE TABLE late_1 PARTITION OF late FOR VALUES FROM (0) TO (10)",
+            "INSERT INTO late VALUES (1, 10), (2, 20)",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+        assert!(
+            sqlstate_of(&mut session, "ALTER TABLE late ADD UNIQUE (j)").await == "0A000",
+            "a key without the partition key cannot be enforced"
+        );
+
+        run_s(&mut session, "ALTER TABLE late ADD PRIMARY KEY (i)").await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT conname, conrelid::regclass::text FROM pg_constraint \
+                 WHERE conname LIKE 'late%pkey' ORDER BY conname",
+            )
+            .await
+                == vec![
+                    text_row(&["late_1_pkey", "late_1"]),
+                    text_row(&["late_pkey", "late"]),
+                ]
+        );
+        assert!(sqlstate_of(&mut session, "INSERT INTO late VALUES (1, 30)").await == "23505");
+
+        // And the copy is built over the rows already stored, so a key the
+        // partition's existing rows break is refused.
+        run_s(
+            &mut session,
+            "CREATE TABLE dupes (i int NOT NULL) PARTITION BY RANGE (i)",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE TABLE dupes_1 PARTITION OF dupes FOR VALUES FROM (0) TO (10)",
+        )
+        .await;
+        run_s(&mut session, "INSERT INTO dupes VALUES (1), (1)").await;
+        assert!(sqlstate_of(&mut session, "ALTER TABLE dupes ADD UNIQUE (i)").await == "23505");
+    }
+
+    /// An unnamed `CREATE INDEX` takes the next free `_idx` label, so a second
+    /// index on the same key is legal. `PostgreSQL`'s `ChooseRelationName`
+    /// counts the label up until nothing in the schema answers to the name. An
+    /// index the statement names itself is never renamed: that name is the
+    /// user's, and a collision in it is an error.
+    #[tokio::test]
+    async fn a_second_unnamed_index_on_one_key_takes_the_next_free_name() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE named (a int, b int)",
+            "CREATE INDEX ON named (a)",
+            "CREATE INDEX ON named (a)",
+            "CREATE INDEX ON named (a)",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT indexname FROM pg_indexes WHERE tablename = 'named' ORDER BY indexname",
+            )
+            .await
+                == vec![
+                    text_row(&["named_a_idx"]),
+                    text_row(&["named_a_idx1"]),
+                    text_row(&["named_a_idx2"]),
+                ]
+        );
+        assert!(
+            sqlstate_of(&mut session, "CREATE INDEX named_a_idx ON named (b)").await == "42P07"
+        );
+    }
+
+    /// A comment dies with the column it describes. `PostgreSQL` deletes the
+    /// `pg_description` row keyed on the column's `attnum` as the column goes,
+    /// so a later column of the same name starts with no comment. The
+    /// relation's own comment, and every other column's, are untouched.
+    #[tokio::test]
+    async fn a_dropped_column_takes_its_comment_with_it() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE described (a int, b int)",
+            "COMMENT ON TABLE described IS 'the table'",
+            "COMMENT ON COLUMN described.a IS 'the first'",
+            "COMMENT ON COLUMN described.b IS 'the second'",
+            "ALTER TABLE described DROP COLUMN a",
+            "ALTER TABLE described ADD COLUMN a int",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT a.attname, col_description(a.attrelid, a.attnum) \
+                 FROM pg_attribute a WHERE a.attrelid = 'described'::regclass \
+                 AND a.attnum > 0 ORDER BY a.attname",
+            )
+            .await
+                == vec![
+                    vec![Some("a".to_string()), None],
+                    text_row(&["b", "the second"]),
+                ]
+        );
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT obj_description('described'::regclass, 'pg_class')",
+            )
+            .await
+                == vec![text_row(&["the table"])]
+        );
+    }
+
+    /// A row-security policy that reads a column depends on it. `PostgreSQL`
+    /// refuses the drop and names the policy, and `CASCADE` takes the whole
+    /// policy — never a policy left reading a column that is gone.
+    #[tokio::test]
+    async fn a_policy_that_reads_a_column_blocks_dropping_it() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE guarded (owner text, payload text, abc int)",
+            "ALTER TABLE guarded ENABLE ROW LEVEL SECURITY",
+            "CREATE POLICY p ON guarded USING (owner = current_user)",
+            "CREATE POLICY q ON guarded FOR INSERT WITH CHECK (owner = 'me')",
+            // Neither policy reads `payload` or `abc`; `owner` occurs inside
+            // neither the identifier `abc` nor any literal.
+            "CREATE POLICY r ON guarded FOR SELECT USING (abc > 0)",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+
+        assert!(
+            error_of(&mut session, "ALTER TABLE guarded DROP COLUMN owner").await
+                == (
+                    "2BP01".to_string(),
+                    "cannot drop column owner of table guarded because other objects depend on \
+                     it\nDETAIL:  policy p on table guarded depends on column owner of table \
+                     guarded\npolicy q on table guarded depends on column owner of table \
+                     guarded\nHINT:  Use DROP ... CASCADE to drop the dependent objects too."
+                        .to_string(),
+                )
+        );
+
+        // A column no policy reads drops without a word, and the refusal above
+        // wrote nothing.
+        run_s(&mut session, "ALTER TABLE guarded DROP COLUMN payload").await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT polname FROM pg_policy ORDER BY polname",
+            )
+            .await
+                == vec![text_row(&["p"]), text_row(&["q"]), text_row(&["r"])]
+        );
+
+        run_s(
+            &mut session,
+            "ALTER TABLE guarded DROP COLUMN owner CASCADE",
+        )
+        .await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT polname FROM pg_policy ORDER BY polname",
+            )
+            .await
+                == vec![text_row(&["r"])]
         );
     }
 

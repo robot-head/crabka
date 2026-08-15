@@ -3522,6 +3522,52 @@ fn read_next_index_id(kv: &dyn Kv) -> Result<IndexId, CatalogError> {
     }
 }
 
+/// Hands out the [`IndexId`]s that stamp one write batch's new indexes, across
+/// however many relations that batch touches.
+///
+/// [`create_indexes_on_table_ops`] covers one relation's worth of indexes on
+/// its own. A statement that indexes several relations at once cannot use it
+/// twice: none of the first relation's records are in the KV yet, so the second
+/// call would read the same stored counter and stamp the same ids again.
+/// `ALTER TABLE … ATTACH PARTITION` of a sub-partitioned relation is exactly
+/// that statement — every partition below the one being attached needs the
+/// parent's indexes copied onto it.
+///
+/// The cursor stays in memory across the batch instead, and [`Self::commit_op`]
+/// writes the counter past the last id it stamped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexIds {
+    /// `None` until a caller asks for the first id. A statement that creates no
+    /// index must not read the counter at all, and must write nothing back.
+    next: Option<IndexId>,
+}
+
+impl IndexIds {
+    /// The next creation-order id. The first call reads the shared counter.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage/corruption errors from the catalog KV seam.
+    pub fn allocate(&mut self, kv: &dyn Kv) -> Result<IndexId, CatalogError> {
+        let id = match self.next {
+            Some(id) => id,
+            None => read_next_index_id(kv)?,
+        };
+        self.next = Some(id + 1);
+        Ok(id)
+    }
+
+    /// The counter write that moves the stored value past every id stamped, or
+    /// `None` when nothing was stamped.
+    #[must_use]
+    pub fn commit_op(self) -> Option<WriteOp> {
+        self.next.map(|next| WriteOp::Put {
+            key: meta_next_index_id_key(),
+            value: U32::new(next).as_bytes().to_vec(),
+        })
+    }
+}
+
 /// Build the write batch for creating a secondary-index catalog record.
 ///
 /// # Errors

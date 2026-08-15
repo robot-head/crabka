@@ -9309,6 +9309,11 @@ impl SqlSession {
         };
         let inheritance_notices =
             crate::exec::inheritance_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
+        // Computed before the statement for the same reason: the walk has to
+        // see the tree as the ADD COLUMN's first arrival sees it, not after
+        // every descendant already carries the column.
+        let column_merge_notices =
+            crate::exec::add_column_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
         // Computed before the statement runs: a `CREATE TYPE` that completes a
         // shell, and a `CREATE FUNCTION` that names one, both change the answer.
         let shell_notices = crate::routine::shell_type_notices(&*self.catalog_kv, stmt);
@@ -9466,6 +9471,11 @@ impl SqlSession {
         for column in inheritance_notices {
             self.plpgsql_notice(PgError::notice(format!(
                 "merging multiple inherited definitions of column \"{column}\""
+            )))?;
+        }
+        for (column, child) in column_merge_notices {
+            self.plpgsql_notice(PgError::notice(format!(
+                "merging definition of column \"{column}\" for child \"{child}\""
             )))?;
         }
         for notice in shell_notices {
@@ -14398,7 +14408,10 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
     // can create one.
     let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
     let error = attach_reg_cast_literal_position(sql, error);
+    // The date/time family first: it owns the temporal operand names, which
+    // `attach_operator_resolution_position` therefore leaves out.
     let error = crate::temporal_arith::attach_operator_position(sql, error);
+    let error = attach_operator_resolution_position(sql, stmt, error);
     let error = attach_query_analysis_position(sql, stmt, error);
     attach_undefined_function_position(
         sql,
@@ -14545,6 +14558,12 @@ fn rejected_input(message: &str) -> Option<RejectedInput<'_>> {
     }
     if let Some(value) = tail(message, "timestamp out of range") {
         return Some(family(value, TIMESTAMP_TYPE_KEYS));
+    }
+    // `date_in`'s own range complaint. It names one type, not a family: the two
+    // `timestamp` spellings above borrow each other's wording because an offset
+    // plays no part in a day being unreachable, but `date` is only ever `date`.
+    if let Some(value) = tail(message, "date out of range") {
+        return Some(named(value, "date"));
     }
     if let Some(value) = tail(message, "malformed array literal") {
         return Some(RejectedInput {
@@ -15237,6 +15256,189 @@ fn reg_lookup_message(message: &str) -> bool {
     message.ends_with(" does not exist")
         || message.starts_with("operator does not exist: ")
         || message == "invalid name syntax"
+}
+
+/// The operand type names a caret may be attached for, for
+/// [`attach_operator_resolution_position`].
+///
+/// These are the base types whose operator set crabka mirrors, so a 42883 over
+/// two of them is one `PostgreSQL` raises as well. Every name left out is left
+/// out for a measured reason rather than an oversight:
+///
+/// * an array, a domain or a range operand marks a place where crabka lacks an
+///   operator `PostgreSQL` has — `numeric[] || integer[]`, `dia || integer` and
+///   `int4range || int4range` all succeed upstream;
+/// * `character varying` is the same gap under a base-type name, because
+///   `character varying = integer` succeeds upstream and crabka refuses it;
+/// * `jsonb` and `tsquery` name families crabka has only in part;
+/// * the date/time names belong to
+///   [`crate::temporal_arith::attach_operator_position`], which runs first and
+///   resolves that family on its own terms.
+const RESOLVED_OPERAND_TYPES: &[&str] = &[
+    "bigint",
+    "boolean",
+    "box",
+    "circle",
+    "double precision",
+    "integer",
+    "line",
+    "lseg",
+    "numeric",
+    "path",
+    "point",
+    "polygon",
+    "real",
+    "smallint",
+    "text",
+    "xid",
+];
+
+/// Point `PostgreSQL`'s caret at the operator a query could not resolve.
+///
+/// `PostgreSQL` carries a location on every operator it fails to resolve and
+/// prints `LINE n:` under it. crabka reproduces the location by re-lexing the
+/// statement and finding the one token that spells what the message names.
+///
+/// # Why the guards are this tight
+///
+/// A caret costs two lines wherever crabka raises an error `PostgreSQL` does
+/// not, so the population that matters is not "every 42883" but "every 42883
+/// upstream raises too". Measured on the pinned 18.4 corpus, crabka reports
+/// `operator does not exist` fifty-nine times: thirty-five have no upstream
+/// counterpart at all, eight have one `PostgreSQL` prints bare, and sixteen
+/// have one that carries a caret. The guards below turn away all forty-three
+/// of the first two groups and eight of the sixteen take their caret here. Of
+/// the other eight, six already have one from
+/// [`attach_reg_cast_literal_position`] or
+/// [`crate::temporal_arith::attach_operator_position`], and the two in
+/// `plpgsql` and `polymorphism` stay bare because upstream points into a
+/// function body rather than into the statement the client sent.
+///
+/// *Only a query.* A utility statement that names an operator writes the same
+/// spelling in its text — `DROP OPERATOR === (int4, int4)` — and gets no caret
+/// upstream, because the lookup happens after parse analysis from a tree that
+/// no longer carries the source. Measured bare on 18.4 for `DROP OPERATOR`,
+/// `COMMENT ON OPERATOR` and `ALTER TYPE … ALTER ATTRIBUTE`. A positive list of
+/// query statements is what admits `SELECT`, `INSERT`, `UPDATE`, `DELETE` and
+/// `MERGE` and nothing else.
+///
+/// *Only a resolved operand type.* See [`RESOLVED_OPERAND_TYPES`]. This is the
+/// guard that separates the sixteen from the thirty-five: crabka's invented
+/// rejections are overwhelmingly array, domain, range, `jsonb` and `tsquery`
+/// operands.
+///
+/// *Only one candidate token.* `PostgreSQL` blames the innermost operator that
+/// failed, and a message naming `integer || integer` for `SELECT 1 || 2 || 3`
+/// does not say which `||` that was. Two candidates is a guess, so it stays
+/// bare.
+///
+/// # Shapes this does not reach
+///
+/// A prefix operator leaves the left operand of the message empty, which no
+/// entry of [`RESOLVED_OPERAND_TYPES`] matches, so `SELECT @@@ 1` stays bare.
+/// `OPERATOR(pg_catalog.+)` puts a schema on the spelling, which is not one
+/// operator token, so it stays bare as well — upstream points at the `OPERATOR`
+/// keyword for that form. Neither shape occurs in the corpus with an operand
+/// type this admits.
+fn attach_operator_resolution_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    use crabka_pgparser::token::{Keyword, Token};
+
+    if !matches!(
+        stmt,
+        Statement::Query(_)
+            | Statement::Insert { .. }
+            | Statement::Update { .. }
+            | Statement::Delete { .. }
+            | Statement::Merge { .. }
+    ) || error.code != "42883"
+        || error
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Some(operands) = error.message.strip_prefix("operator does not exist: ") else {
+        return error;
+    };
+    // `<left type> <spelling> <right type>`, where either type name may hold
+    // spaces (`double precision`) but neither can hold an operator character,
+    // so the one word that lexes as a single operator is the spelling.
+    let words: Vec<&str> = operands.split(' ').collect();
+    let spelled: Vec<(usize, Token)> = words
+        .iter()
+        .enumerate()
+        .filter_map(|(index, word)| sole_operator_token(word).map(|token| (index, token)))
+        .collect();
+    let [(index, wanted)] = spelled.as_slice() else {
+        return error;
+    };
+    if ![words[..*index].join(" "), words[index + 1..].join(" ")]
+        .iter()
+        .all(|name| RESOLVED_OPERAND_TYPES.contains(&name.as_str()))
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let position = |offset: usize| sql[..offset].chars().count() + 1;
+    let written: Vec<usize> = tokens
+        .iter()
+        .filter(|(token, _)| token == wanted)
+        .map(|(_, offset)| position(*offset))
+        .collect();
+    match written.as_slice() {
+        [only] => error.with_position(*only),
+        // An `IN` list lowers to `= ANY`, so the failure reports an `=` the
+        // statement never wrote and `PostgreSQL` points at the `IN` keyword
+        // instead — `select '(0,0)'::point in ('(0,0,0,0)'::box, point(0,0))`
+        // carets the `in`. Only when no `=` is written at all: a statement
+        // holding both leaves which one failed unknowable.
+        [] if *wanted == Token::Eq => match sole_keyword_position(&tokens, Keyword::In, position) {
+            Some(only) => error.with_position(only),
+            None => error,
+        },
+        _ => error,
+    }
+}
+
+/// The one token `spelling` lexes to, when it is an operator.
+///
+/// A message word is the operator only if every character of it is one
+/// `PostgreSQL`'s grammar allows in an operator name *and* crabka's lexer reads
+/// the whole word as a single token. The second half is what rejects a spelling
+/// crabka and `PostgreSQL` tokenise differently: crabka reads `#-` as `#` then
+/// `-` and reports the operator as `#`, and a caret drawn from half an operator
+/// points at the wrong column.
+fn sole_operator_token(spelling: &str) -> Option<crabka_pgparser::token::Token> {
+    /// `PostgreSQL`'s operator character set, from its `op_chars` lexer rule.
+    const OPERATOR_CHARACTERS: &str = "+-*/<>=~!@#%^&|?";
+
+    if spelling.is_empty() || !spelling.chars().all(|c| OPERATOR_CHARACTERS.contains(c)) {
+        return None;
+    }
+    match crabka_pgparser::lexer::lex(spelling).ok()?.as_slice() {
+        [(token, 0), (crabka_pgparser::token::Token::Eof, _)] => Some(token.clone()),
+        _ => None,
+    }
+}
+
+/// Where `keyword` is written, when the statement writes it exactly once.
+fn sole_keyword_position(
+    tokens: &[(crabka_pgparser::token::Token, usize)],
+    keyword: crabka_pgparser::token::Keyword,
+    position: impl Fn(usize) -> usize,
+) -> Option<usize> {
+    let written: Vec<usize> = tokens
+        .iter()
+        .filter(|(token, _)| *token == crabka_pgparser::token::Token::Keyword(keyword))
+        .map(|(_, offset)| position(*offset))
+        .collect();
+    match written.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
 }
 
 /// The top-level clause a token sits in, for [`attach_query_analysis_position`].
@@ -23280,6 +23482,125 @@ mod session_conformance_tests {
                 .and_then(|diagnostics| diagnostics.position)
                 == Some(8)
         );
+    }
+
+    /// `PostgreSQL` points at the operator whose resolution failed, and psql
+    /// draws its `LINE n:` echo from the position on the wire. Every column
+    /// asserted here is the pinned 18.4 oracle's.
+    #[tokio::test]
+    async fn an_unresolved_operator_carries_its_caret() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (sql, position) in [
+            ("select '1'::xid < '2'::xid", Some(17)),
+            ("select '1'::xid <= '2'::xid", Some(17)),
+            ("select '1'::xid > '2'::xid", Some(17)),
+            ("select '1'::xid >= '2'::xid", Some(17)),
+            ("select 3 || 4.0", Some(10)),
+            ("SELECT lseg '((1,2),(3,4))' # point '(1,2)'", Some(29)),
+            // An `IN` list lowers to `= ANY`, so the message names an `=` the
+            // statement never wrote and the caret lands on the keyword.
+            (
+                "select '(0,0)'::point in ('(0,0,0,0)'::box, point(0,0))",
+                Some(23),
+            ),
+            // The wire carries a character offset and psql resolves the line
+            // itself: 63 is the `+` on the fourth line, which upstream prints
+            // as `LINE 4:` with the caret in column 13.
+            (
+                "WITH RECURSIVE t(n) AS (\n    SELECT '7'\nUNION ALL\n    SELECT n+1 FROM t WHERE n < 10\n)\nSELECT n, pg_typeof(n) FROM t",
+                Some(63),
+            ),
+            // Which `||` failed is not knowable from `integer || integer`.
+            ("SELECT 1 || 2 || 3", None),
+            // Operand families crabka carries only in part. It refuses these
+            // where PostgreSQL answers them, so a caret would be two more lines
+            // of divergence rather than two fewer.
+            ("select '{\"a\":1}'::jsonb #- '{a}'", None),
+            ("SELECT ARRAY[1.1] || ARRAY[2,3,4]", None),
+            ("SELECT 'a' <-> 'b & d'::tsquery", None),
+        ] {
+            let error = session.simple_query(sql).await.expect_err(sql);
+            assert!(error.code == "42883", "{sql}: {error:?}");
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// A statement whose whole subject is an operator writes the spelling in
+    /// its own text and still gets no caret upstream: the name is looked up
+    /// after parse analysis, from a tree that no longer carries the source.
+    /// Measured bare on 18.4 for `DROP OPERATOR` and `COMMENT ON OPERATOR`,
+    /// against a caret for the query that writes the same operator.
+    #[test]
+    fn a_statement_naming_an_operator_stays_bare() {
+        for (sql, position) in [
+            ("select '1'::xid # '2'::xid", Some(17)),
+            ("DROP OPERATOR # (xid, xid)", None),
+            ("COMMENT ON OPERATOR # (xid, xid) IS 'x'", None),
+        ] {
+            let error = super::attach_operator_resolution_position(
+                sql,
+                &only_statement(sql),
+                crabka_pgwire::error::PgError::error("42883", "operator does not exist: xid # xid"),
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    /// The operand types decide, not the spelling. The same statement and the
+    /// same operator earn a caret for a pair whose operator set crabka mirrors
+    /// and none for a pair where crabka's own gaps invent the rejection.
+    #[test]
+    fn only_a_mirrored_operand_pair_earns_a_caret() {
+        for (sql, message, position) in [
+            ("select a + b from t", "text + integer", Some(10)),
+            ("select a + b from t", "double precision + bigint", Some(10)),
+            // An array, a domain or a range operand marks a gap: PostgreSQL
+            // answers `numeric[] || integer[]` and `int4range || int4range`.
+            ("select a + b from t", "text[] + integer[]", None),
+            ("select a + b from t", "int4range + integer", None),
+            // The same gap under a base-type name — crabka refuses
+            // `character varying = integer`, which PostgreSQL answers.
+            ("select a + b from t", "character varying + integer", None),
+            // The date/time names belong to `temporal_arith`, which runs first.
+            ("select a + b from t", "date + interval", None),
+            // A prefix operator leaves the left operand of the message empty.
+            ("select a + b from t", "+ integer", None),
+            // crabka reads `#-` as `#` then `-` and reports the operator as
+            // `#`, so a caret drawn from it would point at the wrong column.
+            ("select a #- b from t", "text #- integer", None),
+        ] {
+            let error = super::attach_operator_resolution_position(
+                sql,
+                &only_statement(sql),
+                crabka_pgwire::error::PgError::error(
+                    "42883",
+                    format!("operator does not exist: {message}"),
+                ),
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.position)
+                    == position,
+                "{message}: {error:?}"
+            );
+        }
     }
 
     /// A `reg*` cast resolves a *constant*, so PostgreSQL blames the constant

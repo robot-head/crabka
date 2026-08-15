@@ -1422,7 +1422,8 @@ fn eval_grouped_depth(
                 return Ok(result);
             }
             let x = eval_grouped_depth(expr, grouped, d)?;
-            crate::eval::eval_in_list(expr, &x, list, *negated, ctx, |e| {
+            let element = crate::eval::in_list_element_type(expr, list, scope)?;
+            crate::eval::eval_in_list(expr, &x, list, element, *negated, ctx, |e| {
                 eval_grouped_depth(e, grouped, d)
             })
         }

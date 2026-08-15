@@ -692,3 +692,60 @@ async fn a_regclass_default_prints_its_name_through_returning() {
             == Some("target".into())
     );
 }
+
+/// `IN` has two spellings and `reg*` is the family that can tell them apart.
+///
+/// `transformAExprIn` builds `x = ANY (ARRAY[…])` when more than one right-hand
+/// item is free of `Var`s, and the array's element type is `select_common_type`
+/// over the operand and the list — so each `unknown` literal reaches `regclass`
+/// through `regclassin`, and resolves as a relation *name*. With one such item
+/// or none it builds an OR-chain of `=` instead, and `regclass`'s equality is
+/// `oideq`, so the literal is read as an oid and a name is a syntax error.
+///
+/// Captured from `postgres:18.4`, which accepts the two-element list and
+/// refuses every one-element form beside it.
+#[tokio::test]
+async fn a_multi_element_in_list_reads_its_literals_as_relation_names() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for ddl in ["CREATE TABLE lhs (a int)", "CREATE TABLE rhs (b int)"] {
+        client.run(ddl).await;
+    }
+
+    for (sql, expected) in [
+        ("SELECT 'lhs'::regclass IN ('lhs', 'rhs')", "t"),
+        ("SELECT 'lhs'::regclass IN ('rhs', 'pg_class')", "f"),
+        ("SELECT 'lhs'::regclass NOT IN ('rhs', 'pg_class')", "t"),
+        // A list of three keeps the array form, and a numeric literal beside a
+        // name is still resolved by the same input function.
+        ("SELECT 'lhs'::regclass IN ('rhs', 'pg_class', 'lhs')", "t"),
+        // The operand carries the type through a cast off a catalog column,
+        // which is the shape `create_misc` writes.
+        (
+            "SELECT count(*)::text FROM pg_class \
+             WHERE oid::regclass IN ('lhs', 'rhs')",
+            "2",
+        ),
+    ] {
+        assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");
+    }
+}
+
+/// The OR-chain half of the same rule: one non-`Var` item is not enough for the
+/// array form, so the literal beside a `regclass` is an oid.
+#[tokio::test]
+async fn a_single_element_in_list_reads_its_literal_as_an_oid() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("CREATE TABLE lhs (a int)").await;
+
+    for sql in [
+        "SELECT 'lhs'::regclass = 'lhs'",
+        "SELECT 'lhs'::regclass IN ('lhs')",
+        "SELECT 'lhs'::regclass NOT IN ('lhs')",
+        "SELECT 'lhs'::regclass BETWEEN 'lhs' AND 'lhs'",
+    ] {
+        let (code, message) = client.fails(sql).await;
+        assert!(code == "42804", "{sql}: {code} {message}");
+    }
+}

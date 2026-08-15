@@ -423,3 +423,116 @@ async fn a_child_column_of_a_different_type_refuses_the_merge() {
     // The statement is one batch, so the parent must not have kept the column.
     assert!(s.simple_query("select c from root").await.is_err());
 }
+
+/// The notices an `ADD COLUMN` raises on its way down the tree.
+///
+/// `take_notices` is called after the setup so the receiver holds only what the
+/// `ALTER TABLE` itself raised.
+async fn add_column_notices(setup: &[&str], alter: &str) -> Vec<String> {
+    let (_engine, mut s) = engine_with(setup).await;
+    let mut notices = s.take_notices().expect("notice receiver");
+    while notices.try_recv().is_ok() {}
+    run(&mut s, alter).await;
+    let mut seen = Vec::new();
+    while let Ok(notice) = notices.try_recv() {
+        seen.push(notice.message);
+    }
+    seen
+}
+
+/// `ATExecAddColumn` recurses one edge at a time — `tablecmds.c` says outright
+/// that `find_all_inheritors` cannot be used — so a child reachable by two
+/// paths is arrived at twice. The second arrival finds the column already
+/// there and says so.
+///
+/// Every count here was captured from `postgres:18.4`.
+#[tokio::test]
+async fn a_child_reached_twice_reports_the_merge_once_per_extra_path() {
+    // The `create_misc` diamond: `d` inherits both `b` and `c`, which both
+    // inherit `a`.
+    assert!(
+        add_column_notices(
+            &[
+                "create table a_star (class char, aa int4)",
+                "create table b_star (b text) inherits (a_star)",
+                "create table c_star (c text) inherits (a_star)",
+                "create table d_star (d float8) inherits (b_star, c_star)",
+                "create table e_star (e int2) inherits (c_star)",
+                "create table f_star (f polygon) inherits (e_star)",
+            ],
+            "alter table a_star add column a text",
+        )
+        .await
+            == vec!["merging definition of column \"a\" for child \"d_star\"".to_string()]
+    );
+
+    // Three paths to the same child are two extra arrivals, so two notices.
+    assert!(
+        add_column_notices(
+            &[
+                "create table t0 (x int)",
+                "create table t1 () inherits (t0)",
+                "create table t2 () inherits (t0)",
+                "create table t3 () inherits (t0)",
+                "create table t4 () inherits (t1, t2, t3)",
+            ],
+            "alter table t0 add column q text",
+        )
+        .await
+            == vec![
+                "merging definition of column \"q\" for child \"t4\"".to_string(),
+                "merging definition of column \"q\" for child \"t4\"".to_string(),
+            ]
+    );
+}
+
+/// A child that spelled the column out by hand is the same case one arrival
+/// earlier, so it takes the notice too — and a tree with no second arrival and
+/// no hand-written column takes none.
+#[tokio::test]
+async fn a_child_that_already_declares_the_column_reports_the_merge() {
+    assert!(
+        add_column_notices(
+            &[
+                "create table g0 (x int)",
+                "create table g1 (m text) inherits (g0)",
+                "create table g2 () inherits (g1)",
+            ],
+            "alter table g0 add column m text",
+        )
+        .await
+            == vec!["merging definition of column \"m\" for child \"g1\"".to_string()]
+    );
+
+    let quiet: Vec<String> = Vec::new();
+    assert!(
+        add_column_notices(
+            &[
+                "create table h0 (x int)",
+                "create table h1 () inherits (h0)",
+                "create table h2 () inherits (h1)",
+            ],
+            "alter table h0 add column m text",
+        )
+        .await
+            == quiet
+    );
+    // `IF NOT EXISTS` for a column the parent already has is dropped whole,
+    // descendants included — so the child that inherited it is not merged into.
+    // PostgreSQL raises its own `already exists, skipping` notice there and no
+    // merge notice, which is what `quiet` here means: no *merge* notice.
+    assert!(
+        add_column_notices(
+            &[
+                "create table j0 (m text)",
+                "create table j1 () inherits (j0)"
+            ],
+            "alter table j0 add column if not exists m text",
+        )
+        .await
+        .iter()
+        .filter(|notice| notice.starts_with("merging definition"))
+        .count()
+            == 0
+    );
+}
