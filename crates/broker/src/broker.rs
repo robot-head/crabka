@@ -1792,20 +1792,21 @@ struct ListenerStartup {
 
 async fn bind_listeners_and_recover_moves(
     config: &mut BrokerConfig,
-    mut supplied_listener: Option<TcpListener>,
+    mut supplied_listeners: Vec<TcpListener>,
     partitions: &Arc<PartitionRegistry>,
     throttle_state: &Arc<crate::throttle::ThrottleState>,
 ) -> Result<ListenerStartup, BrokerError> {
     let listener_specs = config.effective_listeners();
     let mut bound = Vec::with_capacity(listener_specs.len());
     for spec in listener_specs {
-        let listener = match supplied_listener.take_if(|listener| {
+        let listener = if let Some(index) = supplied_listeners.iter().position(|listener| {
             listener
                 .local_addr()
                 .is_ok_and(|addr| addr == spec.bind_addr)
         }) {
-            Some(listener) => listener,
-            None => TcpListener::bind(spec.bind_addr).await?,
+            supplied_listeners.swap_remove(index)
+        } else {
+            TcpListener::bind(spec.bind_addr).await?
         };
         let address = listener.local_addr()?;
         bound.push((spec, listener, address));
@@ -1999,7 +2000,7 @@ struct BrokerStorageStartup {
 
 async fn finish_broker_startup(
     mut config: BrokerConfig,
-    data_listener: Option<TcpListener>,
+    data_listeners: Vec<TcpListener>,
     metadata: (
         Arc<dyn crate::metadata_source::MetadataSource>,
         Arc<PartitionRegistry>,
@@ -2021,7 +2022,7 @@ async fn finish_broker_startup(
         future_logs,
     } = bind_listeners_and_recover_moves(
         &mut config,
-        data_listener,
+        data_listeners,
         &partitions,
         &runtime.throttle_state,
     )
@@ -4212,10 +4213,10 @@ impl Broker {
     /// * `controller_listener`: threaded through to
     ///   [`crabka_raft::Controller::start_with_listener`]. Its local address
     ///   MUST equal `config.controller_listen_addr`.
-    /// * `data_plane_listener`: adopted for the data-plane [`ListenerSpec`]
-    ///   whose `bind_addr` equals the listener's local address (for the legacy
-    ///   single-listener path that is `config.listen_addr`). Any non-matching
-    ///   specs still bind from `config`.
+    /// * `data_plane_listeners`: each listener is adopted for the data-plane
+    ///   [`ListenerSpec`] whose `bind_addr` equals its local address (for the
+    ///   legacy single-listener path that is `config.listen_addr`). Any
+    ///   non-matching specs still bind from `config`.
     ///
     /// A live socket handoff closes the TOCTOU window that the bind-and-drop
     /// trick leaves open. That trick reads an ephemeral port and then drops the
@@ -4237,27 +4238,32 @@ impl Broker {
     pub async fn start_with_listeners(
         config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
-        data_plane_listener: Option<tokio::net::TcpListener>,
+        data_plane_listeners: impl IntoIterator<Item = tokio::net::TcpListener>,
     ) -> Result<BrokerHandle, BrokerError> {
-        Self::start_with_listeners_boxed(config, controller_listener, data_plane_listener).await
+        Self::start_with_listeners_boxed(
+            config,
+            controller_listener,
+            data_plane_listeners.into_iter().collect(),
+        )
+        .await
     }
 
     fn start_with_listeners_boxed(
         config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
-        data_plane_listener: Option<tokio::net::TcpListener>,
+        data_plane_listeners: Vec<tokio::net::TcpListener>,
     ) -> BoxFuture<'static, Result<BrokerHandle, BrokerError>> {
         Box::pin(Self::start_with_listeners_inner(
             config,
             controller_listener,
-            data_plane_listener,
+            data_plane_listeners,
         ))
     }
 
     async fn start_with_listeners_inner(
         mut config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
-        data_plane_listener: Option<tokio::net::TcpListener>,
+        data_plane_listeners: Vec<tokio::net::TcpListener>,
     ) -> Result<BrokerHandle, BrokerError> {
         let StartupTransport {
             tls_dynamic,
@@ -4394,7 +4400,7 @@ impl Broker {
 
         finish_broker_startup(
             config,
-            data_plane_listener,
+            data_plane_listeners,
             (controller, partitions, controller_admin_router),
             (
                 group_coordinator,
