@@ -440,8 +440,8 @@ async fn every_copy_refusal_arrives_before_copy_in_mode() {
         ),
         (
             "an encoding it cannot convert from",
-            "COPY t FROM STDIN WITH (FORMAT csv, ENCODING 'LATIN1')",
-            "COPY ENCODING \"LATIN1\" is not supported; the server encoding is UTF8",
+            "COPY t FROM STDIN WITH (FORMAT csv, ENCODING 'LATIN2')",
+            "COPY ENCODING \"LATIN2\" is not supported; the server encoding is UTF8",
         ),
         (
             "a FORCE_NOT_NULL naming a column the copy does not read",
@@ -483,6 +483,125 @@ async fn every_copy_refusal_arrives_before_copy_in_mode() {
             (code.as_str(), message.as_str())
                 == ("0A000", "COPY FROM not supported with row-level security"),
             "{sql}: {code} {message}"
+        );
+    }
+}
+
+/// `ENCODING` converts the payload to the server's UTF-8 rather than being
+/// ignored, so a copy loads the characters the named encoding spells.
+///
+/// The payload is `copyencoding`'s: U+3042 HIRAGANA LETTER A written as UTF-8.
+/// Read back as LATIN1 those three bytes are three separate code points, which
+/// is what `PostgreSQL` 18.4 stores for the same load.
+#[tokio::test]
+async fn copy_from_converts_the_payload_from_the_named_encoding() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(&mut session, "CREATE TABLE enc (t text)").await;
+
+    session
+        .copy_in(
+            "COPY enc FROM STDIN WITH (FORMAT csv, ENCODING 'LATIN1')",
+            0,
+            vec![bytes::Bytes::from_static("\u{3042}\n".as_bytes())],
+        )
+        .await
+        .expect("LATIN1 allows every byte");
+
+    assert!(
+        rows(&mut session, "SELECT t, length(t) FROM enc").await
+            == vec![vec!["[\u{e3}\u{81}\u{82}]".to_string(), "[3]".to_string()]]
+    );
+}
+
+/// A byte sequence the payload's encoding forbids is reported the way
+/// `PostgreSQL` reports it: the encoding named, the bytes of the character its
+/// lead byte promised, and the line the sequence fell on.
+///
+/// Every case is `PostgreSQL` 18.4's observed report for the same payload. The
+/// quoted run is the lead byte's `pg_encoding_mblen`, cut short by the end of
+/// the payload rather than padded — so a truncated character quotes only the
+/// bytes that are there, and a three-byte one quotes the newline it ran into.
+#[tokio::test]
+async fn copy_from_reports_a_sequence_the_payload_encoding_forbids() {
+    struct Case {
+        name: &'static str,
+        encoding: &'static str,
+        data: &'static [u8],
+        message: &'static str,
+        context: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "a JIS X 0208 lead byte with an out-of-range second byte",
+            encoding: "EUC_JP",
+            data: b"\xe3\x81\x82\n",
+            message: "invalid byte sequence for encoding \"EUC_JP\": 0xe3 0x81",
+            context: "COPY enc, line 1",
+        },
+        Case {
+            name: "the line counted is the one the bad byte fell on",
+            encoding: "EUC_JP",
+            data: b"a\nb\n\xe3\x81\x82\nd\n",
+            message: "invalid byte sequence for encoding \"EUC_JP\": 0xe3 0x81",
+            context: "COPY enc, line 3",
+        },
+        Case {
+            name: "SS3 promises three bytes and quotes the newline it reached",
+            encoding: "EUC_JP",
+            data: b"ok\n\x8f\xa1\n",
+            message: "invalid byte sequence for encoding \"EUC_JP\": 0x8f 0xa1 0x0a",
+            context: "COPY enc, line 2",
+        },
+        Case {
+            name: "SS2 takes one half-width katakana byte, not an ASCII space",
+            encoding: "EUC_JP",
+            data: b"ok\n\x8e\x20\n",
+            message: "invalid byte sequence for encoding \"EUC_JP\": 0x8e 0x20",
+            context: "COPY enc, line 2",
+        },
+        Case {
+            name: "a lead byte at end of payload quotes only itself",
+            encoding: "EUC_JP",
+            data: b"ok\n\xa1",
+            message: "invalid byte sequence for encoding \"EUC_JP\": 0xa1",
+            context: "COPY enc, line 2",
+        },
+        Case {
+            name: "the server encoding is checked the same way",
+            encoding: "UTF8",
+            data: b"ok\n\xc3\n",
+            message: "invalid byte sequence for encoding \"UTF8\": 0xc3 0x0a",
+            context: "COPY enc, line 2",
+        },
+    ];
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(&mut session, "CREATE TABLE enc (t text)").await;
+
+    for case in cases {
+        let sql = format!(
+            "COPY enc FROM STDIN WITH (FORMAT csv, ENCODING '{}')",
+            case.encoding
+        );
+        let error = session
+            .copy_in(&sql, 0, vec![bytes::Bytes::from_static(case.data)])
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{} should have failed", case.name));
+        let context = error
+            .diagnostics
+            .as_ref()
+            .and_then(|fields| fields.context.clone());
+        assert!(
+            (
+                error.code.as_str(),
+                error.message.as_str(),
+                context.as_deref()
+            ) == ("22021", case.message, Some(case.context)),
+            "{}",
+            case.name
         );
     }
 }

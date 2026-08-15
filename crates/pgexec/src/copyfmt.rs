@@ -20,10 +20,12 @@
 //! - a NULL is the null string verbatim in both formats: never escaped, never
 //!   quoted, not even under `FORCE_QUOTE *`.
 
+use std::borrow::Cow;
+
 use crabka_pgparser::ast::{CopyColumns, CopyFormat, CopyHeader, CopyOptions};
 use crabka_pgwire::error::PgError;
 
-use crate::error::ExecError;
+use crate::{charset::Charset, error::ExecError};
 
 /// The bytes that separate and delimit fields, once the format's defaults have
 /// been applied. Shared by both directions: a `COPY FROM` reads what a `COPY TO`
@@ -52,6 +54,8 @@ pub(crate) struct CopyOutFormat {
     pub(crate) framing: CopyFraming,
     pub(crate) header: bool,
     force_quote: Option<CopyColumns>,
+    /// The character set the written payload is in.
+    encoding: Charset,
 }
 
 /// A resolved `COPY … FROM` option set.
@@ -67,6 +71,8 @@ pub(crate) struct CopyInFormat {
     force_not_null: Option<CopyColumns>,
     /// `FORCE_NULL`, as written.
     force_null: Option<CopyColumns>,
+    /// The character set the incoming payload is in.
+    pub(crate) encoding: Charset,
 }
 
 fn invalid_parameter(message: &str) -> ExecError {
@@ -187,43 +193,51 @@ fn refuse_unhandled_copy_from_options(options: &CopyOptions) -> Result<(), ExecE
             )));
         }
     }
-    refuse_unhandled_encoding(options.encoding.as_deref())
+    Ok(())
 }
 
-/// The server encoding is UTF-8 and there is no transcoding machinery, so an
-/// `ENCODING` naming anything else would be read as a promise the copy cannot
-/// keep. `PostgreSQL` spells the alias set out in `pg_wchar.h`; the names that
-/// ask for no conversion at all are all this engine can answer to.
+/// The character set a copy's payload is written in.
 ///
-/// `SQL_ASCII` is one of them: it is `PostgreSQL`'s "do not convert", so a copy
-/// under it moves the server's own bytes in either direction, which is what
-/// this engine does anyway. The one divergence is on the way in — `PostgreSQL`
-/// stores whatever bytes arrive, valid UTF-8 or not, and this engine still
-/// requires them to be UTF-8, so it refuses a payload `PostgreSQL` would have
-/// stored and only been unable to read back.
-fn refuse_unhandled_encoding(encoding: Option<&str>) -> Result<(), ExecError> {
-    match encoding {
-        None => Ok(()),
-        Some(name)
-            if name.eq_ignore_ascii_case("utf8")
-                || name.eq_ignore_ascii_case("utf-8")
-                || name.eq_ignore_ascii_case("sql_ascii") =>
-        {
-            Ok(())
-        }
-        Some(name) => Err(ExecError::Unsupported(format!(
-            "COPY ENCODING \"{name}\" is not supported; the server encoding is UTF8"
-        ))),
+/// `PostgreSQL` resolves this in `ProcessCopyOptions`: the `ENCODING` option
+/// when one was given, and `client_encoding` otherwise. `default` is the
+/// session's, already resolved by the caller.
+///
+/// A name outside [`Charset`]'s set is refused rather than quietly read as
+/// UTF-8, because ignoring an `ENCODING` would load *wrong rows* — silently,
+/// and into a table the caller believes it filled correctly. The two refusals
+/// are worded apart: `PostgreSQL` complains about the option's value when the
+/// name is not an encoding at all, and only a name it does know can be one this
+/// engine has no converter for.
+fn resolve_encoding(encoding: Option<&str>, default: Charset) -> Result<Charset, ExecError> {
+    let Some(name) = encoding else {
+        return Ok(default);
+    };
+    if let Some(charset) = Charset::from_name(name) {
+        return Ok(charset);
     }
+    if crate::catalog_fn::encoding_id(name).is_none() {
+        return Err(invalid_parameter(
+            "argument to option \"encoding\" must be a valid encoding name",
+        ));
+    }
+    Err(ExecError::Unsupported(format!(
+        "COPY ENCODING \"{name}\" is not supported; the server encoding is UTF8"
+    )))
 }
 
 impl CopyInFormat {
-    pub(crate) fn resolve(options: &CopyOptions) -> Result<Self, ExecError> {
+    /// `default_encoding` is the session's `client_encoding`, which a copy that
+    /// names no `ENCODING` of its own reads its payload in.
+    pub(crate) fn resolve(
+        options: &CopyOptions,
+        default_encoding: Charset,
+    ) -> Result<Self, ExecError> {
         // Before the framing, so that an option this engine cannot honour is
         // reported as unsupported rather than as a complaint about the value of
         // an option that would have been ignored anyway.
         refuse_unhandled_copy_from_options(options)?;
         Ok(Self {
+            encoding: resolve_encoding(options.encoding.as_deref(), default_encoding)?,
             framing: CopyFraming::resolve(options)?,
             header: options.header.filter(|header| *header != CopyHeader::False),
             force_not_null: options.force_not_null.clone(),
@@ -296,13 +310,48 @@ pub(crate) struct CopyForceFlags {
 }
 
 impl CopyOutFormat {
-    pub(crate) fn resolve(options: &CopyOptions) -> Result<Self, ExecError> {
-        refuse_unhandled_encoding(options.encoding.as_deref())?;
+    /// `default_encoding` is the session's `client_encoding`, which a copy that
+    /// names no `ENCODING` of its own writes its payload in.
+    pub(crate) fn resolve(
+        options: &CopyOptions,
+        default_encoding: Charset,
+    ) -> Result<Self, ExecError> {
         Ok(Self {
+            encoding: resolve_encoding(options.encoding.as_deref(), default_encoding)?,
             framing: CopyFraming::resolve(options)?,
             header: options.header == Some(CopyHeader::True),
             force_quote: options.force_quote.clone(),
         })
+    }
+
+    /// Convert one produced line from the server's UTF-8 to the copy's own
+    /// character set. A copy that writes the server's bytes moves the line
+    /// through untouched, which is every ordinary copy.
+    pub(crate) fn encode_line(&self, line: Vec<u8>) -> Result<Vec<u8>, ExecError> {
+        if self.encoding.is_passthrough() {
+            return Ok(line);
+        }
+        // The line is this engine's own output, so it is UTF-8 by construction.
+        let text = String::from_utf8(line).map_err(|_| {
+            ExecError::Remote(PgError::error(
+                "22021",
+                "invalid byte sequence for encoding \"UTF8\"",
+            ))
+        })?;
+        self.encoding
+            .encode(&text)
+            .map(Cow::into_owned)
+            .map_err(|unmappable| {
+                ExecError::Remote(PgError::error(
+                    "22P05",
+                    format!(
+                        "character with byte sequence {} in encoding \"UTF8\" has no equivalent \
+                         in encoding \"{}\"",
+                        unmappable.rendered(),
+                        self.encoding.canonical_name()
+                    ),
+                ))
+            })
     }
 
     /// Which of `names` `FORCE_QUOTE` covers.
@@ -784,6 +833,40 @@ fn marker_style_mismatch() -> ExecError {
     bad_copy_format("end-of-copy marker does not match previous newline style".into())
 }
 
+/// Convert a `COPY … FROM` payload from its own character set to the server's.
+///
+/// This is a separate step from the framing because the rows the framing
+/// produces borrow from the text, which has to outlive them: a payload that is
+/// already UTF-8 is borrowed straight from `data`, and a converted one is
+/// owned by the caller.
+///
+/// `PostgreSQL` reports a byte the source encoding does not allow against the
+/// line it fell on, quoting the character length the lead byte promised, so the
+/// line is counted here from the newlines that precede it.
+pub(crate) fn decode_copy_payload<'a>(
+    data: &'a [u8],
+    format: &CopyInFormat,
+    relation: &str,
+) -> Result<Cow<'a, str>, ExecError> {
+    format.encoding.decode(data).map_err(|invalid| {
+        // One more piece than there are newlines before the bad byte, which is
+        // the one-based line it fell on.
+        let counted = data[..invalid.offset].split(|byte| *byte == b'\n').count();
+        let line = u64::try_from(counted).unwrap_or(u64::MAX);
+        crate::exec::with_copy_context(
+            ExecError::Remote(PgError::error(
+                "22021",
+                format!(
+                    "invalid byte sequence for encoding \"{}\": {}",
+                    format.encoding.canonical_name(),
+                    invalid.rendered()
+                ),
+            )),
+            copy_context(relation, line, CopyContext::LineNumber),
+        )
+    })
+}
+
 /// Decode a `COPY … FROM` payload into per-row raw values.
 ///
 /// The NULL comparison is against the field *before* de-escaping, as
@@ -793,14 +876,12 @@ fn marker_style_mismatch() -> ExecError {
 /// in it — `""` is the empty string even when the null string is empty, which
 /// is how a CSV copy distinguishes the two at all.
 pub(crate) fn decode_copy_rows<'a>(
-    data: &'a [u8],
+    text: &'a str,
     format: &CopyInFormat,
     columns: &[String],
     force: &CopyForceFlags,
     relation: &str,
 ) -> Result<Vec<CopyRow<'a>>, ExecError> {
-    let text = std::str::from_utf8(data)
-        .map_err(|_| ExecError::Syntax("invalid byte sequence for encoding \"UTF8\"".into()))?;
     let mut reader = CopyLineReader::new(text, format);
     let mut rows = Vec::new();
     let mut header_pending = format.header.is_some();
@@ -1041,7 +1122,7 @@ mod tests {
     use assert2::assert;
     use crabka_pgparser::ast::{CopyColumns, CopyFormat, CopyHeader, CopyOptions};
 
-    use super::{CopyForceFlags, CopyInFormat, CopyOutFormat, decode_copy_rows};
+    use super::{Charset, CopyForceFlags, CopyInFormat, CopyOutFormat, decode_copy_rows};
     use crate::error::ExecError;
 
     fn options(build: impl FnOnce(&mut CopyOptions)) -> CopyOptions {
@@ -1059,7 +1140,7 @@ mod tests {
 
     /// Render a whole copy — header line included — the way the session does.
     fn copy_out(options: &CopyOptions, names: &[&str], rows: &[&[Option<&str>]]) -> String {
-        let format = CopyOutFormat::resolve(options).expect("options resolve");
+        let format = CopyOutFormat::resolve(options, Charset::default()).expect("options resolve");
         let names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
         let forced = format.forced_columns(&names, Some("t")).expect("columns");
         let mut out = format.header_line(&names).unwrap_or_default();
@@ -1408,14 +1489,14 @@ mod tests {
                 message: "CSV quote character must not appear in the NULL specification",
             },
             Case {
-                options: options(|o| o.encoding = Some("LATIN1".into())),
+                options: options(|o| o.encoding = Some("LATIN2".into())),
                 sqlstate: "0A000",
-                message: "COPY ENCODING \"LATIN1\" is not supported; the server encoding is UTF8",
+                message: "COPY ENCODING \"LATIN2\" is not supported; the server encoding is UTF8",
             },
         ];
         for case in cases {
             assert!(
-                error_of(CopyOutFormat::resolve(&case.options))
+                error_of(CopyOutFormat::resolve(&case.options, Charset::default()))
                     == (case.sqlstate.to_string(), case.message.to_string()),
                 "{}",
                 case.message
@@ -1436,14 +1517,63 @@ mod tests {
         );
     }
 
-    /// UTF-8 is the server encoding, so its two spellings are accepted and every
-    /// other encoding name is refused rather than silently ignored.
+    /// An `ENCODING` naming a character set this engine can convert is
+    /// resolved to it; every other name is refused rather than silently
+    /// ignored, and the two ways a name can fail are worded apart.
     #[test]
-    fn the_server_encoding_is_the_only_encoding_accepted() {
-        for name in ["UTF8", "utf-8", "SQL_ASCII", "sql_ascii"] {
-            assert!(CopyOutFormat::resolve(&options(|o| o.encoding = Some(name.into()))).is_ok());
+    fn copy_resolves_only_the_encodings_it_can_convert() {
+        let accepted = [
+            ("UTF8", Charset::Utf8),
+            ("utf-8", Charset::Utf8),
+            ("SQL_ASCII", Charset::SqlAscii),
+            ("sql_ascii", Charset::SqlAscii),
+            ("LATIN1", Charset::Latin1),
+            ("EUC_JP", Charset::EucJp),
+        ];
+        for (name, expected) in accepted {
+            let options = options(|o| o.encoding = Some(name.into()));
+            let resolved =
+                CopyInFormat::resolve(&options, Charset::default()).expect("options resolve");
+            assert!(resolved.encoding == expected, "{name}");
+            assert!(
+                CopyOutFormat::resolve(&options, Charset::default()).is_ok(),
+                "{name}"
+            );
         }
-        assert!(CopyOutFormat::resolve(&options(|o| o.encoding = Some("LATIN1".into()))).is_err());
+
+        let refused = [
+            // Known to PostgreSQL; this engine carries no converter for it.
+            (
+                "LATIN2",
+                "0A000",
+                "COPY ENCODING \"LATIN2\" is not supported; the server encoding is UTF8",
+            ),
+            // Not an encoding name at all.
+            (
+                "BOGUS",
+                "22023",
+                "argument to option \"encoding\" must be a valid encoding name",
+            ),
+        ];
+        for (name, sqlstate, message) in refused {
+            let options = options(|o| o.encoding = Some(name.into()));
+            assert!(
+                error_of(CopyInFormat::resolve(&options, Charset::default()))
+                    == (sqlstate.to_string(), message.to_string()),
+                "{name}"
+            );
+        }
+    }
+
+    /// A copy that names no `ENCODING` reads and writes its payload in the
+    /// session's `client_encoding`, as `ProcessCopyOptions` resolves it.
+    #[test]
+    fn copy_without_an_encoding_option_takes_the_session_default() {
+        for default in [Charset::Utf8, Charset::Latin1, Charset::EucJp] {
+            let resolved =
+                CopyInFormat::resolve(&CopyOptions::default(), default).expect("options resolve");
+            assert!(resolved.encoding == default, "{}", default.canonical_name());
+        }
     }
 
     /// The decoder reads what the encoder wrote, under the same options.
@@ -1508,9 +1638,10 @@ mod tests {
         ];
         let columns = ["s".to_string(), "n".to_string()];
         for case in cases {
-            let format = CopyInFormat::resolve(&case.options).expect("options resolve");
+            let format =
+                CopyInFormat::resolve(&case.options, Charset::default()).expect("options resolve");
             let decoded = decode_copy_rows(
-                case.data.as_bytes(),
+                case.data,
                 &format,
                 &columns,
                 &CopyForceFlags::default(),
@@ -1528,34 +1659,35 @@ mod tests {
     /// `\.` line; it terminates the data and every later line is ignored.
     #[test]
     fn copy_from_stops_at_the_end_of_data_marker() {
-        let format = CopyInFormat::resolve(&CopyOptions::default()).expect("options resolve");
-        let decode = |data: &[u8]| {
+        let format = CopyInFormat::resolve(&CopyOptions::default(), Charset::default())
+            .expect("options resolve");
+        let decode = |data: &str| {
             decode_copy_rows(data, &format, &[], &CopyForceFlags::default(), "t")
                 .expect("decode")
                 .into_iter()
                 .map(|row| row.values)
                 .collect::<Vec<_>>()
         };
+        assert!(decode("1\t0\t\\N\n\\.\n") == vec![vec![Some("1".into()), Some("0".into()), None]]);
         assert!(
-            decode(b"1\t0\t\\N\n\\.\n") == vec![vec![Some("1".into()), Some("0".into()), None]]
+            decode("1\ta\n\\.\nignored\tafter\n") == vec![vec![Some("1".into()), Some("a".into())]]
         );
-        assert!(
-            decode(b"1\ta\n\\.\nignored\tafter\n")
-                == vec![vec![Some("1".into()), Some("a".into())]]
-        );
-        assert!(decode(b"1\ta\n2\tb\n").len() == 2);
+        assert!(decode("1\ta\n2\tb\n").len() == 2);
     }
 
     /// A mismatched `HEADER MATCH` names the field, what it got and what it
     /// wanted, exactly as PostgreSQL does.
     #[test]
     fn header_match_reports_the_first_mismatched_column() {
-        let format = CopyInFormat::resolve(&options(|o| o.header = Some(CopyHeader::Match)))
-            .expect("options resolve");
+        let format = CopyInFormat::resolve(
+            &options(|o| o.header = Some(CopyHeader::Match)),
+            Charset::default(),
+        )
+        .expect("options resolve");
         let columns = ["s".to_string(), "n".to_string()];
         assert!(
             error_of(decode_copy_rows(
-                b"s\twrong\na\t1\n",
+                "s\twrong\na\t1\n",
                 &format,
                 &columns,
                 &CopyForceFlags::default(),
@@ -1568,7 +1700,7 @@ mod tests {
         );
         assert!(
             error_of(decode_copy_rows(
-                b"s\n",
+                "s\n",
                 &format,
                 &columns,
                 &CopyForceFlags::default(),
@@ -1579,7 +1711,7 @@ mod tests {
             )
         );
         assert!(
-            error_of(decode_copy_rows(b"s\t\\N\na\t1\n", &format, &columns, &CopyForceFlags::default(), "t"))
+            error_of(decode_copy_rows("s\t\\N\na\t1\n", &format, &columns, &CopyForceFlags::default(), "t"))
                 == (
                     "22P04".to_string(),
                     "column name mismatch in header line field 2: got null value (\"\\N\"), expected \"n\""
@@ -1615,14 +1747,10 @@ mod tests {
                 options: options(|o| o.reject_limit = Some(5)),
                 message: "COPY REJECT_LIMIT is not supported",
             },
-            Case {
-                options: options(|o| o.encoding = Some("LATIN1".into())),
-                message: "COPY ENCODING \"LATIN1\" is not supported; the server encoding is UTF8",
-            },
         ];
         for case in cases {
             assert!(
-                error_of(CopyInFormat::resolve(&case.options))
+                error_of(CopyInFormat::resolve(&case.options, Charset::default()))
                     == ("0A000".to_string(), case.message.to_string()),
                 "{}",
                 case.message
@@ -1642,7 +1770,7 @@ mod tests {
                 o.log_verbosity = Some(crabka_pgparser::ast::CopyLogVerbosity::Verbose);
             },
         ] {
-            assert!(CopyInFormat::resolve(&options(build)).is_ok());
+            assert!(CopyInFormat::resolve(&options(build), Charset::default()).is_ok());
         }
     }
 
@@ -1651,9 +1779,12 @@ mod tests {
     /// query form are worded differently.
     #[test]
     fn force_quote_resolves_against_the_copied_column_list() {
-        let format = CopyOutFormat::resolve(&csv(|o| {
-            o.force_quote = Some(CopyColumns::Named(vec!["nope".into()]));
-        }))
+        let format = CopyOutFormat::resolve(
+            &csv(|o| {
+                o.force_quote = Some(CopyColumns::Named(vec!["nope".into()]));
+            }),
+            Charset::default(),
+        )
         .expect("options resolve");
         let names = ["s".to_string(), "u".to_string()];
         assert!(
@@ -1671,9 +1802,12 @@ mod tests {
                 )
         );
 
-        let repeated = CopyOutFormat::resolve(&csv(|o| {
-            o.force_quote = Some(CopyColumns::Named(vec!["s".into(), "s".into()]));
-        }))
+        let repeated = CopyOutFormat::resolve(
+            &csv(|o| {
+                o.force_quote = Some(CopyColumns::Named(vec!["s".into(), "s".into()]));
+            }),
+            Charset::default(),
+        )
         .expect("options resolve");
         assert!(
             error_of(repeated.forced_columns(&names, Some("two")))

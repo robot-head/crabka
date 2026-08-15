@@ -10453,6 +10453,21 @@ impl SqlSession {
         ))
     }
 
+    /// The character set a copy that names no `ENCODING` of its own reads and
+    /// writes its payload in.
+    ///
+    /// `PostgreSQL` takes this from `client_encoding`, and so does this: the
+    /// setting is read rather than assumed, so that a copy follows it the day
+    /// the wire layer learns to speak anything but UTF-8. Until then the
+    /// setting admits only `UTF8`, and this is the server encoding.
+    fn copy_encoding(&self) -> crate::charset::Charset {
+        self.guc
+            .effective("client_encoding")
+            .ok()
+            .and_then(|name| crate::charset::Charset::from_name(&name))
+            .unwrap_or_default()
+    }
+
     /// Run a `COPY … TO`'s source and encode every row it produced.
     ///
     /// The whole copy is materialised on purpose. `PostgreSQL` buffers a
@@ -10462,7 +10477,7 @@ impl SqlSession {
     /// failure. Building the payload before anything is framed makes that
     /// indivisible rather than merely intended.
     async fn copy_out_rows(&mut self, copy: &CopyStmt) -> Result<CopiedOut, ExecError> {
-        let format = crate::copyfmt::CopyOutFormat::resolve(&copy.options)?;
+        let format = crate::copyfmt::CopyOutFormat::resolve(&copy.options, self.copy_encoding())?;
         let (source, relation) = self.copy_out_source(copy)?;
         // Boxed because this is `run_one` calling itself: a COPY of a query is
         // a statement inside a statement.
@@ -10477,14 +10492,17 @@ impl SqlSession {
         let names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
         let forced = format.forced_columns(&names, relation.as_deref())?;
         let mut lines = Vec::with_capacity(rows.len() + usize::from(format.header));
-        lines.extend(format.header_line(&names).map(bytes::Bytes::from));
+        if let Some(header) = format.header_line(&names) {
+            lines.push(bytes::Bytes::from(format.encode_line(header)?));
+        }
         let copied = rows.len();
         for row in &rows {
             let cells: Vec<Option<&[u8]>> = row
                 .iter()
                 .map(|cell| cell.as_ref().map(|cell| cell.text.as_ref()))
                 .collect();
-            lines.push(bytes::Bytes::from(format.row_line(&cells, &forced)));
+            let line = format.encode_line(format.row_line(&cells, &forced))?;
+            lines.push(bytes::Bytes::from(line));
         }
         Ok(CopiedOut {
             lines,
@@ -10515,7 +10533,7 @@ impl SqlSession {
         let _statement_pin = matches!(self.state, TxnState::Idle)
             .then(|| self.gc_horizon.pin(self.procarray.snapshot().xmin));
         let target = copy_into_target(copy)?;
-        let format = crate::copyfmt::CopyInFormat::resolve(&copy.options)?;
+        let format = crate::copyfmt::CopyInFormat::resolve(&copy.options, self.copy_encoding())?;
         // `COPY … FROM 'file'` never enters copy-in mode, so it reaches here
         // without passing `copy_in_start`. Both entry points must refuse, or
         // one of them loads rows past a policy.
@@ -10541,8 +10559,9 @@ impl SqlSession {
         // Every failure the decode can raise — a malformed line, a bad header,
         // an unterminated CSV field — is reported with the same `CONTEXT` a
         // failing row gets, so the decode is told the relation to name.
+        let text = crate::copyfmt::decode_copy_payload(&data, &format, &target.name.name)?;
         let rows = crate::copyfmt::decode_copy_rows(
-            &data,
+            &text,
             &format,
             &header_columns,
             &force,
@@ -13609,8 +13628,8 @@ impl SqlSession {
         // it again once the data arrives. What matters is that an option this
         // engine cannot honour is refused *before* copy-in mode is announced:
         // afterwards psql reads the rest of the script as data.
-        let format =
-            crate::copyfmt::CopyInFormat::resolve(&copy.options).map_err(ExecError::into_pg)?;
+        let format = crate::copyfmt::CopyInFormat::resolve(&copy.options, self.copy_encoding())
+            .map_err(ExecError::into_pg)?;
         self.precheck_copy_from(copy).map_err(ExecError::into_pg)?;
         let lists = self.copy_column_lists(target).map_err(ExecError::into_pg)?;
         // Same timing rule: a `FORCE_NOT_NULL` naming a column this copy does

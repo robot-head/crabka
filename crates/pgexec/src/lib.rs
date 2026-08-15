@@ -57,6 +57,7 @@ mod builtin_procs;
 mod bytea_fn;
 mod catalog_fn;
 mod catalog_rel;
+mod charset;
 pub mod clock;
 mod commit;
 mod copyfmt;

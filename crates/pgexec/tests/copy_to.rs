@@ -422,7 +422,7 @@ async fn copy_from_refuses_an_option_it_cannot_honour_before_entering_copy_in() 
     for sql in [
         "COPY loaded FROM STDIN WITH (DEFAULT 'D')",
         "COPY loaded FROM STDIN WITH (ON_ERROR IGNORE)",
-        "COPY loaded FROM STDIN WITH (ENCODING 'LATIN1')",
+        "COPY loaded FROM STDIN WITH (ENCODING 'LATIN2')",
     ] {
         let error = session
             .begin_copy_in(sql)
