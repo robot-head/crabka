@@ -179,7 +179,7 @@ where
         if let Some(v) = f() {
             return v;
         }
-        assert!(
+        assert2::assert!(
             tokio::time::Instant::now() < deadline,
             "condition not met before timeout"
         );
@@ -224,7 +224,7 @@ async fn await_single_leader(net: &SimNet, ids: &[NodeId], timeout: Duration) ->
                 }
             }
         }
-        assert!(
+        assert2::assert!(
             tokio::time::Instant::now() < deadline,
             "no single leader before timeout; states={snap:?}"
         );
@@ -414,6 +414,20 @@ async fn leader_failure_reelects() {
     }
 }
 
+/// 3b. The same leader is killed and reopened over its own data dir five times
+///     in a row, and the quorum must converge on one leader after every round.
+///
+///     This is the acceptance for an ex-leader that comes back. Leadership is
+///     volatile, so the reopened node loads `leader_id == None` while its two
+///     followers still believe it leads. It must not answer their Fetches as if
+///     it did. When it did, each answer scored as a live fetch, their watchdogs
+///     never expired, they held their stale leader belief, and a KIP-996
+///     pre-vote only grants when the voter follows no leader. Nothing could
+///     ever win a pre-vote and the cluster stayed leaderless.
+///
+///     Wall-clock, not `start_paused`: the engines are real spawned tasks and
+///     `await_single_leader` polls them with `yield_now`, so the runtime is
+///     never idle and virtual time would never auto-advance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_leader_restart_reelects() {
     let net = SimNet::new();

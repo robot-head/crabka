@@ -405,6 +405,40 @@ fn should_serve_fetch_records(has_snapshot: bool, has_divergence: bool, is_leade
     )
 }
 
+/// What a fetcher must do with a Fetch response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchResponseDisposition {
+    /// The leader answered. Apply the body and re-arm the fetch watchdog.
+    Replicate(NodeId),
+    /// A non-leader answered and named the leader. Re-target the fetch at it.
+    Redirect(NodeId),
+    /// Nothing to fetch from and no leader to re-target at. Count a miss.
+    Miss,
+}
+
+/// Classify a Fetch response by its error code and the leader it names.
+///
+/// Only a clean answer counts as a live fetch, which is the rule
+/// `KafkaRaftClient` applies: it resets the fetch timeout on `Errors.NONE` and
+/// on nothing else. A fetcher that scores an error as a success never times
+/// out, so it never drops a peer that has stopped leading, and the quorum
+/// cannot re-elect.
+///
+/// A clean answer may still name a leader other than the peer we dialled. That
+/// is the bootstrap-discovery case, where the leader answers under a
+/// placeholder id, so it replicates and re-aliases rather than redirecting.
+fn classify_fetch_response(
+    error_code: i16,
+    from: NodeId,
+    leader_id: Option<NodeId>,
+) -> FetchResponseDisposition {
+    match (error_code, leader_id) {
+        (0, Some(leader_id)) => FetchResponseDisposition::Replicate(leader_id),
+        (_, Some(leader_id)) if leader_id != from => FetchResponseDisposition::Redirect(leader_id),
+        _ => FetchResponseDisposition::Miss,
+    }
+}
+
 fn should_fail_waiters_on_leadership_change(
     was_leader: bool,
     is_leader: bool,
@@ -1478,18 +1512,35 @@ impl Engine {
                     } else {
                         bytes::Bytes::new()
                     };
-                    // Advertise the ACTUAL current leader, not `self.me`: a
+                    // Advertise the ACTUAL current leader, never `self.me`: a
                     // follower serving a Fetch must redirect the fetcher to the
                     // real leader via `current_leader`. Returning `self.me` made a
                     // follower claim leadership of the current epoch — a strict
                     // KRaft follower (the JVM) caches that, then fatal-faults when
                     // the true leader's BeginQuorumEpoch arrives ("inconsistent
-                    // leader at the same epoch"). Fall back to `self.me` only when
-                    // no leader is known (mid-election).
-                    let advertised_leader = self.core.quorum_state().leader_id.unwrap_or(self.me);
+                    // leader at the same epoch").
+                    //
+                    // When we lead nothing and know no leader, say so: `None`
+                    // rides as the `-1` sentinel, and the reply carries
+                    // NOT_LEADER_OR_FOLLOWER. Naming ourselves here instead
+                    // wedged the quorum. A restarted ex-leader comes back with
+                    // `leader_id == None`, so it answered its own followers'
+                    // Fetches as if it still led. Those followers scored a
+                    // successful fetch every round, their liveness watchdog never
+                    // expired, they kept `leader_id == Some(us)`, and a KIP-996
+                    // pre-vote only grants when `leader_id` is `None`. Nobody
+                    // could ever win a pre-vote, so the cluster stayed
+                    // leaderless for as long as it ran.
+                    let advertised_leader = self.core.quorum_state().leader_id;
+                    let error_code = if self.core.role().is_leader() {
+                        0
+                    } else {
+                        wire::FETCH_NOT_LEADER_OR_FOLLOWER
+                    };
                     let resp = wire::PeerResponse::Fetch {
                         leader_id: advertised_leader,
                         leader_epoch: self.core.quorum_state().leader_epoch,
+                        error_code,
                         diverging,
                         snapshot_id,
                         hwm: self.log.hwm().0,
@@ -2774,6 +2825,7 @@ impl Engine {
         let Some(wire::PeerResponse::Fetch {
             leader_id,
             leader_epoch,
+            error_code,
             diverging,
             snapshot_id,
             hwm,
@@ -2781,6 +2833,27 @@ impl Engine {
         }) = wire::PeerResponse::decode_fetch(body)
         else {
             return;
+        };
+        let leader_id = match classify_fetch_response(error_code, from, leader_id) {
+            FetchResponseDisposition::Replicate(leader_id) => leader_id,
+            FetchResponseDisposition::Redirect(leader_id) => {
+                // The peer does not lead, but it named the one that does. Feed
+                // the core so it re-targets and re-arms against the new leader;
+                // there is no body to apply.
+                self.peers.remember_peer(from, leader_id);
+                self.on_event(Event::ReceiveFetchResponse {
+                    leader_id,
+                    leader_epoch,
+                    diverging: None,
+                });
+                return;
+            }
+            FetchResponseDisposition::Miss => {
+                // The peer leads nothing and knows no leader. This is NOT a
+                // successful fetch: swallow it so the fetch watchdog keeps
+                // counting misses and the quorum can time out and re-elect.
+                return;
+            }
         };
         self.peers.remember_peer(from, leader_id);
 
@@ -4470,16 +4543,11 @@ mod tests {
         assert2::assert!(leader.following_leader().is_none());
     }
 
-    #[tokio::test]
-    async fn follower_fetch_redirects_to_current_leader() {
-        let (mut follower, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
-        follower.on_event(Event::ReceiveBeginQuorumEpoch {
-            leader_id: NodeId(2),
-            leader_epoch: 1,
-        });
+    /// Serve one Fetch to `engine` from `NodeId(3)` and return the decoded
+    /// reply.
+    fn fetch_reply_from(engine: &mut Engine) -> wire::PeerResponse {
         let (reply, mut response) = oneshot::channel();
-
-        follower.on_inbound(Inbound::Fetch {
+        engine.on_inbound(Inbound::Fetch {
             req: wire::PeerRequest::Fetch {
                 from: NodeId(3),
                 fetch_epoch: 1,
@@ -4488,20 +4556,103 @@ mod tests {
             .encode(),
             reply,
         });
+        let body = response.try_recv().expect("engine answered the Fetch");
+        wire::PeerResponse::decode_fetch(&body).expect("decode Fetch reply")
+    }
 
-        let body = response
-            .try_recv()
-            .expect("follower returned Fetch redirect");
-        let decoded = wire::PeerResponse::decode_fetch(&body).expect("decode Fetch redirect");
-        assert2::assert!(matches!(
-            decoded,
-            wire::PeerResponse::Fetch {
-                leader_id: NodeId(2),
-                leader_epoch: 1,
-                records,
-                ..
-            } if records.is_empty()
-        ));
+    #[tokio::test]
+    async fn follower_fetch_redirects_to_current_leader() {
+        let (mut follower, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        follower.on_event(Event::ReceiveBeginQuorumEpoch {
+            leader_id: NodeId(2),
+            leader_epoch: 1,
+        });
+
+        assert2::assert!(
+            fetch_reply_from(&mut follower)
+                == wire::PeerResponse::Fetch {
+                    leader_id: Some(NodeId(2)),
+                    leader_epoch: 1,
+                    error_code: wire::FETCH_NOT_LEADER_OR_FOLLOWER,
+                    diverging: None,
+                    snapshot_id: None,
+                    hwm: 0,
+                    records: bytes::Bytes::new(),
+                }
+        );
+    }
+
+    /// A replica that leads nothing and knows no leader must say so, rather
+    /// than name itself.
+    ///
+    /// Naming itself wedged the quorum permanently. A restarted ex-leader has
+    /// `leader_id == None` (leadership is volatile, see `load_quorum_state`),
+    /// so it used to answer its old followers' Fetches as if it still led.
+    /// Each answer scored as a live fetch, so their watchdogs never expired,
+    /// they held `leader_id == Some(us)`, and a KIP-996 pre-vote only grants
+    /// when `leader_id` is `None`. No pre-vote could ever reach a majority.
+    #[tokio::test]
+    async fn leaderless_voter_fetch_names_no_leader_and_returns_not_leader() {
+        let (mut stranded, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        // Reaching for an election abandons the old leader belief, which is the
+        // state a restarted node also loads from disk.
+        stranded.on_event(Event::ElectionTimeout);
+        assert2::assert!(stranded.core.quorum_state().leader_id.is_none());
+
+        assert2::assert!(
+            fetch_reply_from(&mut stranded)
+                == wire::PeerResponse::Fetch {
+                    leader_id: None,
+                    leader_epoch: stranded.core.quorum_state().leader_epoch,
+                    error_code: wire::FETCH_NOT_LEADER_OR_FOLLOWER,
+                    diverging: None,
+                    snapshot_id: None,
+                    hwm: 0,
+                    records: bytes::Bytes::new(),
+                }
+        );
+    }
+
+    #[test]
+    fn fetch_response_disposition_only_treats_a_clean_reply_as_a_live_fetch() {
+        let from = NodeId(2);
+        for (error_code, leader_id, want) in [
+            // The leader answered.
+            (
+                0,
+                Some(NodeId(2)),
+                FetchResponseDisposition::Replicate(NodeId(2)),
+            ),
+            // Bootstrap discovery: the leader answered under a placeholder id.
+            (
+                0,
+                Some(NodeId(7)),
+                FetchResponseDisposition::Replicate(NodeId(7)),
+            ),
+            // Not the leader, but it named the leader.
+            (
+                wire::FETCH_NOT_LEADER_OR_FOLLOWER,
+                Some(NodeId(3)),
+                FetchResponseDisposition::Redirect(NodeId(3)),
+            ),
+            // Not the leader and no leader known: this must NOT clear the
+            // watchdog, or the quorum can never re-elect.
+            (
+                wire::FETCH_NOT_LEADER_OR_FOLLOWER,
+                None,
+                FetchResponseDisposition::Miss,
+            ),
+            // Not the leader, yet it named itself: a lie, still a miss.
+            (
+                wire::FETCH_NOT_LEADER_OR_FOLLOWER,
+                Some(from),
+                FetchResponseDisposition::Miss,
+            ),
+            // Success that names nobody is not a live fetch either.
+            (0, None, FetchResponseDisposition::Miss),
+        ] {
+            check!(classify_fetch_response(error_code, from, leader_id) == want);
+        }
     }
 
     #[test]
@@ -5184,8 +5335,9 @@ mod tests {
             .expect("install snapshot");
         engine.installed_snapshot_epoch = Some(7);
         let fetch_response = wire::PeerResponse::Fetch {
-            leader_id: NodeId(2),
+            leader_id: Some(NodeId(2)),
             leader_epoch: 7,
+            error_code: 0,
             diverging: None,
             snapshot_id: None,
             hwm: 10,
@@ -5275,8 +5427,9 @@ mod tests {
         let mut sends = record_peer_sends(&mut engine, fetch_snapshot_response);
 
         let body = wire::PeerResponse::Fetch {
-            leader_id: NodeId(2),
+            leader_id: Some(NodeId(2)),
             leader_epoch: 3,
+            error_code: 0,
             diverging: None,
             snapshot_id: Some((11, 3)),
             hwm: 11,
@@ -5332,8 +5485,9 @@ mod tests {
     async fn fetch_snapshot_response_error_or_wrong_leader_aborts_transfer() {
         let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2)]);
         let fetch_response = wire::PeerResponse::Fetch {
-            leader_id: NodeId(2),
+            leader_id: Some(NodeId(2)),
             leader_epoch: 3,
+            error_code: 0,
             diverging: None,
             snapshot_id: None,
             hwm: 0,

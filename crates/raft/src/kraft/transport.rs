@@ -314,6 +314,16 @@ pub mod wire {
     /// above key the topic by this id, not by name.
     const METADATA_TOPIC_ID: MetaUuid = MetaUuid([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
+    /// Kafka's `NOT_LEADER_OR_FOLLOWER` partition error code.
+    ///
+    /// KIP-595 makes Fetch a leader-only API on the metadata partition. A
+    /// replica that does not lead the requested epoch answers with this code
+    /// instead of an empty success, exactly as `KafkaRaftClient` does.
+    pub const FETCH_NOT_LEADER_OR_FOLLOWER: i16 = 6;
+
+    /// The `KRaft` "no leader is known" replica-id sentinel.
+    const NO_LEADER_ID: i32 = -1;
+
     /// Captured flexible wire versions, byte-validated against fixture frames.
     const VOTE_VERSION: i16 = 2;
     const QUORUM_EPOCH_VERSION: i16 = 1;
@@ -383,8 +393,15 @@ pub mod wire {
             epoch: Epoch,
         },
         Fetch {
-            leader_id: NodeId,
+            /// The leader the responder currently knows for `leader_epoch`, or
+            /// `None` when it knows of none. `None` rides the wire as the `KRaft`
+            /// `-1` sentinel. A responder that does not lead this epoch must
+            /// never name itself here.
+            leader_id: Option<NodeId>,
             leader_epoch: Epoch,
+            /// `0` on success, otherwise a Kafka partition-level error code.
+            /// [`FETCH_NOT_LEADER_OR_FOLLOWER`] is the one a non-leader returns.
+            error_code: i16,
             diverging: Option<LogOffsetMetadata>,
             /// When set, the follower's fetch offset is below the leader's
             /// pruned log-start, and the follower must `FetchSnapshot` this
@@ -420,6 +437,17 @@ pub mod wire {
     }
     fn node_from_wire(n: i32) -> NodeId {
         NodeId(u64::try_from(n).unwrap_or(0))
+    }
+    /// Converts an optional leader id to the wire, using the `KRaft` `-1` sentinel
+    /// for "no leader is known".
+    fn opt_node_to_wire(n: Option<NodeId>) -> i32 {
+        n.map_or(NO_LEADER_ID, node_to_wire)
+    }
+    /// The inverse of [`opt_node_to_wire`]. Every negative id decodes to "no
+    /// leader is known"; `0` does not, because it is a legal Kafka node id and
+    /// the wire default for this field is `-1`, never `0`.
+    fn opt_node_from_wire(n: i32) -> Option<NodeId> {
+        (n >= 0).then(|| node_from_wire(n))
     }
 
     fn encode_body<T: Encode>(msg: &T, version: i16) -> Bytes {
@@ -739,6 +767,7 @@ pub mod wire {
                 PeerResponse::Fetch {
                     leader_id,
                     leader_epoch,
+                    error_code,
                     diverging,
                     snapshot_id,
                     hwm,
@@ -746,8 +775,9 @@ pub mod wire {
                 } => {
                     let mut partition = fetch_resp::PartitionData {
                         high_watermark: *hwm,
+                        error_code: *error_code,
                         current_leader: fetch_resp::LeaderIdAndEpoch {
-                            leader_id: node_to_wire(*leader_id),
+                            leader_id: opt_node_to_wire(*leader_id),
                             leader_epoch: epoch_to_wire(*leader_epoch),
                             ..Default::default()
                         },
@@ -829,7 +859,7 @@ pub mod wire {
             let mut cur = buf;
             let resp = FetchResponse::decode(&mut cur, FETCH_VERSION).ok()?;
             let p = resp.responses.first()?.partitions.first()?;
-            let leader_id = node_from_wire(p.current_leader.leader_id);
+            let leader_id = opt_node_from_wire(p.current_leader.leader_id);
             let leader_epoch = epoch_from_wire(p.current_leader.leader_epoch);
             // diverging_epoch defaults to (-1, -1); a real divergence carries a
             // non-negative end_offset.
@@ -853,6 +883,7 @@ pub mod wire {
             Some(PeerResponse::Fetch {
                 leader_id,
                 leader_epoch,
+                error_code: p.error_code,
                 diverging,
                 snapshot_id,
                 hwm: p.high_watermark,
@@ -1108,8 +1139,9 @@ pub mod wire {
         #[test]
         fn fetch_response_carries_snapshot_id() {
             let resp = PeerResponse::Fetch {
-                leader_id: NodeId(1),
+                leader_id: Some(NodeId(1)),
                 leader_epoch: 4,
+                error_code: 0,
                 diverging: None,
                 snapshot_id: Some((42, 3)),
                 hwm: 0,
@@ -1171,8 +1203,9 @@ pub mod wire {
         #[test]
         fn fetch_response_round_trips() {
             let with_records = PeerResponse::Fetch {
-                leader_id: NodeId(2),
+                leader_id: Some(NodeId(2)),
                 leader_epoch: 5,
+                error_code: 0,
                 diverging: None,
                 snapshot_id: None,
                 hwm: 7,
@@ -1183,8 +1216,9 @@ pub mod wire {
             );
 
             let diverged = PeerResponse::Fetch {
-                leader_id: NodeId(2),
+                leader_id: Some(NodeId(2)),
                 leader_epoch: 5,
+                error_code: 0,
                 diverging: Some(LogOffsetMetadata {
                     offset: 5,
                     epoch: 1,
@@ -1194,6 +1228,20 @@ pub mod wire {
                 records: Bytes::new(),
             };
             assert2::assert!(PeerResponse::decode_fetch(&diverged.encode()) == Some(diverged));
+
+            // A replica that leads nothing and knows no leader: the `-1`
+            // sentinel must survive the round trip as `None`, not decay to
+            // `NodeId(0)`.
+            let leaderless = PeerResponse::Fetch {
+                leader_id: None,
+                leader_epoch: 5,
+                error_code: FETCH_NOT_LEADER_OR_FOLLOWER,
+                diverging: None,
+                snapshot_id: None,
+                hwm: 0,
+                records: Bytes::new(),
+            };
+            assert2::assert!(PeerResponse::decode_fetch(&leaderless.encode()) == Some(leaderless));
         }
 
         #[test]
@@ -1201,8 +1249,9 @@ pub mod wire {
             use crabka_protocol::{Decode, owned::fetch_response::FetchResponse};
 
             let resp = PeerResponse::Fetch {
-                leader_id: NodeId(2),
+                leader_id: Some(NodeId(2)),
                 leader_epoch: 5,
+                error_code: 0,
                 diverging: None,
                 snapshot_id: None,
                 hwm: 7,
@@ -1223,6 +1272,54 @@ pub mod wire {
             );
         }
 
+        /// A non-leader's Fetch reply must be a Kafka error frame: partition
+        /// `error_code` `NOT_LEADER_OR_FOLLOWER` and `currentLeader.leaderId` of
+        /// `-1`. A JVM follower reads both fields; a `0` error code with a
+        /// bogus leader id would keep it attached to a replica that leads
+        /// nothing.
+        #[test]
+        fn encoded_leaderless_fetch_response_carries_not_leader_and_sentinel_id() {
+            use crabka_protocol::{Decode, owned::fetch_response::FetchResponse};
+
+            let resp = PeerResponse::Fetch {
+                leader_id: None,
+                leader_epoch: 3,
+                error_code: FETCH_NOT_LEADER_OR_FOLLOWER,
+                diverging: None,
+                snapshot_id: None,
+                hwm: 0,
+                records: Bytes::new(),
+            };
+            let mut cur = &resp.encode()[..];
+            let raw =
+                FetchResponse::decode(&mut cur, FETCH_VERSION).expect("decode fetch response");
+            let partition = &raw.responses[0].partitions[0];
+            check!(
+                (
+                    partition.partition_index,
+                    partition.error_code,
+                    partition.current_leader.leader_id,
+                    partition.current_leader.leader_epoch,
+                ) == (METADATA_PARTITION, FETCH_NOT_LEADER_OR_FOLLOWER, -1, 3)
+            );
+        }
+
+        /// Node id `0` is a legal Kafka node id, so it must decode as a real
+        /// leader. Only a negative id means "no leader is known".
+        #[test]
+        fn fetch_response_keeps_node_zero_as_a_real_leader() {
+            let resp = PeerResponse::Fetch {
+                leader_id: Some(NodeId(0)),
+                leader_epoch: 1,
+                error_code: 0,
+                diverging: None,
+                snapshot_id: None,
+                hwm: 0,
+                records: Bytes::new(),
+            };
+            assert2::assert!(PeerResponse::decode_fetch(&resp.encode()) == Some(resp));
+        }
+
         #[test]
         fn fetch_wire_carries_metadata_topic_id() {
             use crabka_protocol::{
@@ -1239,8 +1336,9 @@ pub mod wire {
             assert2::assert!(dreq.topics[0].topic_id == METADATA_TOPIC_ID);
 
             let resp = PeerResponse::Fetch {
-                leader_id: NodeId(1),
+                leader_id: Some(NodeId(1)),
                 leader_epoch: 4,
+                error_code: 0,
                 diverging: None,
                 snapshot_id: None,
                 hwm: 0,

@@ -416,10 +416,17 @@ jobs:
       - run: cargo +nightly fmt --all -- --check
         if: matrix.os == 'ubuntu-latest'
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Run WHOLE crates here, never one `--test` target. The raft line used to
+      # read `--test kraft_model`, which is 4 of the crate's 200 tests and one
+      # of the seven files in `crates/raft/tests/`. The other 196 were
+      # invisible to the only job that exists to cover the consensus engine, so
+      # `kraft_engine_sim::repeated_leader_restart_reelects` merged red and
+      # stayed red across several commits. All 200 take about 11 seconds, so a
+      # filter buys no time and hides every file added later.
       - name: Diskless WAL shipping gates
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo nextest run -p crabka-raft --profile ci --test kraft_model
+          cargo nextest run -p crabka-raft --profile ci
           cargo nextest run -p crabka-broker --profile ci --lib diskless
           cargo nextest run -p crabka-verified --profile ci
       # nextest cannot run doctests, so run them explicitly (once, on Linux).
