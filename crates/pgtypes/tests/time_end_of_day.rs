@@ -199,11 +199,12 @@ fn time_plus_interval_reduces_the_boundary_into_the_day() {
 #[test]
 fn date_plus_the_boundary_lands_on_the_next_day() {
     let end = parse_time("24:00:00").expect("24:00:00");
-    let combined = combine_date_time(jiff::civil::date(2020, 1, 1), end).expect("in range");
+    let combined = combine_date_time(jiff::civil::date(2020, 1, 1).into(), end).expect("in range");
     assert!(timestamp_to_text(combined) == "2020-01-02 00:00:00");
 
     let ordinary = parse_time("13:45:06").expect("13:45:06");
-    let same_day = combine_date_time(jiff::civil::date(2020, 1, 1), ordinary).expect("in range");
+    let same_day =
+        combine_date_time(jiff::civil::date(2020, 1, 1).into(), ordinary).expect("in range");
     assert!(timestamp_to_text(same_day) == "2020-01-01 13:45:06");
 }
 

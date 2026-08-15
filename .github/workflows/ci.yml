@@ -1209,6 +1209,21 @@ jobs:
           sudo mv /tmp/kind /usr/local/bin/kind
           CRABKA_GRES_KIND_ARTIFACT_DIR=target/gres-coldstart-artifacts \
             ./scripts/gres-coldstart.sh
+      # Gres implements exactly one monetary locale, C -- see the note on
+      # `pgtypes::money`. The service container runs `initdb` under its own
+      # `LANG=en_US.utf8`, so the oracle database inherits `$` as its currency
+      # symbol while Gres, and PostgreSQL's own `NUM_prepare_locale` in the C
+      # locale (formatting.c:5333-5336), emit a single space. That difference
+      # scored six `to_char(..., 'L999')` statements against Gres and measured
+      # the harness rather than the engine. pg_regress avoids it with LC_ALL=C
+      # on its own postmaster, and `scripts/gres-sharded-conformance.sh` already
+      # does this to the sharded oracle. The setting is per-database and is NOT
+      # copied from the template, so the substrate leg's `oracle2` gets its own
+      # `ALTER DATABASE` where it is created.
+      - name: Give the oracle database the one monetary locale Gres has
+        run: |
+          psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+            -v ON_ERROR_STOP=1 -c "ALTER DATABASE postgres SET lc_monetary = 'C'"
       - name: Conformance harness against the parity baseline
         run: |
           ./target/debug/crabka-gres --listen 127.0.0.1:54333 &
@@ -1231,7 +1246,11 @@ jobs:
             --regress-summary regress-parity.md \
             --out parity.json --summary parity.md
       - name: Create a fresh oracle database for the substrate leg
-        run: psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" -c "CREATE DATABASE oracle2"
+        run: |
+          psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+            -v ON_ERROR_STOP=1 -c "CREATE DATABASE oracle2"
+          psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+            -v ON_ERROR_STOP=1 -c "ALTER DATABASE oracle2 SET lc_monetary = 'C'"
       - name: Conformance against the substrate-backed engine
         run: |
           export CRABKA_CLUSTER_ID=00000000-0000-0000-0000-000000000001

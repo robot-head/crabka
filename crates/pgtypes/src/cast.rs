@@ -995,7 +995,7 @@ pub fn cast_in(
                     .to_zoned(tz.clone())
                     .map(|z| Datum::Timestamptz(z.timestamp()))
                     .map_err(|_| TypeError::DatetimeFieldOverflow {
-                        value: format!("{d}"),
+                        value: crate::datetime::date_to_text(*d),
                     }),
                 sign => Ok(Datum::Timestamptz(
                     crate::datetime::timestamptz_infinity_of_sign(sign),
@@ -1005,7 +1005,7 @@ pub fn cast_in(
         // timestamp → date: truncate to date part.
         (Datum::Timestamp(dt), ColumnType::Date) => {
             match crate::datetime::timestamp_infinite_sign(*dt) {
-                0 => Ok(Datum::Date(dt.date())),
+                0 => Ok(Datum::Date(dt.date().into())),
                 sign => Ok(Datum::Date(crate::datetime::date_infinity_of_sign(sign))),
             }
         }
@@ -1043,7 +1043,7 @@ pub fn cast_in(
         // timestamptz → date: render in session tz, take date part.
         (Datum::Timestamptz(ts), ColumnType::Date) => {
             match crate::datetime::timestamptz_infinite_sign(*ts) {
-                0 => Ok(Datum::Date(tz.to_datetime(*ts).date())),
+                0 => Ok(Datum::Date(tz.to_datetime(*ts).date().into())),
                 sign => Ok(Datum::Date(crate::datetime::date_infinity_of_sign(sign))),
             }
         }

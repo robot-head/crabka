@@ -1458,8 +1458,9 @@ pub enum Datum {
     /// SP32: PostgreSQL `numeric` — an arbitrary-precision exact decimal, or one
     /// of the `NaN` / `±Infinity` specials.
     Numeric(NumericValue),
-    /// SP37: PostgreSQL `date`: a calendar date (no time-of-day, no timezone).
-    Date(jiff::civil::Date),
+    /// SP37: PostgreSQL `date`: a calendar date (no time-of-day, no timezone),
+    /// or one of the two non-finite values.
+    Date(crate::datetime::PgDate),
     /// SP37: PostgreSQL `time without time zone`: time-of-day only, as
     /// microseconds since midnight so the `24:00:00` boundary is representable.
     Time(crate::datetime::PgTime),
@@ -2617,16 +2618,10 @@ mod tests {
             d.hash(&mut s);
             s.finish()
         }
-        let d1 = Datum::Date(
-            "2024-01-15"
-                .parse::<jiff::civil::Date>()
-                .expect("valid date literal"),
-        );
-        let d2 = Datum::Date(
-            "2024-01-15"
-                .parse::<jiff::civil::Date>()
-                .expect("valid date literal"),
-        );
+        let d1 =
+            Datum::Date(crate::datetime::parse_date("2024-01-15").expect("valid date literal"));
+        let d2 =
+            Datum::Date(crate::datetime::parse_date("2024-01-15").expect("valid date literal"));
         assert_eq!(d1, d2);
         assert_eq!(h(&d1), h(&d2));
         let m = Datum::Interval(Interval {

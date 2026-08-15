@@ -542,7 +542,7 @@ mod tests {
             ((1, 1, 1), -7_515_971_407_706_873_240),
         ];
         for ((year, month, day), expected) in vectors {
-            let value = Datum::Date(jiff::civil::date(year, month, day));
+            let value = Datum::Date(jiff::civil::date(year, month, day).into());
             assert!(hash_of(value) == expected.cast_unsigned());
         }
     }
@@ -672,7 +672,7 @@ mod tests {
         let values = [
             Datum::Int4(42),
             Datum::Text("hello".to_string()),
-            Datum::Date(jiff::civil::date(2026, 7, 29)),
+            Datum::Date(jiff::civil::date(2026, 7, 29).into()),
             Datum::Bool(true),
             Datum::Int8(-1),
         ];
@@ -691,7 +691,7 @@ mod tests {
                 vec![
                     Datum::Int4(42),
                     Datum::Text("hello".to_string()),
-                    Datum::Date(jiff::civil::date(2026, 7, 29)),
+                    Datum::Date(jiff::civil::date(2026, 7, 29).into()),
                     Datum::Bool(true),
                     Datum::Int8(-1),
                 ],

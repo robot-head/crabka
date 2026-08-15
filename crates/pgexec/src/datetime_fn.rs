@@ -214,7 +214,9 @@ pub(crate) fn eval_datetime(
         }
         DtFunc::CurrentDate => {
             require_arity(fc, args.is_empty())?;
-            Ok(Datum::Date(ctx.time_zone.to_datetime(ctx.now).date()))
+            Ok(Datum::Date(
+                ctx.time_zone.to_datetime(ctx.now).date().into(),
+            ))
         }
         DtFunc::CurrentTime => {
             require_arity(fc, args.is_empty())?;
@@ -337,7 +339,7 @@ pub(crate) fn eval_datetime(
                 None => {
                     let today = ctx.time_zone.to_datetime(ctx.now).date();
                     (
-                        crabka_pgtypes::datetime::date_to_midnight(today),
+                        crabka_pgtypes::datetime::date_to_midnight(today.into()),
                         as_datetime(&a, &ctx.time_zone)?,
                     )
                 }
@@ -1210,7 +1212,12 @@ fn date_trunc(
                 crabka_pgtypes::ColumnType::Timestamptz,
                 session_tz,
             )
-            .map_err(|_| invalid_param(format!("date out of range for date_trunc: {d}")))?,
+            .map_err(|_| {
+                invalid_param(format!(
+                    "date out of range for date_trunc: {}",
+                    crabka_pgtypes::datetime::date_to_text(*d)
+                ))
+            })?,
             zone,
             session_tz,
         ),
@@ -1291,7 +1298,7 @@ fn trunc_datetime(unit: &str, type_name: &str, dt: DateTime) -> Result<DateTime,
         "week" => {
             // PG truncates to the most recent Monday (ISO week start), midnight.
             let back = i64::from(d.weekday().to_monday_one_offset()) - 1;
-            let monday = crabka_pgtypes::datetime::date_plus_days(d, -back)
+            let monday = crabka_pgtypes::datetime::date_plus_days(d.into(), -back)
                 .map_err(|_| invalid_param("date_trunc week out of range"))?;
             crabka_pgtypes::datetime::date_to_midnight(monday)
         }
@@ -1638,7 +1645,7 @@ mod tests {
         );
         assert_eq!(
             ev("current_date", &ctx),
-            Datum::Date("2024-01-15".parse().expect("d"))
+            Datum::Date(crabka_pgtypes::datetime::parse_date("2024-01-15").expect("d"))
         );
     }
 
@@ -1912,7 +1919,7 @@ mod tests {
         };
         assert_eq!(
             ev("current_date", &ctx),
-            Datum::Date("2024-01-14".parse().expect("d"))
+            Datum::Date(crabka_pgtypes::datetime::parse_date("2024-01-14").expect("d"))
         );
         // now() is still the absolute instant (timestamptz), zone-independent.
         assert_eq!(ev("now()", &ctx), Datum::Timestamptz(ny));

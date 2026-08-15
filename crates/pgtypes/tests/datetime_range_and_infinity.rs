@@ -252,7 +252,10 @@ fn a_non_finite_date_swallows_the_time_it_is_combined_with() {
     let end_of_day = parse_time("24:00:00").expect("time");
     assert!(combine_date_time(day, PgTime::MIDNIGHT).is_some());
     assert!(
-        combine_date_time(day, end_of_day) == Some(parse_date("2020-01-02").expect("date").into())
+        combine_date_time(day, end_of_day)
+            == Some(crabka_pgtypes::datetime::date_to_midnight(
+                parse_date("2020-01-02").expect("date")
+            ))
     );
 }
 

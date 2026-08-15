@@ -608,7 +608,7 @@ fn round_to_precision(instant: jiff::Timestamp, precision: u8) -> Option<jiff::T
 fn to_date(template: &str, input: &str) -> Result<Datum, ExecError> {
     let p = datetime::parse_by_template(template, input).map_err(map_type)?;
     let date = date_from_parsed(&p, input)?;
-    Ok(Datum::Date(date))
+    Ok(Datum::Date(date.into()))
 }
 
 /// Build a civil `Date` from a `ParsedDateTime`.
@@ -896,7 +896,7 @@ mod tests {
     fn to_timestamp_to_date_make_justify() {
         assert_eq!(
             ev("to_date('2024-07-04', 'YYYY-MM-DD')"),
-            Datum::Date(jiff::civil::date(2024, 7, 4))
+            Datum::Date(jiff::civil::date(2024, 7, 4).into())
         );
         assert_eq!(
             ty("to_timestamp('2024-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS')"),
@@ -909,7 +909,7 @@ mod tests {
         );
         assert_eq!(
             ev("make_date(2024, 7, 4)"),
-            Datum::Date(jiff::civil::date(2024, 7, 4))
+            Datum::Date(jiff::civil::date(2024, 7, 4).into())
         );
         assert_eq!(
             ev("make_interval(0, 0, 0, 5)"),

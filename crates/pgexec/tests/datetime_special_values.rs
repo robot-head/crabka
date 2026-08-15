@@ -178,6 +178,73 @@ async fn infinity_sorts_outside_every_finite_value() {
     );
 }
 
+/// The last civil date the calendar holds is an ordinary date, not the
+/// `infinity` sentinel.
+///
+/// `date` used to reserve the extreme representable value for `infinity`, the
+/// way `timestamp` and `interval` still do. That works only where the storage
+/// has room to spare, and `date`'s storage has none. Its extreme value IS
+/// 9999-12-31, a date `PostgreSQL` 18.4 accepts and prints back. The sentinel
+/// therefore took a real date away, and both spellings below were refused as
+/// out of range. `date` now holds the two non-finite values out of band.
+#[tokio::test]
+async fn the_last_civil_date_is_a_date_and_not_infinity() {
+    let client = connect(spawn().await).await;
+    let cases: &[(&str, &str)] = &[
+        ("SELECT make_date(9999, 12, 31)", "9999-12-31"),
+        ("SELECT date '9999-12-31'", "9999-12-31"),
+        ("SELECT '9999-12-31'::text::date", "9999-12-31"),
+        (
+            "SELECT to_char(date '9999-12-31', 'YYYY-MM-DD')",
+            "9999-12-31",
+        ),
+        ("SELECT extract(year FROM date '9999-12-31')", "9999"),
+        ("SELECT isfinite(date '9999-12-31')", "t"),
+        (
+            "SELECT (date '9999-12-31')::timestamp",
+            "9999-12-31 00:00:00",
+        ),
+        ("SELECT date '9999-12-31' - date '9999-12-01'", "30"),
+        // It still sorts below `infinity`, which is the property the sentinel
+        // used to buy, and `infinity` still prints as itself.
+        ("SELECT date 'infinity' > date '9999-12-31'", "t"),
+        ("SELECT date '9999-12-31' > date '-infinity'", "t"),
+        ("SELECT date 'infinity'", "infinity"),
+    ];
+    for (sql, expected) in cases {
+        assert!(
+            scalar(&client, sql).await.as_deref() == Some(*expected),
+            "{sql}"
+        );
+    }
+    // Stored, ordered and read back: the row encoding keeps the two apart.
+    client
+        .simple_query(
+            "CREATE TABLE last_day (id int primary key, d date); \
+             INSERT INTO last_day VALUES (1, date '9999-12-31'), (2, date 'infinity'), \
+             (3, date '-infinity'), (4, date '2000-01-01')",
+        )
+        .await
+        .expect("seed");
+    assert!(
+        column(&client, "SELECT d FROM last_day ORDER BY d").await
+            == vec![
+                Some("-infinity".to_string()),
+                Some("2000-01-01".to_string()),
+                Some("9999-12-31".to_string()),
+                Some("infinity".to_string()),
+            ]
+    );
+    assert!(
+        column(
+            &client,
+            "SELECT id FROM last_day WHERE d = date '9999-12-31'"
+        )
+        .await
+            == vec![Some("1".to_string())]
+    );
+}
+
 #[tokio::test]
 async fn cancelling_infinities_are_out_of_range() {
     let client = connect(spawn().await).await;

@@ -453,6 +453,13 @@ start_oracle() {
         "$POSTGRES_IMAGE")
     for _ in $(seq 80); do
         if PGAPPNAME= psql "host=127.0.0.1 port=${ORACLE_PORT} user=postgres dbname=postgres" -tAc 'SELECT 1' >/dev/null 2>&1; then
+            # Gres implements one monetary locale, C -- see the note on
+            # `pgtypes::money`. The image runs `initdb` under its own
+            # `LANG=en_US.utf8`, so without this the oracle answers `$ 485` to
+            # `to_char(485, 'L999')` where Gres answers `  485`, and the parity
+            # run scores the harness instead of the engine.
+            PGAPPNAME= psql "host=127.0.0.1 port=${ORACLE_PORT} user=postgres dbname=postgres" \
+                -v ON_ERROR_STOP=1 -c "ALTER DATABASE postgres SET lc_monetary = 'C'" >/dev/null
             return 0
         fi
         sleep 0.5

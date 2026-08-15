@@ -307,7 +307,7 @@ fn avro_value_to_datum(value: &AvroValue, col_ty: ColumnType, decimal_scale: Opt
             let secs = i64::from(*days) * 86_400;
             let dur = jiff::SignedDuration::from_secs(secs);
             match unix_epoch_date().checked_add(dur) {
-                Ok(date) => Datum::Date(date),
+                Ok(date) => Datum::Date(date.into()),
                 Err(_) => Datum::Null,
             }
         }

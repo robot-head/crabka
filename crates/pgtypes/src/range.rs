@@ -525,8 +525,9 @@ fn increment(value: Datum) -> Result<Datum, TypeError> {
             .checked_add(1)
             .map(Datum::Int8)
             .ok_or_else(|| TypeError::out_of_range_for("bigint")),
-        Datum::Date(value) => value
-            .tomorrow()
+        // `is_finite` already held off the two non-finite dates, so the only
+        // failure left is the day after the last date the calendar holds.
+        Datum::Date(value) => crate::datetime::date_plus_days(value, 1)
             .map(Datum::Date)
             .map_err(|_| TypeError::Coded {
                 sqlstate: "22008",

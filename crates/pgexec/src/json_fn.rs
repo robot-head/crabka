@@ -4162,7 +4162,7 @@ mod tests {
                 == r#""2024-01-15T13:45:06+00:00""#
         );
         assert!(
-            to_jsonb(&Datum::Date(jiff::civil::date(2024, 1, 15)), &ctx)
+            to_jsonb(&Datum::Date(jiff::civil::date(2024, 1, 15).into()), &ctx)
                 .expect("date")
                 .to_text()
                 == r#""2024-01-15""#

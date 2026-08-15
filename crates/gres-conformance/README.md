@@ -220,6 +220,21 @@ oracle between runs, so tables left behind by an earlier run turn the corpus's
 `CREATE TABLE` statements into `42P07` on the oracle side only, and every
 statement that depends on them diverges.
 
+Give the oracle database Gres's monetary locale before the first run:
+
+```sh
+psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+  -c "ALTER DATABASE postgres SET lc_monetary = 'C'"
+```
+
+Gres implements one `lc_monetary`, `C`. See the note on `pgtypes::money`. A
+stock `initdb` gives the oracle whatever `LANG` the host has, and `to_char(485,
+'L999')` then reads `$ 485` there against `  485` here, because PostgreSQL's
+`NUM_prepare_locale` falls back to a single space when the locale carries no
+currency symbol. Without the `ALTER DATABASE` the run scores that difference
+against Gres and measures the harness. The setting is per-database and is not
+copied from the template, so each oracle database needs its own.
+
 ## Extended-protocol corpus
 
 `corpus-extended/` contains JSON cases that run through `Parse`/`Bind`/`Execute`

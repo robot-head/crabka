@@ -4486,7 +4486,7 @@ mod tests {
                 r#"{ "1.50" : 30 }"#,
             ),
             (
-                Datum::Date(jiff::civil::date(2020, 1, 2)),
+                Datum::Date(jiff::civil::date(2020, 1, 2).into()),
                 r#"{ "2020-01-02" : 30 }"#,
             ),
             // A quote inside the key is escaped, not dropped.
