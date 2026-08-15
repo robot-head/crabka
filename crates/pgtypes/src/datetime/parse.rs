@@ -154,6 +154,23 @@ pub enum DecodeError {
     /// A field is outside its range, or the value leaves the type's range
     /// (22008).
     FieldOverflow,
+    /// The MONTH or the DAY field is outside its range (22008).
+    ///
+    /// Same class as [`DecodeError::FieldOverflow`] and same message, but
+    /// `PostgreSQL` adds a HINT to it: a month of 18 usually means the literal
+    /// was written in a field order the current `DateStyle` does not read, and
+    /// the month and the day are the two fields that ordering can swap. The
+    /// distinction stops at the coarse check — `1997-02-29` names a real month
+    /// and a day inside `1..=31`, so it is an ordinary field overflow, and
+    /// `PostgreSQL` deliberately leaves it without the HINT.
+    MdFieldOverflow,
+    /// Every field is in range, but the day they name is not (22008).
+    ///
+    /// `PostgreSQL` reports this one by the TYPE rather than by the field —
+    /// `date out of range`, `timestamp out of range` — because no single field
+    /// is at fault. The order matters: the field checks run first, which is why
+    /// `5874898-02-30` is a field overflow and `5874898-01-01` is this.
+    ValueOutOfRange,
     /// A UTC offset outside ±15:59:59 (22009).
     TzDisplacement,
     /// A zone name the zone database does not know (22023).
@@ -866,6 +883,20 @@ fn day_fraction_to_micros(digits: &str) -> Result<i64, DecodeError> {
     Ok((fraction * MICROS_PER_DAY as f64).round() as i64)
 }
 
+/// The length of `month` in `year`, in the astronomical year numbering, where
+/// year 0 is 1 BC and is a leap year. `month` must already be `1..=12`.
+fn days_in_month(year: i32, month: i32) -> i32 {
+    const LENGTHS: [i32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    if month == 2 && is_leap {
+        return 29;
+    }
+    usize::try_from(month - 1)
+        .ok()
+        .and_then(|index| LENGTHS.get(index).copied())
+        .unwrap_or(31)
+}
+
 /// Apply the era and two-digit-year windows and build the calendar date.
 ///
 /// `PostgreSQL`'s `ValidateDate` range-checks each field that arrived BEFORE
@@ -898,12 +929,12 @@ fn finish_date(tm: &Tm, is_bc: bool, is_julian: bool) -> Result<Option<Date>, De
     if let Some(month) = tm.month
         && !(1..=12).contains(&month)
     {
-        return Err(DecodeError::FieldOverflow);
+        return Err(DecodeError::MdFieldOverflow);
     }
     if let Some(day) = tm.day
         && !(1..=31).contains(&day)
     {
-        return Err(DecodeError::FieldOverflow);
+        return Err(DecodeError::MdFieldOverflow);
     }
     let Some(year) = year else {
         if tm.month.is_some() || tm.day.is_some() || tm.yday.is_some() {
@@ -911,7 +942,20 @@ fn finish_date(tm: &Tm, is_bc: bool, is_julian: bool) -> Result<Option<Date>, De
         }
         return Ok(None);
     };
-    let year = i16::try_from(year).map_err(|_| DecodeError::FieldOverflow)?;
+    // Now that the year is known, the day can be checked against the length of
+    // the month it names. `PostgreSQL` deliberately does NOT call this one a
+    // month/day fault: `Feb 29` is unlikely to be a field-order mistake, so it
+    // gets no `DateStyle` hint. The check runs on the year as written rather
+    // than on a calendar date, so it still applies to a year the calendar
+    // cannot hold — `5874898-02-30` is a bad day, not an unreachable one.
+    if let (Some(month), Some(day)) = (tm.month, tm.day)
+        && day > days_in_month(year, month)
+    {
+        return Err(DecodeError::FieldOverflow);
+    }
+    // The fields are all in range by now, so a year the calendar cannot hold is
+    // the VALUE leaving the type's range rather than a field leaving its own.
+    let year = i16::try_from(year).map_err(|_| DecodeError::ValueOutOfRange)?;
 
     if let Some(yday) = tm.yday {
         let jan1 = Date::new(year, 1, 1).map_err(|_| DecodeError::FieldOverflow)?;

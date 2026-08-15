@@ -240,9 +240,36 @@ fn finite_interval(value: Interval) -> Result<Interval, TypeError> {
 }
 
 /// Subtract two intervals field-wise with overflow checking.
+///
+/// The subtraction is done on the fields themselves, not as `a + (-b)`. PG's
+/// `interval_mi` does the same, and the difference is observable: `-b` alone
+/// leaves the range whenever a field of `b` is `i32::MIN`/`i64::MIN`, so
+/// negate-then-add would refuse `f1 - f1` for the very intervals that sit at the
+/// bottom of the range, where the answer is plainly zero.
 pub fn sub_interval(a: Interval, b: Interval) -> Result<Interval, TypeError> {
-    let neg = neg_interval(b)?;
-    add_interval(a, neg)
+    if let Some(sign) = combine_infinite(a.infinite_sign(), -b.infinite_sign()) {
+        if sign == 0 {
+            return Err(interval_out_of_range());
+        }
+        return Ok(Interval::infinity_of_sign(sign));
+    }
+    let months = a
+        .months
+        .checked_sub(b.months)
+        .ok_or_else(interval_out_of_range)?;
+    let days = a
+        .days
+        .checked_sub(b.days)
+        .ok_or_else(interval_out_of_range)?;
+    let micros = a
+        .micros
+        .checked_sub(b.micros)
+        .ok_or_else(interval_out_of_range)?;
+    finite_interval(Interval {
+        months,
+        days,
+        micros,
+    })
 }
 
 /// Negate an interval field-wise with overflow checking.
@@ -260,61 +287,158 @@ pub fn neg_interval(a: Interval) -> Result<Interval, TypeError> {
     })
 }
 
-/// Multiply an interval by a scalar factor. PostgreSQL distributes the factor
-/// over each field and spills any fractional months into days (30-day month)
-/// and fractional days into microseconds (86400000000 µs/day), matching PG's
-/// `interval_mul` behaviour.
+/// Seconds in a day, as PostgreSQL's `SECS_PER_DAY`.
+const SECS_PER_DAY_F64: f64 = 86_400.0;
+/// Days in an interval month, as PostgreSQL's `DAYS_PER_MONTH`.
+const DAYS_PER_MONTH_F64: f64 = 30.0;
+/// Microseconds in a second, as PostgreSQL's `USECS_PER_SEC`.
+const USECS_PER_SEC_F64: f64 = 1_000_000.0;
+
+/// `PostgreSQL`'s `TSROUND`: round to microsecond resolution. The cascade needs
+/// it because a factor such as `1/3` leaves a tail far below a microsecond that
+/// would otherwise decide which side of a whole day the remainder falls on.
+fn ts_round(value: f64) -> f64 {
+    (value * USECS_PER_SEC_F64).round_ties_even() / USECS_PER_SEC_F64
+}
+
+/// `PostgreSQL`'s `FLOAT8_FITS_IN_INT32`. `NaN` fails both comparisons, so this
+/// screens it out too.
+fn fits_in_i32(value: f64) -> bool {
+    (-2_147_483_648.0_f64..2_147_483_648.0_f64).contains(&value)
+}
+
+/// `PostgreSQL`'s `FLOAT8_FITS_IN_INT64`.
+fn fits_in_i64(value: f64) -> bool {
+    (-9_223_372_036_854_775_808.0_f64..9_223_372_036_854_775_808.0_f64).contains(&value)
+}
+
+/// The sign of an interval as a whole (`interval_sign`): the sign of its
+/// canonical 30-day-month, 24-hour-day microsecond value.
+fn interval_sign(a: Interval) -> i32 {
+    match a.canonical_micros().cmp(&0) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// Scale every field of a FINITE interval by `scale`, cascading the fractions
+/// down. This is the body `interval_mul` and `interval_div` share: the two
+/// differ only in whether `scale` multiplies or divides, and doing the division
+/// directly rather than as multiplication by the reciprocal is what keeps
+/// `interval '4 mons 4 days 40:48:00' / 10` on `PostgreSQL`'s answer.
+///
+/// Fractions cascade DOWN only — months into days at 30 days a month, days into
+/// microseconds at 86400 seconds a day. PostgreSQL does not cascade back up,
+/// because the representation does not force it to; `justify_hours` is how a
+/// caller asks for that.
+fn scale_interval(a: Interval, scale: impl Fn(f64) -> f64) -> Result<Interval, TypeError> {
+    let scaled_months = scale(f64::from(a.months));
+    if !fits_in_i32(scaled_months) {
+        return Err(interval_out_of_range());
+    }
+    let months = scaled_months as i32;
+
+    let scaled_days = scale(f64::from(a.days));
+    if !fits_in_i32(scaled_days) {
+        return Err(interval_out_of_range());
+    }
+    let mut days = scaled_days as i32;
+
+    // The whole-number parts are settled; what is left of the months and days
+    // products has to go somewhere lower down.
+    let month_remainder_days = ts_round((scaled_months - f64::from(months)) * DAYS_PER_MONTH_F64);
+    let mut sec_remainder = ts_round(
+        (scaled_days - f64::from(days) + month_remainder_days - month_remainder_days.trunc())
+            * SECS_PER_DAY_F64,
+    );
+
+    // Rounding, or a cascade from the months, can leave a whole day or more in
+    // the seconds remainder. Lift those days back out before they reach the
+    // microsecond field.
+    if sec_remainder.abs() >= SECS_PER_DAY_F64 {
+        let whole = sec_remainder / SECS_PER_DAY_F64;
+        if !fits_in_i32(whole) {
+            return Err(interval_out_of_range());
+        }
+        let whole = whole as i32;
+        days = days.checked_add(whole).ok_or_else(interval_out_of_range)?;
+        sec_remainder -= f64::from(whole) * SECS_PER_DAY_F64;
+    }
+
+    if !fits_in_i32(month_remainder_days) {
+        return Err(interval_out_of_range());
+    }
+    days = days
+        .checked_add(month_remainder_days as i32)
+        .ok_or_else(interval_out_of_range)?;
+
+    let scaled_micros =
+        (scale(a.micros as f64) + sec_remainder * USECS_PER_SEC_F64).round_ties_even();
+    if !fits_in_i64(scaled_micros) {
+        return Err(interval_out_of_range());
+    }
+    finite_interval(Interval {
+        months,
+        days,
+        micros: scaled_micros as i64,
+    })
+}
+
+/// Multiply an interval by a scalar factor (`interval_mul`).
+///
+/// An infinite operand on either side carries through with the product's sign.
+/// The two combinations that would have to name a quantity the type cannot hold
+/// — an infinite interval times zero, and a zero-length interval times infinity
+/// — are `interval out of range`, because `interval` has no `NaN`.
 pub fn mul_interval(a: Interval, factor: f64) -> Result<Interval, TypeError> {
-    if !factor.is_finite() {
-        return Err(TypeError::Overflow);
+    if factor.is_nan() {
+        return Err(interval_out_of_range());
     }
     if a.is_infinite() {
         if factor == 0.0 {
             return Err(interval_out_of_range());
         }
-        let sign = if factor < 0.0 { -1 } else { 1 };
-        return Ok(Interval::infinity_of_sign(a.infinite_sign() * sign));
+        return Ok(Interval::infinity_of_sign(if factor < 0.0 {
+            -a.infinite_sign()
+        } else {
+            a.infinite_sign()
+        }));
     }
-    // Scale months; carry the fraction down to days.
-    let months_f = f64::from(a.months) * factor;
-    let months_whole = months_f.trunc();
-    let months_frac = months_f.fract();
-    let months = months_whole as i64;
-
-    // Spill fractional months → days (PG uses 30-day month).
-    let days_from_months = months_frac * 30.0;
-    let days_f = f64::from(a.days) * factor + days_from_months;
-    let days_whole = days_f.trunc();
-    let days_frac = days_f.fract();
-    let days = days_whole as i64;
-
-    // Spill fractional days → micros.
-    let micros_from_days = days_frac * USECS_PER_DAY_I64 as f64;
-    let micros_f = a.micros as f64 * factor + micros_from_days;
-
-    // Range-check the fields (interval fields are i32/i64).
-    let months = i32::try_from(months).map_err(|_| TypeError::Overflow)?;
-    let days = i32::try_from(days).map_err(|_| TypeError::Overflow)?;
-    // Guard micros: a finite f64 larger than i64::MAX (= 2^63 = 9.22e18) would
-    // silently saturate to i64::MAX on `as i64` cast; reject it explicitly.
-    // `i64::MAX as f64` rounds up to exactly 2^63, so `>= 2^63` is the right bound.
-    if !micros_f.is_finite() || micros_f.abs() >= 9_223_372_036_854_775_808.0_f64 {
-        return Err(TypeError::Overflow);
+    if factor.is_infinite() {
+        let sign = interval_sign(a);
+        if sign == 0 {
+            return Err(interval_out_of_range());
+        }
+        let negative = (factor < 0.0) != (sign < 0);
+        return Ok(Interval::infinity_of_sign(if negative { -1 } else { 1 }));
     }
-    let micros = micros_f.round() as i64;
-    Ok(Interval {
-        months,
-        days,
-        micros,
-    })
+    scale_interval(a, |field| field * factor)
 }
 
-/// Divide an interval by a scalar divisor (zero → 22012).
+/// Divide an interval by a scalar divisor (`interval_div`; zero → 22012).
+///
+/// Dividing a FINITE interval by an infinity is not an error: every field goes
+/// to zero, which the ordinary division already gives. Only `infinity/infinity`
+/// has no answer.
 pub fn div_interval(a: Interval, divisor: f64) -> Result<Interval, TypeError> {
     if divisor == 0.0 {
         return Err(TypeError::DivisionByZero);
     }
-    mul_interval(a, 1.0 / divisor)
+    if divisor.is_nan() {
+        return Err(interval_out_of_range());
+    }
+    if a.is_infinite() {
+        if divisor.is_infinite() {
+            return Err(interval_out_of_range());
+        }
+        return Ok(Interval::infinity_of_sign(if divisor < 0.0 {
+            -a.infinite_sign()
+        } else {
+            a.infinite_sign()
+        }));
+    }
+    scale_interval(a, |field| field / divisor)
 }
 
 /// Add `days` to a `Date`, returning the new `Date` (overflow → 22008). Adding
@@ -406,6 +530,25 @@ pub fn time_to_interval(t: PgTime) -> Interval {
         days: 0,
         micros: t.micros_of_day(),
     }
+}
+
+/// Read an `interval` as a `time` (`interval_time`), the reverse conversion.
+///
+/// Only the microseconds field takes part: neither a month nor a day has a
+/// fixed length in microseconds, so PostgreSQL ignores both rather than guess.
+/// What is left is reduced into one day by taking the FLOOR, which is why
+/// `interval '-2 hours'` reads `22:00:00` and not `-02:00:00`. An infinite
+/// interval names no reading at all (22008).
+pub fn interval_to_time(iv: Interval) -> Result<PgTime, TypeError> {
+    if iv.is_infinite() {
+        return Err(TypeError::DatetimeOutOfRange {
+            message: "cannot convert infinite interval to time".to_string(),
+        });
+    }
+    let micros = iv.micros.rem_euclid(USECS_PER_DAY_I64);
+    PgTime::from_micros_of_day(micros).ok_or_else(|| TypeError::DatetimeFieldOverflow {
+        value: "interval".to_string(),
+    })
 }
 
 /// Add an `Interval` to a `Date` (PG: promotes date→midnight timestamp first)
@@ -508,9 +651,17 @@ pub fn time_plus_interval(t: PgTime, iv: Interval) -> PgTime {
 /// and `time + date` → `timestamp`). A `24:00:00` reading lands at midnight on
 /// the following day, so `date '2020-01-01' + time '24:00:00'` is
 /// `2020-01-02 00:00:00`. `None` when that day is past the end of the calendar.
+///
+/// A non-finite date swallows the reading, exactly as `datetime_timestamp` does:
+/// it promotes the date to a timestamp first and adds the time only to a finite
+/// one, so `date 'infinity' + time '01:00'` is `infinity` and not a clock
+/// reading on the last representable day.
 #[must_use]
 pub fn combine_date_time(d: Date, t: PgTime) -> Option<DateTime> {
-    t.on_date(d)
+    match date_infinite_sign(d) {
+        0 => t.on_date(d),
+        sign => Some(timestamp_infinity_of_sign(sign)),
+    }
 }
 
 /// Add an `Interval` to a `timestamptz` instant, calendar-aware in `tz`. The
@@ -726,6 +877,27 @@ fn decode_error(err: DecodeError, type_name: &'static str, value: &str) -> TypeE
         },
         DecodeError::FieldOverflow => TypeError::DatetimeFieldOverflow {
             value: value.to_string(),
+        },
+        // Same 22008 and same message as `FieldOverflow`; the month and the day
+        // are the fields a mis-read `DateStyle` swaps, so PostgreSQL names the
+        // setting that would read the literal the way it was meant.
+        DecodeError::MdFieldOverflow => TypeError::CodedWithHint {
+            sqlstate: "22008",
+            message: format!("date/time field value out of range: \"{value}\""),
+            hint: "Perhaps you need a different \"DateStyle\" setting.",
+        },
+        // Named by the type, not by a field, because no single field is at
+        // fault. `timestamptz` borrows `timestamp`'s wording, as PostgreSQL
+        // does — the offset plays no part in the day being unreachable.
+        DecodeError::ValueOutOfRange => TypeError::DatetimeOutOfRange {
+            message: format!(
+                "{} out of range: \"{value}\"",
+                if type_name == "date" {
+                    "date"
+                } else {
+                    "timestamp"
+                }
+            ),
         },
         DecodeError::TzDisplacement => TypeError::TimezoneDisplacementOverflow {
             value: value.to_string(),
@@ -5668,66 +5840,158 @@ fn input_starts_with_ci(chars: &[char], i: usize, needle: &[char]) -> bool {
 // executor wires them into `make_*`/`justify_*` SQL functions in a later task.
 // ---------------------------------------------------------------------------
 
-/// Map a jiff civil-constructor error (an out-of-range field) to a
-/// `DatetimeFieldOverflow` (22008), labelling the offending field set.
-fn field_overflow(value: impl Into<String>) -> TypeError {
-    TypeError::DatetimeFieldOverflow {
-        value: value.into(),
+/// The seconds argument of a `make_*` complaint, spelled as C's `%02g` spells
+/// it: six significant digits, trailing zeros trimmed, exponent notation once
+/// the value leaves `1e-5 .. 1e6`, and a minimum field width of two.
+///
+/// The width is what turns a whole `0` into `00`, so `make_time(-1, 0, 0)`
+/// reports `-1:00:00` rather than `-1:00:0`. PostgreSQL's own `snprintf` spells
+/// the non-finite values `Infinity` and `NaN`, not C's `inf` and `nan`.
+fn format_seconds_g(sec: f64) -> String {
+    let mut rendered = if sec.is_nan() {
+        "NaN".to_string()
+    } else if sec.is_infinite() {
+        if sec < 0.0 { "-Infinity" } else { "Infinity" }.to_string()
+    } else {
+        // `%g` picks its style from the exponent a `%e` conversion of the same
+        // precision would carry, so read that exponent off such a conversion
+        // rather than off a logarithm, which disagrees on the rounding
+        // boundaries.
+        let scientific = format!("{sec:.5e}");
+        let exponent: i32 = scientific
+            .split_once('e')
+            .and_then(|(_, exponent)| exponent.parse().ok())
+            .unwrap_or(0);
+        if (-4..6).contains(&exponent) {
+            let precision = usize::try_from(5 - exponent).unwrap_or(0);
+            trim_g_zeros(&format!("{sec:.precision$}"))
+        } else {
+            let (mantissa, _) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+            let sign = if exponent < 0 { '-' } else { '+' };
+            format!("{}e{sign}{:02}", trim_g_zeros(mantissa), exponent.abs())
+        }
+    };
+    // The field width counts the sign, and the `0` flag pads behind it, so only
+    // a bare single digit grows.
+    while rendered.len() < 2 {
+        rendered.insert(usize::from(rendered.starts_with('-')), '0');
+    }
+    rendered
+}
+
+/// Drop the trailing zeros of a fixed-point rendering, and the decimal point
+/// with them when nothing is left after it. This is `%g`'s trailing-zero rule.
+fn trim_g_zeros(rendered: &str) -> String {
+    if rendered.contains('.') {
+        rendered.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        rendered
+    }
+    .to_string()
+}
+
+/// `date field value out of range: 2013-02-30`: the 22008 the `make_*`
+/// constructors raise for a field `ValidateDate` refuses.
+///
+/// The three fields are spelled `%d-%02d-%02d`, so the month and the day are
+/// zero-padded to two characters and the sign counts towards the width — a
+/// negative day comes out as `2013-11--1`, exactly as PostgreSQL prints it.
+fn date_field_out_of_range(year: i32, month: i32, day: i32) -> TypeError {
+    TypeError::DatetimeOutOfRange {
+        message: format!("date field value out of range: {year}-{month:02}-{day:02}"),
     }
 }
 
-/// Split a fractional-seconds `f64` into whole seconds + nanoseconds at µs
-/// resolution (PG stores microseconds, so the nanos are always a multiple of
-/// 1000). Returns `None` when the whole-second part does not fit an `i8` (the
-/// jiff `Time`/`DateTime` second field), which a civil time would reject anyway.
-fn split_seconds(sec: f64) -> Option<(i8, i32)> {
-    if !sec.is_finite() {
-        return None;
+/// `date out of range: 5874898-01-01`: the 22008 for a field set that passes
+/// validation but names a day outside the type's range.
+fn make_date_out_of_range(year: i32, month: i32, day: i32) -> TypeError {
+    TypeError::DatetimeOutOfRange {
+        message: format!("date out of range: {year}-{month:02}-{day:02}"),
     }
-    let whole = sec.trunc();
-    if !(-128.0..=127.0).contains(&whole) {
-        return None;
-    }
-    let whole = whole as i8;
-    // Fractional part → microseconds, then ×1000 for jiff's nanosecond field.
-    // `.round()` stands in for PG's `rint` on the µs value.
-    let micros = (sec.fract() * 1_000_000.0).round() as i32;
-    let nanos = micros * 1_000;
-    Some((whole, nanos))
 }
 
-/// `make_date(year, month, day)`. An out-of-range field (month 13, day 0, …) →
-/// 22008 (`DatetimeFieldOverflow`).
+/// `time field value out of range: 10:55:100.1`: the 22008 for a clock field
+/// `float_time_overflows` refuses. The seconds are spelled `%02g`.
+fn time_field_out_of_range(hour: i32, min: i32, sec: f64) -> TypeError {
+    TypeError::DatetimeOutOfRange {
+        message: format!(
+            "time field value out of range: {hour}:{min:02}:{}",
+            format_seconds_g(sec)
+        ),
+    }
+}
+
+/// `make_date(year, month, day)` (`ValidateDate` on positional fields).
+///
+/// A NEGATIVE year is the BC era rather than an astronomical year, so
+/// `make_date(-44, 3, 15)` is 44 BC and there is no year zero on either side of
+/// the boundary. A field the validation refuses is `date field value out of
+/// range`; a validated field set that names a day the type cannot hold is `date
+/// out of range`. Both are 22008.
 pub fn make_date(year: i32, month: i32, day: i32) -> Result<Date, TypeError> {
-    let label = || format!("{year}-{month}-{day}");
-    let y = i16::try_from(year).map_err(|_| field_overflow(label()))?;
-    let mo = i8::try_from(month).map_err(|_| field_overflow(label()))?;
-    let d = i8::try_from(day).map_err(|_| field_overflow(label()))?;
-    Date::new(y, mo, d).map_err(|_| field_overflow(label()))
+    let is_bc = year < 0;
+    // PostgreSQL negates in place and then reports whatever the field holds at
+    // the moment it fails, so the year in the message is the era-corrected one
+    // everywhere except on the negation itself.
+    let magnitude = if is_bc {
+        year.checked_neg()
+            .ok_or_else(|| date_field_out_of_range(year, month, day))?
+    } else {
+        year
+    };
+    if magnitude <= 0 {
+        return Err(date_field_out_of_range(magnitude, month, day));
+    }
+    // BC years are stored astronomically: 1 BC is year 0, so `n BC` is `-(n-1)`.
+    let astronomical = if is_bc { -(magnitude - 1) } else { magnitude };
+    // The coarse checks come before the month-length one, which is why
+    // `make_date(2013, 13, 1)` complains about the month and not the day.
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(date_field_out_of_range(astronomical, month, day));
+    }
+    let range = || make_date_out_of_range(astronomical, month, day);
+    let y = i16::try_from(astronomical).map_err(|_| range())?;
+    let mo = i8::try_from(month).map_err(|_| range())?;
+    let d = i8::try_from(day).map_err(|_| range())?;
+    let first = Date::new(y, mo, 1).map_err(|_| range())?;
+    if d > first.days_in_month() {
+        return Err(date_field_out_of_range(astronomical, month, day));
+    }
+    let built = Date::new(y, mo, d).map_err(|_| range())?;
+    // The reserved non-finite encodings are not dates a constructor may return,
+    // and neither is anything below PostgreSQL's own lower bound.
+    if date_is_infinite(built) || built < MIN_FINITE_DATE {
+        return Err(range());
+    }
+    Ok(built)
 }
 
-/// `make_time(hour, min, sec)`; the fractional part of `sec` becomes microseconds
-/// (PG resolution). An out-of-range field (minute 60, hour 25, …) → 22008.
-/// `make_time(24, 0, 0)` is the one hour-24 call PostgreSQL allows, because
-/// `24:00:00` is a `time`; any non-zero minute or second beside it is not.
+/// `make_time(hour, min, sec)` (`float_time_overflows` then `tm2time`); the
+/// fractional part of `sec` becomes microseconds, PostgreSQL's resolution.
+///
+/// The fields are summed rather than assembled, so a seconds argument of `60` is
+/// legal and rolls into the next minute: `make_time(1, 2, 60)` is `01:03:00`.
+/// Only the total is bounded, at `24:00:00`, which is why `make_time(24, 0, 0)`
+/// is the one hour-24 call that succeeds.
 pub fn make_time(hour: i32, min: i32, sec: f64) -> Result<PgTime, TypeError> {
-    let label = || format!("{hour}:{min}:{sec}");
-    let h = i8::try_from(hour).map_err(|_| field_overflow(label()))?;
-    let mi = i8::try_from(min).map_err(|_| field_overflow(label()))?;
-    let (s, nanos) = split_seconds(sec).ok_or_else(|| field_overflow(label()))?;
-    if h == 24 {
-        return (mi == 0 && s == 0 && nanos == 0)
-            .then_some(PgTime::END_OF_DAY)
-            .ok_or_else(|| field_overflow(label()));
+    let refuse = || time_field_out_of_range(hour, min, sec);
+    if !(0..=24).contains(&hour) || !(0..60).contains(&min) || sec.is_nan() {
+        return Err(refuse());
     }
-    Time::new(h, mi, s, nanos)
-        .map(PgTime::from)
-        .map_err(|_| field_overflow(label()))
+    // Round to microseconds BEFORE the range check, so a seconds argument that
+    // only reaches 60 by rounding is not refused for having got there.
+    let sec_micros = (sec * USECS_PER_SEC_F64).round_ties_even();
+    if !(0.0..=60.0 * USECS_PER_SEC_F64).contains(&sec_micros) {
+        return Err(refuse());
+    }
+    let total = (i64::from(hour) * 60 + i64::from(min)) * 60 * 1_000_000 + sec_micros as i64;
+    PgTime::from_micros_of_day(total).ok_or_else(refuse)
 }
 
 /// Civil-`DateTime` builder shared by `make_timestamp` / `make_timestamptz` (the
 /// executor wraps the time-zone step for the latter). An out-of-range field →
-/// 22008.
+/// 22008, worded by whichever half refused it; a field set both halves accept
+/// that still names no `timestamp` is `timestamp out of range`.
 pub fn make_timestamp_civil(
     y: i32,
     mo: i32,
@@ -5738,13 +6002,25 @@ pub fn make_timestamp_civil(
 ) -> Result<DateTime, TypeError> {
     let date = make_date(y, mo, d)?;
     let time = make_time(h, mi, sec)?;
-    combine_date_time(date, time).ok_or_else(|| field_overflow(format!("{y}-{mo}-{d} {h}:{mi}")))
+    combine_date_time(date, time).ok_or_else(|| TypeError::DatetimeOutOfRange {
+        message: format!(
+            "timestamp out of range: {}-{mo:02}-{d:02} {h}:{mi:02}:{}",
+            date.year(),
+            format_seconds_g(sec)
+        ),
+    })
 }
 
 /// `make_interval(years, months, weeks, days, hours, mins, secs)`: weeks fold into
 /// days, years into months, and the clock fields (hours/mins/secs, fractional secs
-/// included) into microseconds. All arithmetic is checked; any field overflow →
-/// 22008.
+/// included) into microseconds. All arithmetic is checked; a field that will not
+/// hold its sum is `interval out of range` (22008), the wording every `interval`
+/// overflow carries.
+///
+/// The one exception is `secs` so large that scaling it to microseconds leaves
+/// `f64` altogether. That is the multiplication overflowing, not the interval,
+/// and PostgreSQL reports it as `float8_mul` does: `value out of range: overflow`
+/// (22003).
 pub fn make_interval(
     years: i32,
     months: i32,
@@ -5754,32 +6030,40 @@ pub fn make_interval(
     mins: i32,
     secs: f64,
 ) -> Result<Interval, TypeError> {
-    let label = "make_interval";
+    // Checked before anything else, as PostgreSQL checks it: a non-finite
+    // seconds argument decides the error even when a whole-number field would
+    // also have overflowed.
+    if !secs.is_finite() {
+        return Err(interval_out_of_range());
+    }
     // months = years*12 + months (checked, i32).
     let months = years
         .checked_mul(12)
         .and_then(|m| m.checked_add(months))
-        .ok_or_else(|| field_overflow(label))?;
+        .ok_or_else(interval_out_of_range)?;
     // days = weeks*7 + days (checked, i32).
     let days = weeks
         .checked_mul(7)
         .and_then(|d| d.checked_add(days))
-        .ok_or_else(|| field_overflow(label))?;
-    // micros = (((hours*60 + mins)*60) * 1e6) + round(secs*1e6) (checked, i64).
-    if !secs.is_finite() {
-        return Err(field_overflow(label));
+        .ok_or_else(interval_out_of_range)?;
+    // micros = (((hours*60 + mins)*60) * 1e6) + rint(secs*1e6) (checked, i64).
+    let sec_micros_f = secs * 1_000_000.0;
+    if sec_micros_f.is_infinite() {
+        return Err(TypeError::OutOfRange {
+            message: "value out of range: overflow".to_string(),
+        });
     }
-    let sec_micros_f = (secs * 1_000_000.0).round();
-    if sec_micros_f.abs() >= 9_223_372_036_854_775_808.0_f64 {
-        return Err(field_overflow(label));
+    let sec_micros_f = sec_micros_f.round_ties_even();
+    if !fits_in_i64(sec_micros_f) {
+        return Err(interval_out_of_range());
     }
     let sec_micros = sec_micros_f as i64;
     let micros = (i64::from(hours) * 60 + i64::from(mins))
         .checked_mul(60)
         .and_then(|s| s.checked_mul(1_000_000))
         .and_then(|us| us.checked_add(sec_micros))
-        .ok_or_else(|| field_overflow(label))?;
-    Ok(Interval {
+        .ok_or_else(interval_out_of_range)?;
+    finite_interval(Interval {
         months,
         days,
         micros,
@@ -5798,7 +6082,7 @@ pub fn justify_days(iv: Interval) -> Result<Interval, TypeError> {
     let whole_months = i64::from(iv.days) / 30;
     let months = i64::from(iv.months) + whole_months;
     Ok(Interval {
-        months: i32::try_from(months).map_err(|_| field_overflow("justify_days"))?,
+        months: i32::try_from(months).map_err(|_| interval_out_of_range())?,
         days: iv.days % 30,
         micros: iv.micros,
     })
@@ -5817,7 +6101,7 @@ pub fn justify_hours(iv: Interval) -> Result<Interval, TypeError> {
     let days = i64::from(iv.days) + whole_days;
     Ok(Interval {
         months: iv.months,
-        days: i32::try_from(days).map_err(|_| field_overflow("justify_hours"))?,
+        days: i32::try_from(days).map_err(|_| interval_out_of_range())?,
         micros: iv.micros % USECS_PER_DAY_I64,
     })
 }
@@ -5866,8 +6150,8 @@ pub fn justify_interval(iv: Interval) -> Result<Interval, TypeError> {
     // in general. Check it: an out-of-i32 result raises 22008 (PG 15+ `ERROR:
     // interval out of range`) rather than silently wrapping.
     Ok(Interval {
-        months: i32::try_from(months).map_err(|_| field_overflow("justify_interval"))?,
-        days: i32::try_from(days).map_err(|_| field_overflow("justify_interval"))?,
+        months: i32::try_from(months).map_err(|_| interval_out_of_range())?,
+        days: i32::try_from(days).map_err(|_| interval_out_of_range())?,
         micros,
     })
 }
@@ -6920,24 +7204,20 @@ mod io_tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Teeth test: proves the CURRENT (unfixed) code saturates instead of
-    // returning Err(Overflow).  After the fix this test must PASS.
-    // -----------------------------------------------------------------------
     #[test]
     fn mul_interval_micros_overflow_is_caught() {
         // The largest FINITE micros (`i64::MAX` itself is the `infinity`
-        // sentinel) times 1000 is ≈ 9.22e21, far above i64::MAX; the fixed code
-        // must return Err(Overflow), not Ok with a saturated i64::MAX value.
+        // encoding) times 1000 is ≈ 9.22e21, far above `i64::MAX`. The product
+        // must be refused rather than saturated, and refused as an `interval`
+        // overflow — `integer out of range` names a type that is not involved.
         let big = Interval {
             months: 0,
             days: 0,
             micros: i64::MAX - 1,
         };
-        assert!(
-            matches!(mul_interval(big, 1000.0), Err(crate::TypeError::Overflow)),
-            "expected Overflow but got a saturated Ok — fix the finite-range guard"
-        );
+        let refused = mul_interval(big, 1000.0).expect_err("9.22e21 µs is out of range");
+        assert!(refused.to_string() == "interval out of range");
+        assert!(refused.sqlstate() == "22008");
     }
 
     #[test]

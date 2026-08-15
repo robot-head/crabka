@@ -237,13 +237,15 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // timestamp carries no offset to attach.
         (Time, ColumnType::Timetz) | (ColumnType::Timetz, Time) => true,
         (Timestamptz, ColumnType::Timetz) => true,
-        // `interval(time)`, the ONE `pg_cast` row that leaves the date/time
-        // category for the timespan one, and the only reason `date - time`
-        // answers a timestamp: the row it resolves to is `date - interval`, so
-        // the `time` has to become an `interval` before the operator runs.
-        // `date`, `timestamp`, `timestamptz` and `timetz` have no interval cast
-        // in either direction.
-        (Time, ColumnType::Interval) => true,
+        // `interval(time)` and `time(interval)`, the two `pg_cast` rows that
+        // join the date/time category to the timespan one. They are not
+        // symmetric in strength: `time → interval` is IMPLICIT, which is the
+        // only reason `date - time` answers a timestamp — the row it resolves
+        // to is `date - interval`, so the `time` becomes an `interval` before
+        // the operator runs. `interval → time` is assignment-only. `date`,
+        // `timestamp`, `timestamptz` and `timetz` have no interval cast in
+        // either direction.
+        (Time, ColumnType::Interval) | (ColumnType::Interval, Time) => true,
         // Everything else — including numeric/bool ↔ temporal, the rest of
         // interval ↔ temporal, and time → timestamp/timestamptz: undefined →
         // 42846.
@@ -1077,6 +1079,13 @@ pub fn cast_in(
         // `1 day` — the conversion sets no days field.
         (Datum::Time(t), ColumnType::Interval) => {
             Ok(Datum::Interval(crate::datetime::time_to_interval(*t)))
+        }
+        // interval → time is `interval_time`, the reverse reading: the
+        // fractional-day part of the elapsed time. The months and the days are
+        // ignored — neither has a fixed length in microseconds — and a negative
+        // interval takes the floor, so `interval '-2 hours'` reads `22:00:00`.
+        (Datum::Interval(iv), ColumnType::Time) => {
+            crate::datetime::interval_to_time(*iv).map(Datum::Time)
         }
         // No defined cast.
         (v, to) => Err(cannot_cast(v, to)),
@@ -1933,15 +1942,12 @@ mod tests {
         assert!(cast_allowed(Timestamptz, Date));
         assert!(cast_allowed(Timestamptz, Time));
         assert!(cast_allowed(Timestamptz, Timestamp));
-        // `interval(time)` is the ONE `pg_cast` row between the date/time and
-        // timespan categories, and it is implicit — which is what lets
-        // `date - time` resolve to the `date - interval` operator.
+        // `interval(time)` is implicit, which is what lets `date - time`
+        // resolve to the `date - interval` operator. The reverse,
+        // `time(interval)`, is assignment-level. The two are `pg_cast`'s only
+        // rows between the date/time and timespan categories.
         assert!(cast_allowed(Time, Interval));
-        // The reverse, `time(interval)`, is `pg_cast`'s only other row between
-        // the two categories. It is assignment-level, so `PostgreSQL` accepts
-        // `interval '3 hours'::time`; crabka does not implement it yet, and
-        // this line records the gap rather than claiming a match.
-        assert!(!cast_allowed(Interval, Time));
+        assert!(cast_allowed(Interval, Time));
         // NOT allowed anywhere: every other interval ↔
         // date/time/timestamp/timestamptz pair.
         assert!(!cast_allowed(Interval, Date));
@@ -3221,10 +3227,6 @@ mod tests {
             Err(TypeError::CannotCast { .. })
         ));
         assert!(matches!(
-            cast(&iv, Time, utc),
-            Err(TypeError::CannotCast { .. })
-        ));
-        assert!(matches!(
             cast(&iv, Timestamp, utc),
             Err(TypeError::CannotCast { .. })
         ));
@@ -3235,7 +3237,6 @@ mod tests {
 
         // cast_allowed is false for these
         assert!(!cast_allowed(Interval, Date));
-        assert!(!cast_allowed(Interval, Time));
         assert!(!cast_allowed(Interval, Timestamp));
         assert!(!cast_allowed(Interval, Timestamptz));
         assert!(!cast_allowed(Date, Interval));

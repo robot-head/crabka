@@ -142,10 +142,18 @@ fn date_order_decides_an_otherwise_ambiguous_numeric_date() {
         );
     }
     // `99 01 08` in MDY order puts 99 in the month slot, which is out of range.
-    assert!(
-        let Err(TypeError::DatetimeFieldOverflow { .. }) =
-            parse_date_in("99 01 08", DateOrder::Mdy, &utc())
-    );
+    // A month or a day out of range is the one field overflow PostgreSQL points
+    // at `DateStyle`, because the ordering is what put the value there.
+    let refused = parse_date_in("99 01 08", DateOrder::Mdy, &utc()).expect_err("month 99");
+    assert!(refused.sqlstate() == "22008");
+    assert!(refused.to_string() == "date/time field value out of range: \"99 01 08\"");
+    assert!(refused.hint() == Some("Perhaps you need a different \"DateStyle\" setting."));
+
+    // `1997-02-29` names a real month and a day inside 1..=31, so the ordering
+    // cannot be what is wrong with it, and PostgreSQL leaves off the HINT.
+    let refused = parse_date_in("1997-02-29", DateOrder::Ymd, &utc()).expect_err("Feb 29 of 1997");
+    assert!(refused.hint().is_none());
+    assert!(let TypeError::DatetimeFieldOverflow { .. } = refused);
 }
 
 #[test]
