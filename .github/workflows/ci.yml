@@ -648,7 +648,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.3
+          version: v4.2.4
       - run: helm lint charts/crabka-operator
       - run: helm template demo charts/crabka-operator > /tmp/rendered.yaml
       - run: |
