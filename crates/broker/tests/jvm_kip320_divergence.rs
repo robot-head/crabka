@@ -1301,6 +1301,12 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
         .partition_record_for_test(TOPIC, 0)
         .expect("partition record present after wait");
     let parked_epoch = LeaderEpoch(partition.leader_epoch.0 + 1);
+
+    // Freeze the JVM replica before parking replication. Otherwise it can
+    // copy part of the deliberately forged suffix while the phantom-leader
+    // metadata is still propagating, making its authoritative prefix longer.
+    set_container_paused(CONTAINER, true);
+
     c1.submit_metadata_record_for_test(MetadataRecord::V1Partition(PartitionRecord {
         topic: TOPIC.to_string(),
         partition: 0,
@@ -1361,6 +1367,9 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
     }))
     .await
     .expect("promote JVM broker for reverse-direction recovery");
+
+    set_container_paused(CONTAINER, false);
+
     wait_for_described_leader(&bootstrap_all, TOPIC, 3, Duration::from_secs(45)).await;
 
     // 5. Observe the truncation itself, before adding any new leader records.
