@@ -797,17 +797,11 @@ fn tenant_reconcile_rules() -> Vec<MockRule> {
     ]
 }
 
-fn tenant_reconcile_rules_with_compute(
-    replicas: i32,
-    pods: &[(&str, &str)],
-) -> Vec<MockRule> {
+fn tenant_reconcile_rules_with_compute(replicas: i32, pods: &[(&str, &str)]) -> Vec<MockRule> {
     let mut rules = tenant_reconcile_rules();
     for rule in &mut rules {
         if rule.path_substr == "/deployments/tenant-a-gres" {
-            rule.response = json_response(
-                200,
-                &ready_deployment_body("tenant-a-gres", replicas),
-            );
+            rule.response = json_response(200, &ready_deployment_body("tenant-a-gres", replicas));
         } else if rule.path_substr == "/pods" {
             rule.response = json_response(200, &pod_list_body(pods));
         }
@@ -821,10 +815,7 @@ fn deployment_reconcile_rules(replicas: i32) -> Vec<MockRule> {
         .map(|method| MockRule {
             method,
             path_substr: "/deployments/tenant-a-gres".into(),
-            response: json_response(
-                200,
-                &ready_deployment_body("tenant-a-gres", replicas),
-            ),
+            response: json_response(200, &ready_deployment_body("tenant-a-gres", replicas)),
         })
         .collect::<Vec<_>>();
     rules.push(MockRule {
@@ -939,7 +930,7 @@ async fn repeated_reconcile_preserves_scram_and_does_not_replace_the_registry_re
 }
 
 #[tokio::test]
-async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
+async fn suspended_registry_state_quiesces_compute_before_parking_wal() {
     let mut rules = tenant_reconcile_rules();
     rules.extend(tenant_reconcile_rules_with_compute(
         0,
@@ -949,6 +940,8 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
         0,
         &[("tenant-a-gres-failed", "Failed")],
     ));
+    rules.extend(deployment_reconcile_rules(0));
+    rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
     rules.extend(deployment_reconcile_rules(0));
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
@@ -985,12 +978,15 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
         .unwrap();
 
     let calls = admin.lock().await.calls();
-    assert!(!calls.iter().any(|call| matches!(call, RecordedCall::DeleteTopics(_))));
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, RecordedCall::DeleteTopics(_)))
+    );
     let upserts = control.upserts.lock().await;
-    assert!(upserts.len() == 1);
-    assert!(upserts[0].state == TenantState::Parking);
-    assert!(upserts[0].wal_generation == 5);
+    assert!(upserts.is_empty());
     drop(upserts);
+    assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Suspended);
     let observed = state.take_observed();
     let deployment = observed
         .iter()
@@ -1016,7 +1012,27 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
             .iter()
             .all(|call| !matches!(call, RecordedCall::DeleteTopics(_)))
     );
+    assert!(control.upserts.lock().await.is_empty());
+    assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Suspended);
+
+    reconcile(Arc::new(tenant()), Arc::new(ctx.clone()))
+        .await
+        .unwrap();
+
+    assert!(
+        admin
+            .lock()
+            .await
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, RecordedCall::DeleteTopics(_)))
+    );
     assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Parking);
+    let upserts = control.upserts.lock().await;
+    assert!(upserts.len() == 1);
+    assert!(upserts[0].state == TenantState::Parking);
+    assert!(upserts[0].wal_generation == 5);
+    drop(upserts);
 
     reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
 
@@ -1140,8 +1156,9 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
 
 #[tokio::test]
 async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
-    let mut rules = tenant_reconcile_rules();
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
     set_lifecycle_requeue(&mut rules, 1_234);
+    rules.extend(deployment_reconcile_rules(0));
     rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
     rules.extend(deployment_reconcile_rules(0));
     rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
@@ -1212,9 +1229,11 @@ async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
 
 #[tokio::test]
 async fn failed_parking_intent_replacement_keeps_wal_until_retry_then_converges_once() {
-    let mut rules = tenant_reconcile_rules();
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
     rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(deployment_reconcile_rules(0));
     rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
+    rules.extend(deployment_reconcile_rules(0));
     let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
@@ -1304,7 +1323,8 @@ async fn failed_parking_intent_replacement_keeps_wal_until_retry_then_converges_
 
 #[tokio::test]
 async fn failed_wal_deletion_keeps_parking_intent_and_retry_converges() {
-    let mut rules = tenant_reconcile_rules();
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
+    rules.extend(deployment_reconcile_rules(0));
     rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
     rules.extend(tenant_reconcile_rules_with_compute(0, &[]));
     rules.extend(deployment_reconcile_rules(0));
@@ -1485,7 +1505,7 @@ async fn suspended_tenant_failure_preserves_lifecycle_without_reactivating_routi
 
 #[tokio::test]
 async fn registry_suspension_is_preserved_when_a_later_dependency_fails() {
-    let mut rules = tenant_reconcile_rules();
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
     rules[2].response = json_response(
         404,
         &serde_json::json!({
@@ -1537,7 +1557,7 @@ async fn registry_suspension_is_preserved_when_a_later_dependency_fails() {
 
 #[tokio::test]
 async fn missing_final_checkpoint_manifest_blocks_suspended_parking() {
-    let state = MockState::new(tenant_reconcile_rules());
+    let state = MockState::new(tenant_reconcile_rules_with_compute(0, &[]));
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
@@ -1574,7 +1594,9 @@ async fn missing_final_checkpoint_manifest_blocks_suspended_parking() {
 
 #[tokio::test]
 async fn parked_tenant_reconciles_again_without_revalidating_stale_checkpoint() {
-    let state = MockState::new(tenant_reconcile_rules());
+    let mut rules = tenant_reconcile_rules_with_compute(0, &[]);
+    rules.extend(deployment_reconcile_rules(0));
+    let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));

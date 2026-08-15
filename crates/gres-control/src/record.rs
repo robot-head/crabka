@@ -1163,6 +1163,7 @@ impl TenantRecord {
     }
 
     /// Returns a record marked suspended with the durable checkpoint that permits parking.
+    /// A late compute checkpoint leaves an operator-owned parking intent unchanged.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1171,6 +1172,9 @@ impl TenantRecord {
         checkpoint: FinalCheckpoint,
     ) -> Result<Self, ControlError> {
         checkpoint.ensure_valid()?;
+        if self.state == TenantState::Parking {
+            return Ok(self);
+        }
         let was_suspended = self.state == TenantState::Suspended;
         self = self.mark_suspended()?;
         if was_suspended && self.final_checkpoint.as_ref() != Some(&checkpoint) {
@@ -2557,6 +2561,31 @@ mod tests {
             !parking
                 .state
                 .can_transition_to(TenantState::ResumeRequested)
+        );
+    }
+
+    #[test]
+    fn late_compute_checkpoint_does_not_erase_parking_intent() {
+        let mut parking = record(1).transition_to(TenantState::Parking).unwrap();
+        parking.final_checkpoint = Some(FinalCheckpoint {
+            wal_generation: 4,
+            covered_offset: 11,
+            manifest_key: "tenant/r0/g4/manifest".into(),
+            total_bytes: 64,
+        });
+        let replacement = FinalCheckpoint {
+            wal_generation: 4,
+            covered_offset: 12,
+            manifest_key: "tenant/r0/g4/later-manifest".into(),
+            total_bytes: 65,
+        };
+
+        assert!(
+            parking
+                .clone()
+                .mark_suspended_after_checkpoint(replacement)
+                .unwrap()
+                == parking
         );
     }
 

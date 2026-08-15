@@ -378,8 +378,10 @@ async fn reconcile_inner(
             range_tls_hash: range_tls_hash.as_deref(),
             tracing: tracing.as_ref(),
         };
-        if lifecycle_state == TenantState::Parking
-            && !reconcile_compute_deployments(&ctx, &ns, &obj, &compute_config).await?
+        if matches!(
+            lifecycle_state,
+            TenantState::Suspended | TenantState::Parking
+        ) && !reconcile_compute_deployments(&ctx, &ns, &obj, &compute_config).await?
         {
             return Ok(lifecycle_requeue(&compute_policy));
         }
@@ -912,7 +914,9 @@ async fn reconcile_compute_deployments(
             .iter()
             .all(|pod| {
                 matches!(
-                    pod.status.as_ref().and_then(|status| status.phase.as_deref()),
+                    pod.status
+                        .as_ref()
+                        .and_then(|status| status.phase.as_deref()),
                     Some("Failed" | "Succeeded")
                 )
             });
@@ -4600,11 +4604,7 @@ mod tests {
         assert!(!deployment_is_ready(&deployment, 1));
 
         deployment.spec.as_mut().expect("spec").replicas = Some(0);
-        deployment
-            .status
-            .as_mut()
-            .expect("status")
-            .replicas = Some(1);
+        deployment.status.as_mut().expect("status").replicas = Some(1);
         assert!(!deployment_is_ready(&deployment, 0));
         deployment.status.as_mut().expect("status").replicas = Some(0);
         assert!(deployment_is_ready(&deployment, 0));
