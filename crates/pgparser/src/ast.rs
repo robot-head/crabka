@@ -75,6 +75,15 @@ impl From<String> for RelationRef {
     }
 }
 
+/// The relation name `CREATE SEQUENCE` writes into the `table` field of
+/// [`Statement::CreateIndex`], which is how that shared variant tells a
+/// sequence from an index.
+///
+/// It is not a name any statement can write: the lexer folds an unquoted
+/// spelling to lowercase and a quoted one keeps its quotes, so no user
+/// identifier collides with it.
+pub const SEQUENCE_RELATION: &str = "__crabka_sequence__";
+
 /// The point at which an ordinary trigger fires relative to its event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerTiming {

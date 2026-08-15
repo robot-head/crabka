@@ -179,6 +179,32 @@ fn starts_schema_element(word: &str) -> bool {
     matches!(word, "grant")
 }
 
+/// Whether a parsed statement is one of the six `PostgreSQL` admits as a
+/// `CREATE SCHEMA` element.
+///
+/// `schema_stmt` lists `CreateStmt`, `IndexStmt`, `CreateSeqStmt`,
+/// `CreateTrigStmt`, `GrantStmt` and `ViewStmt`, and nothing else. So 18.4
+/// answers `CREATE SCHEMA s CREATE MATERIALIZED VIEW …` with a syntax error
+/// rather than a materialized view, and the same for `CREATE TABLE … AS`,
+/// `CREATE FUNCTION`, `CREATE TYPE` and a nested `CREATE SCHEMA`.
+///
+/// `CREATE SEQUENCE` shares [`crate::ast::Statement::CreateIndex`] with
+/// `CREATE INDEX`, so the two are one arm here. `GRANT <role> TO <member>` is
+/// `GrantRoleStmt` upstream, a different node from `GrantStmt`, and is not
+/// admitted.
+fn is_schema_element(statement: &crate::ast::Statement) -> bool {
+    use crate::ast::Statement;
+    matches!(
+        statement,
+        Statement::CreateTable { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::CreateView { .. }
+            | Statement::CreateTrigger(_)
+            | Statement::GrantTablePrivileges { .. }
+            | Statement::GrantSchemaPrivileges { .. }
+    )
+}
+
 /// The leading identifiers [`Parser::session_utility_statement`] claims.
 fn is_session_utility_word(word: &str) -> bool {
     matches!(
@@ -7567,13 +7593,36 @@ impl Parser {
         }
         // The element list is written without separators — PostgreSQL's
         // `OptSchemaEltList` is a sequence of complete statements.
+        let elements_pos = self.peek_pos();
         let mut elements = Vec::new();
         while matches!(
             self.peek(),
             Token::Keyword(Keyword::Create) | Token::Ident(_)
         ) && !matches!(self.peek(), Token::Ident(word) if !starts_schema_element(word))
         {
-            elements.push(self.statement()?.statement);
+            let element_start = self.pos;
+            let element = self.statement()?.statement;
+            if !is_schema_element(&element) {
+                // Rewound one token past `CREATE`, which is where 18.4 puts the
+                // caret: it is the word that decides the statement's kind, and
+                // therefore the word that leaves `schema_stmt`. The position is
+                // not reported, because it is upstream's for that family and
+                // not for `CREATE TABLE … AS`, whose caret sits on the `AS`.
+                self.pos = element_start + 1;
+                return Err(self.syntax_error_here());
+            }
+            elements.push(element);
+        }
+        // Upstream refuses the combination in the grammar, one reduction per
+        // `CREATE SCHEMA` spelling, so the whole list is read first and the
+        // caret lands on the element that should not be there.
+        if if_not_exists && !elements.is_empty() {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "CREATE SCHEMA IF NOT EXISTS cannot include schema elements",
+                elements_pos,
+            )
+            .reporting_position());
         }
         Ok(crate::ast::Statement::CreateSchema {
             name,
@@ -9508,7 +9557,7 @@ impl Parser {
         let options = self.sequence_options(&Token::Semicolon)?;
         Ok(Statement::CreateIndex {
             name: Some(name),
-            table: crate::ast::RelationRef::bare("__crabka_sequence__"),
+            table: crate::ast::RelationRef::bare(crate::ast::SEQUENCE_RELATION),
             keys: encode_sequence_options(&options),
             unique: false,
             placement: crate::ast::IndexPlacement::Local,
@@ -16384,6 +16433,73 @@ mod tests {
         for sql in accepted {
             assert!(crate::parse(sql).is_ok(), "case: {sql}");
         }
+    }
+
+    /// `OptSchemaEltList` holds `schema_stmt`, which names six statements. A
+    /// seventh is a syntax error on 18.4, and the caret sits on the word after
+    /// `CREATE`, because that word is what leaves the rule. Verified against
+    /// `postgres:18.4`.
+    #[test]
+    fn a_create_schema_element_list_admits_only_the_six_schema_statements() {
+        use assert2::assert;
+
+        let admitted = [
+            "CREATE SCHEMA s CREATE TABLE t (a int)",
+            "CREATE SCHEMA s CREATE UNLOGGED TABLE t (a int)",
+            "CREATE SCHEMA s CREATE INDEX ON t (a)",
+            "CREATE SCHEMA s CREATE UNIQUE INDEX i ON t (a)",
+            "CREATE SCHEMA s CREATE SEQUENCE q",
+            "CREATE SCHEMA s CREATE VIEW v AS SELECT 1",
+            "CREATE SCHEMA s CREATE OR REPLACE VIEW v AS SELECT 1",
+            "CREATE SCHEMA s CREATE TRIGGER g BEFORE INSERT ON t \
+             EXECUTE FUNCTION f()",
+            "CREATE SCHEMA s GRANT SELECT ON t TO PUBLIC",
+            "CREATE SCHEMA s GRANT USAGE ON SCHEMA s TO PUBLIC",
+            // Several elements, written without a separator.
+            "CREATE SCHEMA s CREATE TABLE a (x int) CREATE TABLE b (y int)",
+        ];
+        for sql in admitted {
+            assert!(crate::parse(sql).is_ok(), "case: {sql}");
+        }
+
+        // (SQL, the lexeme upstream names in the message)
+        let refused: &[(&str, &str)] = &[
+            (
+                "CREATE SCHEMA s CREATE MATERIALIZED VIEW m AS SELECT 1",
+                "MATERIALIZED",
+            ),
+            ("CREATE SCHEMA s CREATE TYPE ty AS (a int)", "TYPE"),
+            ("CREATE SCHEMA s CREATE SCHEMA inner_one", "SCHEMA"),
+            ("CREATE SCHEMA s CREATE DOMAIN d AS int", "DOMAIN"),
+        ];
+        for (sql, lexeme) in refused {
+            let error = crate::parse(sql).expect_err(sql);
+            assert!(error.sqlstate() == "42601", "case: {sql}");
+            assert!(
+                error.message == format!("syntax error at or near \"{lexeme}\""),
+                "case: {sql}, got {}",
+                error.message
+            );
+        }
+    }
+
+    /// `CREATE SCHEMA IF NOT EXISTS` takes no element list. Upstream refuses the
+    /// pair in the grammar, so the whole list is read first and the caret lands
+    /// on its first statement.
+    #[test]
+    fn create_schema_if_not_exists_refuses_an_element_list() {
+        use assert2::assert;
+
+        let sql = "CREATE SCHEMA IF NOT EXISTS s\n  CREATE TABLE t (a int)";
+        let error = crate::parse(sql).expect_err(sql);
+        assert!(error.sqlstate() == "0A000");
+        assert!(error.message == "CREATE SCHEMA IF NOT EXISTS cannot include schema elements");
+        // One-based, and on the `C` of the element's own `CREATE`.
+        assert!(error.reported_position(sql) == Some(33));
+
+        // Without elements the same spelling is ordinary.
+        assert!(crate::parse("CREATE SCHEMA IF NOT EXISTS s").is_ok());
+        assert!(crate::parse("CREATE SCHEMA IF NOT EXISTS AUTHORIZATION r").is_ok());
     }
 
     /// `GRANT a TO b` is role membership, not a privilege grant. Both open with

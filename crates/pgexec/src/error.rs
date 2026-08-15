@@ -76,6 +76,9 @@ pub enum ExecError {
     /// The table definition itself is invalid (42P16), for example a second
     /// primary key.
     InvalidTableDefinition(String),
+    /// A schema definition contradicts itself (42P15): an element of a
+    /// `CREATE SCHEMA` names a schema other than the one being created.
+    InvalidSchemaDefinition(String),
     /// A written row failed a `CHECK` constraint (23514).
     CheckViolation {
         table: String,
@@ -1148,6 +1151,7 @@ impl ExecError {
                 format!("column \"{column}\" of relation \"{table}\" contains null values"),
             ),
             ExecError::InvalidTableDefinition(m) => PgError::error("42P16", m),
+            ExecError::InvalidSchemaDefinition(m) => PgError::error("42P15", m),
             ExecError::CheckViolation { table, constraint } => PgError::error(
                 "23514",
                 format!(
