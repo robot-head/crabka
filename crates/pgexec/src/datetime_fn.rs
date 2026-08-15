@@ -864,8 +864,8 @@ fn extract_from_datetime(
         }
         "decade" => int_str(year.div_euclid(10)),
         "millennium" => int_str(millennium_of(year)),
-        "year" => int_str(year),
-        "isoyear" => int_str(i64::from(date.iso_week_date().year())),
+        "year" => int_str(year_without_zero(year)),
+        "isoyear" => int_str(year_without_zero(i64::from(date.iso_week_date().year()))),
         "quarter" => int_str(((i64::from(date.month()) - 1) / 3) + 1),
         "month" => int_str(i64::from(date.month())),
         "day" => int_str(i64::from(date.day())),
@@ -1048,6 +1048,16 @@ fn date_trunc_type_name(source: &Datum) -> Option<&'static str> {
     }
 }
 
+/// Astronomical year `y` as `PostgreSQL` numbers it.
+///
+/// The calendar has no year 0: astronomical 0 is 1 BC and astronomical -1 is
+/// 2 BC. `PostgreSQL` stores the astronomical year but reports the calendar
+/// one, so every year at or below 0 loses one more to the gap. That is why
+/// `EXTRACT(YEAR FROM DATE '2020-08-11 BC')` is -2020 and not -2019.
+fn year_without_zero(y: i64) -> i64 {
+    if y > 0 { y } else { y - 1 }
+}
+
 /// century containing AD year `y` (PG: 2000 is in century 20, 2001 starts century 21).
 fn century_of(y: i64) -> i64 {
     if y > 0 {
@@ -1064,6 +1074,44 @@ fn millennium_of(y: i64) -> i64 {
         (y + 999) / 1000
     } else {
         -((999 - (y - 1)) / 1000)
+    }
+}
+
+/// First astronomical year of the decade that holds astronomical year `y`.
+///
+/// A decade is ten consecutive astronomical years, so this is a floor and not
+/// the truncation `/` gives. Truncation rounds -1 up to 0 and puts
+/// `date_trunc('decade', '0002-12-31 BC')` on 1 BC, where `PostgreSQL` puts it
+/// on 11 BC.
+fn decade_start_year(y: i16) -> i64 {
+    i64::from(y).div_euclid(10) * 10
+}
+
+/// First astronomical year of the century that holds astronomical year `y`.
+///
+/// Century 21 runs 2001..2100, so an AD century `c` starts at
+/// `(c - 1) * 100 + 1`. There is no century 0, and the missing one takes up the
+/// slack for BC: century -1 runs 100 BC..1 BC, so a BC century starts at
+/// `c * 100 + 1`. Skip that shift and every BC truncation lands one century
+/// early.
+fn century_start_year(y: i16) -> i64 {
+    let c = century_of(i64::from(y));
+    if y > 0 {
+        (c - 1) * 100 + 1
+    } else {
+        c * 100 + 1
+    }
+}
+
+/// First astronomical year of the millennium that holds astronomical year `y`.
+/// Numbered like [`century_start_year`], with the same skip over the missing
+/// millennium 0.
+fn millennium_start_year(y: i16) -> i64 {
+    let m = millennium_of(i64::from(y));
+    if y > 0 {
+        (m - 1) * 1000 + 1
+    } else {
+        m * 1000 + 1
     }
 }
 
@@ -1211,6 +1259,13 @@ fn unit_redoes_zone(unit: &str) -> bool {
     )
 }
 
+/// Narrow a computed decade/century/millennium start year to the width a civil
+/// date holds. Every year the calendar can hold fits, so this only guards the
+/// arithmetic.
+fn fit_year(y: i64) -> Result<i16, ExecError> {
+    i16::try_from(y).map_err(|_| invalid_param("date_trunc out of range"))
+}
+
 /// Zero out every field below `unit` in a civil datetime. `type_name` is the
 /// source type the caller reports, since the same civil datetime stands in for
 /// a `timestamp` and for a `timestamptz` rendered in its zone.
@@ -1246,16 +1301,9 @@ fn trunc_datetime(unit: &str, type_name: &str, dt: DateTime) -> Result<DateTime,
             mk(y, qm, 1, 0, 0, 0)?
         }
         "year" => mk(y, 1, 1, 0, 0, 0)?,
-        "decade" => mk((y / 10) * 10, 1, 1, 0, 0, 0)?,
-        "century" => {
-            // First year of the century containing y (1901, 2001, …).
-            let cy = ((century_of(i64::from(y)) - 1) * 100 + 1) as i16;
-            mk(cy, 1, 1, 0, 0, 0)?
-        }
-        "millennium" => {
-            let my = ((millennium_of(i64::from(y)) - 1) * 1000 + 1) as i16;
-            mk(my, 1, 1, 0, 0, 0)?
-        }
+        "decade" => mk(fit_year(decade_start_year(y))?, 1, 1, 0, 0, 0)?,
+        "century" => mk(fit_year(century_start_year(y))?, 1, 1, 0, 0, 0)?,
+        "millennium" => mk(fit_year(millennium_start_year(y))?, 1, 1, 0, 0, 0)?,
         _ => return Err(unsupported_field(unit, type_name)),
     })
 }
@@ -1897,6 +1945,99 @@ mod tests {
         // milliseconds = 6*1000 + 500 = 6500; microseconds = 6_500_000.
         assert_eq!(ex("milliseconds"), num("6500"));
         assert_eq!(ex("microseconds"), num("6500000"));
+    }
+
+    /// The calendar has no year 0. `PostgreSQL` stores the astronomical year,
+    /// where 0 is 1 BC, but every year unit reports the calendar number, so a
+    /// non-positive year drops one more. Each expectation is `PostgreSQL`
+    /// 18.4's, read off the server.
+    #[test]
+    fn extract_year_units_skip_the_missing_year_zero() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (unit, literal, expected) in [
+            // Either side of the AD/BC boundary, where the gap opens.
+            ("year", "0001-01-01", "1"),
+            ("year", "0001-01-01 BC", "-1"),
+            ("year", "0002-01-01 BC", "-2"),
+            ("year", "0101-01-01 BC", "-101"),
+            ("year", "2020-08-11 BC", "-2020"),
+            // ISO year follows the same skip, and near a boundary it names a
+            // different year from the calendar one.
+            ("isoyear", "0001-01-01", "1"),
+            ("isoyear", "0001-12-31", "2"),
+            ("isoyear", "0001-01-01 BC", "-2"),
+            ("isoyear", "0001-12-31 BC", "-1"),
+            ("isoyear", "0002-01-01 BC", "-3"),
+            ("isoyear", "0010-06-15 BC", "-10"),
+            ("isoyear", "0012-01-01 BC", "-13"),
+            ("isoyear", "2020-08-11 BC", "-2020"),
+            // Decade 0 runs 1 BC through 9 AD, so it is a floor and not a
+            // truncation toward zero.
+            ("decade", "0004-06-15", "0"),
+            ("decade", "0001-01-01 BC", "0"),
+            ("decade", "0002-01-01 BC", "-1"),
+            ("decade", "0011-01-01 BC", "-1"),
+            ("decade", "0012-01-01 BC", "-2"),
+            ("decade", "0100-01-01 BC", "-10"),
+            ("decade", "0101-01-01 BC", "-10"),
+            // Century -1 runs 100 BC through 1 BC. There is no century 0.
+            ("century", "0004-06-15", "1"),
+            ("century", "0001-01-01 BC", "-1"),
+            ("century", "0100-01-01 BC", "-1"),
+            ("century", "0101-01-01 BC", "-2"),
+            ("century", "1501-01-01 BC", "-16"),
+            ("millennium", "0004-06-15", "1"),
+            ("millennium", "0001-01-01 BC", "-1"),
+            ("millennium", "0100-01-01 BC", "-1"),
+            ("millennium", "1501-01-01 BC", "-2"),
+        ] {
+            let sql = format!("extract({unit} from TIMESTAMP '{literal}')");
+            assert!(ev(&sql, &ctx) == num(expected), "{sql}");
+        }
+    }
+
+    /// `date_trunc` carries the same skip: the first year of a BC century or
+    /// millennium is one whole unit later than the AD formula would put it, and
+    /// the decade floor keeps 2 BC in the decade that starts at 11 BC. Years
+    /// below are astronomical, so 0 is 1 BC. Each expectation is `PostgreSQL`
+    /// 18.4's, read off the server.
+    #[test]
+    fn date_trunc_year_units_skip_the_missing_year_zero() {
+        use assert2::assert;
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (unit, literal, expected_year) in [
+            ("year", "0001-12-31 BC", 0),
+            ("year", "2020-08-11 BC", -2019),
+            ("decade", "0015-06-15", 10),
+            ("decade", "0004-12-25", 0),
+            ("decade", "0001-01-01 BC", 0),
+            ("decade", "0002-12-31 BC", -10),
+            ("decade", "0010-06-15 BC", -10),
+            ("decade", "0012-01-01 BC", -20),
+            ("decade", "0100-01-01 BC", -100),
+            ("century", "0004-06-15", 1),
+            ("century", "0055-08-10 BC", -99),
+            ("century", "0001-01-01 BC", -99),
+            ("century", "0100-01-01 BC", -99),
+            ("century", "0101-01-01 BC", -199),
+            ("century", "1501-01-01 BC", -1599),
+            ("millennium", "0004-06-15", 1),
+            ("millennium", "0001-01-01 BC", -999),
+            ("millennium", "0100-01-01 BC", -999),
+            ("millennium", "1501-01-01 BC", -1999),
+        ] {
+            let sql = format!("date_trunc('{unit}', TIMESTAMP '{literal}')");
+            let want = Datum::Timestamp(jiff::civil::date(expected_year, 1, 1).at(0, 0, 0, 0));
+            assert!(ev(&sql, &ctx) == want, "{sql}");
+        }
+        // `week` reaches back to the Monday of the ISO week, which for the
+        // first day of 1 BC is in the year before it.
+        let sql = "date_trunc('week', TIMESTAMP '0001-01-01 BC')";
+        let want = Datum::Timestamp(jiff::civil::date(-1, 12, 27).at(0, 0, 0, 0));
+        assert!(ev(sql, &ctx) == want, "{sql}");
     }
 
     #[test]
