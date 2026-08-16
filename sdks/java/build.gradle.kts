@@ -12,7 +12,7 @@ dependencies {
     implementation("com.google.protobuf:protobuf-java:4.35.1")
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
 
-    testImplementation("com.squareup.okhttp3:mockwebserver3:5.4.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")
     testImplementation("org.junit.jupiter:junit-jupiter:6.1.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
