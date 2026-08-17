@@ -28,7 +28,11 @@ concurrency:
 jobs:
   kind-bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A cold melange build of the three images takes ~35 minutes on its own,
+    # and each of the four matrix cells takes 2-3 minutes. The first run
+    # after this job started to reach the matrix hit the old 45-minute bound
+    # in the fourth cell.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
