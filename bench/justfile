@@ -11,6 +11,12 @@
 # Override the driver image with BENCH_DRIVER_IMAGE=... at the front.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
+# `just` runs each recipe from the justfile's own directory, which is
+# `bench/`. Every recipe below spells its paths from the repo root
+# (`bench/scripts/…`, `packaging/…`, `$PWD/packages`), so move the working
+# directory one level up. Without this, `just -f bench/justfile install-all`
+# looks for `bench/bench/scripts/install-strimzi.sh` and fails with exit 127.
+set working-directory := ".."
 
 repo_root := justfile_directory() / ".."
 results_dir := repo_root / "bench" / "results"
