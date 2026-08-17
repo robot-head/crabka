@@ -1183,6 +1183,7 @@ fn spawn_liveness_ticker(
 ) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(tick_interval.to_std());
+        let mut state = crate::leader_election::LivenessTickState::default();
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -1194,6 +1195,7 @@ fn spawn_liveness_ticker(
                 &liveness,
                 &metrics,
                 &recovery,
+                &mut state,
             )
             .await;
         }

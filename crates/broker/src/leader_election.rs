@@ -354,24 +354,42 @@ fn is_controller_leader(
         .is_some_and(|n| n == node_id)
 }
 
+/// What the liveness ticker remembers between two ticks.
+#[derive(Default)]
+pub(crate) struct LivenessTickState {
+    /// Whether the previous tick saw this node as controller leader. The
+    /// first tick of a new term seeds the registry before anything else, so a
+    /// registry that expired every session while this node was a follower
+    /// (followers receive no heartbeats) cannot drive a failover.
+    was_leader: bool,
+    /// The image and dead set of the last sweep that found no dead broker
+    /// with a partition still to re-drive. While both are unchanged, the
+    /// sweep has nothing new to learn and skips its walk over the image.
+    clean_sweep: Option<(Arc<MetadataImage>, std::collections::HashSet<u64>)>,
+}
+
 /// One tick of the controller-side failover driver. The liveness ticker in
-/// `broker.rs` calls it at every `liveness_tick_interval`. Three steps run in
-/// order:
+/// `broker.rs` calls it at every `liveness_tick_interval` and hands it the
+/// same [`LivenessTickState`] each time. Four steps run in order:
 ///
-/// 1. Discovery. When this node is the controller leader, every broker that
+/// 1. New term. On the first tick that sees this node as controller leader,
+///    every registered broker is seeded alive with a full timeout window.
+///    The leadership watcher seeds too, but it runs on its own task; the
+///    ticker must not sweep this term before the registry reflects it.
+/// 2. Discovery. When this node is the controller leader, every broker that
 ///    is registered in the metadata image but unknown to the liveness
-///    registry starts a session now. The registry otherwise only knows
-///    brokers that heartbeated this controller or that a leadership change
-///    seeded. A broker that registers and dies before its first heartbeat
-///    reaches this controller would never expire, and the partitions it
-///    leads would never fail over.
-/// 2. Level. [`sweep_dead_leaders`] re-drives the failover for every broker
+///    registry starts a fenced session now. The registry otherwise only
+///    knows brokers that heartbeated this controller or that a leadership
+///    change seeded. A broker that registers and dies before its first
+///    heartbeat reaches this controller would never expire, and the
+///    partitions it leads would never fail over.
+/// 3. Level. [`sweep_dead_leaders`] re-drives the failover for every broker
 ///    that was already dead before this tick and still leads a partition or
 ///    still sits in an ISR. That guarantees convergence when an earlier edge
 ///    was lost. It runs before the edge step so a death handled by this
 ///    tick's edge is not submitted a second time before the image catches
 ///    up.
-/// 3. Edge. `liveness.tick()` emits `AliveToDead` once per death, and this
+/// 4. Edge. `liveness.tick()` emits `AliveToDead` once per death, and this
 ///    step runs [`on_broker_dead`] at once. That is the fast path.
 pub(crate) async fn run_liveness_tick(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
@@ -379,16 +397,24 @@ pub(crate) async fn run_liveness_tick(
     liveness: &Arc<ControllerLivenessState>,
     metrics: &crate::metrics::BrokerMetrics,
     recovery: &crate::unclean_recovery::UncleanRecoveryHandle,
+    state: &mut LivenessTickState,
 ) {
-    if is_controller_leader(controller, node_id) {
+    let leader_now = is_controller_leader(controller, node_id);
+    if leader_now {
         let registered: Vec<u64> = controller
             .current_image()
             .brokers()
             .map(|broker| broker.node_id.0)
             .collect();
+        if !state.was_leader {
+            liveness.seed_brokers(registered.clone()).await;
+        }
         liveness.track_registered(registered).await;
+    } else {
+        state.clean_sweep = None;
     }
-    sweep_dead_leaders(controller, node_id, liveness, metrics, recovery).await;
+    state.was_leader = leader_now;
+    sweep_dead_leaders(controller, node_id, liveness, metrics, recovery, state).await;
     for transition in liveness.tick().await {
         use crate::heartbeat::controller_state::LivenessTransition::{AliveToDead, DeadToAlive};
         match transition {
@@ -523,22 +549,34 @@ async fn fail_over_dead_broker(
 /// completed failover yields an empty plan and no commit.
 ///
 /// The sweep is cheap on the common path. It reads the leader watch and the
-/// dead set. It walks the image only when at least one broker is dead.
+/// dead set. It walks the image only when at least one broker is dead, and
+/// only when the image or the dead set changed since the last walk that
+/// found nothing to re-drive. A broker that stays dead for good, for example
+/// one that was decommissioned, therefore costs one walk per image change,
+/// not one per tick.
 pub(crate) async fn sweep_dead_leaders(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     node_id: NodeId,
     liveness: &Arc<ControllerLivenessState>,
     metrics: &crate::metrics::BrokerMetrics,
     recovery: &crate::unclean_recovery::UncleanRecoveryHandle,
+    state: &mut LivenessTickState,
 ) {
     if !is_controller_leader(controller, node_id) {
         return;
     }
     let dead = liveness.dead_snapshot().await;
     if dead.is_empty() {
+        state.clean_sweep = None;
         return;
     }
     let image = controller.current_image();
+    if let Some((seen_image, seen_dead)) = &state.clean_sweep
+        && Arc::ptr_eq(seen_image, &image)
+        && *seen_dead == dead
+    {
+        return;
+    }
     // Dead brokers that still lead a partition or still sit in an ISR. A
     // `BTreeSet` gives a stable retry order across ticks.
     let mut stuck: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
@@ -548,6 +586,11 @@ pub(crate) async fn sweep_dead_leaders(
         }
         stuck.extend(pr.isr.iter().map(|n| n.0).filter(|n| dead.contains(n)));
     }
+    if stuck.is_empty() {
+        state.clean_sweep = Some((image, dead));
+        return;
+    }
+    state.clean_sweep = None;
     for broker_id in stuck {
         if let Err(error) = fail_over_dead_broker(
             FailoverTrigger::Sweep,
@@ -741,7 +784,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ControllerLivenessState, ElectError, ElectionType, on_broker_dead,
+        ControllerLivenessState, ElectError, ElectionType, LivenessTickState, on_broker_dead,
         select_new_leader_for_partition, select_replacement_leader_for_shutdown,
         sweep_dead_leaders,
     };
@@ -1490,6 +1533,7 @@ mod tests {
         ));
         let metrics = crate::metrics::BrokerMetrics::new();
         let recovery = recovery_handle_for_tests();
+        let mut state = LivenessTickState::default();
 
         // Broker 1 heartbeats once and then its session expires. Broker 3 is
         // alive but out of the ISR. Broker 2 has not heartbeated yet.
@@ -1513,7 +1557,15 @@ mod tests {
         assert!(source.submitted_batches().await.is_empty());
 
         // The sweep sees the same liveness state and is also a no-op.
-        sweep_dead_leaders(&controller, NodeId(7), &liveness, &metrics, &recovery).await;
+        sweep_dead_leaders(
+            &controller,
+            NodeId(7),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
         assert!(source.submitted_batches().await.is_empty());
 
         // Broker 2 comes alive. No new edge fires for broker 1: it is
@@ -1522,7 +1574,15 @@ mod tests {
         assert!(liveness.tick().await.is_empty());
 
         // The sweep re-drives the failover and elects broker 2.
-        sweep_dead_leaders(&controller, NodeId(7), &liveness, &metrics, &recovery).await;
+        sweep_dead_leaders(
+            &controller,
+            NodeId(7),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
         let batches = source.submitted_batches().await;
         assert!(batches.len() == 1);
         let expected = PartitionRecord {
@@ -1618,8 +1678,17 @@ mod tests {
             let liveness = liveness_with_dead(case.dead, case.alive).await;
             let metrics = crate::metrics::BrokerMetrics::new();
             let recovery = recovery_handle_for_tests();
+            let mut state = LivenessTickState::default();
 
-            sweep_dead_leaders(&controller, NodeId(7), &liveness, &metrics, &recovery).await;
+            sweep_dead_leaders(
+                &controller,
+                NodeId(7),
+                &liveness,
+                &metrics,
+                &recovery,
+                &mut state,
+            )
+            .await;
 
             let batches = source.submitted_batches().await;
             let submitted = batches
@@ -1670,12 +1739,29 @@ mod tests {
         ));
         let metrics = crate::metrics::BrokerMetrics::new();
         let recovery = recovery_handle_for_tests();
+        // This node has led for a while, so the tick does not seed a new
+        // term: broker 1 is found by discovery alone.
+        let mut state = LivenessTickState {
+            was_leader: true,
+            ..LivenessTickState::default()
+        };
         liveness.record_heartbeat(2).await;
         liveness.record_heartbeat(3).await;
 
-        // First tick: discovery starts broker 1's session. Nothing expires.
-        run_liveness_tick(&controller, NodeId(2), &liveness, &metrics, &recovery).await;
-        assert!(liveness.is_alive(1).await);
+        // First tick: discovery starts broker 1's session, fenced until it
+        // proves catch-up. Nothing expires and nothing is submitted.
+        run_liveness_tick(
+            &controller,
+            NodeId(2),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
+        assert!(!liveness.is_alive(1).await);
+        assert!(liveness.unavailable_snapshot().await.contains(&1));
+        assert!(liveness.dead_snapshot().await.is_empty());
         assert!(source.submitted_batches().await.is_empty());
 
         // One full window later brokers 2 and 3 heartbeated again. Broker 1
@@ -1683,7 +1769,15 @@ mod tests {
         clock.advance(std::time::Duration::from_millis(11));
         liveness.record_heartbeat(2).await;
         liveness.record_heartbeat(3).await;
-        run_liveness_tick(&controller, NodeId(2), &liveness, &metrics, &recovery).await;
+        run_liveness_tick(
+            &controller,
+            NodeId(2),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
 
         let batches = source.submitted_batches().await;
         assert!(batches.len() == 1, "the edge submits once, got {batches:?}");
@@ -1704,7 +1798,15 @@ mod tests {
         // The test source never applies the change, so the image still shows
         // broker 1 as leader. That models a lost commit. The next tick's
         // sweep re-drives the same failover.
-        run_liveness_tick(&controller, NodeId(2), &liveness, &metrics, &recovery).await;
+        run_liveness_tick(
+            &controller,
+            NodeId(2),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
         let batches = source.submitted_batches().await;
         assert!(batches.len() == 2, "the sweep retries, got {batches:?}");
         assert!(*one_partition_change(&batches[1]) == expected);
@@ -1723,16 +1825,149 @@ mod tests {
         ));
         let metrics = crate::metrics::BrokerMetrics::new();
         let recovery = recovery_handle_for_tests();
+        let mut state = LivenessTickState::default();
 
-        run_liveness_tick(&controller, NodeId(2), &liveness, &metrics, &recovery).await;
+        run_liveness_tick(
+            &controller,
+            NodeId(2),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
         clock.advance(std::time::Duration::from_millis(11));
-        run_liveness_tick(&controller, NodeId(2), &liveness, &metrics, &recovery).await;
+        run_liveness_tick(
+            &controller,
+            NodeId(2),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
 
         // A follower does not receive heartbeats, so it must not start
         // sessions from the image. Otherwise every broker would look dead.
         assert!(liveness.dead_snapshot().await.is_empty());
         assert!(!liveness.is_alive(1).await);
         assert!(source.submitted_batches().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_tick_of_a_new_term_seeds_before_it_sweeps() {
+        // While this node was a follower it received no heartbeats, so its
+        // registry expired every session. When it takes the lead, the first
+        // tick must seed those brokers alive before any sweep can read the
+        // stale dead set and fail over partitions whose leaders are healthy.
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
+        register_brokers(&mut img, &[1, 2, 3]);
+        let source = Arc::new(TestMetadataSource::new(img, Some(NodeId(9))));
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = source.clone();
+        let clock = TestClock::new();
+        let liveness = Arc::new(ControllerLivenessState::with_test_clock(
+            std::time::Duration::from_millis(10),
+            &clock,
+        ));
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let recovery = recovery_handle_for_tests();
+        let mut state = LivenessTickState::default();
+
+        // Sessions from the previous term expire while node 2 follows.
+        for broker in [1, 2, 3] {
+            liveness.record_heartbeat(broker).await;
+        }
+        clock.advance(std::time::Duration::from_millis(11));
+        run_liveness_tick(
+            &controller,
+            NodeId(2),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
+        assert!(liveness.dead_snapshot().await == [1, 2, 3].into_iter().collect());
+
+        // Node 2 takes the lead. The first tick of the term seeds every
+        // registered broker alive and submits nothing.
+        // `send_replace` does not need a live receiver: the tick subscribes
+        // on demand and drops its receiver at once.
+        source.leader_tx.send_replace(Some(NodeId(2)));
+        run_liveness_tick(
+            &controller,
+            NodeId(2),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
+        assert!(liveness.dead_snapshot().await.is_empty());
+        assert!(liveness.is_alive(1).await);
+        assert!(source.submitted_batches().await.is_empty());
+
+        // The seeded window is a real one: a broker that stays silent for a
+        // full window afterwards still expires and fails over.
+        clock.advance(std::time::Duration::from_millis(11));
+        liveness.record_heartbeat(2).await;
+        liveness.record_heartbeat(3).await;
+        run_liveness_tick(
+            &controller,
+            NodeId(2),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
+        assert!(liveness.dead_snapshot().await == [1].into_iter().collect());
+        assert!(source.submitted_batches().await.len() == 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_walks_the_image_once_per_change_while_a_dead_broker_stays_resolved() {
+        // Broker 1 is dead and no longer leads or sits in an ISR. The sweep
+        // walks the image once, records that nothing is stuck, and skips the
+        // walk on later ticks until the image or the dead set changes.
+        let mut img = img_with_partition("t", 0, /*leader*/ 2, &[1, 2, 3], &[2, 3]);
+        register_brokers(&mut img, &[1, 2, 3]);
+        let source = Arc::new(TestMetadataSource::new(img, Some(NodeId(7))));
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = source.clone();
+        let liveness = liveness_with_dead(&[1], &[2, 3]).await;
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let recovery = recovery_handle_for_tests();
+        let mut state = LivenessTickState::default();
+
+        sweep_dead_leaders(
+            &controller,
+            NodeId(7),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
+        let memo = state
+            .clean_sweep
+            .as_ref()
+            .expect("a clean sweep is remembered");
+        assert!(Arc::ptr_eq(&memo.0, &controller.current_image()));
+        assert!(memo.1 == [1].into_iter().collect());
+        assert!(source.submitted_batches().await.is_empty());
+
+        // Broker 1 comes back: the dead set changes and the memo is dropped.
+        liveness.record_heartbeat(1).await;
+        sweep_dead_leaders(
+            &controller,
+            NodeId(7),
+            &liveness,
+            &metrics,
+            &recovery,
+            &mut state,
+        )
+        .await;
+        assert!(state.clean_sweep.is_none());
     }
 
     // ── KIP-112: compute_offline_dir_failover_changes ───────────────────────

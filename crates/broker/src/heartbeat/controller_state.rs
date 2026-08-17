@@ -319,7 +319,11 @@ impl ControllerLivenessState {
     /// Start a session for every broker in `broker_ids` that the registry does
     /// not know yet. Each new entry starts `Alive` with `last_heartbeat =
     /// now`, so the broker gets one full timeout window to send its first
-    /// heartbeat. Known entries keep their state and their death clock.
+    /// heartbeat. It also starts fenced, as a first heartbeat would leave it:
+    /// a broker that has not yet proved metadata catch-up must not be elected
+    /// or receive replicas, and only [`apply_fencing`](Self::apply_fencing)
+    /// with `is_caught_up` lifts the fence. Known entries keep their state,
+    /// their fence, and their death clock.
     ///
     /// The controller leader calls this on every liveness tick with the
     /// brokers registered in the metadata image. Without it the registry
@@ -334,7 +338,7 @@ impl ControllerLivenessState {
             map.entry(id).or_insert(BrokerEntry {
                 last_heartbeat: now,
                 state: BrokerLivenessState::Alive,
-                fenced: false,
+                fenced: true,
             });
         }
     }
@@ -463,15 +467,26 @@ mod tests {
         clock.advance(Duration::from_millis(11));
         assert!(liveness.tick().await == vec![LivenessTransition::AliveToDead(1)]);
 
-        // Broker 1 keeps its dead state. Broker 2 starts a fresh session.
+        // Broker 1 keeps its dead state. Broker 2 starts a fresh session that
+        // is fenced until it proves catch-up: not dead, not electable, and
+        // unavailable for new replicas.
         liveness.track_registered([1, 2]).await;
         assert!(liveness.dead_snapshot().await == [1].into_iter().collect());
+        assert!(!liveness.is_alive(2).await);
+        assert!(liveness.unavailable_snapshot().await.contains(&2));
+
+        // A caught-up heartbeat lifts the fence and only then makes it alive.
+        liveness.record_fenced_heartbeat(2).await;
+        assert!(!liveness.apply_fencing(2, false, true).await);
         assert!(liveness.is_alive(2).await);
 
-        // Broker 2 never heartbeats. It expires one full window later.
+        // Broker 3 is discovered and never heartbeats. It expires one full
+        // window later, while broker 2 keeps heartbeating.
+        liveness.track_registered([3]).await;
         clock.advance(Duration::from_millis(11));
-        assert!(liveness.tick().await == vec![LivenessTransition::AliveToDead(2)]);
-        assert!(liveness.dead_snapshot().await == [1, 2].into_iter().collect());
+        liveness.record_fenced_heartbeat(2).await;
+        assert!(liveness.tick().await == vec![LivenessTransition::AliveToDead(3)]);
+        assert!(liveness.dead_snapshot().await == [1, 3].into_iter().collect());
     }
 
     #[tokio::test]
