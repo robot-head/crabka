@@ -5652,6 +5652,44 @@ mod tests {
         assert!(liveness.is_alive(1).await);
     }
 
+    /// The spawned watcher, not only its per-wake body, must react to a
+    /// leadership change: count it and seed the registered brokers alive.
+    #[tokio::test]
+    async fn leadership_watcher_seeds_liveness_when_this_node_takes_the_lead() {
+        use crate::heartbeat::controller_state::ControllerLivenessState;
+        let me = crabka_raft::NodeId(7);
+        let mock = Arc::new(MockMetadataSource::new(
+            image_with_registered_broker(1),
+            None,
+        ));
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = mock.clone();
+        let liveness = Arc::new(ControllerLivenessState::new(crabka_units::secs(60)));
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let shutdown = CancellationToken::new();
+        spawn_leadership_watcher(
+            controller,
+            liveness.clone(),
+            me,
+            metrics.clone(),
+            shutdown.clone(),
+        );
+        assert!(!liveness.is_alive(1).await);
+
+        mock.leader_tx
+            .send(Some(me))
+            .expect("watcher holds a receiver");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !liveness.is_alive(1).await {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "leadership watcher did not seed the registered broker"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(metrics.controller_leader_changes_total.get() == 1);
+        shutdown.cancel();
+    }
+
     async fn assert_listener_stops_accepting(addr: SocketAddr) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
