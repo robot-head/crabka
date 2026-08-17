@@ -1021,10 +1021,10 @@
       "sha256": "6419c69facb91405d0033932d320df37609eb11e5e1dcffc7ae799cdfe1c19a5"
     },
     "with": {
-      "changed_lines": 1758,
+      "changed_lines": 1755,
       "expected": "with.out",
       "hunks": 105,
-      "sha256": "15b34be9df363d091dd758fcd23f50e7d7ad8811ab088d9585586f77e322eecf"
+      "sha256": "66ece4c28af4f406bbe08d32785dc8f29e289dfca1e1c60da1fd02739feb3c2e"
     },
     "without_overlaps": {
       "changed_lines": 450,
