@@ -1366,12 +1366,14 @@ jobs:
         if: ${{ !cancelled() }}
         # The step summary is capped at 1 MiB and regress-parity.md alone is
         # 2.5 MB, so publish each report's header and root-cause table only.
+        # The writer always emits the trim heading; the byte cap is a second
+        # bound so five reports stay under the limit whatever they contain.
         # The full reports ship in the gres-parity-report artifact.
         run: |
           for report in parity.md regress-parity.md parity-substrate.md extended-parity-standalone.md extended-parity-substrate.md; do
             echo "### ${report}" >> "$GITHUB_STEP_SUMMARY"
             if [ -f "$report" ]; then
-              sed -n '/^## Every statement$/q;p' "$report" >> "$GITHUB_STEP_SUMMARY"
+              sed -n '/^## Every statement$/q;p' "$report" | head -c 190000 >> "$GITHUB_STEP_SUMMARY"
             else
               echo "_not produced_" >> "$GITHUB_STEP_SUMMARY"
             fi

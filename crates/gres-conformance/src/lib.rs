@@ -522,8 +522,11 @@ impl Report {
                 .expect("writing to a String cannot fail");
             }
             md.push('\n');
-            md.push_str("## Every statement\n\n");
         }
+        // Always present, mismatches or not: CI trims the published summary at
+        // this heading, and a report with no mismatches must not publish its
+        // whole per-statement table.
+        md.push_str("## Every statement\n\n");
         md.push_str("| file | statement | result |\n|---|---|---|\n");
         for c in &self.cases {
             let sql = c.sql.replace('|', "\\|").replace('\n', " ");
@@ -1518,6 +1521,26 @@ mod tests {
         };
         let err = r.check_baseline(&b).expect_err("size change must fail");
         assert!(err.contains("corpus size changed"));
+    }
+
+    /// CI trims each published report at this heading, so it must be there
+    /// whether or not any statement mismatched.
+    #[test]
+    fn markdown_summary_always_carries_the_per_statement_heading() {
+        for (cases, has_root_causes) in [
+            (vec![case("a.sql", true), case("a.sql", true)], false),
+            (vec![case("a.sql", true), case("a.sql", false)], true),
+        ] {
+            let summary = Report::new(cases).markdown_summary();
+            let heading = summary
+                .find("\n## Every statement\n")
+                .expect("per-statement heading");
+            assert!(summary.contains("## Mismatches by root cause") == has_root_causes);
+            // The heading precedes the table, so a trim at the heading keeps
+            // the header and any root-cause table and drops every row.
+            assert!(summary[heading..].contains("| file | statement | result |"));
+            assert!(!summary[..heading].contains("| file | statement | result |"));
+        }
     }
 
     #[test]
