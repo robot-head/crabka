@@ -35,6 +35,21 @@ const FAILOVER_SUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) struct FailoverPlan {
     pub changes: Vec<MetadataRecord>,
     pub recoveries: Vec<(String, i32, RecoveryStrategy)>,
+    /// Partitions the dead broker leads that have no live ISR replica to
+    /// elect. The scan leaves them alone. The caller decides how loudly to
+    /// report them: the death edge warns once, the per-tick sweep does not
+    /// repeat that warning every second.
+    pub unavailable: Vec<(String, i32)>,
+}
+
+/// What asked for a dead-broker failover. The edge fires once per death and
+/// warns about every partition it cannot fail over. The sweep repeats the
+/// same question on every tick while the broker stays dead, so it reports
+/// those partitions at debug level only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailoverTrigger {
+    Edge,
+    Sweep,
 }
 
 /// The pure per-partition failover decision shared by the dead-broker scan
@@ -132,6 +147,7 @@ pub(crate) async fn compute_failover_changes(
 ) -> FailoverPlan {
     let mut changes: Vec<MetadataRecord> = Vec::new();
     let mut recoveries: Vec<(String, i32, RecoveryStrategy)> = Vec::new();
+    let mut unavailable: Vec<(String, i32)> = Vec::new();
     // Snapshot the alive set once (single lock) rather than taking the
     // liveness lock per ISR/replica entry inside the scan below.
     let alive: std::collections::HashSet<NodeId> = liveness
@@ -212,10 +228,7 @@ pub(crate) async fn compute_failover_changes(
                 recoveries.push((pr.topic.clone(), pr.partition, strategy));
             }
             FailoverDecision::Unavailable => {
-                warn!(
-                    topic = %pr.topic, partition = pr.partition,
-                    "leader dead, no live ISR replica; partition unavailable"
-                );
+                unavailable.push((pr.topic.clone(), pr.partition));
             }
             FailoverDecision::NoChange => {}
         }
@@ -223,6 +236,7 @@ pub(crate) async fn compute_failover_changes(
     FailoverPlan {
         changes,
         recoveries,
+        unavailable,
     }
 }
 
@@ -322,6 +336,9 @@ pub(crate) async fn compute_offline_dir_failover_changes(
     FailoverPlan {
         changes,
         recoveries,
+        // The offline-dir scan runs once per heartbeat that reports the dir,
+        // so it warns above and reports nothing here.
+        unavailable: Vec::new(),
     }
 }
 
@@ -402,14 +419,38 @@ pub(crate) async fn run_liveness_tick(
 ///
 /// This is a no-op unless `controller` is currently the openraft leader. Only
 /// the leader can `submit_change`.
+pub(crate) async fn on_broker_dead(
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    node_id: NodeId,
+    dead: NodeId,
+    liveness: &Arc<ControllerLivenessState>,
+    metrics: &crate::metrics::BrokerMetrics,
+    recovery: &crate::unclean_recovery::UncleanRecoveryHandle,
+) -> Result<(), BrokerError> {
+    fail_over_dead_broker(
+        FailoverTrigger::Edge,
+        controller,
+        node_id,
+        dead,
+        liveness,
+        metrics,
+        recovery,
+    )
+    .await
+}
+
+/// The failover behind [`on_broker_dead`] and [`sweep_dead_leaders`].
+/// `trigger` only selects how loudly a partition with no live ISR replica is
+/// reported.
 #[tracing::instrument(
     name = "leader_election_on_broker_dead",
     level = "info",
     skip_all,
-    fields(node_id, dead),
+    fields(node_id, dead, ?trigger),
     err
 )]
-pub(crate) async fn on_broker_dead(
+async fn fail_over_dead_broker(
+    trigger: FailoverTrigger,
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     node_id: NodeId,
     dead: NodeId,
@@ -423,6 +464,18 @@ pub(crate) async fn on_broker_dead(
 
     let image = controller.current_image();
     let plan = compute_failover_changes(&image, dead, liveness, metrics).await;
+    for (topic, partition) in &plan.unavailable {
+        match trigger {
+            FailoverTrigger::Edge => warn!(
+                %topic, partition,
+                "leader dead, no live ISR replica; partition unavailable"
+            ),
+            FailoverTrigger::Sweep => tracing::debug!(
+                %topic, partition,
+                "leader still dead, no live ISR replica; partition stays unavailable"
+            ),
+        }
+    }
     if !plan.changes.is_empty() {
         // Bound the commit. A stall here would wedge the liveness ticker, and
         // with it every later edge and sweep. On elapse the caller logs the
@@ -463,8 +516,10 @@ pub(crate) async fn on_broker_dead(
 /// node is not the controller leader at that instant, when no ISR replica is
 /// alive at that instant, or when the commit stalls. This sweep asks the level
 /// question instead: is a dead broker still the leader of a partition, or
-/// still an ISR member? If so, it runs [`on_broker_dead`] again for that
-/// broker. [`compute_failover_changes`] is idempotent, so a repeat after a
+/// still an ISR member? If so, it runs the same failover as
+/// [`on_broker_dead`] again for that broker, with [`FailoverTrigger::Sweep`]
+/// so a partition that has no live replica to elect is not warned about on
+/// every tick. [`compute_failover_changes`] is idempotent, so a repeat after a
 /// completed failover yields an empty plan and no commit.
 ///
 /// The sweep is cheap on the common path. It reads the leader watch and the
@@ -494,7 +549,8 @@ pub(crate) async fn sweep_dead_leaders(
         stuck.extend(pr.isr.iter().map(|n| n.0).filter(|n| dead.contains(n)));
     }
     for broker_id in stuck {
-        if let Err(error) = on_broker_dead(
+        if let Err(error) = fail_over_dead_broker(
+            FailoverTrigger::Sweep,
             controller,
             node_id,
             NodeId(broker_id),

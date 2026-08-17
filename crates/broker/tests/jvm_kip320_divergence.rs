@@ -718,7 +718,13 @@ fn crabka_mixed_config(
     cfg.bootstrap_servers = vec![];
     cfg.cluster_id = Some(cluster_id);
     cfg.heartbeat_interval = crabka_units::millis(1_000);
-    cfg.heartbeat_timeout = crabka_units::millis(4_000);
+    // Kafka's `broker.session.timeout.ms` default. The controller starts a
+    // broker's session when its registration lands, and the JVM broker
+    // heartbeats every 2 s (`broker.heartbeat.interval.ms`). Under CI load the
+    // JVM's first heartbeat can take more than 4 s to reach the controller,
+    // and a shorter window then declares the JVM broker dead, shrinks it out
+    // of the ISR, and breaks the tests that make it leader.
+    cfg.heartbeat_timeout = crabka_units::millis(9_000);
     cfg.replica_lag_time_max = crabka_units::millis(10_000);
     cfg.controller_election_timeout = crabka_units::secs(3);
     cfg.controller_heartbeat_interval = crabka_units::millis(250);
