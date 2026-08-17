@@ -166,8 +166,18 @@ for fragment in (
     "./target/debug/crabka-gres --listen 127.0.0.1:54334 --substrate-bootstrap 127.0.0.1:9092 --tenant conformance --auth trust",
 ):
     assert fragment in substrate_leg, f"substrate conformance leg missing {fragment}"
-summary = workflow_step("Publish extended parity summaries")
-assert "cat extended-parity-standalone.md extended-parity-substrate.md" in summary
+summary = workflow_step("Publish parity summaries")
+for report in (
+    "parity.md",
+    "regress-parity.md",
+    "parity-substrate.md",
+    "extended-parity-standalone.md",
+    "extended-parity-substrate.md",
+):
+    assert report in summary, f"parity summary step must publish {report}"
+assert "/^## Every statement$/q" in summary, (
+    "parity summary step must trim each report at its per-statement table"
+)
 upload = workflow_step("Upload parity report")
 assert all(name in upload for name in ("extended-parity-standalone.json", "extended-parity-substrate.json"))
 pgdog_upload = workflow_step("Upload Gres front-door e2e artifacts")

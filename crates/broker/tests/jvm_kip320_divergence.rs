@@ -178,6 +178,46 @@ fn run_features(bootstrap: &str, command: &[&str]) -> std::process::Output {
     docker_run_kafka_tool_with_image(KAFKA_IMAGE_FEATURES, &args)
 }
 
+/// Default text a JVM broker returns for `UNKNOWN_SERVER_ERROR`. A
+/// broker-only JVM node answers with it when its controller forward fails.
+const JVM_FORWARD_FAILURE: &str = "The server experienced an unexpected error";
+
+/// Run `kafka-features.sh` until a Crabka broker serves the request.
+///
+/// The `AdminClient` fetches metadata from a random bootstrap node and sends
+/// `UpdateFeatures` to the node that the response names as controller. Crabka
+/// names the raft leader, which is a Crabka broker. A `KRaft` JVM broker names
+/// a random live broker, so it can name itself. `bootstrap` names the JVM
+/// broker too. A broker-only JVM node forwards admin writes to the controller
+/// with the KIP-590 `Envelope` RPC. Crabka does not implement `Envelope` (see
+/// `docs/KIP_MATRIX.md`). The JVM node then answers `UNKNOWN_SERVER_ERROR`
+/// with its default text, and that answer says nothing about Crabka's
+/// validation. Retry on that text until a Crabka broker serves the request.
+/// Any other outcome returns at once.
+async fn run_features_on_crabka(bootstrap: &str, command: &[&str]) -> std::process::Output {
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let output = run_features(bootstrap, command);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !text.contains(JVM_FORWARD_FAILURE) {
+            return output;
+        }
+        eprintln!(
+            "CRABKA[kip320] kafka-features {command:?} landed on the JVM broker \
+             (Envelope forward failed); retrying"
+        );
+        assert2::assert!(
+            Instant::now() <= deadline,
+            "kafka-features {command:?} never reached a Crabka broker: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// Single-broker Crabka config bound on `0.0.0.0:<client_port>`, advertised as
 /// `host.docker.internal:<client_port>`. Mirrors `start_host_broker` but
 /// parameterized on the port so the wire-conformance test can pick a port that
@@ -604,28 +644,32 @@ struct MixedCluster {
 }
 
 impl MixedCluster {
-    /// Block, with a bound, until the Crabka leader's broker view includes `n`
+    /// Block, with a bound, until every Crabka broker's view includes `n`
     /// registered brokers. That is, the JVM data-plane broker (id 3) has
     /// finished its `KRaft` join and registered. `CreateTopics(RF=3)` rejects
     /// with `InvalidReplicationFactorException` if it runs before the JVM
     /// broker registers, so every mixed-cluster scenario must gate on this
-    /// first. This method returns `true` if the view converged and `false` on
-    /// timeout. A timeout means the JVM broker never joined, which is the
-    /// dominant Linux-vs-Mac difference for this harness.
+    /// first. The `AdminClient` can route a request to either Crabka broker,
+    /// so one converged view is not enough. This method returns `true` if
+    /// every view converged and `false` on timeout. A timeout means the JVM
+    /// broker never joined, which is the dominant Linux-vs-Mac difference for
+    /// this harness.
     async fn wait_for_brokers(&self, n: usize, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            let mut max_seen = 0;
-            for (h, _) in &self.crabka {
-                max_seen = max_seen.max(h.broker_count());
-            }
-            if max_seen >= n {
+            let min_seen = self
+                .crabka
+                .iter()
+                .map(|(h, _)| h.broker_count())
+                .min()
+                .unwrap_or(0);
+            if min_seen >= n {
                 return true;
             }
             if Instant::now() > deadline {
                 eprintln!(
-                    "CRABKA[kip320] only {max_seen}/{n} brokers registered before timeout \
-                     (JVM broker likely never joined the mixed cluster)"
+                    "CRABKA[kip320] only {min_seen}/{n} brokers registered on every Crabka \
+                     broker before timeout (JVM broker likely never joined the mixed cluster)"
                 );
                 return false;
             }
@@ -674,7 +718,13 @@ fn crabka_mixed_config(
     cfg.bootstrap_servers = vec![];
     cfg.cluster_id = Some(cluster_id);
     cfg.heartbeat_interval = crabka_units::millis(1_000);
-    cfg.heartbeat_timeout = crabka_units::millis(4_000);
+    // Kafka's `broker.session.timeout.ms` default. The controller starts a
+    // broker's session when its registration lands, and the JVM broker
+    // heartbeats every 2 s (`broker.heartbeat.interval.ms`). Under CI load the
+    // JVM's first heartbeat can take more than 4 s to reach the controller,
+    // and a shorter window then declares the JVM broker dead, shrinks it out
+    // of the ISR, and breaks the tests that make it leader.
+    cfg.heartbeat_timeout = crabka_units::millis(9_000);
     cfg.replica_lag_time_max = crabka_units::millis(10_000);
     cfg.controller_election_timeout = crabka_units::secs(3);
     cfg.controller_heartbeat_interval = crabka_units::millis(250);
@@ -831,28 +881,55 @@ async fn start_mixed_cluster(container: &str, jvm_is_controller: bool) -> MixedC
     }
 }
 
+/// Block until every Crabka broker sees the JVM broker (id 3) advertise
+/// `expected` as its `metadata.version` maximum. The `AdminClient` can route
+/// `UpdateFeatures` to either Crabka broker, so both images must hold the
+/// registration before the test sends a downgrade.
 async fn wait_for_jvm_metadata_max(cluster: &MixedCluster, expected: i16) {
     let deadline = Instant::now() + Duration::from_mins(2);
     loop {
-        let observed = cluster.crabka.iter().find_map(|(broker, _)| {
-            broker
-                .controller_image_for_test()
-                .broker(crabka_broker::NodeId(3))
-                .and_then(|registration| {
-                    registration
-                        .features
-                        .get(crabka_metadata::metadata_version::METADATA_VERSION_FEATURE)
-                        .map(|(_, max)| *max)
-                })
-        });
-        if observed == Some(expected) {
+        let observed = cluster
+            .crabka
+            .iter()
+            .map(|(broker, _)| {
+                broker
+                    .controller_image_for_test()
+                    .broker(crabka_broker::NodeId(3))
+                    .and_then(|registration| {
+                        registration
+                            .features
+                            .get(crabka_metadata::metadata_version::METADATA_VERSION_FEATURE)
+                            .map(|(_, max)| *max)
+                    })
+            })
+            .collect::<Vec<_>>();
+        if observed.iter().all(|max| *max == Some(expected)) {
             return;
         }
-        assert!(
+        assert2::assert!(
             Instant::now() <= deadline,
-            "JVM broker did not advertise metadata.version max {expected}; observed {observed:?}"
+            "JVM broker did not advertise metadata.version max {expected} on every Crabka \
+             broker; observed {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Block until every Crabka broker's image holds a controller registration
+/// for every voter. `UpdateFeatures` rejects a `metadata.version` downgrade
+/// with "Controller N has not registered" before it checks the downgrade
+/// capability. The test must not send the downgrade before those
+/// registrations land, or it asserts on the wrong rejection text.
+async fn wait_for_voter_registrations(cluster: &MixedCluster) {
+    for (broker, _) in &cluster.crabka {
+        broker
+            .wait_for_image(|image| {
+                image
+                    .voters()
+                    .iter()
+                    .all(|voter| image.controller(voter.id).is_some())
+            })
+            .await;
     }
 }
 
@@ -873,6 +950,7 @@ async fn metadata_version_downgrade_rejects_pre_kip1155_jvm() {
         "JVM broker never joined the mixed cluster"
     );
     wait_for_jvm_metadata_max(&cluster, UPPER_LEVEL).await;
+    wait_for_voter_registrations(&cluster).await;
     create_mixed_topic(&cluster.bootstrap_all, EXISTING_TOPIC).await;
     let state = |broker: &BrokerHandle| {
         let image = broker.controller_image_for_test();
@@ -911,13 +989,13 @@ async fn metadata_version_downgrade_rejects_pre_kip1155_jvm() {
             vec!["downgrade", "--metadata", "3.7-IV1", "--unsafe"],
         ),
     ] {
-        let output = run_features(&cluster.bootstrap_all, &command);
+        let output = run_features_on_crabka(&cluster.bootstrap_all, &command).await;
         let error = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(
+        assert2::assert!(
             !output.status.success()
                 && error.contains("Broker 3")
                 && error.contains("does not support online metadata.version downgrade"),

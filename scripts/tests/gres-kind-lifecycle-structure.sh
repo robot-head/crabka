@@ -19,9 +19,12 @@ required_patterns=(
     'ghcr.io/pgdogdev/pgdog:0.1.47'
     'kubectl logs -l app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet'
     'deployment\.kubernetes\.io/revision'
+    'PgDog credential grace elapsed'
     'initial confirmed PgDog route'
     'initial PgDog Deployment hash'
     'post-grace-pgdog-${iteration}.log'
+    '"$ARTIFACT_DIR/pgdog.log"'
+    '"$ARTIFACT_DIR/activator.log"'
     'timeout '
 )
 for pattern in "${required_patterns[@]}"; do
@@ -33,6 +36,8 @@ test "$(grep -Fc 'kubectl port-forward deploy/tenant-a-gres 17432:5432' "$gate")
 test "$(grep -Ec '^[[:space:]]*start_pgdog_port_forward$' "$gate")" -eq 3
 test "$(grep -Fc "while true; do printf 'SELECT 1;\\n'; sleep 1; done" "$gate")" -eq 2
 seed_line=$(grep -nF 'CREATE TABLE lifecycle_marker' "$gate" | cut -d: -f1)
+test "$(grep -nF 'PgDog credential grace elapsed' "$gate" | cut -d: -f1)" \
+    -lt "$(grep -nF 'initial confirmed PgDog route' "$gate" | cut -d: -f1)"
 test "$(grep -nF 'initial confirmed PgDog route' "$gate" | cut -d: -f1)" -lt "$seed_line"
 test "$(grep -nF 'initial PgDog Deployment hash' "$gate" | cut -d: -f1)" -lt "$seed_line"
 grep -Fq -- '--field-selector=status.phase=Running' "$gate"

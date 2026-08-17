@@ -1311,6 +1311,113 @@ async fn fleet_reconcile_excludes_unsupported_multi_range_tenants_from_pgdog_con
     assert!(!pgdog_toml.contains("tenant-b"));
 }
 
+/// The two `PgDog` hashes one fleet apply wrote: the config Secret's
+/// `crabka.io/pgdog-config-hash` annotation, and the pod-template
+/// `crabka.io/pgdog-config-hash` annotation on the `PgDog` Deployment. The
+/// second one is the rollout hash: a change to it rolls the `PgDog` pod.
+fn observed_pgdog_hashes(observed: &[http::Request<hyper::body::Bytes>]) -> (String, String) {
+    let annotation = |path: &str, pointer: &str| -> String {
+        let request = observed
+            .iter()
+            .find(|request| {
+                request.method() == Method::PATCH && request.uri().path().contains(path)
+            })
+            .unwrap_or_else(|| panic!("{path} patch captured"));
+        let body: serde_json::Value = serde_json::from_slice(request.body()).unwrap();
+        body.pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("{path} carries {pointer}"))
+            .to_owned()
+    };
+    (
+        annotation(
+            "/secrets/fleet-pgdog-config",
+            "/metadata/annotations/crabka.io~1pgdog-config-hash",
+        ),
+        annotation(
+            "/deployments/fleet-pgdog",
+            "/spec/template/metadata/annotations/crabka.io~1pgdog-config-hash",
+        ),
+    )
+}
+
+#[tokio::test]
+async fn cold_create_and_first_active_status_render_the_same_pgdog_rollout() {
+    // A cold create renders the fleet twice in quick succession: once while
+    // the tenant has no status, and once after the tenant reconciler writes
+    // its first `active` status. Neither write may arm a credential grace, so
+    // both renders must be byte-identical: no Secret reload, no pod roll. A
+    // status that does carry a live grace is the activator route, and must
+    // differ, so the identity check above is not vacuous.
+    let admin = FakePgdogAdmin::new(vec![true, true]);
+    let mut active = tenant_list_body();
+    active["items"][0]["status"] = serde_json::json!({ "lifecyclePhase": "active" });
+    let mut graced = tenant_list_body();
+    graced["items"][0]["status"] = serde_json::json!({
+        "lifecyclePhase": "active",
+        "pgdogCredentialGraceUntilUnixMs": u64::MAX,
+    });
+    let mut rules = reconcile_rules(true);
+    let mut second = reconcile_rules(true);
+    tenant_list_rule(&mut second).response = json_response(200, &active);
+    rules.extend(second);
+    // The activator route carries the tenant credential, so the third apply
+    // reads the tenant password Secret. It also has no Active backend to ask
+    // the PgDog admin about, so it never reads the admin Secret. It inspects
+    // the Deployment instead and, as the canned Deployment has not rolled,
+    // requeues without a status write.
+    let mut third = reconcile_rules(false);
+    third.retain(|rule| rule.path_substr != "/secrets/admin");
+    tenant_list_rule(&mut third).response = json_response(200, &graced);
+    third.push(MockRule {
+        method: Method::GET,
+        path_substr: "/secrets/pw".into(),
+        response: json_response(200, &admin_secret_body()),
+    });
+    third.push(MockRule {
+        method: Method::GET,
+        path_substr: "/deployments/fleet-pgdog".into(),
+        response: json_response(
+            200,
+            &serde_json::json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fleet-pgdog","namespace":"ns"}}),
+        ),
+    });
+    rules.extend(third);
+    let state = MockState::new(rules);
+    let ctx = Arc::new(
+        fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone()),
+    );
+
+    reconcile(Arc::new(gres()), ctx.clone()).await.unwrap();
+    let statusless = observed_pgdog_hashes(&state.take_observed());
+    reconcile(Arc::new(gres()), ctx.clone()).await.unwrap();
+    let first_active = observed_pgdog_hashes(&state.take_observed());
+    reconcile(Arc::new(gres()), ctx).await.unwrap();
+    let within_grace = observed_pgdog_hashes(&state.take_observed());
+
+    assert!(
+        statusless == first_active,
+        "{statusless:?} != {first_active:?}"
+    );
+    assert!(
+        statusless != within_grace,
+        "{statusless:?} == {within_grace:?}"
+    );
+    let requests = admin.requests();
+    assert!(requests.len() == 2);
+    for request in &requests {
+        assert!(request[0].expected_routes[0].host == "tenant-a-gres.ns.svc.cluster.local");
+    }
+    assert!(state.remaining_rules() == 0);
+}
+
+fn tenant_list_rule(rules: &mut [MockRule]) -> &mut MockRule {
+    rules
+        .iter_mut()
+        .find(|rule| rule.path_substr == "/grestenants")
+        .expect("tenant list rule")
+}
+
 #[test]
 fn tenant_watch_maps_to_referenced_gres_fleet() {
     let refs = tenant_to_gres_refs(&gres_tenant("tenant-a", "fleet"));

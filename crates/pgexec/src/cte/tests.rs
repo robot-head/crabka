@@ -410,6 +410,86 @@ async fn a_recursive_term_that_changes_a_column_type_is_42804() {
     );
 }
 
+/// The seeds whose types have a btree opclass but no hash opclass, each with
+/// the setup it needs. The domain case shows that a domain inherits the base
+/// type's opclasses.
+const UNHASHABLE_SEEDS: &[(&[&str], &str)] = &[
+    (&[], "'01'::varbit"),
+    (&[], "B'01'::bit(2)"),
+    (&[], "1::money"),
+    (&[], "'a'::tsvector"),
+    (&[], "'a'::tsquery"),
+    (&["CREATE DOMAIN dvb AS varbit"], "'01'::dvb"),
+];
+
+/// `PostgreSQL` de-duplicates a recursive `UNION` only by hashing, so a column
+/// type with no hash opclass is refused up front. Without the refusal the
+/// varbit case below recurses without bound, because `n < '100'` never turns
+/// false for a bit string that only grows.
+#[tokio::test]
+async fn a_recursive_union_over_an_unhashable_type_is_0a000() {
+    let engine = SqlEngine::new();
+    for (setup, seed) in UNHASHABLE_SEEDS {
+        let mut session = engine.connect();
+        for statement in *setup {
+            session.simple_query(statement).await.expect("setup");
+        }
+        let sql = format!(
+            "WITH RECURSIVE t(n) AS (SELECT {seed} UNION SELECT n FROM t WHERE false) \
+             SELECT n FROM t"
+        );
+        let error = session.simple_query(&sql).await.expect_err(&sql);
+        let detail = error
+            .diagnostics
+            .as_deref()
+            .and_then(|fields| fields.detail.as_deref());
+        assert!(
+            (error.code.as_str(), error.message.as_str(), detail)
+                == (
+                    "0A000",
+                    "could not implement recursive UNION",
+                    Some("All column datatypes must be hashable.")
+                ),
+            "{sql}"
+        );
+    }
+    // The unbounded shape from the pg_regress corpus, which must fail fast
+    // instead of iterating until the memory budget trips.
+    let error = engine
+        .connect()
+        .simple_query(
+            "WITH RECURSIVE t(n) AS (VALUES ('01'::varbit) UNION SELECT n || '10'::varbit \
+             FROM t WHERE n < '100'::varbit) SELECT n FROM t",
+        )
+        .await
+        .expect_err("unbounded varbit recursion");
+    assert!(error.code == "0A000");
+}
+
+/// The hash requirement is specific to a recursive `UNION`. `UNION ALL` never
+/// de-duplicates, a plain `UNION` can sort, and a hash-only type such as `xid`
+/// is exactly what a recursive `UNION` wants.
+#[tokio::test]
+async fn only_a_recursive_distinct_union_needs_a_hash_opclass() {
+    for (setup, seed) in UNHASHABLE_SEEDS {
+        let all = format!(
+            "WITH RECURSIVE t(n) AS (SELECT {seed} UNION ALL SELECT n FROM t WHERE false) \
+             SELECT count(*) FROM t"
+        );
+        let plain = format!("SELECT count(*) FROM (SELECT {seed} UNION SELECT {seed}) q");
+        for sql in [all, plain] {
+            assert!(column(rows(setup, &sql).await) == ["1"], "{sql}");
+        }
+    }
+    let got = rows(
+        &[],
+        "WITH RECURSIVE t(n) AS (SELECT '1'::xid UNION SELECT n FROM t WHERE false) \
+         SELECT n FROM t",
+    )
+    .await;
+    assert!(column(got) == ["1"]);
+}
+
 /// A FROM-clause sub-SELECT is not a "subquery" for the self-reference rule.
 /// `PostgreSQL` restricts SubLinks, not derived tables.
 #[tokio::test]

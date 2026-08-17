@@ -353,7 +353,11 @@ fn evaluate_recursive_cte(
     check_recursive_term_types(ctx, cte, recursive, &output_scope)?;
     if !all {
         for index in 0..width {
-            crate::eval::require_equality_operator(output_scope.ty_at(index))?;
+            let ty = output_scope.ty_at(index);
+            // Equality first: PostgreSQL's parse-analysis error beats the
+            // planner's "must be hashable" one.
+            crate::eval::require_equality_operator(ty)?;
+            crate::eval::require_hashable_for_recursive_union(ty)?;
         }
     }
 

@@ -1164,6 +1164,14 @@ fn spawn_broker_gauge_updater(
     });
 }
 
+/// Drives broker-death failover from the liveness registry. Every
+/// `tick_interval` it runs [`crate::leader_election::run_liveness_tick`]. That
+/// tick discovers registered brokers, handles the `AliveToDead` edge at once,
+/// and then sweeps for dead brokers that still lead a partition. The edge is
+/// the fast path. The sweep guarantees convergence when an edge was lost. An
+/// edge is lost when this node was not the controller leader at that instant,
+/// when no ISR replica was alive at that instant, or when the commit stalled
+/// and timed out.
 fn spawn_liveness_ticker(
     controller: Arc<dyn crate::metadata_source::MetadataSource>,
     liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
@@ -1175,40 +1183,50 @@ fn spawn_liveness_ticker(
 ) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(tick_interval.to_std());
+        let mut state = crate::leader_election::LivenessTickState::default();
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
                 () = shutdown.cancelled() => return,
             }
-            for transition in liveness.tick().await {
-                use crate::heartbeat::controller_state::LivenessTransition::{
-                    AliveToDead, DeadToAlive,
-                };
-                match transition {
-                    AliveToDead(broker_id) => {
-                        if let Err(error) = crate::leader_election::on_broker_dead(
-                            &controller,
-                            node_id,
-                            crabka_raft::NodeId(broker_id),
-                            &liveness,
-                            &metrics,
-                            &recovery,
-                        )
-                        .await
-                        {
-                            tracing::warn!(broker = broker_id, %error, "broker-death election failed");
-                        }
-                    }
-                    DeadToAlive(broker_id) => crate::leader_election::on_broker_alive(
-                        &controller,
-                        node_id,
-                        crabka_raft::NodeId(broker_id),
-                        &liveness,
-                    ),
-                }
-            }
+            crate::leader_election::run_liveness_tick(
+                &controller,
+                node_id,
+                &liveness,
+                &metrics,
+                &recovery,
+                &mut state,
+            )
+            .await;
         }
     });
+}
+
+/// Handles one wake of the leadership watcher. It counts a leadership change
+/// and re-seeds the liveness registry when this node has just become the
+/// controller leader. The seed sits inside the change branch on purpose. A
+/// re-published identical leader must not reset every broker's death clock.
+async fn on_leadership_wake(
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    liveness: &crate::heartbeat::controller_state::ControllerLivenessState,
+    node_id: crabka_metadata::NodeId,
+    metrics: &crate::metrics::BrokerMetrics,
+    previous: &mut Option<crabka_metadata::NodeId>,
+    current: Option<crabka_metadata::NodeId>,
+) {
+    if current == *previous {
+        return;
+    }
+    metrics.controller_leader_changes_total.inc();
+    *previous = current;
+    if current == Some(node_id) {
+        let broker_ids: Vec<u64> = controller
+            .current_image()
+            .brokers()
+            .map(|broker| broker.node_id.0)
+            .collect();
+        liveness.seed_brokers(broker_ids).await;
+    }
 }
 
 fn spawn_leadership_watcher(
@@ -1227,18 +1245,15 @@ fn spawn_leadership_watcher(
                 () = shutdown.cancelled() => return,
             }
             let current = *leaders.borrow();
-            if current != previous {
-                metrics.controller_leader_changes_total.inc();
-                previous = current;
-            }
-            if current == Some(node_id) {
-                let broker_ids: Vec<u64> = controller
-                    .current_image()
-                    .brokers()
-                    .map(|broker| broker.node_id.0)
-                    .collect();
-                liveness.seed_brokers(broker_ids).await;
-            }
+            on_leadership_wake(
+                &controller,
+                &liveness,
+                node_id,
+                &metrics,
+                &mut previous,
+                current,
+            )
+            .await;
         }
     });
 }
@@ -5554,6 +5569,126 @@ mod tests {
         .expect("gauge observes configured minimum ISR");
 
         assert!(metrics.under_min_isr_partition_count.get() == 1);
+        shutdown.cancel();
+    }
+
+    fn image_with_registered_broker(node_id: u64) -> crabka_metadata::MetadataImage {
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&crabka_metadata::MetadataRecord::V1BrokerRegistration(
+            crabka_metadata::BrokerRegistrationRecord {
+                node_id: crabka_raft::NodeId(node_id),
+                broker_epoch: 0,
+                incarnation_id: uuid::Uuid::from_u128(u128::from(node_id)),
+                host: "127.0.0.1".to_string(),
+                port: 9_092,
+                rack: None,
+                endpoints: Vec::new(),
+                log_dirs: Vec::new(),
+                features: std::collections::BTreeMap::new(),
+            },
+        ));
+        image
+    }
+
+    #[tokio::test]
+    async fn leadership_wake_seeds_liveness_only_on_a_real_change() {
+        use crate::heartbeat::controller_state::{
+            ControllerLivenessState, LivenessTransition, TestClock,
+        };
+        let me = crabka_raft::NodeId(7);
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
+            MockMetadataSource::new(image_with_registered_broker(1), Some(me)),
+        );
+        let clock = TestClock::new();
+        let liveness =
+            ControllerLivenessState::with_test_clock(std::time::Duration::from_millis(10), &clock);
+        let metrics = crate::metrics::BrokerMetrics::new();
+
+        // Broker 1 dies while this node leads.
+        liveness.record_heartbeat(1).await;
+        clock.advance(std::time::Duration::from_millis(11));
+        assert!(liveness.tick().await == vec![LivenessTransition::AliveToDead(1)]);
+        let mut previous = Some(me);
+
+        // An identical publish must not reset broker 1's death clock.
+        on_leadership_wake(
+            &controller,
+            &liveness,
+            me,
+            &metrics,
+            &mut previous,
+            Some(me),
+        )
+        .await;
+        assert!(liveness.dead_snapshot().await.contains(&1));
+        assert!(metrics.controller_leader_changes_total.get() == 0);
+
+        // A change to another leader counts, but does not seed here.
+        let other = crabka_raft::NodeId(8);
+        on_leadership_wake(
+            &controller,
+            &liveness,
+            me,
+            &metrics,
+            &mut previous,
+            Some(other),
+        )
+        .await;
+        assert!(previous == Some(other));
+        assert!(liveness.dead_snapshot().await.contains(&1));
+        assert!(metrics.controller_leader_changes_total.get() == 1);
+
+        // A change back to this node seeds every registered broker alive.
+        on_leadership_wake(
+            &controller,
+            &liveness,
+            me,
+            &metrics,
+            &mut previous,
+            Some(me),
+        )
+        .await;
+        assert!(previous == Some(me));
+        assert!(metrics.controller_leader_changes_total.get() == 2);
+        assert!(liveness.dead_snapshot().await.is_empty());
+        assert!(liveness.is_alive(1).await);
+    }
+
+    /// The spawned watcher, not only its per-wake body, must react to a
+    /// leadership change: count it and seed the registered brokers alive.
+    #[tokio::test]
+    async fn leadership_watcher_seeds_liveness_when_this_node_takes_the_lead() {
+        use crate::heartbeat::controller_state::ControllerLivenessState;
+        let me = crabka_raft::NodeId(7);
+        let mock = Arc::new(MockMetadataSource::new(
+            image_with_registered_broker(1),
+            None,
+        ));
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = mock.clone();
+        let liveness = Arc::new(ControllerLivenessState::new(crabka_units::secs(60)));
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let shutdown = CancellationToken::new();
+        spawn_leadership_watcher(
+            controller,
+            liveness.clone(),
+            me,
+            metrics.clone(),
+            shutdown.clone(),
+        );
+        assert!(!liveness.is_alive(1).await);
+
+        mock.leader_tx
+            .send(Some(me))
+            .expect("watcher holds a receiver");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !liveness.is_alive(1).await {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "leadership watcher did not seed the registered broker"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(metrics.controller_leader_changes_total.get() == 1);
         shutdown.cancel();
     }
 
