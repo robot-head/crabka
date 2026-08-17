@@ -1210,7 +1210,13 @@ jobs:
       - name: PostgreSQL 18.4 upstream pg_regress monotone gate
         env:
           GRES_PG_REGRESS_ARTIFACT_DIR: target/gres-pg-regress-ci
-        run: ./scripts/gres-pg-regress.sh gres serial
+        # The artifact directory lives under target/, which rust-cache saves
+        # after a green run and restores into the next one. The script refuses
+        # to write into a directory that exists, so clear it first. The
+        # previous run's copy was already uploaded as a workflow artifact.
+        run: |
+          rm -rf "$GRES_PG_REGRESS_ARTIFACT_DIR"
+          ./scripts/gres-pg-regress.sh gres serial
       - name: Captured driver startup replay
         run: CRABKA_GRES_SKIP_BUILD=1 timeout 30s ./scripts/gres-driver-goldens-gate.sh
       - run: ./scripts/gres-psql-smoke.sh
