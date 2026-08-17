@@ -510,8 +510,10 @@ async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all
     );
 }
 
-#[tokio::test]
-async fn configured_pgdog_grace_reaches_active_tenant_status() {
+/// Reconciles `tenant` once against a fleet whose `directBootstrapGrace` is
+/// seven seconds, and returns the status patch body plus the unix-millisecond
+/// window in which the reconcile ran.
+async fn reconcile_with_seven_second_grace(tenant: GresTenant) -> (serde_json::Value, u128, u128) {
     let mut rules = multi_range_reconcile_rules();
     let mut gres = gres_body("fleet", "ns");
     gres["spec"]["pgdog"]["directBootstrapGrace"] = serde_json::json!("7s");
@@ -534,9 +536,7 @@ async fn configured_pgdog_grace_reaches_active_tenant_status() {
         .unwrap()
         .as_millis();
 
-    reconcile(Arc::new(multi_range_tenant()), Arc::new(ctx))
-        .await
-        .unwrap();
+    reconcile(Arc::new(tenant), Arc::new(ctx)).await.unwrap();
 
     let after = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -553,11 +553,39 @@ async fn configured_pgdog_grace_reaches_active_tenant_status() {
         })
         .expect("status patch");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    (body, before, after)
+}
+
+#[tokio::test]
+async fn configured_pgdog_grace_reaches_active_tenant_status() {
+    // The registry record is absent, so the reconcile treats the tenant as
+    // Active. The CRD status still says `suspended`: this is a wake, and the
+    // held activator session needs the grace.
+    let mut woken = multi_range_tenant();
+    woken.status = Some(GresTenantStatus {
+        lifecycle_phase: Some("suspended".into()),
+        ..Default::default()
+    });
+
+    let (body, before, after) = reconcile_with_seven_second_grace(woken).await;
+
+    assert!(body["status"]["lifecyclePhase"] == "active");
     let grace = body["status"]["pgdogCredentialGraceUntilUnixMs"]
         .as_u64()
         .expect("grace deadline");
     assert!(u128::from(grace) >= before + 7_000);
     assert!(u128::from(grace) <= after + 7_000);
+}
+
+#[tokio::test]
+async fn cold_created_tenant_reaches_active_status_without_pgdog_grace() {
+    // A tenant with no status has never been routed through the activator, so
+    // there is no held session for the grace to protect. Arming it here would
+    // flip the PgDog route to the activator and back on every cold create.
+    let (body, _, _) = reconcile_with_seven_second_grace(multi_range_tenant()).await;
+
+    assert!(body["status"]["lifecyclePhase"] == "active");
+    assert!(body["status"]["pgdogCredentialGraceUntilUnixMs"].is_null());
 }
 
 #[tokio::test]

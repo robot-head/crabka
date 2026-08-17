@@ -2881,6 +2881,15 @@ async fn patch_status(
     Ok(())
 }
 
+/// Returns the `PgDog` credential-grace deadline for the next status write.
+///
+/// The grace holds a woken session on the activator route while compute
+/// recovers. Only the transition from a non-active phase into `Active` arms
+/// it. A cold create has no held session, so the first status write
+/// (`previous_phase == None`) never arms it. A tenant that is already
+/// `Active` keeps the deadline it has and never re-arms. This keeps a
+/// transient error, or a status write without a grace extent, from flipping
+/// the `PgDog` route a second time.
 fn pgdog_grace_deadline(
     previous_phase: Option<&str>,
     existing_grace: Option<u64>,
@@ -2891,13 +2900,13 @@ fn pgdog_grace_deadline(
     if lifecycle_phase != TenantState::Active {
         return None;
     }
-    if previous_phase == Some("active") && existing_grace.is_some() {
-        return existing_grace;
+    match previous_phase {
+        None | Some("active") => existing_grace,
+        // `now` is a unix-millisecond instant, so the grace extent crosses into
+        // millisecond form here to produce the deadline the CRD status carries.
+        Some(_) => direct_bootstrap_grace
+            .map(|grace| now.saturating_add(grace.millis_i64().try_into().unwrap_or(u64::MAX))),
     }
-    // `now` is a unix-millisecond instant, so the grace extent crosses into
-    // millisecond form here to produce the deadline the CRD status carries.
-    direct_bootstrap_grace
-        .map(|grace| now.saturating_add(grace.millis_i64().try_into().unwrap_or(u64::MAX)))
 }
 
 fn preserved_lifecycle_state(obj: &GresTenant) -> TenantState {
@@ -2923,54 +2932,130 @@ mod tests {
 
     #[test]
     fn configured_pgdog_grace_drives_active_transition_deadline() {
-        assert!(
-            pgdog_grace_deadline(
+        let grace = Some(crabka_units::secs(7));
+        // (previous phase, existing grace, next phase, now, grace extent, expected)
+        for (previous_phase, existing_grace, lifecycle_phase, now, extent, expected) in [
+            // A wake from any non-active phase arms the grace.
+            (
                 Some("suspended"),
                 None,
                 TenantState::Active,
                 10_000,
-                Some(crabka_units::secs(7))
-            ) == Some(17_000)
-        );
-        assert!(
-            pgdog_grace_deadline(
+                grace,
+                Some(17_000),
+            ),
+            (
+                Some("resume_requested"),
+                None,
+                TenantState::Active,
+                10_000,
+                grace,
+                Some(17_000),
+            ),
+            (
+                Some("parking"),
+                None,
+                TenantState::Active,
+                10_000,
+                grace,
+                Some(17_000),
+            ),
+            (
                 Some("suspended"),
                 None,
                 TenantState::Active,
                 u64::MAX - 1,
-                Some(crabka_units::secs(7))
-            ) == Some(u64::MAX)
-        );
-        assert!(
-            pgdog_grace_deadline(
+                grace,
+                Some(u64::MAX),
+            ),
+            // A wake without a configured extent has nothing to arm.
+            (
+                Some("suspended"),
+                None,
+                TenantState::Active,
+                10_000,
+                None,
+                None,
+            ),
+            // A cold create has no held session, so it never arms.
+            (None, None, TenantState::Active, 20_000, grace, None),
+            // A cold create keeps whatever the status already carries.
+            (
+                None,
+                Some(12_000),
+                TenantState::Active,
+                20_000,
+                grace,
+                Some(12_000),
+            ),
+            // A steady active tenant keeps its deadline and never re-arms.
+            (
                 Some("active"),
                 Some(12_000),
                 TenantState::Active,
                 20_000,
-                Some(crabka_units::secs(7))
-            ) == Some(12_000)
-        );
-        assert!(
-            pgdog_grace_deadline(
+                grace,
+                Some(12_000),
+            ),
+            (
                 Some("active"),
                 None,
                 TenantState::Active,
                 20_000,
-                Some(crabka_units::secs(7))
-            ) == Some(27_000)
-        );
-        assert!(
-            pgdog_grace_deadline(
+                grace,
+                None,
+            ),
+            (
                 Some("active"),
                 None,
                 TenantState::Active,
                 u64::MAX - 1,
-                Some(crabka_units::secs(7))
-            ) == Some(u64::MAX)
-        );
-        assert!(
-            pgdog_grace_deadline(Some("active"), None, TenantState::Active, 20_000, None).is_none()
-        );
+                grace,
+                None,
+            ),
+            (
+                Some("active"),
+                None,
+                TenantState::Active,
+                20_000,
+                None,
+                None,
+            ),
+            // An error-path write with no extent preserves the deadline.
+            (
+                Some("active"),
+                Some(12_000),
+                TenantState::Active,
+                20_000,
+                None,
+                Some(12_000),
+            ),
+            // Any non-active next phase clears the deadline.
+            (
+                Some("active"),
+                Some(12_000),
+                TenantState::Suspended,
+                20_000,
+                grace,
+                None,
+            ),
+            (
+                Some("suspended"),
+                None,
+                TenantState::ResumeRequested,
+                20_000,
+                grace,
+                None,
+            ),
+        ] {
+            let actual =
+                pgdog_grace_deadline(previous_phase, existing_grace, lifecycle_phase, now, extent);
+            assert!(
+                actual == expected,
+                "previous={previous_phase:?} existing={existing_grace:?} \
+                 next={lifecycle_phase:?} now={now} extent={extent:?}"
+            );
+        }
     }
     use crate::crd::{GresTenantSpec, SecretKeyRef};
 

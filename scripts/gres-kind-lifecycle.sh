@@ -33,11 +33,25 @@ cleanup() {
     kubectl get events -A --sort-by=.lastTimestamp >"$ARTIFACT_DIR/events.txt" 2>&1 || true
     kubectl logs -n crabka-operator deploy/crabka-gres-operator --timestamps \
         >"$ARTIFACT_DIR/operator.log" 2>&1 || true
+    # A label selector caps `kubectl logs` at ten lines per container unless
+    # `--tail=-1` asks for the whole log.
     kubectl logs -l 'app.kubernetes.io/name=crabka-gres,app.kubernetes.io/instance=tenant-a' \
-        --all-containers=true --prefix --ignore-errors=true >"$ARTIFACT_DIR/compute.log" 2>&1 || true
+        --all-containers=true --prefix --tail=-1 --ignore-errors=true \
+        >"$ARTIFACT_DIR/compute.log" 2>&1 || true
     kubectl logs -l 'app.kubernetes.io/name=crabka-gres,app.kubernetes.io/instance=tenant-a' \
-        --all-containers=true --prefix --previous --ignore-errors=true \
+        --all-containers=true --prefix --tail=-1 --previous --ignore-errors=true \
         >"$ARTIFACT_DIR/compute-previous.log" 2>&1 || true
+    # Pooler-side evidence: a first-statement failure through PgDog needs the
+    # PgDog pool log and the activator log next to the operator log.
+    kubectl logs -l 'app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet' \
+        --all-containers=true --prefix --tail=-1 --timestamps --ignore-errors=true \
+        >"$ARTIFACT_DIR/pgdog.log" 2>&1 || true
+    kubectl logs -l 'app.kubernetes.io/name=crabka-pgdog,app.kubernetes.io/instance=fleet' \
+        --all-containers=true --prefix --tail=-1 --timestamps --previous --ignore-errors=true \
+        >"$ARTIFACT_DIR/pgdog-previous.log" 2>&1 || true
+    kubectl logs -l 'app.kubernetes.io/name=crabka-gres-activator,app.kubernetes.io/instance=fleet' \
+        --all-containers=true --prefix --tail=-1 --timestamps --ignore-errors=true \
+        >"$ARTIFACT_DIR/activator.log" 2>&1 || true
     kubectl logs demo-brokers-0 -c broker --timestamps >"$ARTIFACT_DIR/broker.log" 2>&1 || true
     kubectl get gres,grestenant,deploy,pod,svc -A -o yaml \
         >"$ARTIFACT_DIR/final-objects.yaml" 2>&1 || true
@@ -87,6 +101,15 @@ wait_lifecycle() {
     local expected=$1
     deadline_wait 360 "tenant lifecycle $expected" \
         "[ \"\$(kubectl get grestenant tenant-a -o jsonpath='{.status.lifecyclePhase}' 2>/dev/null)\" = '$expected' ]"
+}
+
+# True when tenant-a carries no PgDog credential grace deadline, or when the
+# deadline it carries is already in the past. The operator schedules its lazy
+# route flip on that deadline, so a true result means no flip is pending.
+pgdog_grace_elapsed() {
+    local deadline_ms
+    deadline_ms=$(kubectl get grestenant tenant-a -o jsonpath='{.status.pgdogCredentialGraceUntilUnixMs}' 2>/dev/null)
+    [ -z "$deadline_ms" ] || (( $(date +%s%N) / 1000000 > deadline_ms ))
 }
 
 # The wake query, timed. A tenant coming out of suspend can briefly answer
@@ -329,6 +352,10 @@ kill -0 "$KEEPER_PID" 2>/dev/null || fail "busy-session keeper exited"
 printf 'busy_session_prevented_suspend=true\n' >"$ARTIFACT_DIR/busy-session-proof.txt"
 timeout 180s kubectl rollout status deploy/fleet-pgdog --timeout=170s
 timeout 180s kubectl rollout status deploy/fleet-gres-activator --timeout=170s
+# No PgDog route flip may still be scheduled: a cold create must not arm the
+# credential grace at all, and if the operator armed one anyway it must already
+# have elapsed before the route and Deployment gates below are trusted.
+deadline_wait 120 "PgDog credential grace elapsed" pgdog_grace_elapsed
 deadline_wait 240 "initial confirmed PgDog route" \
     '[ "$(kubectl get gres fleet -o jsonpath='"'"'{.status.confirmedPgdogConfigHash}'"'"')" = "$(kubectl get secret fleet-pgdog-config -o jsonpath='"'"'{.metadata.annotations.crabka\.io/pgdog-config-hash}'"'"')" ]'
 deadline_wait 240 "initial PgDog Deployment hash" \
