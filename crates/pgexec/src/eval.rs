@@ -3806,6 +3806,27 @@ pub(crate) fn has_no_btree_opclass(ty: ColumnType) -> bool {
     matches!(ty.storage_type(), ColumnType::Xid | ColumnType::Cid)
 }
 
+/// The types with a **btree** opclass but no **hash** one: `bit`, `varbit`,
+/// `money`, `tsvector` and `tsquery`, the mirror image of
+/// [`has_no_btree_opclass`].
+///
+/// `GROUP BY`, `DISTINCT` and a plain `UNION` do not notice, because the
+/// planner sorts them instead. A recursive `UNION` does notice: `PostgreSQL`
+/// can only de-duplicate the working table by hashing, so it refuses these
+/// types with `could not implement recursive UNION` (0A000). A domain over one
+/// of them inherits the refusal, as would an array, which the executor cannot
+/// yet build over any of the five.
+pub(crate) fn has_no_hash_opclass(ty: ColumnType) -> bool {
+    matches!(
+        ty.storage_type(),
+        ColumnType::Bit(_)
+            | ColumnType::VarBit(_)
+            | ColumnType::Money
+            | ColumnType::TsVector
+            | ColumnType::TsQuery
+    )
+}
+
 pub(crate) fn is_scalar_jsonpath(ty: ColumnType) -> bool {
     ty.storage_type() == ColumnType::JsonPath
 }
@@ -3914,6 +3935,22 @@ pub(crate) fn require_equality_operator(ty: ColumnType) -> Result<(), ExecError>
             "could not identify an equality operator for type {}",
             ty.name()
         )));
+    }
+    Ok(())
+}
+
+/// Reject a recursive `UNION` column whose type has no hash opclass
+/// ([`has_no_hash_opclass`]).
+///
+/// This is `PostgreSQL`'s planner error, so a caller runs
+/// [`require_equality_operator`] first: a type with no equality operator at
+/// all fails at parse analysis, before the planner ever looks for a hash.
+pub(crate) fn require_hashable_for_recursive_union(ty: ColumnType) -> Result<(), ExecError> {
+    if has_no_hash_opclass(ty) {
+        return Err(ExecError::UnsupportedWithDetail {
+            message: "could not implement recursive UNION".into(),
+            detail: "All column datatypes must be hashable.".into(),
+        });
     }
     Ok(())
 }
