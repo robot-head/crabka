@@ -75,20 +75,21 @@ struct TestClockInner {
 
 /// Test handle for the controllable [`Clock`]. It shares its inner state with
 /// the `Clock::Test` handed to [`ControllerLivenessState::with_clock`], so the
-/// liveness state under test observes every `advance`.
+/// liveness state under test observes every `advance`. Tests in other modules
+/// reach it through [`ControllerLivenessState::with_test_clock`].
 #[cfg(test)]
-struct TestClock(std::sync::Arc<TestClockInner>);
+pub(crate) struct TestClock(std::sync::Arc<TestClockInner>);
 
 #[cfg(test)]
 impl TestClock {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(std::sync::Arc::new(TestClockInner {
             base: Instant::now(),
             offset_nanos: std::sync::atomic::AtomicU64::new(0),
         }))
     }
 
-    fn advance(&self, by: Duration) {
+    pub(crate) fn advance(&self, by: Duration) {
         self.0.offset_nanos.fetch_add(
             u64::try_from(by.as_nanos()).expect("advance fits u64 nanos"),
             std::sync::atomic::Ordering::Relaxed,
@@ -138,6 +139,14 @@ impl ControllerLivenessState {
             brokers: Mutex::new(HashMap::new()),
             wants_shutdown: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Construct with a [`TestClock`]. Tests outside this module use it to
+    /// drive a broker to `Dead` through [`tick`](Self::tick) without a
+    /// wall-clock sleep.
+    #[cfg(test)]
+    pub(crate) fn with_test_clock(timeout: Duration, clock: &TestClock) -> Self {
+        Self::with_clock(timeout, clock.clock())
     }
 
     /// Record whether `broker_id` is currently asking to shut down.
@@ -294,6 +303,42 @@ impl ControllerLivenessState {
             .collect()
     }
 
+    /// Snapshot the brokers whose heartbeat session has expired. Only the
+    /// `Dead` state qualifies. A fenced but alive broker is not in the set,
+    /// and neither is an unknown broker. The liveness ticker's sweep uses it
+    /// to find dead brokers that still lead a partition or still sit in an
+    /// ISR.
+    pub(crate) async fn dead_snapshot(&self) -> HashSet<u64> {
+        let map = self.brokers.lock().await;
+        map.iter()
+            .filter(|(_, entry)| entry.state == BrokerLivenessState::Dead)
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
+    /// Start a session for every broker in `broker_ids` that the registry does
+    /// not know yet. Each new entry starts `Alive` with `last_heartbeat =
+    /// now`, so the broker gets one full timeout window to send its first
+    /// heartbeat. Known entries keep their state and their death clock.
+    ///
+    /// The controller leader calls this on every liveness tick with the
+    /// brokers registered in the metadata image. Without it the registry
+    /// only knows brokers that heartbeated this controller or that a
+    /// leadership change seeded. A broker that registers and dies before its
+    /// first heartbeat reaches this controller would then never expire, and
+    /// the partitions it leads would never fail over.
+    pub(crate) async fn track_registered(&self, broker_ids: impl IntoIterator<Item = u64>) {
+        let mut map = self.brokers.lock().await;
+        let now = self.clock.now();
+        for id in broker_ids {
+            map.entry(id).or_insert(BrokerEntry {
+                last_heartbeat: now,
+                state: BrokerLivenessState::Alive,
+                fenced: false,
+            });
+        }
+    }
+
     /// Seed the liveness registry with the given broker ids as `Alive` with
     /// `last_heartbeat = now`. The broker calls this when it becomes the raft
     /// leader. Live peers then get a full timeout window to redirect their
@@ -382,6 +427,79 @@ mod tests {
         let unavailable = liveness.unavailable_snapshot().await;
         assert!(unavailable.contains(&2));
         assert!(!unavailable.contains(&99));
+    }
+
+    #[tokio::test]
+    async fn dead_snapshot_holds_expired_brokers_only() {
+        let clock = TestClock::new();
+        let liveness = ControllerLivenessState::with_test_clock(Duration::from_millis(10), &clock);
+        liveness.record_heartbeat(1).await;
+        liveness.record_heartbeat(2).await;
+        clock.advance(Duration::from_millis(11));
+        // Broker 2 heartbeats again inside the new window. Broker 1 does not.
+        // Broker 3 is alive but fenced.
+        liveness.record_heartbeat(2).await;
+        liveness.record_fenced_heartbeat(3).await;
+        let transitions = liveness.tick().await;
+        assert!(transitions == vec![LivenessTransition::AliveToDead(1)]);
+
+        let dead = liveness.dead_snapshot().await;
+        assert!(dead == [1].into_iter().collect());
+        // The fenced broker is unavailable but not dead.
+        assert!(liveness.unavailable_snapshot().await.contains(&3));
+        assert!(!dead.contains(&99));
+
+        // A revival heartbeat empties the set.
+        liveness.record_heartbeat(1).await;
+        assert!(liveness.dead_snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn track_registered_adds_unknown_brokers_and_keeps_known_state() {
+        let clock = TestClock::new();
+        let liveness = ControllerLivenessState::with_test_clock(Duration::from_millis(10), &clock);
+        // Broker 1 is known and expires.
+        liveness.record_heartbeat(1).await;
+        clock.advance(Duration::from_millis(11));
+        assert!(liveness.tick().await == vec![LivenessTransition::AliveToDead(1)]);
+
+        // Broker 1 keeps its dead state. Broker 2 starts a fresh session.
+        liveness.track_registered([1, 2]).await;
+        assert!(liveness.dead_snapshot().await == [1].into_iter().collect());
+        assert!(liveness.is_alive(2).await);
+
+        // Broker 2 never heartbeats. It expires one full window later.
+        clock.advance(Duration::from_millis(11));
+        assert!(liveness.tick().await == vec![LivenessTransition::AliveToDead(2)]);
+        assert!(liveness.dead_snapshot().await == [1, 2].into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn track_registered_does_not_refresh_a_stale_session() {
+        let clock = TestClock::new();
+        let liveness = ControllerLivenessState::with_test_clock(Duration::from_millis(10), &clock);
+        liveness.record_heartbeat(5).await;
+        clock.advance(Duration::from_millis(9));
+
+        // Unlike `seed_brokers`, a track call must not extend the window.
+        liveness.track_registered([5]).await;
+        clock.advance(Duration::from_millis(2));
+
+        assert!(liveness.tick().await == vec![LivenessTransition::AliveToDead(5)]);
+    }
+
+    #[tokio::test]
+    async fn seed_moves_dead_broker_out_of_dead_snapshot() {
+        let clock = TestClock::new();
+        let liveness = ControllerLivenessState::with_test_clock(Duration::from_millis(10), &clock);
+        liveness.record_heartbeat(4).await;
+        clock.advance(Duration::from_millis(11));
+        let _ = liveness.tick().await;
+        assert!(liveness.dead_snapshot().await.contains(&4));
+
+        liveness.seed_brokers([4]).await;
+
+        assert!(liveness.dead_snapshot().await.is_empty());
     }
 
     #[tokio::test]

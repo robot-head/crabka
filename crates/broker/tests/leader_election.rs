@@ -140,6 +140,27 @@ fn cluster_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// Waits until every survivor sees a controller leader that is not `victim`.
+/// The victim may have been the raft leader. The survivors then need an
+/// election before any of them can drive the partition failover.
+async fn wait_for_controller_leader_other_than(
+    cluster: &[(BrokerHandle, BrokerConfig, TempDir)],
+    victim: crabka_broker::NodeId,
+) {
+    for (h, _, _) in cluster {
+        let mut rx = h.watch_leader_for_test();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            rx.wait_for(
+                |l| matches!(l, Some(id) if *id != crabka_broker::NodeId(0) && *id != victim),
+            ),
+        )
+        .await
+        .expect("no new controller leader within 30s after kill")
+        .expect("leader channel closed");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn broker_death_elects_new_leader() {
     let _g = cluster_lock().lock().await;
@@ -149,14 +170,17 @@ async fn broker_death_elects_new_leader() {
     create_topic(&cluster[0].0, &bootstrap_1, "elect", 3).await;
 
     // Kill broker 1 (the partition leader by round-robin).
-    let dead = cluster.remove(0);
-    dead.0.shutdown().await;
+    let (dead, dead_cfg, _dead_dir) = cluster.remove(0);
+    let victim = dead_cfg.node_id;
+    dead.shutdown().await;
 
-    // Wait for election: await until the surviving broker sees a new leader.
-    // cluster[0] is now broker 2 (broker 1 was removed above).
+    // Wait for election: first a controller leader among the survivors, then
+    // the partition failover it drives. cluster[0] is now broker 2 (broker 1
+    // was removed above).
+    wait_for_controller_leader_other_than(&cluster, victim).await;
     cluster[0]
         .0
-        .wait_until_partition_leader_changed("elect", 0, crabka_broker::NodeId(1))
+        .wait_until_partition_leader_changed("elect", 0, victim)
         .await;
     let client = Client::builder()
         .bootstrap(cluster[0].1.listen_addr.to_string())
@@ -316,13 +340,16 @@ async fn produce_during_leader_failover() {
             .expect("pre");
     }
     let bootstrap_2 = cluster[1].1.listen_addr.to_string();
-    let dead = cluster.remove(0);
-    dead.0.shutdown().await;
+    let (dead, dead_cfg, _dead_dir) = cluster.remove(0);
+    let victim = dead_cfg.node_id;
+    dead.shutdown().await;
 
-    // Wait for the new leader to be elected (node 1 was killed).
+    // Wait for the new partition leader. The victim may also have been the
+    // controller leader, so first wait for the survivors to elect one.
+    wait_for_controller_leader_other_than(&cluster, victim).await;
     cluster[0]
         .0
-        .wait_until_partition_leader_changed("failover", 0, crabka_broker::NodeId(1))
+        .wait_until_partition_leader_changed("failover", 0, victim)
         .await;
 
     // Continue producing. The first attempt may hit NOT_LEADER_OR_FOLLOWER;
