@@ -16,6 +16,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # (`bench/scripts/…`, `packaging/…`, `$PWD/packages`), so move the working
 # directory one level up. Without this, `just -f bench/justfile install-all`
 # looks for `bench/bench/scripts/install-strimzi.sh` and fails with exit 127.
+# The repo root holds no justfile, so a nested `just <recipe>` call inside a
+# recipe must name this file with `--justfile {{justfile()}}`.
 set working-directory := ".."
 
 repo_root := justfile_directory() / ".."
@@ -34,18 +36,18 @@ runs               := env_var_or_default("RUNS", "10")
 # ── Top-level ──────────────────────────────────────────────────────────────
 
 default:
-    @just --list
+    @just --justfile {{justfile()}} --list
 
 # Full CI smoke: build images, kind-up, install both operators, run CI
 # scenarios on both stacks, tear down.
 bench-ci: build-driver-image kind-up install-all
-    just _run-matrix "1broker-rf1" "{{ci_scenarios}}"
-    just bench-report
+    just --justfile {{justfile()}} _run-matrix "1broker-rf1" "{{ci_scenarios}}"
+    just --justfile {{justfile()}} bench-report
 
 # Full cluster matrix. Assumes a kubeconfig context is already set.
 bench-cluster: install-all
-    just _run-matrix "3broker-rf3" "{{cluster_scenarios}}"
-    just bench-report-failover
+    just --justfile {{justfile()}} _run-matrix "3broker-rf3" "{{cluster_scenarios}}"
+    just --justfile {{justfile()}} bench-report-failover
 
 # 6-broker cluster matrix repeated `runs` times (default 10) for averaging.
 # Each repeat tags its output files `-runNN` so nothing is clobbered; the
@@ -56,9 +58,9 @@ bench-cluster-6broker: install-all
     for i in $(seq 1 {{runs}}); do \
       export BENCH_RUN_TAG="$(printf -- '-run%02d' "$i")"; \
       echo "═══ repeat $i / {{runs}} (tag $BENCH_RUN_TAG) ═══"; \
-      just _run-matrix "6broker-rf3" "{{cluster_scenarios}}"; \
+      just --justfile {{justfile()}} _run-matrix "6broker-rf3" "{{cluster_scenarios}}"; \
     done
-    just bench-report-failover
+    just --justfile {{justfile()}} bench-report-failover
 
 # Aggregate per-run JSON into a Markdown summary, graph-ready CSVs, a
 # standalone Plotly report, and the website charts fragment:
