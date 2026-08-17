@@ -235,6 +235,20 @@ currency symbol. Without the `ALTER DATABASE` the run scores that difference
 against Gres and measures the harness. The setting is per-database and is not
 copied from the template, so each oracle database needs its own.
 
+Give the oracle database pg_regress's public-schema grant as well before you run
+the adopted `pg_regress` corpus (`--corpus-regress`):
+
+```sh
+psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+  -c "GRANT ALL ON SCHEMA public TO public"
+```
+
+pg_regress runs this grant in `test_setup.sql`, because PostgreSQL 15 removed
+`CREATE` on `public` from `PUBLIC`, and the adopted files still expect it.
+Without it, a non-superuser `CREATE` in `sequence.sql` fails on the oracle only
+and aborts the oracle's transaction, so every later statement in that block
+scores against a subject that ran them. This grant is also per-database.
+
 ## Extended-protocol corpus
 
 `corpus-extended/` contains JSON cases that run through `Parse`/`Bind`/`Execute`
@@ -244,11 +258,16 @@ Run it with:
 ```sh
 cargo run -p crabka-gres-conformance -- \
   --oracle-url "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
-  --subject-url "host=127.0.0.1 port=5433 user=crab dbname=crab" \
+  --subject-url "host=127.0.0.1 port=5433 user=crab dbname=postgres" \
   --baseline crates/gres-conformance/baseline.json \
   --extended-corpus crates/gres-conformance/corpus-extended \
   --extended-baseline crates/gres-conformance/corpus-extended/baseline.json
 ```
+
+Connect the subject to a database with the same name as the oracle's. Gres
+reports the database named at connect time, so a different name makes
+`current_database()` and the catalog rows that carry it diverge for a naming
+reason only.
 
 Each `.json` file is discovered recursively and contains cases with `name`,
 `sql`, typed `params`, `setup`, and `teardown`; `baseline.json` is the reserved

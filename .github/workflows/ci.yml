@@ -506,8 +506,21 @@ jobs:
           # died, tried 5 times before giving up" (jobs 94269069069 and
           # 94273891809), before a line of Rust or Java was compiled.
           # `.github/workflows/sdk-java.yml` already caches this way.
+          # `cache-dependency-path` scopes the key to tools/oracle, so an
+          # unrelated Renovate bump under `sdks/java` no longer rotates it.
           cache: gradle
-      - run: (cd tools/oracle && ./gradlew installDist --no-daemon)
+          cache-dependency-path: |
+            tools/oracle/**/*.gradle*
+            tools/oracle/gradle/wrapper/gradle-wrapper.properties
+      - name: Build JVM oracle
+        # Maven Central rate-limits cold resolves (HTTP 429). Retry with
+        # backoff; Gradle keeps what it already downloaded.
+        run: |
+          for attempt in 1 2 3; do
+            if (cd tools/oracle && ./gradlew installDist --no-daemon); then exit 0; fi
+            if [ "$attempt" = 3 ]; then echo "::error::gradle installDist failed after 3 attempts"; exit 1; fi
+            echo "gradle attempt $attempt failed; backing off"; sleep $((attempt * 45))
+          done
       # Select the JVM-oracle targets explicitly. A workspace-wide
       # `--include-ignored` sweep also runs thousands of ordinary tests and
       # Docker- or PostgreSQL-gated suites that belong to dedicated jobs.
@@ -1003,6 +1016,20 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov nextest -p crabka-grpc-gateway --profile ci --tests --test schema_codec --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
+      # Pull the image up front so a registry problem fails this one step with
+      # Docker's own message. Without the preload the first `docker run` in
+      # the differential test pays the pull, and a stalled pull sits inside the
+      # test until the job timeout. `docker pull` has no timeout of its own, so
+      # bound it here. The tag mirrors `IMAGE` in
+      # crates/grpc-gateway/tests/jvm_differential.rs. Keep them in lockstep.
+      - name: Preload Docker images
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          timeout 180 docker pull mirror.gcr.io/confluentinc/cp-kafka:7.5.0 || {
+            echo "::error::docker pull mirror.gcr.io/confluentinc/cp-kafka:7.5.0 failed or stalled past 180s"
+            exit 1
+          }
       - name: JVM gRPC gateway differential
         run: cargo nextest run --locked -p crabka-grpc-gateway --profile ci --test jvm_differential --run-ignored only
       - uses: codecov/codecov-action@v7
@@ -1224,16 +1251,34 @@ jobs:
         run: |
           psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
             -v ON_ERROR_STOP=1 -c "ALTER DATABASE postgres SET lc_monetary = 'C'"
+      # pg_regress runs `GRANT ALL ON SCHEMA public TO public` in
+      # `test_setup.sql` because PostgreSQL 15 removed CREATE on `public` from
+      # PUBLIC, and the adopted regress files still expect it. Without the
+      # grant, `sequence.sql`'s `SET LOCAL SESSION AUTHORIZATION regress_seq_user;
+      # CREATE SEQUENCE seq3` fails on the oracle only (42501) and aborts its
+      # transaction, so every later statement in that block scores 25P02 against
+      # a subject that ran them. Gres does not gate CREATE on schema
+      # privileges, so the grant makes the oracle match the environment the
+      # corpus was written for. It is per-database and is not copied from the
+      # template.
+      - name: Give the oracle database pg_regress's public-schema grant
+        run: |
+          psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+            -v ON_ERROR_STOP=1 -c "GRANT ALL ON SCHEMA public TO public"
+      # The oracle is `dbname=postgres`. Since #985 Gres reports the database
+      # named in the startup packet, so the subject must connect to a database
+      # of the same name. Otherwise `current_database()`, `pg_database.datname`
+      # and `information_schema.*_catalog` diverge for a naming reason only.
       - name: Conformance harness against the parity baseline
         run: |
           ./target/debug/crabka-gres --listen 127.0.0.1:54333 &
           for _ in $(seq 30); do
-            if psql "host=127.0.0.1 port=54333 user=crab dbname=crab sslmode=prefer" -tAc 'SELECT 1' >/dev/null 2>&1; then break; fi
+            if psql "host=127.0.0.1 port=54333 user=crab dbname=postgres sslmode=prefer" -tAc 'SELECT 1' >/dev/null 2>&1; then break; fi
             sleep 0.3
           done
           ./target/debug/crabka-gres-conformance \
             --oracle-url "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
-            --subject-url "host=127.0.0.1 port=54333 user=crab dbname=crab" \
+            --subject-url "host=127.0.0.1 port=54333 user=crab dbname=postgres" \
             --corpus crates/gres-conformance/corpus \
             --baseline crates/gres-conformance/baseline.json \
             --corpus-regress crates/gres-conformance/corpus-regress \
@@ -1311,18 +1356,21 @@ jobs:
             --extended-out extended-parity-substrate.json \
             --extended-summary extended-parity-substrate.md \
             --out parity-substrate.json --summary parity-substrate.md
-      - name: Publish parity summary
+      - name: Publish parity summaries
         if: ${{ !cancelled() }}
-        run: cat parity.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish adopted pg_regress corpus parity summary
-        if: ${{ !cancelled() }}
-        run: cat regress-parity.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish substrate parity summary
-        if: ${{ !cancelled() }}
-        run: cat parity-substrate.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish extended parity summaries
-        if: ${{ !cancelled() }}
-        run: cat extended-parity-standalone.md extended-parity-substrate.md >> "$GITHUB_STEP_SUMMARY"
+        # The step summary is capped at 1 MiB and regress-parity.md alone is
+        # 2.5 MB, so publish each report's header and root-cause table only.
+        # The full reports ship in the gres-parity-report artifact.
+        run: |
+          for report in parity.md regress-parity.md parity-substrate.md extended-parity-standalone.md extended-parity-substrate.md; do
+            echo "### ${report}" >> "$GITHUB_STEP_SUMMARY"
+            if [ -f "$report" ]; then
+              sed -n '/^## Every statement$/q;p' "$report" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "_not produced_" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: Generate Gres end-to-end coverage
         if: ${{ !cancelled() }}
         run: |

@@ -53,9 +53,21 @@ jobs:
           # a network fetch before any compilation, and in ci.yml's
           # jvm-differential job it died twice on 2026-08-12 with "curl: (56)
           # Connection died". `sdk-java.yml` already caches this way.
+          # `cache-dependency-path` scopes the key to tools/oracle, so an
+          # unrelated Renovate bump under `sdks/java` no longer rotates it.
           cache: gradle
+          cache-dependency-path: |
+            tools/oracle/**/*.gradle*
+            tools/oracle/gradle/wrapper/gradle-wrapper.properties
       - name: Build JVM oracle
-        run: (cd tools/oracle && ./gradlew installDist --no-daemon)
+        # Maven Central rate-limits cold resolves (HTTP 429). Retry with
+        # backoff; Gradle keeps what it already downloaded.
+        run: |
+          for attempt in 1 2 3; do
+            if (cd tools/oracle && ./gradlew installDist --no-daemon); then exit 0; fi
+            if [ "$attempt" = 3 ]; then echo "::error::gradle installDist failed after 3 attempts"; exit 1; fi
+            echo "gradle attempt $attempt failed; backing off"; sleep $((attempt * 45))
+          done
       - name: Run parameterised differential sweep (release profile)
         run: cargo test --workspace --test differential_all --release -- --ignored
       - name: Create issue on failure
