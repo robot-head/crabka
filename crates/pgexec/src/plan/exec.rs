@@ -1093,18 +1093,16 @@ fn plan_function_scan(
     select: &SelectStmt,
     source: &TableExpr,
 ) -> Result<Option<SeqScanPlan>, ExecError> {
-    let (table_function, lateral) = match source {
-        TableExpr::Function { functions, lateral, .. } => (
-            crate::routine::expands_as_table(read_ctx.catalog_kv, functions),
-            *lateral,
-        ),
-        TableExpr::JsonTable(table) => (true, table.lateral),
+    let table_function = match source {
+        TableExpr::Function { functions, .. } => {
+            crate::routine::expands_as_table(read_ctx.catalog_kv, functions)
+        }
+        TableExpr::JsonTable(_) => true,
         _ => return Ok(None),
     };
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
-    if lateral
-        || matches!(select.distinct, DistinctClause::On(_))
+    if matches!(select.distinct, DistinctClause::On(_))
         || (!aggregate && crate::grouping::is_grouping_query(select))
         || (window
             && (aggregate

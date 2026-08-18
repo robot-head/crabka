@@ -16952,6 +16952,29 @@ mod tests {
         assert!(relation.rows.is_empty());
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT n FROM LATERAL generate_series(1, 3) AS g(n)"),
+        )
+        .expect("standalone LATERAL FunctionScan plan executes")
+        .expect("standalone LATERAL function uses FunctionScan");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(3)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT v FROM LATERAL JSON_TABLE(jsonb '[1]', '$[*]' COLUMNS (v int PATH '$'))",
+            ),
+        )
+        .expect("standalone LATERAL JSON_TABLE plan executes")
+        .expect("standalone LATERAL JSON_TABLE uses TableFunctionScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT count(*) FROM planned_cte TABLESAMPLE SYSTEM (0)"),
         )
         .expect("sampled CteScan plan executes")
@@ -17177,7 +17200,6 @@ mod tests {
         for sql in [
             "SELECT a FROM seq_scan_test, LATERAL (VALUES (1)) AS derived(n)",
             "SELECT a FROM seq_scan_test, (SELECT a FROM seq_scan_third ORDER BY a) AS derived",
-            "SELECT v FROM LATERAL JSON_TABLE(jsonb '[1]', '$[*]' COLUMNS (v int PATH '$'))",
             "SELECT a, v FROM seq_scan_test, \
              JSON_TABLE(a::text::jsonb, '$' COLUMNS (v int PATH '$'))",
         ] {
@@ -17763,7 +17785,6 @@ mod tests {
             "SELECT a FROM seq_scan_test, public.planned_cte",
             "SELECT a.i FROM generate_series(1, 2) AS a(i) \
              JOIN generate_series(1, 2) AS b(i) ON a.i = b.i",
-            "SELECT n FROM LATERAL generate_series(1, 3) AS g(n)",
             "SELECT DISTINCT count(*) FROM seq_scan_test AS l, seq_scan_third AS r",
             "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
             "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
