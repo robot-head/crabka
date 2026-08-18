@@ -1801,7 +1801,23 @@ fn parse_guc_value(
             )
         });
     }
-    let parsed = (definition.parse)(value, current).map_err(|_| invalid())?;
+    let parsed = (definition.parse)(value, current).map_err(|_| {
+        if definition.name == "IntervalStyle" {
+            return ExecError::Remote(
+                PgError::error(
+                    "22023",
+                    format!(
+                        "invalid value for parameter \"{}\": \"{value}\"",
+                        definition.name
+                    ),
+                )
+                .with_hint(
+                    "Available values: postgres, postgres_verbose, sql_standard, iso_8601.",
+                ),
+            );
+        }
+        invalid()
+    })?;
     // PostgreSQL's integer parameters are C `int`s, and a spelling whose
     // base-unit value overflows one is rejected before the range check.
     if definition.vartype == "integer"
@@ -17786,28 +17802,24 @@ mod tests {
             .simple_query("SET intervalstyle = 'asd'")
             .await
             .expect_err("interval style should be rejected");
-        assert!(
-            error
-                == crabka_pgwire::error::PgError::error(
-                    "22023",
-                    "invalid value for parameter \"IntervalStyle\": \"asd\"",
-                )
-                .with_hint(
-                    "Available values: postgres, postgres_verbose, sql_standard, iso_8601.",
-                )
+        let mut expected = crabka_pgwire::error::PgError::error(
+            "22023",
+            "invalid value for parameter \"IntervalStyle\": \"asd\"",
         );
+        expected = expected.with_hint(
+            "Available values: postgres, postgres_verbose, sql_standard, iso_8601.",
+        );
+        assert!(error == expected);
         let error = s
             .simple_query("SET password_encryption = 'novalue'")
             .await
             .expect_err("password encryption should be rejected");
-        assert!(
-            error
-                == crabka_pgwire::error::PgError::error(
-                    "22023",
-                    "invalid value for parameter \"password_encryption\": \"novalue\"",
-                )
-                .with_hint("Available values: md5, scram-sha-256.")
+        let mut expected = crabka_pgwire::error::PgError::error(
+            "22023",
+            "invalid value for parameter \"password_encryption\": \"novalue\"",
         );
+        expected = expected.with_hint("Available values: md5, scram-sha-256.");
+        assert!(error == expected);
     }
 
     #[tokio::test]
