@@ -377,6 +377,12 @@ async fn windows_run_after_where_and_group_by_and_before_distinct_and_limit() {
             "SELECT g, sum(sum(v)) OVER (ORDER BY g) FROM w GROUP BY g ORDER BY g",
             vec!["1\t30", "2\t90", "3\t90"],
         ),
+        // A named specification is resolved before grouping lowers its
+        // expressions onto the grouped output.
+        (
+            "SELECT g, sum(sum(v)) OVER win FROM w GROUP BY g WINDOW win AS (ORDER BY g) ORDER BY g",
+            vec!["1\t30", "2\t90", "3\t90"],
+        ),
         // An arithmetic combination of a window result and a grouped value.
         (
             "SELECT g, rank() OVER (ORDER BY g) + count(*) FROM w GROUP BY g ORDER BY g",

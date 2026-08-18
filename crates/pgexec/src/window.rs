@@ -302,10 +302,7 @@ fn plan_call(
     scope: &Scope,
 ) -> Result<PlannedCall, ExecError> {
     let func = WindowFunc::classify(&call.name);
-    let spec = match &call.over {
-        WindowRef::Named(name) => lookup_window(name, windows)?.clone(),
-        WindowRef::Spec(spec) => merge_base(spec, windows)?,
-    };
+    let spec = resolve_over(&call.over, windows)?;
     if call.distinct {
         return Err(unsupported(
             "DISTINCT is not implemented for window functions",
@@ -380,6 +377,16 @@ fn plan_call(
         result_ty,
         range_offset_ty,
     })
+}
+
+fn resolve_over(
+    over: &WindowRef,
+    windows: &[(String, WindowSpec)],
+) -> Result<WindowSpec, ExecError> {
+    match over {
+        WindowRef::Named(name) => lookup_window(name, windows).cloned(),
+        WindowRef::Spec(spec) => merge_base(spec, windows),
+    }
 }
 
 /// A non-window, non-aggregate name written with `OVER`.
@@ -754,8 +761,9 @@ fn lower_over_grouping(
     // The window specs' own expressions are grouped-valid too (`rank() OVER
     // (ORDER BY sum(x))`), so they join the same leaf projection.
     let mut window_calls = Vec::with_capacity(s.window_calls.len());
+    let windows = resolve_window_clause(&s.windows)?;
     for call in &s.window_calls {
-        window_calls.push(split_call(call, &mut leaves)?);
+        window_calls.push(split_call(call, &windows, &mut leaves)?);
     }
 
     let inner = grouped_leaf_select(s, scope, fields, out_exprs, &leaves)?;
@@ -1000,7 +1008,11 @@ fn split_all(exprs: &[Expr], leaves: &mut Vec<Expr>) -> Result<Vec<Expr>, ExecEr
     exprs.iter().map(|expr| split(expr, leaves)).collect()
 }
 
-fn split_call(call: &WindowCall, leaves: &mut Vec<Expr>) -> Result<WindowCall, ExecError> {
+fn split_call(
+    call: &WindowCall,
+    windows: &[(String, WindowSpec)],
+    leaves: &mut Vec<Expr>,
+) -> Result<WindowCall, ExecError> {
     let args = match &call.args {
         FuncArgs::Star => FuncArgs::Star,
         FuncArgs::Exprs(args) => FuncArgs::Exprs(
@@ -1009,10 +1021,7 @@ fn split_call(call: &WindowCall, leaves: &mut Vec<Expr>) -> Result<WindowCall, E
                 .collect::<Result<_, ExecError>>()?,
         ),
     };
-    let over = match &call.over {
-        WindowRef::Named(name) => WindowRef::Named(name.clone()),
-        WindowRef::Spec(spec) => WindowRef::Spec(Box::new(split_spec(spec, leaves)?)),
-    };
+    let over = WindowRef::Spec(Box::new(split_spec(&resolve_over(&call.over, windows)?, leaves)?));
     Ok(WindowCall {
         name: call.name.clone(),
         distinct: call.distinct,
