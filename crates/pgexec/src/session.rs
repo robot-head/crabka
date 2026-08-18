@@ -13065,6 +13065,17 @@ pub(crate) fn decode_binary_value(
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
+        ColumnType::Temporal(kind, _) => decode_binary_value(
+            value,
+            match kind {
+                crabka_pgtypes::TemporalType::Time => ColumnType::Time,
+                crabka_pgtypes::TemporalType::Timetz => ColumnType::Timetz,
+                crabka_pgtypes::TemporalType::Timestamp => ColumnType::Timestamp,
+                crabka_pgtypes::TemporalType::Timestamptz => ColumnType::Timestamptz,
+                crabka_pgtypes::TemporalType::Interval => ColumnType::Interval,
+            },
+            time_zone,
+        ),
         ColumnType::Jsonb => decode_jsonb_binary(value),
         // `json_recv` is `textrecv` plus a syntax check: no version byte, and
         // the bytes are kept as sent.

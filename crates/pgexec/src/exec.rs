@@ -10873,6 +10873,13 @@ pub(crate) fn coerce(
     if matches!(&value, Datum::Regclass(_)) && target.is_reg() {
         return Ok(value);
     }
+    if matches!(target, ColumnType::Temporal(_, _)) {
+        return Ok(crabka_pgtypes::cast::cast_assign_in(
+            &value,
+            target,
+            ctx.output_style(),
+        )?);
+    }
     if target == ColumnType::JsonPath {
         return match value {
             Datum::Null => Ok(Datum::Null),

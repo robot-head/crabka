@@ -686,18 +686,20 @@ impl Parser {
             type_word = "bit varying".to_string();
         }
         // A `timestamp(2)` / `time(2)` / `interval(2)` fractional-seconds
-        // precision sits before any `with time zone` qualifier. Crabka stores
-        // every date/time value at microsecond resolution, so the precision is
-        // parsed and discarded rather than rounding the stored value.
-        if matches!(
+        // precision sits before any `with time zone` qualifier. Keep it until
+        // the normalized type is known below.
+        let temporal_precision = if matches!(
             type_word.to_ascii_lowercase().as_str(),
             "timestamp" | "timestamptz" | "time" | "timetz" | "interval"
         ) && *self.peek() == Token::LParen
         {
             self.bump();
-            self.expect_u16("fractional seconds precision")?;
+            let precision = self.expect_u16("fractional seconds precision")?;
             self.expect(&Token::RParen)?;
-        }
+            Some(precision.min(6) as u8)
+        } else {
+            None
+        };
         // SP37: fold the multi-word `timestamp`/`time` { with | without } `time zone`
         // spellings into one normalized name (keyword-free — the lexer lowercases
         // idents, so the three trailing words are matched as plain `Token::Ident`s).
@@ -749,21 +751,22 @@ impl Parser {
             )
         })?;
         // SP32: `numeric`/`decimal` may carry a `(precision[, scale])` modifier.
-        let base = if ty.is_numeric() && *self.peek() == Token::LParen {
-            self.parse_numeric_typmod()?
-        } else if matches!(
-            ty,
-            crabka_pgtypes::ColumnType::Varchar(_) | crabka_pgtypes::ColumnType::Char(_)
-        ) && *self.peek() == Token::LParen
-        {
-            self.parse_string_typmod(ty)?
-        } else if matches!(
-            ty,
-            crabka_pgtypes::ColumnType::Bit(_) | crabka_pgtypes::ColumnType::VarBit(_)
-        ) {
-            self.parse_bit_typmod(ty, type_pos)?
-        } else {
-            ty
+        let base = match (ty, temporal_precision) {
+            (crabka_pgtypes::ColumnType::Time, Some(precision)) => crabka_pgtypes::ColumnType::Temporal(crabka_pgtypes::TemporalType::Time, precision),
+            (crabka_pgtypes::ColumnType::Timetz, Some(precision)) => crabka_pgtypes::ColumnType::Temporal(crabka_pgtypes::TemporalType::Timetz, precision),
+            (crabka_pgtypes::ColumnType::Timestamp, Some(precision)) => crabka_pgtypes::ColumnType::Temporal(crabka_pgtypes::TemporalType::Timestamp, precision),
+            (crabka_pgtypes::ColumnType::Timestamptz, Some(precision)) => crabka_pgtypes::ColumnType::Temporal(crabka_pgtypes::TemporalType::Timestamptz, precision),
+            (crabka_pgtypes::ColumnType::Interval, Some(precision)) => crabka_pgtypes::ColumnType::Temporal(crabka_pgtypes::TemporalType::Interval, precision),
+            (ty, _) if ty.is_numeric() && *self.peek() == Token::LParen => self.parse_numeric_typmod()?,
+            (ty, _) if matches!(
+                ty,
+                crabka_pgtypes::ColumnType::Varchar(_) | crabka_pgtypes::ColumnType::Char(_)
+            ) && *self.peek() == Token::LParen => self.parse_string_typmod(ty)?,
+            (ty, _) if matches!(
+                ty,
+                crabka_pgtypes::ColumnType::Bit(_) | crabka_pgtypes::ColumnType::VarBit(_)
+            ) => self.parse_bit_typmod(ty, type_pos)?,
+            (ty, _) => ty,
         };
         self.parse_array_type_suffix(base, &lookup_name, type_pos)
     }
@@ -1856,8 +1859,8 @@ impl Parser {
         let Token::StringLit(string) = self.bump() else {
             unreachable!("the peek above guaranteed a string literal");
         };
-        if ty == crabka_pgtypes::ColumnType::Interval {
-            return self.interval_literal(string).map(Some);
+        if matches!(ty, crabka_pgtypes::ColumnType::Interval | crabka_pgtypes::ColumnType::Temporal(crabka_pgtypes::TemporalType::Interval, _)) {
+            return self.interval_literal(string, ty).map(Some);
         }
         // `ConstBit` clears the length modifier that `Bit` supplies, so the
         // typed-constant `bit 'xff'` is eight bits while the cast `'xff'::bit`
@@ -1888,12 +1891,16 @@ impl Parser {
     /// (`interval '1.5' day` is `1 day`). Both are properties of the *literal*, so
     /// the qualified form is decoded here, against the field range, and lowered to
     /// the plain interval literal it denotes.
-    fn interval_literal(&mut self, string: String) -> Result<Expr, ParseError> {
+    fn interval_literal(
+        &mut self,
+        string: String,
+        ty: crabka_pgtypes::ColumnType,
+    ) -> Result<Expr, ParseError> {
         use crabka_pgtypes::datetime::IntervalField;
 
         let interval = |text: String| Expr::Cast {
             expr: Box::new(Expr::StringLiteral(text)),
-            ty: crabka_pgtypes::ColumnType::Interval,
+            ty,
         };
         let field_pos = self.peek_pos();
         let Some(start) = self.interval_field() else {
@@ -18363,6 +18370,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_temporal_fractional_second_typmods() {
+        use crabka_pgtypes::TemporalType;
+
+        let ty = |sql: &str| match one(sql) {
+            Statement::CreateTable { columns, .. } => columns[0].ty,
+            other => panic!("expected CreateTable, got {other:?}"),
+        };
+
+        assert_eq!(
+            ty("CREATE TABLE t (x timestamp(2) with time zone)"),
+            ColumnType::Temporal(TemporalType::Timestamptz, 2)
+        );
+        assert_eq!(
+            ty("CREATE TABLE t (x interval(9))"),
+            ColumnType::Temporal(TemporalType::Interval, 6)
+        );
     }
 
     #[test]

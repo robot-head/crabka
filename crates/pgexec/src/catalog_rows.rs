@@ -1466,6 +1466,7 @@ pub(crate) fn attribute_storage(ty: ColumnType) -> &'static str {
         | C::Timestamp
         | C::Timestamptz
         | C::Interval
+        | C::Temporal(_, _)
         | C::Uuid
         | C::Money
         // One byte, pass-by-value: `pg_type.typstorage` for OID 18 is `p`,

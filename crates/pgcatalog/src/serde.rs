@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 12;
+pub const SCHEMA_VERSION: u8 = 13;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -355,23 +355,33 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Date => out.push(type_tag::DATE),
         ColumnType::Time => {
             out.push(type_tag::TIME);
-            out.push(0);
+            out.push(u8::MAX);
         }
         ColumnType::Timetz => {
             out.push(type_tag::TIMETZ);
-            out.push(0);
+            out.push(u8::MAX);
         }
         ColumnType::Timestamp => {
             out.push(type_tag::TIMESTAMP);
-            out.push(0);
+            out.push(u8::MAX);
         }
         ColumnType::Timestamptz => {
             out.push(type_tag::TIMESTAMPTZ);
-            out.push(0);
+            out.push(u8::MAX);
         }
         ColumnType::Interval => {
             out.push(type_tag::INTERVAL);
-            out.push(0);
+            out.push(u8::MAX);
+        }
+        ColumnType::Temporal(kind, precision) => {
+            out.push(match kind {
+                crabka_pgtypes::TemporalType::Time => type_tag::TIME,
+                crabka_pgtypes::TemporalType::Timetz => type_tag::TIMETZ,
+                crabka_pgtypes::TemporalType::Timestamp => type_tag::TIMESTAMP,
+                crabka_pgtypes::TemporalType::Timestamptz => type_tag::TIMESTAMPTZ,
+                crabka_pgtypes::TemporalType::Interval => type_tag::INTERVAL,
+            });
+            out.push(precision);
         }
         ColumnType::Bytea => out.push(type_tag::BYTEA),
         ColumnType::Uuid => out.push(type_tag::UUID),
@@ -488,39 +498,39 @@ fn read_type_with(
         }
         type_tag::DATE => ColumnType::Date,
         type_tag::TIME => {
-            let reserved = take_u8(cur)?;
-            if reserved != 0 {
+            let precision = take_u8(cur)?;
+            if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            ColumnType::Time
+            if precision == u8::MAX { ColumnType::Time } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Time, precision) }
         }
         type_tag::TIMETZ => {
-            let reserved = take_u8(cur)?;
-            if reserved != 0 {
+            let precision = take_u8(cur)?;
+            if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            ColumnType::Timetz
+            if precision == u8::MAX { ColumnType::Timetz } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Timetz, precision) }
         }
         type_tag::TIMESTAMP => {
-            let reserved = take_u8(cur)?;
-            if reserved != 0 {
+            let precision = take_u8(cur)?;
+            if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            ColumnType::Timestamp
+            if precision == u8::MAX { ColumnType::Timestamp } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Timestamp, precision) }
         }
         type_tag::TIMESTAMPTZ => {
-            let reserved = take_u8(cur)?;
-            if reserved != 0 {
+            let precision = take_u8(cur)?;
+            if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            ColumnType::Timestamptz
+            if precision == u8::MAX { ColumnType::Timestamptz } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Timestamptz, precision) }
         }
         type_tag::INTERVAL => {
-            let reserved = take_u8(cur)?;
-            if reserved != 0 {
+            let precision = take_u8(cur)?;
+            if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            ColumnType::Interval
+            if precision == u8::MAX { ColumnType::Interval } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Interval, precision) }
         }
         type_tag::BYTEA => ColumnType::Bytea,
         type_tag::UUID => ColumnType::Uuid,
@@ -3629,7 +3639,7 @@ mod tests {
     /// metadata moved it to `11`, and every other value is refused rather than
     /// decoded on a guess.
     #[test]
-    fn the_schema_version_byte_is_twelve_and_no_other_value_decodes() {
+    fn the_schema_version_byte_is_thirteen_and_no_other_value_decodes() {
         use assert2::assert;
 
         let columns = vec![Column::new("x", ColumnType::Int4)];
@@ -3645,12 +3655,12 @@ mod tests {
             }),
             &[],
         );
-        assert!(bytes[0] == 12);
+        assert!(bytes[0] == 13);
 
         for version in u8::MIN..=u8::MAX {
             let mut written = bytes.clone();
             written[0] = version;
-            assert!(deserialize_schema(&written).is_ok() == (version == 12));
+            assert!(deserialize_schema(&written).is_ok() == (version == 13));
         }
     }
 
@@ -3838,5 +3848,16 @@ mod tests {
         assert!(cur.is_empty());
         let mut cur: &[u8] = &data;
         assert!(take_n(&mut cur, 5).is_err());
+    }
+
+    #[test]
+    fn temporal_precision_round_trips_through_schema_encoding() {
+        use assert2::assert;
+        use crabka_pgtypes::{ColumnType, TemporalType};
+
+        let ty = ColumnType::Temporal(TemporalType::Timestamptz, 2);
+        let mut bytes = Vec::new();
+        super::write_type(&mut bytes, ty);
+        assert!(super::read_type(&mut bytes.as_slice()).expect("type") == ty);
     }
 }

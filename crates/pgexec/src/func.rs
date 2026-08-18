@@ -2642,6 +2642,8 @@ enum TypmodKind {
     /// A fractional-seconds precision (`timestamp(3)`), printed before the
     /// `with/without time zone` tail.
     Seconds,
+    /// `interval(p)`: precision is stored in the low word beneath the field mask.
+    Interval,
     /// A `bit(n)` / `bit varying(n)` length, stored raw. Distinct from
     /// [`TypmodKind::Seconds`] even though both print the stored word, because
     /// `bit varying` has a space in its name and the modifier goes at the END:
@@ -2665,6 +2667,7 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
             format!("({},{})", (packed >> 16) & 0xffff, packed & 0xffff)
         }
         TypmodKind::Seconds | TypmodKind::Bits | TypmodKind::Verbatim => format!("({typmod})"),
+        TypmodKind::Interval => format!("({})", typmod & 0xffff),
     }
 }
 
@@ -2672,7 +2675,7 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
 /// The name carries a `[]` suffix for an array type, and the modifier goes in
 /// before that suffix (`character varying(6)[]`).
 fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
-    use TypmodKind::{Bits, Length, None as NoMod, PrecisionScale, Seconds, Verbatim};
+    use TypmodKind::{Bits, Interval, Length, None as NoMod, PrecisionScale, Seconds, Verbatim};
     Some(match oid {
         // The seven geometric types. None accepts a modifier, so `Verbatim` is
         // only reached through a direct `format_type(600, 4)` call; the reason
@@ -2741,8 +2744,8 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         1183 => ("time without time zone[]", Seconds),
         1184 => ("timestamp with time zone", Seconds),
         1185 => ("timestamp with time zone[]", Seconds),
-        1186 => ("interval", NoMod),
-        1187 => ("interval[]", NoMod),
+        1186 => ("interval", Interval),
+        1187 => ("interval[]", Interval),
         1231 => ("numeric[]", PrecisionScale),
         1266 => ("time with time zone", Seconds),
         1700 => ("numeric", PrecisionScale),

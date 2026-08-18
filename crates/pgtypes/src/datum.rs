@@ -361,14 +361,14 @@ impl ElemType {
             ColumnType::Float8 => ElemType::Float8,
             ColumnType::Numeric(_) => ElemType::Numeric,
             ColumnType::Date => ElemType::Date,
-            ColumnType::Time => ElemType::Time,
+            ColumnType::Time | ColumnType::Temporal(TemporalType::Time, _) => ElemType::Time,
             // `timetz` and `"char"` have no array type in crabka yet. Their
             // `pg_type.typarray` still resolves, so a driver walking the
             // scalar → array link finds the row upstream has.
-            ColumnType::Timetz | ColumnType::InternalChar => return None,
-            ColumnType::Timestamp => ElemType::Timestamp,
-            ColumnType::Timestamptz => ElemType::Timestamptz,
-            ColumnType::Interval => ElemType::Interval,
+            ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) | ColumnType::InternalChar => return None,
+            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => ElemType::Timestamp,
+            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => ElemType::Timestamptz,
+            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => ElemType::Interval,
             ColumnType::Bytea => ElemType::Bytea,
             ColumnType::Uuid => ElemType::Uuid,
             ColumnType::Json => ElemType::Json,
@@ -711,6 +711,16 @@ impl ElemType {
     }
 }
 
+/// The temporal base type carried by [`ColumnType::Temporal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TemporalType {
+    Time,
+    Timetz,
+    Timestamp,
+    Timestamptz,
+    Interval,
+}
+
 /// A SQL column type. SP30 added `Float8`; SP32 added `Numeric`, which carries
 /// an optional `numeric(precision, scale)` modifier for column definitions and
 /// casts, where `None` is unconstrained `numeric`. SP37 adds five date/time
@@ -767,6 +777,8 @@ pub enum ColumnType {
     Timestamptz,
     /// SP37: PostgreSQL `interval` (OID 1186): months + days + microseconds.
     Interval,
+    /// One of PostgreSQL's temporal types with a fractional-seconds typmod.
+    Temporal(TemporalType, u8),
     /// SP40: PostgreSQL `bytea` (OID 17): variable-length binary string.
     Bytea,
     /// PostgreSQL `uuid` (OID 2950): 128-bit identifier.
@@ -1150,11 +1162,11 @@ impl ColumnType {
             ColumnType::Box => oids::BOX,
             ColumnType::Numeric(_) => oids::NUMERIC,
             ColumnType::Date => oids::DATE,
-            ColumnType::Time => oids::TIME,
-            ColumnType::Timetz => oids::TIMETZ,
-            ColumnType::Timestamp => oids::TIMESTAMP,
-            ColumnType::Timestamptz => oids::TIMESTAMPTZ,
-            ColumnType::Interval => oids::INTERVAL,
+            ColumnType::Time | ColumnType::Temporal(TemporalType::Time, _) => oids::TIME,
+            ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) => oids::TIMETZ,
+            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => oids::TIMESTAMP,
+            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => oids::TIMESTAMPTZ,
+            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => oids::INTERVAL,
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
             ColumnType::Regclass => oids::REGCLASS,
@@ -1226,11 +1238,11 @@ impl ColumnType {
             ColumnType::Box => "box",
             ColumnType::Numeric(_) => "numeric",
             ColumnType::Date => "date",
-            ColumnType::Time => "time without time zone",
-            ColumnType::Timetz => "time with time zone",
-            ColumnType::Timestamp => "timestamp without time zone",
-            ColumnType::Timestamptz => "timestamp with time zone",
-            ColumnType::Interval => "interval",
+            ColumnType::Time | ColumnType::Temporal(TemporalType::Time, _) => "time without time zone",
+            ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) => "time with time zone",
+            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => "timestamp without time zone",
+            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => "timestamp with time zone",
+            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => "interval",
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
             ColumnType::Regclass => "regclass",
@@ -1300,11 +1312,11 @@ impl ColumnType {
             ColumnType::Box => 32,
             ColumnType::Numeric(_) => -1,
             ColumnType::Date => 4,
-            ColumnType::Time => 8,
-            ColumnType::Timetz => 12,
-            ColumnType::Timestamp => 8,
-            ColumnType::Timestamptz => 8,
-            ColumnType::Interval => 16,
+            ColumnType::Time | ColumnType::Temporal(TemporalType::Time, _) => 8,
+            ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) => 12,
+            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => 8,
+            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => 8,
+            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => 16,
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
             ColumnType::Regclass => 4,
@@ -1394,10 +1406,30 @@ impl ColumnType {
             // `bittypmodin` stores the bit count with no varlena adjustment,
             // so `bit(4)`'s typmod is 4, not 8.
             ColumnType::Bit(Some(n)) | ColumnType::VarBit(Some(n)) => n,
+            ColumnType::Temporal(TemporalType::Time | TemporalType::Timetz | TemporalType::Timestamp | TemporalType::Timestamptz, p) => i32::from(p),
+            ColumnType::Temporal(TemporalType::Interval, p) => (0x7fff << 16) | i32::from(p),
             // A domain inherits its base type's length modifier.
             ColumnType::Domain(domain) => domain.base.typmod(),
             _ => -1,
         }
+    }
+
+    /// The unmodified temporal type and optional fractional-second precision.
+    #[must_use]
+    pub fn temporal_base(self) -> Option<(ColumnType, Option<u8>)> {
+        Some(match self {
+            ColumnType::Time => (ColumnType::Time, None),
+            ColumnType::Timetz => (ColumnType::Timetz, None),
+            ColumnType::Timestamp => (ColumnType::Timestamp, None),
+            ColumnType::Timestamptz => (ColumnType::Timestamptz, None),
+            ColumnType::Interval => (ColumnType::Interval, None),
+            ColumnType::Temporal(TemporalType::Time, precision) => (ColumnType::Time, Some(precision)),
+            ColumnType::Temporal(TemporalType::Timetz, precision) => (ColumnType::Timetz, Some(precision)),
+            ColumnType::Temporal(TemporalType::Timestamp, precision) => (ColumnType::Timestamp, Some(precision)),
+            ColumnType::Temporal(TemporalType::Timestamptz, precision) => (ColumnType::Timestamptz, Some(precision)),
+            ColumnType::Temporal(TemporalType::Interval, precision) => (ColumnType::Interval, Some(precision)),
+            _ => return None,
+        })
     }
 }
 

@@ -854,6 +854,79 @@ impl Interval {
     }
 }
 
+/// Apply PostgreSQL's fractional-seconds typmod. Values are stored at
+/// microsecond resolution, so a precision below six rounds the microsecond
+/// count half away from zero.
+fn round_typmod_micros(micros: i64, precision: Option<u8>) -> Option<i64> {
+    let precision = precision?;
+    if precision >= 6 {
+        return Some(micros);
+    }
+    let scale = 10_i64.checked_pow(6 - u32::from(precision))?;
+    let half = scale / 2;
+    if micros >= 0 {
+        micros.checked_add(half).map(|value| value / scale * scale)
+    } else {
+        micros
+            .checked_neg()?
+            .checked_add(half)
+            .map(|value| -(value / scale * scale))
+    }
+}
+
+/// Round a `time(p)` value to its declared fractional-second precision.
+pub fn apply_time_typmod(value: PgTime, precision: Option<u8>) -> Result<PgTime, TypeError> {
+    let micros = round_typmod_micros(value.micros_of_day(), precision)
+        .ok_or_else(|| TypeError::DatetimeFieldOverflow {
+            value: time_to_text(value),
+        })?;
+    PgTime::from_micros_of_day(micros).ok_or_else(|| TypeError::DatetimeFieldOverflow {
+        value: time_to_text(value),
+    })
+}
+
+/// Round a `timetz(p)` value without changing its stored UTC offset.
+pub fn apply_timetz_typmod(value: TimeTz, precision: Option<u8>) -> Result<TimeTz, TypeError> {
+    Ok(TimeTz {
+        time: apply_time_typmod(value.time, precision)?,
+        offset: value.offset,
+    })
+}
+
+/// Round a `timestamp(p)` value about PostgreSQL's 2000-01-01 epoch.
+pub fn apply_timestamp_typmod(value: DateTime, precision: Option<u8>) -> Result<DateTime, TypeError> {
+    if timestamp_is_infinite(value) {
+        return Ok(value);
+    }
+    let micros = i64::from_be_bytes(timestamp_to_binary(value));
+    let rounded = round_typmod_micros(micros, precision).ok_or_else(|| TypeError::DatetimeFieldOverflow {
+        value: timestamp_to_text(value),
+    })?;
+    timestamp_from_binary(&rounded.to_be_bytes())
+}
+
+/// Round a `timestamptz(p)` value about PostgreSQL's 2000-01-01 epoch.
+pub fn apply_timestamptz_typmod(value: Timestamp, precision: Option<u8>) -> Result<Timestamp, TypeError> {
+    if timestamptz_is_infinite(value) {
+        return Ok(value);
+    }
+    let micros = i64::from_be_bytes(timestamptz_to_binary(value));
+    let rounded = round_typmod_micros(micros, precision).ok_or_else(|| TypeError::DatetimeFieldOverflow {
+        value: timestamptz_to_text(value, &TimeZone::UTC),
+    })?;
+    timestamptz_from_binary(&rounded.to_be_bytes())
+}
+
+/// Round the microsecond field of `interval(p)`. Field masks are applied while
+/// parsing interval literals; a plain type modifier always has the full range.
+pub fn apply_interval_typmod(value: Interval, precision: Option<u8>) -> Result<Interval, TypeError> {
+    if value.is_infinite() {
+        return Ok(value);
+    }
+    let micros = round_typmod_micros(value.micros, precision).ok_or_else(interval_out_of_range)?;
+    Ok(Interval { micros, ..value })
+}
+
 impl PartialEq for Interval {
     fn eq(&self, other: &Self) -> bool {
         self.canonical_micros() == other.canonical_micros()
@@ -8170,5 +8243,36 @@ mod make_justify_tests {
         })
         .expect_err("rolled month total exceeds i32 in justify_interval");
         assert_eq!(err.sqlstate(), "22008");
+    }
+
+    #[test]
+    fn temporal_typmods_round_half_away_from_zero() {
+        use super::{
+            Interval, apply_interval_typmod, apply_time_typmod, apply_timestamp_typmod,
+            parse_time, parse_timestamp, time_to_text, timestamp_to_text,
+        };
+
+        let time = parse_time("12:34:56.500001").expect("time");
+        assert_eq!(time_to_text(apply_time_typmod(time, Some(0)).expect("round")), "12:34:57");
+
+        let timestamp = parse_timestamp("1999-12-31 23:59:59.500000").expect("timestamp");
+        assert_eq!(
+            timestamp_to_text(apply_timestamp_typmod(timestamp, Some(0)).expect("round")),
+            "1999-12-31 23:59:59"
+        );
+
+        assert_eq!(
+            apply_interval_typmod(
+                Interval {
+                    months: 0,
+                    days: 0,
+                    micros: -1_500_000,
+                },
+                Some(0),
+            )
+            .expect("round")
+            .micros,
+            -2_000_000
+        );
     }
 }

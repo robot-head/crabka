@@ -39,6 +39,11 @@ const CIRCLE_CAST_VERTICES: i32 = 12;
 /// at plan time so an undefined cast surfaces as 42846 before execution, and so
 /// the result column type is known for `RowDescription`.
 pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
+    let from_base = from.temporal_base().map_or(from, |(base, _)| base);
+    let to_base = to.temporal_base().map_or(to, |(base, _)| base);
+    if (from, to) != (from_base, to_base) {
+        return cast_allowed(from_base, to_base);
+    }
     use ColumnType::{Bool, Date, Int4, Text, Time, Timestamp, Timestamptz};
     // SP32: the numeric family — int2/int4/int8/float4/float8/numeric — all
     // interconvert. `bool` is deliberately NOT in it: PostgreSQL has bool↔int4
@@ -312,6 +317,11 @@ fn geometric_assignment_cast(from: ColumnType, to: ColumnType) -> bool {
 ///   * every pair with `interval`, `bytea`, `uuid` or `regclass` across
 ///     type families.
 pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
+    let from_base = from.temporal_base().map_or(from, |(base, _)| base);
+    let to_base = to.temporal_base().map_or(to, |(base, _)| base);
+    if (from, to) != (from_base, to_base) {
+        return assignment_cast_allowed(from_base, to_base);
+    }
     use ColumnType::{Date, Timestamp, Timestamptz};
     let num_family = |t: ColumnType| {
         matches!(
@@ -519,6 +529,10 @@ pub fn cast_in(
     let order = style.date_order;
     if value.is_null() {
         return Ok(Datum::Null);
+    }
+    if let Some((base, Some(precision))) = to.temporal_base() {
+        let value = cast_in(value, base, style)?;
+        return apply_temporal_typmod(value, base, precision);
     }
     // The user-defined types are matched ahead of the built-in table because a
     // composite, an enum or a domain would otherwise be caught by the
@@ -1089,6 +1103,27 @@ pub fn cast_in(
         }
         // No defined cast.
         (v, to) => Err(cannot_cast(v, to)),
+    }
+}
+
+fn apply_temporal_typmod(value: Datum, base: ColumnType, precision: u8) -> Result<Datum, TypeError> {
+    match (value, base) {
+        (Datum::Time(value), ColumnType::Time) => {
+            crate::datetime::apply_time_typmod(value, Some(precision)).map(Datum::Time)
+        }
+        (Datum::Timetz(value), ColumnType::Timetz) => {
+            crate::datetime::apply_timetz_typmod(value, Some(precision)).map(Datum::Timetz)
+        }
+        (Datum::Timestamp(value), ColumnType::Timestamp) => {
+            crate::datetime::apply_timestamp_typmod(value, Some(precision)).map(Datum::Timestamp)
+        }
+        (Datum::Timestamptz(value), ColumnType::Timestamptz) => {
+            crate::datetime::apply_timestamptz_typmod(value, Some(precision)).map(Datum::Timestamptz)
+        }
+        (Datum::Interval(value), ColumnType::Interval) => {
+            crate::datetime::apply_interval_typmod(value, Some(precision)).map(Datum::Interval)
+        }
+        (value, _) => Ok(value),
     }
 }
 
@@ -3605,5 +3640,23 @@ mod tests {
         assert!(!cast_allowed(ColumnType::Polygon, ColumnType::Jsonb));
         let refused = cast(&value, ColumnType::Int4, &tz).expect_err("no polygon -> int4");
         assert!(refused.sqlstate() == "42846");
+    }
+
+    #[test]
+    fn temporal_typmod_casts_parse_and_round() {
+        use assert2::assert;
+        use crate::TemporalType;
+
+        let value = cast(
+            &Datum::Text("2000-01-01 00:00:00.500000".into()),
+            ColumnType::Temporal(TemporalType::Timestamp, 0),
+            &utc(),
+        )
+        .expect("timestamp(0)");
+        assert!(matches!(value, Datum::Timestamp(_)));
+        assert!(
+            cast(&value, ColumnType::Text, &utc()).expect("text")
+                == Datum::Text("2000-01-01 00:00:01".into())
+        );
     }
 }
