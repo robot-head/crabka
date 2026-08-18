@@ -15852,10 +15852,79 @@ fn build_base_table(
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
         Err(error) => return Err(error.into()),
     }
+    scan_stored_base_table(read_ctx, te, name, bounds, scan_plan)
+}
+
+/// Whether `te` is the direct physical table shape the first `SeqScan` node
+/// can own.  This is only planner eligibility: any catalog lookup failure
+/// declines to the established read path, which reports the original error.
+pub(crate) fn is_direct_stored_base_table(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    te: &crabka_pgparser::ast::TableExpr,
+) -> bool {
+    use crabka_pgparser::ast::TableExpr;
+    let TableExpr::Table {
+        name,
+        columns,
+        sample,
+        ..
+    } = te
+    else {
+        return false;
+    };
+    if columns.is_some() || sample.is_some() {
+        return false;
+    }
+    if name.schema.is_none()
+        && (read_ctx.ctes.lookup(&name.name).is_some()
+            || read_ctx
+                .eval_ctx
+                .transition_relations
+                .as_ref()
+                .is_some_and(|runtime| {
+                    runtime
+                        .lock()
+                        .expect("transition relation mutex")
+                        .contains_key(&name.name)
+                }))
+    {
+        return false;
+    }
+    let Ok(name) = resolve_relation(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        name,
+        SchemaDisposition::Reference,
+    ) else {
+        return false;
+    };
+    crabka_pgcatalog::get_view(read_ctx.catalog_kv, &name).is_err()
+        && crabka_pgcatalog::get_table(read_ctx.catalog_kv, &name)
+            .is_ok_and(|table| table.foreign.is_none())
+}
+
+/// Read the physical stored-relation leaf of a base-table item.
+///
+/// This is the one shared tail of the legacy base builder and `SeqScan`: the
+/// permit is acquired before storage is touched, `RawScan` stays internal to
+/// the security module, and row security is the only way out.
+pub(crate) fn scan_stored_base_table(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    te: &crabka_pgparser::ast::TableExpr,
+    name: &crabka_pgcatalog::RelationName,
+    bounds: Option<&ScanBounds>,
+    scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
+) -> Result<Relation, ExecError> {
+    let crabka_pgparser::ast::TableExpr::Table { only, alias, .. } = te else {
+        return Err(ExecError::Unsupported(
+            "scan_stored_base_table expects a base relation".into(),
+        ));
+    };
     // Consulted only once `get_table` has missed, so an ordinary read pays no
     // second catalog lookup for it.
-    let t = crabka_pgcatalog::get_table(catalog_kv, name)
-        .map_err(|error| open_wrong_kind(catalog_kv, name).unwrap_or_else(|| error.into()))?;
+    let t = crabka_pgcatalog::get_table(read_ctx.catalog_kv, name).map_err(|error| {
+        open_wrong_kind(read_ctx.catalog_kv, name).unwrap_or_else(|| error.into())
+    })?;
     // An unpopulated materialized view is refused here, at the one place every
     // stored-relation read passes, rather than in each of the planner's
     // pushdowns: the refusal has to hold whichever path a query takes, and a
@@ -17401,6 +17470,12 @@ pub(crate) fn select_to_relation_with_ctes(
     crate::window::reject_misplaced_calls(s)?;
     crate::grouping::reject_misplaced_calls(s)?;
     if let Some(relation) = crate::plan::exec::try_execute_result(s, ctx)? {
+        return Ok(relation);
+    }
+    if !correlated
+        && row_exprs.is_none()
+        && let Some(relation) = crate::plan::exec::try_execute_seq_scan(read_ctx, s)?
+    {
         return Ok(relation);
     }
     let relation = if s.from.is_empty() {

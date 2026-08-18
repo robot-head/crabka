@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use crabka_pgparser::ast::{DistinctClause, QueryExpr, SelectStmt, ValuesStmt};
+use crabka_pgparser::ast::{DistinctClause, QueryExpr, SelectStmt, TableExpr, ValuesStmt};
 
 use crate::{
     bind::{BoundExpr, bind_optional},
@@ -31,6 +31,34 @@ pub(crate) fn try_execute_result(
     ResultExecutor { ctx, fields, tys }
         .execute(&mut state)
         .map(Some)
+}
+
+/// Execute the simple single-table slice of SELECT through `SeqScan`.
+///
+/// More elaborate tails remain on the established path until their own plan
+/// nodes land, so this node owns only scan, filter, and scalar projection.
+pub(crate) fn try_execute_seq_scan(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+) -> Result<Option<Relation>, ExecError> {
+    let Some(SeqScanPlan {
+        plan,
+        source,
+        fields,
+        tys,
+    }) = plan_seq_scan(read_ctx, select)?
+    else {
+        return Ok(None);
+    };
+    let mut state = PlanState::new(plan, Scope::empty());
+    SeqScanExecutor {
+        read_ctx,
+        source,
+        fields,
+        tys,
+    }
+    .execute(&mut state)
+    .map(Some)
 }
 
 /// Execute a `VALUES` query through its `ValuesScan` node, including the query
@@ -66,6 +94,7 @@ fn plan_result(select: &SelectStmt) -> Result<Option<ResultPlan>, ExecError> {
         || select.grouping.is_some()
         || select.having.is_some()
         || is_ungrouped_aggregate(select)
+        || crate::grouping::is_grouping_query(select)
         || crate::window::has_window_calls(select)
     {
         return Ok(None);
@@ -109,6 +138,82 @@ fn plan_result(select: &SelectStmt) -> Result<Option<ResultPlan>, ExecError> {
         node: PlanNode::Result,
     };
     Ok(Some(ResultPlan { plan, fields, tys }))
+}
+
+struct SeqScanPlan {
+    plan: Plan,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+}
+
+fn plan_seq_scan(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+) -> Result<Option<SeqScanPlan>, ExecError> {
+    let [source] = select.from.as_slice() else {
+        return Ok(None);
+    };
+    if !crate::exec::is_direct_stored_base_table(read_ctx, source)
+        || !matches!(select.distinct, DistinctClause::All)
+        || !select.order_by.is_empty()
+        || select.limit.is_some()
+        || select.offset.is_some()
+        || select.with_ties
+        || !select.group_by.is_empty()
+        || select.grouping.is_some()
+        || select.having.is_some()
+        || is_ungrouped_aggregate(select)
+        || crate::grouping::is_grouping_query(select)
+        || crate::window::has_window_calls(select)
+    {
+        return Ok(None);
+    }
+
+    let scope = crate::exec::build_from_schema_of_select(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        select,
+        read_ctx.ctes,
+    )?
+    .scope;
+    let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
+    if crate::srf::exprs_contain_srf(&exprs) {
+        return Ok(None);
+    }
+    let target_list = exprs
+        .iter()
+        .zip(&fields)
+        .enumerate()
+        .map(|(index, (expr, field))| {
+            Ok(TargetEntry {
+                expr: BoundExpr::new(expr, &scope)?,
+                resno: index + 1,
+                resname: field.name.clone(),
+            })
+        })
+        .collect::<Result<_, ExecError>>()?;
+    let quals = bind_optional(select.filter.as_ref(), &scope)?
+        .into_iter()
+        .map(|clause| RestrictInfo {
+            clause,
+            is_pushed_down: false,
+            security_level: 0,
+            leakproof: true,
+            required_relids: BTreeSet::from([1]),
+        })
+        .collect();
+    let plan = Plan {
+        target_list,
+        quals,
+        node: PlanNode::SeqScan { scanrelid: 1 },
+    };
+    Ok(Some(SeqScanPlan {
+        plan,
+        source: source.clone(),
+        fields,
+        tys,
+    }))
 }
 
 fn is_ungrouped_aggregate(select: &SelectStmt) -> bool {
@@ -156,6 +261,80 @@ impl Executor for ResultExecutor<'_> {
     }
 }
 
+struct SeqScanExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+}
+
+impl Executor for SeqScanExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        if !matches!(state.plan.node, PlanNode::SeqScan { scanrelid: 1 }) {
+            return Err(ExecError::Unsupported(
+                "SeqScanExecutor received a non-SeqScan plan".into(),
+            ));
+        }
+        state.begin_loop();
+        let TableExpr::Table { name, .. } = &self.source else {
+            return Err(ExecError::Unsupported(
+                "SeqScanExecutor received a non-table source".into(),
+            ));
+        };
+        let name = crate::relname::resolve_relation(
+            self.read_ctx.catalog_kv,
+            self.read_ctx.fctx.resolution,
+            name,
+            crate::relname::SchemaDisposition::Reference,
+        )?;
+        let relation =
+            exec::scan_stored_base_table(self.read_ctx, &self.source, &name, None, None)?;
+        execute_seq_scan_rows(
+            state,
+            relation,
+            &self.fields,
+            &self.tys,
+            self.read_ctx.eval_ctx,
+        )
+    }
+}
+
+fn execute_seq_scan_rows(
+    state: &mut PlanState,
+    relation: Relation,
+    fields: &[crabka_pgwire::engine::FieldDescription],
+    tys: &[crabka_pgtypes::ColumnType],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Relation, ExecError> {
+    state.scope = relation.scope.clone();
+    let mut kept = Vec::with_capacity(relation.rows.len());
+    for row in relation.rows {
+        let mut matched = true;
+        for qual in &state.plan.quals {
+            if !exec::row_matches(Some(qual.clause.expr()), &state.scope, &row, ctx)? {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            state.emit_row();
+            kept.push(row);
+        } else {
+            state.remove_row();
+        }
+    }
+    let exprs: Vec<_> = state
+        .plan
+        .target_list
+        .iter()
+        .map(|target| target.expr.expr().clone())
+        .collect();
+    Ok(Relation {
+        scope: exec::projected_scope(fields, tys),
+        rows: exec::project_rows(&exprs, &state.scope, &kept, ctx)?,
+    })
+}
+
 struct ValuesExecutor<'a, 'b> {
     ctx: &'a crate::subquery::SubCtx<'b>,
     query: &'a QueryExpr,
@@ -184,9 +363,11 @@ impl Executor for ValuesExecutor<'_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use crabka_pgparser::ast::{GroupingClause, QueryBody, SetExpr, Statement};
+    use crabka_pgparser::ast::{Expr, GroupingClause, QueryBody, SetExpr, Statement};
+    use crabka_pgtypes::{ColumnType, Datum};
 
     use super::*;
+    use crate::scope::{ColumnBinding, Exposure};
 
     fn select(sql: &str) -> SelectStmt {
         let statements = crabka_pgparser::parser::parse(sql).expect("query parses");
@@ -267,5 +448,53 @@ mod tests {
 
         assert_eq!(emitted.rows, vec![vec![crabka_pgtypes::Datum::Int4(5)]]);
         assert!(rejected.rows.is_empty());
+    }
+
+    #[test]
+    fn seq_scan_filters_then_projects_and_counts_rows() {
+        let scope = Scope {
+            columns: vec![ColumnBinding {
+                exposure: Exposure::Output,
+                qualifier: Some("t".into()),
+                name: "a".into(),
+                ty: ColumnType::Int4,
+            }],
+        };
+        let projection = Expr::Column {
+            table: Some("t".into()),
+            name: "a".into(),
+        };
+        let filter = crabka_pgparser::parser::parse_expression("t.a > 1").expect("filter");
+        let plan = Plan {
+            target_list: vec![TargetEntry {
+                expr: BoundExpr::new(&projection, &scope).expect("bound projection"),
+                resno: 1,
+                resname: "a".into(),
+            }],
+            quals: vec![RestrictInfo {
+                clause: BoundExpr::new(&filter, &scope).expect("bound filter"),
+                is_pushed_down: false,
+                security_level: 0,
+                leakproof: true,
+                required_relids: BTreeSet::from([1]),
+            }],
+            node: PlanNode::SeqScan { scanrelid: 1 },
+        };
+        let mut state = PlanState::new(plan, Scope::empty());
+        state.begin_loop();
+        let relation = execute_seq_scan_rows(
+            &mut state,
+            Relation {
+                scope,
+                rows: vec![vec![Datum::Int4(1)], vec![Datum::Int4(2)]],
+            },
+            &[exec::field("a", ColumnType::Int4)],
+            &[ColumnType::Int4],
+            &crate::clock::EvalCtx::test_default(),
+        )
+        .expect("scan executes");
+
+        assert_eq!(relation.rows, vec![vec![Datum::Int4(2)]]);
+        assert_eq!((state.nloops, state.ntuples, state.rows_removed), (1, 1, 1));
     }
 }

@@ -16746,6 +16746,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_seq_scan_plan_filters_and_projects_a_stored_table() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE seq_scan_test (a int); INSERT INTO seq_scan_test VALUES (1), (2)",
+            )
+            .await
+            .expect("seed table");
+
+        let statements = crabka_pgparser::parse("SELECT a FROM seq_scan_test WHERE a > 1")
+            .expect("query parses");
+        let [crabka_pgparser::ast::Statement::Query(query)] = statements.as_slice() else {
+            panic!("expected query")
+        };
+        let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(select)) =
+            &query.body
+        else {
+            panic!("expected select")
+        };
+        let mut select = (**select).clone();
+        select.order_by = query.order_by.clone();
+        select.limit = query.limit.clone();
+        select.offset = query.offset.clone();
+        select.with_ties = query.with_ties;
+        select.locking = query.locking.clone();
+
+        let (snapshot, own, gsnap) = session.read_context().await.expect("read context");
+        let eval_ctx = session.eval_ctx();
+        let ctes = crate::cte::CteContext::empty();
+        let resolution = session.resolution_scope();
+        let fctx = crate::exec::ForeignCtx {
+            scanner: session.foreign_scanner.as_ref(),
+            current_user: &session.current_role,
+            session_user: &session.session_user,
+            resolution: &resolution,
+            catalog: None,
+            reserved_table_ids: None,
+            own_xid: own,
+            row_security: session.guc.row_security(),
+        };
+        let policy_stack = crate::rls::PolicyStack::default();
+        let read_ctx = crate::subquery::SubCtx {
+            catalog_kv: session.catalog_kv.as_ref(),
+            kv: session.kv.as_ref(),
+            global: session.catalog_kv.as_ref(),
+            gsnap: &gsnap,
+            snapshot: &snapshot,
+            own,
+            ctes: &ctes,
+            eval_ctx: &eval_ctx,
+            fctx,
+            range_scanner: session.range_scanner.as_ref(),
+            blocking_query_memory: session.blocking_query_memory,
+            statement_memory: crate::scanner::StatementMemory::new(session.blocking_query_memory),
+            security_role: fctx.effective_role(),
+            policy_stack: &policy_stack,
+            refs: None,
+        };
+
+        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &select)
+            .expect("plan executes")
+            .expect("stored-table shape uses SeqScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
+
+        let select_of = |sql: &str| {
+            let statements = crabka_pgparser::parse(sql).expect(sql);
+            let [crabka_pgparser::ast::Statement::Query(query)] = statements.as_slice() else {
+                panic!("expected query")
+            };
+            let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
+                select,
+            )) = &query.body
+            else {
+                panic!("expected select")
+            };
+            let mut select = (**select).clone();
+            select.order_by = query.order_by.clone();
+            select.limit = query.limit.clone();
+            select.offset = query.offset.clone();
+            select.with_ties = query.with_ties;
+            select.locking = query.locking.clone();
+            select
+        };
+        for sql in [
+            "SELECT DISTINCT a FROM seq_scan_test",
+            "SELECT a FROM seq_scan_test ORDER BY a",
+            "SELECT a FROM seq_scan_test LIMIT 1",
+            "SELECT a FROM seq_scan_test OFFSET 0",
+            "SELECT count(*) FROM seq_scan_test",
+            "SELECT a FROM seq_scan_test GROUP BY a",
+            "SELECT row_number() OVER () FROM seq_scan_test",
+        ] {
+            let select = select_of(sql);
+            assert!(
+                crate::plan::exec::try_execute_seq_scan(&read_ctx, &select)
+                    .expect(sql)
+                    .is_none(),
+                "{sql} belongs to a later plan node"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn bounded_result_sink_matches_collecting_simple_query() {
         use crabka_pgwire::engine::{CollectingResultSink, ResultPage};
 
