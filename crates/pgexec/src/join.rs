@@ -2208,6 +2208,26 @@ mod tests {
     }
 
     #[test]
+    fn prepared_index_releases_its_retained_bytes_when_discarded() {
+        let left = rel("a", &["k"], (0..80).map(|i| vec![i]).collect());
+        let right = rel("b", &["k"], (0..80).map(|i| vec![i]).collect());
+        let mut prepared = prepare_join_index(
+            &left,
+            &right,
+            &on_eq("a", "k", "b", "k"),
+            &tctx(),
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        )
+        .expect("prepare index");
+
+        assert2::assert!(prepared.index.is_some());
+        assert2::assert!(prepared.estimated_bytes() > 0);
+        prepared.discard_index();
+        assert2::assert!(prepared.index.is_none());
+        assert2::assert!(prepared.estimated_bytes() == 0);
+    }
+
+    #[test]
     fn or_index_preallocates_the_charged_union_scratch() {
         let left = rel("a", &["x", "y"], vec![vec![0, 0]; 4]);
         let right = rel("b", &["k"], vec![vec![0]; 1_025]);
