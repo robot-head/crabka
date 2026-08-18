@@ -1802,11 +1802,23 @@ impl TableLockMode {
 
 /// The parsed `EXPLAIN` option list.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "EXPLAIN's independently settable boolean options are its public AST contract"
+)]
 pub struct ExplainOptions {
     pub analyze: bool,
     pub verbose: bool,
     /// `COSTS` defaults to on; `EXPLAIN (COSTS OFF)` turns the estimates off.
     pub costs: bool,
+    pub buffers: bool,
+    pub wal: bool,
+    pub timing: bool,
+    pub summary: bool,
+    pub settings: bool,
+    pub generic_plan: bool,
+    pub memory: bool,
+    pub serialize: Option<ExplainSerialize>,
     pub format: ExplainFormat,
 }
 
@@ -1817,9 +1829,24 @@ impl Default for ExplainOptions {
             analyze: false,
             verbose: false,
             costs: true,
+            buffers: false,
+            wal: false,
+            timing: true,
+            summary: true,
+            settings: false,
+            generic_plan: false,
+            memory: false,
+            serialize: None,
             format: ExplainFormat::Text,
         }
     }
+}
+
+/// The payload encoding requested by `EXPLAIN (SERIALIZE ...)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplainSerialize {
+    Text,
+    Binary,
 }
 
 /// `EXPLAIN (FORMAT …)` output formats.

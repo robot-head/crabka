@@ -6096,7 +6096,7 @@ impl Parser {
     /// S6: `EXPLAIN [ ( <option>, … ) | ANALYZE | VERBOSE ] <statement>`.
     /// Positioned at the `explain` ident.
     fn explain_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        use crate::ast::{ExplainFormat, ExplainOptions};
+        use crate::ast::{ExplainFormat, ExplainOptions, ExplainSerialize};
         self.bump(); // explain
         let mut options = ExplainOptions::default();
         if *self.peek() == Token::LParen {
@@ -6129,16 +6129,29 @@ impl Parser {
                     "analyze" => options.analyze = self.explain_option_flag()?,
                     "verbose" => options.verbose = self.explain_option_flag()?,
                     "costs" => options.costs = self.explain_option_flag()?,
-                    // The remaining stock options only change instrumentation
-                    // detail the interpreter does not collect; accept their shape.
-                    "buffers" | "wal" | "timing" | "summary" | "settings" | "generic_plan"
-                    | "memory" => {
-                        let _ = self.explain_option_flag()?;
-                    }
+                    "buffers" => options.buffers = self.explain_option_flag()?,
+                    "wal" => options.wal = self.explain_option_flag()?,
+                    "timing" => options.timing = self.explain_option_flag()?,
+                    "summary" => options.summary = self.explain_option_flag()?,
+                    "settings" => options.settings = self.explain_option_flag()?,
+                    "generic_plan" => options.generic_plan = self.explain_option_flag()?,
+                    "memory" => options.memory = self.explain_option_flag()?,
                     "serialize" => {
-                        if matches!(self.peek(), Token::Ident(_)) {
-                            self.bump();
-                        }
+                        let value_pos = self.peek_pos();
+                        let value = self.expect_ident()?;
+                        options.serialize = Some(match value.to_ascii_lowercase().as_str() {
+                            "text" => ExplainSerialize::Text,
+                            "binary" => ExplainSerialize::Binary,
+                            _ => {
+                                return Err(ParseError::new_sqlstate(
+                                    "22023",
+                                    format!(
+                                        "unrecognized value for EXPLAIN option \"serialize\": \"{value}\""
+                                    ),
+                                    value_pos,
+                                ));
+                            }
+                        });
                     }
                     _ => {
                         return Err(ParseError::new(
@@ -16277,6 +16290,69 @@ mod tests {
         let mut v = parse(sql).expect("parse");
         assert_eq!(v.len(), 1);
         v.pop().expect("one statement")
+    }
+
+    #[test]
+    fn explain_options_retain_their_explicit_values() {
+        use crate::ast::{ExplainFormat, ExplainOptions, ExplainSerialize};
+
+        let Statement::Explain { options, .. } = one(
+            "EXPLAIN (ANALYZE OFF, VERBOSE, COSTS OFF, BUFFERS, WAL, TIMING OFF, \
+             SUMMARY OFF, SETTINGS, GENERIC_PLAN, MEMORY, SERIALIZE BINARY, FORMAT YAML) SELECT 1",
+        ) else {
+            panic!("expected EXPLAIN");
+        };
+
+        assert_eq!(
+            options,
+            ExplainOptions {
+                analyze: false,
+                verbose: true,
+                costs: false,
+                buffers: true,
+                wal: true,
+                timing: false,
+                summary: false,
+                settings: true,
+                generic_plan: true,
+                memory: true,
+                serialize: Some(ExplainSerialize::Binary),
+                format: ExplainFormat::Yaml,
+            }
+        );
+
+        let Statement::Explain { options, .. } = one("EXPLAIN (SERIALIZE TEXT) SELECT 1") else {
+            panic!("expected EXPLAIN");
+        };
+        assert_eq!(options.serialize, Some(ExplainSerialize::Text));
+        assert_eq!(
+            crate::parse("EXPLAIN (SERIALIZE neither) SELECT 1")
+                .expect_err("invalid SERIALIZE value is rejected")
+                .sqlstate(),
+            "22023"
+        );
+
+        for (format, expected) in [
+            ("TEXT", ExplainFormat::Text),
+            ("JSON", ExplainFormat::Json),
+            ("XML", ExplainFormat::Xml),
+        ] {
+            let Statement::Explain { options, .. } =
+                one(&format!("EXPLAIN (FORMAT {format}) SELECT 1"))
+            else {
+                panic!("expected EXPLAIN");
+            };
+            assert_eq!(options.format, expected, "{format}");
+        }
+    }
+
+    #[test]
+    fn explain_options_have_postgres_defaults() {
+        let Statement::Explain { options, .. } = one("EXPLAIN SELECT 1") else {
+            panic!("expected EXPLAIN");
+        };
+
+        assert_eq!(options, crate::ast::ExplainOptions::default());
     }
 
     /// `gram.y` reaches `SET ROLE` through two productions — `set_rest`'s bare
