@@ -563,6 +563,31 @@ async fn malformed_frames_report_postgres_sqlstates() {
 }
 
 #[tokio::test]
+async fn frame_bound_unbounded_has_keyword_precedence_only_in_the_bound_form() {
+    let client = fixture().await;
+    assert!(
+        rows(
+            &client,
+            "SELECT sum(v) OVER (ORDER BY v ROWS UNBOUNDED PRECEDING) FROM w ORDER BY v",
+        )
+        .await
+            == vec!["10", "30", "60", "90", "90"]
+    );
+    for (sql, expected) in [
+        (
+            "SELECT count(*) OVER (ROWS unbounded(1) PRECEDING) FROM w",
+            "42883",
+        ),
+        (
+            "SELECT count(*) OVER (ROWS unbounded.v PRECEDING) FROM w AS unbounded",
+            "42P10",
+        ),
+    ] {
+        assert!(sqlstate(&client, sql).await == expected, "{sql}");
+    }
+}
+
+#[tokio::test]
 async fn range_offsets_use_the_ordering_column_type_arithmetic() {
     let client = connect(spawn().await).await;
     client

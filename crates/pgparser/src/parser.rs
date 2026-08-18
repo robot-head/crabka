@@ -2183,7 +2183,15 @@ impl Parser {
     /// `CURRENT ROW`, `<offset> FOLLOWING`, or `UNBOUNDED FOLLOWING`.
     fn frame_bound(&mut self) -> Result<crate::ast::FrameBound, ParseError> {
         use crate::ast::FrameBound;
-        if self.eat_ident_eq("unbounded") {
+        if self.peek_ident_eq("unbounded")
+            && matches!(
+                self.peek2(),
+                Token::Ident(word)
+                    if word.eq_ignore_ascii_case("preceding")
+                        || word.eq_ignore_ascii_case("following")
+            )
+        {
+            self.bump();
             return if self.eat_ident_eq("preceding") {
                 Ok(FrameBound::UnboundedPreceding)
             } else {
@@ -20684,6 +20692,39 @@ mod tests {
         ] {
             let error = parse(sql).expect_err("window call in a window definition");
             assert!(error.sqlstate() == "42P20", "{sql}");
+        }
+    }
+
+    #[test]
+    fn unbounded_is_special_only_when_it_spells_a_frame_bound() {
+        use crate::ast::{FrameBound, QueryBody, SetExpr, WindowRef};
+
+        for (sql, expected) in [
+            (
+                "SELECT count(*) OVER (ROWS UNBOUNDED PRECEDING) FROM w",
+                FrameBound::UnboundedPreceding,
+            ),
+            (
+                "SELECT count(*) OVER (ROWS UNBOUNDED FOLLOWING) FROM w",
+                FrameBound::UnboundedFollowing,
+            ),
+        ] {
+            let Statement::Query(query) = one(sql) else {
+                panic!("not a query: {sql}");
+            };
+            let SetExpr::Query(QueryBody::Select(select)) = query.body else {
+                panic!("not a SELECT: {sql}");
+            };
+            let WindowRef::Spec(spec) = &select.window_calls[0].over else {
+                panic!("not an inline frame: {sql}");
+            };
+            assert!(spec.frame.as_ref().expect("frame").start == expected, "{sql}");
+        }
+        for sql in [
+            "SELECT count(*) OVER (ROWS unbounded(1) PRECEDING) FROM w",
+            "SELECT count(*) OVER (ROWS unbounded.x PRECEDING) FROM w AS unbounded",
+        ] {
+            assert!(parse(sql).is_ok(), "{sql}");
         }
     }
 
