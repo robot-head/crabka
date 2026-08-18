@@ -8320,5 +8320,17 @@ mod make_justify_tests {
                 micros: 0,
             }
         );
+        assert_eq!(
+            parse_interval_ranged(
+                "2 days 03:04:05",
+                Some((IntervalField::Year, IntervalField::Day)),
+            )
+            .expect("day range"),
+            Interval {
+                months: 0,
+                days: 2,
+                micros: 0,
+            }
+        );
     }
 }
