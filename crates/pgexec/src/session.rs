@@ -7732,6 +7732,9 @@ impl SqlSession {
             table,
             crate::relname::SchemaDisposition::Reference,
         )?;
+        if name.schema == crate::search_path::PG_CATALOG && name.name == "pg_class" {
+            return Ok(false);
+        }
         let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
             Ok(table) => table,
             Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
@@ -8040,6 +8043,7 @@ impl SqlSession {
                 fctx,
                 range_scanner: &statement_scanner,
                 blocking_query_memory,
+                statement_memory: crate::scanner::StatementMemory::new(blocking_query_memory),
                 security_role: fctx.effective_role(),
                 policy_stack: &policy_stack,
                 refs: None,
@@ -9685,6 +9689,7 @@ impl SqlSession {
                 fctx,
                 range_scanner: range_scanner.as_ref(),
                 blocking_query_memory,
+                statement_memory: crate::scanner::StatementMemory::new(blocking_query_memory),
                 security_role: fctx.effective_role(),
                 policy_stack: &policy_stack,
                 refs: None,
@@ -11405,9 +11410,18 @@ impl ParamBinder<'_> {
                     crate::relname::SchemaDisposition::Reference,
                 )
                 .map_err(ExecError::into_pg)?;
-                let table = crabka_pgcatalog::get_table(self.catalog_kv, &name)
-                    .map_err(ExecError::from)
-                    .map_err(ExecError::into_pg)?;
+                let table = if name.schema == crate::search_path::PG_CATALOG
+                    && name.name == "pg_class"
+                {
+                    crate::exec::virtual_relation_table(&name).ok_or_else(|| {
+                        ExecError::Unsupported("pg_class virtual relation is unavailable".into())
+                            .into_pg()
+                    })?
+                } else {
+                    crabka_pgcatalog::get_table(self.catalog_kv, &name)
+                        .map_err(ExecError::from)
+                        .map_err(ExecError::into_pg)?
+                };
                 let qualifier = alias.clone().unwrap_or_else(|| table.name.name.clone());
                 let scope = crate::scope::Scope::single(&table, &qualifier);
                 for assignment in assignments {

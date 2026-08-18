@@ -61,6 +61,25 @@ async fn recursive_union_all_counts_up() {
 }
 
 #[tokio::test]
+async fn runtime_policy_caps_recursive_cte_materialization() {
+    let engine = SqlEngine::new_with_policy(crate::RuntimePolicy {
+        blocking_query_memory: crabka_units::bytes(1),
+        ..Default::default()
+    })
+    .expect("policy");
+    let error = engine
+        .connect()
+        .simple_query(
+            "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 2) \
+             SELECT n FROM t",
+        )
+        .await
+        .expect_err("recursive result must use the runtime limit");
+
+    assert!(error.code == "53200");
+}
+
+#[tokio::test]
 async fn recursive_union_drops_rows_already_produced() {
     // Without the duplicate check this step cycles 1 -> 2 -> 0 -> 1 forever.
     let got = rows(

@@ -345,14 +345,8 @@ fn fold(
             }
             let lrows = fold(ctx, left, out_tys, depth + 1)?;
             let rrows = fold(ctx, right, out_tys, depth + 1)?;
-            let combined_bytes = lrows.iter().chain(&rrows).fold(0usize, |bytes, row| {
-                bytes.saturating_add(crate::scanner::datum_row_bytes(row))
-            });
-            if crate::scanner::exceeds_query_memory(
-                combined_bytes,
-                crate::scanner::BLOCKING_QUERY_MEMORY,
-            ) {
-                return Err(crate::scanner::memory_budget_exceeded());
+            for row in lrows.iter().chain(&rrows) {
+                ctx.statement_memory.charge_row(row)?;
             }
             Ok(combine_rows(*op, *all, lrows, rrows))
         }
@@ -618,6 +612,25 @@ mod tests {
             vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
             "UNION should dedup and order: [1, 2, 3]"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_policy_caps_set_operation_materialization() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{Engine, Session};
+
+        let engine = crate::SqlEngine::new_with_policy(crate::RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(1),
+            ..Default::default()
+        })
+        .expect("policy");
+        let error = engine
+            .connect()
+            .simple_query("SELECT 1 UNION SELECT 2")
+            .await
+            .expect_err("set operation must use the runtime limit");
+
+        assert!(error.code == "53200");
     }
 
     /// Every value of column 0, as wire text (`None` for SQL NULL).

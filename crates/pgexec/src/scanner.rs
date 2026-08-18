@@ -4,6 +4,7 @@ use std::{cmp::Ordering, ops::RangeBounds};
 
 use crabka_pgcatalog::Table;
 use crabka_pgmvcc::visibility::Snapshot;
+use crabka_pgtypes::Datum;
 use crabka_units::convert::ByteSizeExt as _;
 use tracing::Instrument as _;
 
@@ -938,22 +939,108 @@ mod join_protocol_tests {
 /// Default cap for rows retained by a blocking executor fallback.
 pub const BLOCKING_QUERY_MEMORY: crabka_units::ByteSize = crabka_units::mebibytes(16);
 
+/// Running memory charge for one blocking operation.
+///
+/// The enclosing statement supplies the limit.  Keeping the charge beside the
+/// retained rows avoids every materializing path reimplementing overflow-safe
+/// accounting.
+#[derive(Debug)]
+pub(crate) struct MemoryBudget {
+    limit: crabka_units::ByteSize,
+    used: usize,
+}
+
+/// The shared blocking-memory charge for one statement.
+///
+/// Every materializing operator receives a clone of this token. The mutex keeps
+/// the limit correct when a statement reaches a blocking worker, while nested
+/// reads share the same total instead of each restarting at the configured
+/// limit.
+#[derive(Debug, Clone)]
+pub(crate) struct StatementMemory(std::sync::Arc<std::sync::Mutex<MemoryBudget>>);
+
+impl StatementMemory {
+    pub(crate) fn new(limit: crabka_units::ByteSize) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(
+            MemoryBudget::new(limit),
+        )))
+    }
+
+    pub(crate) fn charge_row(&self, row: &[Datum]) -> Result<(), ExecError> {
+        self.charge(datum_row_bytes(row))
+    }
+
+    pub(crate) fn charge(&self, bytes: usize) -> Result<(), ExecError> {
+        let mut budget = match self.0.lock() {
+            Ok(budget) => budget,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        budget.charge(bytes)
+    }
+
+    pub(crate) fn limit(&self) -> crabka_units::ByteSize {
+        match self.0.lock() {
+            Ok(budget) => budget.limit,
+            Err(poisoned) => poisoned.into_inner().limit,
+        }
+    }
+}
+
+impl MemoryBudget {
+    pub(crate) fn new(limit: crabka_units::ByteSize) -> Self {
+        Self { limit, used: 0 }
+    }
+
+    pub(crate) fn charge_row(&mut self, row: &[Datum]) -> Result<(), ExecError> {
+        self.charge(datum_row_bytes(row))
+    }
+
+    pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), ExecError> {
+        let used = self.used.saturating_add(bytes);
+        if exceeds_query_memory(used, self.limit) {
+            return Err(memory_budget_exceeded());
+        }
+        self.used = used;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod statement_memory_tests {
+    use assert2::assert;
+
+    use super::StatementMemory;
+
+    #[test]
+    fn clones_share_one_charge() {
+        let first = StatementMemory::new(crabka_units::bytes(2));
+        let second = first.clone();
+
+        first.charge(2).expect("first charge fits");
+        let error = second
+            .charge(1)
+            .expect_err("cloned token must retain the first charge")
+            .into_pg();
+
+        assert!(error.code == "53200");
+    }
+}
+
 #[must_use]
 pub fn exceeds_query_memory(used: usize, limit: crabka_units::ByteSize) -> bool {
     used > limit.bytes_usize()
 }
 
-/// Collect a cursor for a blocking operator, and charge one central byte
-/// budget.
+/// Collect a cursor for a blocking operator, charging the statement's shared
+/// memory budget.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
-pub fn collect_cursor_bounded(
+pub(crate) fn collect_cursor_bounded(
     scanner: &dyn RangeScanner,
     request: ScanRequest<'_>,
-    budget: crabka_units::ByteSize,
+    statement_memory: &StatementMemory,
 ) -> Result<Vec<ScannedRow>, ExecError> {
-    let max_bytes = crabka_units::convert::ByteSizeExt::bytes_usize(budget);
     let cancel = crate::session::query_cancel_runtime();
     // The scoped thread starts with no ambient span, so the statement's is
     // carried across by hand — otherwise every scan span the cursor opens is a
@@ -976,15 +1063,11 @@ pub fn collect_cursor_bounded(
                     runtime.block_on(
                         async move {
                             let mut rows = Vec::new();
-                            let mut used = 0usize;
                             loop {
                                 let page = cursor.next_page(1024).await?;
                                 for row in page.rows {
                                     let bytes = scanned_row_bytes(&row);
-                                    if used.saturating_add(bytes) > max_bytes {
-                                        return Err(memory_budget_exceeded());
-                                    }
-                                    used += bytes;
+                                    statement_memory.charge(bytes)?;
                                     rows.push(row);
                                 }
                                 if page.is_last {
@@ -2435,7 +2518,7 @@ mod cursor_contract_tests {
                 partial_aggregate: None,
                 top_k: None,
             },
-            bytes(64),
+            &super::StatementMemory::new(bytes(64)),
         )
         .expect_err("row must be rejected before exceeding budget");
 
@@ -2557,8 +2640,12 @@ mod streaming_aggregate_tests {
             spec("avg"),
         ];
 
-        let collected =
-            super::collect_cursor_bounded(&scanner, request(&local, &snapshot, &table), budget);
+        let statement_memory = super::StatementMemory::new(budget);
+        let collected = super::collect_cursor_bounded(
+            &scanner,
+            request(&local, &snapshot, &table),
+            &statement_memory,
+        );
         let states = super::collect_partial_aggregates_bounded(
             &scanner,
             request(&local, &snapshot, &table),

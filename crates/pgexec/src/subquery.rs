@@ -21,7 +21,7 @@ use crate::error::ExecError;
 /// The read-side handles a subquery needs to execute. They mirror
 /// `execute_read`'s parameters. The resolution recursion threads them through, so
 /// each nested subquery reads under the outer query's snapshot.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct SubCtx<'a> {
     pub catalog_kv: &'a dyn crabka_pgkv::Kv,
     pub kv: &'a dyn crabka_pgkv::Kv,
@@ -42,6 +42,8 @@ pub(crate) struct SubCtx<'a> {
     pub range_scanner: &'a dyn crate::scanner::RangeScanner,
     /// Memory retained by one blocking query operator.
     pub blocking_query_memory: crabka_units::ByteSize,
+    /// Shared blocking-memory charge for this statement and all nested reads.
+    pub statement_memory: crate::scanner::StatementMemory,
     /// The role whose row-security policies this read is subject to.
     ///
     /// Ordinarily the session's own role. It lives here rather than being
@@ -81,6 +83,7 @@ impl<'a> SubCtx<'a> {
             fctx: self.fctx,
             range_scanner: self.range_scanner,
             blocking_query_memory: self.blocking_query_memory,
+            statement_memory: self.statement_memory.clone(),
             security_role: self.security_role,
             policy_stack: self.policy_stack,
             refs: self.refs,
@@ -99,7 +102,7 @@ impl<'a> SubCtx<'a> {
     {
         SubCtx {
             refs: Some(refs),
-            ..*self
+            ..self.clone()
         }
     }
 
@@ -115,7 +118,10 @@ impl<'a> SubCtx<'a> {
     where
         'a: 'b,
     {
-        SubCtx { refs, ..*self }
+        SubCtx {
+            refs,
+            ..self.clone()
+        }
     }
 
     /// The same read context, with privilege and row-security decisions made
@@ -136,7 +142,7 @@ impl<'a> SubCtx<'a> {
     {
         SubCtx {
             security_role: role,
-            ..*self
+            ..self.clone()
         }
     }
 
@@ -161,7 +167,7 @@ impl<'a> SubCtx<'a> {
                 resolution: scope,
                 ..self.fctx
             },
-            ..*self
+            ..self.clone()
         }
     }
 
@@ -169,6 +175,7 @@ impl<'a> SubCtx<'a> {
     pub(crate) fn join_policy(&self) -> crate::join::JoinPolicy<'_> {
         crate::join::JoinPolicy {
             memory: self.blocking_query_memory,
+            statement_memory: self.statement_memory.clone(),
             refs: self.refs,
         }
     }

@@ -237,6 +237,49 @@ async fn a_rename_keeps_the_statistics_pg_class_stores() {
 }
 
 #[tokio::test]
+async fn a_superuser_can_durably_update_pg_class_planner_statistics() {
+    let (engine, mut session) = engine_with(&["CREATE TABLE planner_stats (a int4)"]).await;
+
+    let update = session
+        .simple_query(
+            "UPDATE pg_class SET reltuples = 11, relpages = 7, relallvisible = 5 \
+             WHERE relname = 'planner_stats'",
+        )
+        .await
+        .expect("superuser updates planner statistics");
+    assert!(matches!(update.as_slice(), [QueryResult::Command { tag }] if tag == "UPDATE 1"));
+    assert!(
+        query(
+            &mut session,
+            "SELECT reltuples::text, relpages::text, relallvisible::text \
+             FROM pg_class WHERE relname = 'planner_stats'",
+        )
+        .await
+            == vec![vec![
+                Some("11".to_string()),
+                Some("7".to_string()),
+                Some("5".to_string()),
+            ]]
+    );
+
+    drop(session);
+    let mut restarted = engine.connect();
+    assert!(
+        query(
+            &mut restarted,
+            "SELECT reltuples::text, relpages::text, relallvisible::text \
+             FROM pg_class WHERE relname = 'planner_stats'",
+        )
+        .await
+            == vec![vec![
+                Some("11".to_string()),
+                Some("7".to_string()),
+                Some("5".to_string()),
+            ]]
+    );
+}
+
+#[tokio::test]
 async fn renaming_a_partition_key_column_rewrites_the_key() {
     // The scheme stores each key column by name as well as by ordinal, and
     // `pg_get_partkeydef` prints the name. Routing reads the ordinal, so this

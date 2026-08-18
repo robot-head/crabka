@@ -711,12 +711,13 @@ fn plan_record(
     })
 }
 
-/// Expand a planned call over already-evaluated arguments.
-pub(crate) fn rows(
+/// Expand a planned call with the enclosing statement's blocking-memory limit.
+pub(crate) fn rows_with_memory(
     plan: &SrfPlan,
     args: &[Expr],
     vals: &mut [Datum],
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let params = param_types(plan);
     crate::eval::coerce_unknown_args(args, vals, &params, ctx)?;
@@ -743,7 +744,7 @@ pub(crate) fn rows(
     }
     let produced = match plan.kind {
         Srf::Unnest => unnest_rows(vals),
-        Srf::GenerateSeries => series_rows(plan, vals, ctx)?,
+        Srf::GenerateSeries => series_rows(plan, vals, ctx, statement_memory)?,
         Srf::GenerateSubscripts => subscript_rows(&plan.name, vals)?,
         Srf::StringToTable => string_to_table_rows(&plan.name, vals)?,
         Srf::RegexpSplitToTable => regexp_split_rows(&plan.name, vals)?,
@@ -761,7 +762,7 @@ pub(crate) fn rows(
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
         Srf::EventDroppedObjects => event_dropped_object_rows(ctx)?,
     };
-    ensure_expansion_fits(&produced)?;
+    ensure_expansion_fits(&produced, statement_memory)?;
     Ok(produced)
 }
 
@@ -1183,13 +1184,16 @@ fn event_dropped_object_rows(ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError
 /// The arguments evaluate in the empty scope. The caller has already
 /// substituted constants for a lateral item's outer references, so nothing here
 /// needs an outer row.
-pub(crate) fn from_item(
+/// Build a FROM-position SRF relation with the statement's blocking-memory
+/// limit.
+pub(crate) fn from_item_with_memory(
     functions: &[TableFuncCall],
     with_ordinality: bool,
     rows_from: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Relation, ExecError> {
     if with_ordinality {
         reject_ordinality_with_column_defs(functions, rows_from)?;
@@ -1202,14 +1206,21 @@ pub(crate) fn from_item(
             .iter()
             .map(|arg| crate::eval::eval(arg, &Scope::empty(), &[], ctx))
             .collect::<Result<Vec<_>, _>>()?;
-        produced.push(rows(plan, &call.args, &mut vals, ctx)?);
+        produced.push(rows_with_memory(
+            plan,
+            &call.args,
+            &mut vals,
+            ctx,
+            statement_memory,
+        )?);
     }
     let rows = zip_in_lockstep(produced, &plans);
+    ensure_expansion_fits(&rows, statement_memory)?;
     qualify(&plans, rows, with_ordinality, alias, column_aliases)
 }
 
 /// The same item's schema, with no rows. This is the `Describe` path, and it
-/// must agree with [`from_item`] on every column name and type.
+/// must agree with the runtime FROM-position path on every column name and type.
 pub(crate) fn from_item_schema(
     functions: &[TableFuncCall],
     with_ordinality: bool,
@@ -1587,7 +1598,10 @@ fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
 
 fn rewrite_expr(expr: &mut Expr, scope: &Scope, calls: &mut Vec<SrfCall>) -> Result<(), ExecError> {
     if let Expr::Func(fc) = expr {
-        let plpgsql_type = crate::routine::plpgsql_set_result_type(fc, scope).transpose()?;
+        let plpgsql_type = crate::routine::is_plpgsql_set_runtime(fc)
+            .then(|| crate::routine::plpgsql_set_result_type(fc, scope))
+            .flatten()
+            .transpose()?;
         if !is_set_returning(&fc.name) && plpgsql_type.is_none() {
             for child in children_mut(expr) {
                 rewrite_expr(child, scope, calls)?;
@@ -1717,13 +1731,15 @@ pub(crate) fn projection_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, 
 /// that is not a select-list output evaluates once per *source* row, and
 /// replicates across that row's expansion. That is what PostgreSQL's resjunk
 /// target does.
-pub(crate) fn project_rows_ordered(
+/// Run ProjectSet with the enclosing statement's blocking-memory limit.
+pub(crate) fn project_rows_ordered_with_memory(
     s: &SelectStmt,
     scope: &Scope,
     fields: &[FieldDescription],
     out_exprs: &[Expr],
     kept: Vec<Vec<Datum>>,
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     if s.distinct.on_exprs().is_some() {
         // PostgreSQL runs `DISTINCT ON` over the expanded rows; that needs the ON
@@ -1764,7 +1780,6 @@ pub(crate) fn project_rows_ordered(
     let set = rewrite(&set_exprs, scope)?;
 
     let mut projected: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::new();
-    let mut budget = MemoryBudget::default();
     for row in &kept {
         let source_keys = order_keys
             .iter()
@@ -1777,7 +1792,7 @@ pub(crate) fn project_rows_ordered(
                 }
             })
             .collect::<Result<Vec<_>, ExecError>>()?;
-        for expanded in expand_row(&set, scope, row, ctx)? {
+        for expanded in expand_row(&set, scope, row, ctx, statement_memory)? {
             let keys: Vec<Datum> = order_keys
                 .iter()
                 .zip(&source_keys)
@@ -1789,8 +1804,8 @@ pub(crate) fn project_rows_ordered(
                 })
                 .collect();
             let out = expanded[..out_exprs.len()].to_vec();
-            budget.charge(&keys)?;
-            budget.charge(&out)?;
+            statement_memory.charge_row(&keys)?;
+            statement_memory.charge_row(&out)?;
             projected.push((keys, out));
         }
     }
@@ -1868,6 +1883,7 @@ fn expand_row(
     scope: &Scope,
     row: &[Datum],
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut values: Vec<Vec<Datum>> = Vec::with_capacity(set.calls.len());
     for call in &set.calls {
@@ -1877,7 +1893,7 @@ fn expand_row(
                     .iter()
                     .map(|arg| crate::eval::eval(arg, scope, row, ctx))
                     .collect::<Result<Vec<_>, _>>()?;
-                let produced = rows(plan, args, &mut vals, ctx)?;
+                let produced = rows_with_memory(plan, args, &mut vals, ctx, statement_memory)?;
                 values.push(collapse_projection(plan, produced));
             }
             SrfCall::PlPgSql { call, .. } => {
@@ -1887,6 +1903,7 @@ fn expand_row(
                         "PL/pgSQL set function runtime disappeared".into(),
                     )
                 })??;
+                statement_memory.charge_row(&produced)?;
                 values.push(produced);
             }
         }
@@ -1902,6 +1919,7 @@ fn expand_row(
         for expr in &set.exprs {
             cells.push(crate::eval::eval(expr, &set.scope, &extended, ctx)?);
         }
+        statement_memory.charge_row(&cells)?;
         out.push(cells);
     }
     Ok(out)
@@ -2030,6 +2048,7 @@ fn series_rows(
     plan: &SrfPlan,
     vals: &[Datum],
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let value_ty = plan.columns[0].ty;
     let start = crabka_pgtypes::cast::cast(&vals[0], value_ty, &ctx.time_zone)?;
@@ -2049,7 +2068,7 @@ fn series_rows(
         std::cmp::Ordering::Less => false,
     };
     let mut out = Vec::new();
-    let mut budget = MemoryBudget::default();
+    let mut budget = crate::scanner::MemoryBudget::new(statement_memory.limit());
     let mut current = start;
     loop {
         let ordering = crabka_pgtypes::ops::compare(&current, &bound)?;
@@ -2062,7 +2081,7 @@ fn series_rows(
         if past_end {
             break;
         }
-        budget.charge(std::slice::from_ref(&current))?;
+        budget.charge_row(std::slice::from_ref(&current))?;
         out.push(vec![current.clone()]);
         current = series_advance(&current, &step, ctx)?;
     }
@@ -2337,34 +2356,12 @@ fn undefined_function(name: &str, given: &[ArgType]) -> ExecError {
     ))
 }
 
-/// A running total of the bytes an expansion has materialized.
-///
-/// An SRF can name far more rows than fit in memory, as
-/// `generate_series(1, 1e9)` does, and crabka materializes. So the same
-/// whole-result budget every other blocking operator honors caps the expansion,
-/// instead of exhausting the process. This type carries the total rather than
-/// recomputing it, so charging stays O(1) per row.
-#[derive(Debug, Default)]
-struct MemoryBudget {
-    bytes: usize,
-}
-
-impl MemoryBudget {
-    fn charge(&mut self, row: &[Datum]) -> Result<(), ExecError> {
-        self.bytes = self
-            .bytes
-            .saturating_add(crate::scanner::datum_row_bytes(row));
-        if crate::scanner::exceeds_query_memory(self.bytes, crate::scanner::BLOCKING_QUERY_MEMORY) {
-            return Err(crate::scanner::memory_budget_exceeded());
-        }
-        Ok(())
-    }
-}
-
-fn ensure_expansion_fits(rows: &[Vec<Datum>]) -> Result<(), ExecError> {
-    let mut budget = MemoryBudget::default();
+fn ensure_expansion_fits(
+    rows: &[Vec<Datum>],
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<(), ExecError> {
     for row in rows {
-        budget.charge(row)?;
+        statement_memory.charge_row(row)?;
     }
     Ok(())
 }
@@ -2440,7 +2437,28 @@ mod tests {
             .iter()
             .map(|a| crate::eval::eval(a, &Scope::empty(), &[], &ctx()))
             .collect::<Result<Vec<_>, _>>()?;
-        rows(&plan, args, &mut vals, &ctx())
+        let statement_memory =
+            crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
+        rows_with_memory(&plan, args, &mut vals, &ctx(), &statement_memory)
+    }
+
+    #[test]
+    fn srf_uses_the_callers_memory_limit() {
+        let args = [int4(1), int4(2)];
+        let plan = plan(
+            "generate_series",
+            &args,
+            CallSite::FromItem(None),
+            &Scope::empty(),
+        )
+        .expect("plan");
+        let mut values = vec![Datum::Int4(1), Datum::Int4(2)];
+        let statement_memory = crate::scanner::StatementMemory::new(crabka_units::bytes(1));
+        let error = rows_with_memory(&plan, &args, &mut values, &ctx(), &statement_memory)
+            .expect_err("series materialization must respect the supplied limit")
+            .into_pg();
+
+        assert!(error.code == "53200");
     }
 
     fn single_column(name: &str, args: &[Expr]) -> Result<Vec<Datum>, ExecError> {
@@ -3513,6 +3531,31 @@ mod tests {
         let result = query(&mut s, "SELECT select_list_set()").await;
         assert!(shape(&result).0 == vec!["select_list_set"]);
         assert!(column_of(&result) == vec![Some("1".into()), Some("2".into())]);
+    }
+
+    #[tokio::test]
+    async fn scalar_udf_can_share_a_select_list_with_a_builtin_srf() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        query(
+            &mut session,
+            "CREATE FUNCTION scalar_plus_one(n int) RETURNS int LANGUAGE sql AS 'SELECT n + 1'",
+        )
+        .await;
+
+        let result = query(
+            &mut session,
+            "SELECT scalar_plus_one(1), generate_series(1, 2)",
+        )
+        .await;
+
+        assert!(
+            shape(&result).2
+                == vec![
+                    vec![Some("2".into()), Some("1".into())],
+                    vec![Some("2".into()), Some("2".into())],
+                ]
+        );
     }
 
     #[tokio::test]

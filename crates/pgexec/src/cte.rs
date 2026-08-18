@@ -364,12 +364,11 @@ fn evaluate_recursive_cte(
     let mut result: Vec<Vec<Datum>> = Vec::new();
     let mut seen: HashSet<Vec<Datum>> = HashSet::new();
     let mut working: Vec<Vec<Datum>> = Vec::new();
-    let mut bytes = 0usize;
     for row in base.rows {
         if !all && !seen.insert(row.clone()) {
             continue;
         }
-        bytes = accumulate(bytes, &row)?;
+        ctx.statement_memory.charge_row(&row)?;
         working.push(row.clone());
         result.push(row);
     }
@@ -409,7 +408,7 @@ fn evaluate_recursive_cte(
             if !all && !seen.insert(row.clone()) {
                 continue;
             }
-            bytes = accumulate(bytes, &row)?;
+            ctx.statement_memory.charge_row(&row)?;
             working.push(row.clone());
             result.push(row);
         }
@@ -485,14 +484,6 @@ fn check_recursive_term_types(
         }
     }
     Ok(())
-}
-
-fn accumulate(bytes: usize, row: &[Datum]) -> Result<usize, ExecError> {
-    let bytes = bytes.saturating_add(crate::scanner::datum_row_bytes(row));
-    if crate::scanner::exceeds_query_memory(bytes, crate::scanner::BLOCKING_QUERY_MEMORY) {
-        return Err(crate::scanner::memory_budget_exceeded());
-    }
-    Ok(bytes)
 }
 
 /// Coerce a recursive-term row to the CTE's column types, which the

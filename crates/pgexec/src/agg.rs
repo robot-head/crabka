@@ -2745,6 +2745,20 @@ pub(crate) fn aggregate_rows(
     rows: Vec<Vec<Datum>>,
     ctx: &EvalCtx,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let statement_memory =
+        crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
+    aggregate_rows_with_memory(s, scope, rows, ctx, &statement_memory)
+}
+
+/// Fold an aggregate query with the enclosing statement's blocking-memory
+/// limit.
+pub(crate) fn aggregate_rows_with_memory(
+    s: &SelectStmt,
+    scope: &Scope,
+    rows: Vec<Vec<Datum>>,
+    ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     // Output columns: the expressions that produce each column via the shared
     // projection resolver (infer_type now understands aggregate result types).
     let (fields, out_exprs, _tys) = crate::exec::resolve_projection(&s.projection, scope)?;
@@ -2852,7 +2866,6 @@ pub(crate) fn aggregate_rows(
     let mut keys: Vec<Vec<Datum>> = Vec::new();
     let mut accs: Vec<Vec<Acc>> = Vec::new();
     let mut index: HashMap<Vec<Datum>, usize> = HashMap::new();
-    let mut group_bytes = 0usize;
     // The grouping keys are the same expressions for every row, so resolve
     // their column references once rather than once per row.
     let bound_group_by = crate::bind::bind_all(&group_by, scope)?;
@@ -2867,13 +2880,7 @@ pub(crate) fn aggregate_rows(
                 let bytes = crate::scanner::datum_row_bytes(&key)
                     .saturating_mul(2)
                     .saturating_add(specs.len().saturating_mul(std::mem::size_of::<Acc>()));
-                if crate::scanner::exceeds_query_memory(
-                    group_bytes.saturating_add(bytes),
-                    crate::scanner::BLOCKING_QUERY_MEMORY,
-                ) {
-                    return Err(crate::scanner::memory_budget_exceeded());
-                }
-                group_bytes += bytes;
+                statement_memory.charge(bytes)?;
                 let i = keys.len();
                 index.insert(key.clone(), i);
                 keys.push(key);
@@ -3126,6 +3133,22 @@ mod tests {
 
     fn int(n: i64) -> Datum {
         Datum::Int8(n)
+    }
+
+    #[test]
+    fn aggregate_uses_the_callers_memory_limit() {
+        let statement = parsed_select("SELECT k, count(*) FROM t GROUP BY k");
+        let error = aggregate_rows_with_memory(
+            &statement,
+            &scope_of(Some(&table())),
+            vec![vec![Datum::Int4(1), Datum::Int4(1)]],
+            &crate::clock::EvalCtx::test_default(),
+            &crate::scanner::StatementMemory::new(crabka_units::bytes(1)),
+        )
+        .expect_err("group state must respect the supplied limit")
+        .into_pg();
+
+        assert2::assert!(error.code == "53200");
     }
 
     #[test]

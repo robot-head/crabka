@@ -1,4 +1,4 @@
-//! Stored `pg_class` relation statistics: `reltuples` and `relhassubclass`.
+//! Stored `pg_class` relation statistics.
 //!
 //! Both columns are *stored* in `PostgreSQL`, not derived, and the regression
 //! corpus observes the difference. `expected/vacuum.out` drops a partition and
@@ -17,7 +17,8 @@
 //!   Presence of the key *is* the flag, which is what lets
 //!   [`crate::inheritance::attach_ops`] and [`crate::partition::attach_ops`]
 //!   emit it without first reading what the other column holds.
-//! * `reltuples` is an estimate that `ANALYZE` overwrites.
+//! * `reltuples`, `relpages`, and `relallvisible` are estimates that `ANALYZE`
+//!   overwrites, or a superuser may set through `pg_class`.
 //!
 //! Keys carry the relation name, as the inheritance, partition and tablespace
 //! keyspaces beside them do, so a rename has to move them. [`rename_ops`] is
@@ -35,6 +36,8 @@ use crate::error::ExecError;
 
 const SUBCLASS_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/subclass/";
 const TUPLES_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/tuples/";
+const PAGES_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/pages/";
+const ALLVISIBLE_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/allvisible/";
 
 /// What `pg_class.reltuples` reports for a relation no `ANALYZE` has looked at:
 /// `PostgreSQL`'s "unknown", which is a negative count rather than a null.
@@ -45,6 +48,10 @@ pub(crate) const UNKNOWN_TUPLES: f32 = -1.0;
 pub(crate) struct RelStats {
     /// `pg_class.reltuples`.
     pub(crate) reltuples: f32,
+    /// `pg_class.relpages`.
+    pub(crate) relpages: i32,
+    /// `pg_class.relallvisible`.
+    pub(crate) relallvisible: i32,
     /// `pg_class.relhassubclass`.
     pub(crate) has_subclass: bool,
 }
@@ -53,6 +60,8 @@ impl Default for RelStats {
     fn default() -> Self {
         Self {
             reltuples: UNKNOWN_TUPLES,
+            relpages: 0,
+            relallvisible: 0,
             has_subclass: false,
         }
     }
@@ -89,6 +98,22 @@ pub(crate) fn set_reltuples_op(relation: &RelationName, reltuples: f32) -> Write
     }
 }
 
+/// The op an `UPDATE pg_class` writes to record a heap page estimate.
+pub(crate) fn set_relpages_op(relation: &RelationName, relpages: i32) -> WriteOp {
+    WriteOp::Put {
+        key: relation_key(PAGES_PREFIX, relation),
+        value: relpages.to_be_bytes().to_vec(),
+    }
+}
+
+/// The op an `UPDATE pg_class` writes to record the all-visible page estimate.
+pub(crate) fn set_relallvisible_op(relation: &RelationName, relallvisible: i32) -> WriteOp {
+    WriteOp::Put {
+        key: relation_key(ALLVISIBLE_PREFIX, relation),
+        value: relallvisible.to_be_bytes().to_vec(),
+    }
+}
+
 /// Move whichever of a relation's statistics exist from `from` to `to`.
 ///
 /// Both facts are stored, so both survive a rename in `PostgreSQL`. Presence of
@@ -106,7 +131,12 @@ pub(crate) fn rename_ops(
     to: &RelationName,
 ) -> Result<Vec<WriteOp>, ExecError> {
     let mut ops = Vec::new();
-    for prefix in [SUBCLASS_PREFIX, TUPLES_PREFIX] {
+    for prefix in [
+        SUBCLASS_PREFIX,
+        TUPLES_PREFIX,
+        PAGES_PREFIX,
+        ALLVISIBLE_PREFIX,
+    ] {
         if let Some(value) = kv.get(&relation_key(prefix, from)).map_err(ExecError::Kv)? {
             ops.push(WriteOp::Delete {
                 key: relation_key(prefix, from),
@@ -127,10 +157,16 @@ pub(crate) fn drop_metadata_ops(relation: &RelationName) -> Vec<WriteOp> {
         WriteOp::Delete {
             key: relation_key(TUPLES_PREFIX, relation),
         },
+        WriteOp::Delete {
+            key: relation_key(PAGES_PREFIX, relation),
+        },
+        WriteOp::Delete {
+            key: relation_key(ALLVISIBLE_PREFIX, relation),
+        },
     ]
 }
 
-/// Every relation's statistics, in two scans rather than two reads per row.
+/// Every relation's statistics, in four scans rather than four reads per row.
 ///
 /// `pg_class` is projected in full for every catalog query that touches it, so
 /// the per-relation cost of this has to stay off the row loop.
@@ -147,6 +183,16 @@ pub(crate) fn all(kv: &dyn Kv) -> Result<BTreeMap<RelationName, RelStats>, ExecE
             .try_into()
             .map_err(|_| corrupt("stored reltuples is not four bytes"))?;
         stats.entry(relation).or_default().reltuples = f32::from_be_bytes(bytes);
+    }
+    for (key, value) in kv.scan_prefix(PAGES_PREFIX).map_err(ExecError::Kv)? {
+        let relation = relation_from_key(PAGES_PREFIX, &key)?;
+        stats.entry(relation).or_default().relpages =
+            integer(&value, "stored relpages is not four bytes")?;
+    }
+    for (key, value) in kv.scan_prefix(ALLVISIBLE_PREFIX).map_err(ExecError::Kv)? {
+        let relation = relation_from_key(ALLVISIBLE_PREFIX, &key)?;
+        stats.entry(relation).or_default().relallvisible =
+            integer(&value, "stored relallvisible is not four bytes")?;
     }
     Ok(stats)
 }
@@ -172,8 +218,36 @@ pub(crate) fn of(kv: &dyn Kv, relation: &RelationName) -> Result<RelStats, ExecE
     };
     Ok(RelStats {
         reltuples,
+        relpages: integer_value(
+            kv,
+            PAGES_PREFIX,
+            relation,
+            "stored relpages is not four bytes",
+        )?,
+        relallvisible: integer_value(
+            kv,
+            ALLVISIBLE_PREFIX,
+            relation,
+            "stored relallvisible is not four bytes",
+        )?,
         has_subclass,
     })
+}
+
+fn integer_value(
+    kv: &dyn Kv,
+    prefix: &[u8],
+    relation: &RelationName,
+    error: &str,
+) -> Result<i32, ExecError> {
+    kv.get(&relation_key(prefix, relation))
+        .map_err(ExecError::Kv)?
+        .map_or(Ok(0), |value| integer(&value, error))
+}
+
+fn integer(value: &[u8], error: &str) -> Result<i32, ExecError> {
+    let bytes: [u8; 4] = value.try_into().map_err(|_| corrupt(error))?;
+    Ok(i32::from_be_bytes(bytes))
 }
 
 fn relation_from_key(prefix: &[u8], key: &[u8]) -> Result<RelationName, ExecError> {
@@ -215,7 +289,7 @@ mod tests {
 
     use super::{
         RelStats, UNKNOWN_TUPLES, all, clear_has_subclass_op, drop_metadata_ops, of, rename_ops,
-        set_has_subclass_op, set_reltuples_op,
+        set_has_subclass_op, set_relallvisible_op, set_relpages_op, set_reltuples_op,
     };
 
     fn relation(schema: &str, name: &str) -> RelationName {
@@ -251,6 +325,8 @@ mod tests {
             of(&kv, &parent).expect("read")
                 == RelStats {
                     reltuples: 7.0,
+                    relpages: 0,
+                    relallvisible: 0,
                     has_subclass: true,
                 }
         );
@@ -259,6 +335,8 @@ mod tests {
             of(&kv, &parent).expect("read")
                 == RelStats {
                     reltuples: 7.0,
+                    relpages: 0,
+                    relallvisible: 0,
                     has_subclass: false,
                 }
         );
@@ -274,6 +352,8 @@ mod tests {
             vec![
                 set_has_subclass_op(&latched),
                 set_reltuples_op(&counted, -0.5),
+                set_relpages_op(&counted, 17),
+                set_relallvisible_op(&counted, 3),
             ],
         );
         let scanned = all(&kv).expect("scan");
@@ -305,7 +385,12 @@ mod tests {
         let name = relation("public", "gone");
         apply(
             &kv,
-            vec![set_has_subclass_op(&name), set_reltuples_op(&name, 3.0)],
+            vec![
+                set_has_subclass_op(&name),
+                set_reltuples_op(&name, 3.0),
+                set_relpages_op(&name, 2),
+                set_relallvisible_op(&name, 1),
+            ],
         );
         apply(&kv, drop_metadata_ops(&name));
         assert!(of(&kv, &name).expect("read") == RelStats::default());
@@ -322,12 +407,19 @@ mod tests {
         let after = relation("public", "counted2");
         apply(
             &kv,
-            vec![set_has_subclass_op(&before), set_reltuples_op(&before, 7.0)],
+            vec![
+                set_has_subclass_op(&before),
+                set_reltuples_op(&before, 7.0),
+                set_relpages_op(&before, 8),
+                set_relallvisible_op(&before, 5),
+            ],
         );
         apply(&kv, rename_ops(&kv, &before, &after).expect("ops"));
         assert!(of(&kv, &before).expect("read") == RelStats::default());
         let moved = of(&kv, &after).expect("read");
         assert!(same_bits(moved.reltuples, 7.0));
+        assert!(moved.relpages == 8);
+        assert!(moved.relallvisible == 5);
         assert!(moved.has_subclass);
         assert!(all(&kv).expect("scan").len() == 1);
     }

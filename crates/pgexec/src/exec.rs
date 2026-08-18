@@ -306,6 +306,7 @@ impl<'a> WriteContext<'a> {
             fctx: self.fctx,
             range_scanner: self.range_scanner,
             blocking_query_memory: self.blocking_query_memory,
+            statement_memory: crate::scanner::StatementMemory::new(self.blocking_query_memory),
             security_role: self.fctx.effective_role(),
             policy_stack: self.policy_stack,
             refs: None,
@@ -2345,6 +2346,17 @@ fn statement_trigger_targets(
     write_ctx: &WriteContext<'_>,
     stmt: &Statement,
 ) -> Result<Vec<(Table, crate::trigger::DmlEvent, Vec<String>)>, ExecError> {
+    if let Statement::Update { table, .. } = stmt {
+        let named = resolve_relation(
+            write_ctx.catalog_kv,
+            write_ctx.eval_ctx.resolution(),
+            table,
+            SchemaDisposition::Reference,
+        )?;
+        if named.schema == crate::search_path::PG_CATALOG && named.name == "pg_class" {
+            return Ok(Vec::new());
+        }
+    }
     if let Statement::Truncate {
         targets, cascade, ..
     } = stmt
@@ -4604,6 +4616,17 @@ async fn execute_write_body(
         } => {
             let table =
                 &resolve_relation(catalog_kv, resolution, table, SchemaDisposition::Reference)?;
+            if table.schema == crate::search_path::PG_CATALOG && table.name == "pg_class" {
+                return update_pg_class_statistics(
+                    write_ctx,
+                    ctes,
+                    alias.as_deref(),
+                    assignments,
+                    from,
+                    filter.as_ref(),
+                    returning.as_ref(),
+                );
+            }
             let t = crabka_pgcatalog::get_table(catalog_kv, table)?;
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
             let fk_ctx = crate::fk::StatementFkContext::resolve(catalog_kv, &t)?;
@@ -5239,6 +5262,125 @@ fn resolve_assignments<'a>(
         }
     }
     Ok(out)
+}
+
+/// Apply the only writable `pg_class` fields Gres needs before it has a
+/// general writable system-catalog implementation.
+///
+/// PostgreSQL lets a superuser adjust these planner estimates. They are not
+/// heap rows here: the catalog projection is synthesized, while the values are
+/// durable relation metadata. Keeping this seam narrow avoids pretending the
+/// other synthesized catalog fields are writable.
+fn update_pg_class_statistics(
+    write_ctx: &WriteContext<'_>,
+    ctes: &crate::cte::CteContext,
+    alias: Option<&str>,
+    assignments: &[crabka_pgparser::ast::Assignment],
+    from: &[crabka_pgparser::ast::TableExpr],
+    filter: Option<&Expr>,
+    returning: Option<&crabka_pgparser::ast::Returning>,
+) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    if !crate::rls::role_is_superuser(write_ctx.catalog_kv, write_ctx.fctx.effective_role())? {
+        return Err(ExecError::PermissionDenied {
+            kind: "table",
+            relation: "pg_class".into(),
+        });
+    }
+    if !from.is_empty() {
+        return Err(ExecError::Unsupported(
+            "UPDATE pg_class with FROM is not supported".into(),
+        ));
+    }
+
+    let table = virtual_catalog_table("pg_class");
+    let qualifier = alias.unwrap_or("pg_class");
+    let scope = Scope::single(&table, qualifier);
+    let targets = resolve_assignments(write_ctx, ctes, &table, assignments)?;
+    for (slot, _) in &targets {
+        if !matches!(
+            table.columns[*slot].name.as_str(),
+            "reltuples" | "relpages" | "relallvisible"
+        ) {
+            return Err(ExecError::Unsupported(format!(
+                "UPDATE pg_class does not support column \"{}\"",
+                table.columns[*slot].name
+            )));
+        }
+    }
+    let filter = crate::bind::bind_optional(filter, &scope)?;
+    let spec = ReturningSpec::new(&table, qualifier, returning, Some(&scope), false)?;
+    let relations = crabka_pgcatalog::list_tables(write_ctx.catalog_kv)?
+        .into_iter()
+        .map(|table| {
+            Ok((
+                crate::catalog_rel::table_relation_oid(table.id)?,
+                table.name,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, ExecError>>()?;
+    let mut ops = Vec::new();
+    let mut returned_rows = Vec::new();
+    let mut updated = 0_u64;
+    for (ordinal, row) in catalog_rows::pg_class_rows(write_ctx.catalog_kv)?
+        .into_iter()
+        .enumerate()
+    {
+        let Some(Datum::Int4(oid)) = row.first() else {
+            return Err(ExecError::Kv(crabka_pgkv::KvError::CorruptRow(
+                "pg_class row has no oid".into(),
+            )));
+        };
+        let Some(relation) = relations.get(oid) else {
+            continue;
+        };
+        if !row_matches(
+            filter.as_ref().map(crate::bind::BoundExpr::expr),
+            &scope,
+            &row,
+            write_ctx.eval_ctx,
+        )? {
+            continue;
+        }
+        let next = apply_assignments(&table, &targets, &scope, &row, write_ctx.eval_ctx)?;
+        for (slot, _) in &targets {
+            match (&*table.columns[*slot].name, &next[*slot]) {
+                ("reltuples", Datum::Float4(value)) => {
+                    ops.push(crate::relstats::set_reltuples_op(relation, *value));
+                }
+                ("relpages", Datum::Int4(value)) => {
+                    ops.push(crate::relstats::set_relpages_op(relation, *value));
+                }
+                ("relallvisible", Datum::Int4(value)) => {
+                    ops.push(crate::relstats::set_relallvisible_op(relation, *value));
+                }
+                (column, Datum::Null) => {
+                    return Err(ExecError::NotNullViolation {
+                        column: column.into(),
+                        table: "pg_class".into(),
+                    });
+                }
+                (column, _) => {
+                    return Err(ExecError::Unsupported(format!(
+                        "UPDATE pg_class received an invalid value for column \"{column}\""
+                    )));
+                }
+            }
+        }
+        if returning.is_some() {
+            let ordinal = u64::try_from(ordinal)
+                .map_err(|_| ExecError::Unsupported("pg_class has too many rows".into()))?
+                .checked_add(1)
+                .ok_or_else(|| ExecError::Unsupported("pg_class has too many rows".into()))?;
+            returned_rows.push(ReturnedRow::updated(next, row, Vec::new(), ordinal));
+        }
+        updated += 1;
+    }
+    spec.outcome(
+        format!("UPDATE {updated}"),
+        returned_rows,
+        write_ctx.eval_ctx,
+    )
+    .map(|outcome| (outcome, ops))
 }
 
 fn assignment_arity_error(targets: usize, values: usize) -> ExecError {
@@ -7327,6 +7469,9 @@ pub(crate) fn write_requires_unique_local_serialization(
         table_name,
         SchemaDisposition::Reference,
     )?;
+    if table_name.schema == crate::search_path::PG_CATALOG && table_name.name == "pg_class" {
+        return Ok(UniqueLocalSerialization::None);
+    }
     table_requires_unique_local_serialization(catalog_kv, &table_name)
 }
 
@@ -12282,7 +12427,7 @@ fn build_correlated_scalar_lookup(
             partial_aggregate: None,
             top_k: None,
         },
-        read_ctx.blocking_query_memory,
+        &read_ctx.statement_memory,
     ) {
         Ok(rows) => rows,
         Err(ExecError::Unsupported(_)) => return Ok(CorrelatedScalarLookupState::Fallback),
@@ -15316,7 +15461,7 @@ fn scan_stored_relation(
     let rows = match crate::scanner::collect_cursor_bounded(
         read_ctx.range_scanner,
         scan_request,
-        read_ctx.blocking_query_memory,
+        &read_ctx.statement_memory,
     ) {
         Ok(rows) => rows,
         Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
@@ -15337,7 +15482,7 @@ fn scan_stored_relation(
                     partial_aggregate: None,
                     top_k: None,
                 },
-                read_ctx.blocking_query_memory,
+                &read_ctx.statement_memory,
             )?
         }
         Err(error) => return Err(error),
@@ -15805,13 +15950,14 @@ fn build_table_expr(
             alias,
             column_aliases,
             ..
-        } => crate::srf::from_item(
+        } => crate::srf::from_item_with_memory(
             functions,
             *with_ordinality,
             *rows_from,
             alias.as_deref(),
             column_aliases,
             ctx,
+            &read_ctx.statement_memory,
         ),
         TableExpr::JsonTable(table) => crate::jsontable::from_item(table, ctx),
     }
@@ -17331,9 +17477,23 @@ pub(crate) fn select_to_relation_with_ctes(
     let out_scope = projected_scope(&fields, &tys);
     let rows = if crate::grouping::is_grouping_query(s) {
         crate::srf::reject_in_aggregate(&out_exprs)?;
-        crate::grouping::aggregate_rows(s, &scope, kept, ctx)?
+        crate::grouping::aggregate_rows_with_memory(
+            s,
+            &scope,
+            kept,
+            ctx,
+            &read_ctx.statement_memory,
+        )?
     } else {
-        project_rows_ordered(s, &scope, &fields, &out_exprs, kept, ctx)?
+        project_rows_ordered_with_memory(
+            s,
+            &scope,
+            &fields,
+            &out_exprs,
+            kept,
+            ctx,
+            &read_ctx.statement_memory,
+        )?
     };
     Ok(Relation {
         scope: out_scope,
@@ -18548,7 +18708,7 @@ pub(crate) async fn execute_read_locking(
     if let Some(row_exprs) = row_exprs {
         materialize_correlated_row_exprs(read_ctx, row_exprs, &mut scope, &mut kept)?;
     }
-    project_order_limit(s, &scope, kept, ctx)
+    project_order_limit(s, &scope, kept, ctx, &read_ctx.statement_memory)
 }
 
 /// Apply DISTINCT / ORDER BY / OFFSET / LIMIT and projection, returning the
@@ -18563,11 +18723,35 @@ pub(crate) fn project_rows_ordered(
     kept: Vec<Vec<Datum>>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let statement_memory =
+        crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
+    project_rows_ordered_with_memory(s, scope, fields, out_exprs, kept, ctx, &statement_memory)
+}
+
+/// Apply DISTINCT / ORDER BY / OFFSET / LIMIT and projection using the
+/// enclosing statement's shared blocking-memory budget.
+fn project_rows_ordered_with_memory(
+    s: &SelectStmt,
+    scope: &Scope,
+    fields: &[FieldDescription],
+    out_exprs: &[Expr],
+    kept: Vec<Vec<Datum>>,
+    ctx: &crate::clock::EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     // A select list with a set-returning function expands rows BELOW DISTINCT,
     // ORDER BY and LIMIT (PostgreSQL's ProjectSet), so it owns the whole
     // sort/dedup/limit shape rather than sharing the one-row-in-one-row-out one.
     if crate::srf::exprs_contain_srf(out_exprs) || crate::srf::order_by_contains_srf(&s.order_by) {
-        return crate::srf::project_rows_ordered(s, scope, fields, out_exprs, kept, ctx);
+        return crate::srf::project_rows_ordered_with_memory(
+            s,
+            scope,
+            fields,
+            out_exprs,
+            kept,
+            ctx,
+            statement_memory,
+        );
     }
     let window = RowWindow {
         offset: eval_row_count(s.offset.as_ref(), RowCountClause::Offset, ctx)?,
@@ -18889,9 +19073,18 @@ fn project_order_limit(
     scope: &Scope,
     kept: Vec<Vec<Datum>>,
     ctx: &crate::clock::EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<QueryResult, ExecError> {
     let (fields, out_exprs, _tys) = resolve_projection(&s.projection, scope)?;
-    let rows = project_rows_ordered(s, scope, &fields, &out_exprs, kept, ctx)?;
+    let rows = project_rows_ordered_with_memory(
+        s,
+        scope,
+        &fields,
+        &out_exprs,
+        kept,
+        ctx,
+        statement_memory,
+    )?;
     Ok(rows_result(fields, &rows, ctx.output_style()))
 }
 
@@ -25297,14 +25490,17 @@ mod tests {
         // A name no SRF registry entry claims is 42883, PostgreSQL's failed
         // function lookup, on both the row and the schema-only path.
         let unknown = call("no_such_function", array_arg);
+        let statement_memory =
+            crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
         for relation in [
-            crate::srf::from_item(
+            crate::srf::from_item_with_memory(
                 &unknown,
                 false,
                 false,
                 None,
                 &None,
                 &crate::clock::EvalCtx::test_default(),
+                &statement_memory,
             ),
             crate::srf::from_item_schema(&unknown, false, false, None, &None),
         ] {

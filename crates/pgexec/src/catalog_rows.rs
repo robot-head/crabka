@@ -279,7 +279,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         .map(|index| index.table_id)
         .collect::<std::collections::BTreeSet<_>>();
     let role_oids = crate::catalog_rel::role_oids(catalog_kv)?;
-    // Two scans, not two reads per relation: `reltuples` and `relhassubclass`
+    // Four scans, not four reads per relation: the stored `pg_class` statistics
     // are stored per relation and only stored relations ever have them.
     let relstats = crate::relstats::all(catalog_kv)?;
     // An index is owned by whoever owns the table it indexes, so the table
@@ -331,6 +331,8 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         row.relforcerowsecurity = table.force_row_security;
         let stats = relstats.get(&table.name).copied().unwrap_or_default();
         row.reltuples = stats.reltuples;
+        row.relpages = stats.relpages;
+        row.relallvisible = stats.relallvisible;
         row.relhassubclass = stats.has_subclass;
         // A partitioned table holds no rows of its own, and a foreign table
         // holds none here at all, so neither carries a store. Every other
@@ -650,6 +652,10 @@ pub(crate) struct PgClassRow<'a> {
     /// `pg_class.reltuples`. [`crate::relstats::UNKNOWN_TUPLES`] until an
     /// `ANALYZE` measures the relation.
     pub(crate) reltuples: f32,
+    /// `pg_class.relpages`, stored with `reltuples`.
+    pub(crate) relpages: i32,
+    /// `pg_class.relallvisible`, stored with `reltuples`.
+    pub(crate) relallvisible: i32,
     pub(crate) relam: i32,
     pub(crate) relfilenode: i32,
     pub(crate) relispartition: bool,
@@ -699,6 +705,8 @@ impl<'a> PgClassRow<'a> {
             relhastriggers: false,
             relhassubclass: false,
             reltuples: crate::relstats::UNKNOWN_TUPLES,
+            relpages: 0,
+            relallvisible: 0,
             // A materialized view's contents live in the heap exactly as a
             // table's do, so PostgreSQL gives it the heap access method too.
             relam: if matches!(relkind, "r" | "m") { 2 } else { 0 },
@@ -731,9 +739,9 @@ impl<'a> PgClassRow<'a> {
             int(self.relfilenode),
             int(i32::try_from(self.reltablespace)
                 .map_err(|_| ExecError::Unsupported("tablespace oid exceeds int4".into()))?),
-            int(0),
+            int(self.relpages),
             Datum::Float4(self.reltuples),
-            int(0),
+            int(self.relallvisible),
             int(0),
             int(self.reltoastrelid),
             Datum::Bool(self.relhasindex),

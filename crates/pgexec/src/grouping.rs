@@ -247,9 +247,23 @@ pub(crate) fn aggregate_rows(
     rows: Vec<Vec<Datum>>,
     ctx: &EvalCtx,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let statement_memory =
+        crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
+    aggregate_rows_with_memory(s, scope, rows, ctx, &statement_memory)
+}
+
+/// Run a grouping-set aggregate with the enclosing statement's blocking-memory
+/// limit.
+pub(crate) fn aggregate_rows_with_memory(
+    s: &SelectStmt,
+    scope: &Scope,
+    rows: Vec<Vec<Datum>>,
+    ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     let group_by = resolve_group_references(s, scope)?;
     if s.grouping.is_none() && group_by == s.group_by && !mentions_grouping_call(s) {
-        return crate::agg::aggregate_rows(s, scope, rows, ctx);
+        return crate::agg::aggregate_rows_with_memory(s, scope, rows, ctx, statement_memory);
     }
     for g in &group_by {
         if crate::agg::contains_aggregate(g) {
@@ -285,12 +299,18 @@ pub(crate) fn aggregate_rows(
     let s = &expanded_projection(s, scope)?;
 
     if rows.is_empty() {
-        return empty_input_rows(s, scope, &plan, ctx);
+        return empty_input_rows(s, scope, &plan, ctx, statement_memory);
     }
     let augmented_scope = augmented_scope(scope, &plan.key_types);
-    let augmented = augmented_rows(&plan, scope, &rows, ctx)?;
+    let augmented = augmented_rows(&plan, scope, &rows, ctx, statement_memory)?;
     let rewritten = rewrite_statement(s, &plan)?;
-    crate::agg::aggregate_rows(&rewritten, &augmented_scope, augmented, ctx)
+    crate::agg::aggregate_rows_with_memory(
+        &rewritten,
+        &augmented_scope,
+        augmented,
+        ctx,
+        statement_memory,
+    )
 }
 
 /// `s` with every `*` / `t.*` in its select list replaced by the explicit column
@@ -362,6 +382,7 @@ fn empty_input_rows(
     scope: &Scope,
     plan: &GroupingPlan,
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let empty_sets = plan.sets.iter().filter(|set| set.is_empty()).count();
     if empty_sets == 0 {
@@ -375,7 +396,13 @@ fn empty_input_rows(
     let mut fold = |e: &Expr| fold_for_empty_set(e, plan);
     rewrite_clauses(&mut stmt, s, &mut fold)?;
     if empty_sets == 1 {
-        return crate::agg::aggregate_rows(&stmt, scope, Vec::new(), ctx);
+        return crate::agg::aggregate_rows_with_memory(
+            &stmt,
+            scope,
+            Vec::new(),
+            ctx,
+            statement_memory,
+        );
     }
     // Several empty grouping sets (`GROUPING SETS ((), ())`) each emit the same
     // row, so the tail has to run over the repeated output rather than per set.
@@ -414,7 +441,8 @@ fn empty_input_rows(
     }
     let (distinct, order_by) = (stmt.distinct.clone(), std::mem::take(&mut stmt.order_by));
     stmt.distinct = crabka_pgparser::ast::DistinctClause::All;
-    let one = crate::agg::aggregate_rows(&stmt, scope, Vec::new(), ctx)?;
+    let one =
+        crate::agg::aggregate_rows_with_memory(&stmt, scope, Vec::new(), ctx, statement_memory)?;
     stmt.order_by = order_by;
     let mut repeated: Vec<Vec<Datum>> = Vec::with_capacity(one.len() * empty_sets);
     for _ in 0..empty_sets {
@@ -471,9 +499,9 @@ fn augmented_rows(
     scope: &Scope,
     rows: &[Vec<Datum>],
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut out = Vec::with_capacity(rows.len().saturating_mul(plan.sets.len()));
-    let mut bytes = 0usize;
     let group_by = crate::bind::bind_all(&plan.group_by, scope)?;
     for row in rows {
         // The grouping expressions are evaluated once per input row; a set only
@@ -492,10 +520,7 @@ fn augmented_rows(
                 });
             }
             augmented.push(Datum::Int4(set_ordinal(ordinal)?));
-            bytes = bytes.saturating_add(crate::scanner::datum_row_bytes(&augmented));
-            if crate::scanner::exceeds_query_memory(bytes, crate::scanner::BLOCKING_QUERY_MEMORY) {
-                return Err(crate::scanner::memory_budget_exceeded());
-            }
+            statement_memory.charge_row(&augmented)?;
             out.push(augmented);
         }
     }
