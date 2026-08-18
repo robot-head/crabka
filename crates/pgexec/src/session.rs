@@ -16928,6 +16928,22 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(3)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT count(*) FROM planned_cte TABLESAMPLE SYSTEM (0)"),
+        )
+        .expect("sampled CteScan plan executes")
+        .expect("CTE TABLESAMPLE uses CteScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(0)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT n FROM planned_transition TABLESAMPLE BERNOULLI (100) WHERE n = 3",
+            ),
+        )
+        .expect("sampled NamedTuplestoreScan plan executes")
+        .expect("transition TABLESAMPLE uses NamedTuplestoreScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(3)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of(
                 "SELECT count(*) FROM seq_scan_test AS l \
                  INNER JOIN seq_scan_third AS r ON l.a = r.a - 2",
@@ -17763,7 +17779,6 @@ mod tests {
             "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived ORDER BY 1",
             "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived LIMIT 1",
             "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived OFFSET 1",
-            "SELECT n FROM planned_cte TABLESAMPLE BERNOULLI(100)",
             "SELECT grouping(n) FROM planned_cte",
             "SELECT DISTINCT count(*) FROM planned_cte",
             "SELECT count(*) FROM planned_cte ORDER BY 1",
@@ -17780,7 +17795,6 @@ mod tests {
             "SELECT n, generate_series(1, 2) FROM planned_cte ORDER BY 1",
             "SELECT n, generate_series(1, 2) FROM planned_cte LIMIT 1",
             "SELECT n, generate_series(1, 2) FROM planned_cte OFFSET 1",
-            "SELECT n FROM planned_transition TABLESAMPLE BERNOULLI(100)",
             "SELECT grouping(n) FROM planned_transition",
             "SELECT grouping(n), count(*) FROM planned_transition GROUP BY ROLLUP(n)",
             "SELECT count(*) FROM planned_transition ORDER BY 1",

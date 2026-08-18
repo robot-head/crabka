@@ -1630,8 +1630,6 @@ fn plan_cte_scan(
 ) -> Result<Option<SeqScanPlan>, ExecError> {
     let TableExpr::Table {
         name,
-        columns: _,
-        sample,
         ..
     } = source
     else {
@@ -1640,7 +1638,6 @@ fn plan_cte_scan(
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if name.schema.is_some()
-        || sample.is_some()
         || (!aggregate && crate::grouping::is_grouping_query(select))
         || (window
             && (aggregate
@@ -1848,7 +1845,6 @@ fn plan_named_tuplestore_scan(
         name,
         alias,
         columns,
-        sample,
         ..
     } = source
     else {
@@ -1857,7 +1853,6 @@ fn plan_named_tuplestore_scan(
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if name.schema.is_some()
-        || sample.is_some()
         || (!aggregate && crate::grouping::is_grouping_query(select))
         || (window
             && (aggregate
@@ -2450,6 +2445,7 @@ impl Executor for CteScanExecutor<'_, '_> {
             name,
             alias,
             columns,
+            sample,
             ..
         } = &self.source
         else
@@ -2471,6 +2467,11 @@ impl Executor for CteScanExecutor<'_, '_> {
                 alias.as_deref().unwrap_or(&name.name),
                 &Some(columns.clone()),
             )?
+        } else {
+            relation
+        };
+        let relation = if let Some(sample) = sample {
+            exec::apply_tablesample(relation, sample, self.read_ctx.eval_ctx)?
         } else {
             relation
         };
@@ -2500,6 +2501,7 @@ impl Executor for NamedTuplestoreScanExecutor<'_, '_> {
             name,
             alias,
             columns,
+            sample,
             ..
         } = &self.source
         else
@@ -2542,6 +2544,11 @@ impl Executor for NamedTuplestoreScanExecutor<'_, '_> {
         };
         let relation = if let Some(columns) = columns {
             crate::values::requalify_derived(relation, qualifier, &Some(columns.clone()))?
+        } else {
+            relation
+        };
+        let relation = if let Some(sample) = sample {
+            exec::apply_tablesample(relation, sample, self.read_ctx.eval_ctx)?
         } else {
             relation
         };
