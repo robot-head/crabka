@@ -95,7 +95,14 @@ fn try_execute_nested_loop(
         return execute_nested_loop_window(read_ctx, select, &scope).map(Some);
     }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
-    if crate::srf::exprs_contain_srf(&exprs) {
+    let project_set = crate::srf::exprs_contain_srf(&exprs);
+    if project_set
+        && (aggregate
+            || !matches!(select.distinct, DistinctClause::All)
+            || !select.order_by.is_empty()
+            || select.limit.is_some()
+            || select.offset.is_some())
+    {
         return Ok(None);
     }
     let distinct = matches!(select.distinct, DistinctClause::Distinct);
@@ -118,7 +125,7 @@ fn try_execute_nested_loop(
         return Ok(None);
     };
     let filter = Plan {
-        target_list: if aggregate {
+        target_list: if aggregate || project_set {
             Vec::new()
         } else {
             bind_target_list(&exprs, &fields, &scope)?
@@ -148,16 +155,27 @@ fn try_execute_nested_loop(
     } else {
         filter
     };
-    let unique = if distinct {
+    let project_set = if project_set {
         Plan {
-            target_list: Vec::new(),
+            target_list: bind_target_list(&exprs, &fields, &scope)?,
             quals: Vec::new(),
-            node: PlanNode::Unique {
+            node: PlanNode::ProjectSet {
                 input: Box::new(aggregate),
             },
         }
     } else {
         aggregate
+    };
+    let unique = if distinct {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(project_set),
+            },
+        }
+    } else {
+        project_set
     };
     let sort = if select.order_by.is_empty() {
         unique
@@ -312,6 +330,29 @@ impl NestedLoopTail<'_, '_> {
             let rows = crate::agg::aggregate_rows_with_memory(
                 self.select,
                 &relation.scope,
+                relation.rows,
+                self.read_ctx.eval_ctx,
+                &self.read_ctx.statement_memory,
+            )?;
+            state.scope = exec::projected_scope(self.fields, self.tys);
+            for _ in &rows {
+                state.emit_row();
+            }
+            Ok(Relation {
+                scope: state.scope.clone(),
+                rows,
+            })
+        }
+        PlanNode::ProjectSet { input } => {
+            let mut child = PlanState::new((**input).clone(), Scope::empty());
+            let relation = self.execute(&mut child)?;
+            let (_, exprs, _) = exec::resolve_projection(&self.select.projection, &relation.scope)?;
+            state.begin_loop();
+            let rows = crate::srf::project_rows_ordered_with_memory(
+                self.select,
+                &relation.scope,
+                self.fields,
+                &exprs,
                 relation.rows,
                 self.read_ctx.eval_ctx,
                 &self.read_ctx.statement_memory,

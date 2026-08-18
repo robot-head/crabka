@@ -16901,6 +16901,28 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, \
+                 seq_scan_third AS r WHERE l.a = 1",
+            ),
+        )
+        .expect("NestedLoop plan executes")
+        .expect("joined SRF uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(1),
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2),
+                ],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT l.a, row_number() OVER (ORDER BY l.a) \
                  FROM seq_scan_test AS l, seq_scan_third AS r",
             ),
@@ -17182,6 +17204,11 @@ mod tests {
             "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
             "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
             "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1",
+            "SELECT count(*), generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r",
+            "SELECT DISTINCT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r",
+            "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
+            "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
+            "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1",
             "SELECT l.a FROM seq_scan_test AS l, seq_scan_third AS r \
              ORDER BY 1 FETCH FIRST 1 ROW WITH TIES",
             "SELECT n FROM LATERAL (SELECT 1 AS n) AS derived",
