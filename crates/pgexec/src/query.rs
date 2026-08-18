@@ -23,17 +23,17 @@ pub(crate) fn query_to_relation_with_ctes(
             }
             let s = crate::plan::exec::select_with_query_tail(q, s);
             crate::grouping::reject_misplaced_calls(&s)?;
-            if !crate::exec::select_contains_subquery(&s)
-                && !crate::srf::projection_contains_srf(&s.projection)
-            {
-                if let Some(relation) = crate::plan::exec::try_execute_result(&s, ctx.eval_ctx)? {
+            if !crate::exec::select_contains_subquery(&s) {
+                let planned = crate::subquery::resolve_in_select(&query_ctx, &s)?;
+                if let Some(relation) = crate::plan::exec::try_execute_result(&planned, ctx.eval_ctx)? {
                     return Ok(relation);
                 }
-                let refs = crate::scope::StatementRefs::of_select(&s);
+                let refs = crate::scope::StatementRefs::of_select(&planned);
                 let plan_ctx = query_ctx.with_refs(&refs);
-                if let Some(relation) = crate::plan::exec::try_execute_seq_scan(&plan_ctx, &s)? {
+                if let Some(relation) = crate::plan::exec::try_execute_seq_scan(&plan_ctx, &planned)? {
                     return Ok(relation);
                 }
+                return crate::exec::select_to_relation_with_ctes(&query_ctx, &planned);
             }
             crate::exec::select_to_relation_with_ctes(&query_ctx, &s)
         }
