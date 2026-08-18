@@ -872,12 +872,7 @@ fn plan_seq_scan(
     }
     let window = crate::window::has_window_calls(select);
     if window
-        && (aggregate
-            || crate::srf::projection_contains_srf(&select.projection)
-            || !matches!(select.distinct, DistinctClause::All)
-            || !select.order_by.is_empty()
-            || select.limit.is_some()
-            || select.offset.is_some())
+        && (aggregate || crate::srf::projection_contains_srf(&select.projection))
     {
         return Ok(None);
     }

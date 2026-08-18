@@ -16978,10 +16978,6 @@ mod tests {
         );
         for sql in [
             "SELECT generate_series(1, 2), row_number() OVER () FROM seq_scan_test",
-            "SELECT DISTINCT a, row_number() OVER () FROM seq_scan_test",
-            "SELECT a, row_number() OVER () FROM seq_scan_test ORDER BY 1",
-            "SELECT a, row_number() OVER () FROM seq_scan_test LIMIT 1",
-            "SELECT a, row_number() OVER () FROM seq_scan_test OFFSET 1",
         ] {
             assert!(
                 crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
@@ -17038,6 +17034,22 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
                 vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
                 vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT a, row_number() OVER (ORDER BY a) AS rn FROM seq_scan_test \
+                 ORDER BY rn DESC LIMIT 2",
+            ),
+        )
+        .expect("WindowAgg tail plan executes")
+        .expect("stored table window tail uses WindowAgg");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(3)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
             ]
         );
         for sql in [
