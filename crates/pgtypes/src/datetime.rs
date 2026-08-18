@@ -1918,10 +1918,9 @@ pub fn parse_timestamptz_in(
         Decoded::Special(special) => match special {
             Special::Infinity => Ok(timestamptz_infinity()),
             Special::NegInfinity => Ok(timestamptz_neg_infinity()),
-            Special::Epoch => special_to_datetime(special)
-                .to_zoned(tz.clone())
-                .map(|z| z.timestamp())
-                .map_err(|_| overflow()),
+            // Unlike a bare civil timestamp, the `epoch` timestamptz spelling
+            // names the fixed Unix instant, independent of the session zone.
+            Special::Epoch => Ok(Timestamp::UNIX_EPOCH),
         },
         Decoded::Parts(parts) => {
             let date = parts.date.ok_or_else(|| TypeError::InvalidDatetimeFormat {
@@ -7447,6 +7446,27 @@ mod io_tests {
         assert_eq!(
             timestamptz_to_text(ts3, &jiff::tz::TimeZone::UTC),
             "2024-01-15 10:00:00+00"
+        );
+        // `epoch` is the Unix instant for timestamptz, not local midnight in
+        // the session zone. PostgreSQL displays that same instant in each zone.
+        let epoch = parse_timestamptz("epoch", &tz).expect("epoch");
+        assert_eq!(epoch, Timestamp::UNIX_EPOCH);
+        assert_eq!(timestamptz_to_text(epoch, &tz), "1969-12-31 19:00:00-05");
+    }
+
+    #[test]
+    fn timestamptz_range_is_checked_after_the_offset_is_applied() {
+        let utc = TimeZone::UTC;
+        let err = parse_timestamptz("4714-11-23 23:59:59+00 BC", &utc)
+            .expect_err("one second before the finite timestamptz range");
+        assert_eq!(err.sqlstate(), "22008");
+
+        // The same instant is valid through a local clock reading one day before
+        // the minimum civil date: the range belongs to the UTC instant.
+        let first = parse_timestamptz("4714-11-23 16:00:00-08 BC", &utc).expect("first instant");
+        assert_eq!(
+            timestamptz_to_text(first, &utc),
+            "4714-11-24 00:00:00+00 BC"
         );
     }
 
