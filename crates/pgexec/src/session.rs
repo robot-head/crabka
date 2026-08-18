@@ -16909,6 +16909,22 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT n, generate_series(1, 2) FROM generate_series(1, 2) AS g(n) \
+                 ORDER BY n DESC, 2 DESC LIMIT 2",
+            ),
+        )
+        .expect("function ProjectSet tail plan executes")
+        .expect("function ProjectSet tail uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT n, count(*) AS c FROM planned_cte \
                  GROUP BY n ORDER BY c DESC LIMIT 1",
             ),
@@ -18167,10 +18183,6 @@ mod tests {
             "SELECT n, row_number() OVER () FROM generate_series(1, 3) AS g(n) LIMIT 1",
             "SELECT row_number() OVER () FROM generate_series(1, 3) AS g(n) OFFSET 1",
             "SELECT count(*), generate_series(1, 2) FROM generate_series(1, 3) AS g(n)",
-            "SELECT DISTINCT n, generate_series(1, 2) FROM generate_series(1, 3) AS g(n)",
-            "SELECT n, generate_series(1, 2) FROM generate_series(1, 3) AS g(n) ORDER BY 1",
-            "SELECT n, generate_series(1, 2) FROM generate_series(1, 3) AS g(n) LIMIT 1",
-            "SELECT n, generate_series(1, 2) FROM generate_series(1, 3) AS g(n) OFFSET 1",
         ] {
             assert!(
                 crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
