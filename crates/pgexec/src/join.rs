@@ -35,10 +35,12 @@ pub(crate) struct Relation {
 ///
 /// Both fields are the enclosing statement's business and neither is derivable
 /// from the rows being joined, which is why they travel together.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct JoinPolicy<'a> {
     /// Memory one blocking operator may retain before it reports 53200.
     pub(crate) memory: crabka_units::ByteSize,
+    /// The statement-wide budget shared with other materializing operators.
+    pub(crate) statement_memory: crate::scanner::StatementMemory,
     /// The statement's whole-row references, which decide the hidden liveness
     /// markers an outer join carries. `None` marks every qualifier; see
     /// [`missing_live_markers`].
@@ -55,6 +57,9 @@ impl Default for JoinPolicy<'_> {
     fn default() -> Self {
         Self {
             memory: crate::scanner::BLOCKING_QUERY_MEMORY,
+            statement_memory: crate::scanner::StatementMemory::new(
+                crate::scanner::BLOCKING_QUERY_MEMORY,
+            ),
             refs: None,
         }
     }
@@ -353,6 +358,7 @@ fn join_relations_impl(
 ) -> Result<Relation, ExecError> {
     let JoinPolicy {
         memory: blocking_query_memory,
+        statement_memory,
         refs,
     } = policy;
     let condition = JoinCondition::new(&left, right, constraint)?;
@@ -388,7 +394,6 @@ fn join_relations_impl(
     let mut candidate_buf = Vec::with_capacity(index.map_or(0, JoinIndex::candidate_capacity));
 
     let mut rows = Vec::new();
-    let mut result_bytes = 0usize;
     match kind {
         JoinKind::Inner | JoinKind::Cross => {
             for l in &left.rows {
@@ -404,12 +409,7 @@ fn join_relations_impl(
                     if condition.matches(l, r, ctx)? {
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
-                        push_bounded_join_row(
-                            &mut rows,
-                            &mut result_bytes,
-                            row,
-                            blocking_query_memory,
-                        )?;
+                        push_bounded_join_row(&mut rows, row, &statement_memory)?;
                     }
                 }
             }
@@ -436,24 +436,14 @@ fn join_relations_impl(
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
                         mark(&mut row, &LIVE, &LIVE);
-                        push_bounded_join_row(
-                            &mut rows,
-                            &mut result_bytes,
-                            row,
-                            blocking_query_memory,
-                        )?;
+                        push_bounded_join_row(&mut rows, row, &statement_memory)?;
                     }
                 }
                 if !any && want_left {
                     let mut row = l.clone();
                     row.extend(vec![Datum::Null; rw]);
                     mark(&mut row, &LIVE, &Datum::Null);
-                    push_bounded_join_row(
-                        &mut rows,
-                        &mut result_bytes,
-                        row,
-                        blocking_query_memory,
-                    )?;
+                    push_bounded_join_row(&mut rows, row, &statement_memory)?;
                 }
             }
             if want_right {
@@ -462,12 +452,7 @@ fn join_relations_impl(
                         let mut row = vec![Datum::Null; lw];
                         row.extend(r.iter().cloned());
                         mark(&mut row, &Datum::Null, &LIVE);
-                        push_bounded_join_row(
-                            &mut rows,
-                            &mut result_bytes,
-                            row,
-                            blocking_query_memory,
-                        )?;
+                        push_bounded_join_row(&mut rows, row, &statement_memory)?;
                     }
                 }
             }
@@ -1084,15 +1069,10 @@ fn reads_only_left(expr: &Expr, combined: &Scope, lw: usize) -> bool {
 
 fn push_bounded_join_row(
     rows: &mut Vec<Vec<Datum>>,
-    used: &mut usize,
     row: Vec<Datum>,
-    blocking_query_memory: crabka_units::ByteSize,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<(), ExecError> {
-    let bytes = crate::scanner::datum_row_bytes(&row);
-    if crate::scanner::exceeds_query_memory(used.saturating_add(bytes), blocking_query_memory) {
-        return Err(crate::scanner::memory_budget_exceeded());
-    }
-    *used += bytes;
+    statement_memory.charge_row(&row)?;
     rows.push(row);
     Ok(())
 }
@@ -1963,6 +1943,7 @@ mod tests {
             &tctx(),
             JoinPolicy {
                 memory: budget,
+                statement_memory: crate::scanner::StatementMemory::new(budget),
                 refs: None,
             },
         )
