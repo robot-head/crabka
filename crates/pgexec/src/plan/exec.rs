@@ -43,8 +43,17 @@ pub(crate) fn try_execute_seq_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
-    let Some(SeqScanPlan {
-        plan,
+    let Some(planned) = plan_seq_scan(read_ctx, select)? else {
+        return Ok(None);
+    };
+    let mut state = PlanState::new(planned.plan.clone(), Scope::empty());
+    execute_seq_scan_plan(&mut state, read_ctx, planned).map(Some)
+}
+
+fn execute_seq_scan_plan(
+    state: &mut PlanState,
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    SeqScanPlan {
         source,
         fields,
         tys,
@@ -55,11 +64,9 @@ pub(crate) fn try_execute_seq_scan(
         aggregate,
         project_set,
         window,
-    }) = plan_seq_scan(read_ctx, select)?
-    else {
-        return Ok(None);
-    };
-    let mut state = PlanState::new(plan, Scope::empty());
+        ..
+    }: SeqScanPlan,
+) -> Result<Relation, ExecError> {
     if let Some(select) = aggregate {
         AggregateExecutor {
             read_ctx,
@@ -68,8 +75,7 @@ pub(crate) fn try_execute_seq_scan(
             tys,
             select,
         }
-        .execute(&mut state)
-        .map(Some)
+        .execute(state)
     } else if let Some(select) = project_set {
         ProjectSetExecutor {
             read_ctx,
@@ -78,16 +84,14 @@ pub(crate) fn try_execute_seq_scan(
             tys,
             select,
         }
-        .execute(&mut state)
-        .map(Some)
+        .execute(state)
     } else if let Some(select) = window {
         WindowAggExecutor {
             read_ctx,
             source,
             select,
         }
-        .execute(&mut state)
-        .map(Some)
+        .execute(state)
     } else if matches!(state.plan.node, PlanNode::Limit { .. }) {
         LimitExecutor {
             read_ctx,
@@ -99,11 +103,10 @@ pub(crate) fn try_execute_seq_scan(
             order_by,
             sort_positions,
         }
-        .execute(&mut state)
-        .map(Some)
+        .execute(state)
     } else {
         execute_seq_scan_input(
-            &mut state,
+            state,
             read_ctx,
             source,
             fields,
@@ -111,7 +114,6 @@ pub(crate) fn try_execute_seq_scan(
             order_by,
             sort_positions,
         )
-        .map(Some)
     }
 }
 
@@ -552,10 +554,14 @@ fn plan_subquery_scan(
     }
     let inner_plan = match &subquery.body {
         crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
-            let Some(ResultPlan { plan, .. }) = plan_result(inner)? else {
-                return Ok(None);
-            };
-            plan
+            if let Some(ResultPlan { plan, .. }) = plan_result(inner)? {
+                plan
+            } else {
+                let Some(SeqScanPlan { plan, .. }) = plan_seq_scan(read_ctx, inner)? else {
+                    return Ok(None);
+                };
+                plan
+            }
         }
         crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(_)) => {
             Plan {
@@ -967,17 +973,31 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
             crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
                 inner,
             )) => {
-                let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
-                    return Err(ExecError::Unsupported(
-                        "SubqueryScanExecutor received a non-Result subquery".into(),
-                    ));
-                };
-                ResultExecutor {
-                    ctx: self.read_ctx.eval_ctx,
-                    fields,
-                    tys,
+                if matches!(child.plan.node, PlanNode::Result) {
+                    let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
+                        return Err(ExecError::Unsupported(
+                            "SubqueryScanExecutor received a non-Result subquery".into(),
+                        ));
+                    };
+                    ResultExecutor {
+                        ctx: self.read_ctx.eval_ctx,
+                        fields,
+                        tys,
+                    }
+                    .execute(&mut child)?
+                } else {
+                    let Some(planned) = plan_seq_scan(self.read_ctx, inner)? else {
+                        return Err(ExecError::Unsupported(
+                            "SubqueryScanExecutor received an unsupported subquery".into(),
+                        ));
+                    };
+                    if child.plan != planned.plan {
+                        return Err(ExecError::Unsupported(
+                            "SubqueryScanExecutor child plan did not match its subquery".into(),
+                        ));
+                    }
+                    execute_seq_scan_plan(&mut child, self.read_ctx, planned)?
                 }
-                .execute(&mut child)?
             }
             crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
                 values,
