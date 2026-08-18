@@ -571,7 +571,7 @@ impl JoinIndex {
                 if crate::scanner::exceeds_query_memory(index_bytes, blocking_query_memory) {
                     return Ok(None);
                 }
-                indexes.push(EquiIndex::build_planned(right, plan));
+                indexes.push(EquiIndex::build_planned(right, plan, ctx)?);
             }
             let index = Self::Disjunctive {
                 indexes,
@@ -591,7 +591,7 @@ impl JoinIndex {
         if crate::scanner::exceeds_query_memory(plan.estimated_bytes, blocking_query_memory) {
             return Ok(None);
         }
-        let index = Self::Conjunctive(EquiIndex::build_planned(right, plan));
+        let index = Self::Conjunctive(EquiIndex::build_planned(right, plan, ctx)?);
         Ok(
             (!crate::scanner::exceeds_query_memory(index.estimated_bytes(), blocking_query_memory))
                 .then_some(index),
@@ -660,7 +660,7 @@ fn equi_keys_for(
     left: &Relation,
     right: &Relation,
     constraint: &JoinConstraint,
-) -> Result<Vec<(LeftKey, usize)>, ExecError> {
+) -> Result<Vec<(LeftKey, RightKey)>, ExecError> {
     let mut combined = left.scope.clone();
     combined.columns.extend(right.scope.columns.iter().cloned());
     match constraint {
@@ -669,7 +669,7 @@ fn equi_keys_for(
             .map(|column| {
                 Ok((
                     LeftKey::Column(left.scope.resolve(None, column)?),
-                    right.scope.resolve(None, column)?,
+                    RightKey::Column(right.scope.resolve(None, column)?),
                 ))
             })
             .collect(),
@@ -678,7 +678,7 @@ fn equi_keys_for(
             .map(|column| {
                 Ok((
                     LeftKey::Column(left.scope.resolve(None, column)?),
-                    right.scope.resolve(None, column)?,
+                    RightKey::Column(right.scope.resolve(None, column)?),
                 ))
             })
             .collect(),
@@ -721,7 +721,7 @@ struct EquiIndex {
 }
 
 struct EquiIndexPlan {
-    keys: Vec<(LeftKey, usize)>,
+    keys: Vec<(LeftKey, RightKey)>,
     left_scope: Scope,
     estimated_bytes: usize,
 }
@@ -749,20 +749,20 @@ impl EquiIndex {
     fn plan(
         left: &Relation,
         right: &Relation,
-        keys: &[(LeftKey, usize)],
+        keys: &[(LeftKey, RightKey)],
         ctx: &crate::clock::EvalCtx,
     ) -> Option<EquiIndexPlan> {
         if keys.is_empty() || left.rows.len().saturating_mul(right.rows.len()) < Self::MIN_PAIRS {
             return None;
         }
-        let keys: Vec<(LeftKey, usize)> = keys
+        let keys: Vec<(LeftKey, RightKey)> = keys
             .iter()
             .filter(|(li, ri)| {
                 // An expression key is materialized once here purely to check
                 // that its values hash the way they compare; the probe
                 // re-evaluates it per left row.
                 let left_values = match li {
-                    LeftKey::Column(lc) => LeftKeyValues::Column(*lc),
+                    LeftKey::Column(lc) => KeyVariantValues::Column(*lc),
                     LeftKey::Expr(expr) => {
                         let mut values = Vec::with_capacity(left.rows.len());
                         for row in &left.rows {
@@ -773,12 +773,25 @@ impl EquiIndex {
                                 Err(_) => return false,
                             }
                         }
-                        LeftKeyValues::Materialized(values)
+                        KeyVariantValues::Materialized(values)
                     }
                 };
                 match (
                     left_values.variant(&left.rows),
-                    key_variant(&right.rows, *ri),
+                    match ri {
+                        RightKey::Column(rc) => KeyVariantValues::Column(*rc),
+                        RightKey::Expr(expr) => {
+                            let mut values = Vec::with_capacity(right.rows.len());
+                            for row in &right.rows {
+                                match crate::eval::eval(expr, &right.scope, row, ctx) {
+                                    Ok(value) => values.push(value),
+                                    Err(_) => return false,
+                                }
+                            }
+                            KeyVariantValues::Materialized(values)
+                        }
+                    }
+                    .variant(&right.rows),
                 ) {
                     (KeyVariant::Mixed, _) | (_, KeyVariant::Mixed) => false,
                     (KeyVariant::Uniform(l), KeyVariant::Uniform(r))
@@ -800,14 +813,24 @@ impl EquiIndex {
         }
         let mut estimated_bytes = keys.len().saturating_mul(std::mem::size_of::<usize>());
         for row in &right.rows {
-            if keys.iter().any(|(_, rc)| row[*rc].is_null()) {
+            let mut key_bytes = 0usize;
+            let mut has_null = false;
+            for (_, key) in &keys {
+                let value = match key {
+                    RightKey::Column(rc) => row[*rc].clone(),
+                    RightKey::Expr(expr) => crate::eval::eval(expr, &right.scope, row, ctx).ok()?,
+                };
+                if value.is_null() {
+                    has_null = true;
+                    break;
+                }
+                key_bytes = key_bytes.saturating_add(crate::scanner::datum_row_bytes(
+                    std::slice::from_ref(&value),
+                ));
+            }
+            if has_null {
                 continue;
             }
-            let key_bytes = keys.iter().fold(0usize, |bytes, (_, rc)| {
-                bytes.saturating_add(crate::scanner::datum_row_bytes(std::slice::from_ref(
-                    &row[*rc],
-                )))
-            });
             estimated_bytes = estimated_bytes
                 .saturating_add(key_bytes)
                 // Worst-case one HashMap entry and one bucket allocation per row,
@@ -821,35 +844,46 @@ impl EquiIndex {
         })
     }
 
-    fn build_planned(right: &Relation, plan: EquiIndexPlan) -> Self {
+    fn build_planned(
+        right: &Relation,
+        plan: EquiIndexPlan,
+        ctx: &crate::clock::EvalCtx,
+    ) -> Result<Self, ExecError> {
         let keys = plan.keys;
         let mut buckets: HashMap<Vec<Datum>, Vec<usize>> = HashMap::new();
         for (ri, row) in right.rows.iter().enumerate() {
             // A NULL in the key never compares Equal, so the row is not indexed
             // and simply falls out as unmatched.
-            if keys.iter().any(|(_, rc)| row[*rc].is_null()) {
+            let key: Vec<Datum> = keys
+                .iter()
+                .map(|(_, key)| match key {
+                    RightKey::Column(rc) => Ok(row[*rc].clone()),
+                    RightKey::Expr(expr) => crate::eval::eval(expr, &right.scope, row, ctx),
+                })
+                .collect::<Result<_, _>>()?;
+            if key.iter().any(Datum::is_null) {
                 continue;
             }
-            let key: Vec<Datum> = keys.iter().map(|(_, rc)| row[*rc].clone()).collect();
             buckets.entry(key).or_default().push(ri);
         }
-        Self {
+        Ok(Self {
             left_key: keys.into_iter().map(|(lc, _)| lc).collect(),
             left_scope: plan.left_scope,
             buckets,
-        }
+        })
     }
 
     /// `keys` are `(left_column, right_column)` pairs the predicate requires to
     /// compare Equal. Returns `None` when no index applies.
     #[cfg(test)]
     fn build(left: &Relation, right: &Relation, keys: &[(usize, usize)]) -> Option<Self> {
-        let keys: Vec<(LeftKey, usize)> = keys
+        let keys: Vec<(LeftKey, RightKey)> = keys
             .iter()
-            .map(|(lc, rc)| (LeftKey::Column(*lc), *rc))
+            .map(|(lc, rc)| (LeftKey::Column(*lc), RightKey::Column(*rc)))
             .collect();
         let ctx = crate::clock::EvalCtx::test_default();
-        Self::plan(left, right, &keys, &ctx).map(|plan| Self::build_planned(right, plan))
+        Self::plan(left, right, &keys, &ctx)
+            .and_then(|plan| Self::build_planned(right, plan, &ctx).ok())
     }
 
     fn estimated_bytes(&self) -> usize {
@@ -923,12 +957,12 @@ fn key_variant_of<'a>(values: impl Iterator<Item = &'a Datum>) -> KeyVariant<'a>
 
 /// A key's left-side values during planning: read straight from a column, or
 /// materialized once from an expression so its variant can be checked.
-enum LeftKeyValues {
+enum KeyVariantValues {
     Column(usize),
     Materialized(Vec<Datum>),
 }
 
-impl LeftKeyValues {
+impl KeyVariantValues {
     fn variant<'a>(&'a self, rows: &'a [Vec<Datum>]) -> KeyVariant<'a> {
         match self {
             Self::Column(column) => key_variant(rows, *column),
@@ -979,7 +1013,7 @@ pub(crate) fn hashes_like_it_compares(sample: &Datum) -> bool {
 /// them safe as a pre-filter — the full predicate still decides every candidate.
 /// Conjuncts of any other shape (including `OR`, which is not a necessary
 /// condition) contribute no key.
-fn equi_key_columns(pred: &Expr, combined: &Scope, lw: usize) -> Vec<(LeftKey, usize)> {
+fn equi_key_columns(pred: &Expr, combined: &Scope, lw: usize) -> Vec<(LeftKey, RightKey)> {
     let mut keys = Vec::new();
     collect_equi_key_columns(pred, combined, lw, &mut keys);
     keys
@@ -989,7 +1023,7 @@ fn collect_equi_key_columns(
     pred: &Expr,
     combined: &Scope,
     lw: usize,
-    out: &mut Vec<(LeftKey, usize)>,
+    out: &mut Vec<(LeftKey, RightKey)>,
 ) {
     match pred {
         Expr::Binary {
@@ -1010,18 +1044,34 @@ fn collect_equi_key_columns(
                 combined_column_index(right, combined),
             ) {
                 (Some(a), Some(b)) => match (a < lw, b < lw) {
-                    (true, false) => out.push((LeftKey::Column(a), b - lw)),
-                    (false, true) => out.push((LeftKey::Column(b), a - lw)),
+                    (true, false) => {
+                        out.push((LeftKey::Column(a), RightKey::Column(b - lw)));
+                    }
+                    (false, true) => {
+                        out.push((LeftKey::Column(b), RightKey::Column(a - lw)));
+                    }
                     _ => {}
                 },
                 // One side is a bare right column and the other an expression
                 // over left columns only: `c.unique2 = coalesce(a.x, b.y)` keys
                 // the index on the expression's value, evaluated per left row.
                 (None, Some(b)) if b >= lw && reads_only_left(left, combined, lw) => {
-                    out.push((LeftKey::Expr(left.as_ref().clone()), b - lw));
+                    out.push((
+                        LeftKey::Expr(left.as_ref().clone()),
+                        RightKey::Column(b - lw),
+                    ));
                 }
                 (Some(a), None) if a >= lw && reads_only_left(right, combined, lw) => {
-                    out.push((LeftKey::Expr(right.as_ref().clone()), a - lw));
+                    out.push((
+                        LeftKey::Expr(right.as_ref().clone()),
+                        RightKey::Column(a - lw),
+                    ));
+                }
+                (Some(a), None) if a < lw && reads_only_right(right, combined, lw) => {
+                    out.push((LeftKey::Column(a), RightKey::Expr(right.as_ref().clone())));
+                }
+                (None, Some(b)) if b < lw && reads_only_right(left, combined, lw) => {
+                    out.push((LeftKey::Column(b), RightKey::Expr(left.as_ref().clone())));
                 }
                 _ => {}
             }
@@ -1034,6 +1084,13 @@ fn collect_equi_key_columns(
 /// expression over left columns evaluated per row.
 #[derive(Clone)]
 enum LeftKey {
+    Column(usize),
+    Expr(Expr),
+}
+
+/// How a hash key's value is obtained from a right row while building buckets.
+#[derive(Clone)]
+enum RightKey {
     Column(usize),
     Expr(Expr),
 }
@@ -1065,6 +1122,19 @@ fn reads_only_left(expr: &Expr, combined: &Scope, lw: usize) -> bool {
         _ => {}
     });
     only_left
+}
+
+fn reads_only_right(expr: &Expr, combined: &Scope, lw: usize) -> bool {
+    let mut only_right = true;
+    crate::grouping::visit_expr(expr, &mut |node: &Expr| match node {
+        Expr::Column { table, name } => match combined.resolve(table.as_deref(), name) {
+            Ok(index) if index >= lw => {}
+            _ => only_right = false,
+        },
+        Expr::ScalarSubquery(_) | Expr::Exists(_) | Expr::InSubquery { .. } => only_right = false,
+        _ => {}
+    });
+    only_right
 }
 
 fn push_bounded_join_row(
@@ -1364,6 +1434,118 @@ mod tests {
             );
             assert2::assert!(actual == expected, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn an_expression_over_right_columns_keys_the_index() {
+        let left = rel(
+            "r",
+            &["id"],
+            (0..80)
+                .map(|i| vec![-i])
+                .chain(std::iter::once(vec![1]))
+                .collect(),
+        );
+        let right = rel(
+            "s",
+            &["id"],
+            (0..80)
+                .map(|i| vec![i])
+                .chain(std::iter::once(vec![90]))
+                .collect(),
+        );
+        // ON r.id = 0 - s.id, the `join_hash` full-outer shape that was
+        // previously a 400-million-pair nested loop.
+        let constraint = JoinConstraint::On(Expr::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(Expr::Column {
+                table: Some("r".into()),
+                name: "id".into(),
+            }),
+            right: Box::new(Expr::Binary {
+                op: BinaryOp::Sub,
+                left: Box::new(Expr::Const {
+                    value: Datum::Int4(0),
+                    ty: ColumnType::Int4,
+                }),
+                right: Box::new(Expr::Column {
+                    table: Some("s".into()),
+                    name: "id".into(),
+                }),
+            }),
+        });
+
+        let index = JoinIndex::build(
+            &left,
+            &right,
+            &constraint,
+            &tctx(),
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        )
+        .expect("valid join constraint")
+        .expect("a right expression key is indexable");
+        assert2::assert!(matches!(
+            &index,
+            JoinIndex::Conjunctive(equi) if matches!(equi.left_key.as_slice(), [LeftKey::Column(0)])
+        ));
+
+        let mut expected: Vec<Vec<Datum>> = (0..80)
+            .map(|i| vec![Datum::Int4(-i), Datum::Int4(i)])
+            .collect();
+        expected.push(vec![Datum::Int4(1), Datum::Null]);
+        expected.push(vec![Datum::Null, Datum::Int4(90)]);
+        let actual = visible(
+            &join_relations(left, right, JoinKind::Full, &constraint, &tctx())
+                .expect("indexed full join"),
+        );
+        assert2::assert!(actual == expected);
+    }
+
+    #[test]
+    fn expression_join_keys_stay_on_their_own_relation_side() {
+        let left = rel("a", &["id"], vec![vec![0]]);
+        let right = rel("b", &["id"], vec![vec![0]]);
+        let mut combined = left.scope.clone();
+        combined.columns.extend(right.scope.columns.iter().cloned());
+        let column = |table: &str| Expr::Column {
+            table: Some(table.into()),
+            name: "id".into(),
+        };
+        let add = |table: &str| Expr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(column(table)),
+            right: Box::new(column(table)),
+        };
+        let eq = |left, right| Expr::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+
+        assert2::assert!(matches!(
+            equi_key_columns(&eq(add("a"), column("b")), &combined, left.scope.width()).as_slice(),
+            [(LeftKey::Expr(_), RightKey::Column(0))]
+        ));
+        assert2::assert!(matches!(
+            equi_key_columns(&eq(column("a"), add("b")), &combined, left.scope.width()).as_slice(),
+            [(LeftKey::Column(0), RightKey::Expr(_))]
+        ));
+        assert2::assert!(matches!(
+            equi_key_columns(&eq(add("b"), column("a")), &combined, left.scope.width()).as_slice(),
+            [(LeftKey::Column(0), RightKey::Expr(_))]
+        ));
+        assert2::assert!(
+            equi_key_columns(&eq(add("b"), column("b")), &combined, left.scope.width()).is_empty()
+        );
+        assert2::assert!(
+            equi_key_columns(&eq(column("a"), add("a")), &combined, left.scope.width()).is_empty()
+        );
+        assert2::assert!(
+            equi_key_columns(&eq(column("b"), add("b")), &combined, left.scope.width()).is_empty()
+        );
+        let subquery =
+            crabka_pgparser::parser::parse_expression("(SELECT 1)").expect("parse scalar subquery");
+        assert2::assert!(!reads_only_right(&subquery, &combined, left.scope.width()));
     }
 
     /// The rows as a query sees them.
@@ -2179,10 +2361,12 @@ mod tests {
     fn index_discards_an_actual_allocation_over_the_budget() {
         let left = rel("a", &["k"], (0..80).map(|i| vec![i]).collect());
         let right = rel("b", &["k"], (0..80).map(|i| vec![i]).collect());
-        let keys = [(LeftKey::Column(0), 0)];
+        let keys = [(LeftKey::Column(0), RightKey::Column(0))];
         let plan = EquiIndex::plan(&left, &right, &keys, &tctx()).expect("index plan");
         let planned_bytes = plan.estimated_bytes;
-        let actual_bytes = EquiIndex::build_planned(&right, plan).estimated_bytes();
+        let actual_bytes = EquiIndex::build_planned(&right, plan, &tctx())
+            .expect("build planned index")
+            .estimated_bytes();
         assert2::assert!(actual_bytes > planned_bytes);
 
         let budget = crabka_units::ByteSize::from_bytes(
