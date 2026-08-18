@@ -16882,6 +16882,13 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT n FROM (SELECT 1 AS n) AS derived WHERE n > 0"),
+        )
+        .expect("SubqueryScan plan executes")
+        .expect("derived Result source uses SubqueryScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT n FROM planned_transition WHERE n > 1"),
         )
         .expect("NamedTuplestoreScan plan executes")
@@ -16956,6 +16963,17 @@ mod tests {
             "SELECT n FROM generate_series(1, 3) AS g(n) ORDER BY n",
             "SELECT n FROM generate_series(1, 3) AS g(n) LIMIT 1",
             "SELECT n FROM planned_table_function()",
+            "SELECT n FROM LATERAL (SELECT 1 AS n) AS derived",
+            "SELECT n FROM (SELECT n FROM seq_scan_test) AS derived",
+            "SELECT n FROM (SELECT 1 AS n ORDER BY n) AS derived",
+            "SELECT n FROM (SELECT 1 AS n OFFSET 0) AS derived",
+            "SELECT n FROM (SELECT 1 AS n FOR UPDATE) AS derived",
+            "SELECT n FROM (SELECT 1 AS n) AS derived ORDER BY n",
+            "SELECT n FROM (SELECT 1 AS n) AS derived OFFSET 0",
+            "SELECT DISTINCT n FROM (SELECT 1 AS n) AS derived",
+            "SELECT count(*) FROM (SELECT 1 AS n) AS derived",
+            "SELECT grouping(n) FROM (SELECT 1 AS n) AS derived",
+            "SELECT row_number() OVER () FROM (SELECT 1 AS n) AS derived",
             "SELECT DISTINCT n FROM planned_cte",
             "SELECT n FROM planned_cte AS p(n)",
             "SELECT n FROM planned_cte TABLESAMPLE BERNOULLI(100)",
