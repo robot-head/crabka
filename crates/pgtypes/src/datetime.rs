@@ -1812,12 +1812,18 @@ fn combine_parts(date: Date, micros_of_day: i64, s: &str) -> Result<DateTime, Ty
 /// Reject a literal outside the finite range, the timestamp counterpart of
 /// [`check_finite_date`].
 fn check_finite_timestamp(ts: DateTime, s: &str) -> Result<(), TypeError> {
-    if timestamp_is_infinite(ts) || ts.date() < MIN_FINITE_DATE {
+    if !timestamp_is_in_range(ts) {
         return Err(TypeError::DatetimeOutOfRange {
             message: format!("timestamp out of range: \"{s}\""),
         });
     }
     Ok(())
+}
+
+/// Whether a timestamp is a finite value in PostgreSQL's supported range.
+#[must_use]
+pub fn timestamp_is_in_range(ts: DateTime) -> bool {
+    !timestamp_is_infinite(ts) && ts.date() >= MIN_FINITE_DATE
 }
 
 /// Render a `timestamp` as `YYYY-MM-DD HH:MM:SS[.ffffff]` (SPACE separator,

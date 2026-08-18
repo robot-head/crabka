@@ -527,7 +527,7 @@ fn date_bin(
         .checked_mul(86_400_000_000)
         .and_then(|days| days.checked_add(stride.micros))
     else {
-        return Err(out_of_range("stride is too large"));
+        return Err(out_of_range("interval out of range"));
     };
     if width <= 0 {
         return Err(out_of_range("stride must be greater than zero"));
@@ -563,9 +563,13 @@ fn date_bin(
         .to_be_bytes();
     let _ = tz;
     match source {
-        Datum::Timestamp(_) => crabka_pgtypes::datetime::timestamp_from_binary(&binned)
-            .map(Datum::Timestamp)
-            .map_err(ExecError::from),
+        Datum::Timestamp(_) => {
+            let timestamp = crabka_pgtypes::datetime::timestamp_from_binary(&binned)?;
+            if !crabka_pgtypes::datetime::timestamp_is_in_range(timestamp) {
+                return Err(out_of_range("timestamp out of range"));
+            }
+            Ok(Datum::Timestamp(timestamp))
+        }
         _ => crabka_pgtypes::datetime::timestamptz_from_binary(&binned)
             .map(Datum::Timestamptz)
             .map_err(ExecError::from),
@@ -1602,6 +1606,8 @@ mod tests {
 
     use crabka_pgtypes::{ColumnType, Datum};
 
+    use super::date_bin;
+
     use crate::{
         clock::{EvalCtx, FixedClock},
         scope::Scope,
@@ -1647,6 +1653,53 @@ mod tests {
     }
     fn num(s: &str) -> Datum {
         Datum::Numeric(crabka_pgtypes::numeric::parse(s).expect("n"))
+    }
+
+    #[test]
+    fn date_bin_reports_postgres_overflow_errors() {
+        use assert2::assert;
+        use crabka_pgtypes::datetime::{Interval, parse_timestamp};
+
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        assert!(
+            ev(
+                "date_bin(interval '15 minutes', timestamp '2024-02-11 15:44:17.71393', timestamp '2001-01-01')",
+                &ctx,
+            ) == Datum::Timestamp(parse_timestamp("2024-02-11 15:30:00").expect("binned"))
+        );
+        for (stride, source, origin, message) in [
+            (
+                Interval {
+                    months: 0,
+                    days: 200_000_000,
+                    micros: 0,
+                },
+                "2024-02-01",
+                "2024-01-01",
+                "interval out of range",
+            ),
+            (
+                Interval {
+                    months: 0,
+                    days: 365_000,
+                    micros: 0,
+                },
+                "4400-01-01 BC",
+                "4000-01-01 BC",
+                "timestamp out of range",
+            ),
+        ] {
+            let error = date_bin(
+                &Datum::Interval(stride),
+                &Datum::Timestamp(parse_timestamp(source).expect("source")),
+                &Datum::Timestamp(parse_timestamp(origin).expect("origin")),
+                &ctx.time_zone,
+            )
+            .expect_err("overflow")
+            .into_pg();
+            assert!(error.code == "22008");
+            assert!(error.message == message);
+        }
     }
 
     /// `AT TIME ZONE` and `date_trunc`'s zone argument read their text as a
