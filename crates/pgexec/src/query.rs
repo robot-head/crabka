@@ -25,12 +25,18 @@ pub(crate) fn query_to_relation_with_ctes(
             crate::grouping::reject_misplaced_calls(&s)?;
             if !crate::exec::select_contains_subquery(&s) {
                 let planned = crate::subquery::resolve_in_select(&query_ctx, &s)?;
-                if let Some(relation) = crate::plan::exec::try_execute_result(&planned, ctx.eval_ctx)? {
+                if let Some((relation, state)) =
+                    crate::plan::exec::try_execute_result_with_state(&planned, ctx.eval_ctx)?
+                {
+                    query_ctx.record_plan_state(state);
                     return Ok(relation);
                 }
                 let refs = crate::scope::StatementRefs::of_select(&planned);
                 let plan_ctx = query_ctx.with_refs(&refs);
-                if let Some(relation) = crate::plan::exec::try_execute_seq_scan(&plan_ctx, &planned)? {
+                if let Some((relation, state)) =
+                    crate::plan::exec::try_execute_seq_scan_with_state(&plan_ctx, &planned)?
+                {
+                    plan_ctx.record_plan_state(state);
                     return Ok(relation);
                 }
                 return crate::exec::select_to_relation_with_ctes(&query_ctx, &planned);

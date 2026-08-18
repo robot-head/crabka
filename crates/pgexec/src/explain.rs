@@ -33,6 +33,15 @@ pub(crate) struct PlanNode {
     /// `key: value` detail lines printed under the node, in `PostgreSQL`'s order.
     pub(crate) details: Vec<(String, String)>,
     pub(crate) children: Vec<PlanNode>,
+    actual: Option<PlanActual>,
+}
+
+/// Measurements gathered by the executor for one node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlanActual {
+    rows: u64,
+    loops: u64,
+    rows_removed: u64,
 }
 
 impl PlanNode {
@@ -43,6 +52,7 @@ impl PlanNode {
             alias: None,
             details: Vec::new(),
             children: Vec::new(),
+            actual: None,
         }
     }
 
@@ -70,6 +80,50 @@ impl PlanNode {
             }
         }
         line
+    }
+}
+
+/// Build a renderable tree from the plan the executor actually ran.
+pub(crate) fn plan_runtime_state(state: &crate::plan::query::PlanState) -> PlanNode {
+    use crate::plan::query::PlanNode as ExecutableNode;
+
+    let mut node = PlanNode::new(match &state.plan.node {
+        ExecutableNode::Result => "Result",
+        ExecutableNode::SeqScan { .. } => "Seq Scan",
+        ExecutableNode::Filter { .. } => "Filter",
+        ExecutableNode::Aggregate { .. } => "Aggregate",
+        ExecutableNode::Sort { .. } => "Sort",
+        ExecutableNode::Unique { .. } => "Unique",
+        ExecutableNode::Limit { .. } => "Limit",
+        ExecutableNode::ProjectSet { .. } => "ProjectSet",
+        ExecutableNode::WindowAgg { .. } => "WindowAgg",
+        ExecutableNode::ValuesScan => "Values Scan",
+        ExecutableNode::FunctionScan => "Function Scan",
+        ExecutableNode::SubqueryScan { .. } => "Subquery Scan",
+        ExecutableNode::CteScan => "CTE Scan",
+        ExecutableNode::NamedTuplestoreScan => "Named Tuplestore Scan",
+        ExecutableNode::TableFunctionScan => "Table Function Scan",
+        ExecutableNode::NestedLoop { .. } => "Nested Loop",
+    });
+    node.actual = Some(PlanActual {
+        rows: state.ntuples,
+        loops: state.nloops,
+        rows_removed: state.rows_removed,
+    });
+    node.children = state.children.iter().map(plan_runtime_state).collect();
+    node
+}
+
+/// Apply executor counters to the syntactic tree that supplies PostgreSQL's
+/// relation names and detail text. The executor has an explicit `Filter` node;
+/// PostgreSQL prints that state on its scan or join child instead.
+pub(crate) fn apply_runtime_state(
+    rendered: &mut PlanNode,
+    runtime: &PlanNode,
+) {
+    rendered.actual = runtime.actual;
+    for (child, runtime_child) in rendered.children.iter_mut().zip(&runtime.children) {
+        apply_runtime_state(child, runtime_child);
     }
 }
 
@@ -889,15 +943,28 @@ fn render_text_node(
         headline.push_str(" (cost=0.00..0.00 rows=0 width=0)");
     }
     if options.analyze {
-        // Only the root node's row count is measured; Gres has no per-node
-        // instrumentation, so an inner node reports zero rather than inventing.
-        let rows = if root { actual_rows } else { 0 };
-        write!(headline, " (actual rows={rows}.00 loops=1)").expect("String write");
+        let actual = node.actual.unwrap_or(PlanActual {
+            rows: u64::try_from(if root { actual_rows } else { 0 }).expect("row count fits u64"),
+            loops: 1,
+            rows_removed: 0,
+        });
+        write!(headline, " (actual rows={}.00 loops={})", actual.rows, actual.loops)
+            .expect("String write");
     }
     lines.push(headline);
     let detail_indent = " ".repeat(2 + depth * 6);
     for (key, value) in &node.details {
         lines.push(format!("{detail_indent}{key}: {value}"));
+    }
+    if (matches!(node.node_type.as_str(), "Filter")
+        || node.details.iter().any(|(key, _)| key == "Filter"))
+        && let Some(actual) = node.actual
+        && actual.rows_removed > 0
+    {
+        lines.push(format!(
+            "{detail_indent}Rows Removed by Filter: {}",
+            actual.rows_removed
+        ));
     }
     for child in &node.children {
         render_text_node(child, options, depth + 1, actual_rows, lines);
@@ -1106,6 +1173,47 @@ mod tests {
             costs: false,
             ..ExplainOptions::default()
         }
+    }
+
+    #[test]
+    fn runtime_tree_renders_each_nodes_actual_counters() {
+        use crate::plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState};
+        use crate::scope::Scope;
+
+        let scan = ExecutablePlan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: ExecutableNode::SeqScan { scanrelid: 1 },
+        };
+        let filter = ExecutablePlan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: ExecutableNode::Filter {
+                input: Box::new(scan.clone()),
+            },
+        };
+        let mut state = PlanState::new(filter, Scope::empty());
+        state.nloops = 1;
+        state.ntuples = 2;
+        state.rows_removed = 1;
+        let mut child = PlanState::new(scan, Scope::empty());
+        child.nloops = 1;
+        child.ntuples = 3;
+        state.children.push(child);
+
+        let options = ExplainOptions {
+            analyze: true,
+            costs: false,
+            ..ExplainOptions::default()
+        };
+        assert!(
+            render_with_rows(&plan_runtime_state(&state), &options, 0)
+                == vec![
+                    "Filter (actual rows=2.00 loops=1)",
+                    "  Rows Removed by Filter: 1",
+                    "  ->  Seq Scan (actual rows=3.00 loops=1)",
+                ]
+        );
     }
 
     /// Each expected block is PostgreSQL 18.4's own `EXPLAIN (COSTS OFF)` text,

@@ -22,6 +22,7 @@ use super::query::{Executor, Plan, PlanNode, PlanState, RestrictInfo, TargetEntr
 
 /// Execute the subset of SELECT that is exactly one scalar `Result` node.
 /// Returns `None` for every shape that still needs a later P0a node.
+#[cfg(test)]
 pub(crate) fn try_execute_result(
     select: &SelectStmt,
     ctx: &crate::clock::EvalCtx,
@@ -46,6 +47,7 @@ pub(crate) fn try_execute_result_with_state(
 ///
 /// More elaborate tails remain on the established path until their own plan
 /// nodes land, so this node owns only scan, filter, and scalar projection.
+#[cfg(test)]
 pub(crate) fn try_execute_seq_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,

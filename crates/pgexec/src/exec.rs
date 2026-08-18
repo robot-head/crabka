@@ -310,6 +310,7 @@ impl<'a> WriteContext<'a> {
             security_role: self.fctx.effective_role(),
             policy_stack: self.policy_stack,
             refs: None,
+            explain_plan_state: None,
         }
     }
 
@@ -17478,13 +17479,16 @@ pub(crate) fn select_to_relation_with_ctes(
     let s = &resolved;
     crate::window::reject_misplaced_calls(s)?;
     crate::grouping::reject_misplaced_calls(s)?;
-    if let Some(relation) = crate::plan::exec::try_execute_result(s, ctx)? {
+    if let Some((relation, state)) = crate::plan::exec::try_execute_result_with_state(s, ctx)? {
+        read_ctx.record_plan_state(state);
         return Ok(relation);
     }
     if !correlated
         && row_exprs.is_none()
-        && let Some(relation) = crate::plan::exec::try_execute_seq_scan(read_ctx, s)?
+        && let Some((relation, state)) =
+            crate::plan::exec::try_execute_seq_scan_with_state(read_ctx, s)?
     {
+        read_ctx.record_plan_state(state);
         return Ok(relation);
     }
     let relation = if s.from.is_empty() {

@@ -64,6 +64,11 @@ pub(crate) struct SubCtx<'a> {
     /// with its own as it starts, so a view body or a subquery is measured by
     /// its own text and never by the text of whatever reached it.
     pub refs: Option<&'a crate::scope::StatementRefs>,
+    /// Where an `EXPLAIN ANALYZE` read retains the root state its planned path
+    /// executed. Ordinary reads leave this absent.
+    pub explain_plan_state: Option<
+        std::sync::Arc<std::sync::Mutex<Option<crate::plan::query::PlanState>>>,
+    >,
 }
 
 impl<'a> SubCtx<'a> {
@@ -87,6 +92,7 @@ impl<'a> SubCtx<'a> {
             security_role: self.security_role,
             policy_stack: self.policy_stack,
             refs: self.refs,
+            explain_plan_state: self.explain_plan_state.clone(),
         }
     }
 
@@ -177,6 +183,14 @@ impl<'a> SubCtx<'a> {
             memory: self.blocking_query_memory,
             statement_memory: self.statement_memory.clone(),
             refs: self.refs,
+        }
+    }
+
+    /// Retain the one planned root that produced this read's result for the
+    /// enclosing `EXPLAIN ANALYZE` renderer.
+    pub(crate) fn record_plan_state(&self, state: crate::plan::query::PlanState) {
+        if let Some(slot) = &self.explain_plan_state {
+            *slot.lock().expect("EXPLAIN plan state") = Some(state);
         }
     }
 
@@ -881,7 +895,10 @@ fn scalar_subquery_type(
 
 #[cfg(test)]
 mod tests {
+    use crabka_pgkv::MemKv;
+    use crabka_pgmvcc::visibility::Snapshot;
     use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
+    use crabka_units::convert::ByteSizeExt as _;
 
     use crate::SqlEngine;
 
@@ -910,6 +927,52 @@ mod tests {
             QueryResult::Rows { rows, .. } => rows.len(),
             other => panic!("expected Rows, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn derived_contexts_replace_their_requested_scope() {
+        let kv = MemKv::new();
+        let snapshot = Snapshot {
+            xmin: 0,
+            xmax: u64::MAX,
+            xip: Vec::new(),
+        };
+        let ctes = crate::cte::CteContext::empty();
+        let eval_ctx = crate::clock::EvalCtx::test_default();
+        let scanner = crate::scanner::LocalRangeScanner;
+        let policy_stack = crate::rls::PolicyStack::default();
+        let refs = crate::scope::StatementRefs::default();
+        let ctx = super::SubCtx {
+            catalog_kv: &kv,
+            kv: &kv,
+            global: &kv,
+            gsnap: &snapshot,
+            snapshot: &snapshot,
+            own: None,
+            ctes: &ctes,
+            eval_ctx: &eval_ctx,
+            fctx: crate::exec::ForeignCtx::none(),
+            range_scanner: &scanner,
+            blocking_query_memory: crabka_units::ByteSize::from_bytes(1),
+            statement_memory: crate::scanner::StatementMemory::new(
+                crabka_units::ByteSize::from_bytes(1),
+            ),
+            security_role: "owner",
+            policy_stack: &policy_stack,
+            refs: Some(&refs),
+            explain_plan_state: None,
+        };
+
+        assert!(ctx.with_refs_opt(None).refs.is_none());
+        assert_eq!(ctx.with_security_role("reader").security_role, "reader");
+
+        let resolution = crate::relname::ResolutionScope {
+            search_path: crate::search_path::SearchPath::parse("private"),
+            user: "reader".into(),
+            backend_id: 42,
+            database: "other".into(),
+        };
+        assert_eq!(ctx.with_resolution(&resolution).fctx.resolution, &resolution);
     }
 
     async fn seed() -> SqlEngine {

@@ -2818,6 +2818,9 @@ pub struct SqlSession {
     /// cancellation/completion pair for each one so protocol cancellation can
     /// stop every worker before releasing the transaction's locks.
     active_workers: Vec<ActiveWorker>,
+    /// The planned root state produced while the enclosing `EXPLAIN ANALYZE`
+    /// runs its statement. The blocking read worker writes this once.
+    explain_plan_state: Option<Arc<Mutex<Option<crate::plan::query::PlanState>>>>,
     next_worker_id: usize,
     /// True only for the transaction wrapper opened by one autocommit
     /// statement. A canceled user `BEGIN` must become Failed, not Idle.
@@ -3286,6 +3289,7 @@ impl SqlSession {
             authenticated_user: "public".into(),
             plpgsql_call_depth: Arc::new(AtomicUsize::new(0)),
             active_workers: Vec::new(),
+            explain_plan_state: None,
             next_worker_id: 0,
             implicit_transaction: false,
             implicit_xid: None,
@@ -5251,19 +5255,33 @@ impl SqlSession {
             crate::exec::describe_statement(&*self.catalog_kv, &self.resolution_scope(), statement)
         })?;
         let mut actual_rows = 0;
+        let explain_plan_state = if options.analyze {
+            Some(Arc::new(Mutex::new(None)))
+        } else {
+            None
+        };
         if options.analyze {
             // ANALYZE runs the statement for real, inside the caller's
             // transaction, exactly as PostgreSQL does.
-            let outcome = Box::pin(self.run_one(statement)).await?;
+            self.explain_plan_state = explain_plan_state.clone();
+            let outcome = Box::pin(self.run_one(statement)).await;
+            self.explain_plan_state = None;
+            let outcome = outcome?;
             if let QueryResult::Rows { rows, .. } = &outcome {
                 actual_rows = rows.len();
             }
         }
         // Deciding whether a call aggregates is a catalog question once a user
         // can define an aggregate, so the renderer needs the runtime too.
-        let plan = crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
+        let mut plan = crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
             crate::explain::plan_statement(statement)
         });
+        if let Some(state) = explain_plan_state
+            .and_then(|slot| slot.lock().expect("EXPLAIN plan state").take())
+        {
+            let runtime = crate::explain::plan_runtime_state(&state);
+            crate::explain::apply_runtime_state(&mut plan, &runtime);
+        }
         let lines = crate::explain::render_with_rows(&plan, options, actual_rows);
         let field = FieldDescription {
             name: "QUERY PLAN".into(),
@@ -8012,6 +8030,7 @@ impl SqlSession {
         let row_security = self.guc.row_security();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
+        let explain_plan_state = self.explain_plan_state.clone();
         let stmt = stmt.clone();
         let (requests, request_rx) = mpsc::channel(1);
         let (worker_id, cancel, finished) = self.register_worker();
@@ -8061,6 +8080,7 @@ impl SqlSession {
                 security_role: fctx.effective_role(),
                 policy_stack: &policy_stack,
                 refs: None,
+                explain_plan_state,
             };
             with_query_cancel_runtime(Some(cancel.canceled), || {
                 with_guc_runtime(guc_values, guc_settings, prepared, || {
@@ -9707,6 +9727,7 @@ impl SqlSession {
                 security_role: fctx.effective_role(),
                 policy_stack: &policy_stack,
                 refs: None,
+                explain_plan_state: None,
             };
             crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
                 runtime.block_on(async {
@@ -16851,6 +16872,7 @@ mod tests {
             security_role: fctx.effective_role(),
             policy_stack: &policy_stack,
             refs: None,
+            explain_plan_state: None,
         };
 
         let select_of = |sql: &str| {
@@ -19480,7 +19502,19 @@ mod tests {
                 == Ok(vec![
                     vec!["Sort (actual rows=2.00 loops=1)".into()],
                     vec!["  Sort Key: id".into()],
-                    vec!["  ->  Seq Scan on t (actual rows=0.00 loops=1)".into()],
+                    vec!["  ->  Seq Scan on t (actual rows=2.00 loops=1)".into()],
+                ])
+        );
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM t WHERE id = 1",
+            )
+            .await
+                == Ok(vec![
+                    vec!["Seq Scan on t (actual rows=1.00 loops=1)".into()],
+                    vec!["  Filter: (id = 1)".into()],
+                    vec!["  Rows Removed by Filter: 1".into()],
                 ])
         );
         assert!(sqlstate(&mut s, "EXPLAIN (NO_SUCH_OPTION) SELECT 1").await == "42601");
