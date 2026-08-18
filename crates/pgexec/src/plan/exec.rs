@@ -1582,16 +1582,17 @@ fn plan_subquery_input(
     else {
         return Ok(None);
     };
-    if subquery.with.is_some()
-        || !subquery.order_by.is_empty()
-        || subquery.limit.is_some()
-        || subquery.offset.is_some()
-        || subquery.locking.is_some()
-    {
-        return Ok(None);
-    }
     match &subquery.body {
         crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
+            if subquery.with.is_some()
+                || !subquery.order_by.is_empty()
+                || subquery.limit.is_some()
+                || subquery.offset.is_some()
+                || subquery.with_ties
+                || subquery.locking.is_some()
+            {
+                return Ok(None);
+            }
             if let Some(ResultPlan { plan, .. }) = plan_result(inner)? {
                 Ok(Some(plan))
             } else {
@@ -1599,6 +1600,9 @@ fn plan_subquery_input(
             }
         }
         crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(_)) => {
+            if subquery.with.is_some() || subquery.locking.is_some() {
+                return Ok(None);
+            }
             Ok(Some(Plan {
                 target_list: Vec::new(),
                 quals: Vec::new(),
