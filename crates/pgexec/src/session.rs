@@ -17183,6 +17183,77 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT count(*) FROM (VALUES (1), (2), (2)) AS derived(n)"),
+        )
+        .expect("SubqueryScan Aggregate plan executes")
+        .expect("derived aggregate uses Aggregate");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(3)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT DISTINCT n FROM (VALUES (1), (2), (2)) AS derived(n)"),
+        )
+        .expect("SubqueryScan Unique plan executes")
+        .expect("derived distinct uses Unique");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT n FROM (VALUES (1), (2), (2)) AS derived(n) \
+                 ORDER BY n DESC LIMIT 1",
+            ),
+        )
+        .expect("SubqueryScan Sort/Limit plan executes")
+        .expect("derived sort and limit use Sort and Limit");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
+        let derived_project_set_select = select_of(
+            "SELECT n, generate_series(1, 2) \
+             FROM (VALUES (1)) AS derived(n)",
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &derived_project_set_select)
+        .expect("SubqueryScan ProjectSet plan executes")
+        .expect("derived projection SRF uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let planned = crate::plan::exec::subquery_scan_plan_for_test(
+            &read_ctx,
+            &derived_project_set_select,
+            &derived_project_set_select.from[0],
+        )
+        .expect("SubqueryScan ProjectSet plans")
+        .expect("derived projection SRF uses ProjectSet");
+        let crate::plan::query::PlanNode::ProjectSet { input } = &planned.node else {
+            panic!("derived projection SRF should plan a ProjectSet");
+        };
+        assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT n, row_number() OVER (ORDER BY n DESC) \
+                 FROM (VALUES (1), (2)) AS derived(n)",
+            ),
+        )
+        .expect("SubqueryScan WindowAgg plan executes")
+        .expect("derived window uses WindowAgg");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(2)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT a FROM (SELECT a FROM seq_scan_test WHERE a > 1) AS derived"),
         )
         .expect("SubqueryScan SeqScan plan executes")
@@ -17400,12 +17471,22 @@ mod tests {
             "SELECT n FROM (SELECT 1 AS n ORDER BY n) AS derived",
             "SELECT n FROM (SELECT 1 AS n OFFSET 0) AS derived",
             "SELECT n FROM (SELECT 1 AS n FOR UPDATE) AS derived",
-            "SELECT n FROM (SELECT 1 AS n) AS derived ORDER BY n",
-            "SELECT n FROM (SELECT 1 AS n) AS derived OFFSET 0",
-            "SELECT DISTINCT n FROM (SELECT 1 AS n) AS derived",
-            "SELECT count(*) FROM (SELECT 1 AS n) AS derived",
             "SELECT grouping(n) FROM (SELECT 1 AS n) AS derived",
-            "SELECT row_number() OVER () FROM (SELECT 1 AS n) AS derived",
+            "SELECT DISTINCT count(*) FROM (SELECT 1 AS n) AS derived",
+            "SELECT count(*) FROM (SELECT 1 AS n) AS derived ORDER BY 1",
+            "SELECT count(*) FROM (SELECT 1 AS n) AS derived LIMIT 1",
+            "SELECT count(*) FROM (SELECT 1 AS n) AS derived OFFSET 1",
+            "SELECT count(*), row_number() OVER () FROM (SELECT 1 AS n) AS derived",
+            "SELECT generate_series(1, 2), row_number() OVER () FROM (SELECT 1 AS n) AS derived",
+            "SELECT DISTINCT n, row_number() OVER () FROM (SELECT 1 AS n) AS derived",
+            "SELECT n, row_number() OVER () FROM (SELECT 1 AS n) AS derived ORDER BY 1",
+            "SELECT n, row_number() OVER () FROM (SELECT 1 AS n) AS derived LIMIT 1",
+            "SELECT row_number() OVER () FROM (SELECT 1 AS n) AS derived OFFSET 1",
+            "SELECT count(*), generate_series(1, 2) FROM (SELECT 1 AS n) AS derived",
+            "SELECT DISTINCT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived",
+            "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived ORDER BY 1",
+            "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived LIMIT 1",
+            "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived OFFSET 1",
             "SELECT n FROM planned_cte AS p(n)",
             "SELECT n FROM planned_cte TABLESAMPLE BERNOULLI(100)",
             "SELECT grouping(n) FROM planned_cte",
