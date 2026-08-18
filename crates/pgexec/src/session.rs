@@ -16928,6 +16928,30 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(3)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of(
+                "SELECT a, p FROM seq_scan_test, planned_cte AS c(p) WHERE a = 1 AND p = 2",
+            ),
+        )
+        .expect("NestedLoop CteScan plan executes")
+        .expect("aliased CTE in a nested loop uses CteScan");
+        assert_eq!(
+            relation.rows,
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int4(2),
+            ]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT a FROM seq_scan_test, planned_transition TABLESAMPLE SYSTEM (0)",
+            ),
+        )
+        .expect("NestedLoop NamedTuplestoreScan plan executes")
+        .expect("sampled transition in a nested loop uses NamedTuplestoreScan");
+        assert!(relation.rows.is_empty());
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT count(*) FROM planned_cte TABLESAMPLE SYSTEM (0)"),
         )
         .expect("sampled CteScan plan executes")
@@ -17736,8 +17760,6 @@ mod tests {
             ]
         );
         for sql in [
-            "SELECT a FROM seq_scan_test, planned_cte AS p(n)",
-            "SELECT a FROM seq_scan_test, planned_cte TABLESAMPLE BERNOULLI(100)",
             "SELECT a FROM seq_scan_test, public.planned_cte",
             "SELECT a.i FROM generate_series(1, 2) AS a(i) \
              JOIN generate_series(1, 2) AS b(i) ON a.i = b.i",

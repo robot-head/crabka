@@ -421,16 +421,9 @@ fn is_nested_loop_source(
     source: &TableExpr,
 ) -> bool {
     match source {
-        TableExpr::Table {
-            name,
-            columns,
-            sample,
-            ..
-        } => {
+        TableExpr::Table { name, .. } => {
             is_direct_stored_scan_source(read_ctx, source)
-                || (sample.is_none()
-                    && columns.is_none()
-                    && name.schema.is_none()
+                || (name.schema.is_none()
                     && (read_ctx.ctes.lookup(&name.name).is_some()
                         || read_ctx
                             .eval_ctx
