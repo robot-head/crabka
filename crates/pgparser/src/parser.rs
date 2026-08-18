@@ -120,6 +120,15 @@ enum FuncAliasColumns {
     Definitions(Vec<crate::ast::TableFuncColumnDef>),
 }
 
+#[derive(Clone, Copy)]
+enum SelectIntoContext {
+    Allowed,
+    Rejected {
+        message: &'static str,
+        reports_position: bool,
+    },
+}
+
 pub(crate) struct Parser {
     toks: Vec<(Token, usize)>,
     source: String,
@@ -143,6 +152,9 @@ pub(crate) struct Parser {
     select_into: Option<crate::ast::RelationRef>,
     /// Whether the pending `SELECT … INTO` target was `TEMP`/`TEMPORARY`.
     select_into_temporary: bool,
+    /// The statement context that owns the query currently being parsed.  A
+    /// `SELECT INTO` creates a table only at a statement's outer query level.
+    select_into_context: SelectIntoContext,
     /// One frame per `SELECT` currently being parsed, innermost last: the window
     /// calls met so far in that SELECT. A subquery pushes its own frame, so a
     /// window call always lands on the SELECT that owns it.
@@ -277,6 +289,7 @@ impl Parser {
             depth: Rc::new(Cell::new(0)),
             select_into: None,
             select_into_temporary: false,
+            select_into_context: SelectIntoContext::Allowed,
             window_calls: Vec::new(),
             window_spec_depth: 0,
             unnamed_subqueries: 0,
@@ -286,6 +299,30 @@ impl Parser {
     fn with_type_schemas(mut self, schemas: &[String]) -> Self {
         self.type_schemas = Some(schemas.to_vec());
         self
+    }
+
+    fn in_select_into_context<T>(
+        &mut self,
+        context: SelectIntoContext,
+        parse: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        let previous = std::mem::replace(&mut self.select_into_context, context);
+        let result = parse(self);
+        self.select_into_context = previous;
+        result
+    }
+
+    fn in_nested_query<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        self.in_select_into_context(
+            SelectIntoContext::Rejected {
+                message: "SELECT ... INTO is not allowed here",
+                reports_position: true,
+            },
+            parse,
+        )
     }
 
     fn peek(&self) -> &Token {
@@ -1026,7 +1063,9 @@ impl Parser {
                         expr: Box::new(lhs),
                         op,
                         all,
-                        subquery: Box::new(self.query_expr_after_open_paren()?),
+                        subquery: Box::new(
+                            self.in_nested_query(Self::query_expr_after_open_paren)?,
+                        ),
                     }
                 } else {
                     let array = Box::new(self.expr(0)?);
@@ -1484,7 +1523,7 @@ impl Parser {
                     Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With)
                 ) {
                     self.bump();
-                    let sub = self.query_expr_after_open_paren()?;
+                    let sub = self.in_nested_query(Self::query_expr_after_open_paren)?;
                     Ok(Expr::ScalarSubquery(Box::new(sub)))
                 } else {
                     self.bump();
@@ -1510,7 +1549,7 @@ impl Parser {
             Token::Keyword(Keyword::Exists) if *self.peek2() == Token::LParen => {
                 self.bump(); // EXISTS
                 self.expect(&Token::LParen)?;
-                let sub = self.query_expr_after_open_paren()?;
+                let sub = self.in_nested_query(Self::query_expr_after_open_paren)?;
                 Ok(Expr::Exists(Box::new(sub)))
             }
             Token::Keyword(Keyword::Array) => self.array_literal(),
@@ -1738,7 +1777,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Array))?;
         if *self.peek() == Token::LParen {
             self.bump();
-            let query = self.query_expr_after_open_paren()?;
+            let query = self.in_nested_query(Self::query_expr_after_open_paren)?;
             return Ok(Expr::ArraySubquery(Box::new(query)));
         }
         self.array_constructor_body()
@@ -3238,7 +3277,7 @@ impl Parser {
             self.peek(),
             Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With)
         ) {
-            let subquery = self.query_expr_after_open_paren()?;
+            let subquery = self.in_nested_query(Self::query_expr_after_open_paren)?;
             return Ok(Expr::InSubquery {
                 expr: Box::new(lhs),
                 subquery: Box::new(subquery),
@@ -5814,7 +5853,7 @@ impl Parser {
             self.expect_ident_eq("hold")?;
         }
         self.expect(&Token::Keyword(Keyword::For))?;
-        let query = self.query_expr()?;
+        let query = self.in_nested_query(Self::query_expr)?;
         Ok(crate::ast::Statement::DeclareCursor {
             name,
             binary,
@@ -6870,7 +6909,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Using))?;
         let source = if *self.peek() == Token::LParen {
             self.bump();
-            let query = self.query_expr_after_open_paren()?;
+            let query = self.in_nested_query(Self::query_expr_after_open_paren)?;
             let alias = self.opt_alias()?.ok_or_else(|| {
                 ParseError::new(
                     "subquery in MERGE USING must have an alias",
@@ -7029,7 +7068,7 @@ impl Parser {
             .then(|| self.expect_col_id())
             .transpose()?;
         self.expect(&Token::Keyword(Keyword::As))?;
-        let query = self.query_expr()?;
+        let query = self.in_nested_query(Self::query_expr)?;
         let with_data = if self.eat_keyword(Keyword::With) {
             let no = self.eat_keyword(Keyword::Not) || self.eat_ident_eq("no");
             self.expect(&Token::Keyword(Keyword::Data))?;
@@ -7085,7 +7124,7 @@ impl Parser {
             .transpose()?;
         self.expect(&Token::Keyword(Keyword::As))?;
         let definition_start = self.peek_pos();
-        let query = self.query_expr()?;
+        let query = self.in_nested_query(Self::query_expr)?;
         // Taken before the `WITH [NO] DATA` tail, which is a property of the
         // statement rather than of the query the relation stores.
         let definition_end = self.peek_pos();
@@ -9274,7 +9313,13 @@ impl Parser {
         let mut options = self.view_options()?;
         self.expect(&Token::Keyword(Keyword::As))?;
         let definition_start = self.peek_pos();
-        let query = self.query_expr()?;
+        let query = self.in_select_into_context(
+            SelectIntoContext::Rejected {
+                message: "views must not contain SELECT INTO",
+                reports_position: false,
+            },
+            Self::query_expr,
+        )?;
         // Taken before the trailing clause is read: `pg_get_viewdef` prints the
         // check option from the catalog's reloptions, so a definition that also
         // carried the clause text would emit it twice.
@@ -11193,7 +11238,9 @@ impl Parser {
             }
             return Ok(InsertSource::Values(rows));
         }
-        Ok(InsertSource::Query(Box::new(self.query_expr()?)))
+        Ok(InsertSource::Query(Box::new(
+            self.in_nested_query(Self::query_expr)?,
+        )))
     }
 
     /// `ON CONFLICT [ ( col, … ) [WHERE pred] | ON CONSTRAINT name ]
@@ -12425,8 +12472,21 @@ impl Parser {
     /// there being one storage class here. `LOCAL` and `GLOBAL` may qualify the
     /// temporary spelling, and `PostgreSQL` gives both the same meaning.
     fn opt_select_into(&mut self) -> Result<(), ParseError> {
+        let into_pos = self.peek_pos();
         if !self.eat_keyword(Keyword::Into) {
             return Ok(());
+        }
+        if let SelectIntoContext::Rejected {
+            message,
+            reports_position,
+        } = self.select_into_context
+        {
+            let error = ParseError::new_sqlstate("0A000", message, into_pos);
+            return Err(if reports_position {
+                error.reporting_position()
+            } else {
+                error
+            });
         }
         // `TEMP`, `TEMPORARY`, `UNLOGGED`, `LOCAL` and `GLOBAL` are all
         // unreserved, so each is the target's own name unless a name still
@@ -12742,7 +12802,7 @@ impl Parser {
             let body = if self.starts_dml_statement() {
                 crate::ast::CteBody::Dml(Box::new(self.dml_statement()?))
             } else {
-                crate::ast::CteBody::Query(Box::new(self.query_expr()?))
+                crate::ast::CteBody::Query(Box::new(self.in_nested_query(Self::query_expr)?))
             };
             self.expect(&Token::RParen)?;
             let search = self.parse_cte_search()?;
@@ -12900,7 +12960,7 @@ impl Parser {
         if *self.peek() == Token::LParen {
             self.bump(); // (
             if matches!(self.peek(), Token::Keyword(Keyword::With)) {
-                let query = self.query_expr_after_open_paren()?;
+                let query = self.in_nested_query(Self::query_expr_after_open_paren)?;
                 return Ok(Self::query_expr_as_outer_primary(query));
             }
             let inner = self.set_expr(0)?;
@@ -13116,7 +13176,7 @@ impl Parser {
                 self.peek(),
                 Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With | Keyword::Table)
             ) {
-                let subquery = self.query_expr_after_open_paren()?;
+                let subquery = self.in_nested_query(Self::query_expr_after_open_paren)?;
                 // The alias is optional, as it has been since PostgreSQL 16.
                 let alias = match self.opt_alias()? {
                     Some(alias) => alias,
@@ -24797,6 +24857,33 @@ mod q1_statement_completeness_tests {
             one("CREATE TABLE t (a int4 DEFAULT CAST(1 AS int4))"),
             Statement::CreateTable { .. }
         ));
+    }
+
+    #[test]
+    fn select_into_is_rejected_in_nested_queries() {
+        let sql = "INSERT INTO int4_tbl SELECT 1 INTO f";
+        let error = parse(sql).expect_err(sql);
+        assert!(error.sqlstate() == "0A000");
+        assert!(error.message == "SELECT ... INTO is not allowed here");
+        assert!(error.reported_position(sql) == Some(31));
+    }
+
+    #[test]
+    fn select_into_is_rejected_in_views() {
+        let sql = "CREATE VIEW v AS SELECT 1 INTO f";
+        let error = parse(sql).expect_err(sql);
+        assert!(error.sqlstate() == "0A000");
+        assert!(error.message == "views must not contain SELECT INTO");
+        assert!(error.reported_position(sql).is_none());
+    }
+
+    #[test]
+    fn select_into_is_rejected_in_copy_queries() {
+        let sql = "COPY (SELECT 1 INTO f) TO STDOUT";
+        let error = parse(sql).expect_err(sql);
+        assert!(error.sqlstate() == "0A000");
+        assert!(error.message == "COPY (SELECT INTO) is not supported");
+        assert!(error.reported_position(sql).is_none());
     }
 
     /// `PostgreSQL`'s `extended_relation_expr` lets any relation reference carry
