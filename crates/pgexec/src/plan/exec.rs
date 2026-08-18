@@ -51,7 +51,7 @@ pub(crate) fn try_execute_seq_scan(
         return Ok(None);
     };
     let mut state = PlanState::new(plan, Scope::empty());
-    SeqScanExecutor {
+    FilterExecutor {
         read_ctx,
         source,
         fields,
@@ -203,10 +203,17 @@ fn plan_seq_scan(
             required_relids: BTreeSet::from([1]),
         })
         .collect();
+    let scan = Plan {
+        target_list: Vec::new(),
+        quals: Vec::new(),
+        node: PlanNode::SeqScan { scanrelid: 1 },
+    };
     let plan = Plan {
         target_list,
         quals,
-        node: PlanNode::SeqScan { scanrelid: 1 },
+        node: PlanNode::Filter {
+            input: Box::new(scan),
+        },
     };
     Ok(Some(SeqScanPlan {
         plan,
@@ -264,8 +271,6 @@ impl Executor for ResultExecutor<'_> {
 struct SeqScanExecutor<'a, 'b> {
     read_ctx: &'a crate::subquery::SubCtx<'b>,
     source: TableExpr,
-    fields: Vec<crabka_pgwire::engine::FieldDescription>,
-    tys: Vec<crabka_pgtypes::ColumnType>,
 }
 
 impl Executor for SeqScanExecutor<'_, '_> {
@@ -289,7 +294,36 @@ impl Executor for SeqScanExecutor<'_, '_> {
         )?;
         let relation =
             exec::scan_stored_base_table(self.read_ctx, &self.source, &name, None, None)?;
-        execute_seq_scan_rows(
+        state.scope = relation.scope.clone();
+        for _ in &relation.rows {
+            state.emit_row();
+        }
+        Ok(relation)
+    }
+}
+
+struct FilterExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+}
+
+impl Executor for FilterExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        let PlanNode::Filter { input } = &state.plan.node else {
+            return Err(ExecError::Unsupported(
+                "FilterExecutor received a non-Filter plan".into(),
+            ));
+        };
+        let mut child = PlanState::new((**input).clone(), Scope::empty());
+        let relation = SeqScanExecutor {
+            read_ctx: self.read_ctx,
+            source: self.source.clone(),
+        }
+        .execute(&mut child)?;
+        state.begin_loop();
+        execute_filter_rows(
             state,
             relation,
             &self.fields,
@@ -299,7 +333,7 @@ impl Executor for SeqScanExecutor<'_, '_> {
     }
 }
 
-fn execute_seq_scan_rows(
+fn execute_filter_rows(
     state: &mut PlanState,
     relation: Relation,
     fields: &[crabka_pgwire::engine::FieldDescription],
@@ -478,11 +512,17 @@ mod tests {
                 leakproof: true,
                 required_relids: BTreeSet::from([1]),
             }],
-            node: PlanNode::SeqScan { scanrelid: 1 },
+            node: PlanNode::Filter {
+                input: Box::new(Plan {
+                    target_list: Vec::new(),
+                    quals: Vec::new(),
+                    node: PlanNode::SeqScan { scanrelid: 1 },
+                }),
+            },
         };
         let mut state = PlanState::new(plan, Scope::empty());
         state.begin_loop();
-        let relation = execute_seq_scan_rows(
+        let relation = execute_filter_rows(
             &mut state,
             Relation {
                 scope,
