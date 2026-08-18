@@ -535,11 +535,6 @@ fn plan_subquery_scan(
     else {
         return Ok(None);
     };
-    let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) =
-        &subquery.body
-    else {
-        return Ok(None);
-    };
     if *lateral
         || subquery.with.is_some()
         || !subquery.order_by.is_empty()
@@ -555,11 +550,21 @@ fn plan_subquery_scan(
     {
         return Ok(None);
     }
-    let Some(ResultPlan {
-        plan: inner_plan, ..
-    }) = plan_result(inner)?
-    else {
-        return Ok(None);
+    let inner_plan = match &subquery.body {
+        crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
+            let Some(ResultPlan { plan, .. }) = plan_result(inner)? else {
+                return Ok(None);
+            };
+            plan
+        }
+        crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(_)) => {
+            Plan {
+                target_list: Vec::new(),
+                quals: Vec::new(),
+                node: PlanNode::ValuesScan,
+            }
+        }
+        _ => return Ok(None),
     };
     let scope = crate::exec::build_from_schema_of_select(
         read_ctx.catalog_kv,
@@ -957,25 +962,37 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
                 "SubqueryScanExecutor received a non-derived source".into(),
             ));
         };
-        let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) =
-            &subquery.body
-        else {
-            return Err(ExecError::Unsupported(
-                "SubqueryScanExecutor received a non-SELECT subquery".into(),
-            ));
-        };
-        let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
-            return Err(ExecError::Unsupported(
-                "SubqueryScanExecutor received a non-Result subquery".into(),
-            ));
-        };
         let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = ResultExecutor {
-            ctx: self.read_ctx.eval_ctx,
-            fields,
-            tys,
-        }
-        .execute(&mut child)?;
+        let relation = match &subquery.body {
+            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
+                inner,
+            )) => {
+                let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
+                    return Err(ExecError::Unsupported(
+                        "SubqueryScanExecutor received a non-Result subquery".into(),
+                    ));
+                };
+                ResultExecutor {
+                    ctx: self.read_ctx.eval_ctx,
+                    fields,
+                    tys,
+                }
+                .execute(&mut child)?
+            }
+            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
+                values,
+            )) => ValuesExecutor {
+                ctx: self.read_ctx,
+                query: subquery,
+                values,
+            }
+            .execute(&mut child)?,
+            _ => {
+                return Err(ExecError::Unsupported(
+                    "SubqueryScanExecutor received an unsupported subquery".into(),
+                ));
+            }
+        };
         state.begin_loop();
         let relation = crate::values::requalify_derived(relation, alias, columns)?;
         state.scope = relation.scope.clone();

@@ -16889,6 +16889,13 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT n FROM (VALUES (1), (2)) AS derived(n) WHERE n > 1"),
+        )
+        .expect("SubqueryScan Values plan executes")
+        .expect("derived Values source uses SubqueryScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT n FROM planned_transition WHERE n > 1"),
         )
         .expect("NamedTuplestoreScan plan executes")
