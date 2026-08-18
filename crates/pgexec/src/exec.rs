@@ -12410,6 +12410,7 @@ fn build_correlated_scalar_lookup(
         })
         .collect::<Vec<_>>();
     let result_column = usize::from(plan.key_column != plan.result_column);
+    let scan_attempt = read_ctx.statement_memory.reserve();
     let scanned = match crate::scanner::collect_cursor_bounded(
         read_ctx.range_scanner,
         ScanRequest {
@@ -12427,7 +12428,7 @@ fn build_correlated_scalar_lookup(
             partial_aggregate: None,
             top_k: None,
         },
-        &read_ctx.statement_memory,
+        scan_attempt.memory(),
     ) {
         Ok(rows) => rows,
         Err(ExecError::Unsupported(_)) => return Ok(CorrelatedScalarLookupState::Fallback),
@@ -12445,13 +12446,7 @@ fn build_correlated_scalar_lookup(
     )?;
     let saw_rows = !rows.is_empty();
     let mut values = HashMap::new();
-    let mut bytes = rows.iter().fold(0usize, |used, row| {
-        used.saturating_add(std::mem::size_of::<ScannedRow>())
-            .saturating_add(crate::scanner::datum_row_bytes(row))
-    });
-    if crate::scanner::exceeds_query_memory(bytes, read_ctx.blocking_query_memory) {
-        return Ok(CorrelatedScalarLookupState::Fallback);
-    }
+    let mut bytes = 0usize;
     for row in &rows {
         let Some(key) = row.first() else {
             return Err(ExecError::Unsupported(
@@ -12467,19 +12462,28 @@ fn build_correlated_scalar_lookup(
         if values.contains_key(key) {
             continue;
         }
-        let Some(value) = row.get(result_column) else {
-            return Err(ExecError::Unsupported(
-                "correlated scalar lookup result is outside the scanned row".into(),
-            ));
+        let value = if result_column == 0 {
+            None
+        } else {
+            let Some(value) = row.get(result_column) else {
+                return Err(ExecError::Unsupported(
+                    "correlated scalar lookup result is outside the scanned row".into(),
+                ));
+            };
+            Some(value.clone())
         };
-        bytes = bytes
-            .saturating_add(crate::scanner::datum_row_bytes(std::slice::from_ref(key)))
-            .saturating_add(crate::scanner::datum_row_bytes(std::slice::from_ref(value)));
+        bytes = bytes.saturating_add(crate::scanner::datum_row_bytes(std::slice::from_ref(key)));
+        if let Some(value) = &value {
+            bytes =
+                bytes.saturating_add(crate::scanner::datum_row_bytes(std::slice::from_ref(value)));
+        }
         if crate::scanner::exceeds_query_memory(bytes, read_ctx.blocking_query_memory) {
             return Ok(CorrelatedScalarLookupState::Fallback);
         }
-        values.insert(key.clone(), value.clone());
+        values.insert(key.clone(), value);
     }
+    drop(rows);
+    scan_attempt.replace_with(bytes)?;
     Ok(CorrelatedScalarLookupState::Ready { values, saw_rows })
 }
 
@@ -12488,6 +12492,7 @@ fn resolve_correlated_scalar_fallback(
     plan: &CorrelatedScalarLookup,
     key_expr: &Expr,
 ) -> Result<Expr, ExecError> {
+    let temporary = read_ctx.statement_memory.reserve();
     let mut query = plan.query.clone();
     let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(select)) =
         &mut query.body
@@ -12506,13 +12511,15 @@ fn resolve_correlated_scalar_fallback(
     } else {
         **right = key_expr.clone();
     }
-    crate::subquery::resolve_expr(read_ctx, &Expr::ScalarSubquery(Box::new(query)))
+    let result = crate::subquery::resolve_expr(read_ctx, &Expr::ScalarSubquery(Box::new(query)));
+    drop(temporary);
+    result
 }
 
 enum CorrelatedScalarLookupState {
     Uninitialized,
     Ready {
-        values: HashMap<Datum, Datum>,
+        values: HashMap<Datum, Option<Datum>>,
         saw_rows: bool,
     },
     Fallback,
@@ -12703,7 +12710,9 @@ impl<'a> LateralBinder<'a> {
                     return resolve_correlated_scalar_fallback(read_ctx, plan, key_expr);
                 }
                 Ok(Expr::Const {
-                    value: values.get(&key).cloned().unwrap_or(Datum::Null),
+                    value: values.get(&key).map_or(Datum::Null, |value| {
+                        value.clone().unwrap_or_else(|| key.clone())
+                    }),
                     ty: plan.result_type,
                 })
             }
@@ -14898,12 +14907,22 @@ fn row_matches_correlated(
     let Some(filter) = filter else {
         return Ok(true);
     };
+    // A direct correlated subquery is reduced to one scalar for this outer row.
+    // Its relation buffers are dead before the next row; keep only explicit
+    // lookup caches (which own their own retained representation) in the
+    // statement ledger.
+    let temporary = binder
+        .scalar_lookups
+        .is_empty()
+        .then(|| read_ctx.statement_memory.reserve());
     let (bound, correlated) = binder.bind_expr(filter, outer, row)?;
     debug_assert!(correlated);
     let lazy = fold_correlated_lazy_expressions(read_ctx, &bound, outer, row, binder)?;
     let initialized = resolve_lazy_initplans(read_ctx, &lazy, binder)?;
     let resolved = crate::subquery::resolve_expr(read_ctx, &initialized)?;
-    row_matches(Some(&resolved), outer, row, read_ctx.eval_ctx)
+    let result = row_matches(Some(&resolved), outer, row, read_ctx.eval_ctx);
+    drop(temporary);
+    result
 }
 
 /// Fold lazy expressions containing deferred subqueries one selected branch or
@@ -15458,13 +15477,19 @@ fn scan_stored_relation(
         partial_aggregate: distributed_plan.partial_aggregate.clone(),
         top_k: distributed_plan.top_k.clone(),
     };
+    let scan_attempt = read_ctx.statement_memory.reserve();
     let rows = match crate::scanner::collect_cursor_bounded(
         read_ctx.range_scanner,
         scan_request,
-        &read_ctx.statement_memory,
+        scan_attempt.memory(),
     ) {
-        Ok(rows) => rows,
+        Ok(rows) => {
+            scan_attempt.commit();
+            rows
+        }
         Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
+            drop(scan_attempt);
+            let fallback_attempt = read_ctx.statement_memory.reserve();
             crate::scanner::collect_cursor_bounded(
                 read_ctx.range_scanner,
                 ScanRequest {
@@ -15482,8 +15507,12 @@ fn scan_stored_relation(
                     partial_aggregate: None,
                     top_k: None,
                 },
-                &read_ctx.statement_memory,
-            )?
+                fallback_attempt.memory(),
+            )
+            .map(|rows| {
+                fallback_attempt.commit();
+                rows
+            })?
         }
         Err(error) => return Err(error),
     };
@@ -17434,31 +17463,34 @@ pub(crate) fn select_to_relation_with_ctes(
     });
     // The uncorrelated filter is the same expression for every row, so its
     // column references are resolved once here instead of once per row.
+    let Relation {
+        mut scope,
+        rows: source_rows,
+    } = relation;
     let bound_filter = if binder.is_none() {
-        crate::bind::bind_optional(s.filter.as_ref(), &relation.scope)?
+        crate::bind::bind_optional(s.filter.as_ref(), &scope)?
     } else {
         None
     };
     let mut kept = Vec::new();
-    for row in &relation.rows {
+    for row in source_rows {
         let matches = if let Some(binder) = &mut binder {
-            row_matches_correlated(read_ctx, s.filter.as_ref(), &relation.scope, row, binder)?
+            row_matches_correlated(read_ctx, s.filter.as_ref(), &scope, &row, binder)?
         } else {
             row_matches(
                 bound_filter.as_ref().map(crate::bind::BoundExpr::expr),
-                &relation.scope,
-                row,
+                &scope,
+                &row,
                 ctx,
             )?
         };
         if matches {
-            kept.push(row.clone());
+            kept.push(row);
         }
     }
     // A correlated select-list / ORDER BY / DISTINCT ON expression is evaluated
     // here, once per surviving source row, and parked in a hidden column. The
     // clauses below then see plain column references and run unchanged.
-    let mut scope = relation.scope;
     if let Some(row_exprs) = row_exprs {
         materialize_correlated_row_exprs(read_ctx, row_exprs, &mut scope, &mut kept)?;
     }

@@ -1214,8 +1214,17 @@ pub(crate) fn from_item_with_memory(
             statement_memory,
         )?);
     }
-    let rows = zip_in_lockstep(produced, &plans);
-    ensure_expansion_fits(&rows, statement_memory)?;
+    let rows = if produced.len() == 1 {
+        // `rows_with_memory` has already charged this allocation.  A sole
+        // function needs no lockstep zipping, so move its rows into the
+        // relation instead of cloning and charging the same retained rows
+        // again.
+        produced.pop().expect("one produced function")
+    } else {
+        let rows = zip_in_lockstep(produced, &plans);
+        ensure_expansion_fits(&rows, statement_memory)?;
+        rows
+    };
     qualify(&plans, rows, with_ordinality, alias, column_aliases)
 }
 
@@ -1292,9 +1301,6 @@ fn plan_all(functions: &[TableFuncCall]) -> Result<Vec<SrfPlan>, ExecError> {
 /// lockstep and pads the shorter ones with NULL until the longest is exhausted.
 /// The multi-argument `unnest(a, b)` form follows the same rule.
 fn zip_in_lockstep(produced: Vec<Vec<Vec<Datum>>>, plans: &[SrfPlan]) -> Vec<Vec<Datum>> {
-    if let [single] = produced.as_slice() {
-        return single.clone();
-    }
     let height = produced.iter().map(Vec::len).max().unwrap_or(0);
     (0..height)
         .map(|index| {

@@ -959,6 +959,17 @@ pub(crate) struct MemoryBudget {
 #[derive(Debug, Clone)]
 pub(crate) struct StatementMemory(std::sync::Arc<std::sync::Mutex<MemoryBudget>>);
 
+/// A temporary materialization's statement-memory charges.
+///
+/// Dropping an uncommitted reservation restores exactly the charge that existed
+/// before the temporary buffer started, preserving any older live buffers.
+#[derive(Debug)]
+pub(crate) struct StatementMemoryReservation {
+    memory: StatementMemory,
+    used: usize,
+    committed: bool,
+}
+
 impl StatementMemory {
     pub(crate) fn new(limit: crabka_units::ByteSize) -> Self {
         Self(std::sync::Arc::new(std::sync::Mutex::new(
@@ -978,11 +989,57 @@ impl StatementMemory {
         budget.charge(bytes)
     }
 
+    pub(crate) fn reserve(&self) -> StatementMemoryReservation {
+        let used = match self.0.lock() {
+            Ok(budget) => budget.used,
+            Err(poisoned) => poisoned.into_inner().used,
+        };
+        StatementMemoryReservation {
+            memory: self.clone(),
+            used,
+            committed: false,
+        }
+    }
+
     pub(crate) fn limit(&self) -> crabka_units::ByteSize {
         match self.0.lock() {
             Ok(budget) => budget.limit,
             Err(poisoned) => poisoned.into_inner().limit,
         }
+    }
+}
+
+impl StatementMemoryReservation {
+    pub(crate) fn memory(&self) -> &StatementMemory {
+        &self.memory
+    }
+
+    pub(crate) fn commit(mut self) {
+        self.committed = true;
+    }
+
+    pub(crate) fn replace_with(mut self, bytes: usize) -> Result<(), ExecError> {
+        let mut budget = match self.memory.0.lock() {
+            Ok(budget) => budget,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        budget.used = self.used;
+        budget.charge(bytes)?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for StatementMemoryReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut budget = match self.memory.0.lock() {
+            Ok(budget) => budget,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        budget.used = self.used;
     }
 }
 
@@ -1023,6 +1080,19 @@ mod statement_memory_tests {
             .into_pg();
 
         assert!(error.code == "53200");
+    }
+
+    #[test]
+    fn abandoning_a_reservation_preserves_prior_live_charge() {
+        let memory = StatementMemory::new(crabka_units::bytes(2));
+        memory.charge(1).expect("prior retained row fits");
+        {
+            let attempt = memory.reserve();
+            attempt.memory().charge(1).expect("attempt fits");
+        }
+        memory
+            .charge(1)
+            .expect("discarded attempt releases only its own charge");
     }
 }
 
@@ -1066,7 +1136,7 @@ pub(crate) fn collect_cursor_bounded(
                             loop {
                                 let page = cursor.next_page(1024).await?;
                                 for row in page.rows {
-                                    let bytes = scanned_row_bytes(&row);
+                                    let bytes = datum_row_bytes(&row.row);
                                     statement_memory.charge(bytes)?;
                                     rows.push(row);
                                 }
