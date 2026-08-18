@@ -16892,6 +16892,29 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of(
+                "SELECT n, count(*) AS c FROM unnest(ARRAY[1, 1, 2]) AS g(n) \
+                 GROUP BY n ORDER BY c DESC LIMIT 1",
+            ),
+        )
+        .expect("function Aggregate tail plan executes")
+        .expect("function aggregate tail uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int8(2),
+            ]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT DISTINCT count(*) FROM generate_series(1, 3) AS g(n)"),
+        )
+        .expect("function Aggregate distinct plan executes")
+        .expect("function aggregate distinct uses Aggregate");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(3)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT a % 2, count(*) FROM seq_scan_test GROUP BY a % 2"),
         )
         .expect("computed GROUP BY Aggregate plan executes")
@@ -18019,10 +18042,6 @@ mod tests {
             "SELECT n, generate_series(1, 2) FROM planned_transition ORDER BY 1",
             "SELECT n, generate_series(1, 2) FROM planned_transition LIMIT 1",
             "SELECT n, generate_series(1, 2) FROM planned_transition OFFSET 1",
-            "SELECT DISTINCT count(*) FROM generate_series(1, 3) AS g(n)",
-            "SELECT count(*) FROM generate_series(1, 3) AS g(n) ORDER BY 1",
-            "SELECT count(*) FROM generate_series(1, 3) AS g(n) LIMIT 1",
-            "SELECT count(*) FROM generate_series(1, 3) AS g(n) OFFSET 1",
             "SELECT grouping(n) FROM generate_series(1, 3) AS g(n)",
             "SELECT count(*), row_number() OVER () FROM generate_series(1, 3) AS g(n)",
             "SELECT generate_series(1, 2), row_number() OVER () FROM generate_series(1, 3) AS g(n)",
