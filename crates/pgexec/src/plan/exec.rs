@@ -57,15 +57,15 @@ fn try_execute_nested_loop(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
-    if select.from.is_empty()
-        || !select
-            .from
-            .iter()
-            .all(|source| is_direct_nested_loop_source(read_ctx, source))
-        || !matches!(select.distinct, DistinctClause::All)
-        || !select.order_by.is_empty()
-        || select.limit.is_some()
-        || select.offset.is_some()
+    if select.from.is_empty() {
+        return Ok(None);
+    }
+    if !select
+        .from
+        .iter()
+        .all(|source| is_direct_nested_loop_source(read_ctx, source))
+        || matches!(select.distinct, DistinctClause::On(_))
+        || select.with_ties
         || crate::grouping::is_grouping_query(select)
         || crate::window::has_window_calls(select)
     {
@@ -81,6 +81,22 @@ fn try_execute_nested_loop(
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
+    }
+    let distinct = matches!(select.distinct, DistinctClause::Distinct);
+    if distinct {
+        for ty in &tys {
+            crate::eval::require_equality_operator(*ty)?;
+        }
+    }
+    let order_keys =
+        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
+    let mut sort_positions = Vec::with_capacity(order_keys.len());
+    for key in order_keys {
+        let exec::SelectOrderKey::Output(index) = key else {
+            return Ok(None);
+        };
+        crate::eval::require_ordering_operator(tys[index])?;
+        sort_positions.push(index);
     }
     let mut sources = Vec::new();
     for source in &select.from {
@@ -106,7 +122,7 @@ fn try_execute_nested_loop(
             },
         };
     }
-    let plan = Plan {
+    let filter = Plan {
         target_list: bind_target_list(&exprs, &fields, &scope)?,
         quals: bind_optional(select.filter.as_ref(), &scope)?
             .into_iter()
@@ -122,20 +138,115 @@ fn try_execute_nested_loop(
             input: Box::new(loop_plan),
         },
     };
-    let mut state = PlanState::new(plan, Scope::empty());
-    let PlanNode::Filter { input } = &state.plan.node else {
-        unreachable!()
+    let unique = if distinct {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(filter),
+            },
+        }
+    } else {
+        filter
     };
-    let mut loop_state = PlanState::new((**input).clone(), Scope::empty());
-    let relation = execute_nested_loop_plan(&mut loop_state, read_ctx, &sources)?;
-    let relation = filter_relation_rows(&mut state, relation, read_ctx.eval_ctx)?;
-    Ok(Some(project_filter_rows(
-        &state,
-        relation,
-        &fields,
-        &tys,
-        read_ctx.eval_ctx,
-    )?))
+    let sort = if select.order_by.is_empty() {
+        unique
+    } else {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Sort {
+                input: Box::new(unique),
+            },
+        }
+    };
+    let plan = if select.limit.is_some() || select.offset.is_some() {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Limit {
+                input: Box::new(sort),
+            },
+        }
+    } else {
+        sort
+    };
+    let mut state = PlanState::new(plan, Scope::empty());
+    NestedLoopTail {
+        read_ctx,
+        sources: &sources,
+        fields: &fields,
+        tys: &tys,
+        order_by: &select.order_by,
+        sort_positions: &sort_positions,
+        limit: select.limit.as_ref(),
+        offset: select.offset.as_ref(),
+    }
+    .execute(&mut state)
+    .map(Some)
+}
+
+struct NestedLoopTail<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    sources: &'a [TableExpr],
+    fields: &'a [crabka_pgwire::engine::FieldDescription],
+    tys: &'a [crabka_pgtypes::ColumnType],
+    order_by: &'a [crabka_pgparser::ast::OrderItem],
+    sort_positions: &'a [usize],
+    limit: Option<&'a crabka_pgparser::ast::Expr>,
+    offset: Option<&'a crabka_pgparser::ast::Expr>,
+}
+
+impl NestedLoopTail<'_, '_> {
+    fn execute(&self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        crate::session::check_query_canceled()?;
+        match &state.plan.node {
+        PlanNode::Filter { input } => {
+            let mut child = PlanState::new((**input).clone(), Scope::empty());
+            let relation = execute_nested_loop_plan(&mut child, self.read_ctx, self.sources)?;
+            state.begin_loop();
+            let relation = filter_relation_rows(state, relation, self.read_ctx.eval_ctx)?;
+            project_filter_rows(state, relation, self.fields, self.tys, self.read_ctx.eval_ctx)
+        }
+        PlanNode::Unique { input } => {
+            let mut child = PlanState::new((**input).clone(), Scope::empty());
+            let relation = self.execute(&mut child)?;
+            state.begin_loop();
+            unique_relation_rows(state, relation, &self.read_ctx.statement_memory)
+        }
+        PlanNode::Sort { input } => {
+            let mut child = PlanState::new((**input).clone(), Scope::empty());
+            let relation = self.execute(&mut child)?;
+            state.begin_loop();
+            sort_relation_rows(
+                state,
+                relation,
+                self.order_by,
+                self.sort_positions,
+                &self.read_ctx.statement_memory,
+            )
+        }
+        PlanNode::Limit { input } => {
+            let mut child = PlanState::new((**input).clone(), Scope::empty());
+            let relation = self.execute(&mut child)?;
+            let offset = crate::exec::eval_row_count(
+                self.offset,
+                crate::exec::RowCountClause::Offset,
+                self.read_ctx.eval_ctx,
+            )?;
+            let limit = crate::exec::eval_row_count(
+                self.limit,
+                crate::exec::RowCountClause::Limit,
+                self.read_ctx.eval_ctx,
+            )?;
+            state.begin_loop();
+            Ok(limit_relation_rows(state, relation, offset, limit))
+        }
+        _ => Err(ExecError::Unsupported(
+            "NestedLoop tail received an unsupported plan node".into(),
+        )),
+        }
+    }
 }
 
 fn is_direct_nested_loop_source(
