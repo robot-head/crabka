@@ -17742,6 +17742,22 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT n, generate_series(1, 2) FROM planned_transition \
+                 ORDER BY n DESC, 2 DESC LIMIT 2",
+            ),
+        )
+        .expect("NamedTuplestoreScan ProjectSet tail plan executes")
+        .expect("transition ProjectSet owns ordering and limit");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT n, generate_series(1, 2) FROM planned_cte \
                  ORDER BY n DESC, 2 DESC LIMIT 2",
             ),
@@ -18195,10 +18211,6 @@ mod tests {
             "SELECT generate_series(1, 2), row_number() OVER () FROM planned_transition",
             "SELECT count(*), row_number() OVER () FROM planned_transition",
             "SELECT count(*), generate_series(1, 2) FROM planned_transition",
-            "SELECT DISTINCT n, generate_series(1, 2) FROM planned_transition",
-            "SELECT n, generate_series(1, 2) FROM planned_transition ORDER BY 1",
-            "SELECT n, generate_series(1, 2) FROM planned_transition LIMIT 1",
-            "SELECT n, generate_series(1, 2) FROM planned_transition OFFSET 1",
             "SELECT grouping(n) FROM generate_series(1, 3) AS g(n)",
             "SELECT count(*), row_number() OVER () FROM generate_series(1, 3) AS g(n)",
             "SELECT generate_series(1, 2), row_number() OVER () FROM generate_series(1, 3) AS g(n)",

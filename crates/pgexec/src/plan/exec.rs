@@ -1990,13 +1990,7 @@ fn plan_named_tuplestore_scan(
     }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
     let project_set = crate::srf::exprs_contain_srf(&exprs);
-    if project_set
-        && (aggregate
-            || !matches!(select.distinct, DistinctClause::All)
-            || !select.order_by.is_empty()
-            || select.limit.is_some()
-            || select.offset.is_some())
-    {
+    if project_set && aggregate {
         return Ok(None);
     }
     let target_list = bind_target_list(&exprs, &fields, &scope)?;
@@ -2052,6 +2046,28 @@ fn plan_named_tuplestore_scan(
             window: None,
         }));
     }
+    if project_set {
+        return Ok(Some(SeqScanPlan {
+            plan: Plan {
+                target_list,
+                quals: Vec::new(),
+                node: PlanNode::ProjectSet {
+                    input: Box::new(filter),
+                },
+            },
+            source: source.clone(),
+            fields,
+            tys,
+            limit: select.limit.clone(),
+            offset: select.offset.clone(),
+            order_by: select.order_by.clone(),
+            sort_positions: Vec::new(),
+            with_ties: select.with_ties,
+            aggregate: None,
+            project_set: Some(select.clone()),
+            window: None,
+        }));
+    }
     let order_keys =
         exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
     let mut sort_positions = Vec::with_capacity(order_keys.len());
@@ -2062,17 +2078,7 @@ fn plan_named_tuplestore_scan(
         crate::eval::require_ordering_operator(tys[index])?;
         sort_positions.push(index);
     }
-    let project_set_plan = if project_set {
-        Plan {
-            target_list: target_list.clone(),
-            quals: Vec::new(),
-            node: PlanNode::ProjectSet {
-                input: Box::new(filter),
-            },
-        }
-    } else {
-        filter
-    };
+    let project_set_plan = filter;
     let unique = if distinct {
         Plan {
             target_list: Vec::new(),
@@ -2116,7 +2122,7 @@ fn plan_named_tuplestore_scan(
         order_by: select.order_by.clone(),
         sort_positions,
         aggregate: None,
-        project_set: project_set.then(|| select.clone()),
+        project_set: None,
         with_ties: select.with_ties,
         window: None,
     }))
