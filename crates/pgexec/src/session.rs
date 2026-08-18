@@ -16909,6 +16909,22 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT n, generate_series(1, 2) FROM (VALUES (1), (2)) AS derived(n) \
+                 ORDER BY n DESC, 2 DESC LIMIT 2",
+            ),
+        )
+        .expect("derived ProjectSet tail plan executes")
+        .expect("derived ProjectSet tail uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT n, generate_series(1, 2) FROM generate_series(1, 2) AS g(n) \
                  ORDER BY n DESC, 2 DESC LIMIT 2",
             ),
@@ -18148,10 +18164,6 @@ mod tests {
             "SELECT n, row_number() OVER () FROM (SELECT 1 AS n) AS derived LIMIT 1",
             "SELECT row_number() OVER () FROM (SELECT 1 AS n) AS derived OFFSET 1",
             "SELECT count(*), generate_series(1, 2) FROM (SELECT 1 AS n) AS derived",
-            "SELECT DISTINCT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived",
-            "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived ORDER BY 1",
-            "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived LIMIT 1",
-            "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived OFFSET 1",
             "SELECT grouping(n) FROM planned_cte",
             "SELECT count(*), row_number() OVER () FROM planned_cte",
             "SELECT generate_series(1, 2), row_number() OVER () FROM planned_cte",
