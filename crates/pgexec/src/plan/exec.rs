@@ -210,6 +210,9 @@ fn plan_seq_scan(
     if matches!(source, TableExpr::Table { name, .. } if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some()) {
         return plan_cte_scan(read_ctx, select, source);
     }
+    if matches!(source, TableExpr::Table { name, .. } if name.schema.is_none() && read_ctx.eval_ctx.transition_relations.as_ref().is_some_and(|runtime| runtime.lock().expect("transition relation mutex").contains_key(&name.name))) {
+        return plan_named_tuplestore_scan(read_ctx, select, source);
+    }
     if !crate::exec::is_direct_stored_base_table(read_ctx, source) {
         return Ok(None);
     }
@@ -590,6 +593,99 @@ fn plan_cte_scan(
     }))
 }
 
+fn plan_named_tuplestore_scan(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+    source: &TableExpr,
+) -> Result<Option<SeqScanPlan>, ExecError> {
+    let TableExpr::Table {
+        name,
+        alias,
+        columns,
+        sample,
+        ..
+    } = source
+    else {
+        return Ok(None);
+    };
+    if name.schema.is_some()
+        || columns.is_some()
+        || sample.is_some()
+        || !matches!(select.distinct, DistinctClause::All)
+        || !select.order_by.is_empty()
+        || select.limit.is_some()
+        || select.offset.is_some()
+        || crate::grouping::is_grouping_query(select)
+        || crate::window::has_window_calls(select)
+    {
+        return Ok(None);
+    }
+    let transition = read_ctx
+        .eval_ctx
+        .transition_relations
+        .as_ref()
+        .and_then(|runtime| {
+            runtime
+                .lock()
+                .expect("transition relation mutex")
+                .get(&name.name)
+                .cloned()
+        });
+    let Some(transition) = transition else {
+        return Ok(None);
+    };
+    let qualifier = alias.as_deref().unwrap_or(&name.name);
+    let scope = Scope {
+        columns: transition
+            .columns
+            .into_iter()
+            .map(|(name, ty)| crate::scope::ColumnBinding {
+                exposure: crate::scope::Exposure::Output,
+                qualifier: Some(qualifier.to_string()),
+                name,
+                ty,
+            })
+            .collect(),
+    };
+    let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
+    if crate::srf::exprs_contain_srf(&exprs) {
+        return Ok(None);
+    }
+    let plan = Plan {
+        target_list: bind_target_list(&exprs, &fields, &scope)?,
+        quals: bind_optional(select.filter.as_ref(), &scope)?
+            .into_iter()
+            .map(|clause| RestrictInfo {
+                clause,
+                is_pushed_down: false,
+                security_level: 0,
+                leakproof: true,
+                required_relids: BTreeSet::from([1]),
+            })
+            .collect(),
+        node: PlanNode::Filter {
+            input: Box::new(Plan {
+                target_list: Vec::new(),
+                quals: Vec::new(),
+                node: PlanNode::NamedTuplestoreScan,
+            }),
+        },
+    };
+    Ok(Some(SeqScanPlan {
+        plan,
+        source: source.clone(),
+        fields,
+        tys,
+        limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        sort_positions: Vec::new(),
+        aggregate: None,
+        project_set: None,
+        window: None,
+    }))
+}
+
 fn needs_aggregate_node(select: &SelectStmt) -> bool {
     !select.group_by.is_empty()
         || select.projection.iter().any(|item| {
@@ -783,6 +879,64 @@ impl Executor for CteScanExecutor<'_, '_> {
     }
 }
 
+struct NamedTuplestoreScanExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+}
+
+impl Executor for NamedTuplestoreScanExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        if !matches!(state.plan.node, PlanNode::NamedTuplestoreScan) {
+            return Err(ExecError::Unsupported(
+                "NamedTuplestoreScanExecutor received a non-NamedTuplestoreScan plan".into(),
+            ));
+        }
+        crate::session::check_query_canceled()?;
+        let TableExpr::Table { name, alias, .. } = &self.source else {
+            return Err(ExecError::Unsupported(
+                "NamedTuplestoreScanExecutor received a non-table source".into(),
+            ));
+        };
+        let transition = name
+            .schema
+            .is_none()
+            .then_some(self.read_ctx.eval_ctx.transition_relations.as_ref())
+            .flatten()
+            .and_then(|runtime| {
+                runtime
+                    .lock()
+                    .expect("transition relation mutex")
+                    .get(&name.name)
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                ExecError::Unsupported("NamedTuplestoreScanExecutor source is not a transition relation".into())
+            })?;
+        state.begin_loop();
+        let qualifier = alias.as_deref().unwrap_or(&name.name);
+        let relation = Relation {
+            scope: Scope {
+                columns: transition
+                    .columns
+                    .into_iter()
+                    .map(|(name, ty)| crate::scope::ColumnBinding {
+                        exposure: crate::scope::Exposure::Output,
+                        qualifier: Some(qualifier.to_string()),
+                        name,
+                        ty,
+                    })
+                    .collect(),
+            },
+            rows: transition.rows,
+        };
+        state.scope = relation.scope.clone();
+        for _ in &relation.rows {
+            state.emit_row();
+        }
+        Ok(relation)
+    }
+}
+
 struct FilterExecutor<'a, 'b> {
     read_ctx: &'a crate::subquery::SubCtx<'b>,
     source: TableExpr,
@@ -819,6 +973,9 @@ fn execute_filter_input(
         PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source }.execute(&mut child)?,
         PlanNode::FunctionScan => FunctionScanExecutor { read_ctx, source }.execute(&mut child)?,
         PlanNode::CteScan => CteScanExecutor { read_ctx, source }.execute(&mut child)?,
+        PlanNode::NamedTuplestoreScan => {
+            NamedTuplestoreScanExecutor { read_ctx, source }.execute(&mut child)?
+        }
         _ => {
             return Err(ExecError::Unsupported(
                 "FilterExecutor input was not a scan plan".into(),

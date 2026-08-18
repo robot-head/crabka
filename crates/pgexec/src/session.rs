@@ -16775,7 +16775,7 @@ mod tests {
         select.locking = query.locking.clone();
 
         let (snapshot, own, gsnap) = session.read_context().await.expect("read context");
-        let eval_ctx = session.eval_ctx();
+        let mut eval_ctx = session.eval_ctx();
         let mut ctes = crate::cte::CteContext::empty();
         ctes.insert(
             "planned_cte".into(),
@@ -16795,6 +16795,19 @@ mod tests {
                 ],
             },
         );
+        eval_ctx.transition_relations = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::from([(
+                "planned_transition".into(),
+                crate::clock::TransitionRelation {
+                    columns: vec![("n".into(), crabka_pgtypes::ColumnType::Int4)],
+                    rows: vec![
+                        vec![crabka_pgtypes::Datum::Int4(1)],
+                        vec![crabka_pgtypes::Datum::Int4(2)],
+                        vec![crabka_pgtypes::Datum::Int4(3)],
+                    ],
+                },
+            )]),
+        )));
         let resolution = session.resolution_scope();
         let fctx = crate::exec::ForeignCtx {
             scanner: session.foreign_scanner.as_ref(),
@@ -16860,6 +16873,19 @@ mod tests {
         )
         .expect("CteScan plan executes")
         .expect("CTE source uses CteScan");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(3)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n FROM planned_transition WHERE n > 1"),
+        )
+        .expect("NamedTuplestoreScan plan executes")
+        .expect("transition source uses NamedTuplestoreScan");
         assert_eq!(
             relation.rows,
             vec![
@@ -16938,6 +16964,14 @@ mod tests {
             "SELECT count(*) FROM planned_cte",
             "SELECT grouping(n) FROM planned_cte",
             "SELECT row_number() OVER () FROM planned_cte",
+            "SELECT DISTINCT n FROM planned_transition",
+            "SELECT n FROM planned_transition AS p(n)",
+            "SELECT n FROM planned_transition TABLESAMPLE BERNOULLI(100)",
+            "SELECT n FROM planned_transition ORDER BY n",
+            "SELECT n FROM planned_transition LIMIT 1",
+            "SELECT count(*) FROM planned_transition",
+            "SELECT grouping(n) FROM planned_transition",
+            "SELECT row_number() OVER () FROM planned_transition",
             "SELECT count(*) FROM generate_series(1, 3) AS g(n)",
             "SELECT 1 FROM generate_series(1, 3) AS g(n) HAVING count(*) > 0",
             "SELECT grouping(n) FROM generate_series(1, 3) AS g(n)",
