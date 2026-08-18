@@ -33,6 +33,7 @@ pub(crate) struct PlanNode {
     /// `key: value` detail lines printed under the node, in `PostgreSQL`'s order.
     pub(crate) details: Vec<(String, String)>,
     pub(crate) children: Vec<PlanNode>,
+    output: Vec<String>,
     actual: Option<PlanActual>,
 }
 
@@ -52,6 +53,7 @@ impl PlanNode {
             alias: None,
             details: Vec::new(),
             children: Vec::new(),
+            output: Vec::new(),
             actual: None,
         }
     }
@@ -273,6 +275,17 @@ fn plan_select(select: &SelectStmt) -> PlanNode {
     if select.limit.is_some() || select.offset.is_some() {
         node = PlanNode::new("Limit").with_child(node);
     }
+    node.output = select
+        .projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::Wildcard => "*".to_string(),
+            SelectItem::QualifiedWildcard(table) => format!("{table}.*"),
+            SelectItem::Expr { expr, alias } => {
+                alias.clone().unwrap_or_else(|| deparse_bare(expr))
+            }
+        })
+        .collect();
     node
 }
 
@@ -952,6 +965,9 @@ fn render_text_node(
     }
     lines.push(headline);
     let detail_indent = " ".repeat(2 + depth * 6);
+    if options.verbose && !node.output.is_empty() {
+        lines.push(format!("{detail_indent}Output: {}", node.output.join(", ")));
+    }
     for (key, value) in &node.details {
         lines.push(format!("{detail_indent}{key}: {value}"));
     }
@@ -1362,6 +1378,44 @@ mod tests {
         assert!(
             render_with_rows(&plan_runtime_state(&state), &options, 0)
                 == vec!["Filter (actual rows=0.00 loops=1)"]
+        );
+    }
+
+    #[test]
+    fn verbose_text_includes_the_plans_output_list() {
+        let lines = plan_text(
+            "SELECT id AS key FROM d1 WHERE id = 1",
+            &ExplainOptions {
+                verbose: true,
+                costs: false,
+                ..ExplainOptions::default()
+            },
+        );
+
+        assert!(
+            lines
+                == [
+                    "Seq Scan on d1",
+                    "  Output: key",
+                    "  Filter: (id = 1)",
+                ]
+        );
+    }
+
+    #[test]
+    fn offset_without_limit_still_has_a_limit_node() {
+        let parsed = crabka_pgparser::parse("SELECT id FROM d1").expect("parse");
+        let [Statement::Query(query)] = parsed.as_slice() else {
+            panic!("expected query");
+        };
+        let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
+            panic!("expected select");
+        };
+        let mut select = (**select).clone();
+        select.offset = Some(Expr::IntLiteral("1".into()));
+        assert!(
+            render_with_rows(&plan_select(&select), &costs_off(), 0)
+                == ["Limit", "  ->  Seq Scan on d1"]
         );
     }
 
