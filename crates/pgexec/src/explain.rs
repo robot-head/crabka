@@ -1023,6 +1023,15 @@ fn json_node(
         fields.push(format!("{pad}\"Alias\": \"{}\"", json_escape(&alias)));
     }
     fields.push(format!("{pad}\"Disabled\": false"));
+    if options.verbose && !node.output.is_empty() {
+        let output = node
+            .output
+            .iter()
+            .map(|value| format!("\"{}\"", json_escape(value)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fields.push(format!("{pad}\"Output\": [{output}]"));
+    }
     if let Some(actual) = explain_actual(node, options, actual_rows, root) {
         fields.push(format!("{pad}\"Actual Rows\": {}", actual.rows));
         fields.push(format!("{pad}\"Actual Loops\": {}", actual.loops));
@@ -1092,6 +1101,15 @@ fn yaml_node(
         lines.push(format!("{pad}Alias: \"{alias}\""));
     }
     lines.push(format!("{pad}Disabled: false"));
+    if options.verbose && !node.output.is_empty() {
+        let output = node
+            .output
+            .iter()
+            .map(|value| format!("\"{value}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("{pad}Output: [{output}]"));
+    }
     if let Some(actual) = explain_actual(node, options, actual_rows, root) {
         lines.push(format!("{pad}Actual Rows: {}", actual.rows));
         lines.push(format!("{pad}Actual Loops: {}", actual.loops));
@@ -1147,6 +1165,13 @@ fn xml_node(
         lines.push(format!("{inner}<Alias>{}</Alias>", xml_escape(&alias)));
     }
     lines.push(format!("{inner}<Disabled>false</Disabled>"));
+    if options.verbose && !node.output.is_empty() {
+        lines.push(format!("{inner}<Output>"));
+        for value in &node.output {
+            lines.push(format!("{inner}  <Item>{}</Item>", xml_escape(value)));
+        }
+        lines.push(format!("{inner}</Output>"));
+    }
     if let Some(actual) = explain_actual(node, options, actual_rows, root) {
         lines.push(format!("{inner}<Actual-Rows>{}</Actual-Rows>", actual.rows));
         lines.push(format!("{inner}<Actual-Loops>{}</Actual-Loops>", actual.loops));
@@ -1315,6 +1340,7 @@ mod tests {
             0,
         );
         assert!(yaml[0].contains("Actual Loops: 1"));
+        assert!(yaml[0].contains("Rows Removed by Filter: 1"));
 
         let xml = render_with_rows(
             &runtime,
@@ -1325,6 +1351,7 @@ mod tests {
             0,
         );
         assert!(xml[0].contains("<Actual-Rows>2</Actual-Rows>"));
+        assert!(xml[0].contains("<Rows-Removed-by-Filter>1</Rows-Removed-by-Filter>"));
     }
 
     #[test]
@@ -1379,18 +1406,35 @@ mod tests {
             render_with_rows(&plan_runtime_state(&state), &options, 0)
                 == vec!["Filter (actual rows=0.00 loops=1)"]
         );
+        let runtime = plan_runtime_state(&state);
+        for format in [ExplainFormat::Json, ExplainFormat::Yaml, ExplainFormat::Xml] {
+            let removed = if format == ExplainFormat::Xml {
+                "Rows-Removed-by-Filter"
+            } else {
+                "Rows Removed by Filter"
+            };
+            assert!(
+                !render_with_rows(
+                    &runtime,
+                    &ExplainOptions {
+                        format,
+                        ..options.clone()
+                    },
+                    0,
+                )[0]
+                    .contains(removed)
+            );
+        }
     }
 
     #[test]
     fn verbose_text_includes_the_plans_output_list() {
-        let lines = plan_text(
-            "SELECT id AS key FROM d1 WHERE id = 1",
-            &ExplainOptions {
-                verbose: true,
-                costs: false,
-                ..ExplainOptions::default()
-            },
-        );
+        let options = ExplainOptions {
+            verbose: true,
+            costs: false,
+            ..ExplainOptions::default()
+        };
+        let lines = plan_text("SELECT id AS key FROM d1 WHERE id = 1", &options);
 
         assert!(
             lines
@@ -1400,6 +1444,35 @@ mod tests {
                     "  Filter: (id = 1)",
                 ]
         );
+        assert!(
+            plan_text(
+                "SELECT id AS key FROM d1",
+                &ExplainOptions {
+                    format: ExplainFormat::Json,
+                    ..options.clone()
+                },
+            )[0]
+                .contains("\"Output\": [\"key\"]")
+        );
+        assert!(
+            plan_text(
+                "SELECT id AS key FROM d1",
+                &ExplainOptions {
+                    format: ExplainFormat::Yaml,
+                    ..options.clone()
+                },
+            )[0]
+                .contains("Output: [\"key\"]")
+        );
+        let xml = plan_text(
+                "SELECT id AS key FROM d1",
+                &ExplainOptions {
+                    format: ExplainFormat::Xml,
+                    ..options
+                },
+            );
+        assert!(xml[0].contains("<Output>"));
+        assert!(xml[0].contains("<Item>key</Item>"));
     }
 
     #[test]
@@ -1725,6 +1798,9 @@ mod tests {
         assert!(json[0].contains("\"Relation Name\": \"d1\""));
         assert!(json[0].starts_with("[\n  {\n    \"Plan\": {"));
         assert!(json[0].ends_with(']'));
+        assert!(!json[0].contains("\"Plans\""));
+        assert!(json[0].contains("\"Alias\": \"d1\",\n      \"Disabled\""));
+        assert!(json[0].contains("\"Disabled\": false\n    }"));
 
         let yaml = plan_text(
             "SELECT * FROM d1",
@@ -1736,6 +1812,7 @@ mod tests {
         );
         assert!(yaml[0].starts_with("- Plan:"));
         assert!(yaml[0].contains("Node Type: \"Seq Scan\""));
+        assert!(!yaml[0].contains("Plans:"));
 
         let xml = plan_text(
             "SELECT * FROM d1",
@@ -1747,5 +1824,55 @@ mod tests {
         );
         assert!(xml[0].starts_with("<explain xmlns="));
         assert!(xml[0].contains("<Node-Type>Seq Scan</Node-Type>"));
+        assert!(!xml[0].contains("<Plans>"));
+    }
+
+    #[test]
+    fn structured_formats_keep_nested_plan_layout_and_hide_non_verbose_output() {
+        let options = ExplainOptions {
+            costs: false,
+            ..ExplainOptions::default()
+        };
+        for format in [ExplainFormat::Json, ExplainFormat::Yaml, ExplainFormat::Xml] {
+            assert!(
+                !plan_text(
+                    "SELECT id FROM d1",
+                    &ExplainOptions {
+                        format,
+                        ..options.clone()
+                    },
+                )[0]
+                    .contains("Output")
+            );
+        }
+
+        let json = plan_text(
+            "SELECT id FROM d1 ORDER BY id",
+            &ExplainOptions {
+                format: ExplainFormat::Json,
+                ..options.clone()
+            },
+        );
+        assert!(json[0].contains("\"Plans\": [\n        {\n          \"Node Type\": \"Seq Scan\""));
+        assert!(json[0].contains("\n        }\n      ]"));
+
+        let yaml = plan_text(
+            "SELECT id FROM d1 ORDER BY id",
+            &ExplainOptions {
+                format: ExplainFormat::Yaml,
+                ..options.clone()
+            },
+        );
+        assert!(yaml[0].contains("Plans:\n        Node Type: \"Seq Scan\""));
+
+        let xml = plan_text(
+            "SELECT id FROM d1 ORDER BY id",
+            &ExplainOptions {
+                format: ExplainFormat::Xml,
+                ..options
+            },
+        );
+        assert!(xml[0].contains("<Plans>\n        <Plan>\n          <Node-Type>Seq Scan</Node-Type>"));
+        assert!(xml[0].contains("        </Plan>\n      </Plans>"));
     }
 }
