@@ -278,8 +278,9 @@ pub struct Box2 {
 }
 
 impl Box2 {
-    /// Parse `box_in`: `(x1,y1),(x2,y2)`, `((x1,y1),(x2,y2))` or the bare
-    /// `x1,y1,x2,y2`, each with at most one optional outer parenthesis pair.
+    /// Parse `box_in`: `(x1,y1),(x2,y2)`, adjacent `(x1,y1)(x2,y2)`,
+    /// `((x1,y1),(x2,y2))` or the bare `x1,y1,x2,y2`, each with at most one
+    /// optional outer parenthesis pair.
     /// Square brackets are *not* accepted, unlike `lseg_in`.
     ///
     /// # Errors
@@ -1382,9 +1383,9 @@ fn parenthesis_wraps_whole(value: &str) -> bool {
     false
 }
 
-/// Split a two-point body into its two point texts. A parenthesized body
-/// splits on the comma *between* the points; a bare `x,y,x,y` splits at its
-/// second comma so each half is an `x,y` pair.
+/// Split a two-point body into its two point texts. Parenthesized points can
+/// be comma-separated or adjacent; a bare `x,y,x,y` splits at its second comma
+/// so each half is an `x,y` pair.
 fn split_points(inner: &str) -> Option<Vec<&str>> {
     let trimmed = inner.trim();
     if !trimmed.starts_with('(') {
@@ -1402,7 +1403,9 @@ fn split_points(inner: &str) -> Option<Vec<&str>> {
         if rest.is_empty() {
             break;
         }
-        rest = rest.strip_prefix(',')?.trim_start();
+        if let Some(after_comma) = rest.strip_prefix(',') {
+            rest = after_comma.trim_start();
+        }
         if rest.is_empty() {
             return None;
         }
@@ -2929,6 +2932,8 @@ mod tests {
         for spelling in [
             "(1.0,1.0,3.0,3.0)",
             "(3,3),(1,1)",
+            "(1,1)(3,3)",
+            "(1,1) (3,3)",
             "((1,1),(3,3))",
             "3,3,1,1",
         ] {
