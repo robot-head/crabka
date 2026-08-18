@@ -16883,6 +16883,23 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(2)],
             ]
         );
+        let (_, state) = crate::plan::exec::try_execute_seq_scan_with_state(&read_ctx, &select)
+            .expect("plan state executes")
+            .expect("stored-table shape retains plan state");
+        assert_eq!((state.nloops, state.ntuples, state.rows_removed), (1, 2, 1));
+        assert_eq!(state.children.len(), 1);
+        assert!(matches!(
+            state.children[0].plan.node,
+            crate::plan::query::PlanNode::SeqScan { .. }
+        ));
+        assert_eq!(
+            (
+                state.children[0].nloops,
+                state.children[0].ntuples,
+                state.children[0].rows_removed,
+            ),
+            (1, 3, 0)
+        );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of("SELECT x FROM seq_scan_test AS renamed(x) WHERE x = 1"),
