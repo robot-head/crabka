@@ -17078,6 +17078,94 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT n, row_number() OVER (ORDER BY n DESC) FROM planned_transition"),
+        )
+        .expect("NamedTuplestoreScan WindowAgg plan executes")
+        .expect("transition source window uses WindowAgg");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int8(1)],
+            ]
+        );
+        let named_aggregate_select = select_of("SELECT count(*) FROM planned_transition");
+        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &named_aggregate_select)
+        .expect("NamedTuplestoreScan Aggregate plan executes")
+        .expect("transition source aggregate uses Aggregate");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(3)]]);
+        let planned = crate::plan::exec::named_tuplestore_scan_plan_for_test(
+            &read_ctx,
+            &named_aggregate_select,
+            &named_aggregate_select.from[0],
+        )
+        .expect("NamedTuplestoreScan Aggregate plans")
+        .expect("transition source aggregate uses Aggregate");
+        let crate::plan::query::PlanNode::Aggregate { input } = &planned.node else {
+            panic!("transition aggregate should plan an Aggregate");
+        };
+        assert!(input.target_list.is_empty(), "Filter leaves projection to Aggregate");
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT DISTINCT n % 2 FROM planned_transition"),
+        )
+        .expect("NamedTuplestoreScan Unique plan executes")
+        .expect("transition distinct uses Unique");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(0)],
+            ]
+        );
+        let named_limit_select = select_of("SELECT n FROM planned_transition ORDER BY n DESC LIMIT 2");
+        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &named_limit_select)
+            .expect("NamedTuplestoreScan Sort/Limit plan executes")
+            .expect("transition sort and limit use Sort and Limit");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(3)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let planned = crate::plan::exec::named_tuplestore_scan_plan_for_test(
+            &read_ctx,
+            &named_limit_select,
+            &named_limit_select.from[0],
+        )
+        .expect("NamedTuplestoreScan Sort/Limit plans")
+        .expect("transition sort and limit use Sort and Limit");
+        assert!(
+            matches!(planned.node, crate::plan::query::PlanNode::Limit { .. }),
+            "transition limit should plan a Limit"
+        );
+        let named_project_set_select =
+            select_of("SELECT n, generate_series(1, 2) FROM planned_transition WHERE n = 1");
+        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &named_project_set_select)
+            .expect("NamedTuplestoreScan ProjectSet plan executes")
+            .expect("transition projection SRF uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let planned = crate::plan::exec::named_tuplestore_scan_plan_for_test(
+            &read_ctx,
+            &named_project_set_select,
+            &named_project_set_select.from[0],
+        )
+        .expect("NamedTuplestoreScan ProjectSet plans")
+        .expect("transition projection SRF uses ProjectSet");
+        let crate::plan::query::PlanNode::ProjectSet { input } = &planned.node else {
+            panic!("transition projection SRF should plan a ProjectSet");
+        };
+        assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT count(*) FROM planned_cte WHERE n > 1"),
         )
         .expect("CteScan Aggregate plan executes")
@@ -17505,14 +17593,23 @@ mod tests {
             "SELECT n, generate_series(1, 2) FROM planned_cte ORDER BY 1",
             "SELECT n, generate_series(1, 2) FROM planned_cte LIMIT 1",
             "SELECT n, generate_series(1, 2) FROM planned_cte OFFSET 1",
-            "SELECT DISTINCT n FROM planned_transition",
             "SELECT n FROM planned_transition AS p(n)",
             "SELECT n FROM planned_transition TABLESAMPLE BERNOULLI(100)",
-            "SELECT n FROM planned_transition ORDER BY n",
-            "SELECT n FROM planned_transition LIMIT 1",
-            "SELECT count(*) FROM planned_transition",
             "SELECT grouping(n) FROM planned_transition",
-            "SELECT row_number() OVER () FROM planned_transition",
+            "SELECT grouping(n), count(*) FROM planned_transition GROUP BY ROLLUP(n)",
+            "SELECT count(*) FROM planned_transition ORDER BY 1",
+            "SELECT count(*) FROM planned_transition LIMIT 1",
+            "SELECT count(*) FROM planned_transition OFFSET 1",
+            "SELECT n, row_number() OVER () FROM planned_transition ORDER BY 1",
+            "SELECT row_number() OVER () FROM planned_transition OFFSET 1",
+            "SELECT DISTINCT n, row_number() OVER () FROM planned_transition",
+            "SELECT generate_series(1, 2), row_number() OVER () FROM planned_transition",
+            "SELECT count(*), row_number() OVER () FROM planned_transition",
+            "SELECT count(*), generate_series(1, 2) FROM planned_transition",
+            "SELECT DISTINCT n, generate_series(1, 2) FROM planned_transition",
+            "SELECT n, generate_series(1, 2) FROM planned_transition ORDER BY 1",
+            "SELECT n, generate_series(1, 2) FROM planned_transition LIMIT 1",
+            "SELECT n, generate_series(1, 2) FROM planned_transition OFFSET 1",
             "SELECT DISTINCT count(*) FROM generate_series(1, 3) AS g(n)",
             "SELECT count(*) FROM generate_series(1, 3) AS g(n) ORDER BY 1",
             "SELECT count(*) FROM generate_series(1, 3) AS g(n) LIMIT 1",

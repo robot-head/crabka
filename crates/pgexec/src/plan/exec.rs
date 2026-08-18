@@ -1658,15 +1658,25 @@ fn plan_named_tuplestore_scan(
     else {
         return Ok(None);
     };
+    let aggregate = needs_aggregate_node(select);
+    let window = crate::window::has_window_calls(select);
     if name.schema.is_some()
         || columns.is_some()
         || sample.is_some()
-        || !matches!(select.distinct, DistinctClause::All)
-        || !select.order_by.is_empty()
-        || select.limit.is_some()
-        || select.offset.is_some()
-        || crate::grouping::is_grouping_query(select)
-        || crate::window::has_window_calls(select)
+        || (!aggregate && crate::grouping::is_grouping_query(select))
+        || (window
+            && (aggregate
+                || crate::srf::projection_contains_srf(&select.projection)
+                || !matches!(select.distinct, DistinctClause::All)
+                || !select.order_by.is_empty()
+                || select.limit.is_some()
+                || select.offset.is_some()))
+        || (aggregate
+            && (!matches!(select.distinct, DistinctClause::All)
+                || !select.order_by.is_empty()
+                || select.limit.is_some()
+                || select.offset.is_some()
+                || select.grouping.is_some()))
     {
         return Ok(None);
     }
@@ -1697,12 +1707,83 @@ fn plan_named_tuplestore_scan(
             })
             .collect(),
     };
+    if window {
+        let quals = bind_optional(select.filter.as_ref(), &scope)?
+            .into_iter()
+            .map(|clause| RestrictInfo {
+                clause,
+                is_pushed_down: false,
+                security_level: 0,
+                leakproof: true,
+                required_relids: BTreeSet::from([1]),
+            })
+            .collect();
+        let scan = Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::NamedTuplestoreScan,
+        };
+        let filter = Plan {
+            target_list: Vec::new(),
+            quals,
+            node: PlanNode::Filter {
+                input: Box::new(scan),
+            },
+        };
+        return Ok(Some(SeqScanPlan {
+            plan: Plan {
+                target_list: Vec::new(),
+                quals: Vec::new(),
+                node: PlanNode::WindowAgg {
+                    input: Box::new(filter),
+                },
+            },
+            source: source.clone(),
+            fields: Vec::new(),
+            tys: Vec::new(),
+            limit: None,
+            offset: None,
+            order_by: Vec::new(),
+            sort_positions: Vec::new(),
+            aggregate: None,
+            project_set: None,
+            window: Some(select.clone()),
+        }));
+    }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
-    if crate::srf::exprs_contain_srf(&exprs) {
+    let project_set = crate::srf::exprs_contain_srf(&exprs);
+    if project_set
+        && (aggregate
+            || !matches!(select.distinct, DistinctClause::All)
+            || !select.order_by.is_empty()
+            || select.limit.is_some()
+            || select.offset.is_some())
+    {
         return Ok(None);
     }
-    let plan = Plan {
-        target_list: bind_target_list(&exprs, &fields, &scope)?,
+    let target_list = bind_target_list(&exprs, &fields, &scope)?;
+    let distinct = matches!(select.distinct, DistinctClause::Distinct);
+    if distinct {
+        for ty in &tys {
+            crate::eval::require_equality_operator(*ty)?;
+        }
+    }
+    let order_keys =
+        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
+    let mut sort_positions = Vec::with_capacity(order_keys.len());
+    for key in order_keys {
+        let exec::SelectOrderKey::Output(index) = key else {
+            return Ok(None);
+        };
+        crate::eval::require_ordering_operator(tys[index])?;
+        sort_positions.push(index);
+    }
+    let filter = Plan {
+        target_list: if aggregate || project_set {
+            Vec::new()
+        } else {
+            target_list.clone()
+        },
         quals: bind_optional(select.filter.as_ref(), &scope)?
             .into_iter()
             .map(|clause| RestrictInfo {
@@ -1721,19 +1802,83 @@ fn plan_named_tuplestore_scan(
             }),
         },
     };
+    let aggregate_plan = if aggregate {
+        Plan {
+            target_list: target_list.clone(),
+            quals: Vec::new(),
+            node: PlanNode::Aggregate {
+                input: Box::new(filter),
+            },
+        }
+    } else {
+        filter
+    };
+    let project_set_plan = if project_set {
+        Plan {
+            target_list: target_list.clone(),
+            quals: Vec::new(),
+            node: PlanNode::ProjectSet {
+                input: Box::new(aggregate_plan),
+            },
+        }
+    } else {
+        aggregate_plan
+    };
+    let unique = if distinct {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(project_set_plan),
+            },
+        }
+    } else {
+        project_set_plan
+    };
+    let sort = if select.order_by.is_empty() {
+        unique
+    } else {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Sort {
+                input: Box::new(unique),
+            },
+        }
+    };
+    let plan = if select.limit.is_some() || select.offset.is_some() {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Limit {
+                input: Box::new(sort),
+            },
+        }
+    } else {
+        sort
+    };
     Ok(Some(SeqScanPlan {
         plan,
         source: source.clone(),
         fields,
         tys,
-        limit: None,
-        offset: None,
-        order_by: Vec::new(),
-        sort_positions: Vec::new(),
-        aggregate: None,
-        project_set: None,
+        limit: select.limit.clone(),
+        offset: select.offset.clone(),
+        order_by: select.order_by.clone(),
+        sort_positions,
+        aggregate: aggregate.then(|| select.clone()),
+        project_set: project_set.then(|| select.clone()),
         window: None,
     }))
+}
+
+#[cfg(test)]
+pub(crate) fn named_tuplestore_scan_plan_for_test(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+    source: &TableExpr,
+) -> Result<Option<Plan>, ExecError> {
+    plan_named_tuplestore_scan(read_ctx, select, source).map(|plan| plan.map(|planned| planned.plan))
 }
 
 fn needs_aggregate_node(select: &SelectStmt) -> bool {
