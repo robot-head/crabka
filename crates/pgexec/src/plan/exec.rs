@@ -1584,19 +1584,14 @@ fn plan_subquery_input(
     };
     match &subquery.body {
         crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
-            if subquery.with.is_some()
-                || !subquery.order_by.is_empty()
-                || subquery.limit.is_some()
-                || subquery.offset.is_some()
-                || subquery.with_ties
-                || subquery.locking.is_some()
-            {
+            if subquery.with.is_some() || subquery.locking.is_some() {
                 return Ok(None);
             }
-            if let Some(ResultPlan { plan, .. }) = plan_result(inner)? {
+            let inner = select_with_query_tail(subquery, inner);
+            if let Some(ResultPlan { plan, .. }) = plan_result(&inner)? {
                 Ok(Some(plan))
             } else {
-                Ok(plan_seq_scan(read_ctx, inner)?.map(|planned| planned.plan))
+                Ok(plan_seq_scan(read_ctx, &inner)?.map(|planned| planned.plan))
             }
         }
         crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(_)) => {
@@ -1611,6 +1606,19 @@ fn plan_subquery_input(
         }
         _ => Ok(None),
     }
+}
+
+fn select_with_query_tail(
+    query: &crabka_pgparser::ast::QueryExpr,
+    select: &SelectStmt,
+) -> SelectStmt {
+    let mut select = select.clone();
+    select.order_by = query.order_by.clone();
+    select.limit = query.limit.clone();
+    select.offset = query.offset.clone();
+    select.with_ties = query.with_ties;
+    select.locking = query.locking.clone();
+    select
 }
 
 #[cfg(test)]
@@ -2381,8 +2389,9 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
             crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
                 inner,
             )) => {
+                let inner = select_with_query_tail(subquery, inner);
                 if matches!(child.plan.node, PlanNode::Result) {
-                    let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
+                    let Some(ResultPlan { fields, tys, .. }) = plan_result(&inner)? else {
                         return Err(ExecError::Unsupported(
                             "SubqueryScanExecutor received a non-Result subquery".into(),
                         ));
@@ -2394,7 +2403,7 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
                     }
                     .execute(&mut child)?
                 } else {
-                    let Some(planned) = plan_seq_scan(self.read_ctx, inner)? else {
+                    let Some(planned) = plan_seq_scan(self.read_ctx, &inner)? else {
                         return Err(ExecError::Unsupported(
                             "SubqueryScanExecutor received an unsupported subquery".into(),
                         ));

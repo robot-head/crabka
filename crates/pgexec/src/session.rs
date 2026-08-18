@@ -16893,6 +16893,37 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT a FROM (SELECT a FROM seq_scan_test ORDER BY a DESC LIMIT 2) AS derived",
+            ),
+        )
+        .expect("derived SelectSort and Limit plan executes")
+        .expect("derived SELECT ORDER BY and LIMIT use SubqueryScan");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT a FROM (SELECT a FROM seq_scan_test ORDER BY a FETCH FIRST 2 ROWS WITH TIES) AS derived",
+            ),
+        )
+        .expect("derived SelectLimit ties plan executes")
+        .expect("derived SELECT FETCH WITH TIES uses SubqueryScan");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT n FROM (VALUES (2), (1) ORDER BY 1 LIMIT 1) AS derived(n)",
             ),
         )
@@ -17261,9 +17292,19 @@ mod tests {
         .expect("NestedLoop SubqueryScan select plan executes")
         .expect("stored table and derived select source use NestedLoop");
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT l.a FROM seq_scan_test AS l, \
+                 (SELECT a FROM seq_scan_third ORDER BY a LIMIT 1) AS derived \
+                 WHERE l.a = 1",
+            ),
+        )
+        .expect("NestedLoop derived SelectSort and Limit plan executes")
+        .expect("nested derived SELECT tail uses SubqueryScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
         for sql in [
             "SELECT a FROM seq_scan_test, LATERAL (VALUES (1)) AS derived(n)",
-            "SELECT a FROM seq_scan_test, (SELECT a FROM seq_scan_third ORDER BY a) AS derived",
             "SELECT a, v FROM seq_scan_test, \
              JSON_TABLE(a::text::jsonb, '$' COLUMNS (v int PATH '$'))",
         ] {
