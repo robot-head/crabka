@@ -16752,7 +16752,9 @@ mod tests {
                 "CREATE TABLE seq_scan_test (a int); \
                  INSERT INTO seq_scan_test VALUES (1), (2), (2); \
                  CREATE FUNCTION planned_table_function() RETURNS TABLE (n int) \
-                 LANGUAGE sql AS 'SELECT 1'",
+                 LANGUAGE sql AS 'SELECT 1'; \
+                 CREATE FUNCTION planned_values_function() RETURNS TABLE (n int) \
+                 LANGUAGE sql AS 'VALUES (1), (2)'",
             )
             .await
             .expect("seed table");
@@ -16920,6 +16922,20 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(3)],
             ]
         );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n FROM planned_table_function() WHERE n > 0"),
+        )
+        .expect("TableFunctionScan plan executes")
+        .expect("table function source uses TableFunctionScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n FROM planned_values_function() WHERE n > 1"),
+        )
+        .expect("TableFunctionScan Values plan executes")
+        .expect("values table function source uses TableFunctionScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
         for (sql, expected) in [
             ("SELECT a FROM seq_scan_test LIMIT 1", vec![1]),
             ("SELECT a FROM seq_scan_test OFFSET 1", vec![2, 2]),
@@ -16982,7 +16998,6 @@ mod tests {
             "SELECT DISTINCT n FROM generate_series(1, 3) AS g(n)",
             "SELECT n FROM generate_series(1, 3) AS g(n) ORDER BY n",
             "SELECT n FROM generate_series(1, 3) AS g(n) LIMIT 1",
-            "SELECT n FROM planned_table_function()",
             "SELECT n FROM LATERAL (SELECT 1 AS n) AS derived",
             "SELECT n FROM (SELECT 1 AS n ORDER BY n) AS derived",
             "SELECT n FROM (SELECT 1 AS n OFFSET 0) AS derived",

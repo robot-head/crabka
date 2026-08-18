@@ -464,13 +464,16 @@ fn plan_function_scan(
     source: &TableExpr,
 ) -> Result<Option<SeqScanPlan>, ExecError> {
     let TableExpr::Function {
-        functions, lateral, ..
+        functions,
+        lateral,
+        alias,
+        column_aliases,
+        ..
     } = source
     else {
         return Ok(None);
     };
     if *lateral
-        || crate::routine::expands_as_table(read_ctx.catalog_kv, functions)
         || !matches!(select.distinct, DistinctClause::All)
         || !select.order_by.is_empty()
         || select.limit.is_some()
@@ -480,13 +483,34 @@ fn plan_function_scan(
     {
         return Ok(None);
     }
-    let scope = crate::exec::build_from_schema_of_select(
-        read_ctx.catalog_kv,
-        read_ctx.fctx.resolution,
-        select,
-        read_ctx.ctes,
-    )?
-    .scope;
+    let table_function = crate::routine::expands_as_table(read_ctx.catalog_kv, functions);
+    let scope = if table_function {
+        let (query, names) = crate::routine::table_function_expansion(read_ctx.catalog_kv, &functions[0])?;
+        let scope = match &query.body {
+            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
+                let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
+                    return Ok(None);
+                };
+                exec::projected_scope(&fields, &tys)
+            }
+            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(values)) => {
+                crate::values::values_to_relation_with_ctes(read_ctx, values)?.scope
+            }
+            _ => return Ok(None),
+        };
+        crate::values::requalify_derived(
+            Relation { scope, rows: Vec::new() },
+            alias.as_deref().unwrap_or(&functions[0].name),
+            &column_aliases.clone().or(Some(names)),
+        )?.scope
+    } else {
+        crate::exec::build_from_schema_of_select(
+            read_ctx.catalog_kv,
+            read_ctx.fctx.resolution,
+            select,
+            read_ctx.ctes,
+        )?.scope
+    };
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
@@ -507,7 +531,11 @@ fn plan_function_scan(
             input: Box::new(Plan {
                 target_list: Vec::new(),
                 quals: Vec::new(),
-                node: PlanNode::FunctionScan,
+                node: if table_function {
+                    PlanNode::TableFunctionScan
+                } else {
+                    PlanNode::FunctionScan
+                },
             }),
         },
     };
@@ -907,7 +935,10 @@ struct FunctionScanExecutor<'a, 'b> {
 
 impl Executor for FunctionScanExecutor<'_, '_> {
     fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
-        if !matches!(state.plan.node, PlanNode::FunctionScan) {
+        if !matches!(
+            state.plan.node,
+            PlanNode::FunctionScan | PlanNode::TableFunctionScan
+        ) {
             return Err(ExecError::Unsupported(
                 "FunctionScanExecutor received a non-FunctionScan plan".into(),
             ));
@@ -927,15 +958,70 @@ impl Executor for FunctionScanExecutor<'_, '_> {
             ));
         };
         state.begin_loop();
-        let relation = crate::srf::from_item_with_memory(
-            functions,
-            *with_ordinality,
-            *rows_from,
-            alias.as_deref(),
-            column_aliases,
-            self.read_ctx.eval_ctx,
-            &self.read_ctx.statement_memory,
-        )?;
+        let relation = if matches!(state.plan.node, PlanNode::TableFunctionScan) {
+            if *with_ordinality {
+                return Err(ExecError::Unsupported(
+                    "WITH ORDINALITY over a user-defined function is not supported".into(),
+                ));
+            }
+            let (query, names) =
+                crate::routine::table_function_expansion(self.read_ctx.catalog_kv, &functions[0])?;
+            let inner = match &query.body {
+                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
+                    select,
+                )) => {
+                    let Some(ResultPlan { plan, fields, tys }) = plan_result(select)? else {
+                        return Err(ExecError::Unsupported(
+                            "TableFunctionScan requires a Result function body".into(),
+                        ));
+                    };
+                    let mut child = PlanState::new(plan.clone(), Scope::empty());
+                    ResultExecutor {
+                        ctx: self.read_ctx.eval_ctx,
+                        fields,
+                        tys,
+                    }
+                    .execute(&mut child)?
+                }
+                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
+                    values,
+                )) => {
+                    let plan = Plan {
+                        target_list: Vec::new(),
+                        quals: Vec::new(),
+                        node: PlanNode::ValuesScan,
+                    };
+                    let mut child = PlanState::new(plan.clone(), Scope::empty());
+                    ValuesExecutor {
+                        ctx: self.read_ctx,
+                        query: &query,
+                        values,
+                    }
+                    .execute(&mut child)?
+                }
+                _ => {
+                    return Err(ExecError::Unsupported(
+                        "TableFunctionScan requires a simple query body".into(),
+                    ));
+                }
+            };
+            let columns = column_aliases.clone().or(Some(names));
+            crate::values::requalify_derived(
+                inner,
+                alias.as_deref().unwrap_or(&functions[0].name),
+                &columns,
+            )?
+        } else {
+            crate::srf::from_item_with_memory(
+                functions,
+                *with_ordinality,
+                *rows_from,
+                alias.as_deref(),
+                column_aliases,
+                self.read_ctx.eval_ctx,
+                &self.read_ctx.statement_memory,
+            )?
+        };
         state.scope = relation.scope.clone();
         for _ in &relation.rows {
             state.emit_row();
@@ -1150,6 +1236,9 @@ fn execute_filter_input(
     let relation = match child.plan.node {
         PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source }.execute(&mut child)?,
         PlanNode::FunctionScan => FunctionScanExecutor { read_ctx, source }.execute(&mut child)?,
+        PlanNode::TableFunctionScan => {
+            FunctionScanExecutor { read_ctx, source }.execute(&mut child)?
+        }
         PlanNode::SubqueryScan { .. } => {
             SubqueryScanExecutor { read_ctx, source }.execute(&mut child)?
         }
