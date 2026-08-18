@@ -21,12 +21,20 @@ pub(crate) fn query_to_relation_with_ctes(
                     "locking SELECT must use execute_read_locking".into(),
                 ));
             }
-            let mut s = (**s).clone();
-            s.order_by = q.order_by.clone();
-            s.limit = q.limit.clone();
-            s.offset = q.offset.clone();
-            s.with_ties = q.with_ties;
-            s.locking = q.locking.clone();
+            let s = crate::plan::exec::select_with_query_tail(q, s);
+            crate::grouping::reject_misplaced_calls(&s)?;
+            if !crate::exec::select_contains_subquery(&s)
+                && !crate::srf::projection_contains_srf(&s.projection)
+            {
+                if let Some(relation) = crate::plan::exec::try_execute_result(&s, ctx.eval_ctx)? {
+                    return Ok(relation);
+                }
+                let refs = crate::scope::StatementRefs::of_select(&s);
+                let plan_ctx = query_ctx.with_refs(&refs);
+                if let Some(relation) = crate::plan::exec::try_execute_seq_scan(&plan_ctx, &s)? {
+                    return Ok(relation);
+                }
+            }
             crate::exec::select_to_relation_with_ctes(&query_ctx, &s)
         }
         SetExpr::Query(QueryBody::Values(v)) => crate::plan::exec::execute_values(&query_ctx, q, v),

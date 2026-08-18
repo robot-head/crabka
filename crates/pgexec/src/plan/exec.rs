@@ -1619,7 +1619,7 @@ fn plan_subquery_input(
     }
 }
 
-fn select_with_query_tail(
+pub(crate) fn select_with_query_tail(
     query: &crabka_pgparser::ast::QueryExpr,
     select: &SelectStmt,
 ) -> SelectStmt {

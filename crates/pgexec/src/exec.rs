@@ -13778,6 +13778,15 @@ fn row_clauses_contain_subquery(select: &SelectStmt) -> bool {
             .is_some_and(|on| on.iter().any(contains_subquery))
 }
 
+/// Whether a SELECT still needs the legacy subquery folding path.
+pub(crate) fn select_contains_subquery(select: &SelectStmt) -> bool {
+    row_clauses_contain_subquery(select)
+        || select.filter.as_ref().is_some_and(contains_subquery)
+        || select.having.as_ref().is_some_and(contains_subquery)
+        || select.limit.as_ref().is_some_and(contains_subquery)
+        || select.offset.as_ref().is_some_and(contains_subquery)
+}
+
 /// Row-local expressions that read the source row, and the hidden relation
 /// columns they are materialized into.
 #[derive(Default)]
